@@ -624,8 +624,10 @@ def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
   )
 
   assert_equal "ok", result
-  assert_equal [ "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--add-dir", @folder, "--budget", "3", "-" ],
-               captured[:cmd]
+  assert_equal [
+    "codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--add-dir", @folder, "--budget", "3",
+    "--ignore-user-config", "-"
+  ], captured[:cmd]
   assert_equal "diagnose", captured[:stdin_data]
   assert_equal 12, captured[:timeout_sec]
   assert_nil captured[:environment].fetch("OPENAI_API_KEY")

@@ -211,7 +211,7 @@ loads that immutable runtime context once for both prompt and permission setup;
 preset actor compilation is in-memory and does not create empty policy state.
 `gh` and `qmd` remain baseline Hive dependencies. New publication is v2-only:
 it does not detect, convert, resubmit, or bulk-migrate legacy registry layouts,
-and it exposes no separate public status or Hivebox mutation route.
+and it exposes no separate public status or Hive web mutation route.
 
 ## Publishing and recovery internals
 
@@ -288,7 +288,7 @@ exact catalogue name/version/release-digest entry yields `listed`; offline
 reconciliation may return a prior state as cached with its original
 `observed_at`. A newer blocking lint policy is reported during retained
 read-only reconciliation and stops only a still-required remote mutation.
-Publication ends at registry review. Hivebox has no publish or
+Publication ends at registry review. Hive web has no publish or
 status route, and no legacy conversion/migration command is provided.
 
 ## Documentation ownership

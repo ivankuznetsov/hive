@@ -237,7 +237,7 @@ module HiveBench
 
     # Best-effort: read the execute-stage model from hive's UsageDb via the
     # sqlite3 CLI. Returns nil (→ "unknown") if the CLI, the DB, or a row is
-    # absent — execute often runs in tmux and records no usage row.
+    # absent.
     def lookup_model_via_usage_db(task_slug)
       db = ENV["HIVE_USAGE_DB_PATH"] || File.expand_path("~/.local/share/hive/usage.db")
       return nil unless File.file?(db)

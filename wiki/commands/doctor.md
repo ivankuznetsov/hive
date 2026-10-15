@@ -3,8 +3,8 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-09-02
-tags: [command, preflight, skills, hive, openclaw, tmux, provisioning]
+updated: 2026-10-15
+tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
 **TLDR**: `hive doctor` is the read-only renderer for Hive's managed-skill
@@ -15,7 +15,7 @@ filesystem evidence is joined with the real runtime resolver and exact
 projection digests; Doctor does not launch supported agent CLIs, because even
 nominally read-only upstream commands can initialize user state. `--json` is
 the versioned `hive-doctor.v2` contract.
-Legacy tmux, QMD, and deprecated-config checks remain separate rows. When a
+Legacy Claude auth/config, QMD, and deprecated-config checks remain separate rows. When a
 runtime database or cutover manifest exists, Doctor also reports exact SQLite
 application/schema/integrity health without creating or migrating anything.
 
@@ -44,7 +44,7 @@ falls back to legacy authority and never offers rollback, restore, or downgrade.
 
 The CLI loads the project through the shared `Hive::Config.load` boundary
 before constructing the doctor inspector. Unsupported project root keys
-therefore stop the command with exit 78 before any tmux, QMD, agent, or skill
+therefore stop the command with exit 78 before any QMD, agent, or skill
 probe runs and before a success table/JSON report is emitted. The error names
 the config path and every unsupported key. During the reviewers migration
 window, a valid root-level `reviewers` value is promoted to
@@ -125,10 +125,35 @@ files. It never launches `openclaw` or writes the OpenClaw skill directory.
 
 ## Legacy rows and exit codes
 
-Doctor retains dependency/warning checks for `tmux >= 3.0` when
-`claude.mode: tmux`, managed QMD availability/native ABI failures, exported
-Claude API-key warnings in tmux mode, and legacy `brainstorm.runtime` config.
-These appear under `checks`, not `managed_skills`.
+Doctor retains these legacy rows: a `claude/auth` warning when the shell
+exports `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY` (Hive unsets them before
+launching Claude, so Claude bills the subscription, not the API key); a
+`claude/config` warning when `.hive-state/config.yml` still sets the retired
+`claude.mode` key (`Hive::Config.obsolete_claude_mode_key?`; the value is
+ignored and the row tells the operator to delete the line); managed QMD
+availability/native ABI failures; an unparseable `config.yml` warning; and
+`web/environment` alias warnings; and the MCP rows below. Warning rows never
+change the exit code.
+
+MCP rows (`Hive::Mcp::DoctorCheck`, stage `mcp`; see [[modules/mcp]]):
+
+| Label | Kind | When |
+|---|---|---|
+| `mcp/catalog` | warning | the global config is unreadable, so granted servers are skipped at launch |
+| `mcp/inherit` | warning | `mcp.inherit_user` is true (isolation off); other MCP rows are skipped |
+| `mcp/isolation` | warning | a role runs an agent Hive cannot isolate (Grok, custom profiles) |
+| `mcp/grants` | warning | a role whose agent cannot receive granted servers (Pi, Grok) has a non-empty grant |
+| `mcp/login` | warning | an OAuth server is granted to an agent with no saved login; names `hive mcp login` |
+| `mcp/env` | warning | a granted server references an env var unset in doctor's environment (name only) |
+| `mcp/codex-config` | present | `config.toml` settings Hive carries over on every Codex launch |
+| `mcp/personal` | warning | personal servers not in the catalog; names `hive mcp import` |
+| `mcp/drift` | warning | a catalog entry changed or disappeared at its source |
+
+The last two compare personal configs through `Hive::Mcp::Discovery`, which runs
+`codex mcp list --json` and `opencode debug config`; in-process tests skip that
+comparison (`mcp_discover: nil`).
+These appear under `checks`, not
+`managed_skills`.
 
 | Code | Meaning |
 |---:|---|

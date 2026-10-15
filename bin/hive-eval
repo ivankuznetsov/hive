@@ -253,6 +253,10 @@ if path
 end
 
 if inherited_rake_dry_run?(ENV["RAKEOPT"])
+  # A rejected inherited RAKEOPT must not leave a stale default report behind,
+  # matching the other pre-run guards that exit before the shared removal point.
+  # Custom report paths are still only cleared after full validation, below.
+  remove_report!(report_path) if report_path == default_report
   warn "hive-eval: inherited RAKEOPT may not enable rake dry-run"
   exit 1
 end

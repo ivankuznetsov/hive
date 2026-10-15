@@ -56,7 +56,7 @@ jobs:
         run: bundle exec rake coverage:collect
       - name: Retain raw coverage results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: coverage/.resultset/shard-${{ matrix.shard }}
@@ -66,7 +66,7 @@ jobs:
           retention-days: 1
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-shard-${{ matrix.shard }}
           path: tmp/ci-failure-evidence.json
@@ -101,7 +101,7 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - name: Download coverage shards
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-shard-*
           path: coverage/.resultset/merged
@@ -115,7 +115,7 @@ jobs:
         run: bundle exec rake coverage:report
       - name: Retain coverage evidence (uncovered lines, shard map)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-evidence
           path: |
@@ -154,7 +154,7 @@ jobs:
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-${{ matrix.name }}
           path: tmp/ci-failure-evidence.json
@@ -190,7 +190,7 @@ jobs:
         run: sudo loginctl disable-linger "$USER" || true
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-systemd-user-gate
           path: tmp/ci-failure-evidence.json
@@ -229,7 +229,7 @@ jobs:
           fi
       - name: Retain failure evidence
         if: ${{ steps.measure.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-tui-reactivity-latency
           path: tmp/ci-failure-evidence.json
@@ -296,7 +296,7 @@ jobs:
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
       - name: Retain e2e reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
@@ -305,7 +305,7 @@ jobs:
           retention-days: 14
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-e2e
           path: tmp/ci-failure-evidence.json
@@ -324,7 +324,7 @@ jobs:
         with:
           ruby-version: "3.4"
       - name: Download e2e report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
@@ -424,26 +424,6 @@ jobs:
         env:
           HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
         run: test "$HIVE_WEB_TESTS_RESULT" = "success"
-
-  # Hosted Windows runners cannot run Linux containers (Windows-container
-  # mode only, no WSL2) — the per-OS surface that CAN break is our
-  # PowerShell installer. Run it on real Windows PowerShell with a stubbed
-  # docker: failure copy, $LASTEXITCODE handling, argv shape.
-  hivebox-installer-windows:
-    name: hivebox installer (Windows PowerShell)
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Syntax-check both installers
-        shell: pwsh
-        run: |
-          $err = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile("packaging/docker/install-box.ps1", [ref]$null, [ref]$err)
-          if ($err) { $err; exit 1 }
-      - name: Exercise install-box.ps1 against a stubbed docker
-        shell: pwsh
-        run: packaging/docker/test-install-box.ps1
 
   rubocop:
     name: rubocop (37signals omakase)
@@ -570,7 +550,7 @@ jobs:
           done
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-launchd-macos
           path: tmp/ci-failure-evidence.json

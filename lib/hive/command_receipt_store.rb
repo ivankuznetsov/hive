@@ -59,6 +59,7 @@ module Hive
     rescue Hive::ConfigError
       raise
     rescue Hive::Error, Sequel::Error, SQLite3::Exception => error
+      raise Hive::CommandReceiptsNotInstalled if Hive::CommandReceiptsNotInstalled.missing_database?(error)
       if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
         raise Hive::ConcurrentRunError,
               "command receipt storage is busy; resolve database contention and retry"
@@ -582,8 +583,7 @@ module Hive
     def require_extension!
       return if Hive::RuntimeControlPlane::CommandSchema.installed?(database)
 
-      raise Hive::ConfigError,
-            "command receipts are not installed; run `hive setup --install-command-receipts`"
+      raise Hive::CommandReceiptsNotInstalled
     end
 
 

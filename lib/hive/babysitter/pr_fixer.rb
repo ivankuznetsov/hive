@@ -1,7 +1,11 @@
 require "fileutils"
 require "set"
+require "json"
 require "shellwords"
+require "time"
+require "hive/agent_limit"
 require "hive/agent_profiles"
+require "hive/atomic_file"
 require "hive/babysitter/context_builder"
 require "hive/babysitter/dry_run_env"
 require "hive/babysitter/events"
@@ -14,6 +18,7 @@ module Hive
   module Babysitter
     class PrFixer
       GIVE_UP_TAIL_BYTES = 4096
+      LIMIT_HOLD_FILE = "agent-limit-hold.json".freeze
 
       def self.run(pr, project, cfg, detail_sink: nil, **options)
         fixer = new(pr, project, cfg, **options)
@@ -67,6 +72,7 @@ module Hive
 
         return handle_green(status, started) if already_green?(status)
         return :shutdown unless admission_open?
+        return hold_for_limit(started) if limit_held?
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
         context = Hive::Babysitter::ContextBuilder.build(
@@ -82,7 +88,8 @@ module Hive
 
         outcome = outcome_for(result, worktree.path)
         emit_agent_event(outcome, started)
-        return outcome if %i[success dry_run].include?(outcome)
+        record_limit_hold(result, outcome)
+        return outcome if %i[success dry_run limits_reached].include?(outcome)
 
         give_up(worktree.path, result, outcome, started)
         outcome
@@ -284,12 +291,75 @@ module Hive
         end
       end
 
-      def spawn_agent(worktree_path, context)
-        task = babysitter_task(worktree_path)
-        profile = Hive::AgentProfiles.lookup(
+      def agent_profile
+        @agent_profile ||= Hive::AgentProfiles.lookup(
           @cfg.dig("babysitter", "agent") || @cfg.dig("execute", "agent") || "claude",
           cfg: @cfg
         )
+      end
+
+      # A provider usage limit is not a repair failure: nothing about the PR
+      # needs a human, and every spawn before the quota resets fails the
+      # same way. Hold this provider's spawns for the project; like the
+      # stage limit holds, the next attempt is due on the hourly cooldown
+      # from when the limit was recorded (AgentLimit.retry_due?), so an
+      # account switch or top-up is noticed before the provider's reset date.
+      def limit_hold_path
+        File.join(@project.fetch("hive_state_path"), "babysitter", LIMIT_HOLD_FILE)
+      end
+
+      def limit_holds
+        data = JSON.parse(File.read(limit_hold_path))
+        data.is_a?(Hash) ? data : {}
+      rescue Errno::ENOENT, JSON::ParserError
+        {}
+      end
+
+      def limit_held?
+        hold = limit_holds[agent_profile.name.to_s]
+        return false unless hold.is_a?(Hash)
+
+        limited_at = Time.iso8601(hold["limited_at"].to_s)
+        !Hive::AgentLimit.retry_due?(limited_at: limited_at)
+      rescue ArgumentError
+        false
+      end
+
+      def hold_for_limit(started)
+        hold = limit_holds.fetch(agent_profile.name.to_s)
+        Hive::Babysitter::Events.emit(
+          project: @project,
+          pr: number,
+          action: "skipped",
+          outcome: "limits_reached",
+          duration_ms: duration_ms(started),
+          provider: agent_profile.name.to_s,
+          retry_after: hold["retry_after"]
+        )
+        :limits_reached
+      end
+
+      def record_limit_hold(result, outcome)
+        return if @dry_run
+
+        holds = limit_holds
+        provider = agent_profile.name.to_s
+        if outcome == :limits_reached
+          holds[provider] = {
+            "limited_at" => Time.now.utc.iso8601,
+            "retry_after" => result[:retry_at],
+            "message" => result[:error_message].to_s.byteslice(0, 500).to_s.scrub
+          }
+        else
+          return unless holds.delete(provider)
+        end
+        FileUtils.mkdir_p(File.dirname(limit_hold_path))
+        Hive::AtomicFile.write(limit_hold_path, "#{JSON.pretty_generate(holds)}\n")
+      end
+
+      def spawn_agent(worktree_path, context)
+        task = babysitter_task(worktree_path)
+        profile = agent_profile
         prompt = render_prompt(worktree_path, context)
         spawn = lambda do
           return :shutdown unless admission_open?
@@ -309,7 +379,8 @@ module Hive
               current: Hive::Stages::Base.model_routing_current(@cfg["babysitter"])
             ),
             status_mode: :exit_code_only,
-            terminate_on_parent_signal: false
+            terminate_on_parent_signal: false,
+            mcp_scope: "babysitter"
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call
@@ -360,6 +431,7 @@ module Hive
 
       def outcome_for(result, worktree_path = nil)
         return :timeout if result[:status] == :timeout || result[:timed_out]
+        return :limits_reached if result[:error_reason] == "limits_reached"
         return :budget_exhausted if budget_exhausted?(result)
         if @dry_run && result[:status] == :ok
           return :dry_run if worktree_path && File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
@@ -385,6 +457,7 @@ module Hive
         when :dry_run then "dry_run"
         when :timeout then "timeout"
         when :budget_exhausted then "budget_exhausted"
+        when :limits_reached then "limits_reached"
         else "failure"
         end
         Hive::Babysitter::Events.emit(
@@ -448,18 +521,23 @@ module Hive
         )
       end
 
+      # The classified error leads: the agent tail is often provider startup
+      # noise (MCP connection errors, tool-manager banners) that hides why
+      # the run actually ended.
       def give_up_comment(result, outcome)
+        error = result[:error_message].to_s.strip.scrub
         tail = (result[:final_message] || result[:error_message] || "agent exited without a final message").to_s
         if tail.bytesize > GIVE_UP_TAIL_BYTES
           tail = tail.byteslice(-GIVE_UP_TAIL_BYTES, GIVE_UP_TAIL_BYTES).to_s
         end
         tail = tail.scrub
+        error_line = error.empty? ? "" : "Error: #{error.byteslice(0, 500).to_s.scrub}\n\n"
         <<~BODY
           hive-babysitter could not repair this PR automatically.
 
           Outcome: #{outcome}
 
-          Agent tail:
+          #{error_line}Agent tail:
 
           ```
           #{tail}

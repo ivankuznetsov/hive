@@ -285,8 +285,8 @@ class E2EReproScriptWriterTest < Minitest::Test
                        "register_project replay must not use relative -Ilib bin/hive from the copied project")
           assert_includes body, Hive::E2E::Paths.hive_bin,
                           "register_project replay must use the absolute hive binary"
-          assert_includes body, Shellwords.escape("cfg['claude']['mode'] = 'headless'"),
-                          "secondary-project replay must not enter interactive agent mode"
+          refute_includes body, "cfg['claude']",
+                          "secondary-project replay must not write the retired claude.mode key"
           assert_includes body, "ruby_block runs with sandbox, run_home, and slug locals restored",
                           "ruby_block must include the restored binding-context note"
           # Live-tmux steps are explicitly skipped with the new comment.

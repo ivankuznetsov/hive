@@ -4,10 +4,12 @@ module Hive::AgentSupport::Codex
   LEGACY_CLAUDE_MODEL = /\A(?:claude-|anthropic\/claude-)/i.freeze
 
   autoload :ArtifactPolicy, "hive/agent_support/codex/artifact_policy"
+  autoload :Mcp, "hive/agent_support/codex/mcp"
   autoload :Reviewer, "hive/agent_support/codex/reviewer"
   autoload :Runtime, "hive/agent_support/codex/runtime"
   autoload :Skills, "hive/agent_support/codex/skills"
   autoload :SetupAdapter, "hive/agent_support/codex/setup_adapter"
+  autoload :UserConfig, "hive/agent_support/codex/user_config"
 
   module_function
 

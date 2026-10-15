@@ -28,6 +28,8 @@ module Hive
           #   :severity    — :high | :medium | :nit (used to group findings in fix-guardrail-NN.md)
           #   :targets     — :code | :file_path (which side of the diff to scan)
           #   :description — single-line explanation surfaced in the finding
+          #   :exempt_new_file_paths — optional Regexp; a :raw_diff_header match on a
+          #                  `new file mode` line is skipped when the file path matches
           DEFAULTS = {
             shell_pipe_to_interpreter: {
               detector: :regex,
@@ -91,6 +93,11 @@ module Hive
               regex: /\A(?:old mode|new mode|deleted file mode|new file mode) 10[0-9][0-9][0-9][1357]$/,
               severity: :medium,
               targets: :raw_diff_header,
+              # New executables under test directories are fake CLI stubs
+              # and fixture scripts (e.g. web/test/e2e/support/codex), not
+              # granted execution rights. chmod +x of an existing file, or a
+              # new executable anywhere else, still trips.
+              exempt_new_file_paths: %r{(?:\A|/)(?:test|tests|spec|specs|__tests__|testdata|fixtures?)/},
               description: "executable / setuid / setgid bit added: a fix that flips file mode to an executable or privileged mode may be granting execution rights to a script the user didn't expect."
             }
           }.freeze

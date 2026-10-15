@@ -4,6 +4,7 @@ require "hive/reviewers/runtime"
 require "hive/reviewers/synthetic_task"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
+require "hive/mcp"
 
 module Hive::AgentSupport::Codex
   # Native-`codex review` reviewer.
@@ -156,6 +157,7 @@ module Hive::AgentSupport::Codex
       rescue Hive::AgentError => e
         return error_result("preflight failed: #{e.message}")
       end
+      warn_mcp_not_isolated
 
       prompt = render_prompt
       configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
@@ -229,6 +231,20 @@ module Hive::AgentSupport::Codex
 
     def synthetic_task
       Hive::Reviewers.synthetic_task_for(ctx)
+    end
+
+    # Top-level `codex review` has no `--ignore-user-config`, so this pass
+    # keeps the operator's MCP servers. Moving to `codex exec review` waits
+    # on comparing its output with the parsers above (plan 2026-10-15-001,
+    # U0 c); until then the gap is logged instead of silently accepted.
+    def warn_mcp_not_isolated
+      return if Hive::Mcp.policy(@cfg, scope: "review").inherit_user
+
+      Hive::Stages::Base.write_spawn_warning(
+        synthetic_task, "isolation-warnings.log",
+        "[hive] MCP isolation incomplete: `codex review` cannot ignore the operator's Codex config, " \
+        "so reviewer #{name} keeps its personal MCP servers and receives no Hive grants"
+      )
     end
 
     def finalize(run, attempts, max_attempts)

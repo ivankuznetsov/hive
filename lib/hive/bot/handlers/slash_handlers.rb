@@ -305,7 +305,7 @@ module Hive
 
         # Telegram's automatic first-contact command. A welcome with the
         # next concrete step beats the bare command list: the operator just
-        # connected the bot from hivebox and wants proof it works.
+        # connected the bot from Hive web and wants proof it works.
         def start(_update)
           @result_class.new(
             action: :reply,

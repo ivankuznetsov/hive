@@ -322,7 +322,7 @@ they do not parse platform-specific, padded `wc` output. The source archive
 stays an internal retained QA input. The tag workflow has no gem, source,
 skill, or web build and no fallback
 dispatch or rebuild: missing, expired, mixed, stale, or substituted proof fails
-before the existing GitHub Release, Homebrew, AUR, Docker, and post-release
+before the existing GitHub Release, Homebrew, AUR, and post-release
 graph can begin.
 
 `qa_ready` is evidence, not release authority. Only a maintainer's separate,

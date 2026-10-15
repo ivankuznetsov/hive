@@ -16,6 +16,7 @@ require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/claude_launcher"
 require "hive/agent_observation"
 require "hive/billing_evidence"
 require "hive/context_provenance"
@@ -152,7 +153,7 @@ module Hive
       # Production stage launches run inside a durable attempt. Direct unit
       # calls predating attempt supervision receive nil and retain their
       # explicit test profile seam; real launches always resolve and journal
-      # implementation ownership before Process.spawn/tmux starts.
+      # implementation ownership before Process.spawn starts.
       def implementation_stage_identity(task, cfg, stage)
         return nil unless Hive::Attempts::Context.current
 
@@ -329,7 +330,7 @@ module Hive
           values = {
             add_dirs: base_dirs,
             permission_mode: nil,
-            allowed_tools: default_allowed_tools_for_mode(cfg, profile, default_allowed_tools),
+            allowed_tools: yolo_default_allowed_tools(profile, default_allowed_tools),
             disallowed_tools: nil
           }
           return prepare_support_scope(values, profile, stage_name, yolo: true)
@@ -443,11 +444,10 @@ module Hive
         raise
       end
 
-      def default_allowed_tools_for_mode(cfg, profile, default_allowed_tools)
-        return nil unless default_allowed_tools
-        support = Hive::AgentSupport.for(profile)
-        return nil unless cfg && support&.respond_to?(:interactive_mode) &&
-                          support.interactive_mode(cfg) == :tmux
+      # Yolo Claude launches keep the stage's default `--allowedTools`;
+      # other providers cannot take Claude's tool list.
+      def yolo_default_allowed_tools(profile, default_allowed_tools)
+        return nil unless default_allowed_tools && Hive::AgentSupport.supports?(profile, :Launch)
 
         default_allowed_tools
       end
@@ -482,6 +482,12 @@ module Hive
           event_type: :stage_enter,
           message: "run started"
         )
+        # A tmux-era Stop-hook stub or its backup left in the worktree
+        # would trip these stages' dirty-worktree checks, which run before
+        # the launch that normally repairs it.
+        if WORKTREE_OWNING_STAGES.include?(stage)
+          Hive::ClaudeLauncher.repair_legacy_scratch_settings([ read_worktree_path(task) ])
+        end
         result = yield
         event_task = task_after_controller_move(task, result)
         if cfg && ensure_clean_on_exit_enabled?(cfg) && WORKTREE_OWNING_STAGES.include?(stage)
@@ -961,7 +967,9 @@ module Hive
                       defer_implementation_observation: false,
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
-                      terminate_on_parent_signal: true)
+                      terminate_on_parent_signal: true,
+                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+        mcp_launch = nil
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
         unless unknown_launch_keys.empty? && launch_environment.values.all? { |value| value.is_a?(String) }
@@ -1000,7 +1008,7 @@ module Hive
         # instead of letting the exception escape and land
         # `reason="runner_exception"`.
         begin
-          Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
+          probe = Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
         rescue Hive::AgentError => e
           if context&.explicit_routing?
             return {
@@ -1009,8 +1017,19 @@ module Hive
               error_message: "preflight failed for admitted provider account #{context.provider_account_id}"
             }
           end
-          return { status: :error,
+          return { status: :error, preflight_failed: true,
                    error_message: "preflight failed: #{e.message}" }
+        end
+
+        # Hive-owned MCP (plan 2026-10-15-001): the scope's grant, rendered
+        # for this profile, unless a managed runtime policy already isolates.
+        unless runtime_policy&.mcp_isolated
+          mcp_launch = Hive::Mcp.prepare(
+            profile: profile,
+            policy: Hive::Mcp.policy(cfg, scope: mcp_scope || Hive::Mcp.scope_for(task.stage_name)),
+            cwd: cwd || task.folder,
+            version: (probe.version if probe.is_a?(Hive::AgentRuntime::ProbeResult))
+          )
         end
 
         support = Hive::AgentSupport.for(profile)
@@ -1021,6 +1040,21 @@ module Hive
         end
         if max_budget_usd && !profile.budget_flag
           warn_budget_unenforced(task, profile, max_budget_usd)
+        end
+        claude_launch = Hive::AgentSupport.supports?(profile, :Launch)
+        # A killed tmux-era runner could leave its Stop-hook stub behind in
+        # either scratch dir; every Claude spawn path repairs it here.
+        if claude_launch
+          Hive::ClaudeLauncher.repair_legacy_scratch_settings([ task.folder, cwd || task.folder ])
+        end
+        # A Claude question menu has no one to answer it on a detached
+        # launch, so every Claude spawn denies it. A runtime_policy carries
+        # its own deny list, which already includes it.
+        if runtime_policy.nil? && claude_launch
+          disallowed_tools = Hive::PermissionScope.tool_csv(
+            Hive::PermissionScope.tool_csv(disallowed_tools).to_s.split(",") +
+              Hive::AgentSupport::Claude::Launch::DENIED_TOOLS
+          )
         end
 
         # `cli_flags: nil` means "no explicit flags — derive model/effort
@@ -1058,8 +1092,10 @@ module Hive
 
         started_at = Time.now.utc.iso8601
         effective_status_mode = runtime_policy&.host_outputs? ? :exit_code_only : status_mode
+        # `observed_*` name what a caller already put in cli_flags (the
+        # Claude launcher's claude.* resolution); they feed the receipt only.
         requested_identity = requested_model(
-          context, routing_arguments, launch_arguments, model
+          context, routing_arguments, launch_arguments, model || receipt_model
         )
         requested_provider, requested_model_identity = execution_identity(
           profile, requested_identity
@@ -1072,7 +1108,9 @@ module Hive
           role: log_label || task.stage_name,
           requested_provider: requested_provider,
           requested_model: requested_model_identity,
-          requested_effort: requested_effort(context, routing_arguments, launch_arguments, effort),
+          requested_effort: requested_effort(
+            context, routing_arguments, launch_arguments, effort || receipt_effort
+          ),
           billing_route: billing_route,
           billing_evidence_source: billing_evidence_source,
           timeout_sec: timeout_sec,
@@ -1114,7 +1152,8 @@ module Hive
               permission_policy: permission_policy,
               isolate_environment: isolate_environment,
               completion_probe: completion_probe,
-              terminate_on_parent_signal: terminate_on_parent_signal
+              terminate_on_parent_signal: terminate_on_parent_signal,
+              mcp_launch: mcp_launch
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
               agent_result.is_a?(Hash) && agent_result.key?(:requested_route)
@@ -1158,6 +1197,7 @@ module Hive
           end
         end
       ensure
+        mcp_launch&.cleanup!
         runtime_policy&.cleanup! if cleanup_runtime_policy
       end
 
@@ -1186,6 +1226,17 @@ module Hive
         )
       end
 
+      # Claude enforces a budget (--max-budget-usd), so a Claude stage is
+      # capped only when the project config sets its budget; the built-in
+      # defaults do not cap it. Other agents keep the merged value.
+      def stage_budget_usd(cfg, stage_name, profile, default: nil)
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          return Hive::Config.configured_budget_usd(cfg, stage_name)
+        end
+
+        cfg.dig("budget_usd", stage_name) || default
+      end
+
       def stage_resource_limits(cfg, stage)
         budget = Hive::Config.stage_resource_limit_resolution(
           cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
@@ -1202,181 +1253,80 @@ module Hive
         }
       end
 
+      # Named keywords are the ones this layer reads or re-defaults; every
+      # other launch option (Hive::ClaudeLauncher::LAUNCH_OPTIONS) travels
+      # in `options`, which launch_options validates so an unknown keyword
+      # still raises ArgumentError here.
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
-                         session_name:, add_dirs: [], cwd: nil, log_label: nil,
-                         profile: nil, expected_output: nil, status_mode: nil,
-                         permission_mode: nil, allowed_tools: nil,
-                         disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil,
-                         routing_arguments: nil, runtime_policy: nil,
-                         implementation_stage: nil,
-                         additional_read_roots: [], additional_write_roots: [],
-                         edit_patterns: [], bash_patterns: [],
-                         resource_guards: nil, agent_custody: nil,
-                         model: nil, effort: nil)
-        require "hive/claude_launcher"
-
+                         add_dirs: [], cwd: nil, log_label: nil, profile: nil,
+                         implementation_stage: nil, **options)
+        options = Hive::ClaudeLauncher.launch_options(options)
+        common = {
+          prompt: prompt, max_budget_usd: max_budget_usd,
+          timeout_sec: timeout_sec, add_dirs: add_dirs, log_label: log_label
+        }
         context = Hive::Attempts::Context.current
         if context&.explicit_routing? &&
-            !Hive::AgentSupport.supports?(context.adapter, :Interactive)
+            !Hive::AgentSupport.supports?(context.adapter, :Launch)
           return spawn_agent(
-            task,
-            prompt: prompt,
-            max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec,
-            add_dirs: add_dirs,
-            cwd: cwd,
-            log_label: log_label,
+            task, **common, **options,
+            cwd: cwd, cfg: cfg,
             profile: Hive::AgentProfiles.lookup(context.adapter, cfg: cfg),
-            expected_output: expected_output,
-            status_mode: status_mode,
-            cfg: cfg,
-            permission_mode: permission_mode,
-            allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools,
-            identity_arguments: identity_arguments,
-            routing_arguments: routing_arguments,
-            runtime_policy: runtime_policy,
-            implementation_stage: implementation_stage,
-            additional_read_roots: additional_read_roots,
-            additional_write_roots: additional_write_roots,
-            edit_patterns: edit_patterns,
-            bash_patterns: bash_patterns,
-            resource_guards: resource_guards,
-            agent_custody: agent_custody,
-            model: model, effort: effort
+            implementation_stage: implementation_stage
           )
         end
 
-        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if context&.explicit_routing?
-        profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        unless Hive::AgentSupport.supports?(profile, :Interactive)
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg) if profile.nil? || context&.explicit_routing?
+        unless Hive::AgentSupport.supports?(profile, :Launch)
           raise Hive::AgentError,
                 "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
         end
 
-        headless = context&.explicit_routing? || Hive::Config.claude_mode(cfg) == :headless
-        if headless
-          return Hive::ClaudeLauncher.launch!(
-            task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-            cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec, log_label: log_label,
-            session_name: session_name, status_mode: status_mode,
-            expected_output: expected_output, profile: profile,
-            permission_mode: permission_mode, allowed_tools: allowed_tools,
-            disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-            strict_mcp_config: strict_mcp_config,
-            identity_arguments: identity_arguments,
-            routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-            additional_read_roots: additional_read_roots,
-            additional_write_roots: additional_write_roots,
-            edit_patterns: edit_patterns,
-            bash_patterns: bash_patterns,
-            resource_guards: resource_guards, agent_custody: agent_custody,
-            model: model, effort: effort
-          )
-        end
-
-        prompt = Hive::ContextProvenance.decorate_prompt(
-          task: task, prompt: prompt, context: context
+        Hive::ClaudeLauncher.launch!(
+          task: task, cfg: cfg, **common, **options,
+          cwd: cwd || task.folder, profile: profile
         )
-        observation = session_observation(
-          task: task, context: context, profile: profile,
-          role: log_label || task.stage_name,
-          requested_model: requested_model(context, routing_arguments, nil, model),
-          requested_effort: requested_effort(context, routing_arguments, nil, effort),
-          timeout_sec: timeout_sec,
-          guards: runtime_resource_guards(
-            resource_guards, profile: profile, max_budget_usd: max_budget_usd,
-            timeout_sec: timeout_sec
-          )
-        )
-        result = nil
-        started_at = Time.now.utc.iso8601
-        start_session_observation!(observation)
-        begin
-          result = run_with_agent_custody(agent_custody) do
-            Hive::ClaudeLauncher.launch!(
-              task: task, cfg: cfg, prompt: prompt, add_dirs: add_dirs,
-              cwd: cwd || task.folder, max_budget_usd: max_budget_usd,
-              timeout_sec: timeout_sec, log_label: log_label,
-              session_name: session_name, status_mode: status_mode,
-              expected_output: expected_output, profile: profile,
-              permission_mode: permission_mode, allowed_tools: allowed_tools,
-              disallowed_tools: disallowed_tools, mcp_config_path: mcp_config_path,
-              strict_mcp_config: strict_mcp_config,
-              identity_arguments: identity_arguments,
-              routing_arguments: routing_arguments, runtime_policy: runtime_policy,
-              additional_read_roots: additional_read_roots,
-              additional_write_roots: additional_write_roots,
-              edit_patterns: edit_patterns,
-              bash_patterns: bash_patterns,
-              model: model, effort: effort
-            )
-          end
-          record_usage(
-            task, profile, result, started_at,
-            context: context, session_id: observation.session_id
-          )
-          if context && agent_custody_safe_after?(agent_custody)
-            Hive::ContextProvenance.promote_agent_receipt(
-              task: task, context: context
-            )
-          end
-          result
-        ensure
-          if agent_custody_safe_after?(agent_custody)
-            observation.finish!(result || {}, exception: $!)
-          end
-        end
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the
       # calling stage's own task.state_file with an attributed marker
       # rather than propagating uncaught through Plan.run! / OpenPr.run!
       # / Finalize.run! / Artifacts.run! / Execute.run_pass — none of
-      # which carry their own `rescue Hive::AgentError`.
-      #
-      # tmux-unavailable errors are tagged `reason="tmux_unavailable"`
-      # (existing contract, preserved). Every OTHER AgentError raised
-      # by `ClaudeLauncher.launch!` — "tmux session … did not start",
-      # "tmux session … already exists", "claude interactive prompt did
-      # not become ready", "could not inspect claude tmux session",
-      # etc. — used to escape as a generic crash via cli.rb, leaving a
-      # stale AGENT_WORKING marker on disk. Now they land
-      # `reason="claude_launch_failed"` so the operator sees the real
-      # cause and AGENT_WORKING is replaced.
+      # which carry their own `rescue Hive::AgentError`. Without it a
+      # launch failure escapes as a generic crash via cli.rb, leaving a
+      # stale AGENT_WORKING marker on disk; `reason="claude_launch_failed"`
+      # shows the operator the real cause and lets daemon auto-retry pick
+      # it up.
       #
       # The 6-review stage deliberately does NOT use this helper: its
-      # sub-stage spawns share state with the main review task, and the
-      # outer `Stages::Review.run!` rescue maps the same AgentError to
-      # `:review_error reason="tmux_unavailable"` against the real task.
-      # Routing through here would write the wrong marker shape onto the
+      # sub-stage spawns share state with the main review task, and
+      # routing through here would write the wrong marker shape onto the
       # synthetic-task state file (which points at the main task.md).
-      def spawn_claude_with_tmux_marker!(task, cfg, **kwargs)
-        spawn_claude!(task, cfg, **kwargs)
+      #
+      # A missing or outdated claude binary does not raise: spawn_agent
+      # returns `preflight_failed: true` before anything runs, and the
+      # stage's own marker would still be the previous run's. Mark it too.
+      def spawn_claude_with_failure_marker!(task, cfg, **kwargs)
+        result = spawn_claude!(task, cfg, **kwargs)
+        return result unless result.is_a?(Hash) && result[:preflight_failed]
+
+        mark_claude_launch_failed(task, result[:error_message])
       rescue Hive::AgentError => e
         raise if e.is_a?(Hive::ProviderRouteFailed)
-
-        if Hive::Config.claude_mode(cfg) == :tmux &&
-           Hive::ClaudeLauncher.tmux_unavailable_error?(e)
-          warn "[hive] claude tmux mode is unavailable: #{e.message}"
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "tmux_unavailable",
-                            message: e.message)
-          return { status: :error, error_message: e.message }
-        end
 
         # Any other AgentError out of the launcher: surface the cause,
         # replace any stale AGENT_WORKING with an attributed :error so
         # `hive status` shows the failure state and the runner picks a
         # recoverable next step instead of treating the task as alive.
-        warn "[hive] claude launch failed: #{e.message}"
-        Hive::Markers.set(task.state_file, :error,
-                          reason: "claude_launch_failed",
-                          exception_class: e.class.name,
-                          message: e.message)
-        { status: :error, error_message: e.message }
+        mark_claude_launch_failed(task, e.message, exception_class: e.class.name)
+      end
+
+      def mark_claude_launch_failed(task, message, exception_class: nil)
+        warn "[hive] claude launch failed: #{message}"
+        attrs = { reason: "claude_launch_failed" }
+        attrs[:exception_class] = exception_class if exception_class
+        Hive::Markers.set(task.state_file, :error, **attrs, message: message)
+        { status: :error, error_message: message }
       end
 
       # Artifact custody belongs around the untrusted provider execution, not

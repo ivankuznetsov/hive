@@ -635,6 +635,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       "limits_reached" => "limits_reached",
       "timeout" => "stage_timeout",
       "ensure_clean_on_exit_failed" => "clean_exit_residue",
+      "agent_orphaned" => "agent_loss_retry",
       "tmux_session_terminated" => "agent_loss_retry",
       "unknown_failure" => "error_retry"
     }
@@ -661,9 +662,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       "review_agent_died" => "review_agent_died",
       "limits_reached" => "reviewer_limits_reached",
       "all_failed" => "reviewer_all_failed",
-      "fix_failed" => "fix_claude_stop_hook",
+      "fix_failed" => "fix_failed",
       "fix_auto_commit_scope_failed" => "fix_auto_commit_retry",
-      "reviewer_partial_failure" => "reviewer_tmux_session_terminated",
+      "reviewer_partial_failure" => "reviewer_partial_failure",
       "unknown_failure" => "review_error_retry"
     }
 

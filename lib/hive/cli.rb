@@ -80,17 +80,16 @@ module Hive
 
         0. Workflow (when >1 workflow is registered)             — default coding
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Claude launch mode (project-global, tmux/headless)    — default tmux
-        3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
+        2. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
-        4. Development agent (drives 4-execute)                  — default codex
-        5. Review agents (multi-select over 3 default reviewers) — default all
-        6. Patrol PR review agents                               — default codex only
-        7. Triage bias (courageous / safetyist)                  — default courageous
-        8. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        9. Daemon enrollment                                     — default enabled
-       10. Hive babysitter enrollment                            — default enabled
-       11. Daemon autostart                                      — default disabled
+        3. Development agent (drives 4-execute)                  — default codex
+        4. Review agents (multi-select over 3 default reviewers) — default all
+        5. Patrol PR review agents                               — default codex only
+        6. Triage bias (courageous / safetyist)                  — default courageous
+        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        8. Daemon enrollment                                     — default enabled
+        9. Hive babysitter enrollment                            — default enabled
+       10. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -109,7 +108,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux,
+        hive: using defaults — planning=claude,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
         patrol_reviewers=codex-native-review, triage=courageous, limits=defaults,
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled
@@ -469,6 +468,44 @@ module Hive
     def disconnect(service)
       require "hive/commands/disconnect"
       Hive::Commands::Disconnect.new(service, json: options[:json]).call
+    end
+
+    desc "mcp SUBCOMMAND [SERVER]", "Import personal MCP servers into Hive's catalog, or sign an agent in to one"
+    long_desc <<~DESC
+      Hive-launched agents use only the MCP servers Hive grants them. `hive mcp
+      import` reads the servers configured in Codex, Claude, OpenCode, Pi and
+      Grok (names, transports, URLs and argv; credential values are never
+      copied) and writes the chosen ones to the global catalog
+      (`mcp.servers` in ~/.config/hive/config.yml). Grant them per project or
+      stage with `mcp: { use: [name] }`.
+
+        hive mcp import                    # interactive table and selection
+        hive mcp import --dry-run --json   # plan only, machine-readable
+        hive mcp import --all --yes        # every new server
+        hive mcp import --only linear,docs --yes
+        hive mcp import --all --update --yes   # also replace drifted entries
+        hive mcp login linear --agent codex    # sign Codex in for Hive launches
+
+      Without a terminal a write needs --all or --only plus --yes. Literal
+      credentials become environment-variable names the command lists for
+      export. `login` is interactive and supports codex and claude.
+
+      Exit codes: 0 success; 1 sign-in failed; 64 usage or consent required;
+      78 malformed global config.
+    DESC
+    option :all, type: :boolean, default: false, desc: "import every new server"
+    option :only, type: :string, desc: "comma-separated server names or row ids to import"
+    option :dry_run, type: :boolean, default: false, desc: "preview without writing"
+    option :yes, type: :boolean, default: false, desc: "write without asking"
+    option :update, type: :boolean, default: false, desc: "replace catalog entries whose source changed"
+    option :agent, type: :string, desc: "agent to sign in (login): codex or claude"
+    def mcp(subcommand = nil, server = nil)
+      require "hive/commands/mcp"
+      exit Hive::Commands::Mcp.new(
+        subcommand, server,
+        json: options[:json], all: options[:all], only: options[:only], dry_run: options[:dry_run],
+        yes: options[:yes], update: options[:update], agent: options[:agent]
+      ).call
     end
 
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"

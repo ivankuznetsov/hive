@@ -6,6 +6,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
 
   ROOT = File.expand_path("../../..", __dir__)
   RETIRED_SOURCE_FILES = %w[
+    lib/hive/agent_support/claude/interactive.rb
     lib/hive/attempts/decision_index.rb
     lib/hive/attempts/pending_finalization_store.rb
     lib/hive/attempts/permanent_proof_store.rb
@@ -13,6 +14,7 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/attempts/record_migration.rb
     lib/hive/attempts/storage_health.rb
     lib/hive/attempts/store.rb
+    lib/hive/claude_completion_fallback.rb
     lib/hive/daemon/dispatch_request_queue.rb
     lib/hive/daemon/dispatch_result_queue.rb
     lib/hive/daemon/pr_merge_reconciliation_store.rb
@@ -33,23 +35,31 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     lib/hive/runtime_control_plane/diagnostics.rb
     lib/hive/runtime_control_plane/identity.rb
     lib/hive/runtime_control_plane/legacy_import.rb
+    lib/hive/scripts/interactive_claude_wrapper.sh
+    lib/hive/scripts/stop_hook.sh
+    lib/hive/stop_hook_installer.rb
+    lib/hive/tmux_runner.rb
+    lib/hive/web/supervisor.rb
   ].freeze
   RETIRED_SCHEMA_FILES = %w[
     schemas/hive-attempt.v3.json
     schemas/hive-attempt.v4.json
     schemas/hive-circuits.v1.json
+    schemas/hive-init.v2.json
     schemas/hive-pr-merge-reconciliation.v1.json
     schemas/hive-provider-health-event.v1.json
     schemas/hive-provider-health.v1.json
     schemas/hive-routing-policy.v1.json
   ].freeze
   RETIRED_CONSTANTS = %w[
+    Hive::AgentSupport::Claude::Interactive
     Hive::Attempts::DecisionIndex
     Hive::Attempts::PendingFinalizationStore
     Hive::Attempts::PermanentProofStore
     Hive::Attempts::RecordMigration
     Hive::Attempts::StorageHealth
     Hive::Attempts::Store
+    Hive::ClaudeCompletionFallback
     Hive::Daemon::DispatchRequestQueue
     Hive::Daemon::DispatchResultQueue
     Hive::Daemon::PrMergeReconciliationStore
@@ -57,8 +67,24 @@ class RuntimeControlPlaneDeletionContractTest < Minitest::Test
     Hive::ProviderRouting::OperationalProjection
     Hive::ProviderRouting::PolicyRepository
     Hive::ProviderRouting::PolicyStore
+    Hive::StopHookInstaller
+    Hive::TmuxError
+    Hive::TmuxRunner
+    Hive::Web::Supervisor
   ].freeze
-  RETIRED_ENVIRONMENT_PATHS = %w[HIVE_ATTEMPT_STORE_ROOT HIVE_USAGE_DB_PATH].freeze
+  RETIRED_ENVIRONMENT_PATHS = %w[
+    HIVE_ATTEMPT_STORE_ROOT
+    HIVE_TMUX_BIN
+    HIVE_TMUX_COMMAND_TIMEOUT_SEC
+    HIVE_TMUX_PROMPT_SETTLE_TIMEOUT_SEC
+    HIVE_TMUX_PROMPT_SUBMIT_DELAY_SEC
+    HIVE_TMUX_SOCKET
+    HIVE_USAGE_DB_PATH
+    HIVEBOX_PRECOMPILED_ASSETS
+    HIVEBOX_REPOS_DIR
+    HIVEBOX_SESSION_SECRET
+    HIVEBOX_SUPERVISOR_PID
+  ].freeze
   RETAINED_FILE_STORES = %w[
     lib/hive/artifact_firewall.rb
     lib/hive/atomic_file.rb

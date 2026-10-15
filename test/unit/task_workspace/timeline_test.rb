@@ -219,6 +219,18 @@ class TaskWorkspaceTimelineTest < Minitest::Test
                                      .dig("records", 0, "event_id")
   end
 
+  # The retired tmux launch mode wrote `claude_completion_fallback` events;
+  # journals from before its removal must still render as material records.
+  def test_legacy_claude_completion_fallback_event_still_renders
+    legacy = event("fallback", "claude_completion_fallback", at: "2026-08-12T12:00:00Z")
+
+    panel = timeline(events: [ legacy ]).call
+
+    assert_equal [ "fallback" ], panel.fetch("records").map { |row| row.fetch("event_id") }
+    assert_equal "claude_completion_fallback", panel.fetch("records").first.fetch("kind")
+    assert_empty panel.fetch("noise_groups")
+  end
+
   def test_hostile_event_fields_are_normalized_to_the_registered_record_schema
     huge = "/home/operator/" + ("x" * 10_000)
     events = 101.times.map do |index|

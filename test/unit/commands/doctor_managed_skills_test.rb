@@ -11,7 +11,6 @@ class HiveCommandsDoctorManagedSkillsTest < Minitest::Test
 
   def base_config
     {
-      "claude" => { "mode" => "headless" },
       "brainstorm" => { "agent" => "claude" },
       "plan" => { "agent" => "claude" }
     }

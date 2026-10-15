@@ -511,15 +511,6 @@ class ArtifactsCaptureToolkitTest < Minitest::Test
     end
   end
 
-  def test_packaged_codex_pin_meets_the_managed_capture_minimum
-    dockerfile = File.read(File.expand_path("../../../packaging/docker/Dockerfile", __dir__))
-
-    assert_includes(
-      dockerfile,
-      "@openai/codex@#{Hive::AgentSupport.for(:codex)::ArtifactPolicy::MINIMUM_VERSION}"
-    )
-  end
-
   def test_capture_proxy_maps_only_the_issued_origin_to_the_issued_app_port
     proxy = Hive::Artifacts::CaptureProxy.new
     app = TCPServer.new("127.0.0.1", proxy.app_port)

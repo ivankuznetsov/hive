@@ -188,7 +188,7 @@ module Hive
         # profiles implement permission_preset_supported?, so Pi/Grok and any
         # future profile still fail closed unless they explicitly advertise a
         # preset.
-        Hive::AgentSupport.supports?(profile_name, :Interactive)
+        Hive::AgentSupport.supports?(profile_name, :Launch)
       end
       if preset != YOLO && !supported
         raise Hive::ConfigError,

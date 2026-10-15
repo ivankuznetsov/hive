@@ -35,7 +35,7 @@ execute: { mcp: { use: [context7, linear] } }   # a stage block replaces it
 
 ## Launch path
 
-`Hive::Mcp.prepare(profile:, policy:, cwd:, version:)` returns a `Launch` (argv, default argv, env, passthrough env names, config overlay, cleanup paths, isolation, notices) from `AgentSupport.for(profile)::Mcp`:
+`Hive::Mcp.prepare(profile:, policy:, cwd:, version:)` returns a `Launch` (argv, default argv, env, passthrough env names, config overlay, cleanup paths, isolation, notices) from the agent's facet `AgentSupport::<Agent>::Mcp` (`Hive::Mcp.adapter`). Each facet also declares `ISOLATES` and `ACCEPTS_GRANTS`, implements `discover` for `hive mcp import`, and Codex/Claude implement `login_argv`; agent-specific code stays under `lib/hive/agent_support/<agent>/`:
 
 | Agent | Isolation | Granted servers |
 |---|---|---|
@@ -58,7 +58,7 @@ Wiring:
 
 ## Doctor
 
-`Hive::Mcp::DoctorCheck` adds `hive doctor` rows (stage `mcp`): unreadable catalog, `inherit_user` on, Grok roles, Pi roles with grants, OAuth grants without a login, referenced env vars unset (names only), Codex settings carried over (informational `present` row), personal servers not in the catalog, and drifted or vanished catalog entries. See [[commands/doctor]].
+`Hive::Mcp::DoctorCheck` adds `hive doctor` rows (stage `mcp`): unreadable catalog, `inherit_user` on, roles on agents Hive cannot isolate (Grok), roles whose agent cannot receive grants (Pi, Grok), OAuth grants without a login, referenced env vars unset (names only), Codex settings carried over (informational `present` row), personal servers not in the catalog, and drifted or vanished catalog entries. See [[commands/doctor]].
 
 ## Backlinks
 

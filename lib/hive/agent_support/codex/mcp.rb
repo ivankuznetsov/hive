@@ -1,6 +1,7 @@
 require "json"
 require "hive/mcp"
-require "hive/agent_skills/manifest"
+require "hive/mcp/discovery"
+require "hive/agent_skills"
 
 # Codex MCP renderer. `--ignore-user-config` drops every personal and
 # trusted-project server (`-c mcp_servers={}` cannot: overrides deep-merge),
@@ -22,6 +23,10 @@ module Hive::AgentSupport::Codex::Mcp
   # Literal credentials in a carried table stay in config.toml: replaying
   # them would put the value in argv.
   SECRET_KEY = /(?:TOKEN|SECRET|PASSWORD|API_?KEY|HEADERS|AUTHORIZATION)/i
+
+  Discovery = Hive::Mcp::Discovery
+  ISOLATES = true
+  ACCEPTS_GRANTS = true
 
   module_function
 
@@ -78,10 +83,7 @@ module Hive::AgentSupport::Codex::Mcp
   end
 
   def managed_plugins
-    @managed_plugins ||= Hive::AgentSkills::Manifest.load.packages.filter_map do |package|
-      native = package.agents["codex"]
-      native.package if native.is_a?(Hive::AgentSkills::Manifest::NativePackage)
-    end.freeze
+    @managed_plugins ||= Hive::AgentSkills.native_packages(:codex).freeze
   end
 
   def server_arguments(server, environment)
@@ -121,6 +123,69 @@ module Hive::AgentSupport::Codex::Mcp
 
   def inline_table(hash)
     "{ #{hash.map { |key, value| "#{toml_key(key)} = #{JSON.generate(value)}" }.join(', ')} }"
+  end
+
+  # `codex mcp list --json` resolves user and trusted-project servers and
+  # each one's login state without starting them.
+  def discover(cwd:, env:, capture:, **)
+    rows = Discovery.probe(capture, [ Hive::AgentProfiles.lookup(:codex).bin, "mcp", "list", "--json" ], cwd, "codex")
+    raise Discovery::Skipped, "`codex mcp list --json` returned no server list" unless rows.is_a?(Array)
+
+    user_config = Hive::AgentSupport::Codex::UserConfig.load(
+      Hive::AgentSupport::Codex::UserConfig.path(env: env)
+    )
+    rows.map do |row|
+      name = row["name"].to_s
+      transport = row["transport"].is_a?(Hash) ? row["transport"] : {}
+      raw = case transport["type"]
+      when "stdio"
+        {
+          "command" => transport["command"], "args" => transport["args"] || [],
+          "env" => transport["env"] || {}, "cwd" => transport["cwd"],
+          "env_from" => Array(transport["env_vars"]).to_h { |var| [ var, var ] }
+        }
+      when "streamable_http"
+        next Discovery.refused(name, "codex", "its http_headers_helper command cannot be copied") if transport["http_headers_helper"]
+
+        {
+          "url" => transport["url"], "headers" => transport["http_headers"] || {},
+          "headers_env" => transport["env_http_headers"] || {},
+          "bearer_token_env" => transport["bearer_token_env_var"],
+          "oauth_resource" => Hive::AgentSupport::Codex::UserConfig.string(
+            user_config.table("mcp_servers", name)["oauth_resource"]
+          )
+        }
+      else
+        next Discovery.refused(name, "codex", "transport #{transport['type'].inspect} is not supported")
+      end
+      status = row["auth_status"]
+      Discovery.candidate(name, "codex", raw, oauth: %w[o_auth not_logged_in].include?(status),
+                                    logged_in: status == "o_auth")
+    end
+  end
+
+  # `codex mcp login` with the exact name and URL Hive renders, so the saved
+  # login's key matches later launches.
+  def login_argv(name, spec)
+    argv = [ Hive::AgentProfiles.lookup(:codex).bin, "mcp", "login", name,
+             "-c", "mcp_servers.#{name}.url=#{JSON.generate(spec['url'])}" ]
+    argv.push("-c", "mcp_servers.#{name}.oauth_resource=#{JSON.generate(spec['oauth_resource'])}") if spec["oauth_resource"]
+    argv.push("--scopes", spec["oauth_scopes"].join(",")) if spec["oauth_scopes"]
+    argv
+  end
+
+  # The informational doctor row for settings every launch carries over.
+  def doctor_rows(environment)
+    document = Hive::AgentSupport::Codex::UserConfig.load(Hive::AgentSupport::Codex::UserConfig.path(env: environment))
+    carried = [ "model", *CARRIED_KEYS ].select { |key| document[key] } +
+              CARRIED_TABLES.select { |table| document.tables_under(table).any? }
+    return [] if carried.empty?
+
+    [ {
+      kind: "dependency", stage: "mcp", label: "mcp/codex-config", agent: "codex",
+      configured_skill: "config.toml", skill: carried.join(","), status: "present",
+      message: "carried over from config.toml on every Hive Codex launch: #{carried.join(', ')}"
+    } ]
   end
 
   def toml_key(key) = key.match?(/\A[A-Za-z0-9_-]+\z/) ? key : JSON.generate(key)

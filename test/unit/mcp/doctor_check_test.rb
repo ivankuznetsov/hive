@@ -64,14 +64,15 @@ class McpDoctorCheckTest < Minitest::Test
       found = rows(config, environment: { "OTHER" => "sekret-value", "CODEX_HOME" => ENV.fetch("CODEX_HOME") }, discover: discover_stub, root: dir)
       by_label = found.group_by { |row| row[:label] }
 
-      assert(by_label.fetch("mcp/grok").any? { |row| row[:configured_skill] == "review.fix" })
-      assert(by_label.fetch("mcp/pi").any? { |row| row[:message].include?("Pi runs review") })
+      assert(by_label.fetch("mcp/isolation").any? { |row| row[:agent] == "grok" && row[:configured_skill] == "review.fix" })
+      assert(by_label.fetch("mcp/grants").any? { |row| row[:message].include?("pi runs review") })
       login = by_label.fetch("mcp/login").find { |row| row[:agent] == "claude" && row[:configured_skill] == "execute" }
       assert_includes login[:message], "run `hive mcp login linear --agent claude`"
       assert_equal [ "INTERNAL_TOKEN" ], by_label.fetch("mcp/env").map { |row| row[:skill] }
       codex = by_label.fetch("mcp/codex-config").first
       assert_equal "present", codex[:status]
       assert_equal "model,service_tier,profiles", codex[:skill]
+      refute(by_label.fetch("mcp/isolation").any? { |row| row[:agent] == "claude" })
       assert_includes by_label.fetch("mcp/personal").first[:message], "notion; run `hive mcp import`"
       drift = by_label.fetch("mcp/drift").map { |row| row[:skill] }
       assert_equal %w[gone internal], drift.sort
@@ -82,7 +83,7 @@ class McpDoctorCheckTest < Minitest::Test
   def test_inherit_user_and_unreadable_catalog_short_circuit
     with_project({ "mcp" => { "inherit_user" => true } }) do |config|
       found = rows(config, discover: ->(_root) { raise "not called" })
-      assert_equal [ "mcp/isolation" ], found.map { |row| row[:label] }
+      assert_equal [ "mcp/inherit" ], found.map { |row| row[:label] }
     end
 
     with_project({}) do |config|

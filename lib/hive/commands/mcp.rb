@@ -15,8 +15,6 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       SUBCOMMANDS = %w[import login].freeze
-      # Agents whose own CLI can sign in to a Hive-rendered server.
-      LOGIN_AGENTS = %w[codex claude].freeze
       ERROR_KINDS = %w[usage consent_required config agent internal].freeze
 
       class ConsentRequired < Hive::UsageError; end
@@ -185,9 +183,11 @@ module Hive
       def login
         raise Hive::UsageError, "hive mcp login is interactive and has no JSON mode" if @json
         raise Hive::UsageError, "hive mcp login: name the catalog SERVER" if @server.to_s.empty?
-        unless LOGIN_AGENTS.include?(@agent.to_s)
-          raise Hive::UsageError, "hive mcp login: --agent must be one of #{LOGIN_AGENTS.join(', ')}; " \
-                                  "Pi cannot receive Hive-granted servers and OpenCode/Grok logins are not supported yet"
+        adapter = Hive::Mcp.adapter(@agent.to_s)
+        unless adapter.respond_to?(:login_argv)
+          signers = Hive::Mcp::Discovery::AGENTS.select { |agent| Hive::Mcp.adapter(agent).respond_to?(:login_argv) }
+          raise Hive::UsageError, "hive mcp login: --agent must be one of #{signers.join(', ')}; " \
+                                  "the other agents cannot sign in to a Hive-rendered server yet"
         end
         raise Hive::UsageError, "hive mcp login needs a terminal: the agent opens a browser sign-in" unless @input.respond_to?(:tty?) && @input.tty?
 
@@ -195,28 +195,12 @@ module Hive
         raise Hive::UsageError, "hive mcp login: #{@server} is not in the global MCP catalog; run `hive mcp import` first" unless spec
         raise Hive::UsageError, "hive mcp login: #{@server} is a stdio server; only HTTP servers sign in" unless spec["url"]
 
-        unless @runner.call(login_argv(spec))
+        unless @runner.call(adapter.login_argv(@server, spec))
           raise Hive::AgentError, "hive mcp login: #{@agent} sign-in for #{@server} did not complete"
         end
         Hive::Mcp::Importer.record_login!(@server, @agent)
         @output.puts "#{@agent} is signed in to #{@server}; Hive launches will now render it for #{@agent}."
         0
-      end
-
-      # Codex: the -c overrides reproduce the exact name and URL Hive renders,
-      # so the saved login's key matches later launches. Claude: `claude mcp
-      # login` finds the server by name in Claude's own config, which must
-      # carry the same type, URL and headers (`hive mcp import` keeps them).
-      def login_argv(spec)
-        if @agent == "codex"
-          argv = [ Hive::AgentProfiles.lookup(:codex).bin, "mcp", "login", @server,
-                   "-c", "mcp_servers.#{@server}.url=#{JSON.generate(spec['url'])}" ]
-          argv.push("-c", "mcp_servers.#{@server}.oauth_resource=#{JSON.generate(spec['oauth_resource'])}") if spec["oauth_resource"]
-          argv.push("--scopes", spec["oauth_scopes"].join(",")) if spec["oauth_scopes"]
-          return argv
-        end
-
-        [ Hive::AgentProfiles.lookup(:claude).bin, "mcp", "login", @server ]
       end
     end
   end

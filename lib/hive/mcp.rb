@@ -66,16 +66,25 @@ module Hive
       Settings.resolve(cfg || {}, scope: scope)
     end
 
-    # The config block a task's stage reads its grant from: "4-execute" ->
-    # "execute", "5-open-pr" -> "open_pr" (the admitted-route convention).
+    # The config block a task's stage reads its grant from: the stage folder
+    # name without its numeric prefix, dashes as underscores (the
+    # admitted-route convention).
     def scope_for(stage_name)
       stage_name.to_s.sub(/\A\d+-/, "").tr("-", "_")
+    end
+
+    # The per-agent MCP facet (`AgentSupport::<Agent>::Mcp`): `prepare`,
+    # `discover`, the ISOLATES/ACCEPTS_GRANTS capabilities, and optionally
+    # `login_argv` and `doctor_rows`. nil for a custom profile.
+    def adapter(profile)
+      Hive::AgentSupport.supports?(profile, :Mcp) ? Hive::AgentSupport.for(profile)::Mcp : nil
     end
 
     def prepare(profile:, policy:, cwd:, version: nil)
       return launch(isolation: :inherit, notices: policy.notices) if policy.inherit_user
 
-      unless Hive::AgentSupport.supports?(profile, :Mcp)
+      renderer = adapter(profile)
+      unless renderer
         name = profile.respond_to?(:name) ? profile.name : profile
         notices = policy.notices + [
           "MCP isolation incomplete: agent #{name} has no Hive MCP renderer, so it keeps its own MCP config" \
@@ -84,9 +93,7 @@ module Hive
         return launch(isolation: :none, notices: notices)
       end
 
-      Hive::AgentSupport.for(profile)::Mcp.prepare(
-        policy: policy, cwd: cwd, version: version, profile: profile
-      )
+      renderer.prepare(policy: policy, cwd: cwd, version: version, profile: profile)
     end
 
     # Prepare a launch for a caller outside spawn_agent (a direct

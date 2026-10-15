@@ -182,8 +182,7 @@ class McpProvidersTest < Minitest::Test
 
     assert_equal :none, launch.isolation
     assert_empty launch.arguments
-    assert_equal [ "MCP isolation incomplete: agent grok has no Hive MCP renderer, so it keeps its own MCP config" ],
-                 launch.notices
+    assert_equal [ "MCP isolation incomplete: Grok has no flag to ignore its own MCP config" ], launch.notices
   end
 
   # --- launchers outside Hive::Agent -----------------------------------------

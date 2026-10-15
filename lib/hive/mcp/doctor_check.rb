@@ -1,5 +1,6 @@
 require "hive/config"
 require "hive/mcp"
+require "hive/mcp/discovery"
 require "hive/mcp/importer"
 
 module Hive
@@ -8,11 +9,6 @@ module Hive
     # row fits the hive-doctor.v2 LegacyCheck shape; warnings never change
     # the exit code. Env vars are reported by name, never by value.
     module DoctorCheck
-      # Codex settings Hive replays on every `--ignore-user-config` launch.
-      CARRIED_CODEX_KEYS = %w[
-        model model_reasoning_effort service_tier personality model_provider profile openai_base_url
-      ].freeze
-
       module_function
 
       # `discover` is nil when the caller skips the (slow, subprocess-based)
@@ -24,11 +20,11 @@ module Hive
                            "granted MCP servers are skipped at launch") ]
         end
         if Hive::Mcp::Settings.resolve(config, scope: "execute").inherit_user
-          return [ warning("mcp/isolation", "hive", "mcp.inherit_user", "inherit_user",
+          return [ warning("mcp/inherit", "hive", "mcp.inherit_user", "inherit_user",
                            "mcp.inherit_user is true: isolation is off and agents load their own MCP config") ]
         end
 
-        rows = grant_rows(config, environment) + codex_rows(environment)
+        rows = grant_rows(config, environment) + adapter_rows(environment)
         rows.concat(discovery_rows(project_root, discover)) if discover
         rows
       end
@@ -49,15 +45,16 @@ module Hive
         missing_env = []
         roles(config).each do |scope, agent|
           policy = Hive::Mcp::Settings.resolve(config, scope: scope)
-          if agent == "grok"
-            rows << warning("mcp/grok", "grok", scope, "isolation",
-                            "Grok runs #{scope} without MCP isolation: it has no flag to ignore its own MCP config")
+          adapter = Hive::Mcp.adapter(agent)
+          unless adapter&.const_get(:ISOLATES)
+            rows << warning("mcp/isolation", agent, scope, "isolation",
+                            "#{agent} runs #{scope} without MCP isolation: it keeps its own MCP config")
           end
           next if policy.servers.empty?
 
-          if agent == "pi"
-            rows << warning("mcp/pi", "pi", scope, policy.servers.map(&:name).join(","),
-                            "Pi runs #{scope} and cannot receive Hive-granted servers; they are dropped at launch")
+          unless adapter&.const_get(:ACCEPTS_GRANTS)
+            rows << warning("mcp/grants", agent, scope, policy.servers.map(&:name).join(","),
+                            "#{agent} runs #{scope} and cannot receive Hive-granted servers; they are dropped at launch")
           end
           policy.servers.each do |server|
             if Hive::Mcp.oauth?(server) && !Array(server.oauth_logins).include?(agent)
@@ -75,18 +72,13 @@ module Hive
         rows
       end
 
-      def codex_rows(environment)
-        user_config = Hive::AgentSupport.for(:codex)::UserConfig
-        document = user_config.load(user_config.path(env: environment))
-        carried = CARRIED_CODEX_KEYS.select { |key| document[key] } +
-                  %w[model_providers profiles].select { |table| document.tables_under(table).any? }
-        return [] if carried.empty?
-
-        [ {
-          kind: "dependency", stage: "mcp", label: "mcp/codex-config", agent: "codex",
-          configured_skill: "config.toml", skill: carried.join(","), status: "present",
-          message: "carried over from config.toml on every Hive Codex launch: #{carried.join(', ')}"
-        } ]
+      # Agent-specific informational rows, such as the Codex settings every
+      # launch carries over.
+      def adapter_rows(environment)
+        Hive::Mcp::Discovery::AGENTS.flat_map do |agent|
+          adapter = Hive::Mcp.adapter(agent)
+          adapter.respond_to?(:doctor_rows) ? adapter.doctor_rows(environment) : []
+        end
       end
 
       def discovery_rows(project_root, discover)
@@ -114,7 +106,7 @@ module Hive
           skill: skill, status: "warning", message: message
         }
       end
-      private_class_method :grant_rows, :codex_rows, :discovery_rows, :warning
+      private_class_method :grant_rows, :adapter_rows, :discovery_rows, :warning
     end
   end
 end

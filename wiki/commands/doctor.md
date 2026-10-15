@@ -140,9 +140,9 @@ MCP rows (`Hive::Mcp::DoctorCheck`, stage `mcp`; see [[modules/mcp]]):
 | Label | Kind | When |
 |---|---|---|
 | `mcp/catalog` | warning | the global config is unreadable, so granted servers are skipped at launch |
-| `mcp/isolation` | warning | `mcp.inherit_user` is true (isolation off); other MCP rows are skipped |
-| `mcp/grok` | warning | a role runs Grok, which has no MCP isolation flag |
-| `mcp/pi` | warning | a Pi role has a non-empty grant (Pi cannot receive granted servers) |
+| `mcp/inherit` | warning | `mcp.inherit_user` is true (isolation off); other MCP rows are skipped |
+| `mcp/isolation` | warning | a role runs an agent Hive cannot isolate (Grok, custom profiles) |
+| `mcp/grants` | warning | a role whose agent cannot receive granted servers (Pi, Grok) has a non-empty grant |
 | `mcp/login` | warning | an OAuth server is granted to an agent with no saved login; names `hive mcp login` |
 | `mcp/env` | warning | a granted server references an env var unset in doctor's environment (name only) |
 | `mcp/codex-config` | present | `config.toml` settings Hive carries over on every Codex launch |

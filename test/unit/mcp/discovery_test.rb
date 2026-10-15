@@ -139,7 +139,7 @@ class McpDiscoveryTest < Minitest::Test
         "projects" => { work => { "mcpServers" => { "shared" => { "type" => "http", "url" => "https://local.example/mcp" } } } }
       })
       write(File.join(work, ".mcp.json"), { "mcpServers" => { "proj" => { "type" => "http", "url" => "https://proj.example/mcp", "headers" => { "X-A" => "b" } } } })
-      key = Hive::Mcp::Discovery.claude_login_key("proj", { "type" => "http", "url" => "https://proj.example/mcp", "headers" => { "X-A" => "b" } })
+      key = Hive::AgentSupport.for(:claude)::Mcp.login_key("proj", { "type" => "http", "url" => "https://proj.example/mcp", "headers" => { "X-A" => "b" } })
       write(File.join(dir, "home", ".claude", ".credentials.json"), { "claudeAiOauth" => {}, "mcpOAuth" => { key => { "accessToken" => "x" } } })
       claude = by_name(discover(dir), "claude")
 

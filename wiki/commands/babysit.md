@@ -147,7 +147,19 @@ the repository catalogue. A concurrent creation is accepted only after Hive
 verifies that the label now exists, without overwriting its metadata. If
 provisioning is denied, label application fails closed, records the reason in
 the babysitter event, and lets the independent give-up comment preserve the
-repair blocker.
+repair blocker. The comment leads with the classified `Error:` line before the
+agent tail, because the tail is often provider startup noise (for example MCP
+connection errors from the operator's own Codex config).
+
+A provider usage limit (`error_reason: "limits_reached"` from `Hive::Agent`) is
+not a give-up: no label, no comment. `PrFixer` records the provider in
+`.hive-state/babysitter/agent-limit-hold.json` (`limited_at`, the provider's
+`retry_after` estimate, and the message) and emits `agent-fix` with outcome
+`limits_reached`. Until `AgentLimit.retry_due?` says the hourly cooldown from
+`limited_at` has passed, later ticks skip that provider's spawns with a
+`skipped`/`limits_reached` event; the next real spawn that does not hit the
+limit clears the hold. `limits_reached` is a `:retry` outcome class, so the
+one-shot projection reports it as `waiting_external` until the next poll.
 
 ## Dry Run
 

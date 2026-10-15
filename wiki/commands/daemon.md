@@ -254,7 +254,12 @@ Daemon ticks never migrate task metadata. Missing task ids, display names, and
 legacy completion clocks are repaired only by the explicit [[commands/migrate]]
 command, so routine scheduling does not compete with stage commits. Recovery
 receipts for an id-less task instruct the operator to run `hive migrate --all`;
-they never claim a later daemon tick will allocate the id.
+they never claim a later daemon tick will allocate the id. A task whose
+`meta.yml` id is already bound to a different registered task subject (usually
+a task created under another `HIVE_HOME`) gets the same rule: the recovery
+safety check returns `safety_blocked` with owner `operator` and names the owning
+`project:slug`, operational status shows it as `needs_repair`, and the daemon
+never rewrites the id itself. See [[state-model]].
 
 | `tasks[].action`      | Daemon action                                |
 |-----------------------|----------------------------------------------|

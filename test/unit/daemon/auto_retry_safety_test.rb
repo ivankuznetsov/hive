@@ -27,6 +27,42 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
+  def test_refuses_a_folder_whose_task_id_is_bound_to_another_subject
+    with_tmp_dir do |dir|
+      conflict = {
+        task_id: "1", project_name: "hive", task_slug: "fresh-rerun",
+        project_id: "p", workflow_id: "coding", observed_path: "/gone"
+      }
+      with_identity_probe(->(path) { path == dir ? conflict : nil }) do
+        ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-discover"))
+
+        assert_equal false, ok
+        assert_match(/\Atask id 1 is already bound to hive:fresh-rerun; give this task folder a fresh unique id/, reason)
+      end
+    end
+  end
+
+  def test_identity_probe_failure_leaves_the_lease_authoritative
+    with_tmp_dir do |dir|
+      with_identity_probe(->(_path) { raise Hive::RuntimeControlPlane::Unavailable.new("down", code: :down) }) do
+        ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-discover"))
+
+        assert_equal true, ok
+        assert_includes reason, "no mutable work-area guard"
+      end
+    end
+  end
+
+  def with_identity_probe(callable)
+    probe = Object.new
+    probe.define_singleton_method(:identity_conflict) { |path| callable.call(path) }
+    original = Hive::Lock.instance_variable_get(:@task_lease_repository)
+    Hive::Lock.task_lease_repository = probe
+    yield
+  ensure
+    Hive::Lock.task_lease_repository = original
+  end
+
   def test_marker_attrs_defaults_to_an_empty_hash_for_unknown_row_shapes
     assert_equal(
       {},

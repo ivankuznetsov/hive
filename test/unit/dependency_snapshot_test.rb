@@ -586,6 +586,50 @@ class DependencySnapshotTest < Minitest::Test
                  Hive::DependencySnapshot.semantic_fingerprint(no_fallback)
   end
 
+  def test_branch_ref_inventory_runs_only_for_declarations_that_can_stack
+    calls = []
+    with_replaced_singleton_method(
+      Hive::Worktree, :branch_refs,
+      ->(root) { calls << root; Set[ "refs/heads/base-task" ].freeze }
+    ) do
+      [ nil, [ "base-task" ], "other:base-task", "Not A Slug!", [] ].each do |declaration|
+        inventory = Hive::DependencySnapshot.branch_refs_for("/repo", [ declaration ])
+
+        refute inventory.needed, "#{declaration.inspect} cannot stack"
+        assert_nil inventory.refs
+      end
+      assert_empty calls
+
+      inventory = Hive::DependencySnapshot.branch_refs_for("/repo", [ [ "a" ], "base-task" ])
+
+      assert inventory.needed
+      assert_includes inventory.refs, "refs/heads/base-task"
+      assert_equal [ "/repo" ], calls
+    end
+  end
+
+  def test_semantic_fingerprint_survives_non_json_leaves_in_an_invalid_list_declaration
+    with_tmp_dir do |root|
+      folder = execute_folder(root, "nan-list")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "slug: nan-list\ndepends_on: [base-task, .nan]\n")
+
+      rows = Hive::DependencySnapshot.admission_tasks(root, {}, exclude_archived: true)
+      context = Hive::DependencyAdmission::Context.new(projects: [
+        Hive::DependencyAdmission::ProjectSnapshot.new(
+          name: "app", path: root, repository_identity: nil, live_repository_identity: nil,
+          dependency_gate_stage: "8-finalize", tasks: rows, validation_error: nil
+        )
+      ])
+
+      assert_equal [ [ "base-task", "NaN" ] ], rows.map(&:depends_on)
+      assert_equal :invalid_reference, rows.first.metadata_status
+      assert_match(/\A\h{64}\z/, Hive::DependencySnapshot.semantic_fingerprint(context))
+      assert_equal "dependency_reference_invalid",
+                   context.verdict(project: "app", slug: "nan-list").admission_error.reason_code
+    end
+  end
+
   def test_admission_context_preserves_corrupt_metadata_as_an_error
     with_tmp_dir do |root|
       slug = "corrupt-task"

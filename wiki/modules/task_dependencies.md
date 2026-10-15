@@ -48,7 +48,9 @@ absent legacy sidecar from unreadable YAML, a non-mapping document, and an
 invalid `depends_on`. General display code may still use the tolerant reader,
 which projects malformed declarations as a schema-safe string or null instead
 of leaking raw arrays or mappings into public status. Admission never uses that
-projection and retains the original malformed value as strict evidence.
+projection and retains the original malformed list shape as strict evidence;
+non-finite YAML floats (`.nan`, `.inf`) inside that list are rendered as text
+so semantic fingerprints and TUI/Web projections stay JSON-serializable.
 Metadata mutators refuse to rewrite corrupt input,
 so id/display-name backfill cannot erase damaged dependency evidence. The
 strict reader rejects duplicate top-level `depends_on` keys before YAML's
@@ -159,6 +161,10 @@ Each `unmet_dependencies` entry contains `reference`, resolved `blocked_by`,
 for a resolvable same-project scalar and `default` otherwise. The array is the
 authoritative fan-in explanation; scalar singulars remain compatibility
 projections and are always null for list declarations.
+Only a valid same-project scalar triggers the `git for-each-ref` branch
+inventory (`DependencySnapshot.branch_refs_for`); lists, cross-project scalars,
+and invalid scalars resolve `default` without a git subprocess, in both status
+and `admission_fingerprint`.
 
 For a scalar declaration, the singular compatibility fields describe only the
 first unmet direct edge. If that direct prerequisite has reached its gate but

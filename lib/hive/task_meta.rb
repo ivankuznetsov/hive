@@ -353,9 +353,22 @@ module Hive
     def normalize_dependency(value, preserve_invalid: false)
       Hive::Dependencies.normalize_declaration(value)
     rescue Hive::Dependencies::InvalidReference
-      return value if preserve_invalid && value.is_a?(Array)
+      return json_safe_evidence(value) if preserve_invalid && value.is_a?(Array)
 
       normalize_string(Hive::Dependencies.display_declaration(value))
+    end
+
+    # Invalid list evidence keeps its shape for diagnostics, but every
+    # projection that hashes or publishes it must stay JSON-serializable.
+    # YAML admits non-finite floats (`.nan`, `.inf`) that JSON rejects, so
+    # render those leaves as text at any nesting depth.
+    def json_safe_evidence(value)
+      case value
+      when Array then value.map { |element| json_safe_evidence(element) }
+      when Hash then value.to_h { |key, element| [ json_safe_evidence(key), json_safe_evidence(element) ] }
+      when Float then value.finite? ? value : value.to_s
+      else value
+      end
     end
 
     def normalize_plan_review_required(value, label:, allow_nil: false, strict: false)

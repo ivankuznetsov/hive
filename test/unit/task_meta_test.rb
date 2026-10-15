@@ -197,6 +197,20 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_read_for_admission_keeps_invalid_list_shape_but_renders_non_json_leaves_as_text
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on: [base-task, .nan, [-.inf], {.inf: 1.5}]\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_equal [ "base-task", "NaN", [ "-Infinity" ], { "Infinity" => 1.5 } ],
+                   result.data[:depends_on]
+      assert_match(/element 2/, result.error)
+      assert JSON.generate(result.data)
+    end
+  end
+
   def test_read_for_admission_rejects_explicit_null_dependency
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "meta.yml"), "depends_on:\n")

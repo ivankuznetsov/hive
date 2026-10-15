@@ -168,16 +168,25 @@ module Hive
         available_branch_refs.include?("refs/heads/#{branch}")
     end
 
-    # Branch evidence is needed only for scalar declarations. Keeping this
-    # predicate beside the inventory operation prevents status and durable
-    # attempt fingerprinting from drifting into different policies.
+    # Branch evidence is needed only for declarations that can stack: a
+    # valid same-project scalar. Lists, cross-project scalars, and invalid
+    # scalars always select the default base, so they never pay for a git
+    # inventory. Keeping this predicate beside the inventory operation
+    # prevents status and durable attempt fingerprinting from drifting into
+    # different policies.
     def branch_refs_for(project_root, declarations)
-      needed = Array(declarations).any? do |declaration|
-        declaration && !Hive::Dependencies.list_declaration?(declaration)
-      end
+      needed = Array(declarations).any? { |declaration| stackable_declaration?(declaration) }
       return BranchRefInventory.new(needed: false, refs: nil) unless needed
 
       BranchRefInventory.new(needed: true, refs: Hive::Worktree.branch_refs(project_root))
+    end
+
+    def stackable_declaration?(declaration)
+      return false if declaration.nil? || Hive::Dependencies.list_declaration?(declaration)
+
+      !Hive::Dependencies.parse_reference(declaration).explicit_project
+    rescue Hive::Dependencies::InvalidReference
+      false
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,

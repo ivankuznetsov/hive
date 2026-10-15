@@ -29,7 +29,9 @@ class NewCommandReceiptTest < Minitest::Test
     assert_includes error.message, "command receipt storage is busy"
   end
 
-  def test_keyed_call_refuses_a_real_base_only_runtime_before_task_creation
+  # Receipts are an unpublished opt-in extension; a base-only runtime keeps
+  # the pre-receipt per-project TaskCapture idempotency instead of refusing.
+  def test_keyed_call_on_a_real_base_only_runtime_falls_back_to_task_capture
     with_tmp_dir do |root|
       activate_test_control_plane(root)
       database = Hive::RuntimeControlPlane::Database.new(
@@ -39,11 +41,18 @@ class NewCommandReceiptTest < Minitest::Test
       command = Hive::Commands::New.new(
         "demo", "idea", idempotency_key: "stable", command_receipt_store: store
       )
-      command.define_singleton_method(:perform_call!) { flunk "legacy task capture executed" }
+      command.define_singleton_method(:command_operation) { flunk "receipt path used without receipts" }
+      command.define_singleton_method(:perform_call!) do
+        raise "fallback ran inside a command operation" if @inside_command_operation
 
-      error = assert_raises(Hive::ConfigError) { command.call! }
+        "created"
+      end
 
-      assert_includes error.message, "command receipts are not installed"
+      result = nil
+      _out, err = capture_io { result = command.call! }
+
+      assert_equal "created", result
+      assert_equal "#{Hive::Commands::New::RECEIPT_FALLBACK_NOTICE}\n", err
       database.disconnect
     end
   end

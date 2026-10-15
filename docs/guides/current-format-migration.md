@@ -17,6 +17,12 @@ flag. An installed extension is retained when later setup omits the flag.
 Namespace keyed intake is a separate, disabled-by-default project config
 switch; it neither installs nor removes schema.
 
+Without the extension, `hive new --idempotency-key` keeps its per-project
+idempotency (an identical retry returns the existing task with `created:
+false`; a different request with the same key is a usage error) and prints one
+stderr notice. Other keyed commands require the extension and fail with CONFIG
+until it is installed.
+
 Migration 002 adds tables, indexes, and aggregate-maintenance triggers only. It
 does not alter or delete any existing object or row, including `schema_info` and installation identity. Its
 blast radius is the one shared host control-plane database: every Hive project

@@ -46,6 +46,13 @@ Hive now renders MCP for every agent it launches (plan
   removed by ADR-055.)
 - **Bench harness Pi profiles** (`templates/builtins/bench/runtime/harness/`)
   launch Pi outside Hive and still declare `0.70.2`; they pass no `--no-mcp`.
+- **Closed 2026-10-16: native Codex reviewer isolation.** The `codex_review`
+  reviewer ran top-level `codex review`, which has no `--ignore-user-config`,
+  so it kept personal MCP servers. It now runs `codex exec review` with the
+  standard Codex MCP launch ([[modules/reviewers]]). Still open: the parser's
+  fixtures are one real codex-cli 0.162.1 findings run; the clean-verdict and
+  usage-limit fixtures are derived from it, not captured, and no live patrol
+  pass has run on the new argv yet.
 
 ## Claude headless-only follow-ups (2026-10-14)
 

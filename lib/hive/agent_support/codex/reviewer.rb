@@ -7,14 +7,23 @@ require "hive/agent_profiles"
 require "hive/mcp"
 
 module Hive::AgentSupport::Codex
-  # Native-`codex review` reviewer.
+  # Native Codex review reviewer.
   #
   # Unlike Hive::Reviewers::Agent (which spawns `codex exec /ce-code-review`
   # and lets the agent WRITE the findings file itself), this adapter runs
-  # codex's built-in `codex review` subcommand — a single tuned, read-only
-  # code-review pass — and CAPTURES its stdout, then writes that stdout to
-  # `reviews/<output_basename>-<pass>.md`. It is the patrol-default reviewer:
-  # one cheap pass instead of the multi-persona ce-code-review fan-out.
+  # codex's built-in review — a single tuned, read-only code-review pass —
+  # through `codex exec review` and CAPTURES its output, then writes the
+  # findings to `reviews/<output_basename>-<pass>.md`. It is the
+  # patrol-default reviewer: one cheap pass instead of the multi-persona
+  # ce-code-review fan-out.
+  #
+  # Why `codex exec review` and not top-level `codex review`: only the exec
+  # form accepts `--ignore-user-config`, so only it can take the same
+  # Hive-rendered MCP launch (no personal servers, Hive grants as `-c`
+  # entries, carried-over personal settings) every other Codex launch gets.
+  # Both forms stream the same session transcript to stderr and the final
+  # message to stdout (verified against codex-cli 0.162.1; see
+  # test/fixtures/codex_exec_review), so the parsing below serves both.
   #
   # Why a custom PROMPT instead of `--base`:
   #   `codex review --base <BRANCH>` works, but the codex CLI's argument
@@ -25,13 +34,14 @@ module Hive::AgentSupport::Codex
   #   loop unchanged. We therefore use the custom-PROMPT mode and have the
   #   prompt itself (a) scope the review to `git diff <base>...HEAD` and
   #   (b) coerce the High/Medium/Nit checkbox output. argv is
-  #   `[codex, "review", "--title", <title>, <prompt>]`.
+  #   `[codex, <routing>, "exec", "review", <mcp launch>, "-c",
+  #   sandbox_mode="read-only", "--title", <title>, <prompt>]`.
   #
-  # Token usage: `codex review` emits a human-readable transcript on stdout
-  # with no machine-parseable per-token usage event (that only exists for
-  # `codex exec --json`). We therefore intentionally do NOT record usage —
-  # fabricating zeros would pollute UsageDb. If a future codex release adds
-  # a usage line to `codex review`, wire it through Base.record_usage here.
+  # Token usage: the review transcript carries no per-token usage, and
+  # `codex exec review --json` reports all-zero usage on its turn.completed
+  # event (codex-cli 0.162.1). We therefore intentionally do NOT record
+  # usage — fabricating zeros would pollute UsageDb. If a future codex
+  # release reports real review usage, wire it through Base.record_usage here.
   class Reviewer < Hive::Reviewers::Base
     # Reuse Agent's per-reviewer wall-clock default (2h) so a config that
     # omits timeout_sec behaves identically across reviewer kinds.
@@ -71,6 +81,11 @@ module Hive::AgentSupport::Codex
     # `review_body` drops; `CODEX_REPLY` is the final-message marker.
     SESSION_MARKER = /\A(?:exec|thinking|codex)\z/.freeze
     CODEX_REPLY = /\Acodex\z/.freeze
+
+    # The reviewer never edits the worktree. Explicit, because
+    # `--ignore-user-config` would otherwise leave the sandbox to codex's
+    # default rather than to anything Hive states.
+    READ_ONLY_ARGUMENTS = [ "-c", 'sandbox_mode="read-only"' ].freeze
 
     # Canonical clean-pass findings, in the exact shape the prompt asks for an
     # empty review ("No findings." under each header). Published when codex
@@ -139,9 +154,9 @@ module Hive::AgentSupport::Codex
 
       profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
       # A8 fail-closed gate. This adapter always runs codex's built-in
-      # `<bin> review` subcommand — a read-only pass that takes no tool-list
+      # `<bin> exec review` subcommand — a read-only pass that takes no tool-list
       # args — regardless of which `agent` profile the entry names (a
-      # `kind: codex_review, agent: claude` entry still runs `<bin> review`,
+      # `kind: codex_review, agent: claude` entry still runs `<bin> exec review`,
       # NOT claude's tool scoping). So a reviewer that declares a non-yolo
       # `permissions:` (which load-validation accepts as a valid reviewer
       # entry) can never be honored. enforce_permission_scope_gate! raises
@@ -157,8 +172,20 @@ module Hive::AgentSupport::Codex
       rescue Hive::AgentError => e
         return error_result("preflight failed: #{e.message}")
       end
-      warn_mcp_not_isolated
 
+      Hive::Mcp.with_launch(profile:, cfg: @cfg, scope: "review", cwd: ctx.worktree_path) do |mcp_launch|
+        log_mcp_notices(mcp_launch)
+        review_with_retries(profile, routing_arguments, mcp_launch, deadline)
+      end
+    end
+
+    def failure_output_path
+      staged_output_path
+    end
+
+    private
+
+    def review_with_retries(profile, routing_arguments, mcp_launch, deadline)
       prompt = render_prompt
       configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
       max_attempts = max_attempts_from_spec
@@ -177,7 +204,7 @@ module Hive::AgentSupport::Codex
         end
 
         run = run_codex_review(
-          profile, prompt, spawn_timeout || configured_timeout, routing_arguments
+          profile, prompt, spawn_timeout || configured_timeout, routing_arguments, mcp_launch
         )
         break if usable_review?(run)
         break if attempts >= max_attempts
@@ -194,12 +221,6 @@ module Hive::AgentSupport::Codex
 
       finalize(run, attempts, max_attempts)
     end
-
-    def failure_output_path
-      staged_output_path
-    end
-
-    private
 
     # Fail closed when this reviewer's effective permission scope is
     # anything other than yolo, since `codex review` can't enforce tool
@@ -233,18 +254,15 @@ module Hive::AgentSupport::Codex
       Hive::Reviewers.synthetic_task_for(ctx)
     end
 
-    # Top-level `codex review` has no `--ignore-user-config`, so this pass
-    # keeps the operator's MCP servers. Moving to `codex exec review` waits
-    # on comparing its output with the parsers above (plan 2026-10-15-001,
-    # U0 c); until then the gap is logged instead of silently accepted.
-    def warn_mcp_not_isolated
-      return if Hive::Mcp.policy(@cfg, scope: "review").inherit_user
-
-      Hive::Stages::Base.write_spawn_warning(
-        synthetic_task, "isolation-warnings.log",
-        "[hive] MCP isolation incomplete: `codex review` cannot ignore the operator's Codex config, " \
-        "so reviewer #{name} keeps its personal MCP servers and receives no Hive grants"
-      )
+    # A launch's notices (a granted server skipped for a missing login, a
+    # personal setting not carried over) — names and reasons only. This
+    # adapter has no agent log of its own, so they go where spawn warnings go.
+    def log_mcp_notices(mcp_launch)
+      mcp_launch.notices.each do |notice|
+        Hive::Stages::Base.write_spawn_warning(
+          synthetic_task, "isolation-warnings.log", "[hive] reviewer #{name} mcp notice: #{notice}"
+        )
+      end
     end
 
     def finalize(run, attempts, max_attempts)
@@ -425,7 +443,21 @@ module Hive::AgentSupport::Codex
       body = idx ? text[idx..] : text
       head, reply = split_session_transcript(body)
       head = "" if template_echo?(head) # the echoed prompt example, not findings
-      [ head.rstrip, reply.strip ].reject(&:empty?).join("\n\n")
+      [ head.rstrip, collapse_repeated_reply(reply).strip ].reject(&:empty?).join("\n\n")
+    end
+
+    # codex prints its final message twice: once under the transcript's last
+    # `codex` marker (stderr) and once alone on stdout. Both land in the one
+    # captured stream, so a reply that is exactly one message repeated
+    # (optionally split by a blank line) is collapsed to a single copy —
+    # otherwise a GFM reply would publish every finding twice.
+    def collapse_repeated_reply(reply)
+      lines = reply.strip.lines.map(&:rstrip)
+      half = lines.length / 2
+      first = lines[0...half]
+      rest = lines[half..]
+      rest = rest.drop(1) if lines.length.odd? && rest.first.empty?
+      first == rest ? first.join("\n") : reply
     end
 
     # Split a (header-leading) body into the leading findings block and
@@ -472,28 +504,35 @@ module Hive::AgentSupport::Codex
       "#{CLEAN_FINDINGS}\n<!-- codex review summary: #{note} -->\n"
     end
 
-    # Run `codex review --title <title> <prompt>` in the worktree, capturing
-    # combined stdout+stderr with a wall-clock timeout. On timeout the
-    # process group is signalled so a hung review can't outlive the budget.
+    # Run `codex exec review --title <title> <prompt>` in the worktree with
+    # the Hive MCP launch's argv and env (`--ignore-user-config`, granted
+    # servers, carried settings — whose defaults yield to the routing
+    # arguments), capturing combined stdout+stderr with a wall-clock timeout.
+    # On timeout the process group is signalled so a hung review can't
+    # outlive the budget.
     #
     # The codex binary's existence is already proven by `check_version!`
     # (the caller's preflight), so a spawn-time ENOENT is unreachable here
     # — we deliberately do not re-rescue it.
-    def run_codex_review(profile, prompt, timeout_sec, routing_arguments = nil)
+    def run_codex_review(profile, prompt, timeout_sec, routing_arguments, mcp_launch)
       global_arguments = routing_arguments&.global_arguments || []
       subcommand_arguments = routing_arguments&.subcommand_arguments || []
       argv = [
         profile.bin,
         *global_arguments,
+        "exec",
         "review",
+        *mcp_launch.arguments_for([ *global_arguments, *subcommand_arguments ]),
         *subcommand_arguments,
+        *READ_ONLY_ARGUMENTS,
         "--title",
         review_title,
         prompt
       ]
 
       @runtime.capture(
-        environment: profile.subscription_environment, argv:, chdir: ctx.worktree_path,
+        environment: mcp_launch.environment_for(profile.subscription_environment),
+        argv:, chdir: ctx.worktree_path,
         timeout_sec:, timeout_message: "codex review timed out after #{timeout_sec}s"
       )
     end

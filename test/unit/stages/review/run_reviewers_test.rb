@@ -1429,6 +1429,22 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_fix_success_kind_reads_binding_and_fails_closed_on_io_error
+    Dir.mktmpdir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      sentinel = File.join(reviews, "fix-success-04.md")
+      File.write(sentinel, "<!-- HIVE: fix-success sentinel; head=#{'a' * 40} kind=fixed -->\n")
+
+      assert_equal "fixed", Hive::Stages::Review.fix_success_kind(dir, 4)
+      with_replaced_singleton_method(File, :open, ->(*) { raise IOError, "unreadable" }) do
+        assert_nil Hive::Stages::Review.fix_success_kind(dir, 4)
+      end
+      File.write(sentinel, "<!-- HIVE: fix-success sentinel; head=#{'a' * 40} -->\n")
+      assert_nil Hive::Stages::Review.fix_success_kind(dir, 4), "legacy sentinels carry no kind"
+    end
+  end
+
   def test_next_pass_for_retries_when_escalations_newer_than_fix_success
     # If an operator edits escalations after the sentinel was written,
     # the prior fix pass no longer covers the accepted set. Retry pass 4

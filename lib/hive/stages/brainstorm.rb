@@ -74,7 +74,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", "brainstorm"),
+          max_budget_usd: Hive::Config.configured_budget_usd(cfg, "brainstorm"),
           timeout_sec: cfg.dig("timeout_sec", "brainstorm"),
           log_label: "brainstorm",
           profile: profile,

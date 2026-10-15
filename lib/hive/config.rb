@@ -1090,6 +1090,17 @@ module Hive
       ).freeze
     end
 
+    # The stage budget the project's own config sets, or nil when only the
+    # built-in default applies. A config without load provenance (a plain
+    # Hash) counts every value it carries as set.
+    def configured_budget_usd(cfg, stage_name)
+      value = cfg.dig("budget_usd", stage_name)
+      provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
+      return value unless provenance.is_a?(Hash)
+
+      Array(provenance["budget_usd"]).include?(stage_name) ? value : nil
+    end
+
     def explicit_resource_limits(data)
       RESOURCE_LIMIT_FIELDS.to_h do |field|
         values = data[field]

@@ -1212,6 +1212,17 @@ module Hive
         )
       end
 
+      # Claude enforces a budget (--max-budget-usd), so a Claude stage is
+      # capped only when the project config sets its budget; the built-in
+      # defaults do not cap it. Other agents keep the merged value.
+      def stage_budget_usd(cfg, stage_name, profile, default: nil)
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          return Hive::Config.configured_budget_usd(cfg, stage_name)
+        end
+
+        cfg.dig("budget_usd", stage_name) || default
+      end
+
       def stage_resource_limits(cfg, stage)
         budget = Hive::Config.stage_resource_limit_resolution(
           cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd

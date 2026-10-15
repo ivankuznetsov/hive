@@ -210,7 +210,7 @@ module Hive
           prompt: prompt,
           add_dirs: (scope.fetch(:add_dirs) + [ source_checkout ].compact).uniq,
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", "plan"),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "plan", profile),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,

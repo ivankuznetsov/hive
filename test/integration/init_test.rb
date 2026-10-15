@@ -2353,16 +2353,23 @@ class InitTest < Minitest::Test
     end
   end
 
-  def test_init_renders_bumped_generous_limit_defaults
+  # Init sets no budget caps: stage and reviewer budgets are commented
+  # suggestions, while timeouts are written.
+  def test_init_suggests_budget_caps_without_setting_them
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
+        raw = File.read(File.join(dir, ".hive-state", "config.yml"))
         cfg = Hive::Config.load(dir)
 
-        assert_equal 50,    cfg.dig("budget_usd", "brainstorm")
-        assert_equal 100,   cfg.dig("budget_usd", "plan")
-        assert_equal 500,   cfg.dig("budget_usd", "execute_implementation")
-        assert_equal 100,   cfg.dig("budget_usd", "artifacts")
+        refute YAML.safe_load(raw).key?("budget_usd")
+        assert_match(/^# budget_usd:\n#   brainstorm: 50\n#   plan: 100\n/, raw)
+        assert_match(/^#   execute_implementation: 500$/, raw)
+        assert_match(/^      # budget_usd: 50  # suggested cap; uncomment to enforce$/, raw)
+        cfg.dig("review", "reviewers").each { |spec| refute spec.key?("budget_usd"), spec["name"] }
+        Hive::Commands::Init::Prompts::LIMIT_KEYS.each do |key|
+          assert_nil Hive::Config.configured_budget_usd(cfg, key), key
+        end
         assert_equal 14400, cfg.dig("timeout_sec", "execute_implementation")
         assert_equal 3600,  cfg.dig("timeout_sec", "artifacts")
       end
@@ -2376,9 +2383,10 @@ class InitTest < Minitest::Test
         cfg_path = File.join(dir, ".hive-state", "config.yml")
         # Parse the YAML and check structurally — comments mentioning
         # execute_review are fine; the rendered key/value is not.
-        parsed = YAML.safe_load(File.read(cfg_path))
-        refute parsed["budget_usd"].key?("execute_review"),
-               "rendered budget_usd must not include the deprecated execute_review key"
+        raw = File.read(cfg_path)
+        parsed = YAML.safe_load(raw)
+        refute_match(/^#?\s*execute_review:/, raw,
+                     "rendered config must not include the deprecated execute_review key")
         refute parsed["timeout_sec"].key?("execute_review"),
                "rendered timeout_sec must not include the deprecated execute_review key"
       end
@@ -2497,6 +2505,8 @@ class InitTest < Minitest::Test
         assert_equal true, cfg.dig("review", "github_publish", "enabled")
         assert_equal false, cfg.dig("review", "adhoc", "fix")
         assert_equal 30,  cfg.dig("budget_usd", "plan")
+        assert_equal 30,  Hive::Config.configured_budget_usd(cfg, "plan")
+        assert_nil Hive::Config.configured_budget_usd(cfg, "brainstorm")
         assert_equal 900, cfg.dig("timeout_sec", "plan")
 
         names = cfg.dig("review", "reviewers").map { |r| r["name"] }.sort

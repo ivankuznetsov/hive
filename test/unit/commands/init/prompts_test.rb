@@ -49,9 +49,7 @@ class InitPromptsTest < Minitest::Test
       "triage_bias" => "courageous",
       "adhoc_auto_fix" => false,
       "refactor_patrol_enabled" => true,
-      "budgets" => Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |k, h|
-        h[k] = Hive::Config::DEFAULTS["budget_usd"][k]
-      end,
+      "budgets" => Hive::Commands::Init::Prompts::LIMIT_KEYS.to_h { |k| [ k, nil ] },
       "timeouts" => Hive::Commands::Init::Prompts::LIMIT_KEYS.each_with_object({}) do |k, h|
         h[k] = Hive::Config::DEFAULTS["timeout_sec"][k]
       end,
@@ -564,17 +562,19 @@ class InitPromptsTest < Minitest::Test
     answers = prompts.collect
     assert_equal 30, answers["budgets"]["plan"]
     assert_equal 900, answers["timeouts"]["plan"]
-    # Other keys stay at defaults
-    assert_equal Hive::Config::DEFAULTS["budget_usd"]["brainstorm"], answers["budgets"]["brainstorm"]
+    # Other keys keep no budget cap and the default timeout
+    assert_nil answers["budgets"]["brainstorm"]
     assert_equal Hive::Config::DEFAULTS["timeout_sec"]["execute_implementation"], answers["timeouts"]["execute_implementation"]
   end
 
   def test_interactive_limits_partial_pair_uses_default_for_missing_side
-    # ",900" → keep budget default, override timeout
+    # ",900" → no budget cap, override timeout
     limits = [ ",900" ] + ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1))
-    prompts, _output = make_prompts(interactive_input(limits: limits))
+    prompts, output = make_prompts(interactive_input(limits: limits))
     answers = prompts.collect
-    assert_equal Hive::Config::DEFAULTS["budget_usd"]["brainstorm"], answers["budgets"]["brainstorm"]
+    assert_nil answers["budgets"]["brainstorm"]
+    assert_match(/brainstorm\s+\[no cap \(suggested 50\),1800\]/, output.string)
+    assert_match(/limits\s+= brainstorm=no cap\/900s/, output.string)
     assert_equal 900, answers["timeouts"]["brainstorm"]
   end
 
@@ -790,8 +790,7 @@ class InitPromptsTest < Minitest::Test
     assert_equal "safetyist", answers["triage_bias"]
     assert_equal 30,  answers["budgets"]["plan"]
     assert_equal 900, answers["timeouts"]["plan"]
-    assert_equal Hive::Config::DEFAULTS["budget_usd"]["execute_implementation"],
-                 answers["budgets"]["execute_implementation"]
+    assert_nil answers["budgets"]["execute_implementation"]
   end
 
   # --- testability contract (R9) -------------------------------------------

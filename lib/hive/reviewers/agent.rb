@@ -38,7 +38,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: spec["budget_usd"] || 50,
+            max_budget_usd: reviewer_budget_usd(profile),
             timeout_sec: spawn_timeout || configured_timeout,
             log_label: build_log_label(attempts),
             profile: profile,
@@ -65,6 +65,13 @@ module Hive
       end
 
       private
+
+      # A Claude reviewer is capped only by a budget its spec sets.
+      def reviewer_budget_usd(profile)
+        return spec["budget_usd"] if Hive::AgentSupport.supports?(profile, :Launch)
+
+        spec["budget_usd"] || 50
+      end
 
       # model_launch_arguments makes spawn_agent skip its cfg-derived
       # permission mode, so a yolo Claude reviewer takes

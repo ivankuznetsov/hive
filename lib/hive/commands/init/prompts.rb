@@ -6,7 +6,7 @@ module Hive
     class Init
       # Interactive first-run prompt flow for `hive init`. Asks the operator
       # which agents to use for planning / development / review and (if they
-      # want) tweaks the per-stage budget+timeout sanity caps. On non-TTY
+      # want) sets per-stage budget caps (none by default) and timeouts. On non-TTY
       # input streams (CI, pipes, test harnesses) `#collect` short-circuits
       # to the recommended defaults and emits a one-line summary so callers
       # see what was applied.
@@ -161,7 +161,7 @@ module Hive
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => false,
             "refactor_patrol_enabled" => false,
-            "budgets" => limit_defaults("budget_usd"),
+            "budgets" => no_budgets,
             "timeouts" => limit_defaults("timeout_sec"),
             "daemon_enabled" => false,
             "babysitter_enabled" => false,
@@ -173,6 +173,11 @@ module Hive
           LIMIT_KEYS.to_h { |key| [ key, Hive::Config::DEFAULTS.fetch(section).fetch(key) ] }
         end
         private_class_method :limit_defaults
+
+        # Init sets no budget caps; the template suggests them in comments.
+        def self.no_budgets
+          LIMIT_KEYS.to_h { |key| [ key, nil ] }
+        end
 
         # Run the prompt flow (or short-circuit to defaults).
         # Returns the answers hash with shape:
@@ -186,7 +191,7 @@ module Hive
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
         #     "refactor_patrol_enabled" => Boolean     # architecture discovery
-        #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
+        #     "budgets"  => Hash<String, Integer|nil>, # 10 keys (LIMIT_KEYS); nil = no cap
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
         #     "babysitter_enabled"=> Boolean           # experimental PR babysitter
@@ -272,7 +277,7 @@ module Hive
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
             "refactor_patrol_enabled" => effective_refactor_patrol_default,
-            "budgets" => default_budgets,
+            "budgets" => self.class.no_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
             "babysitter_enabled" => true,
@@ -295,15 +300,6 @@ module Hive
             "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
-        end
-
-        def default_budgets
-          # `fetch` rather than `[]`: if LIMIT_KEYS and Config::DEFAULTS["budget_usd"]
-          # ever drift (a key added to one but not the other), surface as KeyError
-          # at first run instead of silently rendering a YAML key with no value
-          # (which YAML.safe_load parses to nil and validate_review_attempts!
-          # accepts only for the four `review_*` paths it knows about).
-          LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"].fetch(k) }
         end
 
         def effective_refactor_patrol_default
@@ -594,17 +590,18 @@ module Hive
 
         def prompt_limits
           @output.puts ""
-          @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec> (blank = defaults)."
-          @output.puts "Defaults are generous sanity caps — most tasks finish well within them."
+          @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec>."
+          @output.puts "No budget cap is set unless you enter one; the suggested cap is shown."
+          @output.puts "Blank keeps no cap and the default timeout."
 
           budgets = {}
           timeouts = {}
           width = LIMIT_KEYS.map(&:length).max
 
           LIMIT_KEYS.each do |key|
-            default_b = Hive::Config::DEFAULTS["budget_usd"][key]
-            default_t = Hive::Config::DEFAULTS["timeout_sec"][key]
-            b, t = prompt_one_limit(key, default_b, default_t, width)
+            suggested_b = Hive::Config::DEFAULTS["budget_usd"].fetch(key)
+            default_t = Hive::Config::DEFAULTS["timeout_sec"].fetch(key)
+            b, t = prompt_one_limit(key, suggested_b, default_t, width)
             budgets[key] = b
             timeouts[key] = t
           end
@@ -612,12 +609,12 @@ module Hive
           [ budgets, timeouts ]
         end
 
-        def prompt_one_limit(key, default_b, default_t, width)
+        def prompt_one_limit(key, suggested_b, default_t, width)
           loop do
-            @output.print(format("  %-#{width}s [%d,%d]: ", key, default_b, default_t))
+            @output.print(format("  %-#{width}s [no cap (suggested %d),%d]: ", key, suggested_b, default_t))
             @output.flush
             answer = read_line
-            return [ default_b, default_t ] if answer.empty?
+            return [ nil, default_t ] if answer.empty?
 
             parts = answer.split(",", -1).map(&:strip)
             unless parts.size == 2
@@ -627,18 +624,18 @@ module Hive
 
             b_str, t_str = parts
             if !b_str.empty? && t_str.empty?
-              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for defaults"
+              @output.puts "  timeout is required when budget is provided; use <budget>,<timeout> or blank for no cap"
               next
             end
 
-            b = b_str.empty? ? default_b : parse_positive_int(b_str)
+            b = b_str.empty? ? :none : parse_positive_int(b_str)
             t = t_str.empty? ? default_t : parse_positive_int(t_str)
             if b.nil? || t.nil?
               @output.puts "  budget and timeout must be positive integers"
               next
             end
 
-            return [ b, t ]
+            return [ b == :none ? nil : b, t ]
           end
         end
 
@@ -700,12 +697,12 @@ module Hive
 
         def summarize_limits(answers)
           changed = LIMIT_KEYS.reject do |k|
-            answers["budgets"][k] == Hive::Config::DEFAULTS["budget_usd"][k] &&
+            answers["budgets"][k].nil? &&
               answers["timeouts"][k] == Hive::Config::DEFAULTS["timeout_sec"][k]
           end
-          return "all defaults" if changed.empty?
+          return "all defaults (no budget caps)" if changed.empty?
 
-          changed.map { |k| "#{k}=#{answers['budgets'][k]}/#{answers['timeouts'][k]}s" }.join(", ")
+          changed.map { |k| "#{k}=#{answers['budgets'][k] || 'no cap'}/#{answers['timeouts'][k]}s" }.join(", ")
         end
 
         def confirm!

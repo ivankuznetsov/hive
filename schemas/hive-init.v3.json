@@ -97,6 +97,35 @@
         "review_browser": { "type": "integer", "minimum": 1 }
       }
     },
+    "BudgetMap": {
+      "description": "Stage budget caps in USD; null means no cap is written to config.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "brainstorm",
+        "plan",
+        "execute_implementation",
+        "open_pr",
+        "artifacts",
+        "finalize",
+        "review_ci",
+        "review_triage",
+        "review_fix",
+        "review_browser"
+      ],
+      "properties": {
+        "brainstorm": { "type": ["integer", "null"], "minimum": 1 },
+        "plan": { "type": ["integer", "null"], "minimum": 1 },
+        "execute_implementation": { "type": ["integer", "null"], "minimum": 1 },
+        "open_pr": { "type": ["integer", "null"], "minimum": 1 },
+        "artifacts": { "type": ["integer", "null"], "minimum": 1 },
+        "finalize": { "type": ["integer", "null"], "minimum": 1 },
+        "review_ci": { "type": ["integer", "null"], "minimum": 1 },
+        "review_triage": { "type": ["integer", "null"], "minimum": 1 },
+        "review_fix": { "type": ["integer", "null"], "minimum": 1 },
+        "review_browser": { "type": ["integer", "null"], "minimum": 1 }
+      }
+    },
     "Answers": {
       "type": "object",
       "additionalProperties": false,
@@ -151,7 +180,7 @@
           "type": "boolean",
           "description": "Whether fresh-project architecture patrol discovery was enabled. This does not authorize auto-fixing or issue filing."
         },
-        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "budgets": { "$ref": "#/$defs/BudgetMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },
         "daemon_enabled": { "type": "boolean" },
         "babysitter_enabled": { "type": "boolean" },
@@ -237,7 +266,7 @@
           "type": "boolean",
           "description": "Mirrors answers.refactor_patrol_enabled for machine consumers."
         },
-        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "budgets": { "$ref": "#/$defs/BudgetMap" },
         "timeouts": { "$ref": "#/$defs/LimitMap" },
         "daemon_enabled": { "type": "boolean" },
         "babysitter_enabled": { "type": "boolean" },

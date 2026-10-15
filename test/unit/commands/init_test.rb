@@ -59,7 +59,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "safetyist", config_binding.triage_bias
     assert_equal true, config_binding.adhoc_auto_fix
     assert_equal false, config_binding.refactor_patrol_enabled
-    assert_equal default_init_limits("budget_usd"), config_binding.budgets
+    assert_equal Hive::Commands::Init::Prompts.no_budgets, config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
     refute config_binding.daemon_enabled
   end

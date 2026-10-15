@@ -180,7 +180,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
-          max_budget_usd: finalize_budget(cfg),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "finalize", profile, default: 50),
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
@@ -552,10 +552,6 @@ module Hive
       rescue StandardError => e
         warn "hive: redact_pr_body raised #{e.class}: #{e.message}; PR body may still contain the secret"
         :failed
-      end
-
-      def finalize_budget(cfg)
-        cfg.dig("budget_usd", "finalize") || 50
       end
 
       def finalize_timeout(cfg)

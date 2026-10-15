@@ -1875,7 +1875,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: ctx.worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "review_fix") || 100,
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_fix", profile, default: 100),
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,

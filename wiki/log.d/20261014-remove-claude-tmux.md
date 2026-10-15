@@ -41,3 +41,11 @@
 - Review triage deletes a same-pass escalations file left by an earlier run
   before it spawns (its content is already in the prompt), so a retry that
   writes nothing fails instead of passing on the stale file.
+- Budgets: the formerly-tmux Claude launches (brainstorm, plan, execute,
+  open-pr, artifacts, finalize, review fix/triage/CI/browser, Claude
+  reviewers) pass `--max-budget-usd` only when the project config sets that
+  budget (`Config.configured_budget_usd`, `Stages::Base.stage_budget_usd`);
+  built-in defaults no longer cap them. `hive init` no longer sets budgets:
+  stage and reviewer budgets are written as commented suggestions, the limit
+  prompt's blank answer means no cap, and `hive init --json` reports an unset
+  budget as `null` (`BudgetMap` in `hive-init.v3`).

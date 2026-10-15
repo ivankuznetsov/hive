@@ -141,8 +141,12 @@ upgrading, let running Claude stages finish (`hive status`). After upgrading,
 list leftover sessions with `tmux ls` and stop any Hive Claude session with
 `tmux kill-session -t <name>`. A leftover `claude.mode` line in
 `.hive-state/config.yml` is ignored; delete it when `hive doctor` reports it.
-Stage `budget_usd` caps now apply to every Claude stage, so raise a stage's
-budget in config if a long Claude run stops with a budget error.
+A Claude stage is capped (`--max-budget-usd`) only by a `budget_usd` entry in
+the project's own config; the built-in defaults no longer cap Claude. `hive
+init` now writes the stage budgets as commented-out suggestions, so a fresh
+project runs uncapped until you uncomment one. A project initialized by an
+older version still has its budgets set: raise one if a long Claude run stops
+with a budget error, or delete it to run that stage uncapped.
 
 ### Recover a review-fix left by the retired Claude Stop hook
 

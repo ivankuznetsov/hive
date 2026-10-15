@@ -5625,6 +5625,24 @@ class ConfigTest < Minitest::Test
                  )
   end
 
+  # Built-in budget defaults do not count as set; only the project's own
+  # budget_usd entries do.
+  def test_configured_budget_usd_ignores_built_in_defaults
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "budget_usd:\n  plan: 12\n")
+      cfg = Hive::Config.load(dir)
+
+      assert_equal 12, Hive::Config.configured_budget_usd(cfg, "plan")
+      assert_equal 500, cfg.dig("budget_usd", "execute_implementation")
+      assert_nil Hive::Config.configured_budget_usd(cfg, "execute_implementation")
+    end
+
+    assert_equal 7, Hive::Config.configured_budget_usd({ "budget_usd" => { "plan" => 7 } }, "plan")
+    assert_nil Hive::Config.configured_budget_usd({}, "plan")
+  end
+
   def test_stage_resource_limit_resolution_retains_value_source_and_scope
     explicit = {
       "budget_usd" => { "execute" => 12 },

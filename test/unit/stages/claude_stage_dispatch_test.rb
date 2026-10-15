@@ -541,6 +541,26 @@ class ClaudeStageDispatchTest < Minitest::Test
     end
   end
 
+  # Claude enforces --max-budget-usd, so it is capped only by a budget the
+  # project config sets. Other agents keep the merged value or fallback.
+  def test_stage_budget_usd_caps_claude_only_when_configured
+    claude = Hive::AgentProfiles.lookup(:claude)
+    codex = Hive::AgentProfiles.lookup(:codex)
+    defaults_only = {
+      "budget_usd" => { "plan" => 100 },
+      Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [] }
+    }
+    configured = {
+      "budget_usd" => { "plan" => 30 },
+      Hive::Config::EXPLICIT_RESOURCE_LIMITS_KEY => { "budget_usd" => [ "plan" ] }
+    }
+
+    assert_nil Hive::Stages::Base.stage_budget_usd(defaults_only, "plan", claude, default: 50)
+    assert_equal 30, Hive::Stages::Base.stage_budget_usd(configured, "plan", claude)
+    assert_equal 100, Hive::Stages::Base.stage_budget_usd(defaults_only, "plan", codex)
+    assert_equal 50, Hive::Stages::Base.stage_budget_usd({}, "open_pr", codex, default: 50)
+  end
+
   def identity_config
     fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
     {

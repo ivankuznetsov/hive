@@ -437,7 +437,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: cfg.dig("budget_usd", "review_ci") || 25,
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_ci", profile, default: 25),
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,

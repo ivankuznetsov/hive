@@ -203,17 +203,19 @@ open_pr:
 finalize:
   agent: claude
 
-budget_usd:
-  brainstorm: 50
-  plan: 100
-  execute_implementation: 500
-  open_pr: 50
-  finalize: 50
-  review_ci: 100
-  review_triage: 75
-  review_fix: 500
-  review_browser: 100
-  patrol: 100
+# Spend caps (USD) are opt-in: init writes them commented out as
+# suggestions. A Claude stage is capped only by a value set here.
+# budget_usd:
+#   brainstorm: 50
+#   plan: 100
+#   execute_implementation: 500
+#   open_pr: 50
+#   finalize: 50
+#   review_ci: 100
+#   review_triage: 75
+#   review_fix: 500
+#   review_browser: 100
+#   patrol: 100
 
 timeout_sec:
   brainstorm: 1800

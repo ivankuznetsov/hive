@@ -612,7 +612,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "execute_implementation", profile),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,

@@ -542,7 +542,9 @@ module Hive
             prompt: prompt,
             add_dirs: launch_dirs,
             cwd: writable_root || task.worktree_path || task.folder,
-            max_budget_usd: cfg.dig("budget_usd", "artifacts") || Hive::Config::DEFAULTS.dig("budget_usd", "artifacts"),
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(
+              cfg, "artifacts", profile, default: Hive::Config::DEFAULTS.dig("budget_usd", "artifacts")
+            ),
             timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
             log_label: "artifacts-#{role}-#{context_id}", profile: profile,
             status_mode: :exit_code_only, cfg: cfg,

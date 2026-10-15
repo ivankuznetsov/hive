@@ -377,8 +377,8 @@ class TriageTest < Minitest::Test
 
       assert_equal 1800, captured[:timeout_sec],
                    "triage timeout fallback must match DEFAULTS review_triage (1800), not the old 300"
-      assert_equal 75, captured[:max_budget_usd],
-                   "triage budget fallback must match DEFAULTS review_triage (75), not the old 15"
+      assert_nil captured[:max_budget_usd],
+                 "a Claude triage is capped only by a budget the project config sets"
     end
   end
 

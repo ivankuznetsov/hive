@@ -192,7 +192,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: cwd,
-          max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "open_pr", profile, default: 50),
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr-author",
           profile: profile,

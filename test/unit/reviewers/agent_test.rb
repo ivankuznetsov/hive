@@ -162,6 +162,33 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  # A Claude reviewer is capped only by a budget its spec sets; other
+  # agents keep the 50 USD fallback.
+  def test_reviewer_budget_caps_claude_only_when_the_spec_sets_one
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      budgets = {}
+      spawn = lambda do |_task, **options|
+        budgets[options.fetch(:profile).name] = options.fetch(:max_budget_usd)
+        File.write(options.fetch(:expected_output), "## High\nNo findings.\n")
+        { status: :ok }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert Hive::Reviewers::Agent.new(make_spec.except("budget_usd"), ctx, cfg: {}).run!.ok?
+        assert Hive::Reviewers::Agent.new(
+          make_spec("agent" => "pi").except("budget_usd"), ctx, cfg: {}
+        ).run!.ok?
+      end
+      assert_equal({ claude: nil, pi: 50 }, budgets)
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+        assert Hive::Reviewers::Agent.new(make_spec("budget_usd" => 9), ctx, cfg: {}).run!.ok?
+      end
+      assert_equal 9, budgets[:claude]
+    end
+  end
+
   def test_top_level_models_route_overrides_stage_local_reviewer_model
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)

@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-version.v1.json
 created: 2026-04-25
-updated: 2026-08-25
+updated: 2026-10-15
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 

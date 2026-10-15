@@ -42,6 +42,33 @@ Hive now renders MCP for every agent it launches (plan
   which the new floor refuses. Bumping it needs the current npm package name and
   version checked against the registry; the local Pi 1.2.0 install reports the
   package `@earendil-works/pi-coding-agent`, not `@mariozechner/pi`.
+- **Live OAuth reuse is unverified (U0 live part deferred).** After the Codex
+  quota resets (2026-10-18), launch Codex with `--ignore-user-config` and a
+  Hive-rendered `-c mcp_servers.linear…` entry and confirm the existing keyring
+  login is found. Codex's login key derivation (name + URL assumed) is read
+  from strings only. Claude needs a `hive mcp login` first; whether Claude
+  hashes `${VAR}` headers raw or expanded in its login key is unverified, and
+  `claude mcp login` is assumed to find only servers in Claude's own config.
+- **The native `codex review` reviewer is not isolated.** Top-level `codex
+  review` has no `--ignore-user-config`; it logs an isolation warning. Moving
+  to `codex exec review --ignore-user-config` needs one sample run compared
+  with `review_body` / `NATIVE_FINDING` parsing.
+- **Codex settings outside the carried-over list are dropped**, including the
+  project `.codex/config.toml` layer, multi-line values, and provider keys that
+  look like credentials (`http_headers`, `*_api_key`); Hive logs a notice for
+  the carried keys it skipped. Doctor's `mcp/codex-config` row lists what is
+  carried.
+- **Grok runs keep their own MCP servers** (no isolation flag; doctor warns).
+- **Login-presence formats for Pi (`mcp-auth.json`) and Grok are inferred** from
+  docs, not observed; OpenCode logins are not detected at all. OpenCode, Pi and
+  Grok have no `hive mcp login` path.
+- **`codex mcp list --json` may contact servers** for OAuth discovery while
+  reporting `auth_status`; `hive mcp import` and `hive doctor` call it.
+- **SSE servers cannot enter the catalog**; import refuses them.
+- **Screenote is not wired to any stage** (`Hive::Screenote::McpConfig#write!`
+  has no caller); wiring it through the catalog is open.
+- **Bypass launchers log no MCP notices.** The diagnosis, digest and
+  display-name launchers render MCP but have no launch log for notices.
 - **Bench harness Pi profiles** (`templates/builtins/bench/runtime/harness/`)
   launch Pi outside Hive and still declare `0.70.2`; they pass no `--no-mcp`.
 

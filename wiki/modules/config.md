@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-09-06
+updated: 2026-10-15
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
@@ -810,6 +810,21 @@ The daemon checks for yesterday's document on the configured cadence. A saved
 closed document requires no repeated GitHub or agent work. Telegram delivery is
 separate and uses the existing bot token and first allowlisted private chat.
 Reads remain available when generation is disabled.
+
+## MCP grants and catalog
+
+`mcp` is a strict root key (`DEFAULTS["mcp"] = {"inherit_user" => false, "use" => []}`).
+Project and stage blocks may set only `mcp.use` (plus project
+`mcp.inherit_user`); `validate_mcp!` scans every top-level block and the nested
+role blocks in `MCP_NESTED_GRANT_PATHS`, and rejects project `mcp.servers`.
+The global block (`load_global_mcp`, validated by `validate_global_mcp!`)
+holds `inherit_user`, `servers`, and `import_offered` (set once `hive setup` or
+`hive init` asked to run `hive mcp import`). Server keys: stdio `command`,
+`args`, `env`, `env_from`, `cwd`; HTTP `url`, `bearer_token_env`, `headers`,
+`headers_env`, `oauth_resource`, `oauth_client_id`, `oauth_scopes`,
+`oauth_logins` (agents with a saved login); common `imported_from`, `enabled`.
+A granted name missing from a readable catalog fails project load. Resolution
+and launch rendering live in [[modules/mcp]].
 
 ## Screenote config
 

@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-09-02
+updated: 2026-10-15
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -108,18 +108,19 @@ warning and does not prevent exit `0` after local credential removal.
 ## Runtime Use
 
 Connected credentials are not placed in YAML config and are not exposed through
-environment variables. For Claude-backed `7-artifacts`, hive writes an ephemeral
-strict MCP config under `Hive::Paths.cache_home`, points Claude at it with
-`--mcp-config` / `--strict-mcp-config`, and adds the Screenote MCP tools to
-`--allowedTools`. The prompt supplies the selected project id and instructs the
-agent to call `create_screenshot_upload`, PUT local PNG/JPEG bytes to the signed
-upload URL, and write the resulting `screenote_url` into
+environment variables. `Hive::Screenote::McpConfig#write!` can render a strict
+Screenote MCP config, but no launch path calls it: the Claude-only
+`mcp_config_path:` / `strict_mcp_config:` launch keywords were removed when Hive
+took ownership of agent MCP (plan 2026-10-15-001, [[modules/mcp]]). Agents now
+receive only catalog servers granted with `mcp.use`, so `7-artifacts` does not
+inject Screenote today; wiring it through the catalog is an open item in
+[[gaps]]. When wired, the prompt is meant to supply the selected project id and
+instruct the agent to call `create_screenshot_upload`, PUT local PNG/JPEG bytes
+to the signed upload URL, and write the resulting `screenote_url` into
 `media/manifest.json`.
 
-If the credential is missing, expired, incomplete, invalid, or lacks a default
-project, no MCP server is injected. The artifacts prompt records that Screenote
-is unavailable and tells the agent to keep local media plus
-`screenote_skipped_reason` entries.
+No stage prompt mentions Screenote today. The finalize prompt adds a `## Demo`
+section only when `media/manifest.json` already holds `screenote_url` values.
 
 ## Backlinks
 

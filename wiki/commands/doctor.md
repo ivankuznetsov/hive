@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-10-14
+updated: 2026-10-15
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
@@ -132,7 +132,26 @@ launching Claude, so Claude bills the subscription, not the API key); a
 `claude.mode` key (`Hive::Config.obsolete_claude_mode_key?`; the value is
 ignored and the row tells the operator to delete the line); managed QMD
 availability/native ABI failures; an unparseable `config.yml` warning; and
-`web/environment` alias warnings. Warning rows never change the exit code.
+`web/environment` alias warnings; and the MCP rows below. Warning rows never
+change the exit code.
+
+MCP rows (`Hive::Mcp::DoctorCheck`, stage `mcp`; see [[modules/mcp]]):
+
+| Label | Kind | When |
+|---|---|---|
+| `mcp/catalog` | warning | the global config is unreadable, so granted servers are skipped at launch |
+| `mcp/isolation` | warning | `mcp.inherit_user` is true (isolation off); other MCP rows are skipped |
+| `mcp/grok` | warning | a role runs Grok, which has no MCP isolation flag |
+| `mcp/pi` | warning | a Pi role has a non-empty grant (Pi cannot receive granted servers) |
+| `mcp/login` | warning | an OAuth server is granted to an agent with no saved login; names `hive mcp login` |
+| `mcp/env` | warning | a granted server references an env var unset in doctor's environment (name only) |
+| `mcp/codex-config` | present | `config.toml` settings Hive carries over on every Codex launch |
+| `mcp/personal` | warning | personal servers not in the catalog; names `hive mcp import` |
+| `mcp/drift` | warning | a catalog entry changed or disappeared at its source |
+
+The last two compare personal configs through `Hive::Mcp::Discovery`, which runs
+`codex mcp list --json` and `opencode debug config`; in-process tests skip that
+comparison (`mcp_discover: nil`).
 These appear under `checks`, not
 `managed_skills`.
 

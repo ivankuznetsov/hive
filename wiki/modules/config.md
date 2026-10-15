@@ -310,6 +310,7 @@ reference.
  "attempt_first_heartbeat_timeout_sec" => 30,
  "project_name" => nil,
  "permissions" => "yolo",
+ "mcp" => {"inherit_user" => false, "use" => []},
  "command_receipts" =>
   {"keyed_intake_enabled" => false,
    "nonterminal_limit" => 1000,

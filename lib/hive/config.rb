@@ -43,6 +43,15 @@ module Hive
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
       "permissions" => Hive::PermissionScope::YOLO,
+      # Hive-owned MCP grants (plan 2026-10-15-001). Servers are defined only
+      # in the global catalog (`mcp.servers` in the XDG config.yml); a project
+      # grants catalog names with `mcp.use` and a stage block's own `mcp.use`
+      # replaces that grant. `inherit_user: true` restores each agent CLI's
+      # personal MCP config. Hive::Mcp::Settings resolves the effective policy.
+      "mcp" => {
+        "inherit_user" => false,
+        "use" => []
+      },
       "command_receipts" => {
         "keyed_intake_enabled" => false,
         "nonterminal_limit" => 1_000,
@@ -789,6 +798,10 @@ module Hive
     OBSOLETE_CLAUDE_MODE_KEY = :__hive_obsolete_claude_mode
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
     IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
+    # The project's raw `mcp.inherit_user` (nil when unset), so resolution can
+    # let an explicit project value beat the global one without mistaking the
+    # merged default for a project choice.
+    MCP_INHERIT_USER_PROVENANCE_KEY = :__hive_mcp_inherit_user
     IMPLEMENTATION_IDENTITY_PATHS = {
       "execute" => %w[execute],
       "open_pr" => %w[open_pr],
@@ -876,11 +889,14 @@ module Hive
       merged[OBSOLETE_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
+      merged[MCP_INHERIT_USER_PROVENANCE_KEY] =
+        nested_key?(data, "mcp", "inherit_user") ? data["mcp"]["inherit_user"] : nil
       if provider_routing_configured?(data)
         merged[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = load_global_provider_accounts
       end
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
+      validate_mcp_grants_against_catalog!(merged, source_path)
       merged
     end
 
@@ -1549,6 +1565,23 @@ module Hive
       merged
     end
 
+    # The global MCP server catalog. `servers` lives only here; the project
+    # default `use` list is not a global field, so the block merges over its
+    # own base instead of DEFAULTS["mcp"].
+    def load_global_mcp
+      load_global_block("mcp", validator: :validate_global_mcp!) do |_merged, _data, override|
+        deep_merge({ "inherit_user" => false, "servers" => {} }, override)
+      end
+    end
+
+    # An unreadable global config is a doctor warning plus a launch notice
+    # for MCP, not a load failure: the catalog is optional until a grant
+    # needs it.
+    def global_mcp_catalog_readable?
+      path = global_config_path
+      !File.exist?(path) || File.readable?(path)
+    end
+
     def load_global_answer_digest_block
       load_global_block("answer_digest", validator: :validate_answer_digest!)
     end
@@ -2143,6 +2176,7 @@ module Hive
       validate_provider_routing!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
+      validate_mcp!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
@@ -2174,6 +2208,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      mcp
       models
       plan
       plan_review
@@ -2263,7 +2298,7 @@ module Hive
 
     PLAN_REVIEW_KEYS = %w[
       enabled classifier_version minimum_level coding skip protected_paths attempts
-      coverage adapter reviewers routes approval_policies
+      coverage adapter reviewers routes approval_policies mcp
     ].freeze
     PLAN_REVIEW_NESTED_KEYS = {
       "coding" => %w[minimum_level],
@@ -3386,6 +3421,228 @@ module Hive
       Hive::PermissionScope.validate!(spec, stage: label)
     rescue Hive::ConfigError => e
       raise ConfigError, "#{e.message} in #{describe_source(source_path)}"
+    end
+
+    # MCP server names keep their case because Claude and Codex key saved
+    # OAuth logins by the exact name (for example `openaiDeveloperDocs`).
+    MCP_SERVER_NAME = /\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z/
+    MCP_ENV_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
+    MCP_HEADER_NAME = /\A[A-Za-z0-9!#$%&'*+.^_`|~-]+\z/
+    MCP_URL = %r{\Ahttps?://[^\s]+\z}
+    # Literal env keys and header names that look like credentials. Secrets
+    # reach a server only by env-var NAME (`env_from`, `bearer_token_env`,
+    # `headers_env`), never as a value written into Hive config.
+    MCP_SECRET_NAME = /(TOKEN|SECRET|PASSWORD|API_?KEY)/i
+    MCP_PROJECT_KEYS = %w[inherit_user use].freeze
+    MCP_STAGE_KEYS = %w[use].freeze
+    MCP_GLOBAL_KEYS = %w[inherit_user servers].freeze
+    MCP_STDIO_KEYS = %w[command args env env_from cwd].freeze
+    MCP_HTTP_KEYS = %w[
+      url bearer_token_env headers headers_env oauth_resource oauth_client_id oauth_scopes
+    ].freeze
+    MCP_COMMON_KEYS = %w[imported_from enabled].freeze
+    # Nested role blocks that resolve their own grant, beyond the shallow
+    # top-level scan (the permission_entries precedent).
+    MCP_NESTED_GRANT_PATHS = [
+      %w[review ci], %w[review triage], %w[review fix], %w[review browser_test], %w[patrol fix]
+    ].freeze
+
+    # Shape-check the project `mcp` block and every `<block>.mcp` grant. Like
+    # permission_entries, the top-level scan is a deliberate superset: generic
+    # workflow stage names are not known here, so any top-level Hash may
+    # carry a grant and a malformed one fails the load.
+    def validate_mcp!(cfg, source_path)
+      project = cfg.fetch("mcp")
+      reject_project_mcp_servers!(project, "mcp", source_path)
+      validate_closed_mapping!(project, MCP_PROJECT_KEYS, "mcp", source_path)
+      unless [ true, false ].include?(project["inherit_user"])
+        raise ConfigError,
+              "mcp.inherit_user in #{describe_source(source_path)} must be true or false; " \
+              "got #{project['inherit_user'].inspect}"
+      end
+      validate_mcp_use!(project["use"], "mcp.use", source_path)
+
+      mcp_grant_blocks(cfg).each do |label, grant|
+        unless grant.is_a?(Hash)
+          raise ConfigError,
+                "#{label} in #{describe_source(source_path)} must be a Hash like `{ use: [names] }`; " \
+                "got #{grant.inspect} (#{grant.class})"
+        end
+        reject_project_mcp_servers!(grant, label, source_path)
+        validate_closed_mapping!(grant, MCP_STAGE_KEYS, label, source_path)
+        validate_mcp_use!(grant["use"], "#{label}.use", source_path) unless grant["use"].nil?
+      end
+    end
+
+    def mcp_grant_blocks(cfg)
+      blocks = cfg.filter_map do |key, value|
+        next if key == "mcp"
+
+        [ "#{key}.mcp", value["mcp"] ] if value.is_a?(Hash) && value.key?("mcp")
+      end
+      MCP_NESTED_GRANT_PATHS.each do |path|
+        block = path.reduce(cfg) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+        blocks << [ "#{path.join('.')}.mcp", block["mcp"] ] if block.is_a?(Hash) && block.key?("mcp")
+      end
+      blocks
+    end
+
+    def reject_project_mcp_servers!(block, label, source_path)
+      return unless block.key?("servers")
+
+      raise ConfigError,
+            "#{label}.servers in #{describe_source(source_path)} is not supported: MCP servers " \
+            "are defined only in the global catalog (#{global_config_path}). Run `hive mcp import` " \
+            "to copy personal servers there, then grant them here with `mcp.use`."
+    end
+
+    def validate_mcp_use!(value, label, source_path)
+      return if value.is_a?(Array) && value.all? { |name| name.is_a?(String) && name.match?(MCP_SERVER_NAME) }
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be a list of MCP server names " \
+            "matching #{MCP_SERVER_NAME.inspect}; got #{value.inspect}"
+    end
+
+    def mcp_grant_names(cfg)
+      grants = mcp_grant_blocks(cfg).map { |_label, grant| Array(grant["use"]) }
+      (Array(cfg.dig("mcp", "use")) + grants.flatten).uniq
+    end
+
+    # A granted name missing from a readable catalog is a load error naming
+    # the project file. The catalog is read only when something is granted.
+    def validate_mcp_grants_against_catalog!(cfg, source_path)
+      names = mcp_grant_names(cfg)
+      return if names.empty? || !global_mcp_catalog_readable?
+
+      missing = names - load_global_mcp.fetch("servers").keys
+      return if missing.empty?
+
+      raise ConfigError, mcp_missing_servers_message(missing, "MCP grants in #{describe_source(source_path)}")
+    end
+
+    def mcp_missing_servers_message(missing, subject)
+      "#{subject} name server(s) missing from the global MCP catalog " \
+        "#{global_config_path}: #{missing.join(', ')}. Run `hive mcp import` or define them " \
+        "under mcp.servers there."
+    end
+
+    def validate_global_mcp!(cfg, source_path)
+      block = cfg.fetch("mcp")
+      validate_closed_mapping!(block, MCP_GLOBAL_KEYS, "mcp", source_path)
+      unless [ true, false ].include?(block["inherit_user"])
+        raise ConfigError,
+              "mcp.inherit_user in #{describe_source(source_path)} must be true or false; " \
+              "got #{block['inherit_user'].inspect}"
+      end
+      servers = block["servers"]
+      unless servers.is_a?(Hash)
+        raise ConfigError,
+              "mcp.servers in #{describe_source(source_path)} must be a Hash of name => server; " \
+              "got #{servers.inspect} (#{servers.class})"
+      end
+      servers.each { |name, spec| validate_mcp_server!(name, spec, source_path) }
+    end
+
+    def validate_mcp_server!(name, spec, source_path)
+      unless name.is_a?(String) && name.match?(MCP_SERVER_NAME)
+        raise ConfigError,
+              "mcp.servers in #{describe_source(source_path)} has invalid server name #{name.inspect}; " \
+              "names must match #{MCP_SERVER_NAME.inspect}"
+      end
+      label = "mcp.servers.#{name}"
+      unless spec.is_a?(Hash)
+        raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash; got #{spec.inspect}"
+      end
+      http = spec.key?("url")
+      unless http ^ spec.key?("command")
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} must set exactly one of `url` (HTTP) " \
+              "or `command` (stdio)"
+      end
+      allowed = (http ? MCP_HTTP_KEYS : MCP_STDIO_KEYS) + MCP_COMMON_KEYS
+      validate_closed_mapping!(spec, allowed, label, source_path)
+      http ? validate_mcp_http_server!(spec, label, source_path) : validate_mcp_stdio_server!(spec, label, source_path)
+      if spec.key?("imported_from") && !GLOBAL_AGENT_BACKENDS.include?(spec["imported_from"])
+        raise ConfigError,
+              "#{label}.imported_from in #{describe_source(source_path)} must be one of " \
+              "#{GLOBAL_AGENT_BACKENDS.inspect}; got #{spec['imported_from'].inspect}"
+      end
+      validate_boolean!(spec["enabled"], "#{label}.enabled", source_path)
+    end
+
+    def validate_mcp_stdio_server!(spec, label, source_path)
+      validate_mcp_string!(spec["command"], "#{label}.command", source_path)
+      validate_mcp_string_list!(spec["args"], "#{label}.args", source_path, allow_empty: true) if spec.key?("args")
+      validate_mcp_string!(spec["cwd"], "#{label}.cwd", source_path) if spec.key?("cwd")
+      validate_mcp_map!(spec["env"], "#{label}.env", source_path, key: MCP_ENV_NAME) if spec.key?("env")
+      Hash(spec["env"]).each_key do |key|
+        next unless key.match?(MCP_SECRET_NAME)
+
+        raise ConfigError,
+              "#{label}.env.#{key} in #{describe_source(source_path)} looks like a secret; " \
+              "Hive config holds no secret values. Use `env_from: { #{key}: HOST_VAR }` to pass it " \
+              "from the environment."
+      end
+      return unless spec.key?("env_from")
+
+      validate_mcp_map!(spec["env_from"], "#{label}.env_from", source_path, key: MCP_ENV_NAME, value: MCP_ENV_NAME)
+    end
+
+    def validate_mcp_http_server!(spec, label, source_path)
+      validate_mcp_string!(spec["url"], "#{label}.url", source_path, pattern: MCP_URL)
+      if spec.key?("oauth_resource")
+        validate_mcp_string!(spec["oauth_resource"], "#{label}.oauth_resource", source_path, pattern: MCP_URL)
+      end
+      validate_mcp_string!(spec["oauth_client_id"], "#{label}.oauth_client_id", source_path) if spec.key?("oauth_client_id")
+      validate_mcp_string_list!(spec["oauth_scopes"], "#{label}.oauth_scopes", source_path) if spec.key?("oauth_scopes")
+      if spec.key?("bearer_token_env")
+        validate_mcp_string!(spec["bearer_token_env"], "#{label}.bearer_token_env", source_path, pattern: MCP_ENV_NAME)
+      end
+      if spec.key?("headers_env")
+        validate_mcp_map!(spec["headers_env"], "#{label}.headers_env", source_path,
+                          key: MCP_HEADER_NAME, value: MCP_ENV_NAME)
+      end
+      return unless spec.key?("headers")
+
+      validate_mcp_map!(spec["headers"], "#{label}.headers", source_path, key: MCP_HEADER_NAME)
+      spec["headers"].each_key do |header|
+        next unless header.casecmp?("authorization") || header.match?(MCP_SECRET_NAME)
+
+        raise ConfigError,
+              "#{label}.headers.#{header} in #{describe_source(source_path)} is a literal credential; " \
+              "Hive config holds no secret values. Use `bearer_token_env` or " \
+              "`headers_env: { #{header}: HOST_VAR }` instead."
+      end
+    end
+
+    def validate_mcp_string!(value, label, source_path, pattern: nil)
+      return if value.is_a?(String) && !value.strip.empty? && (pattern.nil? || value.match?(pattern))
+
+      expected = pattern ? "a String matching #{pattern.inspect}" : "a non-empty String"
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be #{expected}; got #{value.inspect}"
+    end
+
+    def validate_mcp_string_list!(value, label, source_path, allow_empty: false)
+      valid = value.is_a?(Array) && (allow_empty || !value.empty?) &&
+        value.all? { |item| item.is_a?(String) && !item.empty? }
+      return if valid
+
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be a list of non-empty Strings; " \
+                         "got #{value.inspect}"
+    end
+
+    def validate_mcp_map!(map, label, source_path, key:, value: nil)
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash" unless map.is_a?(Hash)
+
+      map.each do |name, item|
+        valid_value = item.is_a?(String) && (value.nil? || item.match?(value))
+        next if name.is_a?(String) && name.match?(key) && valid_value
+
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} has an invalid entry " \
+              "#{name.inspect} => #{item.inspect}"
+      end
     end
 
     # Sentinel distinguishing "stage declared no permissions key" from a

@@ -53,7 +53,7 @@ jobs:
           export AGENT_CLI_RUNTIME_OPENCODE_OFFLINE_BIN="$(command -v opencode)"
           ruby -Icomponents/agent-cli-runtime/test \
             components/agent-cli-runtime/test/opencode_offline_smoke_test.rb
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: agent-cli-runtime-candidate
           path: dist

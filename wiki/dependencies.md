@@ -43,8 +43,8 @@ the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
 the executable workflow dependency between review and execution, while the
 trailing version comments keep Dependabot updates legible.
 
-All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
-`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+All seven `actions/upload-artifact` calls likewise pin v7.0.2 to
+`cf430e030ddbb5b0abf93d22962f4752f3646cd9`. They retain archive mode and
 their existing missing-file, hidden-file, and retention policies; Hive does
 not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.

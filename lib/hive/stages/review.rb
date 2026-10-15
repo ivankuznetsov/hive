@@ -1375,16 +1375,29 @@ module Hive
         end
 
         # Defend against hostile / stale `*-99.md` files by capping at
-        # max_passes + 1. A user manually editing a reviewer file with
-        # a wildly higher NN would otherwise drive the loop past
-        # `review.max_passes` and overwrite real findings.
+        # the highest pass the runner could have admitted. A user manually
+        # editing a reviewer file with a wildly higher NN would otherwise
+        # drive the loop past `review.max_passes` and overwrite real
+        # findings.
         max_passes = cfg ? (cfg.dig("review", "max_passes") || 4) : nil
-        if max_passes && max > max_passes + 1
+        if max_passes && max > admitted_pass_ceiling(task_folder, max_passes)
           raise Hive::ConfigError,
                 "review pass NN=#{max} exceeds review.max_passes=#{max_passes}; remove or rename #{offending}"
         end
 
         max
+      end
+
+      # Highest pass number the runner can legitimately have on disk. The
+      # verify pass (max_passes + 1) is always admissible. Beyond it, a pass
+      # exists only because the previous pass completed through a CI repair
+      # (`kind=ci_repaired` sentinel), which admits exactly one more reviewer
+      # pass. Walk that chain of controller-written receipts so a retry can
+      # resume a CI-admitted pass; the first pass without one bounds it.
+      def admitted_pass_ceiling(task_folder, max_passes)
+        ceiling = max_passes + 1
+        ceiling += 1 while fix_success_kind(task_folder, ceiling) == "ci_repaired"
+        ceiling
       end
 
       # Run every configured reviewer sequentially. Returns :all_failed

@@ -2794,6 +2794,55 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_retry_of_ci_admitted_verify_pass_beyond_the_verify_pass_reruns_reviewers
+    # max_passes=1: pass 1 fixes, verify pass 2 is clean but its CI gate
+    # repairs, which admits verify pass 3 (= max_passes + 2). Pass 3 stops
+    # at REVIEW_STALE; a retry must resume it instead of tripping the
+    # on-disk pass guard with config_error.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        fix_spawns = install_committing_fix_driver(worktree)
+        test_case = self
+        ci_runner = lambda do |call|
+          next nil unless call == 2
+
+          File.write(File.join(worktree, "ci-repair.txt"), "repair\n")
+          test_case.run!("git", "-C", worktree, "add", "ci-repair.txt")
+          test_case.run!("git", "-C", worktree, "commit", "-m", "fix CI", "--quiet")
+          nil
+        end
+
+        reviewer_passes, ci_calls = drive_review_loop(
+          folder, worktree,
+          findings: { 1 => "## High\n- [x] broken\n", 3 => "## High\n- [x] repair regressed\n" },
+          ci_runner: ci_runner
+        )
+
+        task_md = File.join(folder, "task.md")
+        marker = Hive::Markers.current(task_md)
+        assert_equal :review_stale, marker.name, marker.attrs.inspect
+        assert_equal "final_fix_unverified", marker.attrs.fetch("reason")
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 1, 2, 3 ], reviewer_passes
+        assert_equal [ 1, 2 ], ci_calls.map(&:first)
+        assert_match(/kind=ci_repaired/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
+
+        Hive::Markers.clear_current(task_md, expected_name: :review_stale)
+        reviewer_passes, = drive_review_loop(folder, worktree, findings: {})
+
+        marker = Hive::Markers.current(task_md)
+        assert_equal :review_complete, marker.name, marker.attrs.inspect
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 3 ], reviewer_passes, "the retry re-runs the CI-admitted verify pass's reviewers"
+        assert_equal 1, fix_spawns.call, "verify passes never spawn the fix agent"
+      end
+    end
+  end
+
   # --- Stage 72: review orchestrator branch coverage -------------------
 
   def test_ci_error_result_yields_review_error_marker

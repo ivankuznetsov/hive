@@ -1702,6 +1702,43 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_max_review_pass_admits_passes_opened_by_ci_repair_receipts
+    # max_passes=2: pass 03 is the verify pass. Each kind=ci_repaired
+    # receipt admitted exactly one more pass, so 04 and 05 are legitimate;
+    # 06 has no admitting receipt and still fails loudly.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=ci_repaired -->\n")
+      File.write(File.join(reviews, "fix-success-04.md"), "<!-- HIVE: head=#{'b' * 40} kind=ci_repaired -->\n")
+      File.write(File.join(reviews, "claude-05.md"), "## High\n")
+      cfg = { "review" => { "max_passes" => 2 } }
+
+      assert_equal 5, Hive::Stages::Review.admitted_pass_ceiling(dir, 2)
+      assert_equal 5, Hive::Stages::Review.max_review_pass(dir, cfg)
+
+      File.write(File.join(reviews, "claude-06.md"), "## High\n")
+      err = assert_raises(Hive::ConfigError) { Hive::Stages::Review.max_review_pass(dir, cfg) }
+      assert_match(/claude-06\.md/, err.message)
+    end
+  end
+
+  def test_max_review_pass_rejects_pass_without_an_admitting_ci_repair
+    # A verify pass that completed clean (or a forged out-of-range file)
+    # admits nothing further: max_passes + 2 is out of range.
+    with_tmp_dir do |dir|
+      reviews = File.join(dir, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=clean -->\n")
+      File.write(File.join(reviews, "claude-04.md"), "## High\n")
+
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Review.max_review_pass(dir, { "review" => { "max_passes" => 2 } })
+      end
+      assert_match(/NN=4 exceeds review\.max_passes=2/, err.message)
+    end
+  end
+
   def test_max_review_pass_without_cfg_skips_the_cap
     # Backward-compatible: existing call sites that pass no cfg get
     # the pre-R5 behaviour.

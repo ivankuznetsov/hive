@@ -23,3 +23,10 @@
 - `test_max_passes_cap_completes_after_final_allowed_fix`, which pinned the
   old behaviour, is replaced by the verify-pass tests in
   `test/integration/run_review_test.rb`.
+- Follow-up: the on-disk pass guard (`max_review_pass`) accepted only
+  `max_passes + 1`, so retrying a pass admitted by a CI repair during the
+  verify pass (`max_passes + 2`) failed with `REVIEW_ERROR
+  reason=config_error`. The ceiling now comes from
+  `Review.admitted_pass_ceiling`, which extends `max_passes + 1` by one for
+  each consecutive `kind=ci_repaired` receipt; a pass with no admitting
+  receipt is still rejected.

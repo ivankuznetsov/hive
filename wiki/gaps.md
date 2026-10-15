@@ -12,14 +12,14 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 The final fix pass now gets a verify-only pass (see [[stages/review]]). Open
 items:
 
-- **On-disk pass guard vs. CI-repair chains.** `Review.max_review_pass` raises
-  `ConfigError` once a top-level `reviews/*-NN.md` exceeds `max_passes + 1`.
-  The verify pass is `max_passes + 1`, but a CI fixer commit during the verify
-  pass's completion gate opens `max_passes + 2`. The in-memory run handles it;
-  if that pass then ends in `REVIEW_ERROR`/`REVIEW_STALE`, the retry hits the
-  guard and lands `REVIEW_ERROR reason=config_error`. Same shape existed before
-  for a CI repair at the cap's own clean boundary; it is now likelier because
-  the final fix's first CI run happens in the verify pass.
+- **Closed 2026-10-15: on-disk pass guard vs. CI-repair chains.**
+  `Review.max_review_pass` used to raise `ConfigError` once a top-level
+  `reviews/*-NN.md` exceeded `max_passes + 1`, so a retry of a pass that a CI
+  repair during the verify pass had admitted (`max_passes + 2`) landed
+  `REVIEW_ERROR reason=config_error`. The ceiling is now
+  `Review.admitted_pass_ceiling`: `max_passes + 1`, extended by one for each
+  consecutive `kind=ci_repaired` sentinel from the verify pass upward. A pass
+  with no admitting receipt still fails loudly.
 - **No finalize-side backstop.** 8-finalize does not check that the review's
   `REVIEW_COMPLETE` HEAD matches the branch it finalizes; the fix relies on the
   review loop alone.

@@ -19,7 +19,7 @@ terminal history. The former public full-fleet status surface is removed.
 
 | Invocation | Contract |
 |---|---|
-| `hive status` | Bounded human daemon/liveness snapshot. |
+| `hive status` | Bounded human daemon/liveness snapshot. It lists live work only, so it always ends its task block with `Waiting, blocked, and queued work: hive status --operational`; `NO RUNNING TASKS` does not mean nothing is waiting on the operator. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
 | `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |

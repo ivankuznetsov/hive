@@ -40,6 +40,20 @@ module Hive
     end
   end
 
+  # The shared runtime control-plane database lacks the command-receipt
+  # extension (migration 002), or the database itself was never created.
+  # Keyed commands that existed before receipts (`hive new`) treat this as
+  # "use the per-project path"; receipt-only commands surface it as CONFIG.
+  class CommandReceiptsNotInstalled < ConfigError
+    def initialize(message = "command receipts are not installed; run `hive setup --install-command-receipts`")
+      super
+    end
+
+    def self.missing_database?(error)
+      error.is_a?(Hive::RuntimeControlPlane::MigrationRequired) && error.code == :missing_database
+    end
+  end
+
   class CommandOutcomeError < Error
     attr_reader :reason, :state, :command_receipt
 

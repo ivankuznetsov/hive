@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-07-24
+updated: 2026-10-15
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
@@ -167,6 +167,34 @@ returns the original slug with `created: false` even after the task has moved;
 reuse for different input/workflow fails without a second task, and duplicate
 metadata is a fail-closed repair error.
 
+### Durable receipts versus per-project fallback
+
+Keyed creation chooses its dedupe path per call with
+`Hive::CommandOperation.receipts_installed?(store)`, the same predicate the
+keyed `CommandOperation` constructor enforces
+(`lib/hive/command_operation.rb`). When the command-receipt extension
+(runtime control-plane migration 002) is installed, the call runs inside
+`CommandOperation`: an identical retry replays the stored response
+byte-for-byte (`created: true` plus `command_receipt`), different input fails
+`command_conflict` (exit 20), and a TaskCapture-only match with no saved
+response is refused as `CommandUnresolved`.
+
+When the extension is absent — including a host whose runtime database file
+was never created — `Commands::New#keyed_call!` prints one stderr line,
+`hive: command receipts not installed; using per-project idempotency for this
+key`, and runs the pre-receipt TaskCapture path described above: a matching
+retry returns the existing task with `created: false`, and different input
+raises `IdempotencyConflict` (usage, exit 64). Stdout stays a valid
+`hive-new.v1` document with no `command_receipt`. Busy receipt storage still
+fails `concurrent_run` and unreadable or foreign storage still fails `config`
+without creating a task; only `Hive::CommandReceiptsNotInstalled` (a
+`ConfigError` subclass) selects the fallback. Both paths write `idempotency_key`
+and `input_fingerprint` to `meta.yml`, so a task keyed while receipts were
+installed is still deduplicated by the fallback. This restores the behavior
+that #1494 removed: from that change until this fix every keyed `hive new`
+failed with CONFIG on every host, because production builds cannot install
+the extension yet (see [[commands/receipt]]).
+
 If a capture commit fails after staging, both idempotent and legacy paths
 remove the owned candidate and reset its exact state-index pathspec. Failures
 raised after directory ownership, including `EEXIST`, likewise remove only the
@@ -191,7 +219,7 @@ re-raises that encoding error and emits no fallback document. Programmatic
 
 | Code | Meaning |
 |---:|---|
-| 0 | The task was created, or an idempotency-key replay returned its existing task. |
+| 0 | The task was created, or an idempotency-key replay returned its existing task (receipt replay or per-project fallback). |
 | 1 | A generic project, slug, collision, filesystem, or I/O failure occurred. |
 | 64 | Arguments, workflow selection, base/dependency shape, or draft-PR combination were invalid. |
 | 70 | An internal software boundary failed. |

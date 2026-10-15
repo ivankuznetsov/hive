@@ -144,6 +144,16 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_receipt_dependency_identity_preserves_legacy_scalars_and_normalizes_lists
+    command = Hive::Commands::New.allocate
+
+    assert_equal 42, command.send(:dependency_receipt_value, 42)
+    assert_equal "  base-task  ",
+                 command.send(:dependency_receipt_value, "  base-task  ")
+    assert_equal [ "base-task" ],
+                 command.send(:dependency_receipt_value, [ "base-task", "base-task" ])
+  end
+
   def test_invalid_dependency_lists_emit_schema_valid_json_values
     with_initialized_project do |_project_root, project|
       out, err, status = with_captured_exit do

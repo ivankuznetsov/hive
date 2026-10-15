@@ -329,6 +329,9 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unknown", rows.fetch("invalid").fetch("state")
     assert_equal "needs_repair", rows.fetch("admission").fetch("state")
     assert_equal "Break the cycle.", rows.fetch("admission").fetch("reason")
+    assert_equal [ "base" ], rows.fetch("admission")
+      .dig("dependency", "unmet_dependencies").map { |entry| entry["blocked_by"] }
+    assert_nil rows.fetch("admission").fetch("action")
     refute_includes rows.fetch("admission").fetch("reasons").map { |reason| reason["code"] },
                     "dependency_wait"
   end

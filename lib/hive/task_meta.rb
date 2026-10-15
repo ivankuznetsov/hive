@@ -36,7 +36,7 @@ module Hive
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
-        depends_on: normalize_dependency(fetch(raw, "depends_on"), preserve_invalid: true),
+        depends_on: normalize_dependency(fetch(raw, "depends_on")),
         workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
       if raw.key?("base_branch") || raw.key?(:base_branch)

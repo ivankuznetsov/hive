@@ -165,7 +165,10 @@ present.
 
 Automation may add `--idempotency-key KEY --json`. Hive stores the opaque key
 with a fingerprint of the normalized input, resolved workflow, dependency, and
-base branch. Idempotent attachments are copied once into a private temporary
+base branch. Legacy scalar dependency inputs retain their exact receipt
+representation, including numeric and whitespace-padded values, so an identical
+retry does not conflict after list support is installed. New list declarations
+use their normalized ordered representation. Idempotent attachments are copied once into a private temporary
 snapshot; the fingerprint and task asset both use those bytes, and the final
 copy is digest-verified. A pathname replacement or source edit between lookup
 and task creation therefore cannot make metadata describe different captured

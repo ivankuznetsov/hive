@@ -450,7 +450,13 @@ Every task row has `depends_on`, `blocked_by`, `dependency_stage`,
 `admission_error`. `depends_on` is a string, an ordered string array, or null.
 `dependency_base_mode` is `stacked` only for a resolvable same-project scalar;
 lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
-`default`. The correlations are closed:
+`default`. One scan reuses each project's already loaded default-branch policy
+and one batched local/origin branch-ref inventory; it does not parse project
+configuration or fork Git once per row. Incremental projections build the
+bounded base-selection context only when a changed row declares a dependency.
+If that base-only context or ref inventory fails, affected base modes degrade to
+`default` without marking unrelated rows dependency-blocked. The correlations
+are closed:
 
 - clear: `blocked: false`, singular wait fields null,
   `unmet_dependencies: []`, `admission_error: null`;

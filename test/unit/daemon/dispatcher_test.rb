@@ -2868,7 +2868,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     observed = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     snapshot = FakeOperationalSnapshot.new
     status_payload = {
-      "schema" => "hive-status", "schema_version" => 8, "ok" => true,
+      "schema" => "hive-status", "schema_version" => 9, "ok" => true,
       "generated_at" => T0.iso8601(6), "projects" => []
     }
     with_tmp_dir do |state_home|
@@ -4850,6 +4850,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil event
     assert_equal "dependency_repository_mismatch", event[1][:reason_code]
     assert_equal "data:base", event[1][:offending_ref]
+  end
+
+  def test_admission_error_log_fallback_renders_dependency_lists_as_text
+    rows = [
+      row(
+        action: "admission_error", command: nil, blocked: true,
+        depends_on: %w[first second], admission_error: nil
+      )
+    ]
+    dispatcher, _sup, _ctrl, logger, = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:reason] == "admission_error"
+    end
+    assert_equal "first, second", event.last.fetch(:offending_ref)
+    refute_includes event.last.fetch(:offending_ref), '["'
   end
 
   def test_finalize_recoverable_error_routes_to_merge_watcher

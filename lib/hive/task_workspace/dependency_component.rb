@@ -199,13 +199,14 @@ module Hive
               )
             end
           rescue Hive::Dependencies::InvalidReference
-            target_id = "missing:#{Digest::SHA256.hexdigest(reference_value.to_s)[0, 20]}"
+            invalid_label = "invalid dependency declaration"
+            target_id = "missing:#{Digest::SHA256.hexdigest(invalid_label)[0, 20]}"
             placeholders[target_id] ||= missing_node(
-              target_id, reason: "dependency_reference_invalid", slug: reference_value.to_s
+              target_id, reason: "dependency_reference_invalid", slug: invalid_label
             )
-            diagnostics << diagnostic("dependency_reference_invalid", reference_value.to_s)
+            diagnostics << diagnostic("dependency_reference_invalid", invalid_label)
             edges << edge(
-              node, placeholders.fetch(target_id), nil, invalid_reference: reference_value.to_s
+              node, placeholders.fetch(target_id), nil, invalid_reference: invalid_label
             )
           end
         end

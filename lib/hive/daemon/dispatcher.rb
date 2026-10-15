@@ -2435,10 +2435,21 @@ module Hive
           action: row.action,
           reason: "admission_error",
           reason_code: error&.reason_code || "dependency_validation_failed",
-          offending_ref: error&.offending_ref || row.depends_on || row.slug,
+          offending_ref: error&.offending_ref || admission_log_reference(row),
           safe_correction: error&.safe_correction ||
             "Inspect dependency admission state before dispatching."
         )
+      end
+
+      def admission_log_reference(row)
+        declaration = row.depends_on
+        return row.slug if declaration.nil?
+        return declaration.to_s unless declaration.is_a?(Array)
+
+        references = declaration.filter_map do |value|
+          value.to_s if value.is_a?(String) || value.is_a?(Integer)
+        end.reject(&:empty?)
+        references.empty? ? "invalid dependency declaration" : references.join(", ")
       end
 
       # Return the two structural Q&A signals used by the policy: pending when

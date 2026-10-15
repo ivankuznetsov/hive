@@ -247,6 +247,19 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
                  panel.fetch("records").first.dig("admission", "error", "reason_code")
   end
 
+  def test_malformed_array_declaration_uses_an_explicit_invalid_label
+    malformed = task("broken", depends_on: [ "base", "" ])
+    panel = component(context(project(tasks: [ malformed ])), slug: "broken").call
+
+    assert_includes panel.fetch("diagnostics").map { |row| row["reference"] },
+                    "invalid dependency declaration"
+    assert panel.fetch("records").any? do |node|
+      node["kind"] == "missing" && node["slug"] == "invalid dependency declaration"
+    end
+    assert_equal [ "invalid dependency declaration" ],
+                 panel.fetch("edges").map { |edge| edge["reference"] }
+  end
+
   def test_deadline_degrades_with_exact_cap_name
     indexed = context(project(tasks: [ task("a"), task("b", depends_on: "a") ]))
     ticks = [ 0.0, 3.0, 3.1 ]

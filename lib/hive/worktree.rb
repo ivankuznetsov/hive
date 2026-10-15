@@ -1,4 +1,5 @@
 require "open3"
+require "set"
 require "fileutils"
 require "securerandom"
 require "yaml"
@@ -668,6 +669,14 @@ module Hive
                                     "rev-parse", "--verify", "--quiet",
                                     "refs/heads/#{branch}")
       status.success?
+    end
+
+    def self.branch_refs(project_root)
+      out, _, status = Open3.capture3(
+        "git", "-C", project_root, "for-each-ref", "--format=%(refname)",
+        "refs/heads", "refs/remotes/origin"
+      )
+      status.success? ? out.lines(chomp: true).to_set.freeze : Set.new.freeze
     end
 
     def self.materialize_pr(repo_root:, pr_number:, path:, branch:)

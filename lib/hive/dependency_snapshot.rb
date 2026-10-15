@@ -100,7 +100,11 @@ module Hive
     # resolver stays free of disk I/O.
     def base_selection(task, default_branch, warn_on_fallback: true,
                        admission_context: nil, project_name: nil,
-                       local_branch_evidence: false)
+                       available_branch_refs: nil)
+      if admission_context.nil? != project_name.nil?
+        raise ArgumentError, "admission_context and project_name must be supplied together"
+      end
+
       dependency = depends_on(task)
       return BaseSelection.new(branch: nil, mode: "default") if dependency.nil?
       if Hive::Dependencies.list_declaration?(dependency)
@@ -116,27 +120,24 @@ module Hive
         return BaseSelection.new(branch: nil, mode: "default")
       end
 
-      base = if admission_context && project_name
+      candidates = if admission_context
         prerequisite = if Hive::Dependencies.numeric?(reference.task)
           admission_context.task_snapshot(project: project_name, id: Integer(reference.task))
         else
           admission_context.task_snapshot(project: project_name, slug: reference.task)
         end
-        if prerequisite.nil? || Hive::Dependencies.same_task?(prerequisite, current_task(task))
-          default_branch
-        else
-          prerequisite.slug || default_branch
-        end
+        [ prerequisite ].compact
       else
-        Hive::Dependencies.base_branch_for(
-          depends_on: dependency,
-          tasks: tasks(task.project_root),
-          default_branch: default_branch,
-          task: current_task(task)
-        )
+        tasks(task.project_root)
       end
+      base = Hive::Dependencies.base_branch_for(
+        depends_on: dependency,
+        tasks: candidates,
+        default_branch: default_branch,
+        task: current_task(task)
+      )
       if base == default_branch ||
-         (local_branch_evidence && !stacked_branch_available?(task.project_root, base))
+         (available_branch_refs && !stacked_branch_available?(available_branch_refs, base))
         if warn_on_fallback
           warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} " \
                "but it did not resolve to a stacked base (prerequisite missing " \
@@ -161,9 +162,9 @@ module Hive
     # Status uses the same remote-tracking/local-ref fallback choices as
     # Worktree#freshest_override_base, but never performs a network fetch.
     # Execution may refresh the remote evidence before selecting its base.
-    def stacked_branch_available?(project_root, branch)
-      Hive::Worktree.origin_branch_ref_exists?(project_root, branch) ||
-        Hive::Worktree.local_branch_ref_exists?(project_root, branch)
+    def stacked_branch_available?(available_branch_refs, branch)
+      available_branch_refs.include?("refs/remotes/origin/#{branch}") ||
+        available_branch_refs.include?("refs/heads/#{branch}")
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
@@ -363,7 +364,7 @@ module Hive
           corrections << "#{refs} to reach the configured dependency gate " \
             "(currently at #{verdict.dependency_stage})"
         else
-          refs = unmet_dependencies.map(&:blocked_by).join(", ")
+          refs = unmet_dependencies.first.blocked_by.to_s
         end
         correction = "Wait for every prerequisite: #{corrections.join('; ')}."
         raise Hive::DependencyWaitError.new(
@@ -412,7 +413,8 @@ module Hive
       unless project
         payload = [
           "hive-dependency-admission-v2", "project_enrollment",
-          match_count, root, task.slug.to_s
+          match_count, root, task.slug.to_s,
+          Hive::Dependencies.normalize_declaration(task.depends_on)
         ]
         return ::Digest::SHA256.hexdigest(JSON.generate(payload))
       end
@@ -421,10 +423,14 @@ module Hive
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
       default_branch = Hive::Config.load(task.project_root)["default_branch"]
+      available_branch_refs = if task.depends_on &&
+                                 !Hive::Dependencies.list_declaration?(task.depends_on)
+        Hive::Worktree.branch_refs(task.project_root)
+      end
       base_mode = base_selection(
         task, default_branch, warn_on_fallback: false,
         admission_context: admission_context, project_name: project,
-        local_branch_evidence: true
+        available_branch_refs: available_branch_refs
       ).mode
       unmet = verdict.unmet_dependencies.map do |dependency|
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
@@ -432,6 +438,7 @@ module Hive
       end
       payload = [
         "hive-dependency-admission-v2", project, task.slug.to_s,
+        Hive::Dependencies.normalize_declaration(task.depends_on),
         verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
         unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s

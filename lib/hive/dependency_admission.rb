@@ -163,18 +163,6 @@ module Hive
         ([ projects ] + Array(@fallback&.project_snapshot_layers)).freeze
       end
 
-      def with_task(project:, task:)
-        matches = @projects_by_name[project] || []
-        return self unless matches.one?
-
-        overlaid = @projects.map do |snapshot|
-          next snapshot unless snapshot.equal?(matches.first)
-
-          snapshot.with(tasks: (snapshot.tasks + [ task ]).freeze)
-        end
-        self.class.new(projects: overlaid, fallback: @fallback)
-      end
-
       def verdict(project:, slug:)
         source_project = unique_project(project)
         return admission_error("dependency_project_unknown", project, project_correction(project)) unless source_project
@@ -205,6 +193,7 @@ module Hive
       def walk(source)
         frames = []
         active_index = {}
+        walk_cache = {}
         push_frame(frames, active_index, source, incoming: nil)
 
         until frames.empty?
@@ -215,6 +204,7 @@ module Hive
             evaluation = complete_frame(frame)
             frames.pop
             active_index.delete(frame.identity)
+            walk_cache[frame.identity] = evaluation
             @verdict_cache[frame.identity] = evaluation unless evaluation.cycle_derived
             return evaluation.verdict if frames.empty?
 
@@ -259,7 +249,7 @@ module Hive
           else
             { blocker: gate_result, admission_error: nil }.freeze
           end
-          if (cached = @verdict_cache[target_identity])
+          if (cached = @verdict_cache[target_identity] || walk_cache[target_identity])
             absorb_child(frame, incoming, cached)
           else
             push_frame(frames, active_index, target, incoming: incoming)

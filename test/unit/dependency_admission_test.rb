@@ -90,6 +90,13 @@ class DependencyAdmissionTest < Minitest::Test
     assert_error context(project(tasks: [ mismatch ])).verdict(project: "app", slug: "drift"),
                  "plan_dependency_mismatch"
 
+    shape_mismatch = task(
+      "app", "shape-drift", depends_on: "base", plan_status: :ok,
+      plan_dependency: [ "base" ]
+    )
+    assert_error context(project(tasks: [ shape_mismatch ]))
+      .verdict(project: "app", slug: "shape-drift"), "plan_dependency_mismatch"
+
     invalid = task("app", "bad-plan", plan_status: :invalid, plan_error: "bad frontmatter")
     assert_error context(project(tasks: [ invalid ])).verdict(project: "app", slug: "bad-plan"),
                  "plan_dependency_invalid"
@@ -315,6 +322,49 @@ class DependencyAdmissionTest < Minitest::Test
     assert_equal "app:b -> app:a -> app:b", from_b.admission_error.offending_ref
   end
 
+  def test_cycle_abort_does_not_poison_shared_acyclic_nodes_in_either_root_order
+    tasks = [
+      task("app", "cyclic-root", depends_on: %w[shared loop]),
+      task("app", "loop", depends_on: "cyclic-root", stage: "9-done"),
+      task("app", "acyclic-root", depends_on: "shared"),
+      task("app", "shared", stage: "9-done")
+    ]
+
+    [ %w[cyclic-root acyclic-root], %w[acyclic-root cyclic-root] ].each do |order|
+      indexed = context(project(tasks: tasks))
+      verdicts = order.to_h do |slug|
+        [ slug, indexed.verdict(project: "app", slug: slug) ]
+      end
+
+      assert_error verdicts.fetch("cyclic-root"), "dependency_cycle"
+      assert verdicts.fetch("acyclic-root").clear?
+    end
+  end
+
+  def test_cycle_derived_fan_in_is_memoized_within_one_root_walk
+    tasks = [ task("app", "cycle", depends_on: "cycle", stage: "9-done") ]
+    previous = [ "cycle" ]
+    12.times do |depth|
+      current = [ "left-#{depth}", "right-#{depth}" ]
+      current.each do |slug|
+        tasks << task("app", slug, depends_on: previous, stage: "9-done")
+      end
+      previous = current
+    end
+    tasks << task("app", "root", depends_on: previous)
+    indexed = context(project(tasks: tasks))
+    validations = 0
+    original_validate = indexed.method(:validate_node)
+    indexed.define_singleton_method(:validate_node) do |snapshot|
+      validations += 1
+      original_validate.call(snapshot)
+    end
+
+    assert_error indexed.verdict(project: "app", slug: "root"), "dependency_self_reference"
+    assert_operator validations, :<=, tasks.length,
+                    "each node should be expanded at most once within the root query"
+  end
+
   def test_deep_dependency_chain_is_evaluated_without_ruby_recursion
     tasks = (0...1_500).map do |index|
       dependency = index == 1_499 ? nil : "node-#{index + 1}"
@@ -427,20 +477,6 @@ class DependencyAdmissionTest < Minitest::Test
     assert_equal %w[active archived], indexed.project_snapshots.flat_map(&:tasks).map(&:slug)
     assert_predicate indexed.project_snapshot_layers, :frozen?
     assert_predicate indexed.project_snapshots, :frozen?
-  end
-
-  def test_context_overlays_one_unique_project_without_mutating_the_snapshot
-    app = project(tasks: [ task("app", "active") ])
-    data = project(name: "data", tasks: [ task("data", "unchanged") ])
-    indexed = context(app, data)
-    added = task("app", "proposed")
-
-    overlaid = indexed.with_task(project: "app", task: added)
-
-    assert_equal %w[active proposed], overlaid.projects.first.tasks.map(&:slug)
-    assert_equal [ "unchanged" ], overlaid.projects.last.tasks.map(&:slug)
-    assert_equal [ "active" ], indexed.projects.first.tasks.map(&:slug)
-    assert_same indexed, indexed.with_task(project: "missing", task: added)
   end
 
   def test_immutable_context_memoizes_shared_dependency_tails

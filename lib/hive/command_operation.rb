@@ -232,9 +232,13 @@ module Hive
       raise if persistence_failed
       raise if error.is_a?(SystemExit) && claim&.disposition == :replay
       if claim && effect && retryable_pre_application_rejection?(error)
-        @store.abort_pre_submission(
-          claim, effect_id: effect.fetch(:effect_id), reason: "command_pre_application_rejected"
-        )
+        begin
+          @store.abort_pre_submission(
+            claim, effect_id: effect.fetch(:effect_id), reason: "command_pre_application_rejected"
+          )
+        rescue StandardError
+          persist_uncertainty(claim, effect)
+        end
       elsif claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
       elsif claim

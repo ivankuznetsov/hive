@@ -1700,3 +1700,11 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   follow-up.
 - Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
   database or WAL files shrink on disk.
+
+## Multi-dependency review verification (2026-10-15)
+
+- Focused tests cover cycle fan-in, declaration/gate/base-mode freshness,
+  schema-safe malformed metadata, batched status inputs, and consumer
+  projections. They do not measure a long-running installed daemon, TUI, or Web
+  process against a production-sized cyclic graph; hosted review and CI remain
+  separate verification boundaries.

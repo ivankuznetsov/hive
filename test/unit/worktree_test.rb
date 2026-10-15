@@ -1274,6 +1274,20 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_branch_refs_collects_local_and_origin_tracking_refs_in_one_inventory
+    with_tmp_git_repo do |repo|
+      run!("git", "-C", repo, "branch", "feature")
+      run!("git", "-C", repo, "update-ref", "refs/remotes/origin/remote-feature", "HEAD")
+
+      refs = Hive::Worktree.branch_refs(repo)
+
+      assert_instance_of Set, refs
+      assert_includes refs, "refs/heads/feature"
+      assert_includes refs, "refs/remotes/origin/remote-feature"
+      assert_predicate refs, :frozen?
+    end
+  end
+
   # Regression for the recorded FETCH_HEAD stack-collapse: on a narrow
   # (single-branch) fetch refspec, a plain `git fetch origin <branch>`
   # updates only FETCH_HEAD and never writes refs/remotes/origin/<branch>,

@@ -46,7 +46,10 @@ stacked-branch and declared-revision behavior; every list, including
 `meta.yml` is authoritative. `TaskMeta.read_for_admission` distinguishes an
 absent legacy sidecar from unreadable YAML, a non-mapping document, and an
 invalid `depends_on`. General display code may still use the tolerant reader,
-but admission never does. Metadata mutators refuse to rewrite corrupt input,
+which projects malformed declarations as a schema-safe string or null instead
+of leaking raw arrays or mappings into public status. Admission never uses that
+projection and retains the original malformed value as strict evidence.
+Metadata mutators refuse to rewrite corrupt input,
 so id/display-name backfill cannot erase damaged dependency evidence. The
 strict reader rejects duplicate top-level `depends_on` keys before YAML's
 last-key-wins behavior can hide one of two declarations.
@@ -121,9 +124,11 @@ including the repeated closing node. Creation rejects any resolvable cycle or
 self-reference before publishing the new task, including cycles behind an
 unreachable gate; qualified self-reference paths identify the actual upstream
 task. Admission repeats the complete check against current disk state. Cycle
-bookkeeping and immutable-context verdicts are indexed and memoized, so one
-active projection evaluates shared
-dependency tails once instead of rewalking them for every row. Each task folder's
+bookkeeping and immutable-context verdicts are indexed and memoized. Non-cycle
+verdicts may be reused across roots; cycle-derived verdicts stay in the current
+root walk because their paths are root-relative. That walk-local cache still
+evaluates each shared node once per root instead of once per incoming route, so
+fan-in over a cycle remains linear in the reachable graph. Each task folder's
 device/inode identity is checked before and after strict reads; a concurrent
 stage move invalidates that snapshot instead of retaining the enumerated old
 stage after an `ENOENT` race.
@@ -188,9 +193,12 @@ are deliberately exempt so an operator can repair stale/corrupt marker state.
 A full dispatch-request scan constructs one immutable admission context for
 recovery generation validation. Its indexed verdicts are reused across queued
 requests; per-task state files and task identity are still revalidated under
-each task lock. Fingerprints resolve the task's project from the context's path
-index, preserving the same zero/duplicate-enrollment payload as the uncached
-path without rescanning the fleet.
+each task lock. Fingerprints include the ordered, shape-preserving dependency
+declaration as well as the resulting verdict and base mode, so any declaration,
+gate, blocker, or branch-evidence change invalidates generation-bound work.
+They resolve the task's project from the context's path index, preserving the
+same zero/duplicate-enrollment payload as the uncached path without rescanning
+the fleet.
 A task-local admission error exits 78 without dropping the entire enrolled
 project from daemon scheduling.
 
@@ -227,7 +235,10 @@ snapshot that lacks enough rows returns a partial-project sentinel.
 Traversal is capped at 32 projects, 10,000 scanned metadata entries, 100 nodes,
 200 edges, depth 20, 4 MiB, and two seconds. Missing or inaccessible nodes,
 cycles, blocked chains, and each exhausted cap remain explicit nodes/edges or
-truncation diagnostics. Same-repository stack evidence compares immutable
+truncation diagnostics. A malformed composite declaration remains structured
+on its task node, while its synthetic placeholder, edge, and diagnostic use an
+explicit invalid-declaration label rather than Ruby array inspection text.
+Same-repository stack evidence compares immutable
 worktree repository/base branch/base OID with separately observed local refs;
 cross-project dependencies remain scheduling-only. No component node triggers
 a Git fetch or GitHub query.

@@ -129,29 +129,31 @@ class DependencySnapshotTest < Minitest::Test
       context = Object.new
       context.define_singleton_method(:task_snapshot) { |**| prerequisite }
 
-      missing = with_replaced_singleton_method(
-        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }
-      ) do
-        with_replaced_singleton_method(Hive::Worktree, :local_branch_ref_exists?, ->(*) { false }) do
-          Hive::DependencySnapshot.base_selection(
-            task, "main", admission_context: context, project_name: "app",
-            local_branch_evidence: true
-          )
-        end
-      end
-      local = with_replaced_singleton_method(
-        Hive::Worktree, :origin_branch_ref_exists?, ->(*) { false }
-      ) do
-        with_replaced_singleton_method(Hive::Worktree, :local_branch_ref_exists?, ->(*) { true }) do
-          Hive::DependencySnapshot.base_selection(
-            task, "main", admission_context: context, project_name: "app",
-            local_branch_evidence: true
-          )
-        end
-      end
+      missing = Hive::DependencySnapshot.base_selection(
+        task, "main", admission_context: context, project_name: "app",
+        available_branch_refs: []
+      )
+      local = Hive::DependencySnapshot.base_selection(
+        task, "main", admission_context: context, project_name: "app",
+        available_branch_refs: [ "refs/heads/base-task" ]
+      )
 
       assert_equal [ nil, "default" ], [ missing.branch, missing.mode ]
       assert_equal [ "base-task", "stacked" ], [ local.branch, local.mode ]
+    end
+  end
+
+  def test_base_selection_rejects_partial_admission_context_arguments
+    task = FakeTask.new(
+      slug: "dependent", id: 2, depends_on: "base-task",
+      folder: "/tmp/dependent", project_root: "/tmp"
+    )
+
+    assert_raises(ArgumentError) do
+      Hive::DependencySnapshot.base_selection(task, "main", admission_context: Object.new)
+    end
+    assert_raises(ArgumentError) do
+      Hive::DependencySnapshot.base_selection(task, "main", project_name: "app")
     end
   end
 
@@ -235,7 +237,7 @@ class DependencySnapshotTest < Minitest::Test
         task, registry_entries: registry_entries
       )
       expected_payload = [
-        "hive-dependency-admission-v2", project, slug,
+        "hive-dependency-admission-v2", project, slug, nil,
         "clear", "", "", [], "default", "", "", ""
       ]
 
@@ -264,7 +266,7 @@ class DependencySnapshotTest < Minitest::Test
         )
       end
       expected_payload = [
-        "hive-dependency-admission-v2", project, slug,
+        "hive-dependency-admission-v2", project, slug, nil,
         "clear", "", "", [], "default", "", "", ""
       ]
 
@@ -291,12 +293,116 @@ class DependencySnapshotTest < Minitest::Test
         task, registry_entries: registry
       )
       expected_payload = [
-        "hive-dependency-admission-v2", project, "dependent-task",
+        "hive-dependency-admission-v2", project, "dependent-task", [ "base-task" ],
         "wait", "", "", [ [ "base-task", "base-task", "8-finalize", "9-done" ] ],
         "default", "", "", ""
       ]
 
       assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
+    end
+  end
+
+  def test_admission_fingerprint_changes_when_a_satisfied_declaration_changes
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)
+      write_task_meta(root, "9-done", "first-task", id: 1)
+      write_task_meta(root, "9-done", "second-task", id: 2)
+      project = File.basename(root)
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+
+      fingerprints = %w[first-task second-task].map do |dependency|
+        declaration = [ dependency ]
+        Hive::TaskMeta.write(
+          dependent, id: 3, slug: "dependent-task", display_name: nil,
+          depends_on: declaration
+        )
+        task = FakeTask.new(
+          slug: "dependent-task", id: 3, depends_on: declaration,
+          folder: dependent, project_root: root, project_name: project
+        )
+        Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+      end
+
+      refute_equal fingerprints.first, fingerprints.last
+    end
+  end
+
+  def test_admission_fingerprint_changes_when_only_the_second_blocker_stage_changes
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 3)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: "dependent-task", display_name: nil,
+        depends_on: %w[first-task second-task]
+      )
+      write_task_meta(root, "7-artifacts", "first-task", id: 1)
+      second = write_task_meta(root, "7-artifacts", "second-task", id: 2)
+      project = File.basename(root)
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+      task = FakeTask.new(
+        slug: "dependent-task", id: 3, depends_on: %w[first-task second-task],
+        folder: dependent, project_root: root, project_name: project
+      )
+
+      before = Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+      destination = File.join(root, ".hive-state", "stages", "8-finalize", "second-task")
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mv(second, destination)
+      after = Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+
+      refute_equal before, after
+    end
+  end
+
+  def test_admission_fingerprint_changes_when_only_the_required_gate_changes
+    with_tmp_dir do |root|
+      hive_state = File.join(root, ".hive-state")
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "base-task"
+      )
+      write_task_meta(root, "7-artifacts", "base-task", id: 1)
+      project = File.basename(root)
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+      task = FakeTask.new(
+        slug: "dependent-task", id: 2, depends_on: "base-task",
+        folder: dependent, project_root: root, project_name: project
+      )
+
+      File.write(File.join(hive_state, "config.yml"), "dependency_gate_stage: 8-finalize\n")
+      before = Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+      File.write(File.join(hive_state, "config.yml"), "dependency_gate_stage: 9-done\n")
+      after = Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+
+      refute_equal before, after
+    end
+  end
+
+  def test_admission_fingerprint_changes_when_only_the_effective_base_mode_changes
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "base-task"
+      )
+      write_task_meta(root, "9-done", "base-task", id: 1)
+      project = File.basename(root)
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+      task = FakeTask.new(
+        slug: "dependent-task", id: 2, depends_on: "base-task",
+        folder: dependent, project_root: root, project_name: project
+      )
+      inventories = [ Set.new, Set["refs/heads/base-task"] ]
+
+      fingerprints = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs, ->(*) { inventories.shift }
+      ) do
+        2.times.map do
+          Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
+        end
+      end
+
+      refute_equal fingerprints.first, fingerprints.last
     end
   end
 
@@ -324,7 +430,7 @@ class DependencySnapshotTest < Minitest::Test
         Hive::DependencySnapshot.admission_fingerprint(task, registry_entries: registry)
       end
       expected_payload = [
-        "hive-dependency-admission-v2", project, "dependent-task",
+        "hive-dependency-admission-v2", project, "dependent-task", "develop",
         "clear", "", "", [], "default", "", "", ""
       ]
 
@@ -1268,7 +1374,7 @@ class DependencySnapshotTest < Minitest::Test
         error = assert_raises(Hive::DependencyWaitError) do
           Hive::DependencySnapshot.enforce_admission!(task, registry_entries: registry)
         end
-        assert_equal "one, two", error.offending_ref
+        assert_equal "one", error.offending_ref
         assert_match(/one at 7-artifacts \(needs 9-done\)/, error.message)
         assert_match(/two to reach 9-done \(currently at 8-finalize\)/,
                      error.safe_correction)

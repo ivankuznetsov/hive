@@ -191,7 +191,11 @@ module Hive
         # PlanFrontmatter already parsed and validated this into a Reference
         # or an array of References; malformed declarations never reach here.
         return if Array(declared).any? do |reference|
-          !reference.explicit_project && reference.task == task.slug
+          same_slug = reference.task == task.slug
+          same_numeric_id = !reference.explicit_project && reference.task == task.id.to_s
+          same_qualified_identity = reference.explicit_project &&
+            reference.project == task.project_name && same_slug
+          (!reference.explicit_project && same_slug) || same_numeric_id || same_qualified_identity
         end
 
         Hive::TaskMeta.rewrite(

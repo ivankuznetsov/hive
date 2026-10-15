@@ -5,7 +5,7 @@ require "hive/task_meta"
 class HiveStagesPlanTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:folder, :slug, keyword_init: true)
+  FakeTask = Struct.new(:folder, :slug, :id, :project_name, keyword_init: true)
   Marker = Struct.new(:name)
 
   def with_planned_task(plan_frontmatter, meta_depends_on: nil, slug: "cli-task")
@@ -15,7 +15,7 @@ class HiveStagesPlanTest < Minitest::Test
         depends_on: meta_depends_on
       )
       File.write(File.join(dir, "plan.md"), plan_frontmatter)
-      yield FakeTask.new(folder: dir, slug: slug), dir
+      yield FakeTask.new(folder: dir, slug: slug, id: 42, project_name: "app"), dir
     end
   end
 
@@ -76,6 +76,16 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
+  def test_numeric_and_qualified_self_dependencies_are_refused
+    [ "42", "app:cli-task" ].each do |reference|
+      with_planned_task(plan_doc(reference)) do |task, dir|
+        Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+
+        assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+      end
+    end
+  end
+
   # Adoption only saves an operator a copy, so a meta.yml that refuses the
   # rewrite must stay silent rather than fail the plan stage: admission still
   # reports plan_dependency_mismatch and still says what to do about it.
@@ -108,7 +118,7 @@ class HiveStagesPlanTest < Minitest::Test
     record.define_singleton_method(:[]) { |key| data.fetch(key) }
     projection = Struct.new(:record).new(record)
     with_replaced_singleton_method(Hive::PlanReview::Projection, :load, ->(task_folder:) { projection }) do
-      yield FakeTask.new(folder: "/tmp/task", slug: "task")
+      yield FakeTask.new(folder: "/tmp/task", slug: "task", id: 1, project_name: "demo")
     end
   end
 
@@ -151,7 +161,8 @@ class HiveStagesPlanTest < Minitest::Test
   def test_missing_review_carries_nothing
     missing = ->(task_folder:) { raise Hive::PlanReview::InvalidRecord, "no review" }
     with_replaced_singleton_method(Hive::PlanReview::Projection, :load, missing) do
-      assert_equal "", Hive::Stages::Plan.carried_decisions_text(FakeTask.new(folder: "/tmp/task", slug: "task"))
+      task = FakeTask.new(folder: "/tmp/task", slug: "task", id: 1, project_name: "demo")
+      assert_equal "", Hive::Stages::Plan.carried_decisions_text(task)
     end
   end
 

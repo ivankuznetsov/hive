@@ -347,7 +347,7 @@ class NewTest < Minitest::Test
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
 
-        capture_io do
+        _out, err = capture_io do
           Hive::CLI.start([
             "new", project, "--depends-on", "base-task", "--depends-on", "base-task",
             "duplicate prerequisites"
@@ -356,6 +356,27 @@ class NewTest < Minitest::Test
 
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "duplicate-prerequisites-*")].first
         assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes err, "multiple --depends-on values are scheduling-only"
+      end
+    end
+  end
+
+  def test_repeated_dependency_notice_is_not_emitted_when_creation_fails
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _out, err = capture_io do
+          assert_raises(SystemExit) do
+            Hive::CLI.start([
+              "new", project, "--depends-on", "base-task", "--depends-on", "BAD TASK",
+              "invalid prerequisites"
+            ])
+          end
+        end
+
+        refute_includes err, "multiple --depends-on values are scheduling-only"
       end
     end
   end
@@ -439,6 +460,54 @@ class NewTest < Minitest::Test
         refute Dir.exist?(
           File.join(dir, ".hive-state", "stages", "1-inbox", "self-dependent")
         )
+      end
+    end
+  end
+
+  def test_creation_persists_dependencies_on_prerequisites_with_deferred_admission_errors
+    %i[unreadable_metadata plan_mismatch].each do |failure|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+          prerequisite = "broken-prerequisite"
+          existing = File.join(dir, ".hive-state", "stages", "1-inbox", prerequisite)
+          FileUtils.mkdir_p(existing)
+          File.write(File.join(existing, "idea.md"), "# Broken prerequisite\n<!-- WAITING -->\n")
+          if failure == :unreadable_metadata
+            File.write(File.join(existing, "meta.yml"), "depends_on: [unterminated\n")
+            expected_reason = "dependency_metadata_unreadable"
+          else
+            Hive::TaskMeta.write(
+              existing, id: 40, slug: prerequisite, display_name: nil,
+              depends_on: "first-upstream"
+            )
+            File.write(
+              File.join(existing, "plan.md"),
+              "---\ndepends_on: second-upstream\n---\n# Plan\n"
+            )
+            expected_reason = "plan_dependency_mismatch"
+          end
+
+          capture_io do
+            created_slug = "dependent-#{failure.to_s.tr('_', '-')}"
+            Hive::Commands::New.new(
+              project, "deferred dependency #{failure}",
+              slug_override: created_slug, depends_on: prerequisite
+            ).call!
+          end
+          created = File.join(
+            dir, ".hive-state", "stages", "1-inbox",
+            "dependent-#{failure.to_s.tr('_', '-')}"
+          )
+          assert_equal prerequisite, Hive::TaskMeta.read(created)[:depends_on]
+          context = Hive::DependencySnapshot.admission_context([
+            { "name" => project, "path" => dir, "repository_identity" => nil }
+          ])
+          assert_equal expected_reason,
+                       context.verdict(project: project, slug: File.basename(created))
+                         .admission_error.reason_code
+        end
       end
     end
   end

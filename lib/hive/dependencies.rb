@@ -22,18 +22,6 @@ module Hive
       end
     end
 
-    # `unresolved` is NOT a stored field: it is derived so the three-field
-    # tuple can never contradict itself. A blocked row with no identified
-    # prerequisite (missing dependency or self-reference) is unresolved; a
-    # blocked row that names a prerequisite slug is a real below-gate wait.
-    # `resolve` guarantees the correlation `unresolved? ⟺ (blocked &&
-    # blocked_by.nil?)` by construction (see the resolved⟹slug guard below).
-    Result = Data.define(:blocked_by, :dependency_stage, :blocked) do
-      def unresolved?
-        blocked && blocked_by.nil?
-      end
-    end
-
     module_function
 
     def parse_reference(value)
@@ -133,30 +121,6 @@ module Hive
       false
     end
 
-    def resolve(depends_on:, tasks:, threshold_stage:, task: nil)
-      dependency = normalize_depends_on(depends_on)
-      return Result.new(blocked_by: nil, dependency_stage: nil, blocked: false) unless dependency
-
-      prerequisite = find_task(dependency, tasks)
-      if prerequisite.nil? || same_task?(prerequisite, task)
-        return Result.new(blocked_by: nil, dependency_stage: nil, blocked: true)
-      end
-
-      # Resolved ⟹ slug present. Every snapshot builder guarantees a slug,
-      # so a resolved prerequisite without one is a corrupt input, not a
-      # missing dependency — raise rather than emit a tuple that would
-      # render as "(unresolved)". Callers on the never-fail status surface
-      # isolate this per row, not per project: apply_dependency_result
-      # rescues each row independently, so one corrupt prerequisite blanks
-      # only its own dependent's gate, not the whole project's.
-      slug = task_slug(prerequisite)
-      raise ArgumentError, "resolved prerequisite #{dependency.inspect} has no slug" unless slug
-
-      stage = stage_name_for(prerequisite)
-      blocked = stage_index_for(prerequisite) < threshold_index(threshold_stage)
-      Result.new(blocked_by: slug, dependency_stage: stage, blocked: blocked)
-    end
-
     def blocker_names(unmet_dependencies:, blocked_by: nil)
       names = Array(unmet_dependencies).filter_map do |entry|
         value = field(entry, :blocked_by).to_s.strip
@@ -203,8 +167,9 @@ module Hive
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)
       return default_branch if list_declaration?(depends_on)
 
-      dependency = normalize_depends_on(depends_on)
-      return default_branch unless dependency
+      return default_branch if depends_on.nil?
+
+      dependency = parse_reference(depends_on).to_s
 
       prerequisite = find_task(dependency, tasks)
       return default_branch if prerequisite.nil? || same_task?(prerequisite, task)
@@ -215,12 +180,6 @@ module Hive
     def find_task(depends_on, tasks)
       tasks.find { |candidate| task_slug(candidate) == depends_on } ||
         (numeric?(depends_on) ? tasks.find { |candidate| task_id(candidate) == Integer(depends_on) } : nil)
-    end
-
-    def normalize_depends_on(value)
-      return nil if value.nil?
-
-      parse_reference(value).to_s
     end
 
     def numeric?(value)
@@ -250,59 +209,20 @@ module Hive
 
       Integer(raw)
     rescue ArgumentError, TypeError
-      # A corrupt prerequisite id (non-numeric string in meta.yml) makes a
-      # numeric `depends_on` FAIL to resolve (treated as a missing
-      # prerequisite): `find_task`'s numeric arm compares `nil == <int>` →
-      # false, so the prereq is not found — it does NOT mis-resolve to the
-      # wrong task. Note this rescue is effectively dead on the production
-      # status path: `TaskMeta.normalize_id` already coerces a corrupt id to
-      # nil before the resolver ever sees it, so the breadcrumb fires only for
-      # callers that pass a raw, unnormalized id. Kept so the "typo in
-      # depends_on" case stays distinguishable from "prereq id is garbage"
-      # when debugging an unexpected unresolved gate.
+      # A corrupt prerequisite id cannot satisfy the numeric branch selector.
+      # TaskMeta normally coerces it to nil before this helper sees it; keep a
+      # breadcrumb for raw integration inputs.
       warn "[hive] dependencies: prerequisite id #{raw.inspect} is not an integer; " \
            "ignoring it for numeric depends_on matching"
       nil
     end
 
-    def stage_index_for(task)
-      raw = field(task, :stage_index)
-      return raw if raw.is_a?(Integer)
-      return Integer(raw) if raw
-
-      stage = field(task, :stage)
-      resolved = Hive::Stages.resolve(stage.to_s)
-      return Hive::Stages::DIRS.index(resolved) + 1 if resolved
-
-      raise ArgumentError, "dependency task #{task_slug(task).inspect} has no valid stage"
-    end
-
-    def stage_name_for(task)
-      stage = field(task, :stage)
-      resolved = Hive::Stages.resolve(stage.to_s)
-      return resolved if resolved
-
-      Hive::Stages::DIRS.fetch(stage_index_for(task) - 1)
-    end
-
-    def threshold_index(threshold_stage)
-      resolved = Hive::Stages.resolve(threshold_stage.to_s)
-      raise ArgumentError, "unknown dependency gate stage #{threshold_stage.inspect}" unless resolved
-
-      Hive::Stages::DIRS.index(resolved) + 1
-    end
-
     # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
     # string-keyed) or an object exposing `key` as a reader. Most production
-    # callers pass a SYMBOL-keyed Hash: Status#apply_dependency_result and
-    # DependencySnapshot#stacked_base both project their rows/tasks into
-    # symbol-keyed Hashes before calling in (the snapshot deliberately does
-    # not duck-type other inputs). The string-key arm remains part of the
-    # public resolver contract for JSON-shaped callers and compatibility
-    # with older integrations. The TUI admission cache itself now carries
-    # immutable TaskSnapshots rather than reduced row hashes. The reader arm
-    # (e.g. a `Hive::Task`) is test ergonomics / forward compatibility — no
-    # production path passes a reader-exposing object today. Returns nil only
+    # callers pass symbol-keyed Hashes, while DependencySnapshot base
+    # selection also passes immutable TaskSnapshot readers. The string-key
+    # arm remains part of the public resolver contract for JSON-shaped callers
+    # and compatibility with older integrations. Returns nil only
     # when the key is genuinely absent from a
     # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves

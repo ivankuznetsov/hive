@@ -883,6 +883,28 @@ class CommandOperationTest < Minitest::Test
     assert_equal expected, operation.send(:persisted_receipt_identity, claim)
   end
 
+  def test_failed_pre_application_abort_preserves_the_operator_error_and_marks_uncertainty
+    retryable_error_class = Class.new(Hive::Error) do
+      def retryable_pre_application_rejection? = true
+    end
+    with_operation(key: "abort-failure") do |operation, store|
+      store.define_singleton_method(:abort_pre_submission) do |*_, **|
+        raise Sequel::DatabaseError, "abort failed"
+      end
+      original = retryable_error_class.new("dependency cycle")
+
+      raised = assert_raises(retryable_error_class) do
+        operation.call { raise original }
+      end
+
+      assert_same original, raised
+      receipt = store.database.read do |db|
+        db[:command_receipts].first(key_digest: Digest::SHA256.hexdigest("abort-failure"))
+      end
+      assert_equal "unresolved", receipt.fetch(:state)
+    end
+  end
+
   private
 
   def with_operation(key: "stable")

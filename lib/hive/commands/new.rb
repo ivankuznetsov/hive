@@ -700,6 +700,8 @@ module Hive
       end
 
       def dependency_receipt_value(value)
+        return value unless value.is_a?(Array)
+
         Hive::Dependencies.normalize_declaration(value)
       rescue Hive::Dependencies::InvalidReference
         dependency_error_value(value)

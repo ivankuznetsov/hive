@@ -768,7 +768,6 @@
     "test/unit/web/session_secret_test.rb": 0.0021,
     "test/unit/web/source_bundle_test.rb": 0.1052,
     "test/unit/web/status_feed_test.rb": 5.9954,
-    "test/unit/web/supervisor_test.rb": 5.9247,
     "test/unit/web/task_capture_coverage_test.rb": 0.0414,
     "test/unit/web/task_capture_test.rb": 178.2776,
     "test/unit/web/task_diff_test.rb": 1.2106,

@@ -3,13 +3,13 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-09-01
+updated: 2026-10-15
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest]
 ---
 
 **TLDR**: Minitest covers unit/integration behavior; opt-in layers cover outer
 e2e, eval, native package/bootstrap, authenticated agent skills, install
-verification, release proof, and Hivebox images. Offline tests pin the
+verification, and release proof. Offline tests pin the
 agent-first status/watch/action contracts, coherent daemon snapshots, canonical
 five-platform skill projections, safe consent-gated provisioning, native web
 service/readiness contracts, and the exact-artifact proof verifier. The trusted
@@ -738,7 +738,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `commands/{approve,finding_toggle,run,stage_action,status}_test.rb`, `integration/{run_error_envelope,status_error_envelope,run_findings,markers_command}_test.rb` | Shared runtime error-envelope production — command-specific schemas, closed error-kind mappings, condition-gate recovery fields, approve final-stage extras, findings operations, status/diagnose schema selection, single-document stdout guards, internal-error wrapping, and emit-time JSON failures after the producers converge on `Hive::Schemas::EnvelopeEmitter`. |
 | `cli_test.rb` | `Hive::CLI` — command delegation and option threading for the Thor surface, including `hive workflow new`, `hive generate-name` lookup scoping, and internal archive recovery flags. |
 | `commands/bench_submit_test.rb` | `Hive::Commands::BenchSubmit` — resolves completed `9-done` tasks from registered projects, derives the source repo from GitHub `origin`, requires `worktree.yml` + `pr.md`, aborts before PR creation on local secret findings, and surfaces missing slugs/checkouts as usage errors. Coverage now includes the default local secret scanner, JSON/text reporting, `run_git`, extractor invocation against a stub `harness/extract.rb`, and submission branch creation with a real local Git push to a bare fixture while `gh` and external GitHub interactions remain stubbed; no real hive-bench validator or GitHub PR is exercised. |
-| `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `integration/{honeycomb_workflow_lifecycle,workflow_publish_cli,workflow_publish_submission}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current v2 authoring, publication, and install lifecycle — metadata/README/no-follow component snapshots, canonical immutable v1 package bytes, canonical YAML and release/package fingerprints, checksum-bound pinned lint rules/fixtures/expectations with redacted findings, exact actor permission projection and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, Codex exact-file `Read(path)` mounts without task/package-root exposure and their unresolvable-target rejection, Pi bubblewrap runtime/auth isolation with read-only tool mapping and agent-network rejection, the fail-closed arms for a missing bubblewrap or auth file and for every `mise which pi` executable-resolution outcome, single-payload recovery from a malformed JSON fence, direct-governance negation hardening, catalog/manifest/source-provenance binding, owner-private receipt/bundle/object integrity with retained-checkout symlink refusal, monotonic concurrent receipt/observation updates, intent-before-effect direct/fork submission recovery, fork-parent and commit-parent authority, digest-matching external-branch adoption, deleted-terminal-branch lifecycle recovery with live-open and surviving-branch identity checks, current-vs-cached PR/catalog lifecycle, schema-v2 dry-run/digest binding and exact error-kind/exit/retry arms, v2 flat-catalog install/configuration snapshots, immutable store transaction/task-pin concurrency, isolated invalid-selection warnings, incomplete-pin cleanup refusal, executable-mode hardening, Hivebox-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, Rails `Workflow` row modelling, route-bound workflow-change operations, install access disclosure without consent flags, update/remove consent and ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. No fixture executes package instructions or uses live GitHub. |
+| `workflow_package/*_test.rb`, `commands/workflow_{install,list,remove,update,publish}_test.rb`, `integration/{honeycomb_workflow_lifecycle,workflow_publish_cli,workflow_publish_submission}_test.rb`, `web/workflow_lifecycle_test.rb`, `workflow_lifecycle_schema_test.rb` | Legacy Honeycomb author-package canonicalization/security plus current v2 authoring, publication, and install lifecycle — metadata/README/no-follow component snapshots, canonical immutable v1 package bytes, canonical YAML and release/package fingerprints, checksum-bound pinned lint rules/fixtures/expectations with redacted findings, exact actor permission projection and optional-input redaction, exact/wildcard domain and shell/path-hook enforcement, Codex exact-file `Read(path)` mounts without task/package-root exposure and their unresolvable-target rejection, Pi bubblewrap runtime/auth isolation with read-only tool mapping and agent-network rejection, the fail-closed arms for a missing bubblewrap or auth file and for every `mise which pi` executable-resolution outcome, single-payload recovery from a malformed JSON fence, direct-governance negation hardening, catalog/manifest/source-provenance binding, owner-private receipt/bundle/object integrity with retained-checkout symlink refusal, monotonic concurrent receipt/observation updates, intent-before-effect direct/fork submission recovery, fork-parent and commit-parent authority, digest-matching external-branch adoption, deleted-terminal-branch lifecycle recovery with live-open and surviving-branch identity checks, current-vs-cached PR/catalog lifecycle, schema-v2 dry-run/digest binding and exact error-kind/exit/retry arms, v2 flat-catalog install/configuration snapshots, immutable store transaction/task-pin concurrency, isolated invalid-selection warnings, incomplete-pin cleanup refusal, executable-mode hardening, Hive-web-to-real-CLI preview/apply delegation with package/selection/configuration identity rebinding, Rails `Workflow` row modelling, route-bound workflow-change operations, install access disclosure without consent flags, update/remove consent and ownership, post-commit warning semantics, closed JSON envelopes, deterministic legacy packaging, and injected fork/PR seams. No fixture executes package instructions or uses live GitHub. |
 | `runtime_identity_test.rb`, `commands/daemon_test.rb`, `daemon/operational_snapshot_test.rb`, `web/{service_status,web_command}_test.rb`, `web/test/integration/health_test.rb`, `operational_status_test.rb`, `commands/status_test.rb`, `cli_test.rb`, `integration/cli_version_test.rb` | Runtime identity and lifecycle status — release defaults; exact complete dogfood channel/SHA/deployment projection; partial, malformed, and invalid-byte annotation redaction; unchanged bare semver probes; producer-owned daemon PID, operational-cache, and web-health identity with fail-closed legacy/mixed-process behavior; and schema-valid version, daemon, web, compact, and operational status documents. |
 | `running_status_test.rb`, `commands/status_test.rb`, `cli_test.rb`, `integration/cli_usage_error_json_test.rb` | Bounded running-task status — empty snapshots, live lock-only runners, orphaned live agent PIDs, PID-reuse and stale-lock rejection, transition/malformed input isolation, metadata fallback, row/string/document caps, schema-valid success/error envelopes, and CLI isolation from full/operational graph producers. |
 | `commands/setup/*_test.rb` | `Hive::Commands::Setup` — agent-skills-first ordering, one consent boundary, `--yes`, JSON/non-TTY refusal before diagnostics or agent discovery, diagnose-only `--no-bootstrap`, nested-init preflight suppression, phase-success predicate and JSON/process-exit agreement, strict lifecycle-only service state even when the shared status snapshot contains runtime identity, the shared `phase(name)` StandardError-to-`ok:false` wrapper for QMD bootstrap, web-bundle, daemon-service, enrollment, and optional web-service phases, and hard diagnostic failures. |
@@ -777,7 +777,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `web/test/models/agent_login_test.rb`, `web/test/integration/agents_test.rb`, `web/test/system/agents_login_flow_test.rb` | Rails agent-login resource ownership — immutable PTY-session snapshots, session/agent URL binding, dedicated create/show/completion routes, login-status rendering without account/project/skill inventory, Turbo frame responses without a recursive source, binary-output safety, paste-back/operator-ward polling policy, and real-browser polling that stops when the CLI session completes. |
 | `test/unit/web/{status_feed,task_target_resolver}_test.rb`, `web/test/channels/status_channel_test.rb`, `web/test/models/{project,board,status_broadcaster}_test.rb`, `web/test/integration/{status,tasks}_test.rb`, `web/test/system/{kanban_board,pipeline_flow}_test.rb` | Hive web status/archive views and broadcasting — descriptor-ordered board bands, ordinary producer filtering and linked hidden summaries, separate lossless archive snapshots that do not replace the ordinary feed baseline, project-scoped archive navigation, expired-task detail lookup through explicit archive source and exact project/stage resolution, immutable archive logs without repeated polling, hidden-count-only semantic changes, unknown-stage/degraded-project visibility, Board/Grid preferences and filtering, one shared scan per poll tick, non-scanning cached HTTP renders, same-generation still-valid scheduler receipt continuity through daemon tick start, cold loading-to-first-publication handoff, canonical semantic tokens, confirmed-channel catch-up, broadcast lifecycle/error recovery, mutation survival, and real-browser Board-to-Archive-to-task navigation. |
 | `web/agents_auth_test.rb`, `web/agents_auth_login_test.rb`, `web/agents_routes_test.rb` | `Hive::Web::AgentsAuth` — Claude paste-back PTY login URL capture, Codex and Grok `--device-auth` poll-login behavior, `gh auth login --web` URL capture plus auto-Enter prompt handling, binary PTY output scrubbing, rejected-code errors, watchdog/process-group cleanup, concurrent-session cap, Pi token JSON rejection/persistence, and route wiring. |
-| `web/config_test.rb`, `web/supervisor_test.rb`, `web/app_coverage_test.rb` | Hivebox config/supervisor packaging support — global web defaults/validation, child restart/backoff/reload/shutdown decisions, and route coverage attribution guardrails. |
+| `web/config_test.rb`, `web/app_coverage_test.rb` | Hive web config support — global web defaults/validation and route coverage attribution guardrails. |
 | patrol scheduler, StateStore, value, feature-batch, reviewer, fingerprint, and command tests | Ordinary Patrol discovery — detached SHA-bound rotation, strict evidence, native finding lifecycle, direct cycle reservation, direct Patrol Fix admission, allowance/backoff behavior including reservation-time registration, enablement, capacity, and concurrent failure-backoff rechecks, and dry-run non-mutation. |
 | `patrol/source_reader_test.rb`, `patrol/mapper_test.rb`, `patrol/architecture_mapper_test.rb` | Architecture source inspection — bounded root-confined reads, language-neutral mapping, dependency context, symlink/device rejection, UTF-8 scrubbing, and source-size caps. |
 | `managed_directory_test.rb`, `refactor_patrol/{job_store_files,job_query_index,job_store,discovery_transitions,architecture_intake_transitions}_test.rb`, `integration/refactor_patrol_command_test.rb` | Direct v4 JobStore authority — deterministic intake identities, claim/checkpoint/release/retirement, claim-time retry deadlines, observation-fenced diagnostic blocks, bounded query indexing, first-mutation creation, opaque v3 bytes, and no converter, occurrence journal, effect delivery, or compatibility fallback. |
@@ -1041,41 +1041,12 @@ on coarse CI filesystems. The production path also depends on
 the daemon's internal task projection preserving subsecond task mtimes; otherwise a newer answer
 written in the same second as the baseline can be reported as older or equal.
 
-The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
-boots a fresh container on a random host port, polls Rails `/health`, requires
-daemon-backed `/health?deep=1` to stay healthy across the supervisor's
-ten-second fast-failure window, asserts the ownerless `/login` page is
-claimable, verifies unauthenticated `/` is owner-gated with a 302, and probes
-deep health once more. The
-image's runtime Docker `HEALTHCHECK` uses the same deep endpoint, so a missing
-runtime gem, crashlooping daemon, or stale/missing daemon pidfile fails the
-publish smoke even when Rails is still serving.
-`test/unit/packaging/verify_release_test.rb` executes the smoke against stubbed
-Docker/curl commands to prove one transient deep-health success cannot pass,
-and pins the libffi headers required to compile the explicit Fiddle dependency
-before Hive is installed in the slim Ruby image.
-`.github/workflows/release.yml` pushes amd64 and native arm64 content without
-public tags, runs the smoke against each exact registry digest, and promotes
-only those two proven digests into the versioned and `latest` multi-arch tags.
-The native arm64 job runs on `ubuntu-24.04-arm`; a failed architecture smoke
-therefore leaves no public release tag to pull. Commit `54fd3455` established
-the native runner after proving hosted Apple Silicon runners cannot provide
-the nested virtualization Colima needs. Current `.github/workflows/ci.yml` does not
-build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
-tests, the golden-path browser E2E, and the Windows installer-script harness.
-The Windows CI surface is
-`packaging/docker/test-install-box.ps1`: real PowerShell
-syntax, `$LASTEXITCODE` behavior, and failure-output capture with a stubbed
-Docker CLI for missing-Docker diagnostics, happy-path pull/run argv including
-the default `127.0.0.1:4567:4567` bind, and existing-container refusal. The
-harness invokes `install-box.ps1` inside child `pwsh` and redirects all streams
-to a temp file that the parent reads after exit, because `exit` inside the
-installer tears down piped capture before `Out-String` flushes on failure paths.
-Installer failures write their user-facing copy with `Write-Host` rather than
-`Write-Error` so the file-backed capture sees the message before the child
-process exits.
-These tests do not exercise real GitHub, Claude, Codex, or Telegram provider
-credentials inside a running box.
+The Hivebox image smoke, its stubbed-Docker unit tests, the release image
+jobs, and the Windows PowerShell installer harness were removed with the
+Hivebox distribution (ADR-055). `test/unit/packaging/verify_release_test.rb`
+now asserts that `release.yml` builds no container image, and
+`test/unit/native_web_positioning_test.rb` asserts that no workflow or
+maintained entry point routes to the removed Docker packaging.
 
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
@@ -1297,7 +1268,7 @@ through a shell. The install-smoke ShellCheck job also scans the packaged shell
 scripts, so shell fixes must be applied to both hive-bench and Hive's runtime
 snapshot.
 
-The hivebox task media route also carries a Brakeman file-access ignore. The
+The Hive web task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then
 `Task#media_path` requires `File.basename` equality, repeats the extension
 check, resolves the real task folder and media directory, refuses a

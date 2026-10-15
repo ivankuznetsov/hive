@@ -55,7 +55,7 @@ transfer.
 
 Playwright remains a development dependency for Rails system tests and manual
 demo scripts. It is not an outcome-evidence capture interface. Screenote and
-legacy Hivebox media remain optional diagnostics and are never completion
+built-in synthetic capture media remain optional diagnostics and are never completion
 authority.
 
 For the ledger, retry, recovery, and reviewer contracts, see

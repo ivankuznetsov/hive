@@ -520,7 +520,7 @@ before acknowledgement may repeat the notification. There is no second outbox.
 adapters submit observations, while replay re-resolves identity and safety
 under lock before resuming the persisted phase.
 
-Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
+Hive web's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. Lazy feed construction is serialized separately from subscriber
 lifecycle, so concurrent HTTP requests and the broadcaster share one feed.
@@ -1285,13 +1285,13 @@ and one reviewer representation are required, with bounded supplemental
 storyboards allowed for video. Retained bytes stay inside the task folder and
 are rechecked for containment, regular-file status, media type/structure, size,
 SHA-256, safe content, and source provenance whenever the package is published
-or displayed. Built-in synthetic Hivebox capture is diagnostic-only.
+or displayed. Built-in synthetic capture (evidence type `hivebox`) is diagnostic-only.
 
 `current.json` is the sole replaceable publication pointer. It includes the
 requirement digest, complete ordered attempt ID/digest history, accepted or
 blocked status, and—when blocked—failed claims, reviewer rationales, recovery
 digest, and epoch. Publication is terminal only after all pointed-to documents,
-proof bytes, and semantic-review structure revalidate. Hivebox uses that same
+proof bytes, and semantic-review structure revalidate. Hive web uses that same
 reader and fails closed to an integrity warning instead of rendering or serving
 tampered evidence.
 

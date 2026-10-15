@@ -89,10 +89,10 @@ class RepoSetupFlowTest < ApplicationSystemTestCase
   end
 
   def with_repos_root(root)
-    old = ENV["HIVEBOX_REPOS_DIR"]
-    ENV["HIVEBOX_REPOS_DIR"] = root
+    original = Repository.method(:default_root)
+    Repository.define_singleton_method(:default_root) { root }
     yield
   ensure
-    old.nil? ? ENV.delete("HIVEBOX_REPOS_DIR") : ENV["HIVEBOX_REPOS_DIR"] = old
+    Repository.define_singleton_method(:default_root, original)
   end
 end

@@ -27,8 +27,8 @@ tool rules; OpenCode receives a per-process deny-first permission document
 through `OPENCODE_PERMISSION` while retaining its native config, login, and
 state. Neither is an OS sandbox. The agent runs as the same OS user;
 `read-only` limits accidental over-reach, but it does not contain a determined
-or compromised runtime. For real isolation, run Hive under a sandboxed user or
-choose the [Hivebox container distribution](../packaging/docker/README.md).
+or compromised runtime. For real isolation, run Hive under a sandboxed OS user
+or inside a VM.
 
 ## Managed Honeycomb Policy
 
@@ -37,8 +37,8 @@ inheriting the owner-authored stage default above. Hive validates each exact
 actor scope during install or update and again immediately before spawn; a
 profile that cannot enforce the declared bound fails closed. Preview and status
 show permission/input metadata and secret-binding availability, never secret
-values. These tool controls are still not an OS sandbox, so use Hivebox or
-another container boundary when inherited settings, plugins, MCP servers, or
+values. These tool controls are still not an OS sandbox, so use a separate OS
+user, VM, or other OS-level boundary when inherited settings, plugins, MCP servers, or
 the shared OS user must also be isolated.
 
 The authoritative package-policy specification—including disclosure versus

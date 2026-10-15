@@ -418,7 +418,7 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
     assert_equal "offline", capability.call.reason
   end
 
-  def test_legacy_inventory_records_unreadable_receipts_and_supervisor_identity
+  def test_legacy_inventory_records_unreadable_receipts_and_ignores_retired_supervisor_env
     with_tmp_dir do |root|
       File.write(File.join(root, ".daemon.pid"), "[invalid")
       File.write(File.join(root, ".bot.pid"), { "pid" => "bad" }.to_yaml)
@@ -430,9 +430,11 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
         state_home: root, process_identity: identity,
         custody: Hive::Attempts::ProcessCustody.unsupported("test")
       )
+      # The discontinued Hivebox image exported HIVEBOX_SUPERVISOR_PID; it
+      # is no longer a legacy process source.
       with_env("HIVEBOX_SUPERVISOR_PID" => "123") do
         inventory = capability.send(:known_legacy_processes)
-        assert_equal 3, inventory.length
+        assert_equal 2, inventory.length
         assert inventory.all? { |entry| entry.fetch("unknown_reason") }
       end
     end

@@ -157,7 +157,7 @@ shape, and reconstruct selected captured files. It cannot:
 - replace the Safe Agent Git Gate's separate Git configuration and
   exact-publication guarantees.
 
-Use Hivebox or OS-level isolation for stronger containment. The Agent ABI,
+Use OS-level isolation (a separate OS user or VM) for stronger containment. The Agent ABI,
 Artifact Firewall, and Safe Agent Git Gate remain three separate guarantees.
 
 ## Hive adapters

@@ -3,13 +3,15 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-07-18
+updated: 2026-10-15
 tags: [roadmap, status]
 ---
 
 **TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows with resource controls, Claude/Codex/Pi/Grok agent profiles, `hive refactor-patrol`, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and headless-only Claude launches (the tmux launch mode was removed 2026-10-14) are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
 
 ## Status
+
+The Hivebox Docker distribution was removed on 2026-10-15 (ADR-055): packaging, image release jobs, the Windows installer CI job, the recovery workflow, and the container supervisor are gone. Hivebox rows in the history tables below describe that retired surface and are kept as history.
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` owns both stable-wrapper resolution and the shared PATH-only executable lookup used by doctor, update, and service installation. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 

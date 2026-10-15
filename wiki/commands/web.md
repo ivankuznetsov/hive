@@ -1,18 +1,18 @@
 ---
 title: hive web
 type: command
-source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
+source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-09-23
-tags: [command, web, rails, turbo, hivebox-container, plan-review, archive, retention, dogfood, daily-digest]
+updated: 2026-10-15
+tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
 **TLDR**: `hive web` boots the default native Hive browser UI — a vanilla
 **Rails 8** app (importmap, Turbo, Stimulus, propshaft, solid_cable) living in
 `web/` at the repo root. It is the browser counterpart to the TUI over the same
 local registry and workflow state, with no mandatory sign-in on a verified
-loopback request. Hivebox is the separate owner-gated container distribution
-of the same app at `/app/web`. The web tier adds no
+loopback request. The former Hivebox container distribution is discontinued
+(ADR-055). The web tier adds no
 pipeline logic. Task detail is an operator-first semantic v2 view of the same
 workflow result and exact usage projection exposed by native `hive task`; v1
 attempt/provenance/timeline evidence remains on explicit audit paths. Status
@@ -60,11 +60,10 @@ Relative `HIVE_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.
 It exports `SECRET_KEY_BASE` (derived from the same persisted
-`Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVE_WEB_ORIGIN` (extra Action Cable origin allow; same-origin
+`Hive::Web::SessionSecret` file — sessions survive restarts and upgrades), `HIVE_WEB_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVE_WEB_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount). In
+`Hive::Paths.state_home/web-storage` so they survive managed-bundle upgrades). In
 production it guarantees a usable fingerprinted asset graph before Rails
 starts. Versioned managed bundles compile and validate assets while they are
 provisioned; direct source checkouts and operator-managed app overrides run
@@ -72,16 +71,11 @@ provisioned; direct source checkouts and operator-managed app overrides run
 manifest and application CSS/JavaScript entrypoints are usable. Startup
 compilation uses temporary build storage rather than the live solid-stack
 databases. It then runs `bin/rails db:prepare` and execs `bin/rails server`.
-Without a container app, source checkout, or bootstrapped managed bundle, the
+Without an app-dir override, source checkout, or bootstrapped managed bundle, the
 command exits 1 with guidance. Released package roots include `hive.gemspec`,
 so the managed bundle
 can resolve its path dependency without a parent source checkout; the Rails
 source itself remains a separate authenticated bundle.
-
-Hivebox keeps a separate asset lifecycle: its container image compiles and
-validates the Rails asset graph during the image build, then exports the
-internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
-repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path. Its thin Hive installer owns
@@ -210,7 +204,9 @@ settings: `HIVE_WEB_APP_DIR`, `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`,
 including invalid canonical values, and old-only or both-set input warns with
 the replacement and next-major support window. Warnings are deduplicated on
 stderr, included in setup/web JSON, and exposed as doctor warning rows.
-Container-only Hivebox variables are deliberately outside this deprecated set.
+The former container-only Hivebox variables (`HIVEBOX_SESSION_SECRET`,
+`HIVEBOX_REPOS_DIR`, `HIVEBOX_PRECOMPILED_ASSETS`, `HIVEBOX_SUPERVISOR_PID`) are
+no longer read (ADR-055).
 Foreground Rails receives resolved canonical timeout values even when the
 operator supplied an alias, and managed systemd/launchd units persist all six
 resolved settings so foreground and service-manager launches agree.
@@ -218,8 +214,8 @@ resolved settings so foreground and service-manager launches agree.
 ## Access and GitHub connection
 
 Owner-gated access uses a GitHub **device flow** (RFC 8628, see [[decisions]]
-ADR-036). This includes Hivebox and native Hive web reached through any
-non-loopback hostname. An ownerless instance is CLAIMABLE: the first successful device-flow login writes
+ADR-036). This covers native Hive web reached through any non-loopback
+hostname. An ownerless instance is CLAIMABLE: the first successful device-flow login writes
 itself into `web.github.owner` (config-lock-guarded so concurrent first
 logins race safely; the claim is logged loudly) — the install path has no
 config-editing step.
@@ -272,9 +268,7 @@ literal-loopback access stores the login and token in the browser session but
 never claims or changes `web.github.owner`. The same native service reached
 through a non-loopback Host presents owner sign-in instead, and an ownerless
 instance is claimable.
-Outside loopback mode, native installs use the `Hive web` product identity;
-the container-only `HIVEBOX_PRECOMPILED_ASSETS=1` marker preserves the
-`hivebox` identity for the Docker distribution.
+Outside loopback mode, the app uses the `Hive web` product identity.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
@@ -542,10 +536,10 @@ Honeycomb projections.
   web gem bin directory may lead PATH without becoming a false daemon target.
   It presents one compact state banner (running, warning, or stopped), hides
   internal service-installation fields, and surfaces binary drift as the
-  human-facing “Binary path differs” repair action. A running supervised
-  hivebox daemon intentionally has no separate platform service unit; the
-  strip therefore shows CLI recovery guidance only when the daemon is actually
-  down, not merely when `service_installed` is false. A
+  human-facing “Binary path differs” repair action. A running daemon without a
+  platform service unit (for example a foreground or detached `hive daemon
+  start`) is healthy; the strip therefore shows CLI recovery guidance only when
+  the daemon is actually down, not merely when `service_installed` is false. A
   stopped, otherwise healthy daemon points to `hive daemon start --detach`;
   a missing or drifted service points to `hive daemon install --force`.
 - **Archive (`/archive`)** — requests `StatusFeed#archive_snapshot`, whose
@@ -560,8 +554,7 @@ Honeycomb projections.
   remains usable instead of its child requests becoming false 404s. Each route
   resolves that exact task and its reachable prerequisites, and
   terminal archive logs load once without the live task page's three-second
-  polling loop. Native Hive web and Hivebox use this same Rails route and
-  producer path.
+  polling loop.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -741,11 +734,10 @@ Honeycomb projections.
   post-clone/post-existing-dir `Repository` origin-normalization pass:
   absent or non-GitHub remotes are left alone, while GitHub SSH remotes
   (`git@github.com:owner/repo.git` or `ssh://git@github.com/owner/repo.git`)
-  become `https://github.com/owner/repo.git`. The box can only push with
-  token-fed https credentials (`gh` clones over ssh when the operator's
-  `git_protocol` prefers it, and ssh pushes dead-end because the container has
-  no keys and no agent for a headless daemon). The Docker image wires git's
-  github.com https credential helper to `gh auth git-credential`.
+  become `https://github.com/owner/repo.git`, so a headless daemon can push
+  with token-fed https credentials (`gh` clones over ssh when the operator's
+  `git_protocol` prefers it, and ssh pushes dead-end when the daemon has no
+  keys or agent).
 - **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form. Login create/show/completion enter the dedicated
   `AgentLogin`, `Agents::LoginsController`, and
@@ -755,12 +747,12 @@ Honeycomb projections.
   selected-project skill health from the Agents collection page. Turbo-frame
   responses omit a self-referential `src`, and polling is attached to
   replaceable inner content so the final completed snapshot disconnects the
-  timer. `gh` joins the relay (login supplies git push
-  credentials via the image's credential helper); its `--web` flow blocks on
+  timer. `gh` joins the relay (its login supplies the
+  token for https git pushes); its `--web` flow blocks on
   a bare Enter rather than a paste-back code, which the relay auto-answers.
   Codex uses `codex login --device-auth` rather than the localhost-callback
-  `codex login`, because the callback server would bind inside the container
-  and surface an unreachable localhost URL to the host browser. Grok uses
+  `codex login`, because the callback server would bind on the Hive host and
+  surface a localhost URL that a remote browser cannot reach. Grok uses
   `grok login --device-auth`, exposed through the same first-class login action
   and constrained session routes as the other relayed agents. Codex, Grok,
   and `gh`
@@ -789,7 +781,8 @@ Honeycomb projections.
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
-  getMe-validated token save, allowlist, supervisor SIGHUP, round-trip test
+  getMe-validated token save, allowlist, restart guidance (`hive bot stop &&
+  hive bot start`), round-trip test
   message, and first-contact pairing. Pairing can securely bootstrap with an
   empty allowlist: the form persists `bot.pairing_enabled`, pending 24-hour
   codes come from the shared `hive pairing list` JSON contract, and an
@@ -800,7 +793,7 @@ Honeycomb projections.
   `Integer(..., exception: false)`
   before any Telegram network call or config/env write: when pairing is off,
   blank input renders 422, and handles such as `@mychannel` always render 422
-  and persist nothing. These rules, secret persistence, supervisor reload,
+  and persist nothing. These rules, secret persistence, restart guidance,
   test delivery, and pairing lifecycle are owned by the Rails `TelegramBot`
   model. The settings controller is limited to `show`/`update`; the existing
   test-message and pairing-approval URLs now target standard `create` actions
@@ -970,17 +963,10 @@ Its real-resume helper uses a sandbox state home, reads the live status row,
 submits recorder-owned recovery through the same writer, and boots the daemon
 to consume it; it never deletes `plan.md` or foreground-runs the plan stage.
 
-## Docker
+## Outcome-evidence capture runtime
 
-`packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
-the gem builds/installs from `/app`; the Rails app bundles and precompiles
-assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. The slim Ruby image installs `libffi-dev` before the root bundle so
-the explicit Fiddle runtime dependency can build its native extension. Local
-non-Docker installs instead use the managed release bundle
-described in [[commands/setup]]. The image prewarms Hive's exact native
-`agent-browser` plus managed Chrome outside the runtime `/data` volume, ships
-Hive's Ruby PTY recorder for terminal casts/text, and includes
+The managed capture toolkit pins Hive's exact native `agent-browser` plus
+managed Chrome, Hive's Ruby PTY recorder for terminal casts/text, and
 `ffmpeg`/`ffprobe`/Tesseract for media admission. It does not ship or discover
 asciinema, Firefox, Playwright, VHS, or terminal-GIF tooling for evidence.
 Missing required capability publishes an outcome-evidence blocker before the
@@ -997,62 +983,16 @@ into the attempt root. Hive closes the mailbox, gateway, and named session,
 then cleans their private roots, managed app/proxy, and producer process group.
 Terminal evidence runs controller-side, reuses Linux child-subreaper custody,
 and rejects detached descendants.
-The image sets git's system credential helper for `https://github.com`
-to `gh auth git-credential`, so the Agents-page `gh` login also supplies push
-credentials for repos under `/data/repos`. The container supervisor
-(`lib/hive/web/supervisor.rb`) runs three children — `hive daemon start`,
-`hive web --bind 0.0.0.0 --allow-public`, and (when global config enables it)
-`hive bot start --foreground` — and respawns any crashed child, backing off
-5s for fast failures. The Telegram settings page's SIGHUP reload contract is
-state-authoritative, not pid-authoritative: an enabled running bot is TERMed
-and immediately respawned so credential rotations take effect; a disabled bot
-is stopped for good regardless of whether it is currently running or already
-crashed with a respawn queued — its desired-running state flips to false and
-the queued restart entry is cancelled, so the reap of the supervisor's own
-TERM and the due-restart scan can never bring it back. A later reload that
-sees the bot enabled starts it again and re-arms the desired state. The
-supervisor still spawns
-`hive web --bind 0.0.0.0` — unchanged
-interface, now exec-ing Rails. Plain `/health` is unauthenticated web-tier
-liveness; the Docker `HEALTHCHECK` hits `/health?deep=1`, which also verifies
-the daemon pidfile through `Hive::PidFile` semantics and returns 503 when the
-daemon child is down or stale.
-`/data` remains the persistence boundary; the sqlite files for
-cable/cache/queue live under `/data/state/hive/web-storage`.
 
-`packaging/docker/install-box.sh` is the shell one-command install entrypoint
-intended for `curl -fsSL https://hivecli.sh/box | sh`; Windows PowerShell uses
-the same contract through `packaging/docker/install-box.ps1`, intended for
-`irm https://hivecli.sh/box.ps1 | iex`. Both require reachable Docker, honor
-`HIVEBOX_IMAGE` / `HIVEBOX_NAME` / `HIVEBOX_PORT` / `HIVEBOX_DATA` /
-`HIVEBOX_BIND`, refuse to overwrite an existing container name, pull the image,
-start it with `--restart unless-stopped`, mount persistent data, and print the
-local URL plus claim reminder. The bind default is `127.0.0.1`, because an
-ownerless box is claimed by its first GitHub login; operators can set
-`HIVEBOX_BIND=0.0.0.0` after claiming or when fronting the box with a trusted
-tunnel/proxy. The PowerShell variant uses Docker Desktop-oriented diagnostics
-and avoids requiring `sh` or Git Bash volume-path translation.
-`.github/workflows/release.yml` publishes the matching multi-arch GHCR image as
-`ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after
-`release-finalize` succeeds. Image publishing is smoke-gated by
-`packaging/docker/smoke.sh`: native amd64 and arm64 jobs each push untagged
-content by digest, require both `/health` and a ten-second stable window of
-daemon-backed `/health?deep=1`, and recheck deep health after the front-door
-assertions. Only then does a promotion job attach the versioned and `latest`
-tags to a multi-arch manifest built from those exact proven digests. The arm64
-job runs on native `ubuntu-24.04-arm` Docker. This replaced the old hosted macOS/Colima
-attempt: hosted Apple Silicon runners do not expose nested virtualization, so
-Colima cannot boot a Linux VM there. Current `.github/workflows/ci.yml` does
-not run a push/PR Docker image smoke; it covers Rails web tests, the
-golden-path browser E2E, and the Windows installer harness. The smoke covers
-web and daemon health plus the front door (`/health`, `/health?deep=1`,
-claimable `/login`, owner-gated `/`) and fetches the exact digest-stamped CSS
-and JavaScript graph advertised by that page, then runs the managed-install
-manifest predicate against the real precompile output. The Windows workflow
-cannot run Linux
-containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
-`packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the
-installer's diagnostics and pull/run argv shape.
+Plain `/health` is unauthenticated web-tier liveness; `/health?deep=1` also
+verifies the daemon pidfile through `Hive::PidFile` semantics and returns 503
+when the daemon is down or stale. The deep probe was the Hivebox container
+healthcheck; it remains available as a readiness probe for native operators.
+
+Hive no longer builds, smokes, or publishes the Hivebox Docker image (ADR-055):
+the Docker packaging directory, the release image jobs, the Windows installer
+CI job, and `hivebox-recover.yml` are gone. Already published
+`ghcr.io/ivankuznetsov/hivebox` tags remain in the registry without updates.
 
 Root web assets are served from `web/public/`: `/favicon.ico` (multi-size
 legacy icon), `/icon.svg`, and `/icon.png` (apple-touch). The layout links all
@@ -1073,7 +1013,7 @@ publication remains a separate command. The capture file intentionally omits the
 `_test.rb` suffix so Rails integration discovery does not require a browser.
 See `web/README.md` for the recipe.
 
-The header displays `Hive` (or `hivebox` in the container distribution) with a
+The header displays `Hive` with a
 compact logo gap and aligns the mobile account row with the navigation links. It uses `/brand.svg`: the existing Hive geometry, transparent background,
 and terracotta colors matched to the light/dark web theme. Launcher/favicons keep
 the opaque yellow-on-black assets. Signed-in users see their public GitHub avatar
@@ -1154,37 +1094,19 @@ perform one fixed read for the validated registered repository/PR/head, under
 single-flight and minimum-interval limits. Cache and remote failures degrade
 that panel without hiding task controls, artifacts, diff, or log.
 
-## Hivebox publication recovery
-
-`hivebox-recover.yml` accepts an existing stable release tag and builds its
-source with the current Dockerfile. The SHA must match the source identifier
-in the release workflow-signed checksums. Each architecture must pass the native
-web/daemon smoke before its digest is promoted. Promotion checks that the
-requested release is still GitHub's latest release and shares the normal
-promotion concurrency lock. This does not replace the release tag or signed native
-artifacts.
-
-The entrypoint initializes fresh runtime storage using `Installation.setup`
-before launching the supervisor, and validates existing storage without conversion.
-
-The image installs `sudo` for agent-browser's Linux dependency installer.
-Chrome for Testing does not supply a Linux ARM64 payload, so ARM64 images skip
-browser prewarming. Web and agent workflows remain available there; built-in
-browser-based task capture is unavailable on Linux ARM64 in 0.7.3.
-
 ## Supervised worktree capture server
 
 `hive web capture --task-folder TASK_FOLDER [--source-root WORKTREE]` is the
 supported task recorder. The task must be in `7-artifacts`, have a current
 `required` capture receipt, and own the exact clean source worktree. The
 optional source root is an assertion: it must resolve to that owned worktree.
-Recorder selection occurs before any Hivebox bundle, browser, server, runtime,
+Recorder selection occurs before any built-in recorder bundle, browser, server, runtime,
 or media-staging object is constructed. A positive capability check selects the
-built-in recorder only when the source has the complete locked Hive/Hivebox web
+built-in recorder only when the source has the complete locked Hive web
 layout. A conventional project instead uses its validated
 `artifacts.capture.provider` declaration. With neither capability nor a
 provider, capture stops with an actionable configuration diagnostic; it never
-asks the project to fabricate Hivebox dependency files.
+asks the project to fabricate Hive web dependency files.
 
 The built-in path seeds deterministic private fixture data, records the
 board-to-task flow through pinned native `agent-browser` and managed Chrome,

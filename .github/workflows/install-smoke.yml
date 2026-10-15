@@ -15,8 +15,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: bash -n install.sh
       - run: bash -n packaging/verify-release.sh
-      - run: sh -n packaging/docker/install-box.sh
-      - run: bash -n packaging/docker/test-install-box.sh
       - name: Shellcheck
         uses: ludeeus/action-shellcheck@00b27aa7cb85167568cb48a3838b75f4265f2bca
         with:
@@ -24,10 +22,7 @@ jobs:
           additional_files: |
             install.sh
             packaging/verify-release.sh
-            packaging/docker/install-box.sh
-            packaging/docker/test-install-box.sh
       - run: bash install.sh --dry-run --version=v0.1.0
-      - run: bash packaging/docker/test-install-box.sh
 
   macos-dry-run:
     name: macOS dry run

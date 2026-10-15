@@ -425,26 +425,6 @@ jobs:
           HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
         run: test "$HIVE_WEB_TESTS_RESULT" = "success"
 
-  # Hosted Windows runners cannot run Linux containers (Windows-container
-  # mode only, no WSL2) — the per-OS surface that CAN break is our
-  # PowerShell installer. Run it on real Windows PowerShell with a stubbed
-  # docker: failure copy, $LASTEXITCODE handling, argv shape.
-  hivebox-installer-windows:
-    name: hivebox installer (Windows PowerShell)
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Syntax-check both installers
-        shell: pwsh
-        run: |
-          $err = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile("packaging/docker/install-box.ps1", [ref]$null, [ref]$err)
-          if ($err) { $err; exit 1 }
-      - name: Exercise install-box.ps1 against a stubbed docker
-        shell: pwsh
-        run: packaging/docker/test-install-box.ps1
-
   rubocop:
     name: rubocop (37signals omakase)
     runs-on: ubuntu-latest

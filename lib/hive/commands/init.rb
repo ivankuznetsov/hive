@@ -101,7 +101,7 @@ module Hive
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
                      setup_agents_factory: nil, agent_skill_preflight: !defined?(Minitest),
-                     module_event_publisher: nil)
+                     module_event_publisher: nil, mcp_import_offer: !defined?(Minitest))
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -131,6 +131,7 @@ module Hive
           raise ArgumentError, "agent_skill_preflight must be true or false"
         end
         @agent_skill_preflight = agent_skill_preflight
+        @mcp_import_offer = mcp_import_offer == true
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
@@ -251,6 +252,7 @@ module Hive
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight! if @agent_skill_preflight
+        offer_mcp_import! if @mcp_import_offer
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # The interactive WORKFLOW prompt (resolve_workflow_choice, which runs
         # before collect_prompt_answers) aborts on closed stdin. Mirror
@@ -451,6 +453,7 @@ module Hive
         end
         register_daemon_service!(autostart: answers.fetch("daemon_autostart", false))
         run_init_preflight! if @agent_skill_preflight
+        offer_mcp_import! if @mcp_import_offer
       end
 
       def scaffold_descriptor_commit!(ops, id)
@@ -1071,6 +1074,18 @@ module Hive
                                  "run `hive doctor` for details"
       rescue StandardError => e
         emit_preflight_bug(e)
+      end
+
+      # Ask once, in a terminal, to import personal MCP servers (plan
+      # 2026-10-15-001); `hive mcp import` stays available afterwards.
+      def offer_mcp_import!
+        return unless interactive_provisioning?
+
+        require "hive/mcp/import_offer"
+        Hive::Mcp::ImportOffer.run(
+          cwd: @project_path, input: @provisioning_input,
+          output: @provisioning_output, error: @provisioning_error
+        )
       end
 
       def interactive_provisioning?

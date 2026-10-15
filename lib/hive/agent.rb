@@ -12,6 +12,7 @@ require "hive/agent_support"
 require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
+require "hive/mcp"
 require "hive/permission_scope"
 require "hive/secret_patterns"
 
@@ -54,7 +55,7 @@ module Hive
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
-                :runtime_policy, :child_environment, :observable_result
+                :runtime_policy, :observable_result
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
@@ -68,7 +69,7 @@ module Hive
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
                    completion_probe: nil, isolate_environment: false,
-                   terminate_on_parent_signal: true)
+                   terminate_on_parent_signal: true, mcp_launch: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -136,16 +137,21 @@ module Hive
         end
       end
       support = Hive::AgentSupport.for(@profile)
-      controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
+      @controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
         support.controller_environment_scrub
       else
         {}
       end
-      @child_environment = @child_environment
+      @base_child_environment = @child_environment
         .merge(@launch_environment)
         .merge(@profile.subscription_environment)
-        .merge(controller_environment_scrub)
         .freeze
+      @child_environment = nil
+      # Hive-owned MCP: a caller-supplied launch is the caller's to clean up.
+      # Without one the agent renders the empty grant itself on first use and
+      # removes it after run!; a managed policy that isolates MCP needs none.
+      @mcp_launch = mcp_launch
+      @owns_mcp_launch = false
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =
         Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
@@ -164,6 +170,46 @@ module Hive
       @identity_arguments = supplied_identity_arguments.freeze
       @routing_arguments =
         routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
+    end
+
+    # The child env: the base env, then the MCP launch env and the host vars
+    # its servers read (so they survive `unsetenv_others`), then the
+    # provider's controller scrub.
+    def child_environment
+      @child_environment ||= begin
+        launch = mcp_launch
+        base = launch ? launch.environment_for(@base_child_environment) : @base_child_environment
+        base.merge(@controller_environment_scrub).freeze
+      end
+    end
+
+    # nil when the managed runtime policy already isolates MCP.
+    def mcp_launch
+      return @mcp_launch if @mcp_launch || @runtime_policy&.mcp_isolated
+
+      @owns_mcp_launch = true
+      @mcp_launch = Hive::Mcp.prepare(
+        profile: @profile, policy: Hive::Mcp.policy(nil, scope: @log_label), cwd: @cwd
+      )
+    end
+
+    def mcp_arguments
+      launch = mcp_launch
+      return [] unless launch
+
+      launch.arguments_for(
+        [ *@identity_arguments, *@routing_arguments&.native_arguments, *@cli_flags ].map(&:to_s)
+      )
+    end
+
+    def cleanup_mcp_launch!
+      return unless @owns_mcp_launch
+
+      @mcp_launch.cleanup!
+      @owns_mcp_launch = false
+      @mcp_launch = nil
+      @child_environment = nil
+      @compiled_invocation = nil
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -229,6 +275,7 @@ module Hive
       @observable_result = Hive::AgentRuntime.observe(@profile, result)
       result
     ensure
+      cleanup_mcp_launch!
       emit_agent_event(:agent_end, message: agent_end_message(result, $!))
     end
 
@@ -277,12 +324,13 @@ module Hive
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
                  "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
                  "#{launch_identity_log_fields}"
+        write_mcp_log(log)
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(@child_environment, *cmd, **spawn_opts)
+      pid = Process.spawn(child_environment, *cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)
@@ -834,7 +882,7 @@ module Hive
     end
 
     def compiled_invocation
-      @compiled_invocation ||= Hive::AgentRuntime.compile(
+      @compiled_invocation ||= Hive::Mcp.collapse_repeated_flags(Hive::AgentRuntime.compile(
         Hive::AgentRuntime::Request.new(
           profile: @profile,
           prompt: @prompt,
@@ -847,11 +895,11 @@ module Hive
           identity_arguments: @identity_arguments,
           routing_arguments: @routing_arguments,
           raw_cli_arguments: @cli_flags,
-          trusted_cli_arguments: @runtime_cli_flags,
+          trusted_cli_arguments: @runtime_cli_flags + mcp_arguments,
           executable: @runtime_policy&.executable,
           command_prefix: @runtime_policy&.command_prefix
         )
-      )
+      ))
     end
 
     def kill_group(pgid)
@@ -1445,6 +1493,13 @@ module Hive
       return value if value.is_a?(Hive::ImplementationIdentity::LaunchArguments)
 
       raise ArgumentError, "launch_arguments must be a Hive::ImplementationIdentity::LaunchArguments"
+    end
+
+    # MCP isolation state and notices; names and reasons only, never values.
+    def write_mcp_log(log)
+      launch = mcp_launch
+      log.puts "[hive] mcp isolation=#{launch ? launch.isolation : 'managed'}"
+      Array(launch&.notices).each { |notice| log.puts "[hive] mcp notice: #{notice}" }
     end
 
     def launch_identity_log_fields

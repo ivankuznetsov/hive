@@ -900,6 +900,7 @@ class AgentTest < Minitest::Test
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", "gpt-5.6-terra",
         "-c", "model_reasoning_effort=medium",
+        "--ignore-user-config",
         "--json",
         "-"
       ], codex_agent.send(:build_cmd)
@@ -919,11 +920,13 @@ class AgentTest < Minitest::Test
         "--max-budget-usd", "1",
         "--model", "opus",
         "--effort", "high",
+        "--strict-mcp-config", "--mcp-config", claude_agent.mcp_launch.arguments.last,
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
         "--no-session-persistence"
       ], claude_agent.send(:build_cmd)
+      claude_agent.cleanup_mcp_launch!
     end
   end
 
@@ -2125,7 +2128,7 @@ class AgentTest < Minitest::Test
       ).run!
 
       assert_equal :ok, result[:status]
-      assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
+      assert_equal [ "-p", "--no-mcp" ], File.read(argv_log).lines.map(&:chomp)
       assert_equal prompt, File.binread(stdin_log)
     end
   end

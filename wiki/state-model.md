@@ -1124,7 +1124,7 @@ finalize:   { agent: claude }
 agents:                 # per-CLI profile overrides (claude, codex, pi, grok)
   claude: { bin: claude, env_override: HIVE_CLAUDE_BIN, min_version: 2.1.118 }
   codex:  { bin: codex,  env_override: HIVE_CODEX_BIN,  min_version: 0.125.0 }
-  pi:     { bin: pi,     env_override: HIVE_PI_BIN,     min_version: 0.70.2 }
+  pi:     { bin: pi,     env_override: HIVE_PI_BIN,     min_version: 1.0.4 }
   grok:   { bin: grok,   env_override: HIVE_GROK_BIN,   min_version: 0.2.90 }
 review:                 # 6-review stage config (U2)
   ci:           { command: null, max_attempts: 3, prompt_template: ci_fix_prompt.md.erb }

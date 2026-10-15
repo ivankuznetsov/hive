@@ -122,7 +122,8 @@ module Hive
             ),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists,
-            agent_custody: agent_custody
+            agent_custody: agent_custody,
+            mcp_scope: "review.triage"
           }
           spawn_result =
             if Hive::AgentSupport.supports?(profile, :Launch)

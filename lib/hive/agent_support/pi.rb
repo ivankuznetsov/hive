@@ -3,6 +3,7 @@ require "hive/agent/message_extractor"
 require "json"
 
 module Hive::AgentSupport::Pi
+  autoload :Mcp, "hive/agent_support/pi/mcp"
   autoload :Runtime, "hive/agent_support/pi/runtime"
   autoload :Skills, "hive/agent_support/pi/skills"
   autoload :SetupAdapter, "hive/agent_support/pi/setup_adapter"

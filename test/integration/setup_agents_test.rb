@@ -100,7 +100,7 @@ class SetupAgentsIntegrationTest < Minitest::Test
     if args == ["--version"]
       puts({
         "claude" => "2.1.179", "codex" => "codex-cli 0.144.0",
-        "pi" => "0.80.6", "opencode" => "1.18.16"
+        "pi" => "1.0.4", "opencode" => "1.18.16"
       }.fetch(agent))
     elsif agent == "claude" && args == ["plugin", "list", "--json"]
       puts JSON.generate(state["packages"].map do |id, row|

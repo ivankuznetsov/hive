@@ -48,7 +48,7 @@ module Hive
         additional_read_roots: [], additional_write_roots: [],
         edit_patterns: [], bash_patterns: [],
         resource_guards: nil, agent_custody: nil,
-        model: nil, effort: nil
+        model: nil, effort: nil, mcp_scope: nil
       }
     end
 
@@ -66,8 +66,7 @@ module Hive
     end
 
     def launch!(task:, cfg:, prompt:, add_dirs:, cwd:, max_budget_usd:,
-                timeout_sec:, log_label:, profile: nil,
-                mcp_config_path: nil, strict_mcp_config: false, **options)
+                timeout_sec:, log_label:, profile: nil, **options)
       options = launch_options(options)
       routing_arguments = options[:routing_arguments]
       identity_arguments = options[:identity_arguments]
@@ -89,8 +88,7 @@ module Hive
       cli_flags = routed_flags || identity_arguments ||
                   (cfg ? Hive::Config.claude_cli_flags(cfg, model: model, effort: effort) : [])
       require "hive/stages/base"
-      headless_flags = (routing_arguments ? [] : cli_flags) +
-                       (options[:runtime_policy] ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
+      headless_flags = routing_arguments ? [] : cli_flags
       # model/effort are already folded into cli_flags and the receipt pair.
       Hive::Stages::Base.spawn_agent(
         task,

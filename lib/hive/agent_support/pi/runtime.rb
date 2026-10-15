@@ -98,7 +98,7 @@ module Hive::AgentSupport::Pi::Runtime
       agent_add_dirs: [].freeze, command_prefix: prefix.freeze,
       executable: File.join(RUNTIME_MOUNT, File.basename(executable)).freeze,
       task_root: source_root.freeze, output_paths: {}.freeze,
-      cleanup_paths: [ runtime_home ].freeze
+      cleanup_paths: [ runtime_home ].freeze, mcp_isolated: true
     ).freeze
   rescue StandardError
     FileUtils.remove_entry_secure(runtime_home, true) if runtime_home
@@ -145,7 +145,7 @@ module Hive::AgentSupport::Pi::Runtime
       scope, task_root: task_root, directories: directories,
       environment: pi_environment, outputs: outputs, runtime_root: runtime_home,
       cli_flags: flags, executable: File.join(RUNTIME_MOUNT, File.basename(executable)),
-      command_prefix: prefix
+      command_prefix: prefix, mcp_isolated: true
     )
   end
 

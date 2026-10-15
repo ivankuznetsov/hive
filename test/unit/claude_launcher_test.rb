@@ -87,44 +87,6 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_headless_mode_assembles_mcp_config_and_allowed_tools_flags
-    with_tmp_task do |task|
-      captured = nil
-      original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
-      capture_unbound_method_on(Hive::Stages::Base, :spawn_agent, original) do
-        Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_spawn_task, **kwargs|
-          captured = kwargs
-          { status: :complete }
-        end
-
-        Hive::ClaudeLauncher.launch!(
-          task: task,
-          cfg: { "claude" => { "permission_mode" => "auto" } },
-          prompt: "prompt",
-          add_dirs: [ task.folder ],
-          cwd: task.folder,
-          max_budget_usd: 1,
-          timeout_sec: 1,
-          log_label: "test",
-          status_mode: :state_file_marker,
-          allowed_tools: "Read,mcp__screenote__list_projects",
-          mcp_config_path: "/tmp/screenote.mcp.json",
-          strict_mcp_config: true
-        )
-
-        # The headless branch passes allowed_tools through as a kwarg (Agent
-        # renders it to --allowedTools downstream, alongside disallowed_tools)
-        # and appends mcp_cli_flags after any cfg-derived flags. Assert both
-        # halves of that assembly: the tool kwarg and the trailing mcp flags.
-        assert_equal "Read,mcp__screenote__list_projects", captured.fetch(:allowed_tools)
-        assert_equal(
-          %w[--mcp-config /tmp/screenote.mcp.json --strict-mcp-config],
-          captured.fetch(:cli_flags).last(3)
-        )
-      end
-    end
-  end
-
   # The headless branch delegates to Stages::Base.spawn_agent, which owns
   # the AskUserQuestion deny: a plan launch with no caller deny must still
   # render it, and per-stage model/effort must reach argv unchanged.
@@ -326,8 +288,7 @@ class ClaudeLauncherTest < Minitest::Test
   end
 
   # An explicitly routed non-Claude adapter skips the launcher: spawn_claude!
-  # hands spawn_agent the launch options plus cfg and implementation_stage,
-  # and drops the Claude-only MCP flags.
+  # hands spawn_agent the launch options plus cfg and implementation_stage.
   def test_spawn_claude_routes_non_claude_adapter_straight_to_spawn_agent
     with_tmp_task do |task|
       context = Struct.new(:adapter) { def explicit_routing? = true }.new("codex")
@@ -341,7 +302,6 @@ class ClaudeLauncherTest < Minitest::Test
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
           Hive::Stages::Base.spawn_claude!(
             task, cfg, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1,
-            mcp_config_path: "/tmp/x.mcp.json", strict_mcp_config: true,
             implementation_stage: "4-execute", model: "opus",
             allowed_tools: %w[Read]
           )
@@ -357,8 +317,6 @@ class ClaudeLauncherTest < Minitest::Test
       assert_equal "opus", kwargs.fetch(:model)
       assert_equal %w[Read], kwargs.fetch(:allowed_tools)
       assert_equal [], kwargs.fetch(:additional_read_roots)
-      refute kwargs.key?(:mcp_config_path)
-      refute kwargs.key?(:strict_mcp_config)
     end
   end
 

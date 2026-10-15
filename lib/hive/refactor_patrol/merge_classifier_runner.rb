@@ -51,14 +51,19 @@ module Hive
         end
         result = nil
         begin
-          result = Hive::Agent.new(
-            task: task, prompt: prompt, add_dirs: [], cwd: @project_root,
-            max_budget_usd: nil, max_turns: launch.fetch(:max_turns),
-            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-            log_label: STAGE, profile: profile, expected_output: nil,
-            status_mode: :exit_code_only, cli_flags: launch.fetch(:cli_flags),
-            **Hive::Stages::Base.implementation_launch_arguments(@identity, profile)
-          ).run!
+          result = Hive::Mcp.with_launch(
+            profile: profile, cfg: @cfg, scope: "refactor_patrol", cwd: @project_root
+          ) do |mcp_launch|
+            Hive::Agent.new(
+              task: task, prompt: prompt, add_dirs: [], cwd: @project_root,
+              max_budget_usd: nil, max_turns: launch.fetch(:max_turns),
+              timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+              log_label: STAGE, profile: profile, expected_output: nil,
+              status_mode: :exit_code_only, cli_flags: launch.fetch(:cli_flags),
+              mcp_launch: mcp_launch,
+              **Hive::Stages::Base.implementation_launch_arguments(@identity, profile)
+            ).run!
+          end
         ensure
           @launch_budget.record!(
             result: result, profile: profile, stage: STAGE, started_at: started_at

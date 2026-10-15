@@ -37,8 +37,16 @@ module Hive
         :commands, :domains, :executables, :environment,
         :settings_path, :mcp_config_path, :policy_path, :cli_flags,
         :permission_flags, :agent_add_dirs, :command_prefix, :executable,
-        :task_root, :output_paths, :cleanup_paths
+        :task_root, :output_paths, :cleanup_paths, :mcp_isolated
       ) do
+        # `mcp_isolated` is true when this policy already keeps personal and
+        # project MCP out of the launch (strict Claude config, Codex
+        # --ignore-user-config, a bwrap fresh home), so Hive::Agent renders
+        # no MCP of its own. A yolo direct policy is not isolated.
+        def initialize(mcp_isolated: false, **attributes)
+          super
+        end
+
         def host_outputs?
           !output_paths.empty?
         end
@@ -395,7 +403,7 @@ module Hive
       end
 
       def self.portable_policy(scope, task_root:, directories:, environment:, outputs:, runtime_root:,
-                               cli_flags:, executable:, command_prefix: [])
+                               cli_flags:, executable:, command_prefix: [], mcp_isolated: false)
         Policy.new(
           permission_mode: nil,
           allowed_tools: scope.allowed_tools,
@@ -415,7 +423,8 @@ module Hive
           executable: executable.freeze,
           task_root: task_root.freeze,
           output_paths: outputs.freeze,
-          cleanup_paths: Array(runtime_root).compact.freeze
+          cleanup_paths: Array(runtime_root).compact.freeze,
+          mcp_isolated: mcp_isolated
         ).freeze
       end
 
@@ -684,7 +693,8 @@ module Hive
           executable: nil,
           task_root: @task_folder.freeze,
           output_paths: {}.freeze,
-          cleanup_paths: [].freeze
+          cleanup_paths: [].freeze,
+          mcp_isolated: true
         ).freeze
       end
 

@@ -470,6 +470,44 @@ module Hive
       Hive::Commands::Disconnect.new(service, json: options[:json]).call
     end
 
+    desc "mcp SUBCOMMAND [SERVER]", "Import personal MCP servers into Hive's catalog, or sign an agent in to one"
+    long_desc <<~DESC
+      Hive-launched agents use only the MCP servers Hive grants them. `hive mcp
+      import` reads the servers configured in Codex, Claude, OpenCode, Pi and
+      Grok (names, transports, URLs and argv; credential values are never
+      copied) and writes the chosen ones to the global catalog
+      (`mcp.servers` in ~/.config/hive/config.yml). Grant them per project or
+      stage with `mcp: { use: [name] }`.
+
+        hive mcp import                    # interactive table and selection
+        hive mcp import --dry-run --json   # plan only, machine-readable
+        hive mcp import --all --yes        # every new server
+        hive mcp import --only linear,docs --yes
+        hive mcp import --all --update --yes   # also replace drifted entries
+        hive mcp login linear --agent codex    # sign Codex in for Hive launches
+
+      Without a terminal a write needs --all or --only plus --yes. Literal
+      credentials become environment-variable names the command lists for
+      export. `login` is interactive and supports codex and claude.
+
+      Exit codes: 0 success; 1 sign-in failed; 64 usage or consent required;
+      78 malformed global config.
+    DESC
+    option :all, type: :boolean, default: false, desc: "import every new server"
+    option :only, type: :string, desc: "comma-separated server names or row ids to import"
+    option :dry_run, type: :boolean, default: false, desc: "preview without writing"
+    option :yes, type: :boolean, default: false, desc: "write without asking"
+    option :update, type: :boolean, default: false, desc: "replace catalog entries whose source changed"
+    option :agent, type: :string, desc: "agent to sign in (login): codex or claude"
+    def mcp(subcommand = nil, server = nil)
+      require "hive/commands/mcp"
+      exit Hive::Commands::Mcp.new(
+        subcommand, server,
+        json: options[:json], all: options[:all], only: options[:only], dry_run: options[:dry_run],
+        yes: options[:yes], update: options[:update], agent: options[:agent]
+      ).call
+    end
+
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
     long_desc <<~DESC
       Stops and deregisters the per-user daemon service, removes hive config

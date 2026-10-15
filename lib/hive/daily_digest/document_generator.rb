@@ -3,6 +3,7 @@ require "tempfile"
 require "hive/agent"
 require "hive/agent_runtime"
 require "hive/config"
+require "hive/mcp"
 require "hive/paths"
 require "hive/secret_patterns"
 require "hive/stages/base"
@@ -21,12 +22,17 @@ module Hive
         require "prdigest"
         config = @config_loader.call
         profile = Hive::Stages::Base.stage_profile(config, "execute", explicit_agent: config.dig("daily_digest", "agent"))
-        invocation = Hive::AgentRuntime.compile(Hive::AgentRuntime::Request.new(
+        request = Hive::AgentRuntime::Request.new(
           profile: profile, prompt: Prdigest::Document.prompt(facts),
           permission_mode: Hive::Config.claude_permission_mode(config),
           **Hive::Stages::Base.model_launch_arguments(config, "execute", profile, current: config.fetch("daily_digest", {}))
-        ))
-        output = capture(invocation, profile)
+        )
+        output = Hive::Mcp.with_launch(profile: profile, cfg: config, scope: "daily_digest", cwd: Paths.state_home) do |launch|
+          @mcp_launch = launch
+          capture(Hive::Mcp.compile(request, launch), profile)
+        ensure
+          @mcp_launch = nil
+        end
         text = final_message(profile, output)
         if text.to_s.strip.empty?
           raise Hive::AgentError, "digest agent did not return a complete document"
@@ -65,6 +71,7 @@ module Hive
         input.rewind
         FileUtils.mkdir_p(Paths.state_home, mode: 0o700)
         environment = profile.subscription_environment.merge(Hive::Agent::SCRUBBED_CHILD_ENV)
+        environment = @mcp_launch.environment_for(environment) if @mcp_launch
         pid = Process.spawn(environment, *invocation.argv, chdir: Paths.state_home,
                             in: input, out: output, err: errors, pgroup: true)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_sec

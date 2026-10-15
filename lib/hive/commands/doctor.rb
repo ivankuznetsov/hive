@@ -28,20 +28,24 @@ module Hive
       # JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
+      # `mcp_discover` compares personal agent MCP configs with Hive's catalog
+      # by running each agent's read-only listing; in-process tests skip it.
       def initialize(config:, project_root:, json: false, output: $stdout,
-                     inspector: nil, environment: ENV)
+                     inspector: nil, environment: ENV,
+                     mcp_discover: defined?(Minitest) ? nil : :default)
         @config = config
         @project_root = project_root
         @json = json
         @output = output
         @inspector = inspector
         @environment = environment
+        @mcp_discover = mcp_discover
         @rows = nil
       end
 
       def call
         legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
-                      check_web_environment_aliases + check_runtime_control_plane
+                      check_web_environment_aliases + check_runtime_control_plane + check_mcp
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -61,6 +65,18 @@ module Hive
       end
 
       private
+
+      def check_mcp
+        require "hive/mcp/doctor_check"
+        discover = @mcp_discover
+        if discover == :default
+          require "hive/mcp/discovery"
+          discover = ->(root) { Hive::Mcp::Discovery.discover(cwd: root || Dir.pwd) }
+        end
+        Hive::Mcp::DoctorCheck.rows(
+          config: @config, environment: @environment, project_root: @project_root, discover: discover
+        )
+      end
 
       def check_runtime_control_plane
         require "hive/runtime_control_plane"

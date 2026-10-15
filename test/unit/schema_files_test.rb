@@ -12,6 +12,7 @@ require "hive/commands/doctor"
 require "hive/commands/decide"
 require "hive/commands/plan_review"
 require "hive/commands/forget"
+require "hive/commands/mcp"
 require "hive/commands/init"
 require "hive/commands/patrol"
 require "hive/commands/prune"
@@ -444,6 +445,20 @@ class SchemaFilesTest < Minitest::Test
     ).send(:payload, result)
 
     assert_empty schemer.validate(payload).to_a
+  end
+
+  def test_mcp_import_schema_matches_the_command_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-mcp-import")))
+    schemer = JSONSchemer.schema(document)
+
+    assert_equal Hive::Commands::Mcp::ERROR_KINDS.sort,
+                 document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Mcp::Discovery::AGENTS.sort,
+                 document.dig("$defs", "Row", "properties", "sources", "items", "enum").sort
+    error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-mcp-import", error: Hive::UsageError.new("bad"), error_kind: "usage", extras: { "action" => "login" }
+    )
+    assert_empty schemer.validate(error).to_a
   end
 
   def test_honeycomb_contract_schema_files_are_valid_and_versioned

@@ -28,6 +28,25 @@ items:
   reviewers instead of fixing from edited marks. To act on those findings the
   operator commits fixes by hand (or raises `review.max_passes`) and retries.
 
+## Hive-owned MCP follow-ups (2026-10-15)
+
+Hive now renders MCP for every agent it launches (plan
+2026-10-15-001; [[modules/mcp]]). Open items:
+
+- **Pi floor lives only on the Hive side.** `agents.pi.min_version` defaults to
+  `1.0.4` (the first Pi with `--no-mcp`), but the `agent-cli-runtime`
+  component's `PI` profile still says `0.70.2`. Raising it needs its own
+  package change and release (`docs/RELEASING.md`, "Releasing
+  agent-cli-runtime"); until then cfg-less profile lookups keep the old floor.
+- **Closed 2026-10-15: live-skills workflow Pi package.** The
+  live-agent-skills workflow installed the deprecated
+  `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new floor); it now
+  installs `@earendil-works/pi-coding-agent`, which the npm registry names as
+  its replacement. (The Hivebox image that pinned `@mariozechner/pi@0.70.2` was
+  removed by ADR-055.)
+- **Bench harness Pi profiles** (`templates/builtins/bench/runtime/harness/`)
+  launch Pi outside Hive and still declare `0.70.2`; they pass no `--no-mcp`.
+
 ## Claude headless-only follow-ups (2026-10-14)
 
 The Claude tmux launch mode was removed (ADR-053 in [[decisions]]). Open items

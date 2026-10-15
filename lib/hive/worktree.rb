@@ -672,11 +672,17 @@ module Hive
     end
 
     def self.branch_refs(project_root)
-      out, _, status = Open3.capture3(
+      out, err, status = Open3.capture3(
         "git", "-C", project_root, "for-each-ref", "--format=%(refname)",
         "refs/heads", "refs/remotes/origin"
       )
-      status.success? ? out.lines(chomp: true).to_set.freeze : Set.new.freeze
+      unless status.success?
+        detail = err.to_s.strip
+        detail = "git for-each-ref exited #{status.exitstatus}" if detail.empty?
+        raise WorktreeError, "could not inventory branch refs: #{detail}"
+      end
+
+      out.lines(chomp: true).to_set.freeze
     end
 
     def self.materialize_pr(repo_root:, pr_number:, path:, branch:)

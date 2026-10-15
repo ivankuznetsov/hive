@@ -1,5 +1,6 @@
 require "hive/stages"
 require "hive/config"
+require "json"
 require "psych"
 
 module Hive
@@ -95,6 +96,17 @@ module Hive
       value.to_s
     end
 
+    # Render malformed declaration evidence as schema-safe, readable text.
+    # Composite values use JSON rather than Ruby's hash-rocket inspect syntax;
+    # non-JSON scalars still degrade to their ordinary string representation.
+    def display_declaration(value)
+      return value.to_s if value.is_a?(String) || value.is_a?(Integer)
+
+      JSON.generate(value)
+    rescue JSON::GeneratorError, TypeError
+      value.to_s
+    end
+
     def declaration_references(value)
       parsed = parse_optional_declaration(value)
       parsed.is_a?(Array) ? parsed : Array(parsed)
@@ -132,10 +144,10 @@ module Hive
       names.uniq
     end
 
-    # Single source of truth for the "⏸ blocked by …" indicator rendered by
-    # Commands::Status and the TUI. The complete unmet collection is
-    # authoritative; scalar singulars are compatibility fallbacks only.
-    def blocked_label(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
+    # Undecorated blocker summary shared by human and structured renderers.
+    # The complete unmet collection is authoritative; scalar singulars are
+    # compatibility fallbacks only.
+    def blocker_summary(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
       blockers = Array(unmet_dependencies).filter_map do |entry|
         reference = field(entry, :reference)
         target = field(entry, :blocked_by)
@@ -161,7 +173,12 @@ module Hive
           "a task dependency"
         end
       end
-      "⏸ blocked by #{blockers.join(', ')}"
+      "blocked by #{blockers.join(', ')}"
+    end
+
+    # Single source of truth for the decorated status/TUI indicator.
+    def blocked_label(**attributes)
+      "⏸ #{blocker_summary(**attributes)}"
     end
 
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)
@@ -217,13 +234,10 @@ module Hive
       nil
     end
 
-    # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
-    # string-keyed) or an object exposing `key` as a reader. Most production
-    # callers pass symbol-keyed Hashes, while DependencySnapshot base
-    # selection also passes immutable TaskSnapshot readers. The string-key
-    # arm remains part of the public resolver contract for JSON-shaped callers
-    # and compatibility with older integrations. Returns nil only
-    # when the key is genuinely absent from a
+    # Read `key` (a symbol) from a supported task shape: symbol-keyed Hash,
+    # string-keyed Hash, or an object exposing `key` as a reader. Status and
+    # TUI blocker payloads exercise the string-keyed path, while dependency
+    # snapshots exercise readers. Returns nil only when the key is absent from a
     # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
     # a breadcrumb instead of silently resolving every field to "missing".

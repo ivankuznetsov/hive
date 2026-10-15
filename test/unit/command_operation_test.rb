@@ -905,6 +905,39 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_failed_pre_application_abort_preserves_the_operator_error_when_recovery_store_is_down
+    retryable_error_class = Class.new(Hive::Error) do
+      def retryable_pre_application_rejection? = true
+    end
+    with_operation(key: "abort-and-recovery-failure") do |operation, store|
+      store.define_singleton_method(:abort_pre_submission) do |*_, **|
+        raise Sequel::DatabaseError, "abort failed"
+      end
+      store.define_singleton_method(:authoritative_result_recorded?) do |**|
+        raise Sequel::DatabaseError, "read failed"
+      end
+      store.define_singleton_method(:mark_unresolved) do |*_, **|
+        raise Sequel::DatabaseError, "recovery failed"
+      end
+      original = retryable_error_class.new("dependency cycle")
+
+      raised = assert_raises(retryable_error_class) do
+        operation.call { raise original }
+      end
+
+      assert_same original, raised
+    end
+  end
+
+  def test_best_effort_uncertainty_guard_never_replaces_the_callers_error
+    operation = Hive::CommandOperation.allocate
+    operation.define_singleton_method(:persist_uncertainty) do |*|
+      raise Sequel::DatabaseError, "store unavailable"
+    end
+
+    assert_nil operation.send(:persist_uncertainty_without_masking, Object.new, nil, RuntimeError.new)
+  end
+
   private
 
   def with_operation(key: "stable")

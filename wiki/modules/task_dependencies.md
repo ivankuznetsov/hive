@@ -125,10 +125,11 @@ self-reference before publishing the new task, including cycles behind an
 unreachable gate; qualified self-reference paths identify the actual upstream
 task. Admission repeats the complete check against current disk state. Cycle
 bookkeeping and immutable-context verdicts are indexed and memoized. Non-cycle
-verdicts may be reused across roots; cycle-derived verdicts stay in the current
-root walk because their paths are root-relative. That walk-local cache still
-evaluates each shared node once per root instead of once per incoming route, so
-fan-in over a cycle remains linear in the reachable graph. Each task folder's
+verdicts may be reused across roots. A cycle-derived walk-local verdict is
+reused only while all of its cycle anchors remain active; once a route unwinds
+past an anchor, Hive recomputes the node so the cycle path, reason, and unmet
+collection remain relative to the current route. Acyclic fan-in remains linear
+in the reachable graph. Each task folder's
 device/inode identity is checked before and after strict reads; a concurrent
 stage move invalidates that snapshot instead of retaining the enumerated old
 stage after an `ENOENT` race.
@@ -158,6 +159,12 @@ Each `unmet_dependencies` entry contains `reference`, resolved `blocked_by`,
 for a resolvable same-project scalar and `default` otherwise. The array is the
 authoritative fan-in explanation; scalar singulars remain compatibility
 projections and are always null for list declarations.
+
+For a scalar declaration, the singular compatibility fields describe only the
+first unmet direct edge. If that direct prerequisite has reached its gate but
+is itself blocked by a transitive prerequisite, `blocked_by` and
+`dependency_stage` are null; `unmet_dependencies` still contains the complete
+transitive blocker set.
 
 The admission-error object contains exactly `reason_code`, `offending_ref`, and
 `safe_correction`. The closed reason set is:

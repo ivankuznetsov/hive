@@ -20,8 +20,11 @@ module Hive
       plan_dependency_mismatch
       dependency_validation_failed
     ].freeze
+    CYCLE_REASON_CODES = %w[dependency_cycle dependency_self_reference].freeze
 
     AdmissionError = Data.define(:reason_code, :offending_ref, :safe_correction) do
+      def cycle? = CYCLE_REASON_CODES.include?(reason_code)
+
       def to_h
         {
           "reason_code" => reason_code,
@@ -67,11 +70,11 @@ module Hive
     private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REFERENCES
 
     Blocker = Data.define(:identity, :unmet)
-    Evaluation = Data.define(:verdict, :blockers, :cycle_derived)
+    Evaluation = Data.define(:verdict, :blockers, :cycle_derived, :cycle_anchors)
     Frame = Struct.new(
       :task, :identity, :incoming, :entered, :references, :cursor,
       :list_declaration, :direct_blockers, :transitive_blockers,
-      :admission_error, :cycle_derived,
+      :admission_error, :cycle_derived, :cycle_anchors,
       keyword_init: true
     ) do
       def complete? = cursor >= references.length
@@ -82,10 +85,12 @@ module Hive
         reference
       end
 
-      def fail!(error, cycle_derived: false)
-        cycle_error = %w[dependency_cycle dependency_self_reference].include?(error&.reason_code)
+      def fail!(error, cycle_derived: false, cycle_anchor: nil, cycle_anchors: [])
+        cycle_error = error&.cycle?
         self.admission_error = error if admission_error.nil? || cycle_error
         self.cycle_derived ||= cycle_derived
+        self.cycle_anchors |= Array(cycle_anchors)
+        self.cycle_anchors |= [ cycle_anchor ] if cycle_anchor
       end
     end
     private_constant :Blocker, :Evaluation, :Frame
@@ -227,7 +232,7 @@ module Hive
               "dependency_self_reference",
               cycle,
               "Remove or correct depends_on in #{frame.task.folder}/meta.yml."
-            ).admission_error, cycle_derived: true)
+            ).admission_error, cycle_derived: true, cycle_anchor: target_identity)
             next
           end
           if (cycle_start = active_index[target_identity])
@@ -236,7 +241,7 @@ module Hive
               "dependency_cycle",
               cycle,
               "Break the cycle by correcting one depends_on declaration in the reported path."
-            ).admission_error, cycle_derived: true)
+            ).admission_error, cycle_derived: true, cycle_anchor: target_identity)
             next
           end
 
@@ -249,7 +254,12 @@ module Hive
           else
             { blocker: gate_result, admission_error: nil }.freeze
           end
-          if (cached = @verdict_cache[target_identity] || walk_cache[target_identity])
+          cached = @verdict_cache[target_identity]
+          walked = walk_cache[target_identity]
+          if cached.nil? && walked && reusable_walk_evaluation?(walked, active_index)
+            cached = walked
+          end
+          if cached
             absorb_child(frame, incoming, cached)
           else
             push_frame(frames, active_index, target, incoming: incoming)
@@ -264,7 +274,7 @@ module Hive
           task: task, identity: identity, incoming: incoming, entered: false,
           references: EMPTY_REFERENCES, cursor: 0, list_declaration: false,
           direct_blockers: [], transitive_blockers: [], admission_error: nil,
-          cycle_derived: false
+          cycle_derived: false, cycle_anchors: []
         )
       end
 
@@ -313,7 +323,11 @@ module Hive
         frame.fail!(incoming[:admission_error]) if incoming[:admission_error]
         return unless evaluation.verdict.error?
 
-        frame.fail!(evaluation.verdict.admission_error, cycle_derived: evaluation.cycle_derived)
+        frame.fail!(
+          evaluation.verdict.admission_error,
+          cycle_derived: evaluation.cycle_derived,
+          cycle_anchors: evaluation.cycle_anchors
+        )
       end
 
       def complete_frame(frame)
@@ -334,8 +348,13 @@ module Hive
         Evaluation.new(
           verdict: verdict.freeze,
           blockers: blockers.freeze,
-          cycle_derived: frame.cycle_derived
+          cycle_derived: frame.cycle_derived,
+          cycle_anchors: frame.cycle_anchors.uniq.freeze
         ).freeze
+      end
+
+      def reusable_walk_evaluation?(evaluation, active_index)
+        !evaluation.cycle_derived || evaluation.cycle_anchors.all? { |anchor| active_index.key?(anchor) }
       end
 
       def blocker_for_requesting_project(frame, blocker)
@@ -394,7 +413,7 @@ module Hive
           correction = invalid_reference_correction(task)
           return admission_error(
             "dependency_reference_invalid",
-            task.depends_on || qualify(task),
+            task.depends_on ? Hive::Dependencies.display_declaration(task.depends_on) : qualify(task),
             correction
           )
         when :invalid
@@ -416,7 +435,7 @@ module Hive
         if task.plan_dependency && task.depends_on.nil?
           return admission_error(
             "plan_dependency_missing",
-            task.plan_dependency.to_s,
+            Hive::Dependencies.display_declaration(task.plan_dependency),
             "Add the same depends_on value to #{task.folder}/meta.yml or remove the stale plan assertion."
           )
         end
@@ -424,7 +443,7 @@ module Hive
         if task.plan_dependency && normalized_declaration(task.plan_dependency) != normalized_declaration(task.depends_on)
           return admission_error(
             "plan_dependency_mismatch",
-            task.plan_dependency.to_s,
+            Hive::Dependencies.display_declaration(task.plan_dependency),
             "Make plan.md depends_on exactly match #{task.folder}/meta.yml."
           )
         end
@@ -438,7 +457,7 @@ module Hive
       rescue Hive::Dependencies::InvalidReference => e
         admission_error(
           "dependency_reference_invalid",
-          value.to_s,
+          Hive::Dependencies.display_declaration(value),
           "Use one task reference or a nonempty flat list of task references; #{e.message}."
         )
       end

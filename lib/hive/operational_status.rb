@@ -1034,12 +1034,12 @@ module Hive
     end
 
     def dependency_wait_message(row)
-      Hive::Dependencies.blocked_label(
+      Hive::Dependencies.blocker_summary(
         depends_on: row["depends_on"],
         blocked_by: row["blocked_by"],
         dependency_stage: row["dependency_stage"],
         unmet_dependencies: row["unmet_dependencies"]
-      ).delete_prefix("⏸ ")
+      )
     end
 
     def typed_attempt_diagnostic(row)

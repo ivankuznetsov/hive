@@ -97,6 +97,31 @@ class DependencyAdmissionTest < Minitest::Test
     assert_error context(project(tasks: [ shape_mismatch ]))
       .verdict(project: "app", slug: "shape-drift"), "plan_dependency_mismatch"
 
+    reverse_shape_mismatch = task(
+      "app", "reverse-shape-drift", depends_on: [ "base" ], plan_status: :ok,
+      plan_dependency: "base"
+    )
+    assert_error context(project(tasks: [ reverse_shape_mismatch ]))
+      .verdict(project: "app", slug: "reverse-shape-drift"), "plan_dependency_mismatch"
+
+    matching_list = task(
+      "app", "matching-list", depends_on: %w[first second], plan_status: :ok,
+      plan_dependency: %w[first second]
+    )
+    matching_context = context(project(tasks: [
+      matching_list,
+      task("app", "first", stage: "9-done"),
+      task("app", "second", stage: "9-done")
+    ]))
+    assert matching_context.verdict(project: "app", slug: "matching-list").clear?
+
+    reordered_list = task(
+      "app", "reordered-list", depends_on: %w[first second], plan_status: :ok,
+      plan_dependency: %w[second first]
+    )
+    assert_error context(project(tasks: [ reordered_list ]))
+      .verdict(project: "app", slug: "reordered-list"), "plan_dependency_mismatch"
+
     invalid = task("app", "bad-plan", plan_status: :invalid, plan_error: "bad frontmatter")
     assert_error context(project(tasks: [ invalid ])).verdict(project: "app", slug: "bad-plan"),
                  "plan_dependency_invalid"
@@ -338,12 +363,47 @@ class DependencyAdmissionTest < Minitest::Test
 
       assert_error verdicts.fetch("cyclic-root"), "dependency_cycle"
       assert verdicts.fetch("acyclic-root").clear?
+      loop_verdict = indexed.verdict(project: "app", slug: "loop")
+      assert_error loop_verdict, "dependency_cycle"
+      assert_equal "app:loop -> app:cyclic-root -> app:loop",
+                   loop_verdict.admission_error.offending_ref
     end
   end
 
-  def test_cycle_derived_fan_in_is_memoized_within_one_root_walk
-    tasks = [ task("app", "cycle", depends_on: "cycle", stage: "9-done") ]
-    previous = [ "cycle" ]
+  def test_cycle_derived_walk_cache_is_reused_only_while_its_anchor_is_active
+    alpha = project(name: "alpha", tasks: [
+      task("alpha", "a3", depends_on: "beta:b3", stage: "9-done")
+    ])
+    beta = project(name: "beta", tasks: [
+      task("beta", "b1", depends_on: [ "alpha:a3", "b6" ]),
+      task("beta", "b3", depends_on: "b6", stage: "9-done"),
+      task("beta", "b5", stage: "7-artifacts"),
+      task("beta", "b6", depends_on: [ "b5", "b3" ], stage: "9-done")
+    ])
+
+    verdict = context(alpha, beta).verdict(project: "beta", slug: "b1")
+
+    assert_error verdict, "dependency_cycle"
+    assert_equal "beta:b6 -> beta:b3 -> beta:b6", verdict.admission_error.offending_ref
+    assert_equal [ "beta:b5" ], verdict.unmet_dependencies.map(&:blocked_by)
+  end
+
+  def test_cycle_derived_walk_cache_reuses_an_evaluation_while_its_anchor_is_active
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: %w[b c]),
+      task("app", "b", depends_on: "c", stage: "9-done"),
+      task("app", "c", depends_on: "a", stage: "9-done")
+    ]))
+
+    verdict = indexed.verdict(project: "app", slug: "a")
+
+    assert_error verdict, "dependency_cycle"
+    assert_equal "app:a -> app:b -> app:c -> app:a", verdict.admission_error.offending_ref
+  end
+
+  def test_acyclic_fan_in_is_memoized_within_one_root_walk
+    tasks = [ task("app", "leaf", stage: "9-done") ]
+    previous = [ "leaf" ]
     12.times do |depth|
       current = [ "left-#{depth}", "right-#{depth}" ]
       current.each do |slug|
@@ -360,7 +420,7 @@ class DependencyAdmissionTest < Minitest::Test
       original_validate.call(snapshot)
     end
 
-    assert_error indexed.verdict(project: "app", slug: "root"), "dependency_self_reference"
+    assert indexed.verdict(project: "app", slug: "root").clear?
     assert_operator validations, :<=, tasks.length,
                     "each node should be expanded at most once within the root query"
   end
@@ -384,11 +444,13 @@ class DependencyAdmissionTest < Minitest::Test
     indexed = context(project(tasks: [ newer, malformed ]))
 
     upgrade = indexed.verdict(project: "app", slug: "newer").admission_error.safe_correction
-    repair = indexed.verdict(project: "app", slug: "malformed").admission_error.safe_correction
+    malformed_error = indexed.verdict(project: "app", slug: "malformed").admission_error
+    repair = malformed_error.safe_correction
     assert_match(/Upgrade Hive/, upgrade)
     assert_match(/preserve every listed prerequisite/, upgrade)
     assert_match(/Repair depends_on/, repair)
     refute_match(/Upgrade Hive/, repair)
+    assert_equal "[null]", malformed_error.offending_ref
   end
 
   def test_context_copies_nested_declarations_and_freezes_blocker_collections

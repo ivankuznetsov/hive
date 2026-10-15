@@ -353,7 +353,9 @@ module Hive
     def normalize_dependency(value, preserve_invalid: false)
       Hive::Dependencies.normalize_declaration(value)
     rescue Hive::Dependencies::InvalidReference
-      preserve_invalid ? value : normalize_string(value)
+      return value if preserve_invalid && value.is_a?(Array)
+
+      normalize_string(Hive::Dependencies.display_declaration(value))
     end
 
     def normalize_plan_review_required(value, label:, allow_nil: false, strict: false)

@@ -27,6 +27,7 @@ module Hive
 
     ActiveProjectInput = Data.define(:task_folders)
     BaseSelection = Data.define(:branch, :mode)
+    BranchRefInventory = Data.define(:needed, :refs)
 
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
@@ -165,6 +166,18 @@ module Hive
     def stacked_branch_available?(available_branch_refs, branch)
       available_branch_refs.include?("refs/remotes/origin/#{branch}") ||
         available_branch_refs.include?("refs/heads/#{branch}")
+    end
+
+    # Branch evidence is needed only for scalar declarations. Keeping this
+    # predicate beside the inventory operation prevents status and durable
+    # attempt fingerprinting from drifting into different policies.
+    def branch_refs_for(project_root, declarations)
+      needed = Array(declarations).any? do |declaration|
+        declaration && !Hive::Dependencies.list_declaration?(declaration)
+      end
+      return BranchRefInventory.new(needed: false, refs: nil) unless needed
+
+      BranchRefInventory.new(needed: true, refs: Hive::Worktree.branch_refs(project_root))
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
@@ -399,6 +412,7 @@ module Hive
     # create a fresh generation.
     def admission_fingerprint(task, registry_entries: nil, admission_context: nil)
       root = File.expand_path(task.project_root)
+      declaration = fingerprint_declaration(task.depends_on)
       if admission_context
         match_count = admission_context.project_path_match_count(root)
         project = admission_context.project_for_path(root)&.name
@@ -414,7 +428,7 @@ module Hive
         payload = [
           "hive-dependency-admission-v2", "project_enrollment",
           match_count, root, task.slug.to_s,
-          Hive::Dependencies.normalize_declaration(task.depends_on)
+          declaration
         ]
         return ::Digest::SHA256.hexdigest(JSON.generate(payload))
       end
@@ -422,23 +436,28 @@ module Hive
       admission_context ||= self.admission_context(registry_entries)
       verdict = admission_context.verdict(project: project, slug: task.slug)
       error = verdict.admission_error
-      default_branch = Hive::Config.load(task.project_root)["default_branch"]
-      available_branch_refs = if task.depends_on &&
-                                 !Hive::Dependencies.list_declaration?(task.depends_on)
-        Hive::Worktree.branch_refs(task.project_root)
+      branch_inventory = begin
+        branch_refs_for(task.project_root, [ task.depends_on ])
+      rescue StandardError
+        BranchRefInventory.new(needed: true, refs: nil)
       end
-      base_mode = base_selection(
-        task, default_branch, warn_on_fallback: false,
-        admission_context: admission_context, project_name: project,
-        available_branch_refs: available_branch_refs
-      ).mode
+      base_mode = if branch_inventory.needed
+        default_branch = Hive::Config.load(task.project_root)["default_branch"]
+        base_selection(
+          task, default_branch, warn_on_fallback: false,
+          admission_context: admission_context, project_name: project,
+          available_branch_refs: branch_inventory.refs
+        ).mode
+      else
+        "default"
+      end
       unmet = verdict.unmet_dependencies.map do |dependency|
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
           dependency.required_gate ]
       end
       payload = [
         "hive-dependency-admission-v2", project, task.slug.to_s,
-        Hive::Dependencies.normalize_declaration(task.depends_on),
+        declaration,
         verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
         unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
@@ -448,6 +467,12 @@ module Hive
       ::Digest::SHA256.hexdigest(
         JSON.generate([ "hive-dependency-admission-v2", "unreadable", e.class.name, e.message.to_s ])
       )
+    end
+
+    def fingerprint_declaration(value)
+      Hive::Dependencies.normalize_declaration(value)
+    rescue Hive::Dependencies::InvalidReference
+      Hive::Dependencies.display_declaration(value)
     end
 
     def admission_project(entry, exclude_archived: false,

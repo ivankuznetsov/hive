@@ -453,10 +453,12 @@ lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
 `default`. One scan reuses each project's already loaded default-branch policy
 and one batched local/origin branch-ref inventory; it does not parse project
 configuration or fork Git once per row. Incremental projections build the
-bounded base-selection context only when a changed row declares a dependency.
-If that base-only context or ref inventory fails, affected base modes degrade to
-`default` without marking unrelated rows dependency-blocked. The correlations
-are closed:
+bounded base-selection context only when a changed row declares a scalar
+dependency. If that base-only context fails, affected base modes degrade to
+`default` without marking unrelated rows dependency-blocked. If ref inventory
+is temporarily unavailable, status skips that evidence check rather than
+turning a previously valid stacked relationship into `default`. The
+correlations are closed:
 
 - clear: `blocked: false`, singular wait fields null,
   `unmet_dependencies: []`, `admission_error: null`;
@@ -475,7 +477,9 @@ Each unmet entry requires `reference`, resolved `blocked_by`, observed
 `dependency_stage`, and `required_gate`. Scalar gates follow project
 `dependency_gate_stage`; list entries always report `required_gate: 9-done`.
 The singular fields are compatibility projections, not a lossy summary for
-fan-in.
+fan-in. In particular, when a scalar prerequisite has reached its own gate but
+is waiting on a transitive prerequisite, both singular fields are null and the
+transitive blockers remain available through `unmet_dependencies`.
 
 Text/TUI render all benign blockers from `unmet_dependencies`; scalar rows keep
 the familiar `⏸ blocked by <task> (<stage>)` form. Admission errors render the

@@ -1288,6 +1288,21 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_branch_refs_distinguishes_inventory_failure_from_an_empty_inventory
+    status_class = Struct.new(:successful, :exitstatus) do
+      def success? = successful
+    end
+    failed = status_class.new(false, 128)
+
+    error = with_replaced_singleton_method(
+      Open3, :capture3, ->(*) { [ "", "fatal: refs unavailable", failed ] }
+    ) do
+      assert_raises(Hive::WorktreeError) { Hive::Worktree.branch_refs("/project") }
+    end
+
+    assert_includes error.message, "fatal: refs unavailable"
+  end
+
   # Regression for the recorded FETCH_HEAD stack-collapse: on a narrow
   # (single-branch) fetch refspec, a plain `git fetch origin <branch>`
   # updates only FETCH_HEAD and never writes refs/remotes/origin/<branch>,

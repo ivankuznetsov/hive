@@ -46,9 +46,7 @@ module Hive
 
         edges, placeholders, edge_diagnostics = build_edges(nodes_by_id)
         diagnostics.concat(edge_diagnostics)
-        truncated ||= edge_diagnostics.any? do |row|
-          row["cap"] == "dependency_deadline_seconds"
-        end
+        truncated ||= edge_diagnostics.any? { |row| row["cap"] }
         nodes_by_id = nodes_by_id.merge(placeholders)
         selection = connected_selection(target_id, nodes_by_id, edges, diagnostics)
         truncated ||= selection.fetch(:truncated)
@@ -175,6 +173,7 @@ module Hive
         edges = []
         nodes.values.each do |node|
           break if deadline_exhausted!(diagnostics)
+          break if diagnostics.any? { |row| row["cap"] == "dependency_edges" }
 
           reference_value = node["depends_on"]
           next if reference_value.nil?
@@ -182,6 +181,14 @@ module Hive
           begin
             references = Hive::Dependencies.declaration_references(reference_value)
             references.each do |reference|
+              break if deadline_exhausted!(diagnostics)
+              if edges.length >= @limits.fetch(:dependency_edges)
+                diagnostics << cap_diagnostic(
+                  "dependency_edges", @limits.fetch(:dependency_edges), edges.length + 1
+                ) unless diagnostics.any? { |row| row["cap"] == "dependency_edges" }
+                break
+              end
+
               target_project = reference.explicit_project ? reference.project : node.fetch("project")
               target = resolve_target(nodes, numeric_targets, target_project, reference.task)
               unless target
@@ -199,12 +206,18 @@ module Hive
               )
             end
           rescue Hive::Dependencies::InvalidReference
+            if edges.length >= @limits.fetch(:dependency_edges)
+              diagnostics << cap_diagnostic(
+                "dependency_edges", @limits.fetch(:dependency_edges), edges.length + 1
+              ) unless diagnostics.any? { |row| row["cap"] == "dependency_edges" }
+              next
+            end
             invalid_label = "invalid dependency declaration"
-            target_id = "missing:#{Digest::SHA256.hexdigest(invalid_label)[0, 20]}"
+            target_id = "missing:#{Digest::SHA256.hexdigest("invalid:#{node.fetch('id')}")[0, 20]}"
             placeholders[target_id] ||= missing_node(
               target_id, reason: "dependency_reference_invalid", slug: invalid_label
             )
-            diagnostics << diagnostic("dependency_reference_invalid", invalid_label)
+            diagnostics << diagnostic("dependency_reference_invalid", node.fetch("id"))
             edges << edge(
               node, placeholders.fetch(target_id), nil, invalid_reference: invalid_label
             )

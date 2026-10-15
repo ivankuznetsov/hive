@@ -274,6 +274,58 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_fingerprint_skips_config_and_git_for_nil_and_list_declarations
+    project = Struct.new(:name).new("app")
+    context = Object.new
+    context.define_singleton_method(:project_path_match_count) { |_| 1 }
+    context.define_singleton_method(:project_for_path) { |_| project }
+    context.define_singleton_method(:verdict) do |**|
+      Hive::DependencyAdmission::Verdict.new(state: :clear)
+    end
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config is scalar-only" }) do
+      with_replaced_singleton_method(Hive::Worktree, :branch_refs, ->(*) { flunk "git is scalar-only" }) do
+        [ nil, [ "base-task" ] ].each_with_index do |declaration, index|
+          task = FakeTask.new(
+            slug: "task-#{index}", id: index, depends_on: declaration,
+            folder: "/tmp/task-#{index}", project_root: "/tmp", project_name: "app"
+          )
+          assert_match(/\A[0-9a-f]{64}\z/,
+                       Hive::DependencySnapshot.admission_fingerprint(
+                         task, admission_context: context
+                       ))
+        end
+      end
+    end
+  end
+
+  def test_admission_fingerprint_retains_identity_for_corrupt_declarations
+    project = Struct.new(:name).new("app")
+    context = Object.new
+    context.define_singleton_method(:project_path_match_count) { |_| 1 }
+    context.define_singleton_method(:project_for_path) { |_| project }
+    context.define_singleton_method(:verdict) do |project:, slug:|
+      error = Hive::DependencyAdmission::AdmissionError.new(
+        reason_code: "dependency_reference_invalid",
+        offending_ref: slug,
+        safe_correction: "Repair the declaration."
+      )
+      Hive::DependencyAdmission::Verdict.new(state: :error, admission_error: error)
+    end
+    tasks = [
+      FakeTask.new(slug: "bad-one", id: 1, depends_on: '["a", "!!"]',
+                   folder: "/tmp/bad-one", project_root: "/tmp", project_name: "app"),
+      FakeTask.new(slug: "bad-two", id: 2, depends_on: '{"a" => "b"}',
+                   folder: "/tmp/bad-two", project_root: "/tmp", project_name: "app")
+    ]
+
+    fingerprints = tasks.map do |task|
+      Hive::DependencySnapshot.admission_fingerprint(task, admission_context: context)
+    end
+
+    refute_equal fingerprints.first, fingerprints.last
+  end
+
   def test_admission_fingerprint_includes_every_unmet_list_dependency
     with_tmp_dir do |root|
       dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
@@ -403,6 +455,37 @@ class DependencySnapshotTest < Minitest::Test
       end
 
       refute_equal fingerprints.first, fingerprints.last
+    end
+  end
+
+  def test_transient_branch_inventory_failure_does_not_change_a_stacked_fingerprint
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "base-task"
+      )
+      write_task_meta(root, "9-done", "base-task", id: 1)
+      project = File.basename(root)
+      registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
+      task = FakeTask.new(
+        slug: "dependent-task", id: 2, depends_on: "base-task",
+        folder: dependent, project_root: root, project_name: project
+      )
+      context = Hive::DependencySnapshot.admission_context(registry)
+
+      unavailable = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs, ->(*) { raise Hive::WorktreeError, "git unavailable" }
+      ) do
+        Hive::DependencySnapshot.admission_fingerprint(task, admission_context: context)
+      end
+      available = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs, ->(*) { Set["refs/heads/base-task"] }
+      ) do
+        Hive::DependencySnapshot.admission_fingerprint(task, admission_context: context)
+      end
+
+      assert_equal available, unavailable
     end
   end
 

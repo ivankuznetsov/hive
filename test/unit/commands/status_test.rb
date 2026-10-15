@@ -259,6 +259,33 @@ class CommandsStatusTest < Minitest::Test
     assert warnings.any? { |message| message.include?("IOError: refs unavailable") }
   end
 
+  def test_dependency_base_mode_loads_config_only_when_not_supplied
+    command = Hive::Commands::Status.new
+    fake_task = Struct.new(:project_root).new("/project")
+    observed_default = nil
+
+    mode = with_replaced_singleton_method(
+      Hive::Config, :load, ->(*) { { "default_branch" => "develop" } }
+    ) do
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :base_selection,
+        lambda do |_task, default_branch, **|
+          observed_default = default_branch
+          Hive::DependencySnapshot::BaseSelection.new(branch: nil, mode: "default")
+        end
+      ) do
+        command.send(
+          :dependency_base_mode,
+          { task: fake_task, slug: "dependent", depends_on: "base" },
+          admission_context: Object.new, project_name: "demo"
+        )
+      end
+    end
+
+    assert_equal "default", mode
+    assert_equal "develop", observed_default
+  end
+
   def test_dependency_annotation_reuses_config_and_one_branch_ref_inventory_per_project
     command = Hive::Commands::Status.new
     prerequisite = Struct.new(:slug, :id).new("base", 1)
@@ -389,7 +416,7 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "dependency_validation_failed",
                    row.dig("admission_error", "reason_code")
       assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
-      assert_equal "default", row.fetch("dependency_base_mode")
+      assert_equal "stacked", row.fetch("dependency_base_mode")
     end
   end
 
@@ -420,6 +447,27 @@ class CommandsStatusTest < Minitest::Test
       end
 
       assert_equal false, payload.dig("projects", 0, "tasks", 0, "blocked")
+    end
+  end
+
+  def test_incremental_projection_skips_base_context_and_git_for_list_declarations
+    command = Hive::Commands::Status.new
+    project = { "name" => "demo", "path" => "/project" }
+    rows = [ { slug: "fan-in", depends_on: %w[first second] } ]
+
+    with_replaced_singleton_method(
+      Hive::Worktree, :branch_refs, ->(*) { flunk "lists need no branch inventory" }
+    ) do
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :targeted_admission_context,
+        ->(*) { flunk "lists need no base-only context" }
+      ) do
+        context, available = command.send(
+          :incremental_dependency_base_context, rows, project, nil
+        )
+        assert_nil context
+        assert available
+      end
     end
   end
 
@@ -1260,6 +1308,40 @@ class CommandsStatusTest < Minitest::Test
       end
 
       assert_equal "default", row.fetch("dependency_base_mode")
+    end
+  end
+
+  def test_json_dependency_base_mode_retains_stacked_mode_when_ref_inventory_is_unavailable
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(
+        hive_state, "9-done", "base-task", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task", state_file: "task.md",
+        marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(base, id: 1, slug: "base-task", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "base-task"
+      )
+      command = Hive::Commands::Status.new(json: true)
+      row = nil
+
+      _out, warning = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs,
+        ->(*) { raise Hive::WorktreeError, "temporary ref failure" }
+      ) do
+        capture_io do
+          row = command.json_payload([
+            { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+          ]).dig("projects", 0, "tasks").find { |task| task["slug"] == "dependent-task" }
+        end
+      end
+
+      assert_equal "stacked", row.fetch("dependency_base_mode")
+      assert_includes warning, "retaining base mode without ref evidence"
     end
   end
 

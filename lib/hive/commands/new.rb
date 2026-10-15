@@ -708,11 +708,7 @@ module Hive
       end
 
       def dependency_error_value(value)
-        return value if value.is_a?(String) || value.is_a?(Integer)
-
-        JSON.generate(value)
-      rescue JSON::GeneratorError
-        value.to_s
+        Hive::Dependencies.display_declaration(value)
       end
 
       def validate_creation_dependency_cycle!(project:, slug:, depends_on:, workflow:, task_dir:)
@@ -726,7 +722,7 @@ module Hive
           folder: task_dir
         )
         error = verdict.admission_error
-        return unless error && %w[dependency_cycle dependency_self_reference].include?(error.reason_code)
+        return unless error&.cycle?
 
         path = error.offending_ref
         raise InvalidDependencyError.new(

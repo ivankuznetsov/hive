@@ -237,7 +237,7 @@ module Hive
             claim, effect_id: effect.fetch(:effect_id), reason: "command_pre_application_rejected"
           )
         rescue StandardError
-          persist_uncertainty(claim, effect)
+          persist_uncertainty_without_masking(claim, effect, error)
         end
       elsif claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
@@ -379,6 +379,14 @@ module Hive
       rescue StandardError
         # The original exception remains authoritative and no buffered success is emitted.
       end
+    end
+
+    def persist_uncertainty_without_masking(claim, effect, error = nil)
+      persist_uncertainty(claim, effect, error)
+    rescue StandardError
+      # The caller's rejection remains authoritative even when every receipt
+      # recovery write fails against the same unavailable store.
+      nil
     end
 
     def persisted_receipt_identity(claim)

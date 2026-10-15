@@ -47,6 +47,12 @@ class DependenciesTest < Minitest::Test
                  Hive::Dependencies.normalize_declaration([ "base-task", "base-task" ])
   end
 
+  def test_display_declaration_uses_json_for_composites_and_safe_scalar_fallbacks
+    assert_equal '["a",{"k":"v"}]',
+                 Hive::Dependencies.display_declaration([ "a", { "k" => "v" } ])
+    assert_equal "NaN", Hive::Dependencies.display_declaration(Float::NAN)
+  end
+
   def test_parse_declaration_rejects_invalid_elements_with_their_indexes
     invalid = [ [], [ "base-task", nil ], [ [ "base-task" ] ], [ {} ], { "task" => "base-task" } ]
 
@@ -173,6 +179,9 @@ class DependenciesTest < Minitest::Test
     assert_equal "⏸ blocked by a task dependency", Hive::Dependencies.blocked_label(
       depends_on: [], blocked_by: nil, dependency_stage: nil
     )
+    assert_equal "blocked by a task dependency", Hive::Dependencies.blocker_summary(
+      depends_on: [], blocked_by: nil, dependency_stage: nil
+    )
   end
 
   def test_blocker_names_preserves_order_deduplicates_and_uses_references
@@ -193,6 +202,27 @@ class DependenciesTest < Minitest::Test
     snapshot_entry = task("base-task", id: 42, stage_index: 4)
 
     assert Hive::Dependencies.same_task?(snapshot_entry, current)
+  end
+
+  def test_same_task_accepts_numeric_string_ids_and_warns_for_corrupt_raw_ids
+    assert Hive::Dependencies.same_task?(
+      { "id" => "42" }, { id: 42 }
+    )
+
+    _out, err = capture_io do
+      refute Hive::Dependencies.same_task?(
+        { "id" => "not-an-id" }, { id: 42 }
+      )
+    end
+    assert_includes err, "is not an integer"
+  end
+
+  def test_same_task_warns_for_an_unrecognized_task_shape
+    _out, err = capture_io do
+      refute Hive::Dependencies.same_task?(Object.new, { slug: "task" })
+    end
+
+    assert_includes err, "unrecognized task shape"
   end
 
   private

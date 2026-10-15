@@ -184,6 +184,19 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_read_for_admission_normalizes_non_json_invalid_scalars_to_snapshot_safe_text
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on: .nan\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_equal "NaN", result.data[:depends_on]
+      assert_equal "NaN", Hive::TaskMeta.read(dir)[:depends_on]
+      assert JSON.generate(result.data)
+    end
+  end
+
   def test_read_for_admission_rejects_explicit_null_dependency
     Dir.mktmpdir do |dir|
       File.write(File.join(dir, "meta.yml"), "depends_on:\n")
@@ -345,12 +358,17 @@ class TaskMetaTest < Minitest::Test
 
         value = Hive::TaskMeta.read(dir)[:depends_on]
         assert_instance_of String, value
-        assert_equal declaration.to_s, value
-        assert_equal "⏸ blocked by #{declaration} (unresolved)",
+        assert_equal Hive::Dependencies.display_declaration(declaration), value
+        assert_equal "⏸ blocked by #{value} (unresolved)",
                      Hive::Dependencies.blocked_label(
                        depends_on: value, blocked_by: nil, dependency_stage: nil
                      )
       end
+
+
+      declaration = [ "base-task", { "key" => "value" } ]
+      File.write(File.join(dir, "meta.yml"), YAML.dump("depends_on" => declaration))
+      assert_equal '["base-task",{"key":"value"}]', Hive::TaskMeta.read(dir)[:depends_on]
     end
   end
 

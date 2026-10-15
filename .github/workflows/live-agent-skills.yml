@@ -146,7 +146,7 @@ jobs:
             npm_package: "@openai/codex"
           - platform: pi
             display: Pi
-            npm_package: "@mariozechner/pi-coding-agent"
+            npm_package: "@earendil-works/pi-coding-agent"
     steps:
       - name: Revalidate live-proof authorization
         env:

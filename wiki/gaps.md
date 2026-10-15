@@ -38,10 +38,12 @@ Hive now renders MCP for every agent it launches (plan
   component's `PI` profile still says `0.70.2`. Raising it needs its own
   package change and release (`docs/RELEASING.md`, "Releasing
   agent-cli-runtime"); until then cfg-less profile lookups keep the old floor.
-- **The hivebox Docker image installs Pi 0.70.2** (`packaging/docker/Dockerfile`),
-  which the new floor refuses. Bumping it needs the current npm package name and
-  version checked against the registry; the local Pi 1.2.0 install reports the
-  package `@earendil-works/pi-coding-agent`, not `@mariozechner/pi`.
+- **Closed 2026-10-15: hivebox Docker image and live-skills workflow Pi package.**
+  The Dockerfile installed `@mariozechner/pi@0.70.2`, which ships only a
+  `pi-pods` binary (no `pi`), and the live-agent-skills workflow installed the
+  deprecated `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new
+  floor). Both now install `@earendil-works/pi-coding-agent` (Docker pinned to
+  1.2.0, bin `pi`), which the npm registry names as its replacement.
 - **Live OAuth reuse is unverified (U0 live part deferred).** After the Codex
   quota resets (2026-10-18), launch Codex with `--ignore-user-config` and a
   Hive-rendered `-c mcp_servers.linear…` entry and confirm the existing keyring

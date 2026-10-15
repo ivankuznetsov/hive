@@ -36,7 +36,7 @@ service installation, and reverse-proxy boundaries are documented in
 No. Hive has two supported routes: install native Hive and run `hive setup`
 (Homebrew on macOS arm64, AUR on Arch, the bash installer on glibc Linux, or
 any of those inside WSL with systemd on Windows) when you want to run and
-tinker with it yourself, or use the hosted Hive cloud product when you would
+tinker with it yourself, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) when you would
 rather not. The Hivebox Docker distribution is discontinued. Already published
 `ghcr.io/ivankuznetsov/hivebox` images keep running but get no new builds or
 updates.

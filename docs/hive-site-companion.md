@@ -44,7 +44,7 @@ installed, enabled, running, manager availability, URL, and readiness distinct.
 
 Hive has two supported routes: install native Hive (Homebrew on macOS arm64,
 AUR on Arch, the bash installer on glibc Linux) when the reader wants to run
-and tinker with it, or use the hosted Hive cloud product otherwise. Windows
+and tinker with it, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) otherwise. Windows
 guidance is native Hive inside WSL with systemd. The Hivebox Docker
 distribution is discontinued: already published images keep running but get no
 updates, and the site must no longer offer the `hivecli.sh/box` or `box.ps1`
@@ -100,4 +100,4 @@ explicitly authorized versioned changelog section:
 > major release. Setup never creates or widens network exposure. The Hivebox
 > Docker distribution is discontinued: published images keep working but get
 > no updates; Windows users run native Hive inside WSL, and everyone who would
-> rather not self-host uses the hosted Hive cloud product.
+> rather not self-host uses the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh).

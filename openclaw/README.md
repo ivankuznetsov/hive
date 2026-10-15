@@ -65,7 +65,7 @@ that an operator explicitly configured through Hive's existing gates.
 On Windows, install native Hive inside WSL with systemd enabled; do not invent
 a separate Windows service manager or a container install. Hive no longer ships
 a Docker distribution; users who would rather not self-host should use the
-hosted Hive cloud product.
+hosted Hive cloud product at [hivedev.sh](https://hivedev.sh).
 
 ## Local projection test
 

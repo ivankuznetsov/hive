@@ -159,7 +159,7 @@ run bare `hive web` as a read-only status check. Use
 already installs the managed service unless `--no-service` is passed.
 
 Hive does not ship a Docker distribution. If the user would rather not run
-Hive themselves, point them to the hosted Hive cloud product instead of a
+Hive themselves, point them to the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) instead of a
 container. The discontinued Hivebox images still run but receive no updates; to
 migrate one, install native Hive, run `hive setup`, copy or reclone the
 projects from the box's `/data/repos` mount, register each with `hive init`,

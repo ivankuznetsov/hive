@@ -28,7 +28,7 @@ Tailscale exposure. Use `hive setup --no-service` to keep Hive web
 foreground-only, `hive web` to run it in the foreground, and
 `hive web status --json` for read-only structured state. Windows users should
 install native Hive inside WSL with systemd enabled. If you would rather not
-run Hive yourself, use the hosted Hive cloud product; Hive no longer ships a
+run Hive yourself, use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh); Hive no longer ships a
 Docker distribution (see [the FAQ](faq.md#is-there-a-docker-image-what-happened-to-hivebox)).
 
 ## Step 2 - Attach Hive To A Project

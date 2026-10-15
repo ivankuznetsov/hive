@@ -96,7 +96,7 @@ workstation; it is the self-hosted route. On Windows, install
 native Hive inside WSL with systemd enabled; do not invent a separate Windows
 service manager or a container install. Hive does not ship a Docker
 distribution; users who do not want to run Hive themselves should use the
-hosted Hive cloud product instead.
+hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) instead.
 
 Initial project enrollment is a separate consent boundary. Explain that a
 non-TTY `hive init` takes defaults that enable medium patrol, architecture

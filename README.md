@@ -109,7 +109,7 @@ the intended owner before sharing that URL. Set
 Windows users should install native Hive inside WSL with systemd enabled.
 
 Hive has two supported routes: install native Hive (above) when you want to
-run and tinker with it yourself, or use the hosted Hive cloud product when you
+run and tinker with it yourself, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) when you
 would rather not. The Hivebox Docker distribution is discontinued: already
 published `ghcr.io/ivankuznetsov/hivebox` images keep running but receive no
 further builds or updates. To move a Hivebox install to native Hive, install

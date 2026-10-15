@@ -2,7 +2,7 @@
 
 - Hive now has two supported routes: native Hive (Homebrew on macOS arm64,
   AUR on Arch, `install.sh` on glibc Linux, WSL with systemd on Windows) for
-  people who want to tinker, or the hosted cloud product for everyone else.
+  people who want to tinker, or the hosted cloud product (hivedev.sh) for everyone else.
   ADR-055 in [[decisions]] records the decision and supersedes ADR-037's
   Hivebox container deployment mode plus the Hivebox-specific consequences of
   ADR-035/ADR-036.

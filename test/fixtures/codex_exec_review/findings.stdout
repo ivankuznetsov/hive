@@ -1,0 +1,12 @@
+The patch computes incorrect averages, changes empty-input error handling, and introduces shell command injection through configuration paths.
+
+Full review comments:
+
+- [P1] Read configuration files without invoking a shell — /worktree/calc.py:17-17
+  If `path` contains shell metacharacters, `os.system` executes them as commands with the application's privileges; for example, `settings.json; echo injected` executes an additional command. Paths containing spaces also break. Read the file directly rather than concatenating its path into a shell command.
+
+- [P1] Include the first value in the average — /worktree/calc.py:4-4
+  Starting the loop at index 1 excludes the first value while still dividing by the full list length. Consequently, `average([2, 4])` returns `2.0` instead of `3.0`, and every nonzero singleton returns zero. Iterate over all values.
+
+- [P2] Preserve the empty-input validation — /worktree/calc.py:6-6
+  For an empty list, the removed validation changes the exception from the explicit `ValueError` to `ZeroDivisionError`. This breaks callers handling invalid input via `ValueError`; restore the non-empty check before calculating the mean.

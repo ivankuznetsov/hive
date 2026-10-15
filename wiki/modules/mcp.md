@@ -54,7 +54,7 @@ Wiring:
 - A managed `RuntimePolicy` with `mcp_isolated` (strict Claude policy, Codex/Pi/Grok managed actors) gets nothing extra; a yolo `direct_policy` is not isolated and gets normal rendering.
 - The agent log records `[hive] mcp isolation=<isolated|partial|none|inherit|managed>` and each notice.
 - `test/unit/mcp/launch_site_contract_test.rb` fails on any `AgentRuntime.compile(` / `Hive::Agent.new(` / `profile.bin` argv site that does not reference `Hive::Mcp`; the TUI steer session is the listed exemption.
-- The native `codex review` reviewer cannot take `--ignore-user-config`; it logs that it is not isolated until `codex exec review` output is verified (see [[gaps]]).
+- The native Codex reviewer (`AgentSupport::Codex::Reviewer`, scope `review`) runs `codex exec review` inside `Hive::Mcp.with_launch`, so it gets the same `--ignore-user-config` + `-c` launch as other Codex launches (top-level `codex review` has no such flag). The launch's notices go to the task's `isolation-warnings.log`, since the adapter keeps no agent log. See [[modules/reviewers]].
 
 ## Doctor
 

@@ -17,7 +17,7 @@ class ReleaseContractTest < Minitest::Test
   COLLECT_EVIDENCE = File.join(ROOT, "packaging/release_candidate/workflows/collect_evidence.sh")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
-  SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+  SETUP_NODE_ACTION = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"
   GITHUB_SCRIPT_ACTION = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
   CANDIDATE_SHA = "a" * 40
   WORKFLOW_SHA = "b" * 40

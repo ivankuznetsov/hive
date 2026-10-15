@@ -173,6 +173,96 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_restore_human_destination_reports_invalid_metadata_without_writing
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      Hive::TaskMeta.write(source, id: 1, slug: "source", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+      File.write(Hive::TaskMeta.path(source), "id: [\n")
+      state = File.join(source, "approval.md")
+      File.write(state, "current\n")
+
+      _out, err = capture_io do
+        assert_includes command.send(
+          :restore_human_destination!, task(folder: source), nil,
+          { state_file: "approval.md", existed: true, body: "original\n" },
+          observation: observation
+        ), "invalid task metadata while restoring human state"
+      end
+
+      assert_includes err, "invalid task metadata while restoring human state"
+      assert_equal "current\n", File.read(state)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_failed_move_with_replaced_task_reports_incomplete_rollback
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "work.md"), "ready\n")
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      prepare_test_task_lease_repository(source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      cmd = command
+      cmd.define_singleton_method(:initialize_human_destination!) do |locked, _dest|
+        metadata = File.binread(Hive::TaskMeta.path(locked.folder))
+        FileUtils.rm_rf(locked.folder)
+        FileUtils.mkdir_p(locked.folder)
+        File.binwrite(Hive::TaskMeta.path(locked.folder), metadata)
+        File.write(File.join(locked.folder, "done.md"), "replacement\n")
+        { state_file: "done.md", existed: false, body: nil }
+      end
+
+      error = nil
+      _out, err = capture_io do
+        error = assert_raises(Hive::RollbackFailed) do
+          cmd.send(:perform_move_and_commit, current, "2-done")
+        end
+      end
+
+      assert_kind_of Hive::TaskMeta::StaleTask, error.cause
+      assert_includes error.message, "stale task while restoring human state"
+      assert_includes err, "approve rollback skipped stale task"
+      assert_equal "replacement\n", File.read(File.join(source, "done.md"))
+      refute File.exist?(File.join(state, "stages", "2-done", "slug-260522-abcd")),
+             "a same-path replacement must never be moved into the destination stage"
+    end
+  end
+
+  def test_move_task_rejects_a_task_missing_before_the_move
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      approve_task = task(folder: source, hive_state_path: state, project_root: root)
+
+      error = assert_raises(Hive::TaskMeta::StaleTask) do
+        command.send(:move_task!, approve_task, "3-plan")
+      end
+
+      assert_includes error.message, "disappeared before move"
+      refute File.exist?(File.join(state, "stages", "3-plan", "slug-260522-abcd"))
+    end
+  end
+
+  def test_cross_device_move_rejects_a_missing_source
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      dst = File.join(root, "dst")
+
+      error = assert_raises(Hive::TaskMeta::StaleTask) do
+        command.send(:cross_device_move!, File.join(root, "missing"), dst)
+      end
+
+      assert_includes error.message, "source disappeared"
+      refute File.exist?(dst)
+    end
+  end
+
   def test_initialize_human_destination_refuses_symlinked_state_file
     with_tmp_dir do |root|
       source = File.join(root, "source")
@@ -446,6 +536,48 @@ class HiveCommandsApproveTest < Minitest::Test
       refute committed
       refute File.exist?(source)
       refute File.exist?(destination)
+    end
+  end
+
+  def test_replaced_terminal_task_at_completion_persistence_never_commits_success
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "1-work", "slug-260522-abcd")
+      destination = File.join(state, "stages", "2-done", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "work.md"), "ready\n")
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      prepare_test_task_lease_repository(source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 1, stage_name: "work", workflow: terminal_workflow
+      )
+      committed = false
+      cmd = command(clock: -> { Time.utc(2026, 10, 14, 12) })
+      cmd.define_singleton_method(:record_hive_commit) { |*| committed = true }
+      original = Hive::TaskMeta.method(:write_completed_at_once)
+      replace_at_persistence = lambda do |folder, value, **kwargs|
+        metadata = File.binread(Hive::TaskMeta.path(folder))
+        FileUtils.rm_rf(folder)
+        FileUtils.mkdir_p(folder)
+        File.binwrite(Hive::TaskMeta.path(folder), metadata)
+        File.write(File.join(folder, "replacement.txt"), "keep\n")
+        original.call(folder, value, **kwargs)
+      end
+
+      with_replaced_singleton_method(
+        Hive::TaskMeta, :write_completed_at_once, replace_at_persistence
+      ) do
+        assert_raises(Hive::Error) do
+          cmd.send(:perform_move_and_commit, current, "2-done")
+        end
+      end
+
+      refute committed, "a stale completion must not reach the success commit"
+      refute File.exist?(source), "rollback must not move the replacement back"
+      assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
+      refute Hive::TaskMeta.read(destination).key?(:completed_at),
+             "the replacement must not receive the stale completion clock"
     end
   end
 
@@ -1023,9 +1155,9 @@ class HiveCommandsApproveTest < Minitest::Test
       src = File.join(root, "src")
       dst = File.join(root, "dst")
       FileUtils.mkdir_p(src)
-      FileUtils.mkdir_p(dst)
       original = FileUtils.singleton_class.instance_method(:cp_r)
       FileUtils.define_singleton_method(:cp_r) do |*_args|
+        File.write(File.join(dst, "partial"), "half\n")
         raise Errno::ENOSPC, "full"
       end
 
@@ -1036,6 +1168,60 @@ class HiveCommandsApproveTest < Minitest::Test
       refute Dir.exist?(dst), "partial destination must be cleaned"
     ensure
       FileUtils.singleton_class.define_method(:cp_r, original) if original
+    end
+  end
+
+  def test_cross_device_copy_failure_preserves_a_destination_replaced_mid_copy
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      src = File.join(root, "src")
+      dst = File.join(root, "dst")
+      FileUtils.mkdir_p(src)
+      original = FileUtils.singleton_class.instance_method(:cp_r)
+      FileUtils.define_singleton_method(:cp_r) do |*_args|
+        Dir.rmdir(dst)
+        Dir.mkdir(dst)
+        File.write(File.join(dst, "replacement.txt"), "keep\n")
+        raise Errno::ENOSPC, "full"
+      end
+
+      assert_raises(Hive::Error) { command.send(:cross_device_move!, src, dst) }
+
+      assert Dir.exist?(src), "failed copy must leave source in place"
+      assert_equal "keep\n", File.read(File.join(dst, "replacement.txt"))
+    ensure
+      FileUtils.singleton_class.define_method(:cp_r, original) if original
+    end
+  end
+
+  def test_cross_device_move_never_copies_into_an_existing_destination
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      destination = File.join(state, "stages", "3-plan", "slug-260522-abcd")
+      Hive::TaskMeta.write(source, id: 1, slug: "slug-260522-abcd", display_name: nil)
+      approve_task = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command
+      cmd.define_singleton_method(:destination_exists?) { |_path| false }
+      original = File.singleton_class.instance_method(:rename)
+      File.define_singleton_method(:rename) do |from, to|
+        if from == source
+          FileUtils.mkdir_p(destination)
+          File.write(File.join(destination, "replacement.txt"), "keep\n")
+          raise Errno::EXDEV, "cross-device"
+        end
+
+        original.bind_call(File, from, to)
+      end
+
+      error = assert_raises(Hive::DestinationCollision) do
+        cmd.send(:move_task!, approve_task, "3-plan")
+      end
+
+      assert_equal destination, error.path
+      assert_equal [ "replacement.txt" ], Dir.children(destination)
+      assert File.exist?(Hive::TaskMeta.path(source)), "source must stay in place"
+    ensure
+      File.singleton_class.define_method(:rename, original) if original
     end
   end
 

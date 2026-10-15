@@ -293,77 +293,45 @@ module Hive
         revalidate_selections!(operations)
         mutated = []
         operations.each do |operation|
-          destination_handle = nil
-          begin
-            Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
-            snapshot = Hive::TaskMeta.snapshot(operation.source)
-            FileUtils.mkdir_p(File.dirname(operation.destination))
-            mutation = { operation: operation, snapshot: snapshot, artifact_moved: false }
-            if operation.source != operation.destination
-              cross_device = false
-              begin
-                File.rename(operation.source, operation.destination)
-              rescue Errno::EXDEV
-                begin
-                  FileUtils.cp_r(operation.source, operation.destination)
-                rescue StandardError
-                  FileUtils.rm_rf(operation.destination) if File.exist?(operation.source)
-                  raise
-                end
-                copied_handle = Hive::TaskMeta.capture_directory_handle!(operation.destination)
-                begin
-                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
-                    operation.destination, operation.observation,
-                    directory_handle: copied_handle
-                  )
-                  copied_handle = nil
-                rescue StandardError
-                  if File.exist?(operation.source) &&
-                     Hive::TaskMeta.directory_handle_matches?(
-                       operation.destination, copied_handle
-                     )
-                    FileUtils.rm_rf(operation.destination)
-                  end
-                  raise
-                ensure
-                  copied_handle&.close unless copied_handle&.closed?
-                end
-                FileUtils.rm_rf(operation.source)
-                cross_device = true
-              end
-              mutated << mutation
-              if cross_device
-                Hive::TaskMeta.relocate_observation!(
-                  operation.source, operation.destination, operation.observation,
-                  destination_handle: destination_handle
-                )
-                destination_handle = nil
-              elsif !operation.observation.same_directory?(operation.destination)
-                raise Hive::TaskMeta::StaleTask,
-                      "managed task #{operation.slug} destination changed identity after move"
-              end
-            else
-              mutated << mutation
-            end
-            if operation.from_state_file != operation.to_state_file
-              from = File.join(operation.destination, operation.from_state_file)
-              to = File.join(operation.destination, operation.to_state_file)
-              if File.exist?(from)
-                FileUtils.mkdir_p(File.dirname(to))
-                FileUtils.mv(from, to)
-                mutation[:artifact_moved] = true
+          Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
+          snapshot = Hive::TaskMeta.snapshot(operation.source)
+          FileUtils.mkdir_p(File.dirname(operation.destination))
+          mutation = { operation: operation, snapshot: snapshot, artifact_moved: false }
+          if operation.source != operation.destination
+            begin
+              move_task_directory!(
+                operation.source, operation.destination, operation.observation
+              )
+            ensure
+              # Record the move for rollback as soon as the task left its
+              # source, even when post-copy custody checks fail afterwards.
+              if !File.exist?(operation.source) && File.exist?(operation.destination)
+                mutated << mutation
               end
             end
-            result = Hive::TaskMeta.rewrite(
-              operation.destination, operation.to_pin,
-              observation: operation.observation
-            )
-            if result.stale?
+            unless operation.observation.same_directory?(operation.destination)
               raise Hive::TaskMeta::StaleTask,
-                    "managed workflow pin update lost task custody for #{operation.slug}"
+                    "managed task #{operation.slug} destination changed identity after move"
             end
-          ensure
-            destination_handle&.close unless destination_handle&.closed?
+          else
+            mutated << mutation
+          end
+          if operation.from_state_file != operation.to_state_file
+            from = File.join(operation.destination, operation.from_state_file)
+            to = File.join(operation.destination, operation.to_state_file)
+            if File.exist?(from)
+              FileUtils.mkdir_p(File.dirname(to))
+              FileUtils.mv(from, to)
+              mutation[:artifact_moved] = true
+            end
+          end
+          result = Hive::TaskMeta.rewrite(
+            operation.destination, operation.to_pin,
+            observation: operation.observation
+          )
+          if result.stale?
+            raise Hive::TaskMeta::StaleTask,
+                  "managed workflow pin update lost task custody for #{operation.slug}"
           end
         end
 
@@ -396,10 +364,8 @@ module Hive
         issues = []
         mutated.reverse_each do |mutation|
           operation = mutation.fetch(:operation)
-          destination_handle = nil
           begin
-            current = operation.destination
-            Hive::TaskMeta.validate_observation!(current, operation.observation)
+            Hive::TaskMeta.validate_observation!(operation.destination, operation.observation)
             if operation.source != operation.destination && File.exist?(operation.source)
               issues << rollback_issue(
                 operation,
@@ -412,46 +378,10 @@ module Hive
               to = File.join(operation.destination, operation.from_state_file)
               FileUtils.mv(from, to) if File.exist?(from)
             end
-            if operation.source != operation.destination && File.exist?(operation.destination)
-              cross_device = false
-              begin
-                File.rename(operation.destination, operation.source)
-              rescue Errno::EXDEV
-                begin
-                  FileUtils.cp_r(operation.destination, operation.source)
-                rescue StandardError
-                  FileUtils.rm_rf(operation.source) if File.exist?(operation.destination)
-                  raise
-                end
-                copied_handle = Hive::TaskMeta.capture_directory_handle!(operation.source)
-                begin
-                  destination_handle = Hive::TaskMeta.capture_relocation_handle!(
-                    operation.source, operation.observation,
-                    directory_handle: copied_handle
-                  )
-                  copied_handle = nil
-                rescue StandardError
-                  if File.exist?(operation.destination) &&
-                     Hive::TaskMeta.directory_handle_matches?(operation.source, copied_handle)
-                    FileUtils.rm_rf(operation.source)
-                  end
-                  raise
-                ensure
-                  copied_handle&.close unless copied_handle&.closed?
-                end
-                FileUtils.rm_rf(operation.destination)
-                cross_device = true
-              end
-              if cross_device
-                Hive::TaskMeta.relocate_observation!(
-                  operation.destination, operation.source, operation.observation,
-                  destination_handle: destination_handle
-                )
-                destination_handle = nil
-              elsif !operation.observation.same_directory?(operation.source)
-                raise Hive::TaskMeta::StaleTask,
-                      "managed task #{operation.slug} rollback destination changed identity"
-              end
+            if operation.source != operation.destination
+              move_task_directory!(
+                operation.destination, operation.source, operation.observation
+              )
             end
             Hive::TaskMeta.validate_observation!(operation.source, operation.observation)
             restored = Hive::TaskMeta.restore(
@@ -469,11 +399,17 @@ module Hive
             issues << rollback_issue(
               operation, "failed: #{error.class}: #{error.message}"
             )
-          ensure
-            destination_handle&.close unless destination_handle&.closed?
           end
         end
         issues
+      end
+
+      # Same-filesystem moves keep the observed inode; cross-device moves copy
+      # under handle custody and rebind the observation to the copy.
+      def move_task_directory!(from, to, observation)
+        File.rename(from, to)
+      rescue Errno::EXDEV
+        Hive::TaskMeta.relocate_across_devices!(from, to, observation)
       end
 
       def rollback_issue(operation, detail)

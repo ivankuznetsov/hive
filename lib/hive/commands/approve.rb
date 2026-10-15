@@ -524,27 +524,9 @@ module Hive
       def restore_rearmed_stages!(task, new_folder, snapshots, observation:)
         return unless snapshots
 
-        folder = File.directory?(task.folder) ? task.folder : new_folder
-        folder ||= task.folder
-        issues = []
-        snapshots.reverse_each do |snapshot|
-          begin
-            path = File.join(folder, snapshot.fetch(:state_file))
-            Hive::Markers.with_markers_lock(path, create: false) do
-              Hive::TaskMeta.validate_observation!(folder, observation)
-              if snapshot.fetch(:existed)
-                Hive::Markers.write_atomic(path, snapshot.fetch(:body))
-              else
-                File.delete(path) if File.exist?(path) || File.symlink?(path)
-              end
-            end
-          rescue Hive::TaskMeta::InvalidMetadata => error
-            issues << rollback_skip(
-              "invalid task metadata while restoring rewound stages", error
-            )
-          rescue Hive::TaskMeta::StaleTask, SystemCallError, IOError, ArgumentError => error
-            issues << rollback_skip("stale task while restoring rewound stages", error)
-          end
+        folder = rollback_folder(task, new_folder)
+        issues = snapshots.reverse_each.filter_map do |snapshot|
+          restore_state_snapshot(folder, snapshot, observation, "rewound stages")
         end
         issues.empty? ? nil : issues.join("; ")
       end
@@ -603,9 +585,18 @@ module Hive
       def restore_human_destination!(task, new_folder, snapshot, observation:)
         return unless snapshot
 
-        folder = File.directory?(task.folder) ? task.folder : new_folder
-        folder ||= task.folder
+        restore_state_snapshot(
+          rollback_folder(task, new_folder), snapshot, observation, "human state"
+        )
+      end
 
+      def rollback_folder(task, new_folder)
+        File.directory?(task.folder) || new_folder.nil? ? task.folder : new_folder
+      end
+
+      # Restore one state file only while the folder is still the observed
+      # task; a stale or replaced task is reported, never overwritten.
+      def restore_state_snapshot(folder, snapshot, observation, label)
         path = File.join(folder, snapshot.fetch(:state_file))
         Hive::Markers.with_markers_lock(path, create: false) do
           Hive::TaskMeta.validate_observation!(folder, observation)
@@ -617,9 +608,9 @@ module Hive
         end
         nil
       rescue Hive::TaskMeta::InvalidMetadata => error
-        rollback_skip("invalid task metadata while restoring human state", error)
+        rollback_skip("invalid task metadata while restoring #{label}", error)
       rescue Hive::TaskMeta::StaleTask, SystemCallError, IOError, ArgumentError => error
-        rollback_skip("stale task while restoring human state", error)
+        rollback_skip("stale task while restoring #{label}", error)
       end
 
       def rollback_skip(context, error)
@@ -655,16 +646,18 @@ module Hive
         # is uniform regardless of platform.
         raise_destination_collision(new_folder) if destination_exists?(new_folder)
 
+        # Never carry a same-path replacement into the destination stage.
+        Hive::TaskMeta.validate_observation!(task.folder, observation) if observation
         begin
           File.rename(task.folder, new_folder)
         rescue Errno::ENOTEMPTY, Errno::EEXIST, Errno::EISDIR
           raise_destination_collision(new_folder)
         rescue Errno::EXDEV
-          cross_device_move!(task.folder, new_folder, observation: observation)
-        end
-        if observation && !observation.same_directory?(new_folder)
-          raise Hive::TaskMeta::StaleTask,
-                "approve destination changed identity after same-filesystem move"
+          begin
+            cross_device_move!(task.folder, new_folder, observation: observation)
+          rescue Errno::EEXIST
+            raise_destination_collision(new_folder)
+          end
         end
         Hive::TaskMeta.validate_observation!(new_folder, observation) if observation
         new_folder
@@ -678,48 +671,18 @@ module Hive
         File.exist?(path) || File.directory?(path)
       end
 
-      # Cross-device fallback: copy then remove. If the copy fails partway
-      # through (ENOSPC mid-tree, EACCES on a child), tear down the partial
-      # destination so the next retry doesn't hit a phantom "destination
-      # exists" collision. The source is left intact on copy failure.
+      # Cross-device fallback: copy then remove (see
+      # Hive::TaskMeta.relocate_across_devices!). A failed or rejected copy is
+      # torn down only while it is still this process's copy, so the next
+      # retry doesn't hit a phantom "destination exists" collision and a
+      # same-path replacement survives. The source is left intact on failure.
       def cross_device_move!(src, dst, observation: nil)
         Hive::TaskMeta.with_observation(src, observation) do |current_observation|
           unless current_observation
             raise Hive::TaskMeta::StaleTask, "cross-device move source disappeared"
           end
-          cross_device_move_observed!(src, dst, observation: current_observation)
+          Hive::TaskMeta.relocate_across_devices!(src, dst, current_observation)
         end
-      end
-
-      def cross_device_move_observed!(src, dst, observation:)
-        begin
-          FileUtils.cp_r(src, dst)
-        rescue StandardError => e
-          FileUtils.rm_rf(dst) if File.exist?(dst)
-          raise Hive::Error,
-                "cross-device move failed while copying; partial destination cleaned up. " \
-                "underlying: #{e.class}: #{e.message}"
-        end
-        copied_handle = Hive::TaskMeta.capture_directory_handle!(dst)
-        begin
-          destination_handle = Hive::TaskMeta.capture_relocation_handle!(
-            dst, observation, directory_handle: copied_handle
-          )
-          copied_handle = nil
-        rescue StandardError
-          if File.exist?(src) && Hive::TaskMeta.directory_handle_matches?(dst, copied_handle)
-            FileUtils.rm_rf(dst)
-          end
-          raise
-        end
-        FileUtils.rm_rf(src)
-        Hive::TaskMeta.relocate_observation!(
-          src, dst, observation, destination_handle: destination_handle
-        )
-        destination_handle = nil
-      ensure
-        copied_handle&.close unless copied_handle&.closed?
-        destination_handle&.close unless destination_handle&.closed?
       end
 
       def raise_destination_collision(path)
@@ -841,16 +804,11 @@ module Hive
         )
       end
 
+      # The caller revalidates the observation at the destination.
       def move_observed_task!(source, destination, observation:)
-        begin
-          File.rename(source, destination)
-        rescue Errno::EXDEV
-          return cross_device_move!(source, destination, observation: observation)
-        end
-        unless observation.same_directory?(destination)
-          raise Hive::TaskMeta::StaleTask,
-                "rollback destination changed identity after same-filesystem move"
-        end
+        File.rename(source, destination)
+      rescue Errno::EXDEV
+        cross_device_move!(source, destination, observation: observation)
       end
 
       def completion_on_terminal_entry?(task, dest_stage)

@@ -101,10 +101,15 @@ For stages 4 and later:
   even when it copies every metadata byte. Directory handles are opened
   nonblocking, so a FIFO at a task path is rejected instead of hanging. An
   authorized cross-device move may rebind only through a handle captured from
-  the exact destination copy before the source is removed. Cross-device
-  callers retain that raw directory handle while validating metadata; cleanup
-  removes the copy only if the destination path still resolves to that handle,
-  preserving a replacement installed before validation rejects the copy.
+  the exact destination copy before the source is removed. Approve and
+  `TaskMigrator` share `relocate_across_devices!`: it creates the destination
+  with an exclusive `Dir.mkdir` (an existing path is never copied into), holds
+  its handle before copying the source contents, validates the copy's stable
+  identity and that the source is still the observed directory, and only then
+  removes the source and rebinds the observation. Every cleanup path (copy
+  failure, identity rejection, replaced source) removes the copy only if the
+  destination path still resolves to that handle and the source still exists,
+  preserving a replacement installed at either path.
 - `rewrite(...)` and the display-name/id setters are update-only. They return
   an `UpdateResult` with `applied?` or `stale?`, never create a missing task
   directory, preserve unrelated fields, and keep invalid metadata or real I/O

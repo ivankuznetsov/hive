@@ -198,6 +198,38 @@ module Hive
       raise
     end
 
+    # Copy-and-remove relocation for workflow moves that cannot rename across
+    # devices. The destination is created exclusively and held by handle
+    # before any byte is copied, so cleanup removes only this copy and never a
+    # same-path replacement. The source is removed only after the copy's
+    # stable identity matches and the source is still the observed directory;
+    # the observation is then rebound to the copy.
+    def relocate_across_devices!(source, destination, observation)
+      Dir.mkdir(destination)
+      copied = capture_directory_handle!(destination)
+      begin
+        begin
+          FileUtils.cp_r(File.join(source, "."), destination)
+        rescue StandardError => error
+          raise Hive::Error,
+                "cross-device move failed while copying; partial destination cleaned up. " \
+                "underlying: #{error.class}: #{error.message}"
+        end
+        capture_relocation_handle!(destination, observation, directory_handle: copied)
+        validate_observation!(source, observation)
+      rescue StandardError
+        if File.exist?(source) && directory_handle_matches?(destination, copied)
+          FileUtils.rm_rf(destination)
+        end
+        raise
+      end
+      FileUtils.rm_rf(source)
+      relocate_observation!(source, destination, observation, destination_handle: copied)
+      copied = nil
+    ensure
+      copied&.close unless copied&.closed?
+    end
+
     def read(task_folder)
       raw = YAML.safe_load(File.read(path(task_folder))) || {}
       return empty unless raw.is_a?(Hash)

@@ -128,10 +128,10 @@ weakening owner-authored descriptor compatibility:
   source-to-destination move and requires every pin rewrite to be applied before
   success counts, pathspecs, the commit callback, recovery pruning, or package
   cleanup. Same-filesystem moves retain the original inode; cross-device moves
-  capture the exact copied destination before removing the source. Forward and
-  rollback copies retain that handle through validation and delete the copy on
-  rejection only while the path still names the captured directory; a substituted
-  destination is preserved. An unexpected destination identity is rejected, and every completed move enters the rollback
+  go through `TaskMeta.relocate_across_devices!` in both directions (see
+  [[modules/task]]): the copy is created exclusively and held by handle before
+  any byte is copied, and is deleted on failure or rejection only while the
+  path still names that directory; a substituted destination is preserved. An unexpected destination identity is rejected, and every completed move enters the rollback
   set before fallible observation rebinding. Its transaction rollback validates
   that same observation before moving artifacts or restoring metadata. A dropped
   task is not recreated and a copied same-path replacement is left untouched;

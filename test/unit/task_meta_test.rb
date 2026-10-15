@@ -70,6 +70,122 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_relocation_requires_custody_of_the_copied_destination
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+      FileUtils.mv(source, destination)
+
+      error = assert_raises(ArgumentError) do
+        Hive::TaskMeta.relocate_observation!(
+          source, destination, observation, destination_handle: nil
+        )
+      end
+      assert_includes error.message, "requires custody"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_directory_custody_rejects_files_missing_paths_and_foreign_metadata
+    with_tmp_dir do |root|
+      file = File.join(root, "file")
+      File.write(file, "not a directory\n")
+      error = assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.capture_directory_handle!(file)
+      end
+      assert_includes error.message, "changed while capturing custody"
+      assert_raises(Errno::ENOENT) do
+        Hive::TaskMeta.capture_directory_handle!(File.join(root, "missing"))
+      end
+
+      source = File.join(root, "source")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      handle = Hive::TaskMeta.capture_directory_handle!(source)
+      refute Hive::TaskMeta.directory_handle_matches?(File.join(root, "missing"), handle)
+
+      observation = Hive::TaskMeta.observe(source)
+      foreign = File.join(root, "foreign")
+      Hive::TaskMeta.write(foreign, id: 8, slug: "other", display_name: nil)
+      error = assert_raises(Hive::TaskMeta::StaleTask) do
+        Hive::TaskMeta.capture_relocation_handle!(foreign, observation)
+      end
+      assert_includes error.message, "relocated task metadata identity changed"
+    ensure
+      handle&.close
+      observation&.close
+    end
+  end
+
+  def test_relocate_across_devices_moves_the_task_and_rebinds_custody
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      File.write(File.join(source, ".hidden"), "kept\n")
+      observation = Hive::TaskMeta.observe(source)
+
+      Hive::TaskMeta.relocate_across_devices!(source, destination, observation)
+
+      refute File.exist?(source)
+      assert_equal "kept\n", File.read(File.join(destination, ".hidden"))
+      assert Hive::TaskMeta.validate_observation!(destination, observation)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_relocate_across_devices_keeps_a_replaced_source_and_drops_only_its_copy
+    with_tmp_dir do |root|
+      source = File.join(root, "source")
+      destination = File.join(root, "destination")
+      Hive::TaskMeta.write(source, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(source)
+      original = Hive::TaskMeta.method(:capture_relocation_handle!)
+      replace_source = lambda do |path, observed, directory_handle: nil|
+        handle = original.call(path, observed, directory_handle: directory_handle)
+        metadata = File.binread(Hive::TaskMeta.path(source))
+        FileUtils.rm_rf(source)
+        FileUtils.mkdir_p(source)
+        File.binwrite(Hive::TaskMeta.path(source), metadata)
+        File.write(File.join(source, "replacement.txt"), "keep\n")
+        handle
+      end
+
+      with_replaced_singleton_method(
+        Hive::TaskMeta, :capture_relocation_handle!, replace_source
+      ) do
+        assert_raises(Hive::TaskMeta::StaleTask) do
+          Hive::TaskMeta.relocate_across_devices!(source, destination, observation)
+        end
+      end
+
+      assert_equal "keep\n", File.read(File.join(source, "replacement.txt"))
+      refute File.exist?(destination), "the rejected copy must be removed"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_guarded_restore_rejects_restored_bytes_that_are_not_valid_metadata
+    with_tmp_dir do |root|
+      folder = File.join(root, "task")
+      Hive::TaskMeta.write(folder, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(folder)
+      snapshot = Hive::TaskMeta::Snapshot.new(exists: true, bytes: "id: [\n")
+
+      error = assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.restore(folder, snapshot, observation: observation, create: false)
+      end
+
+      assert_includes error.message, "cannot restore invalid task metadata"
+    ensure
+      observation&.close
+    end
+  end
+
   def test_relocation_rebinds_the_observation_and_rejects_unsafe_destinations
     with_tmp_dir do |root|
       source = File.join(root, "source")

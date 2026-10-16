@@ -530,7 +530,9 @@ class ClaudeStageDispatchTest < Minitest::Test
       end
       marker = Hive::Markers.current(task.state_file)
       with_replaced_singleton_method(Hive::PlanReview::Orchestrator, :run!, ->(**) { reviewed = true }) do
-        assert_nil Hive::Stages::Plan.start_plan_review(task, cfg, claude_profile(cfg), result, marker)
+        assert_nil Hive::Stages::Plan.start_plan_review(
+          task, cfg, claude_profile(cfg), result, marker, observation: nil
+        )
       end
 
       assert_equal :error, result.fetch(:status)

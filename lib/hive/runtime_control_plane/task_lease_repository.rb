@@ -37,14 +37,17 @@ module Hive
         end
       end
 
-      def acquire(task_folder, payload, create: true)
+      def acquire(task_folder, payload, create: true, observation: nil)
         folder = File.expand_path(task_folder)
-        if create
+        if create && !observation
           FileUtils.mkdir_p(folder)
         elsif !File.directory?(folder)
+          if observation
+            raise Hive::TaskMeta::StaleTask, "task directory changed identity at #{folder}"
+          end
           raise Errno::ENOENT, folder
         end
-        subject = subject_for(folder, observe: true)
+        subject = subject_for(folder, observe: true, observation: observation)
         data = { "started_at" => Codec.dump_time(@clock.call) }.merge(payload.transform_keys(&:to_s))
         data["pid"] = Process.pid
         data["process_start_time"] = @process_start_time.call(Process.pid)
@@ -164,9 +167,12 @@ module Hive
         row && conflicting_subject(row, project, metadata, folder)
       end
 
-      def lease_key(task_folder)
+      def lease_key(task_folder, observation: nil)
         require "hive/task_meta"
-        task_id = Hive::TaskMeta.read(File.expand_path(task_folder))[:id]&.to_s
+        folder = File.expand_path(task_folder)
+        # Bind the lock key to the observed task before reading its stable id.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
+        task_id = Hive::TaskMeta.read(folder)[:id]&.to_s
         raise IdentityError.new(
           "task metadata has no stable id", code: :missing_task_identity
         ) if task_id.to_s.empty?
@@ -176,8 +182,10 @@ module Hive
 
       private
 
-      def subject_for(folder, observe: false)
+      def subject_for(folder, observe: false, observation: nil)
         require "hive/task_meta"
+        # Guard registration and subject lookup against a same-path replacement.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         metadata = Hive::TaskMeta.read(folder)
         task_id = metadata[:id]&.to_s
         raise IdentityError.new("task metadata has no stable id", code: :missing_task_identity) if task_id.to_s.empty?
@@ -205,6 +213,8 @@ module Hive
             details: conflict
           )
         end
+        # Recheck after database reads before publishing a new observed path.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if observe && row.fetch(:observed_path) != folder
           timestamp = Codec.dump_time(@clock.call)
           @database.transaction do |db|

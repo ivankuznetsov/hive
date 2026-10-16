@@ -7,6 +7,22 @@ updated: 2026-10-15
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Task observation boundary (2026-10-02)
+
+Update-only metadata writers, completion clocks, managed-workflow rollback,
+approve/decide rollback, and their live callers now retain and revalidate a
+process-local directory observation. Focused tests force deletion and copied
+same-path replacement before custody, after metadata read, and before
+persistence. Supported `hive drop` participates in the project-commit-lock then
+task-lease order, so observed run and plan-review claims now serialize with it
+without retaining the project lock for their long-running work. Cross-device
+cleanup retains the copied directory handle and preserves a destination whose
+identity changes before validation. This does not claim protection
+against an arbitrary same-user filesystem process that ignores Hive locks and
+mutates paths between individual filesystem syscalls; the observation is
+transient custody evidence, not a persistent generation authority or an OS
+filesystem transaction.
+
 ## Review verify-pass follow-ups (2026-10-15)
 
 The final fix pass now gets a verify-only pass (see [[stages/review]]). Open

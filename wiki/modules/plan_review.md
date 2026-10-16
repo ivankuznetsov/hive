@@ -54,6 +54,17 @@ Hive does not automatically add the requirement to historical tasks. An offline
 conversion must preserve metadata and rerun required review rather than invent
 approval evidence.
 
+Persisting `plan_review_required: true` is a mandatory, identity-fenced update.
+Before creating task-local review storage, the orchestrator validates a retained
+directory observation and acquires the task lease without creating the task.
+That observed lease claim occurs under short project commit custody, closing
+the supported-Drop window before the task-local orchestration lock is entered.
+It retains that lifecycle custody through the bounded orchestration lock and
+every review-store side effect; the orchestration lock never acquires the
+project commit lock. Deletion, a same-path copied replacement, or an unapplied
+rewrite raises `InvalidRecord`; stale metadata can never satisfy or bypass the
+review gate, and review setup cannot recreate a dropped task.
+
 ## Deterministic policy
 
 `Hive::PlanReview::PlanSignals` reads declared files, explicit test scenarios,

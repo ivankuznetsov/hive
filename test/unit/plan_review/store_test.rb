@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/plan_review/store"
 
 class PlanReviewStoreTest < Minitest::Test
+  include HiveTestHelper
+
   def test_read_only_construction_does_not_create_review_state
     Dir.mktmpdir("hive-plan-review-store") do |task_folder|
       store = Hive::PlanReview::Store.new(task_folder:)
@@ -9,6 +11,59 @@ class PlanReviewStoreTest < Minitest::Test
       refute File.exist?(store.root)
       assert_nil store.current(optional: true)
       refute File.exist?(store.root)
+    end
+  end
+
+  def test_orchestration_setup_does_not_recreate_a_deleted_task
+    with_tmp_dir do |root|
+      task_folder = File.join(root, "task")
+      Hive::TaskMeta.write(task_folder, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(task_folder)
+      store = Hive::PlanReview::Store.new(task_folder: task_folder)
+      original = Hive::TaskMeta.method(:validate_observation!)
+      validations = 0
+      delete_after_validation = lambda do |folder, current|
+        result = original.call(folder, current)
+        validations += 1
+        FileUtils.rm_rf(folder) if validations == 1
+        result
+      end
+
+      with_replaced_singleton_method(
+        Hive::TaskMeta, :validate_observation!, delete_after_validation
+      ) do
+        assert_raises(Hive::PlanReview::InvalidRecord) do
+          store.with_orchestration_lock(observation: observation) { flunk "must not enter" }
+        end
+      end
+
+      assert_equal 1, validations
+      refute File.exist?(task_folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_orchestration_lock_acquisition_is_bounded
+    with_tmp_dir do |task_folder|
+      Hive::TaskMeta.write(task_folder, id: 7, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(task_folder)
+      store = Hive::PlanReview::Store.new(task_folder: task_folder)
+      FileUtils.mkdir_p(store.root)
+      lock_path = File.join(store.root, ".orchestrator.lock")
+      holder = File.open(lock_path, File::RDWR | File::CREAT, 0o600)
+      holder.flock(File::LOCK_EX)
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        store.with_orchestration_lock(observation: observation, timeout: 0.01) do
+          flunk "contended lock must not enter"
+        end
+      end
+
+      assert_includes error.message, "held longer"
+    ensure
+      holder&.close
+      observation&.close
     end
   end
 

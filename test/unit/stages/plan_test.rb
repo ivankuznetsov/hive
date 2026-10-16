@@ -23,11 +23,17 @@ class HiveStagesPlanTest < Minitest::Test
     depends_on.nil? ? "# Plan\n" : "---\ndepends_on: #{depends_on}\n---\n\n# Plan\n"
   end
 
+  def adopt_dependency(task, marker, observation: nil)
+    Hive::TaskMeta.with_observation(task.folder, observation) do |current|
+      Hive::Stages::Plan.adopt_plan_dependency!(task, marker, observation: current)
+    end
+  end
+
   # Absence is adopted: a plan that declares a dependency must not park the
   # task on an admission error whose only remedy is copying a string by hand.
   def test_complete_plan_dependency_is_adopted_into_meta
     with_planned_task(plan_doc("rails-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_equal "rails-task", Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -46,7 +52,7 @@ class HiveStagesPlanTest < Minitest::Test
   # so plan_dependency_mismatch stays a human decision.
   def test_existing_meta_dependency_is_never_overwritten
     with_planned_task(plan_doc("rails-task"), meta_depends_on: "operator-choice") do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_equal "operator-choice", Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -54,7 +60,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_incomplete_plan_is_not_adopted
     with_planned_task(plan_doc("rails-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:waiting))
+      adopt_dependency(task, Marker.new(:waiting))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -62,7 +68,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_plan_without_a_dependency_changes_nothing
     with_planned_task(plan_doc(nil)) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -70,7 +76,7 @@ class HiveStagesPlanTest < Minitest::Test
 
   def test_self_dependency_is_refused
     with_planned_task(plan_doc("cli-task")) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -87,17 +93,131 @@ class HiveStagesPlanTest < Minitest::Test
   end
 
   # Adoption only saves an operator a copy, so a meta.yml that refuses the
-  # rewrite must stay silent rather than fail the plan stage: admission still
-  # reports plan_dependency_mismatch and still says what to do about it.
-  def test_meta_rewrite_failure_does_not_fail_the_plan_stage
+  # rewrite remains nonfatal, but it must stay observable and distinct from a
+  # stale task skip. Admission still reports plan_dependency_mismatch.
+  def test_meta_rewrite_failure_is_reported_without_failing_the_plan_stage
     with_planned_task(plan_doc("rails-task")) do |task, dir|
-      raising = ->(*) { raise "meta.yml is held by another writer" }
+      raising = ->(*, **) { raise Errno::EIO, "meta.yml is held by another writer" }
 
-      with_replaced_singleton_method(Hive::TaskMeta, :rewrite, raising) do
-        assert_nil Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, raising) do
+          assert_nil adopt_dependency(task, Marker.new(:complete))
+        end
       end
 
       assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+      assert_includes err, "dependency adoption failed"
+      refute_includes err, "stale task"
+    end
+  end
+
+  def test_stale_dependency_adoption_is_reported_and_not_persisted
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+          assert_nil adopt_dependency(task, Marker.new(:complete))
+        end
+      end
+
+      assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+      assert_includes err, "stale task"
+    end
+  end
+
+  def test_dependency_adoption_does_not_recreate_a_task_deleted_before_update
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      FileUtils.rm_rf(dir)
+
+      _out, err = capture_io do
+        assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
+      end
+
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
+  def test_dependency_adoption_skips_a_task_missing_before_observation
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      FileUtils.rm_rf(dir)
+
+      _out, err = capture_io do
+        assert_nil adopt_dependency(task, Marker.new(:complete))
+      end
+
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
+  def test_dependency_adoption_does_not_recreate_a_task_deleted_after_metadata_read
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      boundary_reached = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :read_for_update!, delete_after_read) do
+          assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      refute File.exist?(dir)
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+      FileUtils.mkdir_p(dir) if dir && !File.exist?(dir)
+    end
+  end
+
+  def test_dependency_adoption_does_not_mutate_a_same_path_replacement
+    with_planned_task(plan_doc("rails-task")) do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      copied_meta = File.binread(Hive::TaskMeta.path(dir))
+      copied_plan = File.binread(File.join(dir, "plan.md"))
+      FileUtils.rm_rf(dir)
+      FileUtils.mkdir_p(dir)
+      File.binwrite(Hive::TaskMeta.path(dir), copied_meta)
+      File.binwrite(File.join(dir, "plan.md"), copied_plan)
+      File.write(File.join(dir, "replacement.txt"), "untouched\n")
+
+      _out, err = capture_io do
+        assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
+      end
+
+      assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+      assert_equal "untouched\n", File.read(File.join(dir, "replacement.txt"))
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_unexpected_dependency_adoption_failure_is_not_swallowed
+    with_planned_task(plan_doc("rails-task")) do |task, _dir|
+      failing = ->(*, **) { raise RuntimeError, "programmer error" }
+
+      with_replaced_singleton_method(Hive::TaskMeta, :rewrite, failing) do
+        error = assert_raises(RuntimeError) do
+          adopt_dependency(task, Marker.new(:complete))
+        end
+        assert_equal "programmer error", error.message
+      end
     end
   end
 
@@ -195,12 +315,16 @@ class HiveStagesPlanTest < Minitest::Test
     record.define_singleton_method(:execution_allowed?) { allowed }
     projection = Struct.new(:record).new(record)
     load = load_error ? ->(task_folder:) { raise load_error } : ->(task_folder:) { projection }
-    with_replaced_singleton_method(Hive::Markers, :current, ->(*) { Struct.new(:name).new(marker) }) do
-      with_replaced_singleton_method(Hive::PlanReview::Projection, :load, load) do
-        with_replaced_singleton_method(Hive::PlanReview::TransitionGuard, :freshness,
-                                       ->(**) { { "status" => freshness, "reason" => nil } }) do
-          yield Struct.new(:folder, :slug, :state_file, keyword_init: true)
-            .new(folder: "/tmp/task", slug: "task", state_file: "/tmp/task/plan.md")
+    Dir.mktmpdir do |folder|
+      Hive::TaskMeta.write(folder, id: 7, slug: "task", display_name: nil)
+      File.write(File.join(folder, "plan.md"), "# Plan\n<!-- COMPLETE -->\n")
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { Struct.new(:name).new(marker) }) do
+        with_replaced_singleton_method(Hive::PlanReview::Projection, :load, load) do
+          with_replaced_singleton_method(Hive::PlanReview::TransitionGuard, :freshness,
+                                         ->(**) { { "status" => freshness, "reason" => nil } }) do
+            yield Struct.new(:folder, :slug, :state_file, keyword_init: true)
+              .new(folder: folder, slug: "task", state_file: File.join(folder, "plan.md"))
+          end
         end
       end
     end

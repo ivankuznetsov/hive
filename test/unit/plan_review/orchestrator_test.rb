@@ -1465,26 +1465,31 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_concurrent_entries_coalesce_under_the_orchestration_lock
+  def test_concurrent_entries_serialize_through_lifecycle_custody
     with_task(standard_plan) do |task, cfg|
+      entered = Queue.new
+      release = Queue.new
       adapter = FakeAdapter.new do |request|
-        sleep 0.03 if request.kind == "primary"
+        if request.kind == "primary"
+          entered << true
+          release.pop
+        end
         successful_result(request)
       end
-      ready = Queue.new
-      release = Queue.new
-      threads = 2.times.map do
-        Thread.new do
-          ready << true
-          release.pop
-          orchestrator(task, cfg, adapter:).advance!
-        end
+      first = Thread.new do
+        orchestrator(task, cfg, adapter:).advance!
       end
-      2.times { ready.pop }
-      2.times { release << true }
-      projections = threads.map(&:value)
+      entered.pop
 
-      assert_equal 1, projections.map { |projection| projection.record.review_id }.uniq.length
+      assert_raises(Hive::ConcurrentRunError) do
+        orchestrator(task, cfg, adapter:).advance!
+      end
+
+      release << true
+      first_projection = first.value
+      retried_projection = orchestrator(task, cfg, adapter: success_adapter).advance!
+
+      assert_equal first_projection.record.review_id, retried_projection.record.review_id
       assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
     end
   end
@@ -1747,22 +1752,222 @@ class PlanReviewOrchestratorTest < Minitest::Test
       runner = orchestrator(task, cfg, adapter: success_adapter)
       task.meta_yml_path && File.write(task.meta_yml_path, "plan_review_required: false\n")
       error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.advance!
+      end
+      assert_includes error.message, "metadata is invalid"
+    end
+  end
+
+  def test_advance_rejects_a_task_missing_before_observation
+    with_task(standard_plan) do |task, cfg|
+      FileUtils.rm_rf(task.folder)
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        orchestrator(task, cfg, adapter: success_adapter).advance!
+      end
+
+      assert_includes error.message, "stale or missing"
+    end
+  end
+
+  def test_advance_translates_stale_observation_errors
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) { runner.advance! }
+
+      assert_includes error.message, "plan review task is stale"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_a_same_path_replacement_even_when_already_true
+    with_task(standard_plan) do |task, cfg|
+      Hive::TaskMeta.rewrite(task.folder, plan_review_required: true)
+      copied = Dir.children(task.folder).to_h do |name|
+        path = File.join(task.folder, name)
+        [ name, File.file?(path) ? File.binread(path) : nil ]
+      end
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      FileUtils.mkdir_p(task.folder)
+      copied.each do |name, bytes|
+        File.binwrite(File.join(task.folder, name), bytes) if bytes
+      end
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
         runner.send(:ensure_review_requirement!)
       end
-      assert_includes error.message, "could not be persisted"
+
+      assert_includes error.message, "stale task"
+      assert_equal true, Hive::TaskMeta.read(task.folder)[:plan_review_required]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_a_task_deleted_before_update_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_deletion_after_metadata_read
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+      boundary_reached = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::TaskMeta, :read_for_update!, delete_after_read
+      ) do
+        with_runner_custody(runner, task, observation: observation) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_stale_review_requirement_rewrite_fails_closed
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+        with_runner_custody(runner, task) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert_includes error.message, "stale task"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    end
+  end
+
+  def test_advance_claims_the_observed_lease_under_project_commit_custody
+    with_task(standard_plan) do |task, cfg|
+      claims = []
+      claim = lambda do |folder, *, **kwargs|
+        claims << [ folder, kwargs ]
+        raise Hive::ConcurrentRunError.new("stop after the claim")
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, claim) do
+        assert_raises(Hive::ConcurrentRunError) do
+          orchestrator(task, cfg, adapter: success_adapter).advance!
+        end
+      end
+
+      folder, kwargs = claims.fetch(0)
+      assert_equal task.folder, folder
+      assert_equal File.dirname(File.dirname(File.dirname(task.folder))),
+                   kwargs.fetch(:acquire_under_commit_lock)
+      assert_equal false, kwargs.fetch(:create)
+      assert_kind_of Hive::TaskMeta::Observation, kwargs.fetch(:observation)
+    end
+  end
+
+  def test_review_requirement_refuses_mutation_without_lifecycle_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "requires lifecycle custody"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_reports_invalid_metadata_under_custody
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      invalid = ->(*) { raise Hive::TaskMeta::InvalidMetadata, "corrupt" }
+
+      error = with_runner_custody(runner, task) do
+        with_replaced_singleton_method(Hive::TaskMeta, :plan_review_required?, invalid) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert_includes error.message, "could not be persisted: corrupt"
     end
   end
 
   private
 
+  def with_runner_custody(runner, task, observation: nil)
+    owned = observation.nil?
+    current = observation || Hive::TaskMeta.observe(task.folder)
+    previous = runner.instance_variable_get(:@task_observation)
+    runner.instance_variable_set(:@task_observation, current)
+    Hive::Lock.with_task_lock(
+      task.folder, slug: task.slug, op: "plan-review-test",
+      create: false, observation: current
+    ) { yield }
+  ensure
+    runner.instance_variable_set(:@task_observation, previous) if runner
+    current&.close if owned
+  end
+
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
                    route_resolver: method(:resolve_route),
-                   clock: -> { Time.utc(2026, 8, 12, 12) })
-    Hive::PlanReview::Orchestrator.new(
+                   clock: -> { Time.utc(2026, 8, 12, 12) }, task_observation: nil)
+    options = {
       task:, cfg:, planner_identity: planner_identity, adapter:,
       planner_revision:, route_resolver:,
       clock:
-    )
+    }
+    options[:task_observation] = task_observation if task_observation
+    Hive::PlanReview::Orchestrator.new(**options)
   end
 
   def resolve_route(role:, **)

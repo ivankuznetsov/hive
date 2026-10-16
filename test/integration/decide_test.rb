@@ -80,6 +80,35 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_restage_restored_files_skips_a_same_path_replacement
+    with_tmp_dir do |root|
+      folder = File.join(root, ".hive-state", "stages", "2-approval", "task")
+      Hive::TaskMeta.write(folder, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(folder)
+      FileUtils.rm_rf(folder)
+      Hive::TaskMeta.write(folder, id: 1, slug: "task", display_name: nil)
+      task = Struct.new(
+        :folder, :project_root, :hive_state_path, :stage_index, :stage_name, :slug,
+        keyword_init: true
+      ).new(
+        folder: folder, project_root: root, hive_state_path: File.join(root, ".hive-state"),
+        stage_index: 2, stage_name: "approval", slug: "task"
+      )
+      command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+
+      _out, err = capture_io do
+        assert_nil command.send(
+          :restage_restored_files, task, { "approval.md" => {} },
+          observation: observation
+        )
+      end
+
+      assert_includes err, "rollback skipped stale task restaging"
+    ensure
+      observation&.close
+    end
+  end
+
   def test_error_kinds_and_argument_guards_are_typed
     command = Hive::Commands::Decide.new("task", "approve", from: "approval")
     cases = [
@@ -93,10 +122,16 @@ class DecideTest < Minitest::Test
       [ Hive::ConfigError.new("config"), "config" ],
       [ Hive::GitError.new("git"), "git" ],
       [ Hive::InternalError.new("internal"), "internal" ],
+      [ Hive::RollbackFailed.new("rollback"), "error" ],
       [ RuntimeError.new("other"), "error" ]
     ]
+    schema = JSON.parse(File.read(File.expand_path("../../schemas/hive-decide.v1.json", __dir__)))
+    error_kinds = schema.fetch("$defs").values.filter_map do |definition|
+      definition.dig("properties", "error_kind", "enum")
+    end.flatten
     cases.each do |error, kind|
       assert_equal kind, command.envelope_error_kind(error)
+      assert_includes error_kinds, kind, "decide error kind must stay inside the published schema"
     end
 
     assert_raises(Hive::InvalidTaskPath) do
@@ -427,6 +462,55 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_self_target_rollback_does_not_restore_or_restage_a_replacement
+    with_registered_workflow(revision_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, agent_skill_preflight: false).call }
+          project = File.basename(dir)
+          capture_io do
+            Hive::Commands::New.new(
+              project, "review this", workflow: "revision", slug_override: "revision-task"
+            ).call!
+          end
+          folder = File.join(dir, ".hive-state", "stages", "1-approval", "revision-task")
+          metadata = File.binread(Hive::TaskMeta.path(folder))
+          replacement_state = "replacement\n"
+          fake_ops = Object.new
+          fake_ops.define_singleton_method(:hive_commit) do |**|
+            FileUtils.rm_rf(folder)
+            FileUtils.mkdir_p(folder)
+            File.binwrite(Hive::TaskMeta.path(folder), metadata)
+            File.write(File.join(folder, "approval.md"), replacement_state)
+            File.write(File.join(folder, "replacement.txt"), "keep\n")
+            raise Hive::GitError, "commit failed"
+          end
+          fake_ops.define_singleton_method(:run_git!) do |*|
+            raise "replacement must not be restaged"
+          end
+
+          _out, err = capture_io do
+            with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+              error = assert_raises(Hive::RollbackFailed) do
+                Hive::Commands::Decide.new(
+                  "revision-task", "revise", from: "approval",
+                  decision_id: decision_id_for(folder)
+                ).send(:do_call)
+              end
+              assert_instance_of Hive::GitError, error.cause
+              assert_includes error.message, "guarded rollback was incomplete"
+            end
+          end
+
+          assert_includes err, "rollback skipped stale task files"
+          assert_equal replacement_state, File.read(File.join(folder, "approval.md"))
+          assert_equal "keep\n", File.read(File.join(folder, "replacement.txt"))
+          assert_nil Hive::Commands::Decide.latest_record(File.join(folder, "approval.md"))
+        end
+      end
+    end
+  end
+
   def test_invalid_waiting_identity_and_non_human_from_are_rejected
     with_editorial_task do |_dir, approval, slug|
       Hive::Markers.set(File.join(approval, "approval.md"), :waiting)
@@ -476,9 +560,11 @@ class DecideTest < Minitest::Test
   end
 
   def test_approve_rolls_back_decision_file_when_commit_fails
-    with_editorial_task do |_dir, approval, slug|
+    with_editorial_task do |dir, approval, slug|
       state = File.join(approval, "approval.md")
       before = File.binread(state)
+      hive_state = File.join(dir, ".hive-state")
+      index_before = run!("git", "-C", hive_state, "ls-files", "--stage")
       fake_ops = Object.new
       fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
       fake_ops.define_singleton_method(:run_git!) { |*| raise Hive::GitError, "restage failed" }
@@ -496,6 +582,255 @@ class DecideTest < Minitest::Test
       assert_nil Hive::Commands::Decide.latest_record(state)
       assert_equal :waiting, Hive::Markers.current(state).name
       refute Hive::TaskMeta.read(approval).key?(:completed_at)
+      assert_equal index_before, run!("git", "-C", hive_state, "ls-files", "--stage")
+    end
+  end
+
+  def test_completion_rollback_reports_invalid_metadata_restore
+    with_editorial_task do |_dir, approval, slug|
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      invalid = ->(*, **) { raise Hive::TaskMeta::InvalidMetadata, "corrupt" }
+
+      error = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+          with_replaced_singleton_method(Hive::TaskMeta, :restore, invalid) do
+            error = assert_raises(Hive::RollbackFailed) do
+              Hive::Commands::Decide.new(
+                slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+              ).send(:do_call)
+            end
+          end
+        end
+      end
+
+      assert_instance_of Hive::GitError, error.cause
+      assert_includes error.message, "rollback skipped invalid task metadata"
+      assert_includes err, "decide rollback skipped invalid task metadata"
+      assert_nil Hive::Commands::Decide.latest_record(File.join(approval, "approval.md")),
+                 "the decision record must still be rolled back"
+    end
+  end
+
+  def test_restore_files_reports_invalid_metadata_without_writing
+    Dir.mktmpdir("hive-decide-restore") do |folder|
+      Hive::TaskMeta.write(folder, id: 1, slug: "task", display_name: nil)
+      observation = Hive::TaskMeta.observe(folder)
+      File.write(Hive::TaskMeta.path(folder), "id: [\n")
+      state = File.join(folder, "approval.md")
+      File.write(state, "current\n")
+      command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+
+      _out, err = capture_io do
+        assert_includes command.send(
+          :restore_files, folder,
+          { "approval.md" => { existed: true, body: "original\n" } },
+          observation: observation
+        ), "invalid task metadata while restoring task files"
+      end
+
+      assert_includes err, "invalid task metadata while restoring task files"
+      assert_equal "current\n", File.read(state)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_restaging_restored_files_tolerates_git_failures
+    Dir.mktmpdir("hive-decide-restage") do |root|
+      task = Struct.new(:folder, :project_root, :hive_state_path, :stage_index, :stage_name, :slug)
+                   .new(root, root, root, 3, "approval", "task")
+      fake_ops = Object.new
+      calls = []
+      fake_ops.define_singleton_method(:run_git!) do |*args|
+        calls << args
+        raise Hive::GitError, "index locked"
+      end
+      command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_nil command.send(
+          :restage_restored_files, task, { "approval.md" => { existed: true, body: "" } }
+        )
+      end
+
+      assert_equal [ [ "-C", root, "add", "-A", "--", "stages/3-approval/task/approval.md" ] ],
+                   calls
+    end
+  end
+
+  def test_commit_index_snapshot_and_rollback_report_git_failures
+    Dir.mktmpdir("hive-decide-index") do |root|
+      task = Struct.new(:hive_state_path, :stage_index, :stage_name, :slug).new(
+        root, 3, "approval", "task"
+      )
+      command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+
+      error = assert_raises(Hive::GitError) { command.send(:snapshot_commit_index, task) }
+      assert_includes error.message, "git index snapshot failed"
+
+      snapshot = { pathspecs: [ "stages/3-approval/task", "logs" ], entries: "".b }
+      _out, err = capture_io do
+        assert_includes command.send(:restore_commit_index, task, snapshot),
+                        "git index rollback inventory failed"
+      end
+      assert_includes err, "decide rollback skipped git index state"
+
+      ok = Object.new
+      ok.define_singleton_method(:success?) { true }
+      failed = Object.new
+      failed.define_singleton_method(:success?) { false }
+      stdout_only = ->(*, **) { [ "fatal: detail on stdout", "", failed ] }
+      with_replaced_singleton_method(Open3, :capture3, stdout_only) do
+        error = assert_raises(Hive::GitError) { command.send(:snapshot_commit_index, task) }
+        assert_includes error.message, "snapshot failed: fatal: detail on stdout"
+        capture_io do
+          assert_includes command.send(:restore_commit_index, task, snapshot),
+                          "inventory failed: fatal: detail on stdout"
+        end
+      end
+
+      [
+        [ "--force-remove", "git index rollback removal failed" ],
+        [ "--index-info", "git index rollback restore failed" ]
+      ].each do |failing_flag, message|
+        git = lambda do |*args, **|
+          next [ "stages/3-approval/task/a.md\0", "", ok ] if args.include?("ls-files")
+          next [ "", "denied", failed ] if args.include?(failing_flag)
+
+          [ "", "", ok ]
+        end
+        entries = "100644 #{'0' * 40} 0\tstages/3-approval/task/a.md\0".b
+        capture_io do
+          with_replaced_singleton_method(Open3, :capture3, git) do
+            assert_includes command.send(
+              :restore_commit_index, task, snapshot.merge(entries: entries)
+            ), message
+          end
+        end
+      end
+    end
+  end
+
+  def test_replaced_task_at_completion_persistence_gets_no_decision_record_or_success_commit
+    with_editorial_task do |_dir, approval, slug|
+      state = File.join(approval, "approval.md")
+      replacement_state = File.binread(state)
+      metadata = File.binread(Hive::TaskMeta.path(approval))
+      committed = false
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| committed = true }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      original = Hive::TaskMeta.method(:write_completed_at_once)
+      replace_at_persistence = lambda do |folder, value, **kwargs|
+        FileUtils.rm_rf(folder)
+        FileUtils.mkdir_p(folder)
+        File.binwrite(Hive::TaskMeta.path(folder), metadata)
+        File.binwrite(File.join(folder, "approval.md"), replacement_state)
+        File.write(File.join(folder, "replacement.txt"), "keep\n")
+        original.call(folder, value, **kwargs)
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::TaskMeta, :write_completed_at_once, replace_at_persistence
+      ) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+          assert_raises(Hive::RollbackFailed) do
+            Hive::Commands::Decide.new(
+              slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+            ).send(:do_call)
+          end
+        end
+      end
+
+      assert_includes error.message, "guarded rollback was incomplete"
+      refute committed
+      assert_equal replacement_state, File.binread(state)
+      assert_equal "keep\n", File.read(File.join(approval, "replacement.txt"))
+      assert_nil Hive::Commands::Decide.latest_record(state)
+      refute Hive::TaskMeta.read(approval).key?(:completed_at)
+    end
+  end
+
+  def test_approve_commit_failure_does_not_recreate_a_missing_task
+    with_editorial_task do |_dir, approval, slug|
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        FileUtils.rm_rf(approval)
+        raise Hive::GitError, "commit failed"
+      end
+
+      error = with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::RollbackFailed) do
+          Hive::Commands::Decide.new(
+            slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+          ).send(:do_call)
+        end
+      end
+
+      assert_includes error.message, "commit failed"
+      assert_includes error.message, "rollback skipped stale task files"
+      refute File.exist?(approval)
+    end
+  end
+
+  def test_approve_commit_failure_does_not_restore_or_restage_a_replacement
+    with_editorial_task do |_dir, approval, slug|
+      metadata = File.binread(Hive::TaskMeta.path(approval))
+      replacement_state = "replacement decision state\n"
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) do |**|
+        FileUtils.rm_rf(approval)
+        FileUtils.mkdir_p(approval)
+        File.binwrite(Hive::TaskMeta.path(approval), metadata)
+        File.write(File.join(approval, "approval.md"), replacement_state)
+        File.write(File.join(approval, "replacement.txt"), "keep\n")
+        raise Hive::GitError, "commit failed"
+      end
+      fake_ops.define_singleton_method(:run_git!) { |*| raise "replacement must not be restaged" }
+
+      error = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(_root) { fake_ops }) do
+          error = assert_raises(Hive::RollbackFailed) do
+            Hive::Commands::Decide.new(
+              slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+            ).send(:do_call)
+          end
+        end
+      end
+
+      assert_includes error.message, "commit failed"
+      assert_includes error.message, "rollback was incomplete"
+      assert_includes err, "rollback skipped stale task files"
+      assert_equal replacement_state, File.read(File.join(approval, "approval.md"))
+      assert_equal "keep\n", File.read(File.join(approval, "replacement.txt"))
+      assert_equal metadata, File.binread(Hive::TaskMeta.path(approval))
+    end
+  end
+
+  def test_approve_commit_failure_reports_a_stale_metadata_restore
+    with_editorial_task do |_dir, approval, slug|
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| raise Hive::GitError, "commit failed" }
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::TaskMeta, :restore, stale) do
+          with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+            error = assert_raises(Hive::RollbackFailed) do
+              Hive::Commands::Decide.new(
+                slug, "approve", from: "approval", decision_id: decision_id_for(approval)
+              ).send(:do_call)
+            end
+            assert_includes error.message, "rollback skipped stale task metadata"
+          end
+        end
+      end
+
+      assert_includes err, "rollback skipped stale task metadata"
     end
   end
 
@@ -584,6 +919,95 @@ class DecideTest < Minitest::Test
       assert_equal approval_before, File.binread(File.join(destination, "approval.md"))
       assert_equal draft_before, File.binread(File.join(destination, "draft.md"))
       assert_nil Hive::Commands::Decide.latest_record(File.join(destination, "approval.md"))
+    end
+  end
+
+  def test_reject_rollback_does_not_overwrite_a_same_path_replacement
+    with_editorial_task do |dir, approval, slug|
+      destination = File.join(dir, ".hive-state", "stages", "2-draft", slug)
+      metadata = File.binread(Hive::TaskMeta.path(approval))
+      replacement_approval = "replacement approval\n"
+      replacement_draft = "replacement draft\n"
+      replacement = lambda do |_target, **kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          kwargs.fetch(:post_rearm_mutation).call(Hive::Task.new(approval))
+          FileUtils.mkdir_p(File.dirname(destination))
+          File.rename(approval, destination)
+          FileUtils.rm_rf(destination)
+          FileUtils.mkdir_p(destination)
+          File.binwrite(Hive::TaskMeta.path(destination), metadata)
+          File.write(File.join(destination, "approval.md"), replacement_approval)
+          File.write(File.join(destination, "draft.md"), replacement_draft)
+          File.write(File.join(destination, "replacement.txt"), "keep\n")
+          raise Hive::GitError, "move failed"
+        end
+        fake
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
+          error = assert_raises(Hive::RollbackFailed) do
+            Hive::Commands::Decide.new(
+              slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+            ).send(:do_call)
+          end
+          assert_instance_of Hive::GitError, error.cause
+          assert_includes error.message, "guarded rollback was incomplete"
+        end
+      end
+
+      assert_includes err, "rollback skipped stale task files"
+      assert_equal replacement_approval, File.read(File.join(destination, "approval.md"))
+      assert_equal replacement_draft, File.read(File.join(destination, "draft.md"))
+      assert_equal "keep\n", File.read(File.join(destination, "replacement.txt"))
+      assert_nil Hive::Commands::Decide.latest_record(File.join(destination, "approval.md"))
+    end
+  end
+
+  def test_reject_rollback_restores_decision_files_under_project_commit_custody
+    with_editorial_task do |_dir, approval, slug|
+      state = File.join(approval, "approval.md")
+      original_state = File.binread(state)
+      replacement = lambda do |_target, **kwargs|
+        fake = Object.new
+        fake.define_singleton_method(:call) do
+          kwargs.fetch(:observation_guard).call(Hive::Task.new(approval))
+          kwargs.fetch(:post_rearm_mutation).call(Hive::Task.new(approval))
+          raise Hive::GitError, "move failed"
+        end
+        fake
+      end
+      commit_depth = 0
+      original_commit_lock = Hive::Lock.method(:with_commit_lock)
+      tracking_commit_lock = lambda do |*args, **kwargs, &block|
+        original_commit_lock.call(*args, **kwargs) do
+          commit_depth += 1
+          block.call
+        ensure
+          commit_depth -= 1
+        end
+      end
+      restores = []
+      command = Hive::Commands::Decide.new(
+        slug, "reject", from: "approval", decision_id: decision_id_for(approval)
+      )
+      original_restore = command.method(:restore_files)
+      command.define_singleton_method(:restore_files) do |*args, **kwargs|
+        restores << commit_depth
+        original_restore.call(*args, **kwargs)
+      end
+
+      with_replaced_singleton_method(Hive::Commands::Approve, :new, replacement) do
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, tracking_commit_lock) do
+          assert_raises(Hive::GitError) { command.send(:do_call) }
+        end
+      end
+
+      assert_equal [ 1 ], restores, "rollback must restore under the project commit lock"
+      assert_equal original_state, File.binread(state)
+      assert_nil Hive::Commands::Decide.latest_record(state)
     end
   end
 

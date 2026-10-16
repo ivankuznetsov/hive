@@ -23,7 +23,7 @@ hive generate-name TARGET [--project NAME] [--stage STAGE]
 
 `--project` scopes slug/id lookup to one registered project. `--stage` accepts a full stage dir (`2-brainstorm`) or short name (`brainstorm`) and narrows slug/id lookup or validates a path target.
 
-There is no `--json` payload for this command. On success it prints the generated display name. On failure inside the display-name generator it prints nothing and returns nil; resolver failures still surface through the normal `Hive::Error` path.
+There is no `--json` payload for this command. On success it prints the generated display name. Expected generation, task-custody, lock-contention, metadata, and filesystem failures emit a bounded diagnostic, print no name, and return nil; resolver failures still surface through the normal `Hive::Error` path. Unexpected programming failures are not swallowed.
 
 ## Pipeline
 
@@ -43,7 +43,7 @@ The subprocess command is built from the profile binary, headless flag, Claude p
 
 ## State effects
 
-Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, name)`. Display-name and daemon id updates share one metadata rewrite path that preserves every declared sidecar field, including workflow provenance, then this command commits through the centrally serialized `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are still swallowed after the sidecar update, matching the command's best-effort display-name posture; ordinary concurrent hive-state writers no longer create an unlocked index race.
+Successful generation calls the guarded `Hive::TaskMeta.update_display_name` path, which preserves every declared sidecar field, including workflow provenance, then this command commits through the centrally serialized `Hive::GitOps#hive_commit(stage_name:, slug:, action: "named")`. Git commit failures are still swallowed after the sidecar update, matching the command's best-effort display-name posture; ordinary concurrent hive-state writers no longer create an unlocked index race.
 
 `hive new` starts this command asynchronously after the captured-task commit:
 
@@ -51,7 +51,7 @@ Successful generation calls `Hive::TaskMeta.update_display_name(task.folder, nam
 hive generate-name <task_dir>
 ```
 
-That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture. If it fails, rerun this command for one task or run [[commands/migrate]] for the project. Daemon and status refreshes never retry name generation.
+That spawn redirects the wrapper command's stdout/stderr to `<state_home>/logs/display-name.log` and intentionally does not block capture. If it fails, rerun this command for the task. Daemon and status refreshes never retry name generation.
 
 ## Exit codes
 
@@ -75,6 +75,7 @@ serialization fallback are not applicable.
 ## Tests
 
 - `test/integration/generate_name_test.rb` covers successful sidecar update + commit and failure leaving `display_name` unchanged.
+- `test/unit/display_name/generator_test.rb` covers bounded generation diagnostics, task replacement/deletion, lock contention, and the no-update/no-commit failure contract.
 - `test/unit/display_name_sanitizer_test.rb` covers sanitization.
 - `test/unit/agent_message_extractor_test.rb` covers structured/plain message extraction.
 

@@ -144,6 +144,11 @@ module Hive
             # storage. Otherwise a host without the runtime control plane
             # (a fresh workspace, a sandbox) reports a config error (78)
             # instead of the usage error (64) the key itself deserves.
+            # Order: project, then key, then receipt storage. An unknown
+            # project is reported as ProjectNotFound whatever the key looks
+            # like (the order before keys gained receipts); a malformed key
+            # is still rejected before receipt storage is opened (#1518).
+            require_project!
             validate_idempotency_key!
             keyed_call!
           end

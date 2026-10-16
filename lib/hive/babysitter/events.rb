@@ -25,6 +25,7 @@ module Hive
         timeout
         budget_exhausted
         limits_reached
+        model_unsupported
         gh-error
         already-green
         label_ignored

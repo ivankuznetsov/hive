@@ -1,6 +1,7 @@
 require "hive/reviewers/base"
 require "hive/reviewers/plan_context"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/config"
@@ -143,6 +144,9 @@ module Hive
           # Surface it at once; the stage's limits_reached marker owns the
           # cooled retry.
           break if provider_limit_result?(result)
+          # A refused model fails identically on every attempt; the stage
+          # surfaces it to the operator as model_unsupported.
+          break if Hive::ModelUnsupported.detected?(result[:error_message].to_s)
 
           sleep_seconds = backoff_seconds_for(attempts)
           if deadline

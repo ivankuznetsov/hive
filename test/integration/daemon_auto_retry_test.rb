@@ -243,6 +243,37 @@ class DaemonAutoRetryTest < Minitest::Test
     assert_equal 2, recoveries.size
   end
 
+  # Supersedes #1473: a refused model is operator-owned configuration. The
+  # daemon must leave it for the operator on every tick, not replay it on the
+  # hourly limit cadence (field: four review tasks retried ~240 times).
+  def test_model_unsupported_is_left_for_the_operator_and_never_auto_retried
+    message = "triage: model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+    with_review_error_row(
+      attrs: { "phase" => "triage", "reason" => "model_unsupported", "pass" => "1",
+               "model" => "gpt-6-sol", "message" => message }
+    ) do |row, state_file|
+      set_status_rows([ row ])
+      instance = dispatcher
+      stub_safe do
+        [ T0, T0 + 3600, T0 + (11 * 24 * 3600) ].each { |now| instance.tick(now: now) }
+      end
+
+      assert_equal :review_error, Hive::Markers.current(state_file).name
+      assert_empty @supervisor.spawned
+      assert_empty(@logger.events.select { |name, _attrs| name == :recovery_requested })
+      skipped = @logger.events.select { |name, attrs| name == :skipped && attrs[:reason] == "model_unsupported" }
+      refute_empty skipped, "the dispatcher must report the operator-owned disposition"
+    end
+
+    with_error_row(attrs: { "reason" => "model_unsupported", "model" => "gpt-6.1-sol" }) do |row, state_file|
+      set_status_rows([ row ])
+      stub_safe { dispatcher.tick(now: T0 + (11 * 24 * 3600)) }
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert_empty @supervisor.spawned
+    end
+  end
+
   def test_current_work_area_safety_defers_without_making_error_terminal
     with_error_row(attrs: { "reason" => "implementer_failed" }) do |row, state_file|
       set_status_rows([ row ])

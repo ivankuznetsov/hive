@@ -7,6 +7,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/agent/message_extractor"
 require "hive/agent_support"
 require "hive/artifact_firewall"
@@ -298,6 +299,7 @@ module Hive
         require_terminal_structured_output: @runtime_policy&.host_outputs? == true
       )
       limit_text = nil
+      model_unsupported_text = nil
       structured_failure = nil
       last_usage = nil
       stream = support::Stream if support&.const_defined?(:Stream, false)
@@ -399,6 +401,13 @@ module Hive
                 detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
                 limit_text = (detail || line).to_s.strip
               end
+            end
+            # Same error-event gate as the limit scan: a model refusal printed
+            # as a bare line (or an error event) is captured raw so handle_exit
+            # can classify it as operator-owned model configuration.
+            if model_unsupported_text.nil? && !sensitive_payload &&
+               provider_limit_candidate?(json) && Hive::ModelUnsupported.detected?(line)
+              model_unsupported_text = line.to_s.strip
             end
             turn_started = stream&.turn_started?(json)
             if turn_started
@@ -565,6 +574,7 @@ module Hive
         provider_error: provider_error,
         status: nil
       }
+      result[:model_unsupported_text] = model_unsupported_text if model_unsupported_text
       if structured_failure
         result[:failure_origin] = structured_failure.fetch(:origin)
         result[:failure_details] = failure_details
@@ -1018,6 +1028,13 @@ module Hive
         return
       end
 
+      # Checked before the quota wall: a refused model is operator-owned
+      # configuration, and must never be parked on the provider cooldown.
+      if (unsupported_text = detected_model_unsupported_text(result))
+        handle_model_unsupported(result, unsupported_text)
+        return
+      end
+
       if (limit_text = detected_limit_text(result))
         # Preserve the raw multiline signal even when classification fell back
         # to final_message. Outer execute/review stages use it to retain an
@@ -1240,6 +1257,36 @@ module Hive
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
       limit
+    end
+
+    # Provider event text is trusted on any exit; free-form output only on a
+    # failed exit, matching detected_limit_text's healthy-output rule.
+    def detected_model_unsupported_text(result)
+      provider_message = result[:provider_error] && result[:provider_error][:message].to_s
+      return provider_message if Hive::ModelUnsupported.detected?(provider_message)
+      return nil if result[:exit_code] == 0 && !result[:timed_out]
+
+      [ result[:model_unsupported_text], result[:final_message] ].map(&:to_s).find do |text|
+        Hive::ModelUnsupported.detected?(text)
+      end
+    end
+
+    def handle_model_unsupported(result, text)
+      message = Hive::ModelUnsupported.error_message(text, agent: @profile.name)
+      if effective_status_mode == :state_file_marker
+        Hive::Markers.set(
+          @task.state_file, :error,
+          {
+            reason: Hive::ModelUnsupported::REASON,
+            provider: @profile.name,
+            model: Hive::ModelUnsupported.model_name(text),
+            message: message
+          }.compact
+        )
+      end
+      result[:status] = :error
+      result[:error_reason] = Hive::ModelUnsupported::REASON
+      result[:error_message] = message
     end
 
     def recovered_provider_error?(result)

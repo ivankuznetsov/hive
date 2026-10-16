@@ -168,6 +168,13 @@ not a give-up: no label, no comment. `PrFixer` records the provider in
 limit clears the hold. `limits_reached` is a `:retry` outcome class, so the
 one-shot projection reports it as `waiting_external` until the next poll.
 
+A refused babysitter model (`error_reason: "model_unsupported"`, ADR-057) is
+not a limit: no hold is recorded. `PrFixer` returns `:model_unsupported`, emits
+`agent-fix` and `give-up` events with outcome `model_unsupported`, applies the
+give-up label, and posts a comment whose `Error:` line names the model and the
+config fix. `ProjectTick` counts it as `needs_human` (outcome class
+`:operator`).
+
 ## Dry Run
 
 Current Patrol hardening supersedes older wording below: authenticated `gh` reads copy only a

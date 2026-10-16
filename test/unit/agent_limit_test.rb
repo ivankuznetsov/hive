@@ -5,11 +5,16 @@ require "hive/agent_limit"
 class AgentLimitTest < Minitest::Test
   include HiveTestHelper
 
-  def test_detects_codex_chatgpt_plan_model_wall
+  # Supersedes #1473: Codex refusing the configured model is an operator-owned
+  # configuration error (Hive::ModelUnsupported), never a provider limit.
+  def test_codex_unsupported_model_is_not_a_limit
     line = '{"type":"error","message":"{\\"type\\":\\"error\\",\\"status\\":400,\\"error\\":' \
-           '{\\"message\\":\\"The \'gpt-6-luna\' model is not supported when using Codex with a ChatGPT account.\\"}}"}'
+           '{\\"message\\":\\"The \'gpt-6-sol\' model is not supported when using Codex with a ChatGPT account.\\"}}"}'
 
-    assert Hive::AgentLimit.limit_reached?(line)
+    refute Hive::AgentLimit.limit_reached?(line)
+    refute Hive::AgentLimit.limit_reached?(
+      "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+    )
     refute Hive::AgentLimit.limit_reached?("This model is not supported by the linter.")
   end
 

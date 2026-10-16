@@ -42,6 +42,23 @@ class DailyDigestHoldObserverTest < Minitest::Test
     end
   end
 
+  def test_model_unsupported_disposition_is_an_operator_authority_hold
+    with_tmp_dir do |root|
+      records = []
+      activity = Object.new
+      activity.define_singleton_method(:record) { |**values| records << values }
+      observer = Hive::DailyDigest::HoldObserver.new(activity_factory: ->(_task) { activity })
+      folder = File.join(root, ".hive-state", "stages", "6-review", "task")
+      FileUtils.mkdir_p(folder)
+      row = Row.new(folder: folder, stage: "6-review",
+                    marker_attrs: { "reason" => "model_unsupported", "provider" => "codex" })
+
+      observer.record(row, decision: :model_unsupported, owner: "operator", reason: "set a supported model")
+
+      assert_equal [ "authority" ], records.map { |record| record.dig(:payload, "hold_kind") }
+    end
+  end
+
   # The daemon appended "hold cleared" activity to a task's journal while its
   # review CI-fix and plan-revision agents ran; custody blamed the agent and
   # rolled the entry back. Holds are deferred while the task lock is live.

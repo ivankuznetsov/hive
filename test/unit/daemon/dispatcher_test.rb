@@ -1655,6 +1655,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assessment = { safe: true, due: true, retry_at: T0, safety_reason: "safe" }
     assert_equal "runnable_now",
                  dispatcher.send(:retry_pending_item, unsafe, now: T0).fetch("bucket")
+
+    # A refused model waits on the operator, never on the retry scheduler.
+    assessment = { safe: true, due: false, retry_at: T0, safety_reason: "safe", operator_required: true }
+    assert_equal [ "waiting_operator", "model_unsupported" ],
+                 dispatcher.send(:retry_pending_item, unsafe, now: T0).values_at("bucket", "reason")
+    refused = row(slug: "refused",
+                  marker_attrs: { "reason" => "model_unsupported", "message" => "set a supported model" })
+    assert_equal [ :model_unsupported, "operator", "set a supported model" ],
+                 dispatcher.send(:retry_disposition, refused, assessment)
   end
 
   def test_project_owned_fails_closed_when_ownership_probe_raises

@@ -641,6 +641,40 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  # Supersedes #1473: a refused model is operator-owned, never a cooldown.
+  def test_run_pass_marks_model_unsupported_for_typed_and_raw_refusals
+    typed_message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; " \
+                    "#{Hive::ModelUnsupported::CONFIG_HINT}"
+    [
+      [ { status: :error, error_reason: "model_unsupported", error_message: typed_message }, "gpt-6-sol" ],
+      [ { status: :error,
+          error_message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." },
+        "gpt-6.1-sol" ]
+    ].each do |result, model|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        write_plan(task)
+        write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+        git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+
+        run_result = with_fake_git_and_spawn(git, result: result) do
+          Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+        end
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "model_unsupported", status: :error }, run_result)
+        assert_equal :error, marker.name
+        assert_equal "model_unsupported", marker.attrs["reason"]
+        assert_equal "codex", marker.attrs["provider"]
+        assert_equal model, marker.attrs["model"]
+        assert_equal "model unsupported for codex: '#{model}' is not available to this account; " \
+                     "#{Hive::ModelUnsupported::CONFIG_HINT}", marker.attrs["message"]
+        assert_nil marker.attrs["retry_after"]
+        refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+      end
+    end
+  end
+
   def test_run_pass_preserves_typed_zero_exit_402_limit_classification
     with_tmp_dir do |dir|
       task = build_task(dir)

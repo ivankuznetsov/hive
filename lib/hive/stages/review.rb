@@ -15,6 +15,7 @@ require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/review_error_reason"
 require "hive/reviewers"
 require "hive/agent_profiles"
@@ -459,6 +460,7 @@ module Hive
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
             reviewer_limit_texts = []
+            reviewer_unsupported_texts = []
             # A cooled retry of a triage-limited pass reuses the reviewer
             # outputs that pass already produced at this exact HEAD, so only
             # the reviewers that failed re-spend provider quota.
@@ -469,10 +471,19 @@ module Hive
               cfg, ctx_pass, task,
               started_at: started_at, max_wall_clock_sec: max_wall_clock,
               limit_texts: reviewer_limit_texts,
-              reuse: reusable_outputs, succeeded: succeeded_reviewers
+              reuse: reusable_outputs, succeeded: succeeded_reviewers,
+              unsupported_texts: reviewer_unsupported_texts
             )
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
+            end
+            if reviewers_result == :all_failed_model_unsupported
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :reviewers, reason: Hive::ModelUnsupported::REASON, pass: pass,
+                                model: Hive::ModelUnsupported.model_name(reviewer_unsupported_texts.first),
+                                message: model_unsupported_summary(reviewer_unsupported_texts.first, :reviewers))
+              return { commit: "reviewers_#{Hive::ModelUnsupported::REASON}_pass_#{format('%02d', pass)}",
+                       status: :review_error }
             end
             if reviewers_result == :all_failed || reviewers_result == :all_failed_limit
               limit = reviewers_result == :all_failed_limit
@@ -1083,7 +1094,15 @@ module Hive
       # earns the self-healing retry stamp. Returns whether the limit path
       # was taken so the caller can label its commit.
       def mark_review_phase_failure(task, phase:, pass:, error_message:, limit_text: nil)
-        if limit_failure?(limit_text: limit_text, error_message: error_message)
+        if Hive::ModelUnsupported.detected?(error_message.to_s)
+          # Operator-owned model configuration: no provider cooldown, and the
+          # daemon healer leaves it for the operator (see ModelUnsupported).
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: phase, reason: Hive::ModelUnsupported::REASON, pass: pass,
+                            model: Hive::ModelUnsupported.model_name(error_message.to_s),
+                            message: model_unsupported_summary(error_message, phase))
+          false
+        elsif limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
@@ -1098,6 +1117,10 @@ module Hive
                             message: review_phase_error_summary(error_message))
           false
         end
+      end
+
+      def model_unsupported_summary(error_message, phase)
+        review_phase_error_summary("#{phase}: #{Hive::ModelUnsupported.operator_message(error_message)}")
       end
 
       def limit_failure?(limit_text:, error_message:)
@@ -1156,6 +1179,7 @@ module Hive
           return result if result.status == :ok
           return result if result.status == :tampered
           return result if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
+          return result if Hive::ModelUnsupported.detected?(result.error_message.to_s)
           return result if attempt >= max_attempts
 
           # Don't start another full triage spawn (timeout_sec default 1800s) if
@@ -1441,7 +1465,7 @@ module Hive
       # gone — the partial results stay on disk for the next run to
       # consume.
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [],
-                        reuse: {}, succeeded: [])
+                        reuse: {}, succeeded: [], unsupported_texts: [])
         specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
@@ -1531,8 +1555,14 @@ module Hive
           # generic all_failed.
           fallback_limit = error_messages.find { |message| Hive::AgentLimit.from_limit?(message.to_s) }
           limit_texts << fallback_limit if limit_texts.empty? && fallback_limit
+          unsupported = error_messages.find { |message| Hive::ModelUnsupported.detected?(message.to_s) }
           if !limit_texts.empty?
             :all_failed_limit
+          elsif unsupported
+            # A refused model needs the operator to change config; it is not a
+            # transient all_failed the healer should keep replaying.
+            unsupported_texts << unsupported
+            :all_failed_model_unsupported
           else
             :all_failed
           end

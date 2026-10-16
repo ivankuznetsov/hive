@@ -20,6 +20,7 @@ module Hive
       OUTCOME_CLASSES = {
         eligible: :runnable, capacity_deferred: :runnable,
         give_up: :operator, fork_pr: :operator, rebase_conflict: :operator, ci_blocked: :operator,
+        model_unsupported: :operator,
         failure: :retry, timeout: :retry, budget_exhausted: :retry,
         limits_reached: :retry,
         pipeline_owned: :pipeline_owned, inflight: :inflight,
@@ -143,7 +144,8 @@ module Hive
           case outcome
           when :success, :rebased then summary[:fixed] += 1
           when :already_green, :noop, :dry_run then summary[:untouched] += 1
-          when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr, :rebase_conflict, :ci_blocked then summary[:needs_human] += 1
+          when :give_up, :failure, :timeout, :budget_exhausted, :fork_pr, :rebase_conflict, :ci_blocked,
+               :model_unsupported then summary[:needs_human] += 1
           end
         end
         summary[:interrupted] = interrupted

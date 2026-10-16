@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-10-16
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -22,6 +22,17 @@ against an arbitrary same-user filesystem process that ignores Hive locks and
 mutates paths between individual filesystem syscalls; the observation is
 transient custody evidence, not a persistent generation authority or an OS
 filesystem transaction.
+
+## Refused-model classification (2026-10-16)
+
+ADR-057 treats Codex's `model is not supported when using Codex with a ChatGPT
+account` as operator-owned configuration (`model_unsupported`). PR #1473 had
+claimed ChatGPT plans also return this text when a model's plan allowance is
+exhausted and the model works again later. Neither claim is verified against
+Codex source or documentation. If the allowance case is real, those tasks now
+wait for an operator retry instead of retrying hourly. Only this Codex sentence
+is matched; other providers' "unknown model" errors still take their
+generic error path (`provider_error`/`exit_code`) and the normal backoff.
 
 ## Review verify-pass follow-ups (2026-10-15)
 

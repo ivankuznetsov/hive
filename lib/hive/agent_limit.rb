@@ -72,11 +72,11 @@ module Hive
       # the file's "never classify on text that can sit in a healthy session" rule.
       %r{(?:usage|rate|api|token|context|message|request|session|spend|spending|credit|quota|account|subscription|\d+[\s-]?hour|hourly|daily|weekly|monthly)[\s-]?limit (?:reached|exceeded|reset)}i,
       /(?:daily|monthly|usage|spend|spending) limit/i,
-      /billing[^\n]{0,80}(?:credit|quota|limit)/i,
-      # Codex on a ChatGPT subscription answers a model whose plan allowance is
-      # exhausted with a 400 "not supported" instead of a quota error; the model
-      # works again once the allowance resets, so it is a wall, not bad config.
-      /model is not supported when using codex with a chatgpt account/i
+      /billing[^\n]{0,80}(?:credit|quota|limit)/i
+      # Codex's "model is not supported when using Codex with a ChatGPT
+      # account" is deliberately NOT here: it is an operator-owned model
+      # configuration error (Hive::ModelUnsupported), not a quota wall. PR
+      # #1473 classified it as a limit and tasks retried hourly for days.
     ].freeze
 
     LIVE_LIMIT_TAIL_LINES = 8

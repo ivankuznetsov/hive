@@ -809,6 +809,35 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class UnsupportedModelErroringReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "reviewer exited 1: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+      )
+    end
+  end
+
+  def test_all_failed_on_unsupported_model_returns_all_failed_model_unsupported
+    with_tmp_dir do |dir|
+      cfg = { "review" => { "reviewers" => [ { "name" => "a", "output_basename" => "a" } ] } }
+      adapters = cfg["review"]["reviewers"].map { |spec| UnsupportedModelErroringReviewer.new(spec, make_ctx(dir)) }
+      unsupported = []
+      limit_texts = []
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(
+          cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")),
+          limit_texts: limit_texts, unsupported_texts: unsupported
+        )
+        assert_equal :all_failed_model_unsupported, result
+        assert_empty limit_texts, "a refused model is not a provider limit"
+        assert_equal 1, unsupported.length
+        assert_match(/'gpt-6-sol' model is not supported/, unsupported.first)
+      end
+    end
+  end
+
   def test_all_failed_with_quoted_limit_text_returns_all_failed
     with_tmp_dir do |dir|
       cfg = {

@@ -624,6 +624,25 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_run_does_not_retry_an_unsupported_model_refusal
+    with_tmp_dir do |dir|
+      reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 3)
+      refused = error_result(
+        "model unsupported for codex: 'gpt-6-sol' is not available to this account; " \
+        "#{Hive::ModelUnsupported::CONFIG_HINT}"
+      )
+
+      with_spawn_stub([ refused, ok_result ]) do |count_fn, _|
+        result = reviewer.run!
+        assert result.error?
+        assert_nil result.limit_text, "a refused model is not a provider limit"
+        assert_equal 1, count_fn.call
+      end
+
+      assert_empty sleeps
+    end
+  end
+
   def test_run_backoff_cap_capped_at_eight_seconds
     with_tmp_dir do |dir|
       reviewer, sleeps = with_stubbed_adapter(dir, "max_attempts" => 6)

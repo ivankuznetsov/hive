@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "time"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
@@ -179,6 +180,12 @@ module Hive
       # to these — those are about worktree state, not pacing.
       OPERATOR_REQUESTORS = %w[action cli bot web].freeze
 
+      # The daemon's own sweep. A marker that names an operator-owned
+      # configuration problem (Hive::ModelUnsupported) is never admitted for
+      # these: replaying it would fail identically until the config changes.
+      # Every human surface may still retry once the operator has fixed it.
+      AUTOMATIC_REQUESTORS = %w[healer].freeze
+
       def retry_delay_sec(retry_count)
         Hive::Recovery::RetryPolicy.delay_sec(retry_count)
       end
@@ -199,12 +206,15 @@ module Hive
         end
         eligible_at = observed_at && observed_at + delay
         safe, safety_reason = @safety.call(row)
-        {
+        result = {
           due: !eligible_at.nil? && now.utc >= eligible_at,
           retry_at: eligible_at,
           safe: safe == true,
           safety_reason: safety_reason.to_s
         }
+        return result unless Hive::ModelUnsupported.marker?(marker_attrs(row))
+
+        result.merge(due: false, operator_required: true)
       rescue StandardError => e
         {
           due: false, retry_at: nil, safe: false,
@@ -234,6 +244,19 @@ module Hive
             remediation: "refresh status so Hive can observe the current marker generation",
             retry_count: retry_count
           )
+        end
+        if assessment[:operator_required]
+          if AUTOMATIC_REQUESTORS.include?(requestor.to_s)
+            return receipt(
+              "blocked", failure_origin: failure_origin, owner: "operator",
+              reason: Hive::ModelUnsupported::REASON,
+              remediation: Hive::ModelUnsupported.remediation(marker_attrs(row)),
+              retry_count: retry_count, provider_hint: provider_hint(row)
+            )
+          end
+          # Never due on its own, so any human surface (including the TUI)
+          # is the operator acting on the fixed config: skip the pacing gate.
+          operator_request = true
         end
         unless assessment[:due] || operator_request
           return receipt(

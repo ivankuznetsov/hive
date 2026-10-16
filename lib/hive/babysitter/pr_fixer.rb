@@ -5,6 +5,7 @@ require "shellwords"
 require "time"
 require "hive/agent_limit"
 require "hive/agent_profiles"
+require "hive/model_unsupported"
 require "hive/atomic_file"
 require "hive/babysitter/context_builder"
 require "hive/babysitter/dry_run_env"
@@ -455,6 +456,9 @@ module Hive
       def outcome_for(result, worktree_path = nil)
         return :timeout if result[:status] == :timeout || result[:timed_out]
         return :limits_reached if result[:error_reason] == "limits_reached"
+        # Never a limit hold: the configured babysitter model is refused, so
+        # give up on the PR with the operator-facing fix in the comment.
+        return :model_unsupported if result[:error_reason] == Hive::ModelUnsupported::REASON
         return :budget_exhausted if budget_exhausted?(result)
         if @dry_run && result[:status] == :ok
           return :dry_run if worktree_path && File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
@@ -481,6 +485,7 @@ module Hive
         when :timeout then "timeout"
         when :budget_exhausted then "budget_exhausted"
         when :limits_reached then "limits_reached"
+        when :model_unsupported then "model_unsupported"
         else "failure"
         end
         Hive::Babysitter::Events.emit(
@@ -532,6 +537,7 @@ module Hive
             case outcome
             when :timeout then "timeout"
             when :budget_exhausted then "budget_exhausted"
+            when :model_unsupported then "model_unsupported"
             else "failure"
             end
           end

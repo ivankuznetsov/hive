@@ -452,6 +452,25 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_model_unsupported_outcome_needs_the_operator
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 })
+      logger = make_logger(dir)
+      prs = [ { "number" => 22, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*_args, **_kwargs) { :model_unsupported }) do
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: false, logger: logger, inflight: Set.new)
+          assert_equal({ total: 1, fixed: 0, untouched: 0, needs_human: 1 }, summary)
+        end
+      end
+      assert_equal :operator, Hive::Babysitter::ProjectTick.outcome_class(:model_unsupported)
+    ensure
+      logger&.close
+    end
+  end
+
   def test_gh_error_emits_event_and_does_not_spawn_agent
     with_tmp_dir do |dir|
       project = project_entry(dir)

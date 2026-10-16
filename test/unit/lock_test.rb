@@ -217,6 +217,67 @@ class LockTest < Minitest::Test
     assert_equal folder, observed_path
   end
 
+  # Regression: a task captured under a throwaway HIVE_HOME got id 1 from that
+  # state home's fresh counter, while this installation had already bound id
+  # 1 to another project's task. The lease refused it on every daemon tick
+  # with no hint of which subject owned the id.
+  def test_foreign_state_home_id_names_the_owning_subject
+    owner = task_folder(1)
+    other_root = File.join(@root, "digest-project")
+    timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+    @database.transaction do |db|
+      installation = db[:installations].get(:installation_id)
+      db[:projects].insert(
+        project_id: "digest-project", installation_id: installation,
+        registration_id: "legacy:digest-project", name: "digest",
+        observed_path: other_root, state_root_path: File.join(other_root, ".hive-state"),
+        active: 1, registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    foreign = File.join(other_root, ".hive-state", "stages", "2-discover", "preview-digest")
+    FileUtils.mkdir_p(foreign)
+    File.write(
+      File.join(foreign, "meta.yml"),
+      { "id" => 1, "slug" => "preview-digest", "workflow" => "digest" }.to_yaml
+    )
+
+    conflict = repository.identity_conflict(foreign)
+    assert_equal(
+      { task_id: "1", project_id: @project_id, project_name: "lock-test",
+        workflow_id: "coding", task_slug: "task-1", observed_path: owner },
+      conflict
+    )
+
+    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
+      Hive::Lock.with_task_lock(foreign, op: "recovery_admission") { flunk "lease must be refused" }
+    end
+    assert_equal :task_identity_conflict, error.code
+    assert_includes error.message, "task 1 belongs to a different registered subject (lock-test:task-1, workflow coding)"
+    assert_includes error.action, "fresh unique id"
+    assert_equal conflict, error.details
+    assert_nil @database.read { |db| db[:task_subjects].where(task_slug: "preview-digest").first }
+  end
+
+  def test_identity_conflict_is_nil_without_a_competing_subject
+    owned = task_folder(30)
+    assert_nil repository.identity_conflict(owned)
+
+    unregistered = File.join(@root, ".hive-state", "stages", "4-execute", "fresh")
+    FileUtils.mkdir_p(unregistered)
+    File.write(File.join(unregistered, "meta.yml"), { "id" => 31, "slug" => "fresh" }.to_yaml)
+    assert_nil repository.identity_conflict(unregistered)
+
+    idless = File.join(@root, ".hive-state", "stages", "4-execute", "idless")
+    FileUtils.mkdir_p(idless)
+    File.write(File.join(idless, "meta.yml"), { "slug" => "idless" }.to_yaml)
+    assert_nil repository.identity_conflict(idless)
+
+    outside = File.join(@root, "elsewhere", "stages", "4-execute", "task-30")
+    FileUtils.mkdir_p(outside)
+    File.write(File.join(outside, "meta.yml"), { "id" => 30, "slug" => "other" }.to_yaml)
+    assert_nil repository.identity_conflict(outside)
+  end
+
   def test_subject_registration_detects_a_concurrent_cross_project_insert
     original = task_folder(102)
     other_root = File.join(@root, "concurrent-project")

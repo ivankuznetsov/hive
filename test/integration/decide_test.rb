@@ -637,6 +637,29 @@ class DecideTest < Minitest::Test
     end
   end
 
+  def test_restaging_restored_files_tolerates_git_failures
+    Dir.mktmpdir("hive-decide-restage") do |root|
+      task = Struct.new(:folder, :project_root, :hive_state_path, :stage_index, :stage_name, :slug)
+                   .new(root, root, root, 3, "approval", "task")
+      fake_ops = Object.new
+      calls = []
+      fake_ops.define_singleton_method(:run_git!) do |*args|
+        calls << args
+        raise Hive::GitError, "index locked"
+      end
+      command = Hive::Commands::Decide.new("task", "approve", from: "approval")
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_nil command.send(
+          :restage_restored_files, task, { "approval.md" => { existed: true, body: "" } }
+        )
+      end
+
+      assert_equal [ [ "-C", root, "add", "-A", "--", "stages/3-approval/task/approval.md" ] ],
+                   calls
+    end
+  end
+
   def test_commit_index_snapshot_and_rollback_report_git_failures
     Dir.mktmpdir("hive-decide-index") do |root|
       task = Struct.new(:hive_state_path, :stage_index, :stage_name, :slug).new(

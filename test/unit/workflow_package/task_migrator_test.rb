@@ -675,16 +675,19 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       current = workflow("review" => 6)
       store = store_for(old:, current:)
       folder = task_folder(dir, "4-review", old_pin)
+      observation = Hive::TaskMeta.observe(folder)
       operation = operation_for(
         source: folder,
-        destination: File.join(dir, "stages", "6-review", File.basename(folder))
+        destination: File.join(dir, "stages", "6-review", File.basename(folder)),
+        observation: observation
       )
       command = migrator(dir, store)
 
       Hive::TaskMeta.rewrite(folder, current_pin)
-      assert_raises(Hive::ConcurrentRunError) do
+      error = assert_raises(Hive::ConcurrentRunError) do
         command.send(:revalidate_tasks!, [ operation ])
       end
+      assert_includes error.message, "changed while its migration was being prepared"
 
       store.selection = {
         "source_commit" => old_pin.fetch(:workflow_commit),
@@ -694,6 +697,8 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
       assert_raises(Hive::ConcurrentRunError) do
         command.send(:revalidate_selections!, [ operation ])
       end
+    ensure
+      observation&.close
     end
   end
 

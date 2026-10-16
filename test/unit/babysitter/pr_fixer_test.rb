@@ -388,6 +388,52 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  # Supersedes #1473: a refused babysitter model is operator-owned config. It
+  # must not take a limit hold; the PR gets the give-up label and a comment
+  # that names the model and the config fix.
+  def test_unsupported_model_gives_up_with_the_config_fix_instead_of_holding
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      labels = []
+      comments = []
+      message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; " \
+                "#{Hive::ModelUnsupported::CONFIG_HINT}"
+      refused = lambda do |*_args, **_kwargs|
+        { status: :error, error_reason: "model_unsupported", error_message: message,
+          final_message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
+      end
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, refused) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, lambda { |*args, **_kwargs|
+            labels << args
+            Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, lambda { |*args, **_kwargs|
+              comments << args[2]
+              Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            }) do
+              assert_equal :model_unsupported,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+            end
+          end
+        end
+      end
+
+      assert_equal 1, labels.size
+      assert_includes comments.fetch(0), "Outcome: model_unsupported"
+      assert_includes comments.fetch(0), "Error: #{message}"
+      refute File.exist?(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")),
+             "a refused model must not record a provider limit hold"
+      events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
+      assert(events.any? { |event| event["action"] == "agent-fix" && event["outcome"] == "model_unsupported" })
+      assert(events.any? { |event| event["action"] == "give-up" && event["outcome"] == "model_unsupported" })
+      refute(events.any? { |event| event["outcome"] == "limits_reached" })
+    end
+  end
+
   def test_due_limit_hold_respawns_and_clears_after_a_non_limit_result
     with_tmp_dir do |dir|
       project = project_entry(dir)

@@ -285,6 +285,42 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # Supersedes #1473's limit classification: a refused model is operator-owned
+  # configuration. The automatic sweep never admits it, however long it waits;
+  # a human retry after fixing the config still goes through.
+  def test_model_unsupported_is_never_auto_admitted_but_operator_retry_is
+    attrs = {
+      "reason" => "model_unsupported", "marker_id" => "marker-1", "model" => "gpt-6-sol",
+      "message" => "model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - (30 * 24 * 3600)) do |coordinator, row, state_home|
+      assessment = coordinator.assessment(row, now: NOW)
+      refute assessment[:due], "a refused model is never due for the automatic sweep"
+      assert assessment[:operator_required]
+      assert assessment[:safe]
+
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+      assert_equal "blocked", receipt.status
+      assert_equal "operator", receipt.owner
+      assert_equal "model_unsupported", receipt.reason
+      assert_equal "model_unsupported", receipt.failure_origin
+      assert_equal attrs.fetch("message"), receipt.remediation
+      assert_empty Q.pending(state_home:)
+
+      operator = coordinator.request(row:, requestor: "cli", request_id: "manual-fix", now: NOW)
+      refute_equal "blocked", operator.status, "an operator retry after a config fix must be admitted"
+      refute_empty Q.pending(state_home:)
+    end
+
+    # The TUI is not one of the cooldown-bypassing requestors, but a refused
+    # model is never due on its own: a fresh marker must not park it on pacing.
+    with_fixture(marker_attrs: attrs, mtime: NOW - 1) do |coordinator, row, state_home|
+      receipt = coordinator.request(row:, requestor: "tui", request_id: "tui-fix", now: NOW)
+      refute_includes %w[blocked cooldown], receipt.status
+      assert_equal NOW.iso8601(6), Q.pending(state_home:).fetch(0).recovery.fetch("next_eligible_at")
+    end
+  end
+
   def test_previously_parked_provider_limit_rearms_without_skipping_hourly_cooldown
     with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
                  mtime: NOW - 3600) do |coordinator, row, state_home|

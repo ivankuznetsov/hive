@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -451,6 +452,23 @@ module Hive
       end
 
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+        if implementer_model_unsupported?(impl_result)
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :error,
+            attrs: {
+              reason: Hive::ModelUnsupported::REASON,
+              provider: implementation_provider(impl_result, cfg),
+              model: Hive::ModelUnsupported.model_name(impl_result[:error_message].to_s),
+              message: Hive::ModelUnsupported.operator_message(
+                impl_result[:error_message].to_s, agent: implementation_provider(impl_result, cfg)
+              )
+            },
+            commit: Hive::ModelUnsupported::REASON, status: :error,
+            waiting_reason: "agent_failure"
+          )
+        end
+
         if implementer_hit_limit?(impl_result)
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
@@ -521,6 +539,17 @@ module Hive
         elsif custody.safe_after?
           yield
         end
+      end
+
+      # A refused model is operator-owned configuration; it must not inherit
+      # the limits_reached provider cooldown.
+      def implementer_model_unsupported?(impl_result)
+        return false unless impl_result
+
+        typed_reason = impl_result[:error_reason].to_s
+        return typed_reason == Hive::ModelUnsupported::REASON unless typed_reason.empty?
+
+        Hive::ModelUnsupported.detected?(impl_result[:error_message].to_s)
       end
 
       def implementer_hit_limit?(impl_result)

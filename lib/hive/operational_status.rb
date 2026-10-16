@@ -1,6 +1,7 @@
 require "time"
 require "hive/attempts/storage_status"
 require "hive/operational_action"
+require "hive/model_unsupported"
 require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
@@ -607,7 +608,7 @@ module Hive
         [ "running", "agent" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
-      when "semantic_terminal_error"
+      when "semantic_terminal_error", Hive::ModelUnsupported::REASON
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         [ "unknown", "hive" ]
@@ -930,7 +931,8 @@ module Hive
       daemon_enabled?(project["name"]) &&
         %w[error review_error].include?(row["marker"].to_s) &&
         !Hive::TaskProjection.history_invalid_row?(row) &&
-        !task_history_unavailable?(row)
+        !task_history_unavailable?(row) &&
+        !Hive::ModelUnsupported.marker?(row["attrs"] || {})
     end
 
     def task_history_unavailable?(row)

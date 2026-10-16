@@ -2573,6 +2573,93 @@ class AgentTest < Minitest::Test
     end
   end
 
+  # Supersedes #1473: a refused model is operator-owned configuration, not a
+  # provider limit — no limits_reached marker, no retry_after cooldown.
+  def test_codex_unsupported_model_error_event_is_model_unsupported_not_a_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "error",
+        "message" => JSON.generate(
+          "type" => "error", "status" => 400,
+          "error" => { "type" => "invalid_request_error",
+                       "message" => "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
+        )
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal :error, result[:status]
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_nil result[:limit_text]
+      assert_nil result[:retry_at]
+      assert_equal "model unsupported for claude: 'gpt-6-sol' is not available to this account; " \
+                   "#{Hive::ModelUnsupported::CONFIG_HINT}", result[:error_message]
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "model_unsupported", marker.attrs["reason"]
+      assert_equal "gpt-6-sol", marker.attrs["model"]
+      assert_equal "claude", marker.attrs["provider"]
+      assert_nil marker.attrs["retry_after"]
+      refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+    end
+  end
+
+  def test_unsupported_model_plain_text_line_is_model_unsupported
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] =
+        "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_match(/'gpt-6\.1-sol'/, result[:error_message])
+      assert_equal "gpt-6.1-sol", Hive::Markers.current(task.state_file).attrs["model"]
+    end
+  end
+
+  def test_unsupported_model_text_in_successful_output_is_not_classified
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+                              status_mode: :exit_code_only)
+      result = {
+        timed_out: false, exit_code: 0,
+        final_message: "Docs: 'The 'x' model is not supported when using Codex with a ChatGPT account.'"
+      }
+
+      agent.handle_exit(result)
+
+      refute_equal "model_unsupported", result[:error_reason]
+    end
+  end
+
+  def test_unsupported_model_provider_error_wins_in_exit_code_mode
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+                              status_mode: :exit_code_only)
+      result = {
+        timed_out: false, exit_code: 0, final_message: "",
+        provider_error: { kind: :provider_error, provider: "codex",
+                          message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result[:status]
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_equal "", File.read(task.state_file), "exit-code mode leaves the marker to the stage"
+    end
+  end
+
   def test_captures_claude_rejected_subscription_window_without_message_text
     with_tmp_dir do |dir|
       task = make_task(dir)

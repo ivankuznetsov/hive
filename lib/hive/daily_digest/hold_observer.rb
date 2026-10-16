@@ -63,7 +63,8 @@ module Hive
         return "capacity" if %w[attempt_capacity global_cap project_cap daily_cap].include?(decision.to_s)
         "authority" if owner.to_s == "operator" &&
                        %w[task_history_invalid project_disabled legacy_layout quarantined
-                          project_dropped folder_missing folder_missing_nil].include?(decision.to_s)
+                          project_dropped folder_missing folder_missing_nil
+                          model_unsupported].include?(decision.to_s)
       end
 
       def provider(row, details)

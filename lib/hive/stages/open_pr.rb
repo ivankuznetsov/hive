@@ -8,6 +8,7 @@ require "hive/dependency_snapshot"
 require "hive/github_publication"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/model_unsupported"
 require "hive/stages/base"
 require "hive/task"
 require "hive/worktree"
@@ -124,6 +125,7 @@ module Hive
         Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "open_pr", spawn_result
         )
+        return model_unsupported_error(task, profile, spawn_result) if authoring_model_unsupported?(spawn_result)
         return limits_reached_error(task, profile, spawn_result) if authoring_limit?(spawn_result)
 
         unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
@@ -142,6 +144,28 @@ module Hive
 
         spawn_result[:error_reason].to_s == "limits_reached" ||
           Hive::AgentLimit.limit_reached?(spawn_result[:error_message].to_s)
+      end
+
+      # A refused model is operator-owned configuration, never a quota wall.
+      def authoring_model_unsupported?(spawn_result)
+        return false unless spawn_result.is_a?(Hash) && spawn_result[:status] != :ok
+
+        spawn_result[:error_reason].to_s == Hive::ModelUnsupported::REASON ||
+          Hive::ModelUnsupported.detected?(spawn_result[:error_message].to_s)
+      end
+
+      def model_unsupported_error(task, profile, spawn_result)
+        text = spawn_result[:error_message].to_s
+        Hive::Markers.set(
+          task.state_file, :error,
+          **{
+            reason: Hive::ModelUnsupported::REASON,
+            provider: profile&.name&.to_s,
+            model: Hive::ModelUnsupported.model_name(text),
+            message: Hive::ModelUnsupported.operator_message(text, agent: profile&.name)
+          }.compact
+        )
+        { commit: Hive::ModelUnsupported::REASON, status: :error }
       end
 
       def limits_reached_error(task, profile, spawn_result)

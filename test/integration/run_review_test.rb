@@ -785,9 +785,9 @@ class RunReviewTest < Minitest::Test
   def triage_limit_result(ctx)
     Hive::Stages::Review::Triage::Result.new(
       status: :error, escalations_path: nil,
-      error_message: "limits reached for codex: The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+      error_message: "limits reached for codex: You've hit your usage limit. Try again later.",
       tampered_files: [],
-      limit_text: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+      limit_text: "You've hit your usage limit. Try again later."
     )
   end
 
@@ -3140,6 +3140,68 @@ class RunReviewTest < Minitest::Test
         assert_equal "1", marker.attrs["pass"]
 
         assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
+      end
+    end
+  end
+
+  # Supersedes #1473: a refused model stops the task for the operator instead
+  # of riding the hourly limits_reached cooldown (field: ~240 retries/task).
+  def test_triage_unsupported_model_stops_as_operator_owned_model_unsupported
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        calls = 0
+        triage_stub = lambda do |cfg:, ctx:|
+          calls += 1
+          Hive::Stages::Review::Triage::Result.new(
+            status: :error,
+            escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
+            error_message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.",
+            tampered_files: [], limit_text: nil
+          )
+        end
+        with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage_stub) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_equal 1, calls, "a refused model must not burn inline triage retries"
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "triage", marker.attrs["phase"]
+        assert_equal "model_unsupported", marker.attrs["reason"]
+        assert_equal "gpt-6-sol", marker.attrs["model"]
+        assert_nil marker.attrs["retry_after"]
+        assert_equal "triage: model unsupported: 'gpt-6-sol' is not available to this account; " \
+                     "#{Hive::ModelUnsupported::CONFIG_HINT}", marker.attrs["message"]
+        refute File.exist?(File.join(folder, "reviews", "reviewer-reuse-01.json")),
+               "only a limit-parked triage records reviewer reuse"
+      end
+    end
+  end
+
+  def test_reviewers_all_failed_on_unsupported_model_marks_model_unsupported
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        formatted = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
+                    "#{Hive::ModelUnsupported::CONFIG_HINT}"
+        reviewer_stub = lambda do |_cfg, _ctx, _task, unsupported_texts:, **_kwargs|
+          unsupported_texts << "reviewer codex failed\n#{formatted}"
+          :all_failed_model_unsupported
+        end
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, reviewer_stub) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "reviewers", marker.attrs["phase"]
+        assert_equal "model_unsupported", marker.attrs["reason"]
+        assert_equal "gpt-6.1-sol", marker.attrs["model"]
+        assert_equal "reviewers: #{formatted}", marker.attrs["message"]
+        assert_nil marker.attrs["retry_after"]
       end
     end
   end

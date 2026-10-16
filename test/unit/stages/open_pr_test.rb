@@ -419,19 +419,36 @@ class HiveStagesOpenPrTest < Minitest::Test
           assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
         end
 
-        # Codex answers an exhausted ChatGPT-plan model with a 400 "not
-        # supported" error; that is a quota wall, not a bad authoring run.
-        codex_wall = "{'type':'error','status':400,'error':{'type':'invalid_request_error'," \
-                     "'message':'The 'gpt-6-luna' model is not supported when using Codex with a ChatGPT account.'}}"
+        # Codex refusing the configured model is operator-owned config, not a
+        # quota wall (supersedes #1473): no cooldown, a message naming the fix.
+        codex_refusal = "{'type':'error','status':400,'error':{'type':'invalid_request_error'," \
+                        "'message':'The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.'}}"
         with_replaced_singleton_method(
           Hive::Stages::OpenPr, :spawn_open_pr_agent,
-          ->(*) { { status: :error, error_message: codex_wall } }
+          ->(*) { { status: :error, error_message: codex_refusal } }
         ) do
           result = Hive::Stages::OpenPr.authoring_for(
             task, cfg, pointer, nil, profile, {}
           )
-          assert_equal({ commit: "limits_reached", status: :error }, result)
-          assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+          assert_equal({ commit: "model_unsupported", status: :error }, result)
+          attrs = Hive::Markers.current(task.state_file).attrs
+          assert_equal "model_unsupported", attrs.fetch("reason")
+          assert_equal "gpt-6-sol", attrs.fetch("model")
+          assert_nil attrs["retry_after"]
+          assert_includes attrs.fetch("message"), ".hive-state/config.yml"
+        end
+
+        typed = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
+                "#{Hive::ModelUnsupported::CONFIG_HINT}"
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          ->(*) { { status: :error, error_reason: "model_unsupported", error_message: typed } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "model_unsupported", status: :error }, result)
+          assert_equal typed, Hive::Markers.current(task.state_file).attrs.fetch("message")
         end
       end
     end

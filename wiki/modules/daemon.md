@@ -872,6 +872,20 @@ advances a workflow stage directly:
    Logs retain `reason=limits_reached` / `reason=reviewer_limits_reached` as
    diagnostic labels, while durable request history supplies the retry count.
 
+   **A refused model is operator-owned and never auto-retried (ADR-057):**
+   an `ERROR`/`REVIEW_ERROR` with `reason=model_unsupported` (see
+   [[modules/agent]]) gets `operator_required: true, due: false` from
+   `RecoveryCoordinator#assessment`, so the healer never submits it; a
+   `healer` request returns `blocked`, `owner=operator`,
+   `reason=model_unsupported`, with the marker message as remediation. The
+   dispatcher's disposition is `model_unsupported` (owner `operator`; one-shot
+   bucket `waiting_operator`), and `hive status --operational` shows the row as
+   `needs_repair`/`operator` with the marker message as its reason, with or
+   without a current scheduler snapshot. Operator retries (`action`, `cli`,
+   `bot`, `web`, `tui`) are still admitted after the config is fixed. This
+   replaced PR #1473's `limits_reached` handling, under which four review
+   tasks retried hourly for about 11 days.
+
    Recovering an error reruns the owning stage through its normal checks;
    it does not bypass tamper detection, clean-exit scope, branch identity,
    repository status, authentication, or publication guards. Tamper reasons

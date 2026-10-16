@@ -512,6 +512,28 @@ class OperationalStatusTest < Minitest::Test
     refute_equal "needs_repair", projected.fetch("state")
   end
 
+  # Supersedes #1473: a refused model is operator-owned configuration, so it
+  # never reads as scheduler-owned automatic retry work, even without a
+  # current scheduler snapshot.
+  def test_model_unsupported_error_needs_the_operator_not_the_scheduler
+    message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+    refused = task(
+      action: "recover_review", slug: "refused", stage: "6-review", marker: "review_error",
+      attrs: { "phase" => "triage", "reason" => "model_unsupported", "model" => "gpt-6-sol",
+               "message" => message }
+    )
+
+    projected = project(
+      status_payload(refused),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal message, projected.fetch("reason")
+    assert_equal "model_unsupported", projected.dig("evidence", "marker_attrs", "reason")
+  end
+
   def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
@@ -955,6 +977,7 @@ class OperationalStatusTest < Minitest::Test
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
+      "model_unsupported" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]

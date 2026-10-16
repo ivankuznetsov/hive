@@ -36,7 +36,7 @@ module Hive
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
-        depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
+        depends_on: normalize_dependency(fetch(raw, "depends_on")),
         workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
       if raw.key?("base_branch") || raw.key?(:base_branch)
@@ -128,7 +128,8 @@ module Hive
       data = normalized_data(raw)
       if key?(raw, "depends_on")
         begin
-          data[:depends_on] = Hive::Dependencies.parse_reference(fetch(raw, "depends_on")).to_s
+          parsed = Hive::Dependencies.parse_declaration(fetch(raw, "depends_on"))
+          data[:depends_on] = Hive::Dependencies.serialize_declaration(parsed)
         rescue Hive::Dependencies::InvalidReference => e
           return AdmissionRead.new(
             status: :invalid,
@@ -163,7 +164,7 @@ module Hive
               idempotency_key: nil, input_fingerprint: nil, completed_at: nil,
               plan_review_required: nil)
       FileUtils.mkdir_p(task_folder)
-      normalized_depends_on = normalize_string(depends_on)
+      normalized_depends_on = Hive::Dependencies.normalize_declaration(depends_on)
       normalized_workflow = normalize_string(workflow)
       normalized_base_branch = normalize_string(base_branch)
       normalized_commit = normalize_string(workflow_commit)
@@ -309,7 +310,7 @@ module Hive
         id: normalize_id(fetch(raw, "id")),
         slug: normalize_string(fetch(raw, "slug")),
         display_name: normalize_string(fetch(raw, "display_name")),
-        depends_on: normalize_string(fetch(raw, "depends_on")),
+        depends_on: normalize_dependency(fetch(raw, "depends_on"), preserve_invalid: true),
         workflow: normalize_string(fetch(raw, "workflow")),
         base_branch: normalize_string(fetch(raw, "base_branch")),
         workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
@@ -347,6 +348,27 @@ module Hive
     def normalize_string(value)
       string = value.to_s.strip
       string.empty? ? nil : string
+    end
+
+    def normalize_dependency(value, preserve_invalid: false)
+      Hive::Dependencies.normalize_declaration(value)
+    rescue Hive::Dependencies::InvalidReference
+      return json_safe_evidence(value) if preserve_invalid && value.is_a?(Array)
+
+      normalize_string(Hive::Dependencies.display_declaration(value))
+    end
+
+    # Invalid list evidence keeps its shape for diagnostics, but every
+    # projection that hashes or publishes it must stay JSON-serializable.
+    # YAML admits non-finite floats (`.nan`, `.inf`) that JSON rejects, so
+    # render those leaves as text at any nesting depth.
+    def json_safe_evidence(value)
+      case value
+      when Array then value.map { |element| json_safe_evidence(element) }
+      when Hash then value.to_h { |key, element| [ json_safe_evidence(key), json_safe_evidence(element) ] }
+      when Float then value.finite? ? value : value.to_s
+      else value
+      end
     end
 
     def normalize_plan_review_required(value, label:, allow_nil: false, strict: false)

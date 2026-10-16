@@ -1,4 +1,6 @@
 require "hive/stages"
+require "hive/config"
+require "json"
 require "psych"
 
 module Hive
@@ -18,18 +20,6 @@ module Hive
     Reference = Data.define(:project, :task, :explicit_project) do
       def to_s
         explicit_project ? "#{project}:#{task}" : task
-      end
-    end
-
-    # `unresolved` is NOT a stored field: it is derived so the three-field
-    # tuple can never contradict itself. A blocked row with no identified
-    # prerequisite (missing dependency or self-reference) is unresolved; a
-    # blocked row that names a prerequisite slug is a real below-gate wait.
-    # `resolve` guarantees the correlation `unresolved? ⟺ (blocked &&
-    # blocked_by.nil?)` by construction (see the resolved⟹slug guard below).
-    Result = Data.define(:blocked_by, :dependency_stage, :blocked) do
-      def unresolved?
-        blocked && blocked_by.nil?
       end
     end
 
@@ -62,10 +52,68 @@ module Hive
       end
     end
 
-    def parse_optional_reference(value)
+    # Parse the authoritative dependency declaration without erasing whether
+    # the author supplied one scalar edge or a scheduling-only list. Arrays
+    # are deliberately not collapsed when they contain only one unique item.
+    def parse_declaration(value)
+      return parse_reference(value) unless value.is_a?(Array)
+
+      raise InvalidReference.new(value, "depends_on list must not be empty") if value.empty?
+
+      references = value.each_with_index.map do |element, index|
+        if element.is_a?(Array) || element.is_a?(Hash) || element.nil?
+          raise InvalidReference.new(
+            value,
+            "depends_on element #{index + 1} must be a scalar task reference"
+          )
+        end
+
+        parse_reference(element)
+      rescue InvalidReference => e
+        raise e if e.value.equal?(value)
+
+        raise InvalidReference.new(value, "depends_on element #{index + 1} is invalid: #{e.message}")
+      end
+
+      references.uniq { |reference| reference.to_s }
+    end
+
+    def parse_optional_declaration(value)
       return nil if value.nil?
 
-      parse_reference(value)
+      parse_declaration(value)
+    end
+
+    def normalize_declaration(value)
+      parsed = parse_optional_declaration(value)
+      serialize_declaration(parsed)
+    end
+
+    def serialize_declaration(value)
+      return nil if value.nil?
+      return value.map(&:to_s) if value.is_a?(Array)
+
+      value.to_s
+    end
+
+    # Render malformed declaration evidence as schema-safe, readable text.
+    # Composite values use JSON rather than Ruby's hash-rocket inspect syntax;
+    # non-JSON scalars still degrade to their ordinary string representation.
+    def display_declaration(value)
+      return value.to_s if value.is_a?(String) || value.is_a?(Integer)
+
+      JSON.generate(value)
+    rescue JSON::GeneratorError, TypeError
+      value.to_s
+    end
+
+    def declaration_references(value)
+      parsed = parse_optional_declaration(value)
+      parsed.is_a?(Array) ? parsed : Array(parsed)
+    end
+
+    def list_declaration?(value)
+      value.is_a?(Array)
     end
 
     # Psych accepts duplicate mapping keys and silently keeps the last value.
@@ -85,47 +133,60 @@ module Hive
       false
     end
 
-    def resolve(depends_on:, tasks:, threshold_stage:, task: nil)
-      dependency = normalize_depends_on(depends_on)
-      return Result.new(blocked_by: nil, dependency_stage: nil, blocked: false) unless dependency
-
-      prerequisite = find_task(dependency, tasks)
-      if prerequisite.nil? || same_task?(prerequisite, task)
-        return Result.new(blocked_by: nil, dependency_stage: nil, blocked: true)
+    def blocker_names(unmet_dependencies:, blocked_by: nil)
+      names = Array(unmet_dependencies).filter_map do |entry|
+        value = field(entry, :blocked_by).to_s.strip
+        value = field(entry, :reference).to_s.strip if value.empty?
+        value unless value.empty?
       end
-
-      # Resolved ⟹ slug present. Every snapshot builder guarantees a slug,
-      # so a resolved prerequisite without one is a corrupt input, not a
-      # missing dependency — raise rather than emit a tuple that would
-      # render as "(unresolved)". Callers on the never-fail status surface
-      # isolate this per row, not per project: apply_dependency_result
-      # rescues each row independently, so one corrupt prerequisite blanks
-      # only its own dependent's gate, not the whole project's.
-      slug = task_slug(prerequisite)
-      raise ArgumentError, "resolved prerequisite #{dependency.inspect} has no slug" unless slug
-
-      stage = stage_name_for(prerequisite)
-      blocked = stage_index_for(prerequisite) < threshold_index(threshold_stage)
-      Result.new(blocked_by: slug, dependency_stage: stage, blocked: blocked)
+      fallback = blocked_by.to_s.strip
+      names << fallback if names.empty? && !fallback.empty?
+      names.uniq
     end
 
-    # Single source of truth for the "⏸ blocked by …" indicator rendered by
-    # both Commands::Status (text mode) and Tui::Views::TasksPane. The
-    # unresolved-vs-resolved discriminator is `blocked_by` presence —
-    # `resolve`'s resolved⟹slug guard makes a resolved prerequisite always
-    # carry its slug and an unresolved one (missing / self-reference) always
-    # nil — so the two renderers can never diverge on the predicate.
-    def blocked_label(depends_on:, blocked_by:, dependency_stage:)
-      if blocked_by.to_s.strip.empty?
-        "⏸ blocked by #{depends_on} (unresolved)"
-      else
-        "⏸ blocked by #{blocked_by} (#{dependency_stage})"
+    # Undecorated blocker summary shared by human and structured renderers.
+    # The complete unmet collection is authoritative; scalar singulars are
+    # compatibility fallbacks only.
+    def blocker_summary(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
+      blockers = Array(unmet_dependencies).filter_map do |entry|
+        reference = field(entry, :reference)
+        target = field(entry, :blocked_by)
+        stage = field(entry, :dependency_stage)
+        gate = field(entry, :required_gate)
+        name = target.to_s.strip.empty? ? reference.to_s.strip : target.to_s.strip
+        next if name.empty?
+
+        if target.to_s.strip.empty?
+          "#{name} (unresolved)"
+        elsif gate.to_s == Hive::Config::DEPENDENCY_GATE_STAGES.last
+          "#{name} (#{stage}, needs #{gate})"
+        else
+          "#{name} (#{stage})"
+        end
       end
+      if blockers.empty?
+        blockers << if !blocked_by.to_s.strip.empty?
+          "#{blocked_by} (#{dependency_stage})"
+        elsif !depends_on.is_a?(Array) && !depends_on.to_s.strip.empty?
+          "#{depends_on} (unresolved)"
+        else
+          "a task dependency"
+        end
+      end
+      "blocked by #{blockers.join(', ')}"
+    end
+
+    # Single source of truth for the decorated status/TUI indicator.
+    def blocked_label(**attributes)
+      "⏸ #{blocker_summary(**attributes)}"
     end
 
     def base_branch_for(depends_on:, tasks:, default_branch:, task: nil)
-      dependency = normalize_depends_on(depends_on)
-      return default_branch unless dependency
+      return default_branch if list_declaration?(depends_on)
+
+      return default_branch if depends_on.nil?
+
+      dependency = parse_reference(depends_on).to_s
 
       prerequisite = find_task(dependency, tasks)
       return default_branch if prerequisite.nil? || same_task?(prerequisite, task)
@@ -136,12 +197,6 @@ module Hive
     def find_task(depends_on, tasks)
       tasks.find { |candidate| task_slug(candidate) == depends_on } ||
         (numeric?(depends_on) ? tasks.find { |candidate| task_id(candidate) == Integer(depends_on) } : nil)
-    end
-
-    def normalize_depends_on(value)
-      return nil if value.nil?
-
-      parse_reference(value).to_s
     end
 
     def numeric?(value)
@@ -171,60 +226,18 @@ module Hive
 
       Integer(raw)
     rescue ArgumentError, TypeError
-      # A corrupt prerequisite id (non-numeric string in meta.yml) makes a
-      # numeric `depends_on` FAIL to resolve (treated as a missing
-      # prerequisite): `find_task`'s numeric arm compares `nil == <int>` →
-      # false, so the prereq is not found — it does NOT mis-resolve to the
-      # wrong task. Note this rescue is effectively dead on the production
-      # status path: `TaskMeta.normalize_id` already coerces a corrupt id to
-      # nil before the resolver ever sees it, so the breadcrumb fires only for
-      # callers that pass a raw, unnormalized id. Kept so the "typo in
-      # depends_on" case stays distinguishable from "prereq id is garbage"
-      # when debugging an unexpected unresolved gate.
+      # A corrupt prerequisite id cannot satisfy the numeric branch selector.
+      # TaskMeta normally coerces it to nil before this helper sees it; keep a
+      # breadcrumb for raw integration inputs.
       warn "[hive] dependencies: prerequisite id #{raw.inspect} is not an integer; " \
            "ignoring it for numeric depends_on matching"
       nil
     end
 
-    def stage_index_for(task)
-      raw = field(task, :stage_index)
-      return raw if raw.is_a?(Integer)
-      return Integer(raw) if raw
-
-      stage = field(task, :stage)
-      resolved = Hive::Stages.resolve(stage.to_s)
-      return Hive::Stages::DIRS.index(resolved) + 1 if resolved
-
-      raise ArgumentError, "dependency task #{task_slug(task).inspect} has no valid stage"
-    end
-
-    def stage_name_for(task)
-      stage = field(task, :stage)
-      resolved = Hive::Stages.resolve(stage.to_s)
-      return resolved if resolved
-
-      Hive::Stages::DIRS.fetch(stage_index_for(task) - 1)
-    end
-
-    def threshold_index(threshold_stage)
-      resolved = Hive::Stages.resolve(threshold_stage.to_s)
-      raise ArgumentError, "unknown dependency gate stage #{threshold_stage.inspect}" unless resolved
-
-      Hive::Stages::DIRS.index(resolved) + 1
-    end
-
-    # Read `key` (a symbol) from `task`, which is either a Hash (symbol- or
-    # string-keyed) or an object exposing `key` as a reader. Most production
-    # callers pass a SYMBOL-keyed Hash: Status#apply_dependency_result and
-    # DependencySnapshot#stacked_base both project their rows/tasks into
-    # symbol-keyed Hashes before calling in (the snapshot deliberately does
-    # not duck-type other inputs). The string-key arm remains part of the
-    # public resolver contract for JSON-shaped callers and compatibility
-    # with older integrations. The TUI admission cache itself now carries
-    # immutable TaskSnapshots rather than reduced row hashes. The reader arm
-    # (e.g. a `Hive::Task`) is test ergonomics / forward compatibility — no
-    # production path passes a reader-exposing object today. Returns nil only
-    # when the key is genuinely absent from a
+    # Read `key` (a symbol) from a supported task shape: symbol-keyed Hash,
+    # string-keyed Hash, or an object exposing `key` as a reader. Status and
+    # TUI blocker payloads exercise the string-keyed path, while dependency
+    # snapshots exercise readers. Returns nil only when the key is absent from a
     # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
     # a breadcrumb instead of silently resolving every field to "missing".

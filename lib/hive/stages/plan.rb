@@ -185,15 +185,23 @@ module Hive
         return unless plan.valid?
 
         declared = plan.depends_on
-        return if declared.nil? || declared.to_s.strip.empty?
+        return if declared.nil?
         return unless Hive::TaskMeta.read(task.folder)[:depends_on].nil?
 
-        # PlanFrontmatter already parsed and validated this into a Reference;
-        # a malformed one never reaches here as :ok.
-        reference = declared.to_s
-        return if reference == task.slug
+        # PlanFrontmatter already parsed and validated this into a Reference
+        # or an array of References; malformed declarations never reach here.
+        return if Array(declared).any? do |reference|
+          same_slug = reference.task == task.slug
+          same_numeric_id = !reference.explicit_project && reference.task == task.id.to_s
+          same_qualified_identity = reference.explicit_project &&
+            reference.project == task.project_name && same_slug
+          (!reference.explicit_project && same_slug) || same_numeric_id || same_qualified_identity
+        end
 
-        Hive::TaskMeta.rewrite(task.folder, depends_on: reference)
+        Hive::TaskMeta.rewrite(
+          task.folder,
+          depends_on: Hive::Dependencies.serialize_declaration(declared)
+        )
       rescue StandardError
         # Adoption is a convenience over an existing admission check. If it
         # fails we must not fail the plan stage: admission still catches the

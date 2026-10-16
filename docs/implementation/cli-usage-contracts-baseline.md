@@ -63,9 +63,9 @@ The table includes resolver-only surfaces as well as every static registry key.
 | markers | `markers clear` | hive-markers-clear / 1 | invalid_task_path | |
 | status default | `status extra` | hive-running-status / 2 | error | |
 | status diagnose | `status --diagnose=task extra` | hive-status-diagnose / 2 | error | Highest option-region precedence |
-| status operational | `status --operational extra` | hive-operational-status / 4 | error | Precedes internal graph/daemon task |
-| status internal graph | `status --internal-task-graph extra` | hive-status / 8 | error | |
-| status daemon task | `status --daemon-task=task extra` | hive-status / 8 | error | |
+| status operational | `status --operational extra` | hive-operational-status / 5 | error | Precedes internal graph/daemon task |
+| status internal graph | `status --internal-task-graph extra` | hive-status / 9 | error | |
+| status daemon task | `status --daemon-task=task extra` | hive-status / 9 | error | |
 | runtime | `runtime unknown extra` | hive-runtime-maintenance / 1 | usage | action=unknown, runtime_code=usage, next_action=null, details={} |
 | runtime default action | `runtime --json=yes` | hive-runtime-maintenance / 1 | usage | action=status when no positional |
 | act empty | `act` | hive-act / 2 | usage | action_id="", target="" |

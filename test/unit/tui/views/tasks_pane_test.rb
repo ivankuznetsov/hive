@@ -18,6 +18,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
+                unmet_dependencies: [], dependency_base_mode: "default",
                 blocked: false, admission_error: nil,
                 implementation_identity: nil,
                 auto_residue: nil,
@@ -29,6 +30,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "depends_on" => depends_on,
       "blocked_by" => blocked_by,
       "dependency_stage" => dependency_stage,
+      "unmet_dependencies" => unmet_dependencies,
+      "dependency_base_mode" => dependency_base_mode,
       "blocked" => blocked,
       "admission_error" => admission_error,
       "stage" => stage,
@@ -300,6 +303,24 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
                  Hive::Tui::Views::TasksPane.status_label(row),
                  "a blocked row must append the dependency block to its action-state label"
+  end
+
+  def test_status_label_lists_every_array_dependency_without_ruby_inspect
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first", "dependency_stage" => "7-artifacts" },
+      { "reference" => "second", "blocked_by" => "second", "dependency_stage" => "8-finalize" }
+    ]
+    snap = make_snapshot([ {
+      "name" => "hive", "tasks" => [ make_task(
+        slug: "dependent-task", depends_on: %w[first second], blocked: true,
+        unmet_dependencies: unmet
+      ) ]
+    } ])
+
+    label = Hive::Tui::Views::TasksPane.status_label(snap.projects.first.rows.first)
+
+    assert_includes label, "first (7-artifacts), second (8-finalize)"
+    refute_includes label, "[\""
   end
 
   def test_plan_review_status_includes_the_shared_required_action

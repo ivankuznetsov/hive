@@ -81,6 +81,38 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
                  panel.fetch("edges").map { |edge| [ edge["from"], edge["to"] ] }
   end
 
+  def test_list_fan_in_emits_one_scheduling_edge_with_per_edge_state
+    indexed = context(project(tasks: [
+      task("ready", stage: "9-done"),
+      task("waiting", stage: "8-finalize"),
+      task("child", depends_on: %w[ready waiting])
+    ]))
+
+    panel = component(indexed, slug: "child").call
+    edges = panel.fetch("edges").select { |edge| edge["from"] == "app:child" }
+
+    assert_equal %w[ready waiting], edges.map { |edge| edge.fetch("reference") }
+    assert_equal [ "scheduling" ], edges.map { |edge| edge.fetch("relationship") }.uniq
+    assert_equal "clear", edges.find { |edge| edge["reference"] == "ready" }.fetch("state")
+    waiting = edges.find { |edge| edge["reference"] == "waiting" }
+    assert_equal "blocking", waiting.fetch("state")
+    assert_equal "9-done", waiting.fetch("required_gate")
+  end
+
+  def test_same_named_cross_project_edges_match_blockers_by_qualified_identity
+    app = project(tasks: [
+      task("same", stage: "4-execute"),
+      task("child", depends_on: [ "same", "data:same" ])
+    ])
+    data = project(name: "data", tasks: [ task("same", project: "data", stage: "9-done") ])
+
+    edges = component(context(app, data), slug: "child").call.fetch("edges")
+      .select { |edge| edge["from"] == "app:child" }
+
+    assert_equal "blocking", edges.find { |edge| edge["to"] == "app:same" }.fetch("state")
+    assert_equal "clear", edges.find { |edge| edge["to"] == "data:same" }.fetch("state")
+  end
+
   def test_connected_nodes_receive_individual_stack_and_publication_observations
     indexed = context(project(tasks: [ task("base"), task("child", depends_on: "base") ]))
     observed = []
@@ -213,6 +245,64 @@ class TaskWorkspaceDependencyComponentTest < Minitest::Test
     refute_includes panel.to_s, "/tmp/app/broken"
     assert_equal "dependency_validation_failed",
                  panel.fetch("records").first.dig("admission", "error", "reason_code")
+  end
+
+  def test_malformed_array_declaration_uses_an_explicit_invalid_label
+    malformed = task("broken", depends_on: [ "base", "" ])
+    panel = component(context(project(tasks: [ malformed ])), slug: "broken").call
+
+    assert_includes panel.fetch("diagnostics").map { |row| row["reference"] },
+                    "app:broken"
+    assert panel.fetch("records").any? do |node|
+      node["kind"] == "missing" && node["slug"] == "invalid dependency declaration"
+    end
+    assert_equal [ "invalid dependency declaration" ],
+                 panel.fetch("edges").map { |edge| edge["reference"] }
+  end
+
+  def test_distinct_malformed_declarations_use_distinct_placeholder_identity
+    indexed = context(project(tasks: [
+      task("broken-one", depends_on: [ "base", "" ]),
+      task("broken-two", depends_on: [ "other", nil ])
+    ]))
+
+    placeholder_ids = %w[broken-one broken-two].map do |slug|
+      component(indexed, slug: slug).call.fetch("records")
+        .find { |node| node["kind"] == "missing" }.fetch("id")
+    end
+
+    refute_equal placeholder_ids.first, placeholder_ids.last
+  end
+
+  def test_wide_declaration_stops_during_edge_expansion
+    references = 10.times.map { |index| "missing-#{index}" }
+    indexed = context(project(tasks: [ task("wide", depends_on: references) ]))
+
+    panel = component(
+      indexed, slug: "wide",
+      limits: Hive::TaskWorkspace::Limits.new(dependency_edges: 3)
+    ).call
+
+    assert panel.fetch("truncated")
+    assert_operator panel.fetch("edges").length, :<=, 3
+    assert_includes panel.fetch("diagnostics").filter_map { |row| row["cap"] },
+                    "dependency_edges"
+  end
+
+  def test_invalid_declaration_respects_an_already_full_edge_budget
+    indexed = context(project(tasks: [
+      task("a-wide", depends_on: %w[missing-one missing-two missing-three]),
+      task("b-broken", depends_on: [ "base", "" ])
+    ]))
+
+    panel = component(
+      indexed, slug: "b-broken",
+      limits: Hive::TaskWorkspace::Limits.new(dependency_edges: 3)
+    ).call
+
+    assert panel.fetch("truncated")
+    assert_includes panel.fetch("diagnostics").filter_map { |row| row["cap"] },
+                    "dependency_edges"
   end
 
   def test_deadline_degrades_with_exact_cap_name

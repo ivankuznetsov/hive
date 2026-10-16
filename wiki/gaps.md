@@ -501,8 +501,8 @@ is advisory while the deterministic scale gate remains required.
 - The dependency workspace view projects the connected subset of the reused
   bounded status snapshot. If that snapshot lacks other projects or exhausts a
   cap, the component remains partial rather than starting a new fleet scan.
-  This is an operator explanation of the existing scalar `depends_on` model,
-  not a durable DAG or publication authority.
+  This is an operator explanation of the existing scalar-or-list `depends_on`
+  model, not a separate durable DAG or publication authority.
 
 See [[modules/task_workspace]].
 
@@ -1769,6 +1769,14 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   host capability; it does not treat unrelated command or storage failures as a
   valid degraded outcome. This documents the exclusion and does not claim that
   a degraded run was observed.
+
+## Multi-dependency review verification (2026-10-15)
+
+- Focused tests cover cycle fan-in, declaration/gate/base-mode freshness,
+  schema-safe malformed metadata, batched status inputs, and consumer
+  projections. They do not measure a long-running installed daemon, TUI, or Web
+  process against a production-sized cyclic graph; hosted review and CI remain
+  separate verification boundaries.
 
 ## Deprecated native-web `HIVEBOX_*` aliases (2026-10-15)
 

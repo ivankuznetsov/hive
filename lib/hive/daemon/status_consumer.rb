@@ -20,7 +20,8 @@ module Hive
                        :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
                        :task_lock_id, :diagnostic, :depends_on, :blocked_by,
-                       :dependency_stage, :blocked, :admission_error,
+                       :dependency_stage, :unmet_dependencies, :dependency_base_mode,
+                       :blocked, :admission_error,
                        :attempt_id, :task_generation,
                        :condition_task_generation, :commit_generation, :current_attempt,
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
@@ -224,6 +225,8 @@ module Hive
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],
               dependency_stage: task["dependency_stage"],
+              unmet_dependencies: Array(task["unmet_dependencies"]),
+              dependency_base_mode: task["dependency_base_mode"] || "default",
               blocked: admission_error ? true : task["blocked"] == true,
               admission_error: admission_error
             )

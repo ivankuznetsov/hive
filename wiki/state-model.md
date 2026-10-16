@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-09-23
+updated: 2026-10-02
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -107,17 +107,28 @@ other metadata rewrites retain it.
 
 The tolerant reader remains total for display/task construction, but dependency
 admission uses `TaskMeta.read_for_admission`, which distinguishes an absent
-legacy file from unreadable YAML, a non-mapping document, and an invalid scalar
-reference. Admission therefore never converts corrupt metadata into “no
-dependency.” Mutation reads reject an explicitly malformed `completed_at`;
+legacy file from unreadable YAML, a non-mapping document, and an invalid
+scalar-or-list declaration. Admission therefore never converts corrupt
+metadata into “no dependency.” Mutation reads reject an explicitly malformed `completed_at`;
 ordinary projection reads warn and fail open. `TaskMeta.update_id` and
 `update_display_name` refuse corrupt input and preserve every
 dependency/workflow/completion field on healthy rewrites. Writes remain atomic
 tempfile-plus-rename.
 
-`depends_on` is one scalar: same-project slug/numeric id, or explicit `project:slug`. The global registry stores canonical remote identity for cross-project verification. An optional `plan.md` frontmatter `depends_on` is only an exact drift assertion; `meta.yml` remains authoritative and prose is ignored. See [[modules/task_dependencies]].
+`depends_on` is either one same-project slug/numeric id or explicit
+`project:slug`, or a nonempty flat array of those references. Declaration shape
+is policy: scalars retain the configured gate and eligible stacking; arrays,
+including singleton arrays, use the project-default base and require every
+edge at `9-done`. The global registry stores canonical remote identity for
+cross-project verification. Optional `plan.md` frontmatter `depends_on` is only
+an exact shape-preserving drift assertion; `meta.yml` remains authoritative
+and prose is ignored. See [[modules/task_dependencies]].
 
-`hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
+`hive-status.v9` projects strict evidence into a three-state read model: clear;
+benign below-gate wait (complete `unmet_dependencies`, plus scalar-only
+`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`,
+`offending_ref`, `safe_correction`). Raw folder moves remain possible, but the
+next status or supported dispatch boundary observes and holds invalid state.
 
 `workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids, names, and completion clocks through strict metadata reads. Daemon ticks and status projections never mutate that metadata. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
 

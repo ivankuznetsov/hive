@@ -261,7 +261,15 @@ module Hive
     rescue Exception => error # rubocop:disable Lint/RescueException -- preserve Interrupt/SystemExit ambiguity
       raise if persistence_failed
       raise if error.is_a?(SystemExit) && claim&.disposition == :replay
-      if claim && effect && deterministic_non_application?(error)
+      if claim && effect && retryable_pre_application_rejection?(error)
+        begin
+          @store.abort_pre_submission(
+            claim, effect_id: effect.fetch(:effect_id), reason: "command_pre_application_rejected"
+          )
+        rescue StandardError
+          persist_uncertainty_without_masking(claim, effect, error)
+        end
+      elsif claim && effect && deterministic_non_application?(error)
         persist_failure(claim, effect, error)
       elsif claim
         persist_uncertainty(claim, effect, error)
@@ -385,6 +393,14 @@ module Hive
       rescue StandardError
         # The original exception remains authoritative and no buffered success is emitted.
       end
+    end
+
+    def persist_uncertainty_without_masking(claim, effect, error = nil)
+      persist_uncertainty(claim, effect, error)
+    rescue StandardError
+      # The caller's rejection remains authoritative even when every receipt
+      # recovery write fails against the same unavailable store.
+      nil
     end
 
     def persisted_receipt_identity(claim)
@@ -637,6 +653,11 @@ module Hive
     def deterministic_non_application?(error)
       error.is_a?(Hive::UsageError) ||
         error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
+    end
+
+    def retryable_pre_application_rejection?(error)
+      error.respond_to?(:retryable_pre_application_rejection?) &&
+        error.retryable_pre_application_rejection?
     end
 
     def retryable_pre_submission_contention?(error)

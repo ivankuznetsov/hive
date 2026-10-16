@@ -608,4 +608,20 @@ class HiveStagesOpenPrTest < Minitest::Test
       end
     end
   end
+
+  def test_dependency_list_does_not_select_a_pr_base_branch
+    with_task do |task, repo, _base_oid|
+      task.depends_on = [ "base-task" ]
+      base_folder = File.join(repo, ".hive-state", "stages", "9-done", "base-task")
+      FileUtils.mkdir_p(base_folder)
+      Hive::TaskMeta.write(base_folder, id: 1, slug: "base-task", display_name: nil)
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_exists?,
+        ->(*) { raise "list dependencies must not probe a prerequisite branch" }
+      ) do
+        assert_nil Hive::Stages::OpenPr.dependency_pr_base_branch(task, cfg)
+      end
+    end
+  end
 end

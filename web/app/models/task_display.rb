@@ -22,7 +22,10 @@ class TaskDisplay
     if task["action"] == "admission_error"
       return task.dig("admission_error", "safe_correction").presence || "Repair the task dependency before it can continue."
     end
-    return "Waiting for #{task['blocked_by']}." if task["blocked_by"].present?
+    blockers = Hive::Dependencies.blocker_names(
+      unmet_dependencies: task["unmet_dependencies"], blocked_by: task["blocked_by"]
+    )
+    return "Waiting for #{blockers.to_sentence}." if blockers.any?
 
     return "An agent is working on this step." if state == "running"
 

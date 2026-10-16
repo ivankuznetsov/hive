@@ -40,7 +40,7 @@ module Hive
                    idempotency_key:, input_fingerprint:, attachments: [],
                    depends_on: nil, base_branch: nil, initial_marker: nil,
                    git_ops: nil, task_id_provider: nil, before_lookup: nil,
-                   before_candidate: nil, candidate_writer: nil, project: nil,
+                   before_candidate: nil, candidate_validator: nil, candidate_writer: nil, project: nil,
                    clock: -> { Time.now.utc })
       @project_root = File.expand_path(project_root)
       @hive_state = File.expand_path(hive_state)
@@ -58,6 +58,7 @@ module Hive
       @task_id_provider = task_id_provider || -> { Hive::TaskCounter.next_or_nil }
       @before_lookup = before_lookup
       @before_candidate = before_candidate
+      @candidate_validator = candidate_validator
       @candidate_writer = candidate_writer
       @project = project
       @clock = clock
@@ -79,6 +80,7 @@ module Hive
 
           task_dir = task_folder
           @before_candidate&.call(task_dir)
+          @candidate_validator&.call(task_dir)
           create_candidate!(task_dir, stable_selection: stable_selection)
           begin
             @git_ops.hive_commit(

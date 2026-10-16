@@ -24,7 +24,7 @@
               <tr>
                 <th scope="row"><%= node.fetch("id") %><% if node["root"] %> <span class="workspace-chip">Current</span><% end %></th>
                 <td><%= node["stage"].presence || node.fetch("kind").humanize %></td>
-                <td><%= node["depends_on"].presence || "None" %></td>
+                <td><%= Array(node["depends_on"]).presence&.to_sentence || "None" %></td>
                 <td><span class="workspace-state-label"><%= node.dig("admission", "state").to_s.humanize.presence || "Unavailable" %></span></td>
               </tr>
             <% end %>

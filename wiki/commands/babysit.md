@@ -138,6 +138,13 @@ administrative state is then pruned immediately with `--expire now`. Failure to
 quarantine or prune aborts the pass explicitly; it cannot leave the same opaque
 `worktree add` error repeating on every tick.
 
+When every failed job explicitly reports a GitHub Actions account-payment or
+spending-limit hold, a mergeable PR records `noop` / `ci_blocked` with reason
+`github_actions_billing` and does not launch a repair agent. Later ticks
+recheck the diagnostics without consuming agent tokens. A separate code
+failure or merge conflict still admits repair. The blocked observation counts
+as a scheduling turn so it cannot starve other PRs.
+
 On success, the babysitter is silent on the PR. On failure, timeout, or budget
 exhaustion it applies `babysitter/needs-human` and posts one give-up comment per
 PR per UTC hour. The first label application idempotently provisions the

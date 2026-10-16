@@ -349,16 +349,21 @@ class NewIdempotencyTest < Minitest::Test
       untouchable.define_singleton_method(:method_missing) { |*| raise "receipt store must not be touched" }
       untouchable.define_singleton_method(:respond_to_missing?) { |*| true }
 
-      out, _err, status = with_captured_exit do
-        Hive::Commands::New.new(
-          "no-such-project", "task", idempotency_key: "k1", json: true,
-          command_receipt_store: untouchable
-        ).call
+      # Includes the empty key the CLI passes for `--idempotency-key=`: the
+      # unknown project wins over the malformed key (hivedev compat suite).
+      [ "k1", "" ].each do |key|
+        out, _err, status = with_captured_exit do
+          Hive::Commands::New.new(
+            "no-such-project", "task", idempotency_key: key, json: true,
+            command_receipt_store: untouchable
+          ).call
+        end
+        payload = JSON.parse(out)
+        refute_equal 0, status
+        refute_equal 64, status, "key #{key.inspect} must not mask the unknown project"
+        assert_equal false, payload.fetch("ok")
+        assert_match(/project not initialized/, payload.fetch("message"))
       end
-      payload = JSON.parse(out)
-      refute_equal 0, status
-      assert_equal false, payload.fetch("ok")
-      assert_match(/project not initialized/, payload.fetch("message"))
     end
   end
 

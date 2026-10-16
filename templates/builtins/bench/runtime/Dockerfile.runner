@@ -16,10 +16,10 @@ FROM ruby:3.4-slim
 # Node powers the candidate agent CLI (pi). Pi is pinned to match the host CLI
 # so a fresh container reproduces local results.
 ARG NODE_VERSION=26.3.1
-ARG PI_VERSION=0.84.2
+ARG PI_VERSION=0.85.1
 ARG CLAUDE_VERSION=2.1.191
 ARG CODEX_VERSION=0.142.2
-ARG OPENCODE_VERSION=1.18.18
+ARG OPENCODE_VERSION=1.18.30
 ARG COMPOUND_ENGINEERING_VERSION=3.22.4
 ARG HIVE_BUILD_SHA=unknown
 
@@ -82,6 +82,8 @@ RUN apt-get update \
 COPY hive-src.tar /tmp/hive-src.tar
 RUN mkdir -p /tmp/hive-build \
   && tar xf /tmp/hive-src.tar -C /tmp/hive-build \
+  && cd /tmp/hive-build \
+  && ruby packaging/betterleaks.rb \
   && cd /tmp/hive-build/components/agent-cli-runtime \
   && gem build agent-cli-runtime.gemspec \
   && gem install ./agent-cli-runtime-*.gem --no-document \

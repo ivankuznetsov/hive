@@ -111,4 +111,5 @@ end
 require "hive/runtime_control_plane/process_guard"
 require "hive/runtime_control_plane/codec"
 require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/operational_inspection"
 require "hive/runtime_control_plane/operational_repository"

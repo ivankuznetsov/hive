@@ -31,6 +31,7 @@ class CiTestPartitionTest < Minitest::Test
         "test:packaged_web_bootstrap" => "test/integration/web_packaged_bootstrap_test.rb",
         "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
         "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
+        "test:status_read_only" => "test/integration/status_read_only_test.rb",
         "test:babysitter_dry_run_security_matrix" =>
           "test/unit/babysitter/dry_run_security_matrix_test.rb"
       }, gate_tests)
@@ -123,6 +124,10 @@ class CiTestPartitionTest < Minitest::Test
           "task" => "test:setup_agents_integration"
         },
         {
+          "name" => "operational status read-only mounts",
+          "task" => "test:status_read_only"
+        },
+        {
           "name" => "babysitter dry-run security matrix",
           "task" => "test:babysitter_dry_run_security_matrix"
         }
@@ -133,6 +138,15 @@ class CiTestPartitionTest < Minitest::Test
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
       assert_equal "${{ matrix.task }}", run_step.fetch("env").fetch("HIVE_CI_GATE_TASK")
+      proof_upload = gate_job.fetch("steps").find do |step|
+        step["name"] == "Retain read-only mount evidence"
+      end
+      assert_equal UPLOAD_ARTIFACT_ACTION, proof_upload.fetch("uses")
+      assert_equal "${{ always() && matrix.task == 'test:status_read_only' }}",
+                   proof_upload.fetch("if")
+      assert_equal "operational-status-read-only-evidence", proof_upload.dig("with", "name")
+      assert_equal "tmp/status-read-only-evidence.json", proof_upload.dig("with", "path")
+      assert_equal "error", proof_upload.dig("with", "if-no-files-found")
 
       coverage_shards = workflow.fetch("jobs").fetch("coverage-shards")
       assert_equal "coverage shard ${{ matrix.label }}/6", coverage_shards.fetch("name")

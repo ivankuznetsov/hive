@@ -175,6 +175,8 @@
         "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
         "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
         "message": { "type": "string" },
+        "code": { "type": "string" },
+        "next_action": { "type": "string" },
         "candidates": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
         "id": { "type": "string" },
         "path": { "type": "string" }

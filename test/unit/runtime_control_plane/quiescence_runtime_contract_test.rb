@@ -113,6 +113,7 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
         database.quiescence_status_snapshot
       end
       assert_equal :database_corrupt, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, error.action
     end
   end
 

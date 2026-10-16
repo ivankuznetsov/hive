@@ -135,6 +135,580 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_mountinfo_confirmation_uses_the_deepest_decoded_component_match
+    with_tmp_dir do |root|
+      state = File.join(root, "state root")
+      nested = File.join(state, "nested")
+      FileUtils.mkdir_p(nested)
+      path = File.join(nested, "runtime.sqlite3")
+      mountinfo = [
+        mountinfo_row("/", options: "rw,relatime", super_options: "rw"),
+        mountinfo_row(state, options: "rw,relatime", super_options: "rw"),
+        mountinfo_row(nested, options: "ro,nosuid", super_options: "rw")
+      ].join
+
+      database = database_with_mountinfo(path, mountinfo: mountinfo)
+
+      assert database.confirmed_read_only_storage?
+
+      writable = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(nested, options: "rw,relatime", super_options: "rw")
+      )
+      refute writable.confirmed_read_only_storage?
+    end
+  end
+
+  def test_mountinfo_confirmation_fails_closed_off_linux_or_without_unambiguous_metadata
+    with_tmp_dir do |root|
+      real = File.join(root, "real")
+      linked = File.join(root, "linked")
+      FileUtils.mkdir_p(real)
+      File.symlink(real, linked)
+      path = File.join(linked, "runtime.sqlite3")
+
+      non_linux = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(real, options: "ro", super_options: "ro"),
+        platform: "darwin"
+      )
+      refute non_linux.confirmed_read_only_storage?
+
+      ambiguous = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(real, options: "ro", super_options: "ro") * 2
+      )
+      refute ambiguous.confirmed_read_only_storage?
+
+      lexical_only = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(linked, options: "ro", super_options: "ro")
+      )
+      refute lexical_only.confirmed_read_only_storage?,
+             "mount matching must use the resolved storage path"
+
+      unreadable_mountinfo = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(real, "runtime.sqlite3")
+      )
+      unreadable_mountinfo.define_singleton_method(:storage_mount_status) do
+        raise IOError, "mountinfo unreadable"
+      end
+      refute unreadable_mountinfo.confirmed_read_only_storage?
+    end
+  end
+
+  def test_mountinfo_confirmation_fails_closed_on_any_malformed_row
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(root, options: "ro", super_options: "ro") +
+          "36 25 0:32 / #{root} ro no-separator-row\n"
+      )
+
+      refute database.confirmed_read_only_storage?,
+             "a matching read-only row must not confirm a partially unparseable table"
+      assert_equal(
+        { status: :unconfirmed, reason: :invalid_mountinfo },
+        database.instance_variable_get(:@storage_mount_diagnostic)
+      )
+    end
+  end
+
+  def test_mount_confirmation_fails_closed_when_post_fork_reset_fails
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "ro", super_options: "ro")
+      )
+      assert database.confirmed_read_only_storage?
+
+      database.instance_variable_set(:@owner_pid, Process.pid + 1)
+      database.define_singleton_method(:disconnect) { raise IOError, "inherited handle" }
+
+      refute database.confirmed_read_only_storage?
+    end
+  end
+
+  def test_mountinfo_parser_fails_closed_if_a_validated_field_disappears
+    fields = Array.new(10, "field")
+    fields[6] = "-"
+    fields.define_singleton_method(:fetch) do |index|
+      raise IndexError, "field disappeared" if index == 4
+
+      super(index)
+    end
+    line = Object.new
+    line.define_singleton_method(:split) { fields }
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime.sqlite3")
+
+    assert_nil database.send(:parse_mountinfo_line, line)
+  end
+
+  def test_storage_errors_are_typed_from_direct_and_wrapped_causes
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "ro", super_options: "ro")
+      )
+      readonly = SQLite3::ReadOnlyException.new("readonly")
+      wrapped = begin
+        raise Sequel::DatabaseError.new("wrapped"), cause: readonly
+      rescue Sequel::DatabaseError => error
+        error
+      end
+
+      [ Errno::EROFS.new(path), readonly, wrapped ].each do |source|
+        error = database.storage_error_for(source)
+        assert_instance_of Hive::RuntimeControlPlane::Unavailable, error
+        assert_equal :state_storage_read_only, error.code
+        assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+        assert_match(/mounted read-only/, error.message)
+      end
+
+      inaccessible = database.storage_error_for(Errno::EACCES.new(path))
+      assert_equal :state_storage_inaccessible, inaccessible.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, inaccessible.action
+
+      writable = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "rw", super_options: "rw")
+      )
+      direct_readonly = writable.storage_error_for(Errno::EROFS.new(path))
+      assert_match(/storage is read-only/, direct_readonly.message)
+      refute_match(/mounted read-only/, direct_readonly.message)
+
+      assert_nil database.storage_error_for(SQLite3::BusyException.new("busy"))
+    end
+  end
+
+  def test_cantopen_is_read_only_only_with_independent_mount_confirmation
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      cantopen = SQLite3::CantOpenException.new("cannot open")
+      read_only = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "rw", super_options: "ro")
+      ).storage_error_for(cantopen)
+      assert_equal :state_storage_read_only, read_only.code
+
+      writable = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(root, options: "rw", super_options: "rw")
+      ).storage_error_for(cantopen)
+      assert_equal :state_storage_inaccessible, writable.code
+    end
+  end
+
+  def test_operational_read_uses_immutable_for_confirmed_read_only_clean_storage
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      refute_path_exists "#{path}-wal"
+      refute_path_exists "#{path}-shm"
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      connections = []
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        connections << options.dup
+        original.call(**options, &block)
+      end
+
+      count = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        database.operational_read(timeout_sec: 1) do |connection|
+          connection[:installations].count
+        end
+      end
+
+      assert_equal 1, count
+      assert_operator connections.length, :>=, 2
+      assert connections.all? { |options| options[:readonly] }
+      assert connections.all? { |options| options.fetch(:database).end_with?("?immutable=1") }
+      refute connections.any? { |options| options.key?(:uri) },
+             "Sequel's SQLite adapter uses the database URI itself, not a :uri option"
+    end
+  end
+
+  def test_operational_read_uses_plain_readonly_for_paired_sidecars_and_sees_wal_rows
+    writer = nil
+    with_database do |database, path|
+      database.disconnect
+      writer = SQLite3::Database.new(path)
+      writer.execute("PRAGMA journal_mode = WAL")
+      writer.execute("PRAGMA wal_autocheckpoint = 0")
+      writer.execute("UPDATE installations SET next_task_id = 41")
+      [ "#{path}-wal", "#{path}-shm" ].each { |candidate| File.chmod(0o600, candidate) }
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      connections = []
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        connections << options.dup
+        original.call(**options, &block)
+      end
+
+      next_task_id = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        database.operational_read { |connection| connection[:installations].get(:next_task_id) }
+      end
+
+      assert_equal 41, next_task_id
+      assert connections.all? { |options| options[:readonly] }
+      refute connections.any? { |options| options.fetch(:database).include?("immutable") }
+    ensure
+      writer&.close
+    end
+  end
+
+  def test_paired_sidecar_recovery_failure_preserves_underlying_sqlite_evidence
+    with_database do |database, path|
+      database.disconnect
+      writer = SQLite3::Database.new(path)
+      writer.execute("PRAGMA journal_mode = WAL")
+      writer.execute("PRAGMA wal_autocheckpoint = 0")
+      writer.execute("UPDATE installations SET next_task_id = 42")
+      [ "#{path}-wal", "#{path}-shm" ].each { |candidate| File.chmod(0o600, candidate) }
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        if options[:readonly]
+          raise SQLite3::CantOpenException, "unable to recover WAL index"
+        end
+        original.call(**options, &block)
+      end
+
+      error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) { database.operational_read { flunk } }
+      end
+
+      assert_equal :state_storage_read_only, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+      assert error.details.fetch(:cause_chain).any? { |cause| cause[:error_class].include?("CantOpen") }
+    ensure
+      writer&.close
+      database&.disconnect
+    end
+  end
+
+  def test_non_linux_operational_read_uses_plain_readonly_inspection
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      database = database_with_mountinfo(
+        path,
+        platform: "darwin",
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      connections = []
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        connections << options.dup
+        original.call(**options, &block)
+      end
+
+      assert_equal 1, with_replaced_singleton_method(Sequel, :connect, replacement) {
+        database.operational_read { |connection| connection[:installations].count }
+      }
+      assert connections.all? { |options| options[:readonly] }
+      refute connections.any? { |options| options.fetch(:database).include?("immutable") }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_operational_read_rejects_either_unpaired_sidecar_with_exact_guidance
+    %w[wal shm].each do |sidecar|
+      with_database do |database, path|
+        database.checkpoint!
+        database.disconnect
+        File.binwrite("#{path}-#{sidecar}", "unpaired")
+        File.chmod(0o600, "#{path}-#{sidecar}")
+        database = database_with_mountinfo(
+          path,
+          mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+        )
+
+        error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          database.operational_read { flunk "unpaired storage must not be inspected" }
+        end
+
+        assert_equal :state_storage_read_only, error.code
+        assert_equal Hive::RuntimeControlPlane::Database::UNPAIRED_STORAGE_ACTION, error.action
+        refute_match(/backup/i, error.action)
+        counterpart = sidecar == "wal" ? "shm" : "wal"
+        refute_path_exists "#{path}-#{counterpart}"
+      end
+    end
+  end
+
+  def test_writable_operational_inspection_never_uses_immutable
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "rw", super_options: "rw")
+      )
+      connections = []
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        connections << options.dup
+        original.call(**options, &block)
+      end
+
+      assert_equal 1, with_replaced_singleton_method(Sequel, :connect, replacement) {
+        database.operational_read { |connection| connection[:installations].count }
+      }
+      refute connections.any? { |options| options.fetch(:database).include?("immutable") }
+    end
+  end
+
+  def test_immutable_inspection_escapes_sqlite_uri_paths
+    with_tmp_dir do |root|
+      state = File.join(root, "state # question?")
+      FileUtils.mkdir_p(state, mode: 0o700)
+      path = File.join(state, "runtime #?.sqlite3")
+      Hive::RuntimeControlPlane::Database.new(path: path).migrate!.tap do |database|
+        database.checkpoint!
+        database.disconnect
+      end
+      database = database_with_mountinfo(
+        path, mountinfo: mountinfo_row(state, options: "ro", super_options: "ro")
+      )
+
+      assert_equal 1, database.operational_read { |connection| connection[:installations].count }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_sidecar_appearing_during_immutable_open_discards_the_inspection
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      original = Sequel.method(:connect)
+      disconnects = 0
+      replacement = lambda do |**options, &block|
+        connection = original.call(**options, &block)
+        original_disconnect = connection.method(:disconnect)
+        connection.define_singleton_method(:disconnect) do
+          disconnects += 1
+          original_disconnect.call
+        end
+        File.binwrite("#{path}-wal", "appeared")
+        File.chmod(0o600, "#{path}-wal")
+        connection
+      end
+      yielded = false
+
+      error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+          database.operational_read { yielded = true }
+        end
+      end
+
+      assert_equal :state_storage_read_only, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+      assert_match(/mounted read-only/, error.message)
+      refute yielded
+      assert_operator disconnects, :>=, 1
+    end
+  end
+
+  def test_operational_read_does_not_retry_or_reclassify_a_user_read_error
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      calls = 0
+
+      error = assert_raises(SQLite3::ReadOnlyException) do
+        database.operational_read do
+          calls += 1
+          raise SQLite3::ReadOnlyException, "user query failed"
+        end
+      end
+
+      assert_equal "user query failed", error.message
+      assert_equal 1, calls
+    end
+  end
+
+  def test_writable_open_translates_a_wrapped_read_only_connection_failure
+    with_database do |database, path|
+      database.checkpoint!
+      database.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      database.define_singleton_method(:verify_runtime_capabilities!) { true }
+      original = Sequel.method(:connect)
+      replacement = lambda do |**options, &block|
+        if options[:readonly] || options[:database] != path
+          original.call(**options, &block)
+        else
+          cause = SQLite3::ReadOnlyException.new("readonly")
+          raise Sequel::DatabaseError.new("wrapped"), cause: cause
+        end
+      end
+
+      error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) { database.open! }
+      end
+
+      assert_equal :state_storage_read_only, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+      assert database.disconnected?
+    end
+  end
+
+  def test_non_storage_query_and_connection_errors_keep_their_existing_types
+    with_database do |database|
+      database.define_singleton_method(:inspect_database) do |**|
+        raise SQLite3::BusyException, "busy status"
+      end
+
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        database.quiescence_status_snapshot
+      end
+      assert_equal :database_corrupt, error.code
+      assert_match(/busy status/, error.message)
+    end
+
+    with_database do |database|
+      database.disconnect
+      database.define_singleton_method(:validate_database_custody!) { true }
+      source = SQLite3::BusyException.new("busy connection")
+      replacement = ->(**) { raise source }
+
+      error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+        assert_raises(SQLite3::BusyException) { database.send(:connect!) }
+      end
+      assert_same source, error
+      assert database.disconnected?
+    end
+  end
+
+  def test_cleanup_errors_surface_without_an_active_error
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime.sqlite3")
+    inspection_error = RuntimeError.new("inspection disconnect failed")
+    inspection = Object.new
+    inspection.define_singleton_method(:disconnect) { raise inspection_error }
+
+    assert_same inspection_error, assert_raises(RuntimeError) {
+      database.send(:disconnect_preserving_error, inspection)
+    }
+
+    connection_error = RuntimeError.new("connection disconnect failed")
+    replacement = -> { raise connection_error }
+    error = with_replaced_singleton_method(database, :disconnect, replacement) do
+      assert_raises(RuntimeError) { database.send(:disconnect_preserving_error) }
+    end
+    assert_same connection_error, error
+  end
+
+  def test_storage_error_translation_does_not_capture_unrelated_io_failures
+    database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/runtime.sqlite3")
+
+    [ Errno::ENOSPC.new, Errno::EIO.new, Errno::EMFILE.new, IOError.new("stream") ].each do |error|
+      assert_nil database.storage_error_for(error), error.class.name
+    end
+  end
+
+  def test_mount_confirmation_handles_non_ascii_paths_as_filesystem_bytes
+    with_tmp_dir do |root|
+      state = File.join(root, "caf\u00e9")
+      FileUtils.mkdir_p(state)
+      database = database_with_mountinfo(
+        File.join(state, "runtime.sqlite3"),
+        mountinfo: mountinfo_row(state, options: "ro", super_options: "ro")
+      )
+
+      assert database.confirmed_read_only_storage?
+    end
+  end
+
+  def test_ambiguous_mount_confirmation_is_explained_in_storage_details
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      row = mountinfo_row(root, options: "ro", super_options: "ro")
+      database = database_with_mountinfo(path, mountinfo: row * 2)
+
+      error = database.storage_error_for(Errno::EACCES.new(path))
+
+      assert_equal :state_storage_inaccessible, error.code
+      assert_equal :ambiguous_mount, error.details.dig(:mount_confirmation, :reason)
+    end
+  end
+
+  def test_operational_inspection_validates_integrity_once_per_owned_session
+    with_database do |original, path|
+      original.checkpoint!
+      original.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      failure = Hive::RuntimeControlPlane::Unavailable.new(
+        "read only", code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: failure, argv: %w[status --operational],
+        state_home: File.dirname(path), database: database
+      )
+      diagnoses = 0
+      diagnose = database.method(:diagnostics_uncoordinated)
+      database.define_singleton_method(:diagnostics_uncoordinated) do |**options|
+        diagnoses += 1
+        diagnose.call(**options)
+      end
+
+      2.times { assert_equal 1, database.read { |connection| connection[:installations].count } }
+      assert_equal 1, diagnoses
+    ensure
+      Hive::RuntimeControlPlane::OperationalInspection.clear!
+      database&.disconnect
+    end
+  end
+
+  def test_operational_inspection_rejects_all_mutating_entrypoints
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      activation = Struct.new(:path) { def confirmed_read_only_storage? = true }.new(path)
+      failure = Hive::RuntimeControlPlane::Unavailable.new(
+        "read only", code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: failure, argv: %w[status --operational], state_home: root, database: activation
+      )
+      database = Hive::RuntimeControlPlane::Database.new(path: path)
+
+      [
+        -> { database.migrate! },
+        -> { database.checkpoint! },
+        -> { database.with_exclusive_writer(role: :controller) { flunk } }
+      ].each do |operation|
+        error = assert_raises(Hive::RuntimeControlPlane::Unavailable, &operation)
+        assert_equal :state_storage_read_only, error.code
+      end
+      refute_path_exists path
+    ensure
+      Hive::RuntimeControlPlane::OperationalInspection.clear!
+    end
+  end
+
   def test_migration_creates_owner_private_database_and_sidecars_under_permissive_umask
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime.sqlite3")
@@ -519,10 +1093,89 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     with_database do |database, path|
       database.disconnect
       FileUtils.remove_entry(File.dirname(path))
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        database.send(:validate_database_custody!)
+      end
+      assert_equal :state_storage_inaccessible, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+    end
+
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(root, "missing", "runtime.sqlite3")
+      )
+      database.define_singleton_method(:storage_error_for) { |_| nil }
+
       error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
         database.send(:validate_database_custody!)
       end
       assert_equal :database_custody_invalid, error.code
+    end
+  end
+
+  def test_custody_metadata_treats_only_enoent_as_absence
+    with_database do |database, path|
+      database.disconnect
+      candidate = "#{path}-wal"
+      original = File.method(:lstat)
+
+      [ Errno::EACCES, Errno::ELOOP, Errno::ENOTDIR ].each do |error_class|
+        replacement = lambda do |requested|
+          raise error_class, requested if requested == candidate
+          original.call(requested)
+        end
+        error = with_replaced_singleton_method(File, :lstat, replacement) do
+          assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+            database.send(:validate_database_custody!)
+          end
+        end
+        assert_equal :state_storage_inaccessible, error.code
+      end
+
+      replacement = lambda do |requested|
+        raise Errno::ENOENT, requested if requested == candidate
+        original.call(requested)
+      end
+      assert with_replaced_singleton_method(File, :lstat, replacement) {
+        database.send(:validate_database_custody!)
+      }
+    end
+  end
+
+  def test_read_only_mount_does_not_downgrade_a_proven_custody_failure
+    with_database do |original_database, path|
+      original_database.disconnect
+      database = database_with_mountinfo(
+        path,
+        mountinfo: mountinfo_row(File.dirname(path), options: "ro", super_options: "ro")
+      )
+      status = File.lstat(path)
+      wrong_owner = Struct.new(:file?, :symlink?, :nlink, :uid, :mode)
+        .new(true, false, 1, Process.euid + 1, status.mode)
+      original = File.method(:lstat)
+      replacement = ->(requested) { requested == path ? wrong_owner : original.call(requested) }
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::IntegrityError) {
+          database.send(:validate_database_custody!)
+        }
+      end
+      assert_equal :database_custody_invalid, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::BACKUP_ACTION, error.action
+    end
+  end
+
+  def test_diagnostics_preserves_inaccessible_metadata_instead_of_reporting_missing
+    with_tmp_dir do |root|
+      path = File.join(root, "runtime.sqlite3")
+      database = Hive::RuntimeControlPlane::Database.new(path: path)
+      original = File.method(:lstat)
+      replacement = ->(requested) { requested == path ? raise(Errno::EACCES, requested) : original.call(requested) }
+
+      error = with_replaced_singleton_method(File, :lstat, replacement) do
+        assert_raises(Hive::RuntimeControlPlane::Unavailable) { database.diagnostics }
+      end
+      assert_equal :state_storage_inaccessible, error.code
     end
   end
 
@@ -542,6 +1195,20 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
   end
 
   private
+
+  def database_with_mountinfo(path, mountinfo:, platform: "linux")
+    proc_root = File.join(File.dirname(path), ".proc")
+    FileUtils.mkdir_p(File.join(proc_root, "self"))
+    File.binwrite(File.join(proc_root, "self", "mountinfo"), mountinfo)
+    Hive::RuntimeControlPlane::Database.new(
+      path: path, proc_root: proc_root, platform: platform
+    )
+  end
+
+  def mountinfo_row(mount_point, options:, super_options:)
+    escaped = mount_point.to_s.gsub("\\") { "\\134" }.gsub(" ") { "\\040" }
+    "36 25 0:32 / #{escaped} #{options} - tmpfs tmpfs #{super_options}\n"
+  end
 
   def with_database
     with_tmp_dir do |root|

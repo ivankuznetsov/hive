@@ -743,10 +743,12 @@ module Hive
             "runtime control-plane database is missing; run hive setup",
             code: :missing_database, action: "run hive setup"
           )
-          emit_lifecycle_storage_error(schema, error)
           raise error
         end
         true
+      rescue Hive::RuntimeControlPlane::Error => error
+        emit_lifecycle_storage_error(schema, error)
+        raise
       ensure
         database&.disconnect
       end

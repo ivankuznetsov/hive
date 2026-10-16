@@ -153,6 +153,17 @@ module Hive
 
       def envelope_serialization_failure_policy = :suppress
 
+      def envelope_extras_for(error)
+        extras = super
+        return extras unless status_schema_for_call == "hive-operational-status"
+        return extras unless error.respond_to?(:code) && error.respond_to?(:action)
+
+        extras.merge(
+          "code" => error.code.to_s,
+          "next_action" => error.action
+        ).compact
+      end
+
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue
       # must match the same schema so consumers can validate either

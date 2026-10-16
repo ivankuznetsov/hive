@@ -42,7 +42,7 @@ class HiveStagesPlanTest < Minitest::Test
   def test_complete_plan_dependency_array_is_adopted_without_collapsing_singleton_shape
     document = "---\ndepends_on:\n  - rails-task\n---\n\n# Plan\n"
     with_planned_task(document) do |task, dir|
-      Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+      adopt_dependency(task, Marker.new(:complete))
 
       assert_equal [ "rails-task" ], Hive::TaskMeta.read(dir)[:depends_on]
     end
@@ -85,7 +85,7 @@ class HiveStagesPlanTest < Minitest::Test
   def test_numeric_and_qualified_self_dependencies_are_refused
     [ "42", "app:cli-task" ].each do |reference|
       with_planned_task(plan_doc(reference)) do |task, dir|
-        Hive::Stages::Plan.adopt_plan_dependency!(task, Marker.new(:complete))
+        adopt_dependency(task, Marker.new(:complete))
 
         assert_nil Hive::TaskMeta.read(dir)[:depends_on]
       end

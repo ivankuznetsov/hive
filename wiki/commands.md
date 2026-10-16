@@ -73,7 +73,7 @@ discovery surface (it routes evidence-backed theses but takes no actions), and
 surface for one exact task,
 `--json` envelopes where the command page says they exist.
 Bare `hive status` and `hive status --json` are the bounded current-liveness
-surface. `--operational --json` selects the v4 agent workflow document with a
+surface. `--operational --json` selects the v5 agent workflow document with a
 required nullable exact routing decision; `hive task`, `hive tui`, and
 `hive archive` own task detail, fleet browsing, and terminal history.
 [[commands/watch]] emits bounded semantic JSON Lines without shell polling.

@@ -1403,6 +1403,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  actual_dispatcher.send(:one_shot_policy_decision, row(slug: "actual"), now: T0)
   end
 
+  def test_one_shot_dependency_conditions_validate_for_fan_in_and_operator_fallback
+    dispatcher, = make_dispatcher(rows: [], scope_projects: [ "p1" ])
+    dispatcher.define_singleton_method(:one_shot_policy_decision) do |*, **|
+      :blocked_on_dependency
+    end
+    unmet = %w[first second].map do |slug|
+      { "reference" => slug, "blocked_by" => slug,
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+    end
+    fan_in = dispatcher.send(
+      :row_pending_item,
+      row(slug: "fan-in", depends_on: %w[first second], blocked: true,
+          unmet_dependencies: unmet),
+      now: T0
+    )
+    operator = dispatcher.send(
+      :row_pending_item,
+      row(slug: "operator", depends_on: %w[missing-one missing-two], blocked: true),
+      now: T0
+    )
+
+    report = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "p1", started_at: T0, finished_at: T0,
+      ran: [], items: [ fan_in, operator ], safe_to_stop: true
+    ).to_h
+
+    assert_equal %w[first second], fan_in.dig("condition", "dependencies")
+    assert_equal %w[missing-one missing-two], operator.dig("condition", "dependencies")
+    assert_equal %w[first second], report.dig("wake_conditions", 0, "dependencies")
+    refute report.dig("wake_conditions", 0).key?("reference")
+    refute report.dig("wake_conditions", 0).key?("dependency_stage")
+    refute report.dig("wake_conditions", 0).key?("required_gate")
+    assert Hive::OneShot::Result.send(:authoritative_document?, report)
+  end
+
   def test_one_shot_row_projection_honors_project_and_retry_gates
     disabled, = make_dispatcher(rows: [], scope_projects: [ "p1" ], project_enabled: false)
     item = disabled.send(:row_pending_item, row(slug: "disabled"), now: T0)
@@ -1559,6 +1594,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
     assert_equal [ "waiting_operator", "operator_action" ],
                  [ item.fetch("bucket"), item.dig("condition", "kind") ]
+
+    scalar = row(slug: "queued", depends_on: "base-task")
+    condition = dependency_dispatcher.send(:operator_dependency_condition, scalar)
+    assert_equal "base-task", condition.fetch("dependency")
   end
 
   def test_recovery_and_retry_projection_cover_running_unknown_and_safety_states
@@ -2795,6 +2834,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
+          unmet_dependencies: [], dependency_base_mode: "default",
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil,
           condition_task_generation: nil, task_history_invalid: false, id: 1)
@@ -2807,7 +2847,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked,
+      dependency_stage: dependency_stage, unmet_dependencies: unmet_dependencies,
+      dependency_base_mode: dependency_base_mode, blocked: blocked,
       admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation,
       condition_task_generation: condition_task_generation,
@@ -2827,7 +2868,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     observed = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     snapshot = FakeOperationalSnapshot.new
     status_payload = {
-      "schema" => "hive-status", "schema_version" => 8, "ok" => true,
+      "schema" => "hive-status", "schema_version" => 9, "ok" => true,
       "generated_at" => T0.iso8601(6), "projects" => []
     }
     with_tmp_dir do |state_home|
@@ -4010,6 +4051,28 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "a resolved prerequisite (blocked_by present) is a real below-gate wait, not unresolved"
   end
 
+  def test_blocked_dependency_list_is_an_external_wait_and_logs_every_blocker
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first",
+        "dependency_stage" => "7-artifacts", "required_gate" => "9-done" },
+      { "reference" => "second", "blocked_by" => "second",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+    ]
+    rows = [ row(
+      action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm",
+      depends_on: %w[first second], blocked: true, unmet_dependencies: unmet
+    ) ]
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "dependency_unmet" }
+    refute_nil event
+    assert_equal false, event.last.fetch(:unresolved)
+    assert_equal unmet, event.last.fetch(:unmet_dependencies)
+  end
+
   # An unresolved block (mistyped/unknown depends_on → blocked_by nil) must
   # still gate dispatch AND carry unresolved:true, so an operator can tell a
   # config error apart from a genuine waiting-on-prerequisite block. The
@@ -4787,6 +4850,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
     refute_nil event
     assert_equal "dependency_repository_mismatch", event[1][:reason_code]
     assert_equal "data:base", event[1][:offending_ref]
+  end
+
+  def test_admission_error_log_fallback_renders_dependency_lists_as_text
+    rows = [
+      row(
+        action: "admission_error", command: nil, blocked: true,
+        depends_on: %w[first second], admission_error: nil
+      )
+    ]
+    dispatcher, _sup, _ctrl, logger, = make_dispatcher(rows: rows)
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find do |name, attrs|
+      name == :blocked && attrs[:reason] == "admission_error"
+    end
+    assert_equal "first, second", event.last.fetch(:offending_ref)
+    refute_includes event.last.fetch(:offending_ref), '["'
   end
 
   def test_finalize_recoverable_error_routes_to_merge_watcher

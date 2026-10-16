@@ -32,7 +32,7 @@ module Hive
       dependency = nil
       if data.key?("depends_on") || data.key?(:depends_on)
         value = data.key?("depends_on") ? data["depends_on"] : data[:depends_on]
-        dependency = Hive::Dependencies.parse_reference(value)
+        dependency = Hive::Dependencies.parse_declaration(value)
       end
 
       Result.new(status: :ok, data: data, depends_on: dependency, error: nil)

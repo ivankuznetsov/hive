@@ -284,6 +284,8 @@ class DaemonQuiescenceIntegrationTest < Minitest::Test
         env, "daemon", "resume", "--timeout", "2", "--json"
       )
       assert_equal Hive::ExitCodes::CONFIG, process.exitstatus
+      assert_equal 1, output.lines.size,
+                   "a lifecycle refusal must emit exactly one JSON envelope"
       refused = JSON.parse(output)
       assert_equal "migration_required", refused.fetch("error_kind")
       assert_match(/current-format-migration/, refused.fetch("next_action"))

@@ -16,6 +16,8 @@ module Hive
     class Database
       MIGRATE_ACTION = "stop Hive writers and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md; command receipts require explicit `hive setup --install-command-receipts`".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
+      STORAGE_ACTION = "Use a writable, accessible state root (HIVE_HOME).".freeze
+      UNPAIRED_STORAGE_ACTION = "Use a writable state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove the stray sidecar after verifying no committed data will be lost.".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
       attr_reader :path, :owner_pid
 
@@ -29,7 +31,8 @@ module Hive
       def initialize(path: Hive::Paths.runtime_control_plane_path, migrations_dir: MIGRATIONS_DIR,
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
                      feature_probe: nil, clock: -> { Time.now.utc },
-                     uuid_generator: -> { SecureRandom.uuid })
+                     uuid_generator: -> { SecureRandom.uuid }, proc_root: "/proc",
+                     platform: RUBY_PLATFORM)
         @path = File.expand_path(path)
         @migrations_dir = File.expand_path(migrations_dir)
         @busy_timeout_ms = Integer(busy_timeout_ms)
@@ -37,6 +40,8 @@ module Hive
         @feature_probe = feature_probe
         @clock = clock
         @uuid_generator = uuid_generator
+        @proc_root = File.expand_path(proc_root)
+        @platform = platform.to_s
         @owner_pid = Process.pid
         @connection = nil
         @validated = false
@@ -44,6 +49,11 @@ module Hive
       end
 
       def open!(revalidate: true, timeout_sec: nil)
+        if operational_inspection_active?
+          operational_read(timeout_sec: timeout_sec) { true }
+          return self
+        end
+
         ProcessGuard.checkout do
           revalidate ? open_uncoordinated!(timeout_sec: timeout_sec) :
             ensure_open!(timeout_sec: timeout_sec)
@@ -52,6 +62,7 @@ module Hive
       end
 
       def migrate!
+        reject_operational_mutation!
         ProcessGuard.checkout do
           ensure_process_owner!
           validate_migration_set!
@@ -84,6 +95,8 @@ module Hive
       end
 
       def read
+        return operational_read { |database| yield database } if operational_inspection_active?
+
         ProcessGuard.checkout do
           ensure_open!
           @connection.run("PRAGMA query_only = ON")
@@ -109,12 +122,83 @@ module Hive
               reason: :command_prune_preview_unavailable, scope: :installation
             )
           end
-          inspect_database { |connection| yield connection }
+          inspect_database(sidecar_policy: false) { |connection| yield connection }
         end
+      end
+
+      # Validated reader for operational observation. The caller decides
+      # whether an invocation is eligible to use this path; Database owns the
+      # connection and preserves custody, identity, schema, and integrity
+      # validation before yielding it.
+      def operational_read(timeout_sec: nil)
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          deadline = timeout_sec.nil? ? nil :
+            Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ Float(timeout_sec), 0.0 ].max
+          session_id = RuntimeControlPlane::OperationalInspection.session_id_for(path)
+          if session_id.nil? || !@operational_inspection_session_id.equal?(session_id)
+            diagnosis = deadline ? diagnostics_uncoordinated(timeout_sec: remaining_timeout(deadline)) :
+              diagnostics_uncoordinated
+            raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+            @operational_inspection_session_id = session_id
+          end
+          deadline ? inspect_database(timeout_sec: remaining_timeout(deadline)) { |database| yield database } :
+            inspect_database { |database| yield database }
+        end
+      end
+
+      # Linux procfs mount metadata is the only confirmation mechanism for the
+      # operational fallback. Permission bits and write probes are deliberately
+      # not evidence that the backing mount itself is read-only.
+      def confirmed_read_only_storage?
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          confirmed_read_only_storage_uncoordinated?
+        end
+      rescue SystemCallError, IOError, ArgumentError, Encoding::CompatibilityError
+        false
+      end
+
+      # Translate only storage-access failures, following wrapped causes. A
+      # nil result means the caller must preserve the original error and its
+      # existing corruption/schema/contention handling.
+      def storage_error_for(error)
+        chain = error_chain(error)
+        read_only = chain.any? { |candidate| read_only_storage_error?(candidate) }
+        cant_open = chain.any? { |candidate| cant_open_storage_error?(candidate) }
+        inaccessible = chain.any? { |candidate| inaccessible_storage_error?(candidate) }
+        return unless read_only || cant_open || inaccessible
+        confirmed_read_only = confirmed_read_only_storage_uncoordinated?
+
+        if read_only || (cant_open && confirmed_read_only)
+          message = if confirmed_read_only
+            "Hive state is mounted read-only at #{File.dirname(path)}"
+          else
+            "Hive state storage is read-only at #{File.dirname(path)}"
+          end
+          return Unavailable.new(
+            message, code: :state_storage_read_only, action: STORAGE_ACTION,
+            details: storage_error_details(error, chain, confirmed_read_only: confirmed_read_only)
+          )
+        end
+
+        Unavailable.new(
+          "Hive state storage is inaccessible at #{File.dirname(path)}",
+          code: :state_storage_inaccessible, action: STORAGE_ACTION,
+          details: storage_error_details(error, chain, confirmed_read_only: confirmed_read_only)
+        )
       end
 
       def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
                       timeout_sec: nil, track_mutation: true)
+        if operational_inspection_active?
+          raise Unavailable.new(
+            "Hive state is mounted read-only at #{File.dirname(path)}",
+            code: :state_storage_read_only, action: STORAGE_ACTION,
+            details: { path: path, confirmed_read_only: true }
+          )
+        end
+
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
         wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -151,6 +235,7 @@ module Hive
       end
 
       def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
+        reject_operational_mutation!
         unless %i[controller migrator].include?(role)
           raise ArgumentError, "exclusive writer role must be controller or migrator"
         end
@@ -165,6 +250,7 @@ module Hive
       end
 
       def checkpoint!(timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
+        reject_operational_mutation!
         timeout_ms = [ (Float(timeout_sec) * 1000).floor, 0 ].max
         ProcessGuard.checkout do
           ensure_open!(timeout_sec: timeout_sec)
@@ -306,6 +392,9 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        storage_error = storage_error_for(error)
+        raise storage_error if storage_error
+
         raise IntegrityError.new(
           "runtime lifecycle status is unreadable: #{error.message}",
           code: :database_corrupt, action: BACKUP_ACTION,
@@ -318,6 +407,7 @@ module Hive
         connection = @connection
         @connection = nil
         @validated = false
+        @operational_inspection_session_id = nil
         connection&.disconnect
         true
       ensure
@@ -326,6 +416,11 @@ module Hive
       def disconnected? = @connection.nil?
 
       private
+
+      def operational_inspection_active?
+        defined?(RuntimeControlPlane::OperationalInspection) &&
+          RuntimeControlPlane::OperationalInspection.active_for?(path)
+      end
 
       def empty_quiescence_snapshot(diagnosis)
         {
@@ -373,7 +468,7 @@ module Hive
 
       def diagnostics_uncoordinated(timeout_sec: nil)
         ensure_process_owner!
-        return diagnosis(:missing) unless File.exist?(path) || File.symlink?(path)
+        return diagnosis(:missing) unless lstat_if_present(path)
         begin
           validate_database_custody!
         rescue IntegrityError => error
@@ -418,6 +513,9 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        storage_error = storage_error_for(error)
+        raise storage_error if storage_error
+
         diagnosis(:corrupt, error: IntegrityError.new(
           "runtime control-plane database is unreadable: #{error.message}",
           code: :database_corrupt, action: BACKUP_ACTION,
@@ -472,20 +570,244 @@ module Hive
           .each { |setting| @connection.run("PRAGMA #{setting}") }
         validate_database_custody!
         @connection
+      rescue Error
+        disconnect_preserving_error
+        raise
+      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        storage_error = storage_error_for(error)
+        disconnect_preserving_error
+        raise storage_error if storage_error
+
+        raise
       end
 
-      def inspect_database(timeout_sec: nil)
+      def inspect_database(timeout_sec: nil, sidecar_policy: true)
         timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
           [ (Float(timeout_sec) * 1000).floor, 0 ].max
-        database = Sequel.connect(adapter: "sqlite", database: path, readonly: true,
-                                  max_connections: 1, timeout: timeout_ms, disable_dqs: true)
+        unless sidecar_policy
+          database = Sequel.connect(adapter: "sqlite", database: path, readonly: true,
+                                    max_connections: 1, timeout: timeout_ms, disable_dqs: true)
+          return yield database
+        end
+
+        validate_database_custody!
+        immutable = false
+        options = {
+          adapter: "sqlite", database: path, readonly: true,
+          max_connections: 1, timeout: timeout_ms, disable_dqs: true
+        }
+        if confirmed_read_only_storage_uncoordinated?
+          sidecars = inspection_sidecars
+          present = sidecars.filter_map { |candidate, status| candidate if status }
+          if present.one?
+            raise unpaired_sidecar_error(present.first)
+          elsif present.empty?
+            immutable = true
+            options[:database] = sqlite_immutable_uri(path)
+          end
+        end
+
+        begin
+          database = Sequel.connect(**options)
+          if immutable && inspection_sidecars.any? { |_candidate, status| status }
+            raise Unavailable.new(
+              "Hive state is mounted read-only and sidecars appeared while immutable inspection was opening",
+              code: :state_storage_read_only, action: STORAGE_ACTION,
+              details: { path: path, confirmed_read_only: true }
+            )
+          end
+          # Force SQLite to initialize and read the database before a caller's
+          # block begins. Storage failures here are opening failures; errors
+          # from the caller's own SQL below are deliberately not reclassified.
+          database.fetch("PRAGMA schema_version").first
+        rescue Error
+          raise
+        rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+          storage_error = storage_error_for(error)
+          raise storage_error if storage_error
+
+          raise
+        end
+
         yield database
       ensure
-        database&.disconnect
+        disconnect_preserving_error(database)
+      end
+
+      def inspection_sidecars
+        [ "#{path}-wal", "#{path}-shm" ].map do |candidate|
+          status = lstat_if_present(candidate)
+          validate_file_custody!(candidate, status) if status
+          [ candidate, status ]
+        end
+      end
+
+      def unpaired_sidecar_error(candidate)
+        Unavailable.new(
+          "Hive state is mounted read-only with an unpaired SQLite sidecar: #{candidate}",
+          code: :state_storage_read_only, action: UNPAIRED_STORAGE_ACTION,
+          details: { path: path, sidecar: candidate, confirmed_read_only: true }
+        )
+      end
+
+      # Cleanup must not replace the exception already leaving the protected
+      # operation. With no active exception, a disconnect failure remains
+      # observable to the caller.
+      def disconnect_preserving_error(connection = self)
+        active_error = $!
+        connection.equal?(self) ? disconnect : connection&.disconnect
+      rescue StandardError => cleanup_error
+        raise cleanup_error unless active_error
+      end
+
+      def confirmed_read_only_storage_uncoordinated?
+        storage_mount_status == :read_only
+      rescue SystemCallError, IOError, ArgumentError, Encoding::CompatibilityError
+        false
       end
 
       def remaining_timeout(deadline)
         [ deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC), 0.0 ].max
+      end
+
+      def storage_mount_status
+        unless @platform.include?("linux")
+          @storage_mount_diagnostic = { status: :unconfirmed, reason: :unsupported_platform }
+          return :unconfirmed
+        end
+
+        target = File.realpath(File.dirname(path)).b
+        rows = File.binread(File.join(@proc_root, "self", "mountinfo")).lines
+        parsed = rows.map { |line| parse_mountinfo_line(line) }
+        if parsed.any?(&:nil?)
+          @storage_mount_diagnostic = { status: :unconfirmed, reason: :invalid_mountinfo }
+          return :unconfirmed
+        end
+
+        matches = parsed.select do |row|
+          mount_point = row.fetch(:mount_point)
+          mount_point == "/" || target == mount_point || target.start_with?("#{mount_point}/")
+        end
+        if matches.empty?
+          @storage_mount_diagnostic = { status: :unconfirmed, reason: :mount_not_found }
+          return :unconfirmed
+        end
+
+        deepest_length = matches.map { |row| row.fetch(:mount_point).length }.max
+        deepest = matches.select { |row| row.fetch(:mount_point).length == deepest_length }
+        unless deepest.one?
+          @storage_mount_diagnostic = {
+            status: :unconfirmed, reason: :ambiguous_mount,
+            candidates: deepest.map { |candidate| candidate.fetch(:mount_point) }
+          }
+          return :unconfirmed
+        end
+
+        row = deepest.first
+        status = (row.fetch(:mount_options) + row.fetch(:super_options)).include?("ro") ?
+          :read_only : :writable
+        @storage_mount_diagnostic = { status: status, mount_point: row.fetch(:mount_point) }
+        status
+      rescue SystemCallError, IOError, ArgumentError, Encoding::CompatibilityError => error
+        @storage_mount_diagnostic = {
+          status: :unconfirmed, reason: :mountinfo_unavailable, error_class: error.class.name
+        }
+        :unconfirmed
+      end
+
+      def parse_mountinfo_line(line)
+        fields = line.split
+        separator = fields.index("-")
+        return unless separator && separator >= 6 && fields.length > separator + 3
+
+        mount_point = decode_mountinfo_path(fields.fetch(4))
+        return unless mount_point&.start_with?("/".b)
+
+        {
+          mount_point: mount_point,
+          mount_options: fields.fetch(5).split(","),
+          super_options: fields.fetch(separator + 3).split(",")
+        }
+      rescue IndexError
+        nil
+      end
+
+      def decode_mountinfo_path(value)
+        value.b.gsub(/\\([0-7]{3})/n) { Regexp.last_match(1).to_i(8).chr(Encoding::BINARY) }
+      end
+
+      def sqlite_immutable_uri(database_path)
+        encoded = database_path.b.each_byte.map do |byte|
+          character = byte.chr
+          if character.match?(/[A-Za-z0-9\-._~\/]/)
+            character
+          else
+            format("%%%02X", byte)
+          end
+        end.join
+        "file:#{encoded}?immutable=1"
+      end
+
+      def error_chain(error)
+        seen = {}
+        chain = []
+        current = error
+        while current && !seen[current.object_id]
+          seen[current.object_id] = true
+          chain << current
+          current = current.cause
+        end
+        chain
+      end
+
+      def read_only_storage_error?(error)
+        error.is_a?(Errno::EROFS) || error.is_a?(SQLite3::ReadOnlyException) ||
+          sqlite_primary_result_code(error) == SQLite3::Constants::ErrorCode::READONLY
+      end
+
+      def cant_open_storage_error?(error)
+        error.is_a?(SQLite3::CantOpenException) ||
+          sqlite_primary_result_code(error) == SQLite3::Constants::ErrorCode::CANTOPEN
+      end
+
+      def inaccessible_storage_error?(error)
+        [ Errno::EACCES, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP ].any? do |type|
+          error.is_a?(type)
+        end || cant_open_storage_error?(error)
+      end
+
+      def sqlite_primary_result_code(error)
+        return unless error.respond_to?(:code)
+
+        code = error.code
+        Integer(code) & 0xff if code
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      def storage_error_details(error, chain, confirmed_read_only:)
+        {
+          error_class: error.class.name,
+          cause_chain: chain.map do |candidate|
+            detail = { error_class: candidate.class.name }
+            code = candidate.respond_to?(:code) ? candidate.code : nil
+            detail[:sqlite_code] = code if code
+            detail
+          end,
+          confirmed_read_only: confirmed_read_only,
+          state_path: File.dirname(path),
+          mount_confirmation: @storage_mount_diagnostic
+        }
+      end
+
+      def reject_operational_mutation!
+        return unless operational_inspection_active?
+
+        raise Unavailable.new(
+          "Hive state is mounted read-only at #{File.dirname(path)}",
+          code: :state_storage_read_only, action: STORAGE_ACTION,
+          details: { path: path, confirmed_read_only: true }
+        )
       end
 
       def verify_runtime_capabilities!
@@ -792,25 +1114,30 @@ module Hive
         parent = File.lstat(File.dirname(path))
         custody_error!(File.dirname(path)) unless
           parent.directory? && !parent.symlink? && parent.uid == Process.euid && (parent.mode & 0o077).zero?
-        validate_database_file_custody!(path)
-        [ "#{path}-wal", "#{path}-shm" ].each do |candidate|
-          validate_database_file_custody!(candidate, tolerate_disappearance: true)
+        [ path, "#{path}-wal", "#{path}-shm" ].each do |candidate|
+          status = lstat_if_present(candidate)
+          validate_file_custody!(candidate, status) if status
         end
         true
       rescue SystemCallError => error
+        storage_error = storage_error_for(error)
+        raise storage_error if storage_error
+
         raise IntegrityError.new(
           "runtime control-plane storage is unsafe: #{error.message}",
           code: :database_custody_invalid, action: BACKUP_ACTION
         )
       end
 
-      def validate_database_file_custody!(candidate, tolerate_disappearance: false)
-        return unless File.exist?(candidate) || File.symlink?(candidate)
-        status = File.lstat(candidate)
+      def lstat_if_present(candidate)
+        File.lstat(candidate)
+      rescue Errno::ENOENT
+        nil
+      end
+
+      def validate_file_custody!(candidate, status)
         custody_error!(candidate) unless status.file? && !status.symlink? && status.nlink == 1 &&
           status.uid == Process.euid && (status.mode & 0o077).zero?
-      rescue Errno::ENOENT
-        raise unless tolerate_disappearance
       end
 
       def custody_error!(candidate)

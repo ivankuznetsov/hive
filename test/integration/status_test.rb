@@ -7,6 +7,7 @@ require "hive/events"
 require "hive/task_meta"
 require "hive/plan_review/orchestrator"
 require "hive/tui/snapshot"
+require "hive/tui/views/tasks_pane"
 
 class StatusTest < Minitest::Test
   include HiveTestHelper
@@ -187,6 +188,77 @@ class StatusTest < Minitest::Test
         assert_equal File.basename(folder), row["slug"]
         assert_equal 1, row["id"]
         assert_equal "Named Status Row", row["display_name"]
+      end
+    end
+  end
+
+  def test_list_blockers_stay_ordered_across_json_text_and_tui_as_prerequisites_advance
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::New.new(project, "first prerequisite", slug_override: "first-task").call
+          Hive::Commands::New.new(project, "second prerequisite", slug_override: "second-task").call
+          Hive::Commands::New.new(
+            project, "fan in dependent", slug_override: "fan-in-dependent",
+            depends_on: %w[first-task second-task]
+          ).call
+        end
+
+        stages = File.join(dir, ".hive-state", "stages")
+        FileUtils.mv(
+          File.join(stages, "1-inbox", "first-task"),
+          File.join(stages, "7-artifacts", "first-task")
+        )
+        FileUtils.mv(
+          File.join(stages, "1-inbox", "second-task"),
+          File.join(stages, "8-finalize", "second-task")
+        )
+
+        first_payload = status_json_payload
+        first_row = status_task(first_payload, "fan-in-dependent")
+        expected = [
+          [ "first-task", "7-artifacts", "9-done" ],
+          [ "second-task", "8-finalize", "9-done" ]
+        ]
+        assert_nil first_row.fetch("blocked_by")
+        assert_nil first_row.fetch("dependency_stage")
+        assert_equal "default", first_row.fetch("dependency_base_mode")
+        assert_equal expected, first_row.fetch("unmet_dependencies").map { |entry|
+          [ entry.fetch("blocked_by"), entry.fetch("dependency_stage"), entry.fetch("required_gate") ]
+        }
+
+        text, = capture_io { Hive::Commands::Status.new(full: true).call }
+        assert_includes text, "first-task (7-artifacts, needs 9-done)"
+        assert_includes text, "second-task (8-finalize, needs 9-done)"
+        refute_includes text, "[\"first-task\""
+
+        tui_label = Hive::Tui::Views::TasksPane.status_label(
+          Hive::Tui::Snapshot.from_payload(first_payload).rows.find { |row|
+            row.slug == "fan-in-dependent"
+          }
+        )
+        assert_includes tui_label, "first-task (7-artifacts, needs 9-done)"
+        assert_includes tui_label, "second-task (8-finalize, needs 9-done)"
+
+        FileUtils.mv(
+          File.join(stages, "7-artifacts", "first-task"),
+          File.join(stages, "9-done", "first-task")
+        )
+        second_row = status_task(status_json_payload, "fan-in-dependent")
+        assert_equal [ "second-task" ],
+                     second_row.fetch("unmet_dependencies").map { |entry| entry.fetch("blocked_by") }
+        assert_equal "default", second_row.fetch("dependency_base_mode")
+
+        FileUtils.mv(
+          File.join(stages, "8-finalize", "second-task"),
+          File.join(stages, "9-done", "second-task")
+        )
+        clear_row = status_task(status_json_payload, "fan-in-dependent")
+        assert_equal false, clear_row.fetch("blocked")
+        assert_empty clear_row.fetch("unmet_dependencies")
+        assert_equal "default", clear_row.fetch("dependency_base_mode")
       end
     end
   end
@@ -415,5 +487,15 @@ class StatusTest < Minitest::Test
     FileUtils.mkdir_p(File.dirname(to))
     FileUtils.mv(from, to)
     File.write(File.join(to, state_file), body)
+  end
+
+  def status_json_payload
+    out, = capture_io { Hive::Commands::Status.new(json: true, full: true).call }
+    JSON.parse(out)
+  end
+
+  def status_task(payload, slug)
+    payload.fetch("projects").flat_map { |project| project.fetch("tasks") }
+      .find { |task| task.fetch("slug") == slug }
   end
 end

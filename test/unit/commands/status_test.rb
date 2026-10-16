@@ -252,6 +252,87 @@ class CommandsStatusTest < Minitest::Test
     assert_empty stderr
   end
 
+  def test_dependency_base_mode_fallback_warns_when_resolution_fails
+    warnings = []
+    command = Hive::Commands::Status.new(warning_sink: warnings)
+    fake_task = Struct.new(:project_root).new("/tmp/project")
+
+    mode = with_replaced_singleton_method(
+      Hive::DependencySnapshot, :base_selection, ->(*) { raise IOError, "refs unavailable" }
+    ) do
+      command.send(
+        :dependency_base_mode, { task: fake_task, slug: "dependent", depends_on: "base" },
+        config: { "default_branch" => nil },
+        admission_context: Object.new, project_name: "demo"
+      )
+    end
+
+    assert_equal "default", mode
+    assert warnings.any? { |message| message.include?("dependency base resolution failed") }
+    assert warnings.any? { |message| message.include?("IOError: refs unavailable") }
+  end
+
+  def test_dependency_base_mode_loads_config_only_when_not_supplied
+    command = Hive::Commands::Status.new
+    fake_task = Struct.new(:project_root).new("/project")
+    observed_default = nil
+
+    mode = with_replaced_singleton_method(
+      Hive::Config, :load, ->(*) { { "default_branch" => "develop" } }
+    ) do
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :base_selection,
+        lambda do |_task, default_branch, **|
+          observed_default = default_branch
+          Hive::DependencySnapshot::BaseSelection.new(branch: nil, mode: "default")
+        end
+      ) do
+        command.send(
+          :dependency_base_mode,
+          { task: fake_task, slug: "dependent", depends_on: "base" },
+          admission_context: Object.new, project_name: "demo"
+        )
+      end
+    end
+
+    assert_equal "default", mode
+    assert_equal "develop", observed_default
+  end
+
+  def test_dependency_annotation_reuses_config_and_one_branch_ref_inventory_per_project
+    command = Hive::Commands::Status.new
+    prerequisite = Struct.new(:slug, :id).new("base", 1)
+    context = Object.new
+    context.define_singleton_method(:verdict) do |**|
+      Hive::DependencyAdmission::Verdict.new(state: :clear)
+    end
+    context.define_singleton_method(:task_snapshot) { |**| prerequisite }
+    task_type = Struct.new(:project_root, :slug, :id, :depends_on)
+    rows = %w[first second].map.with_index do |slug, index|
+      task = task_type.new("/project", slug, index + 2, "base")
+      { slug: slug, task: task, depends_on: "base", archive_member: false }
+    end
+    refs_calls = 0
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config was already supplied" }) do
+      with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs,
+        lambda do |_root|
+          refs_calls += 1
+          Set["refs/heads/base"]
+        end
+      ) do
+        command.send(
+          :annotate_dependencies, rows, { "name" => "demo", "path" => "/project" },
+          admission_context: context, config: { "default_branch" => nil }
+        )
+      end
+    end
+
+    assert_equal 1, refs_calls
+    assert_equal %w[stacked stacked], rows.map { |row| row[:dependency_base_mode] }
+  end
+
   def test_status_payloads_preserve_subsecond_generation_time
     now = Time.utc(2026, 8, 23) + Rational(123_456, 1_000_000)
     command = Hive::Commands::Status.new(json: true, daemon_tasks: [])
@@ -334,7 +415,12 @@ class CommandsStatusTest < Minitest::Test
         json: true, daemon_tasks: [ "demo:#{dependent}" ]
       )
 
-      payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      payload = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "bounded dependency base resolution must not scan every task" }
+      ) do
+        command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      end
       row = payload.dig("projects", 0, "tasks", 0)
 
       assert_equal dependent, row.fetch("slug")
@@ -343,6 +429,94 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "dependency_validation_failed",
                    row.dig("admission_error", "reason_code")
       assert_includes row.dig("admission_error", "safe_correction"), "full dependency scan"
+      assert_equal "stacked", row.fetch("dependency_base_mode")
+    end
+  end
+
+  def test_incremental_dependency_hold_defaults_base_mode_without_a_full_context
+    row = { slug: "dependent-task", dependency_base_mode: nil }
+
+    Hive::Commands::Status.new.send(
+      :hold_incremental_dependency, row, { "name" => "demo" }
+    )
+
+    assert_equal "default", row.fetch(:dependency_base_mode)
+    assert_equal true, row.fetch(:blocked)
+    assert_equal "dependency_validation_failed", row.fetch(:admission_error).reason_code
+  end
+
+  def test_incremental_projection_skips_the_base_context_without_dependencies
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      slug = "independent-task"
+      write_status_task(hive_state, "1-inbox", slug, state_file: "idea.md", marker: "WAITING")
+      command = Hive::Commands::Status.new(json: true, daemon_tasks: [ "demo:#{slug}" ])
+
+      payload = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :targeted_admission_context,
+        ->(*) { flunk "dependency-free incremental rows do not need a base context" }
+      ) do
+        command.daemon_task_payload([ status_project(project_root, hive_state) ])
+      end
+
+      assert_equal false, payload.dig("projects", 0, "tasks", 0, "blocked")
+    end
+  end
+
+  def test_incremental_projection_skips_base_context_and_git_for_list_declarations
+    command = Hive::Commands::Status.new
+    project = { "name" => "demo", "path" => "/project" }
+    rows = [ { slug: "fan-in", depends_on: %w[first second] } ]
+
+    with_replaced_singleton_method(
+      Hive::Worktree, :branch_refs, ->(*) { flunk "lists need no branch inventory" }
+    ) do
+      with_replaced_singleton_method(
+        Hive::DependencySnapshot, :targeted_admission_context,
+        ->(*) { flunk "lists need no base-only context" }
+      ) do
+        context, available = command.send(
+          :incremental_dependency_base_context, rows, project, nil
+        )
+        assert_nil context
+        assert available
+      end
+    end
+  end
+
+  def test_incremental_base_context_failure_degrades_only_dependency_base_mode
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = "dependent-task"
+      independent = "independent-task"
+      dependent_folder = write_status_task(
+        hive_state, "1-inbox", dependent, state_file: "idea.md", marker: "WAITING"
+      )
+      write_status_task(
+        hive_state, "1-inbox", independent, state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        dependent_folder, id: 1, slug: dependent, display_name: nil, depends_on: "missing-task"
+      )
+      command = Hive::Commands::Status.new(
+        json: true, daemon_tasks: [ "demo:#{dependent}", "demo:#{independent}" ]
+      )
+
+      payload = nil
+      _out, warning = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :targeted_admission_context,
+        ->(*) { raise IOError, "archive unavailable" }
+      ) do
+        capture_io do
+          payload = command.daemon_task_payload([ status_project(project_root, hive_state) ])
+        end
+      end
+      rows = payload.dig("projects", 0, "tasks").to_h { |row| [ row["slug"], row ] }
+
+      assert_equal false, rows.fetch(independent).fetch("blocked")
+      assert_nil rows.fetch(independent).fetch("admission_error")
+      assert_equal "default", rows.fetch(dependent).fetch("dependency_base_mode")
+      assert_includes warning, "bounded dependency base resolution failed"
     end
   end
 
@@ -478,6 +652,34 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "admission_error", row.fetch("action")
       assert_nil row.fetch("suggested_command")
       assert_equal "dependency_metadata_unreadable", row.fetch("admission_error").fetch("reason_code")
+    end
+  end
+
+  def test_invalid_dependency_shapes_keep_the_status_envelope_schema_valid
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      declarations = [ [], { "a" => "b" }, true, [ [ "base" ] ], [ "base", nil ], nil ]
+      declarations.each_with_index do |declaration, index|
+        slug = "invalid-dependency-#{index}"
+        folder = write_status_task(
+          hive_state, "4-execute", slug, state_file: "task.md", marker: "EXECUTE_COMPLETE"
+        )
+        File.write(
+          File.join(folder, "meta.yml"),
+          YAML.dump("id" => index + 1, "slug" => slug, "depends_on" => declaration)
+        )
+      end
+
+      payload = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ])
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+
+      assert_empty schema.validate(payload).to_a
+      payload.dig("projects", 0, "tasks").each do |row|
+        assert_equal "admission_error", row.fetch("action")
+        assert row["depends_on"].nil? || row["depends_on"].is_a?(String)
+      end
     end
   end
 
@@ -1017,9 +1219,14 @@ class CommandsStatusTest < Minitest::Test
       checkpoint_status_task(bs)
       checkpoint_status_task(ex)
 
-      tasks = Hive::Commands::Status.new.json_payload([
-        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
-      ]).fetch("projects").first.fetch("tasks")
+      tasks = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).fetch("projects").first.fetch("tasks")
+      end
       brainstorm = tasks.find { |t| t.fetch("slug") == "bs-task-260525-cccc" }
       execute = tasks.find { |t| t.fetch("slug") == "ex-task-260525-dddd" }
 
@@ -1072,15 +1279,245 @@ class CommandsStatusTest < Minitest::Test
       Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
                                       display_name: nil, depends_on: File.basename(base))
 
-      tasks = Hive::Commands::Status.new.json_payload([
-        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
-      ]).fetch("projects").first.fetch("tasks")
+      tasks = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs,
+        ->(*) { [ "refs/heads/#{File.basename(base)}" ].to_set }
+      ) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).fetch("projects").first.fetch("tasks")
+      end
       row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
 
       assert_equal File.basename(base), row.fetch("depends_on")
       assert_equal File.basename(base), row.fetch("blocked_by")
       assert_equal "7-artifacts", row.fetch("dependency_stage")
+      assert_equal [ {
+        "reference" => File.basename(base), "blocked_by" => File.basename(base),
+        "dependency_stage" => "7-artifacts", "required_gate" => "8-finalize"
+      } ], row.fetch("unmet_dependencies")
+      assert_equal "stacked", row.fetch("dependency_base_mode")
       assert_equal true, row.fetch("blocked")
+    end
+  end
+
+  def test_json_dependency_base_mode_falls_back_when_scalar_branch_is_absent
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(hive_state, "9-done", "base-task-260618-aaaa",
+                               state_file: "task.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(base, id: 1, slug: File.basename(base), display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: File.basename(dependent), display_name: nil,
+        depends_on: File.basename(base)
+      )
+
+      row = with_replaced_singleton_method(Hive::Worktree, :branch_refs, ->(*) { Set.new }) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).dig("projects", 0, "tasks").find { |task| task["slug"] == File.basename(dependent) }
+      end
+
+      assert_equal "default", row.fetch("dependency_base_mode")
+    end
+  end
+
+  def test_json_dependency_base_mode_retains_stacked_mode_when_ref_inventory_is_unavailable
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(
+        hive_state, "9-done", "base-task", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task", state_file: "task.md",
+        marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(base, id: 1, slug: "base-task", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: "base-task"
+      )
+      command = Hive::Commands::Status.new(json: true)
+      row = nil
+
+      _out, warning = with_replaced_singleton_method(
+        Hive::Worktree, :branch_refs,
+        ->(*) { raise Hive::WorktreeError, "temporary ref failure" }
+      ) do
+        capture_io do
+          row = command.json_payload([
+            { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+          ]).dig("projects", 0, "tasks").find { |task| task["slug"] == "dependent-task" }
+        end
+      end
+
+      assert_equal "stacked", row.fetch("dependency_base_mode")
+      assert_includes warning, "retaining base mode without ref evidence"
+    end
+  end
+
+  def test_json_dependency_base_mode_uses_the_configured_default_branch
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "default_branch: develop\n")
+      base = write_status_task(
+        hive_state, "9-done", "develop", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task-260618-bbbb",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(base, id: 1, slug: "develop", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: File.basename(dependent), display_name: nil,
+        depends_on: "develop"
+      )
+
+      row = with_replaced_singleton_method(Hive::Worktree, :branch_refs, ->(*) { Set.new }) do
+        Hive::Commands::Status.new.json_payload([
+          { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+        ]).dig("projects", 0, "tasks").find { |task| task["slug"] == File.basename(dependent) }
+      end
+
+      assert_equal "default", row.fetch("dependency_base_mode")
+    end
+  end
+
+  def test_json_and_text_status_emit_every_list_blocker_with_null_singulars
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      first = write_status_task(hive_state, "7-artifacts", "first-task-260618-aaaa",
+                                state_file: "artifact.md", marker: "COMPLETE")
+      second = write_status_task(hive_state, "8-finalize", "second-task-260618-bbbb",
+                                 state_file: "pr.md", marker: "COMPLETE")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260618-cccc",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(first, id: 1, slug: File.basename(first), display_name: nil)
+      Hive::TaskMeta.write(second, id: 2, slug: File.basename(second), display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 3, slug: File.basename(dependent), display_name: nil,
+        depends_on: [ File.basename(first), File.basename(second) ]
+      )
+      project = { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+
+      row = with_replaced_singleton_method(
+        Hive::DependencySnapshot, :tasks,
+        ->(*) { raise "status base-mode projection must reuse its admission context" }
+      ) do
+        Hive::Commands::Status.new.json_payload([ project ])
+          .dig("projects", 0, "tasks")
+          .find { |task| task.fetch("slug") == File.basename(dependent) }
+      end
+
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal [ File.basename(first), File.basename(second) ],
+                   row.fetch("unmet_dependencies").map { |entry| entry.fetch("blocked_by") }
+      assert_equal [ "9-done", "9-done" ],
+                   row.fetch("unmet_dependencies").map { |entry| entry.fetch("required_gate") }
+      assert_equal "default", row.fetch("dependency_base_mode")
+
+      out, = capture_io do
+        Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
+      end
+      assert_includes out, "#{File.basename(first)} (7-artifacts, needs 9-done)"
+      assert_includes out, "#{File.basename(second)} (8-finalize, needs 9-done)"
+      refute_includes out, "[\""
+    end
+  end
+
+  def test_singleton_dependency_list_keeps_singular_fields_null_in_both_envelopes
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      base = write_status_task(
+        hive_state, "8-finalize", "base-task", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(base, id: 1, slug: "base-task", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: [ "base-task" ]
+      )
+      project = status_project(project_root, hive_state)
+      command = Hive::Commands::Status.new(json: true)
+      status = command.json_payload([ project ])
+      row = status.dig("projects", 0, "tasks").find { |task| task["slug"] == "dependent-task" }
+      operational = command.operational_payload(
+        [ project ], status_payload: status, scheduler_snapshot: nil
+      ).fetch("tasks").find { |task| task.dig("identity", "slug") == "dependent-task" }
+
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_nil operational.dig("dependency", "blocked_by")
+      assert_nil operational.dig("dependency", "dependency_stage")
+      assert_equal [ "base-task" ],
+                   operational.dig("dependency", "unmet_dependencies").map { |entry| entry["blocked_by"] }
+    end
+  end
+
+  def test_admission_error_retains_independent_blockers_and_suppresses_actions
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      waiting = write_status_task(
+        hive_state, "8-finalize", "waiting-task", state_file: "task.md", marker: "COMPLETE"
+      )
+      dependent = write_status_task(
+        hive_state, "4-execute", "dependent-task",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      Hive::TaskMeta.write(waiting, id: 1, slug: "waiting-task", display_name: nil)
+      Hive::TaskMeta.write(
+        dependent, id: 2, slug: "dependent-task", display_name: nil,
+        depends_on: %w[waiting-task missing-task]
+      )
+
+      row = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).dig("projects", 0, "tasks").find { |task| task["slug"] == "dependent-task" }
+
+      assert_equal "admission_error", row.fetch("action")
+      assert_nil row.fetch("suggested_command")
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal [ "waiting-task" ],
+                   row.fetch("unmet_dependencies").map { |entry| entry["blocked_by"] }
+      assert_equal "dependency_task_missing", row.dig("admission_error", "reason_code")
+    end
+  end
+
+  def test_scalar_transitive_wait_keeps_singular_fields_null
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      tail = write_status_task(hive_state, "3-plan", "tail-task-260618-aaaa",
+                               state_file: "plan.md", marker: "WAITING")
+      parent = write_status_task(hive_state, "9-done", "parent-task-260618-bbbb",
+                                 state_file: "task.md", marker: "COMPLETE")
+      root = write_status_task(hive_state, "4-execute", "root-task-260618-cccc",
+                               state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(tail, id: 1, slug: File.basename(tail), display_name: nil)
+      Hive::TaskMeta.write(
+        parent, id: 2, slug: File.basename(parent), display_name: nil,
+        depends_on: File.basename(tail)
+      )
+      Hive::TaskMeta.write(
+        root, id: 3, slug: File.basename(root), display_name: nil,
+        depends_on: File.basename(parent)
+      )
+
+      row = Hive::Commands::Status.new.json_payload([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ]).dig("projects", 0, "tasks").find { |task| task["slug"] == File.basename(root) }
+
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal [ File.basename(tail) ],
+                   row.fetch("unmet_dependencies").map { |entry| entry.fetch("blocked_by") }
     end
   end
 

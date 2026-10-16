@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/cli"
 require "hive/task"
 require "hive/task_counter"
 require "hive/task_meta"
@@ -314,6 +315,295 @@ class NewTest < Minitest::Test
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
         assert_equal "base-task", Hive::TaskMeta.read(folder)[:depends_on]
         assert_includes File.read(File.join(folder, "meta.yml")), "depends_on: base-task"
+      end
+    end
+  end
+
+  def test_cli_repeated_dependency_flags_persist_all_references_and_emit_notice
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        out, err = capture_io do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "first-task", "dependent task",
+            "--depends-on", "second-task"
+          ])
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
+        assert_equal [ "first-task", "second-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes out, "hive: captured"
+        assert_includes err, "branches from the project default"
+        assert_includes err, "require 9-done"
+      end
+    end
+  end
+
+  def test_cli_duplicate_dependency_flags_preserve_list_shape_after_deduplication
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _out, err = capture_io do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "base-task", "--depends-on", "base-task",
+            "duplicate prerequisites"
+          ])
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "duplicate-prerequisites-*")].first
+        assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes err, "multiple --depends-on values are scheduling-only"
+      end
+    end
+  end
+
+  def test_repeated_dependency_notice_is_not_emitted_when_creation_fails
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _out, err = capture_io do
+          assert_raises(SystemExit) do
+            Hive::CLI.start([
+              "new", project, "--depends-on", "base-task", "--depends-on", "BAD TASK",
+              "invalid prerequisites"
+            ])
+          end
+        end
+
+        refute_includes err, "multiple --depends-on values are scheduling-only"
+      end
+    end
+  end
+
+  def test_programmatic_dependency_array_preserves_singleton_shape
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::Commands::New.new(project, "array dependency", depends_on: [ "base-task" ]).call
+        end
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "array-dependency-*")].first
+        assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
+  def test_dependency_error_value_falls_back_when_json_generation_fails
+    value = Object.new
+    value.define_singleton_method(:to_s) { "opaque dependency" }
+
+    rendered = with_replaced_singleton_method(
+      JSON, :generate, ->(*) { raise JSON::GeneratorError, "cannot encode" }
+    ) do
+      Hive::Commands::New.allocate.send(:dependency_error_value, value)
+    end
+
+    assert_equal "opaque dependency", rendered
+  end
+
+  def test_creation_rejects_a_resolvable_cycle_before_publishing_or_allocating_an_id
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "proposed-task"
+        )
+        next_id = Hive::TaskCounter.peek
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: "existing-task"
+          ).call!
+        end
+
+        path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "proposed-task")
+        )
+        assert_equal next_id, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_creation_rejects_a_direct_self_reference_with_a_complete_cycle_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "self dependent", slug_override: "self-dependent",
+            depends_on: "self-dependent"
+          ).call!
+        end
+
+        path = "#{project}:self-dependent -> #{project}:self-dependent"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "self-dependent")
+        )
+      end
+    end
+  end
+
+  def test_creation_persists_dependencies_on_prerequisites_with_deferred_admission_errors
+    %i[unreadable_metadata plan_mismatch].each do |failure|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+          prerequisite = "broken-prerequisite"
+          existing = File.join(dir, ".hive-state", "stages", "1-inbox", prerequisite)
+          FileUtils.mkdir_p(existing)
+          File.write(File.join(existing, "idea.md"), "# Broken prerequisite\n<!-- WAITING -->\n")
+          if failure == :unreadable_metadata
+            File.write(File.join(existing, "meta.yml"), "depends_on: [unterminated\n")
+            expected_reason = "dependency_metadata_unreadable"
+          else
+            Hive::TaskMeta.write(
+              existing, id: 40, slug: prerequisite, display_name: nil,
+              depends_on: "first-upstream"
+            )
+            File.write(
+              File.join(existing, "plan.md"),
+              "---\ndepends_on: second-upstream\n---\n# Plan\n"
+            )
+            expected_reason = "plan_dependency_mismatch"
+          end
+
+          capture_io do
+            created_slug = "dependent-#{failure.to_s.tr('_', '-')}"
+            Hive::Commands::New.new(
+              project, "deferred dependency #{failure}",
+              slug_override: created_slug, depends_on: prerequisite
+            ).call!
+          end
+          created = File.join(
+            dir, ".hive-state", "stages", "1-inbox",
+            "dependent-#{failure.to_s.tr('_', '-')}"
+          )
+          assert_equal prerequisite, Hive::TaskMeta.read(created)[:depends_on]
+          context = Hive::DependencySnapshot.admission_context([
+            { "name" => project, "path" => dir, "repository_identity" => nil }
+          ])
+          assert_equal expected_reason,
+                       context.verdict(project: project, slug: File.basename(created))
+                         .admission_error.reason_code
+        end
+      end
+    end
+  end
+
+  def test_creation_rejects_a_cycle_hidden_by_an_unreachable_list_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "proposed-task", workflow: "content"
+        )
+        next_id = Hive::TaskCounter.peek
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: [ "existing-task" ]
+          ).call!
+        end
+
+        path = "#{project}:proposed-task -> #{project}:existing-task -> #{project}:proposed-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+        refute Dir.exist?(
+          File.join(dir, ".hive-state", "stages", "1-inbox", "proposed-task")
+        )
+        assert_equal next_id, Hive::TaskCounter.peek
+      end
+    end
+  end
+
+  def test_creation_reports_an_upstream_self_reference_as_the_actual_cycle
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        existing = File.join(dir, ".hive-state", "stages", "1-inbox", "existing-task")
+        FileUtils.mkdir_p(existing)
+        Hive::TaskMeta.write(
+          existing, id: 40, slug: "existing-task", display_name: nil,
+          depends_on: "existing-task"
+        )
+
+        error = assert_raises(Hive::Commands::New::InvalidDependencyError) do
+          Hive::Commands::New.new(
+            project, "proposed task", slug_override: "proposed-task",
+            depends_on: "existing-task"
+          ).call!
+        end
+
+        path = "#{project}:existing-task -> #{project}:existing-task"
+        assert_equal path, error.value
+        assert_includes error.message, path
+      end
+    end
+  end
+
+  def test_creation_keeps_unresolved_future_dependencies_captureable
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io do
+          Hive::Commands::New.new(
+            project, "future dependent", slug_override: "future-dependent",
+            depends_on: %w[future-one future-two]
+          ).call!
+        end
+
+        folder = File.join(dir, ".hive-state", "stages", "1-inbox", "future-dependent")
+        assert_equal %w[future-one future-two], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
+  def test_cli_invalid_later_dependency_fails_before_publishing_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _out, err, status = with_captured_exit do
+          Hive::CLI.start([
+            "new", project, "--depends-on", "base-task", "--depends-on", "BAD TASK",
+            "invalid dependency list"
+          ])
+        end
+
+        assert_equal Hive::ExitCodes::GENERIC, status
+        assert_includes err, "element 2"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "invalid-dependency-list-*")]
       end
     end
   end

@@ -514,7 +514,8 @@ class HiveCliTest < Minitest::Test
 
   def test_new_task_dispatches_joined_text_and_rejects_blank_text
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "build", "thing" ])
+      _out, err = capture_io { Hive::CLI.start([ "new", "proj", "build", "thing" ]) }
+      assert_empty err
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
@@ -523,10 +524,13 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([
-        "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
-        "--idempotency-key", "creator:v1", "--json", "build", "thing"
-      ])
+      _out, err = capture_io do
+        Hive::CLI.start([
+          "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
+          "--idempotency-key", "creator:v1", "--json", "build", "thing"
+        ])
+      end
+      assert_empty err
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         {
@@ -537,9 +541,30 @@ class HiveCliTest < Minitest::Test
       )
     end
 
+    with_command_new_stub(Hive::Commands::New) do |calls|
+      _out, err = capture_io do
+        Hive::CLI.start([
+          "new", "proj", "--depends-on", "base-task", "build", "thing",
+          "--depends-on", "api:other-task"
+        ])
+      end
+      assert_equal [ "base-task", "api:other-task" ], calls.first.dig(:kwargs, :depends_on)
+      assert_includes err, "branches from the project default"
+      assert_includes err, "require 9-done"
+    end
+
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+
+  def test_new_help_explains_multi_dependency_base_and_gate_transition
+    out, _err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+
+    assert_includes out, "Repeat --depends-on"
+    assert_includes out, "project default branch"
+    assert_includes out, "9-done"
   end
 
   def test_workflow_option_help_advertises_project_authored_workflows

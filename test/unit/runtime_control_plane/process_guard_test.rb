@@ -231,6 +231,46 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
     end
   end
 
+  def test_fork_waiter_does_not_deadlock_inspection_mount_confirmation
+    with_database do |database|
+      entered = Queue.new
+      release = Queue.new
+      original = database.method(:storage_mount_status)
+      calls = 0
+      database.define_singleton_method(:storage_mount_status) do
+        calls += 1
+        if calls == 1
+          entered << true
+          release.pop
+        end
+        original.call
+      end
+
+      reader = Thread.new { database.installation_identity }
+      entered.pop
+      forked = Queue.new
+      forker = Thread.new do
+        Hive::RuntimeControlPlane::ProcessGuard.before_fork!
+        forked << true
+        Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
+      end
+      wait_for_fork_barrier
+      release << true
+
+      Timeout.timeout(2) do
+        reader.join
+        forker.join
+      end
+      assert_equal true, forked.pop
+      assert_operator calls, :>=, 2
+    ensure
+      release << true if reader&.alive?
+      Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
+      reader&.join
+      forker&.join
+    end
+  end
+
   def test_real_fork_child_inherits_no_sqlite_descriptors_from_mixed_open_databases
     with_tmp_dir do |root|
       first = database_at(File.join(root, "first.sqlite3"))

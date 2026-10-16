@@ -4,8 +4,10 @@ require "json"
 require "pathname"
 require "hive/atomic_file"
 require "hive/canonical_json"
+require "hive/lock"
 require "hive/plan_review/record"
 require "hive/secret_patterns"
+require "hive/task_meta"
 
 module Hive
   module PlanReview
@@ -162,11 +164,23 @@ module Hive
       # Serialize the full observe/dispatch/publish lifecycle, not only the
       # current.json CAS write. A waiter re-reads the winner's route after the
       # lock and coalesces instead of spawning a duplicate reviewer.
-      def with_orchestration_lock
+      def with_orchestration_lock(observation:, timeout: Hive::Lock.commit_lock_timeout)
+        Hive::TaskMeta.validate_observation!(task_folder, observation)
         ensure_directory!(root)
+        Hive::TaskMeta.validate_observation!(task_folder, observation)
         path = File.join(root, ".orchestrator.lock")
         File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+          deadline = Hive::Lock.monotonic_now + timeout
+          until lock.flock(File::LOCK_EX | File::LOCK_NB)
+            if Hive::Lock.monotonic_now >= deadline
+              raise Hive::ConcurrentRunError.new(
+                "plan review orchestration lock at #{path} held longer than #{timeout}s",
+                lock_path: path
+              )
+            end
+            sleep [ 0.05, deadline - Hive::Lock.monotonic_now ].min.clamp(0, 0.05)
+          end
+          Hive::TaskMeta.validate_observation!(task_folder, observation)
           yield
         end
       end
@@ -302,7 +316,10 @@ module Hive
           if (status = optional_lstat(root))
             validate_directory_status!(root, status)
           else
-            FileUtils.mkdir_p(root, mode: 0o700)
+            # The task directory is a lifecycle boundary. A non-recursive
+            # create fails if a forced deletion removed it, instead of
+            # resurrecting the task while setting up review storage.
+            Dir.mkdir(root, 0o700)
           end
           File.chmod(0o700, root)
           return root

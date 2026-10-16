@@ -5,7 +5,11 @@
 - Use `hive status` for bounded daemon health and currently live tasks.
 - Use `hive status --json` for the same bounded `hive-running-status.v2`
   projection in machine-readable form.
-- Use `hive status --operational --json` for agent decisions. It emits `hive-operational-status.v4`.
+- Use `hive status --operational --json` for agent decisions. It emits
+  `hive-operational-status.v5`; dependency fan-in is in `unmet_dependencies`,
+  while list rows keep singular `blocked_by`/`dependency_stage` null. Read each
+  entry's `required_gate`, and read `dependency_base_mode` as the effective
+  `stacked`/`default` branch choice after local fallback evidence.
 - Use `hive task TARGET --project NAME --json` for one task's semantic result,
   primary artifact, applicable evidence, exact usage, API-equivalent estimate,
   and receipt-correlated diagnostic-log reference.
@@ -18,6 +22,14 @@
   failed route without retaining provider-health or circuit state.
 
 Operational status is the public fleet workflow projection. A current daemon observation may add scheduler ownership, capacity, queue, provider-hold, cooldown, and recovery facts. Only a complete, unexpired observation from the live daemon generation is current. Missing, stale, invalid, or mismatched scheduler evidence lowers completeness and must not become a confident blocker claim.
+
+Repeated `hive new --depends-on ... --depends-on ...` flags create one
+scheduling-only list, print a successful-creation notice, branch from the
+project default, and require every prerequisite to reach `9-done`. A
+`dependency_gate_unreachable` error identifies the task whose `meta.yml`
+declares a list and the prerequisite workflow that cannot reach that gate.
+Repair the named workflow or metadata. Never drop, collapse, or reorder
+prerequisites merely to clear admission.
 
 Always inspect the required `attempt_storage` cell. If it is `degraded`, report
 its `degraded_reason` and last error operation as a Hive-owned migration or

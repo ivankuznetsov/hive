@@ -108,9 +108,9 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[markers clear], "markers-clear", 1, "invalid_task_path" ],
       [ %w[status extra], "running-status", 2, "error" ],
       [ %w[status --diagnose=task extra], "status-diagnose", 2, "error" ],
-      [ %w[status --operational extra], "operational-status", 4, "error" ],
-      [ %w[status --internal-task-graph extra], "status", 8, "error" ],
-      [ %w[status --daemon-task=task extra], "status", 8, "error" ],
+      [ %w[status --operational extra], "operational-status", 5, "error" ],
+      [ %w[status --internal-task-graph extra], "status", 9, "error" ],
+      [ %w[status --daemon-task=task extra], "status", 9, "error" ],
       [ %w[runtime unknown extra], "runtime-maintenance", 1, "usage",
         { "action" => "unknown", "runtime_code" => "usage", "next_action" => nil, "details" => {} } ],
       [ %w[runtime], "runtime-maintenance", 1, "usage", { "action" => "status" } ],
@@ -280,7 +280,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert status.success?
       payload = JSON.parse(out)
       assert_equal "hive-status", payload.fetch("schema")
-      assert_equal 8, payload.fetch("schema_version")
+      assert_equal 9, payload.fetch("schema_version")
 
       out, _err, status = run_hive(home, "status", "--full", "--json")
       refute status.success?

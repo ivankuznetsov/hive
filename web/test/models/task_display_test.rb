@@ -55,6 +55,19 @@ class TaskDisplayTest < ActiveSupport::TestCase
     assert_equal "Wait for the provider quota to reset.", recovery.detail
   end
 
+  test "dependency waits name every unmet prerequisite without array inspection" do
+    dependency = display(
+      "blocked" => true,
+      "depends_on" => %w[first second],
+      "unmet_dependencies" => [
+        { "blocked_by" => "first" }, { "blocked_by" => "second" }
+      ]
+    )
+
+    assert_equal "Waiting for first and second.", dependency.detail
+    refute_includes dependency.detail, "[\""
+  end
+
   test "input and blocked review are different states" do
     assert_equal "Needs your input", display("action" => "needs_input").label
     assert_equal "Blocked", display("action" => "plan_review_blocked").label

@@ -7,6 +7,22 @@ updated: 2026-10-15
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Task observation boundary (2026-10-02)
+
+Update-only metadata writers, completion clocks, managed-workflow rollback,
+approve/decide rollback, and their live callers now retain and revalidate a
+process-local directory observation. Focused tests force deletion and copied
+same-path replacement before custody, after metadata read, and before
+persistence. Supported `hive drop` participates in the project-commit-lock then
+task-lease order, so observed run and plan-review claims now serialize with it
+without retaining the project lock for their long-running work. Cross-device
+cleanup retains the copied directory handle and preserves a destination whose
+identity changes before validation. This does not claim protection
+against an arbitrary same-user filesystem process that ignores Hive locks and
+mutates paths between individual filesystem syscalls; the observation is
+transient custody evidence, not a persistent generation authority or an OS
+filesystem transaction.
+
 ## Review verify-pass follow-ups (2026-10-15)
 
 The final fix pass now gets a verify-only pass (see [[stages/review]]). Open
@@ -501,8 +517,8 @@ is advisory while the deterministic scale gate remains required.
 - The dependency workspace view projects the connected subset of the reused
   bounded status snapshot. If that snapshot lacks other projects or exhausts a
   cap, the component remains partial rather than starting a new fleet scan.
-  This is an operator explanation of the existing scalar `depends_on` model,
-  not a durable DAG or publication authority.
+  This is an operator explanation of the existing scalar-or-list `depends_on`
+  model, not a separate durable DAG or publication authority.
 
 See [[modules/task_workspace]].
 
@@ -1755,6 +1771,28 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   follow-up.
 - Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
   database or WAL files shrink on disk.
+
+## Read-only operational inspection boundaries (2026-10-14)
+
+- Immutable inspection assumes stable database bytes: no concurrent writer may
+  modify the same database through another read-write mount while the audit is
+  running. A torn read can surface as SQLite corruption and retain the existing
+  backup guidance even when the durable database is healthy. The one-shot
+  fallback does not coordinate writers it cannot see across mounts.
+- Paired WAL/SHM inspection depends on the host SQLite and kernel being able to
+  open or recover the WAL index without writing to the mounted state. The Docker
+  gate accepts only a recovery-specific typed SQLite failure for that excluded
+  host capability; it does not treat unrelated command or storage failures as a
+  valid degraded outcome. This documents the exclusion and does not claim that
+  a degraded run was observed.
+
+## Multi-dependency review verification (2026-10-15)
+
+- Focused tests cover cycle fan-in, declaration/gate/base-mode freshness,
+  schema-safe malformed metadata, batched status inputs, and consumer
+  projections. They do not measure a long-running installed daemon, TUI, or Web
+  process against a production-sized cyclic graph; hosted review and CI remain
+  separate verification boundaries.
 
 ## Deprecated native-web `HIVEBOX_*` aliases (2026-10-15)
 

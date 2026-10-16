@@ -3,7 +3,7 @@ title: Hive::WorkflowPackage
 type: module
 source: lib/hive/workflow_package/
 created: 2026-08-13
-updated: 2026-08-16
+updated: 2026-10-14
 tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, managed-store]
 ---
 
@@ -107,13 +107,14 @@ weakening owner-authored descriptor compatibility:
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Runtime accepts only the selected source commit,
-  manifest digest, and configuration digest. A stale task fails closed with an
-  exact `hive migrate` recovery command. `hive migrate` is the only boundary
-  that loads the task's old descriptor: it maps the old directory through the
-  stable semantic stage name, preflights every destination and task lock,
-  renames the stage artifact when its filename changed, and repins the task to
-  the selected generation. Install and update coordinate pointer activation
-  and retained-task changes in one state commit; failure rolls back both.
+  manifest digest, and configuration digest. A stale task fails closed with a
+  pointer to the current-format migration guide. Managed install/update is the
+  in-product boundary that loads an old descriptor: it maps the old directory
+  through the stable semantic stage name, preflights every destination and
+  non-creating task lease, renames the stage artifact when its filename changed,
+  and repins the task to the selected generation. Install and update coordinate
+  pointer activation and retained-task changes in one state commit; failure
+  rolls back both.
   They also remove stale nonterminal delivery requests, while consume-time task
   identity checks fence requests that raced the migration. Unreferenced
   generations and configurations are removed only after the cutover commits,
@@ -123,6 +124,20 @@ weakening owner-authored descriptor compatibility:
   digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore
   remains resolvable after an update replaces the selected pointer with schema
   v2; cleanup retains it while any task references its digest.
+- `TaskMigrator` carries a retained directory observation across an authorized
+  source-to-destination move and requires every pin rewrite to be applied before
+  success counts, pathspecs, the commit callback, recovery pruning, or package
+  cleanup. Same-filesystem moves retain the original inode; cross-device moves
+  go through `TaskMeta.relocate_across_devices!` in both directions (see
+  [[modules/task]]): the copy is created exclusively and held by handle before
+  any byte is copied, and is deleted on failure or rejection only while the
+  path still names that directory; a substituted destination is preserved. An unexpected destination identity is rejected, and every completed move enters the rollback
+  set before fallible observation rebinding. Its transaction rollback validates
+  that same observation before moving artifacts or restoring metadata. A dropped
+  task is not recreated and a copied same-path replacement is left untouched;
+  rollback skips are reported alongside the original migration failure. Open-file
+  descriptor exhaustion closes already-owned observations and returns a typed
+  availability error naming the process descriptor limit.
 - `SemanticDiff` reports prompt/descriptor changes by hash (never prompt text),
   dependency and policy set changes, file inventory changes, and semantic
   escalation reasons.

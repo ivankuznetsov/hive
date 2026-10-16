@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-09-09
+updated: 2026-10-02
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -53,6 +53,17 @@ without that requirement and without a review root to receive a private
 Hive does not automatically add the requirement to historical tasks. An offline
 conversion must preserve metadata and rerun required review rather than invent
 approval evidence.
+
+Persisting `plan_review_required: true` is a mandatory, identity-fenced update.
+Before creating task-local review storage, the orchestrator validates a retained
+directory observation and acquires the task lease without creating the task.
+That observed lease claim occurs under short project commit custody, closing
+the supported-Drop window before the task-local orchestration lock is entered.
+It retains that lifecycle custody through the bounded orchestration lock and
+every review-store side effect; the orchestration lock never acquires the
+project commit lock. Deletion, a same-path copied replacement, or an unapplied
+rewrite raises `InvalidRecord`; stale metadata can never satisfy or bypass the
+review gate, and review setup cannot recreate a dropped task.
 
 ## Deterministic policy
 
@@ -488,7 +499,7 @@ manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
-`hive-status.v8` and `hive-operational-status.v4` contain one required nullable
+`hive-status.v9` and `hive-operational-status.v5` contain one required nullable
 `plan_review` field. Applicable rows include review and observation identity,
 computed/effective level, state/outcome, degradation reason, attempt/current
 attempt, coverage and finding counts, blockers/owner/reason, retry time, one

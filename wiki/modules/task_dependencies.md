@@ -3,46 +3,55 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-09-23
+updated: 2026-10-14
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
-**TLDR**: A task may declare exactly one authoritative `depends_on` value in
-`meta.yml`: a same-project slug or numeric id, or an explicit
-`project:slug`. One shared fail-closed validator returns clear, benign wait, or
-admission error for status, daemon, `hive run`, and forward `hive approve`.
-Invalid or indeterminate evidence never becomes “no dependency.”
+**TLDR**: A task has one authoritative `depends_on` declaration in `meta.yml`,
+either one task reference or a nonempty flat list of references. Scalars retain
+the configured dependency gate and same-project branch stacking; lists are
+scheduling-only, always branch from the project default, and require every
+prerequisite to reach `9-done`. One shared fail-closed validator returns clear,
+benign wait, or admission error for status, daemon, `hive run`, and forward
+`hive approve`. Invalid or indeterminate evidence never becomes “no
+dependency.”
 
-## Scalar decision and grammar
+## Declaration shape and grammar
 
-Hive deliberately retains one prerequisite rather than a general graph:
+Each reference is a same-project slug or numeric id, or an explicit
+`project:slug`. A list preserves declaration order and shape, including a
+singleton array:
 
 ```yaml
 depends_on: api-task-260716-abcd       # same project by slug
 depends_on: 42                         # same project by numeric id
 depends_on: api:api-task-260716-abcd   # exact enrolled project + slug
+depends_on:                            # every reference is required
+  - api-task-260716-abcd
+  - web:web-task-260716-ef01
 ```
 
-`Hive::Dependencies.parse_reference` is the single parser. A bare reference
-never searches other projects. Cross-project numeric ids, lists, mappings,
-blank values, multiple separators, and gate suffixes are invalid. An explicit
-cross-project edge is a scheduling gate only: it never supplies a local
-stacked-branch or PR base. Same-project dependencies preserve the existing
-stacked-branch and declared revision behavior.
-
-The scalar model should be replaced by a typed DAG only when real work needs
-one or more of these tripwires: multiple prerequisites; cross-repository
-fan-out or fan-in; artifact-typed edges; revision pinning beyond the existing
-stacked-branch mechanism; optional dependencies; or distinct completion gates
-per edge. Until then, lists and per-edge syntax are rejected rather than
-partially interpreted.
+`Hive::Dependencies.parse_reference` is the single reference parser and
+`normalize_declaration` preserves whether the declaration was scalar or a
+list. A bare reference never searches other projects. Lists must be nonempty
+and flat; exact duplicate references are removed without collapsing a list to
+a scalar. Mappings, blank entries, nested arrays, multiple separators, gate
+suffixes, and cross-project numeric ids are invalid. An explicit cross-project
+edge is scheduling-only. A same-project scalar retains the existing
+stacked-branch and declared-revision behavior; every list, including
+`depends_on: [one-task]`, is scheduling-only.
 
 ## Evidence and strict reads
 
 `meta.yml` is authoritative. `TaskMeta.read_for_admission` distinguishes an
 absent legacy sidecar from unreadable YAML, a non-mapping document, and an
 invalid `depends_on`. General display code may still use the tolerant reader,
-but admission never does. Metadata mutators refuse to rewrite corrupt input,
+which projects malformed declarations as a schema-safe string or null instead
+of leaking raw arrays or mappings into public status. Admission never uses that
+projection and retains the original malformed list shape as strict evidence;
+non-finite YAML floats (`.nan`, `.inf`) inside that list are rendered as text
+so semantic fingerprints and TUI/Web projections stay JSON-serializable.
+Metadata mutators refuse to rewrite corrupt input,
 so id/display-name backfill cannot erase damaged dependency evidence. The
 strict reader rejects duplicate top-level `depends_on` keys before YAML's
 last-key-wins behavior can hide one of two declarations.
@@ -56,12 +65,12 @@ depends_on: api:api-task-260716-abcd
 ```
 
 No frontmatter, or frontmatter without `depends_on`, is valid. When present,
-the plan value must parse with the same scalar grammar and normalize to exactly
-the metadata value. A plan-only assertion, mismatch, or malformed frontmatter
-is an admission error. Duplicate top-level `depends_on` keys are invalid here
-too. Frontmatter scanning stops at its closing delimiter and is capped at
-64 KiB, so admission never reads an unbounded plan body. Hive never scans plan
-prose for prerequisites.
+the plan value must parse with the same scalar-or-list grammar and normalize to
+exactly the metadata value, including scalar-versus-list shape. A plan-only
+assertion, mismatch, or malformed frontmatter is an admission error. Duplicate
+top-level `depends_on` keys are invalid here too. Frontmatter scanning stops at
+its closing delimiter and is capped at 64 KiB, so admission never reads an
+unbounded plan body. Hive never scans plan prose for prerequisites.
 
 This cross-check closes the ordering failure observed in the Honeycomb work:
 the plan named a prerequisite that scheduling metadata did not carry. The
@@ -111,28 +120,57 @@ shares each project config across root and fallback reads; reachable policy
 errors and gate stages populate the completed immutable context. Full
 admission and mutation-time revalidation still read current policy.
 Duplicate or ambiguous identities fail closed. Full-chain walking follows
-only explicit project edges, detects missing tasks, self-reference, corrupt
+every scalar or list edge, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path
-including the repeated closing node. Cycle bookkeeping and immutable-context
-verdicts are indexed and memoized, so one active projection evaluates shared dependency
-tails once instead of rewalking them for every row. Each task folder's
+including the repeated closing node. Creation rejects any resolvable cycle or
+self-reference before publishing the new task, including cycles behind an
+unreachable gate; qualified self-reference paths identify the actual upstream
+task. Admission repeats the complete check against current disk state. Cycle
+bookkeeping and immutable-context verdicts are indexed and memoized. Non-cycle
+verdicts may be reused across roots. A cycle-derived walk-local verdict is
+reused only while all of its cycle anchors remain active; once a route unwinds
+past an anchor, Hive recomputes the node so the cycle path, reason, and unmet
+collection remain relative to the current route. Acyclic fan-in remains linear
+in the reachable graph. Each task folder's
 device/inode identity is checked before and after strict reads; a concurrent
 stage move invalidates that snapshot instead of retaining the enumerated old
 stage after an `ENOENT` race.
 
 ## Gate and three verdicts
 
-The depending project's `dependency_gate_stage` is authoritative. It defaults
-to `8-finalize`; `9-done` is the only other supported value. The prerequisite's
-own workflow must contain both its current stage and a reachable gate.
+For a scalar declaration, the depending project's `dependency_gate_stage` is
+authoritative. It defaults to `8-finalize`; `9-done` is the only other
+supported value. Every edge in a list instead has the fixed `9-done` gate,
+regardless of project configuration. Each prerequisite's own workflow must
+contain both its current stage and its required gate. A list edge whose
+workflow cannot reach `9-done` fails with `dependency_gate_unreachable` and
+remediation to use a compatible workflow or correct erroneous workflow
+metadata; changing `dependency_gate_stage` cannot make that list reachable.
 
 Admission returns exactly one verdict:
 
 | Verdict | Meaning | Status shape |
 |---|---|---|
-| Clear | no dependency, or a valid prerequisite at/after the gate | `blocked: false`, wait fields null, `admission_error: null` |
-| Wait | valid prerequisite below the gate | `blocked: true`, `blocked_by` and `dependency_stage` populated, `admission_error: null` |
-| Admission error | invalid, inconsistent, or indeterminate evidence | `blocked: true`, wait fields null, action `admission_error`, no suggested command, structured `admission_error` |
+| Clear | no dependency, or every valid prerequisite at/after its gate | `blocked: false`, singular wait fields null, `unmet_dependencies: []`, `admission_error: null` |
+| Wait | one or more valid prerequisites below their gates | `blocked: true`; scalar rows populate `blocked_by`/`dependency_stage`, while list rows keep those singulars null; `unmet_dependencies` contains every remaining blocker in declaration order |
+| Admission error | invalid, inconsistent, or indeterminate evidence | `blocked: true`, singular wait fields null, action `admission_error`, no suggested command, structured `admission_error`; any independently observed blockers remain in `unmet_dependencies` |
+
+Each `unmet_dependencies` entry contains `reference`, resolved `blocked_by`,
+`dependency_stage`, and `required_gate`. `hive-status.v9` and
+`hive-operational-status.v5` also expose `dependency_base_mode`: `stacked` only
+for a resolvable same-project scalar and `default` otherwise. The array is the
+authoritative fan-in explanation; scalar singulars remain compatibility
+projections and are always null for list declarations.
+Only a valid same-project scalar triggers the `git for-each-ref` branch
+inventory (`DependencySnapshot.branch_refs_for`); lists, cross-project scalars,
+and invalid scalars resolve `default` without a git subprocess, in both status
+and `admission_fingerprint`.
+
+For a scalar declaration, the singular compatibility fields describe only the
+first unmet direct edge. If that direct prerequisite has reached its gate but
+is itself blocked by a transitive prerequisite, `blocked_by` and
+`dependency_stage` are null; `unmet_dependencies` still contains the complete
+transitive blocker set.
 
 The admission-error object contains exactly `reason_code`, `offending_ref`, and
 `safe_correction`. The closed reason set is:
@@ -168,9 +206,12 @@ are deliberately exempt so an operator can repair stale/corrupt marker state.
 A full dispatch-request scan constructs one immutable admission context for
 recovery generation validation. Its indexed verdicts are reused across queued
 requests; per-task state files and task identity are still revalidated under
-each task lock. Fingerprints resolve the task's project from the context's path
-index, preserving the same zero/duplicate-enrollment payload as the uncached
-path without rescanning the fleet.
+each task lock. Fingerprints include the ordered, shape-preserving dependency
+declaration as well as the resulting verdict and base mode, so any declaration,
+gate, blocker, or branch-evidence change invalidates generation-bound work.
+They resolve the task's project from the context's path index, preserving the
+same zero/duplicate-enrollment payload as the uncached path without rescanning
+the fleet.
 A task-local admission error exits 78 without dropping the entire enrolled
 project from daemon scheduling.
 
@@ -188,11 +229,12 @@ calls.
 
 ## Stacked branches
 
-A valid same-project dependency continues to supply the prerequisite slug to
+A valid same-project scalar continues to supply the prerequisite slug to
 `DependencySnapshot.stacked_base`. Execute resolves the base from the remote
 branch, then local branch, then default branch under the existing placeholder
 preservation rules. Open-PR uses the prerequisite base only while that remote
-branch exists. Explicit cross-project edges always return no stacked base.
+branch exists. Explicit cross-project scalars and all lists—including
+singleton arrays—return no stacked base and report `dependency_base_mode: default`.
 
 ## Bounded task-workspace component
 
@@ -206,7 +248,10 @@ snapshot that lacks enough rows returns a partial-project sentinel.
 Traversal is capped at 32 projects, 10,000 scanned metadata entries, 100 nodes,
 200 edges, depth 20, 4 MiB, and two seconds. Missing or inaccessible nodes,
 cycles, blocked chains, and each exhausted cap remain explicit nodes/edges or
-truncation diagnostics. Same-repository stack evidence compares immutable
+truncation diagnostics. A malformed composite declaration remains structured
+on its task node, while its synthetic placeholder, edge, and diagnostic use an
+explicit invalid-declaration label rather than Ruby array inspection text.
+Same-repository stack evidence compares immutable
 worktree repository/base branch/base OID with separately observed local refs;
 cross-project dependencies remain scheduling-only. No component node triggers
 a Git fetch or GitHub query.
@@ -225,6 +270,14 @@ the intended model change. For corrupt state that must move out of a forward
 stage, use a backward `hive approve --to ...`; forward run/approval resumes only
 after admission becomes clear.
 
+Array metadata is a no-downgrade boundary. Upgrade every Hive CLI, daemon, web
+reader, and other long-lived consumer to the release that understands
+`hive-status.v9` / `hive-operational-status.v5`, restart those processes, and
+only then create list declarations. Do not write an array and later run an
+older process: older readers fail closed, and operators must preserve every
+listed prerequisite while completing the upgrade rather than rewriting the
+array as a scalar to make the old reader proceed.
+
 ## Tests
 
 - `test/unit/dependencies_test.rb`, `task_meta_test.rb`, and
@@ -236,7 +289,9 @@ after admission becomes clear.
   forest/table parity without additional scans or remote calls.
 - `test/integration/dependency_admission_test.rb` reproduces anonymized
   plan-only ordering and cross-project repository-mismatch failures across
-  status and manual boundaries.
+  status and manual boundaries, plus a nine-prerequisite fan-in proving exact
+  remaining blockers, fixed `9-done`, scalar configured gates, force
+  non-bypass, and eventual release.
 - status/TUI, daemon, command, and schema suites pin the same three verdicts at
   every consumer.
 

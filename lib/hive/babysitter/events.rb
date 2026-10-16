@@ -31,6 +31,7 @@ module Hive
         draft_pr
         pipeline_owned
         fork_pr
+        ci_blocked
         dry_run
         shutdown
       ].freeze

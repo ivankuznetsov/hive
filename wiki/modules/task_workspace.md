@@ -3,7 +3,7 @@ title: Task workspace projection
 type: module
 source: lib/hive/task_workspace.rb, lib/hive/task_workspace/, lib/hive/context_provenance.rb, lib/hive/task_activity.rb, schemas/hive-task-workspace.v2.json, schemas/hive-context-receipt.v1.json, lib/hive/commands/task.rb, web/app/controllers/tasks/, web/app/views/tasks/
 created: 2026-08-12
-updated: 2026-09-23
+updated: 2026-10-02
 tags: [task, web, projection, semantic, result, usage, provenance, attempts, timeline, dependencies, publication]
 ---
 
@@ -275,12 +275,15 @@ rewritten.
 
 The dependency panel does not create graph state. It reuses the bounded
 `DependencyAdmission::Context` already derived from status rows, builds a
-reverse index, and walks only the target's connected ancestors and transitive
-descendants. Scalar `depends_on` direction and admission state remain
-authoritative.
+reverse index across every scalar or list edge, and walks only the target's
+connected ancestors and transitive descendants. The authoritative declaration
+shape and shared admission verdict remain intact: a singleton array is still a
+list, and list fan-in is not collapsed into one `blocked_by` value.
 
-Same-repository edges may display strict worktree base/head evidence as a
-stacked Git relationship. Cross-project edges are labelled scheduling-only.
+Same-repository scalar edges may display strict worktree base/head evidence as
+a stacked Git relationship. Cross-project edges and all list edges are labelled
+scheduling-only and use `dependency_base_mode: default`; only a resolvable
+same-project scalar uses `stacked`.
 Each selected connected task receives its own bounded local publication
 observation under the component's single two-second deadline, so ancestor and
 descendant branch, base, head, and PR absence are not inferred from the root.

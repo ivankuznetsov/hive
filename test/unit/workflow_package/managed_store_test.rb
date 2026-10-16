@@ -357,6 +357,12 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
       assert_includes err, 'managed workflow "demo"'
       assert_includes err, "malformed"
 
+      inspected = nil
+      _out, inspection_err = capture_io { inspected = store.inspect_selections }
+      assert_empty inspected
+      assert_includes inspection_err, 'managed workflow "demo"'
+      assert_raises(Hive::ConfigError) { store.inspect_selected("demo") }
+
       malformed = { "schema_version" => 1, "name" => "demo" }
       File.write(path, JSON.generate(malformed))
       assert_raises(Hive::ConfigError) { store.selected("demo") }

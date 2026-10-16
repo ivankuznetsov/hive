@@ -47,7 +47,7 @@ module Hive
       end
 
       def initialize(task:, cfg:, planner_identity:, adapter: nil, route_resolver: nil,
-                     planner_revision: nil, clock: -> { Time.now.utc })
+                     planner_revision: nil, clock: -> { Time.now.utc }, task_observation: nil)
         @task = task
         @cfg = cfg
         @planner_identity = stringify(planner_identity)
@@ -60,13 +60,38 @@ module Hive
         end
         @planner_revision = planner_revision || PlannerRevision.new(task:, cfg:)
         @clock = clock
+        @task_observation = task_observation
       end
 
       def advance!
-        @store.with_orchestration_lock { advance_unlocked! }
+        supplied_observation = @task_observation
+        Hive::TaskMeta.with_observation(@task.folder, supplied_observation) do |observation|
+          raise InvalidRecord, "plan review task is stale or missing" unless observation
+
+          @task_observation = observation
+          Hive::Lock.with_task_lock(
+            @task.folder, slug: @task.slug, op: "plan-review",
+            create: false, observation: observation,
+            acquire_under_commit_lock: task_hive_state_path
+          ) do
+            @store.with_orchestration_lock(observation: observation) { advance_unlocked! }
+          end
+        end
+      rescue Hive::TaskMeta::StaleTask => error
+        raise InvalidRecord, "plan review task is stale: #{error.message}"
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        raise InvalidRecord, "plan review task metadata is invalid: #{error.message}"
+      ensure
+        @task_observation = supplied_observation
       end
 
       private
+
+      def task_hive_state_path
+        return @task.hive_state_path if @task.respond_to?(:hive_state_path)
+
+        File.dirname(File.dirname(File.dirname(@task.folder)))
+      end
 
       def advance_unlocked!
         plan_path = File.join(@task.folder, "plan.md")
@@ -1317,12 +1342,14 @@ module Hive
         File.chmod(mode, path)
       end
 
-      def with_task_mutation_lock(&block)
-        return block.call if Hive::Lock.task_lock_held?(@task.folder)
-
-        Hive::Lock.with_task_lock(
-          @task.folder, slug: @task.slug, op: "plan-review-promote", &block
-        )
+      def with_task_mutation_lock
+        raise Hive::TaskMeta::StaleTask, "plan review task is missing" unless @task_observation
+        Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
+        unless Hive::Lock.task_lock_held?(@task.folder)
+          raise Hive::ConcurrentRunError,
+                "plan review task mutation requires lifecycle custody"
+        end
+        yield
       end
 
       def persisted_run_level
@@ -1339,9 +1366,21 @@ module Hive
       def task_id = (@task.id || @task.slug).to_s
 
       def ensure_review_requirement!
-        return if Hive::TaskMeta.plan_review_required?(@task.folder)
+        with_task_mutation_lock do
+          Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
+          next if Hive::TaskMeta.plan_review_required?(@task.folder)
 
-        Hive::TaskMeta.rewrite(@task.folder, plan_review_required: true)
+          result = Hive::TaskMeta.rewrite(
+            @task.folder, { plan_review_required: true },
+            observation: @task_observation
+          )
+          if result.stale?
+            raise Hive::TaskMeta::StaleTask,
+                  "plan review requirement lost task custody"
+          end
+        end
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        raise InvalidRecord, "plan review requirement rejected stale task: #{error.message}"
       rescue Hive::TaskMeta::InvalidMetadata => error
         raise InvalidRecord, "plan review requirement could not be persisted: #{error.message}"
       end

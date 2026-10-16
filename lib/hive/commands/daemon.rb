@@ -280,7 +280,7 @@ module Hive
 
         # A manually-started daemon must keep using the exact Hive CLI that
         # launched it. Without an explicit HIVE_BIN, ChildSupervisor and the
-        # display-name backfiller fall back to the first `hive` on PATH. That
+        # display-name subprocess fall back to the first `hive` on PATH. That
         # can silently mix a checkout daemon with an older packaged gem for
         # every dispatched child. StatusConsumer is in-process. Service units
         # already export HIVE_BIN; pin the equivalent value for foreground
@@ -743,10 +743,12 @@ module Hive
             "runtime control-plane database is missing; run hive setup",
             code: :missing_database, action: "run hive setup"
           )
-          emit_lifecycle_storage_error(schema, error)
           raise error
         end
         true
+      rescue Hive::RuntimeControlPlane::Error => error
+        emit_lifecycle_storage_error(schema, error)
+        raise
       ensure
         database&.disconnect
       end

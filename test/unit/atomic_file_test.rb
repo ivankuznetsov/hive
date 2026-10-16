@@ -29,6 +29,18 @@ class HiveAtomicFileTest < Minitest::Test
     end
   end
 
+  def test_noncreating_write_refuses_a_missing_parent
+    with_tmp_dir do |dir|
+      path = File.join(dir, "missing", "state.json")
+
+      assert_raises(Errno::ENOENT) do
+        Hive::AtomicFile.write(path, "new", create: false)
+      end
+
+      refute File.exist?(File.dirname(path))
+    end
+  end
+
   def test_failed_rename_leaves_target_untouched_and_cleans_tempfile
     with_tmp_dir do |dir|
       path = File.join(dir, "state.json")

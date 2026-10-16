@@ -112,6 +112,34 @@ class HiveCommandsDaemonQuiescenceCommandTest < Minitest::Test
     end
   end
 
+  def test_typed_diagnostic_failures_emit_lifecycle_json_envelopes
+    unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+      "Hive state storage is inaccessible", code: :state_storage_inaccessible,
+      action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+    )
+    database = Object.new
+    database.define_singleton_method(:diagnostics) { raise unavailable }
+    database.define_singleton_method(:disconnect) { true }
+
+    %w[quiesce resume].each do |action|
+      command = Hive::Commands::Daemon.new(action, json: true, hive_home: "/state")
+      output, = capture_io do
+        with_replaced_singleton_method(
+          Hive::RuntimeControlPlane::Database, :new, ->(**) { database }
+        ) do
+          error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+            command.send(:ensure_current_runtime!, "hive-daemon-#{action}")
+          end
+          assert_same unavailable, error
+        end
+      end
+      payload = JSON.parse(output)
+      assert_equal "hive-daemon-#{action}", payload.fetch("schema")
+      assert_equal "state_storage_inaccessible", payload.fetch("runtime_code")
+      assert_schema("hive-daemon-#{action}", payload)
+    end
+  end
+
   def test_resume_uses_the_fixed_600_second_default
     with_tmp_dir do |root|
       captured_timeout = nil

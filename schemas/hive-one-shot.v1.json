@@ -72,7 +72,9 @@
         "kind": {"enum": ["time_due", "check_state_changed", "review_changed", "pr_changed", "task_changed", "attempt_completed", "dependency_completed", "capacity_available", "operator_action"]},
         "repository": {"type": "string"}, "project": {"type": "string"}, "pr": {"type": "integer", "minimum": 1},
         "head_sha": {"type": "string"}, "task": {"type": "string"}, "attempt": {"type": "string"},
-        "resource": {"type": "string"}, "dependency": {"type": "string"}, "deadline": {"$ref": "#/$defs/Timestamp"}
+        "resource": {"type": "string"}, "dependency": {"type": "string"},
+        "dependencies": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "deadline": {"$ref": "#/$defs/Timestamp"}
       }
     },
     "WakeCondition": {
@@ -81,7 +83,9 @@
         "kind": {"enum": ["time_due", "check_state_changed", "review_changed", "pr_changed", "task_changed", "attempt_completed", "dependency_completed", "capacity_available", "operator_action"]},
         "repository": {"type": "string"}, "project": {"type": "string"}, "pr": {"type": "integer", "minimum": 1},
         "head_sha": {"type": "string"}, "task": {"type": "string"}, "attempt": {"type": "string"},
-        "resource": {"type": "string"}, "dependency": {"type": "string"}, "deadline": {"$ref": "#/$defs/Timestamp"},
+        "resource": {"type": "string"}, "dependency": {"type": "string"},
+        "dependencies": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "deadline": {"$ref": "#/$defs/Timestamp"},
         "affected_pending_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
       }
     },

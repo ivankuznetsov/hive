@@ -3,6 +3,7 @@ require "securerandom"
 require "time"
 require "yaml"
 require "hive/dependencies"
+require "hive/errors"
 require "hive/warnings"
 
 module Hive
@@ -17,6 +18,56 @@ module Hive
     ].freeze
 
     class InvalidMetadata < StandardError; end
+    class StaleTask < Hive::ConcurrentRunError; end
+
+    UpdateResult = Data.define(:status, :value) do
+      def applied? = status == :applied
+      def stale? = status == :stale
+    end
+
+    class Observation
+      attr_reader :identity
+
+      def initialize(directory, identity)
+        @directory = directory
+        @identity = identity.freeze
+        stat = directory.stat
+        @device = stat.dev
+        @inode = stat.ino
+      end
+
+      def same_directory?(task_folder)
+        stat = File.lstat(File.expand_path(task_folder))
+        stat.directory? && !stat.symlink? && stat.dev == @device && stat.ino == @inode
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        false
+      end
+
+      def close
+        @directory.close unless @directory.closed?
+      end
+
+      def rebind!(task_folder, directory: nil)
+        flags = File::RDONLY | File::NONBLOCK
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        replacement = directory || File.open(File.expand_path(task_folder), flags)
+        stat = replacement.stat
+        raise StaleTask, "replacement observation is not a directory" unless stat.directory?
+
+        @directory.close unless @directory.closed?
+        @directory = replacement
+        @device = stat.dev
+        @inode = stat.ino
+        true
+      rescue Exception
+        replacement&.close unless replacement&.closed?
+        raise
+      end
+
+      def refresh_identity!(identity)
+        @identity = identity.freeze
+      end
+    end
 
     AdmissionRead = Data.define(:status, :data, :error, :reason) do
       def ok?
@@ -28,6 +79,157 @@ module Hive
       File.join(task_folder, FILENAME)
     end
 
+    # Retains a handle to the original directory so callers can distinguish a
+    # moved task from a same-path replacement even when the replacement copies
+    # every metadata byte. The observation is process-local custody evidence;
+    # callers must close it when their operation finishes.
+    def observe(task_folder)
+      folder = File.expand_path(task_folder)
+      flags = File::RDONLY | File::NONBLOCK
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      directory = File.open(folder, flags)
+      unless directory.stat.directory?
+        directory.close
+        return nil
+      end
+
+      result = read_for_admission(folder)
+      unless result.ok?
+        directory.close
+        raise InvalidMetadata, "cannot observe invalid task metadata: #{result.error}"
+      end
+      observation = Observation.new(directory, stable_identity(result.data))
+      unless observation.same_directory?(folder)
+        observation.close
+        return nil
+      end
+      observation
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EMLINK
+      directory&.close unless directory&.closed?
+      nil
+    end
+
+    def with_observation(task_folder, observation = nil)
+      owned_observation = observation.nil?
+      current = observation || observe(task_folder)
+      yield current
+    ensure
+      current&.close if owned_observation
+    end
+
+    def validate_observation!(task_folder, observation)
+      folder = File.expand_path(task_folder)
+      unless observation&.same_directory?(folder)
+        raise StaleTask, "task directory changed identity at #{folder}"
+      end
+
+      result = read_for_admission(folder)
+      unless result.ok?
+        raise InvalidMetadata, "cannot validate task identity: #{result.error}"
+      end
+      return true if stable_identity(result.data) == observation.identity
+
+      raise StaleTask, "task metadata identity changed at #{folder}"
+    end
+
+    # Cross-device workflow moves cannot retain a directory inode. Callers may
+    # rebind only after they created the destination under lifecycle custody,
+    # the source is gone, and the copied stable metadata still matches.
+    def relocate_observation!(source, destination, observation, destination_handle:)
+      raise StaleTask, "original task path still exists after relocation" if File.exist?(source)
+      unless destination_handle
+        raise ArgumentError, "relocation requires custody of the copied destination"
+      end
+
+      result = read_for_admission(destination)
+      unless result.ok? && stable_identity(result.data) == observation.identity
+        raise StaleTask, "relocated task metadata identity changed at #{destination}"
+      end
+      observation.rebind!(destination, directory: destination_handle)
+      validate_observation!(destination, observation)
+    end
+
+    # Retain custody of a copied cross-device destination independently from
+    # its metadata so cleanup can distinguish that copy from a replacement.
+    def capture_directory_handle!(destination)
+      folder = File.expand_path(destination)
+      flags = File::RDONLY | File::NONBLOCK
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      directory = File.open(folder, flags)
+      stat = directory.stat
+      path_stat = File.lstat(folder)
+      unless stat.directory? && path_stat.directory? && !path_stat.symlink? &&
+             stat.dev == path_stat.dev && stat.ino == path_stat.ino
+        raise StaleTask, "task directory changed while capturing custody at #{folder}"
+      end
+
+      directory
+    rescue Exception
+      directory&.close unless directory&.closed?
+      raise
+    end
+
+    def directory_handle_matches?(destination, directory)
+      return false unless directory
+
+      stat = directory.stat
+      path_stat = File.lstat(File.expand_path(destination))
+      stat.directory? && path_stat.directory? && !path_stat.symlink? &&
+        stat.dev == path_stat.dev && stat.ino == path_stat.ino
+    rescue IOError, SystemCallError
+      false
+    end
+
+    def capture_relocation_handle!(destination, observation, directory_handle: nil)
+      folder = File.expand_path(destination)
+      owned_handle = directory_handle.nil?
+      directory = directory_handle || capture_directory_handle!(folder)
+
+      result = read_for_admission(folder)
+      unless result.ok? && stable_identity(result.data) == observation.identity
+        raise StaleTask, "relocated task metadata identity changed at #{folder}"
+      end
+      unless directory_handle_matches?(folder, directory)
+        raise StaleTask, "relocated task directory changed at #{folder}"
+      end
+      directory
+    rescue Exception
+      directory&.close if owned_handle && !directory&.closed?
+      raise
+    end
+
+    # Copy-and-remove relocation for workflow moves that cannot rename across
+    # devices. The destination is created exclusively and held by handle
+    # before any byte is copied, so cleanup removes only this copy and never a
+    # same-path replacement. The source is removed only after the copy's
+    # stable identity matches and the source is still the observed directory;
+    # the observation is then rebound to the copy.
+    def relocate_across_devices!(source, destination, observation)
+      Dir.mkdir(destination)
+      copied = capture_directory_handle!(destination)
+      begin
+        begin
+          FileUtils.cp_r(File.join(source, "."), destination)
+        rescue StandardError => error
+          raise Hive::Error,
+                "cross-device move failed while copying; partial destination cleaned up. " \
+                "underlying: #{error.class}: #{error.message}"
+        end
+        capture_relocation_handle!(destination, observation, directory_handle: copied)
+        validate_observation!(source, observation)
+      rescue StandardError
+        if File.exist?(source) && directory_handle_matches?(destination, copied)
+          FileUtils.rm_rf(destination)
+        end
+        raise
+      end
+      FileUtils.rm_rf(source)
+      relocate_observation!(source, destination, observation, destination_handle: copied)
+      copied = nil
+    ensure
+      copied&.close unless copied&.closed?
+    end
+
     def read(task_folder)
       raw = YAML.safe_load(File.read(path(task_folder))) || {}
       return empty unless raw.is_a?(Hash)
@@ -36,7 +238,7 @@ module Hive
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
-        depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
+        depends_on: normalize_dependency(fetch(raw, "depends_on")),
         workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
       if raw.key?("base_branch") || raw.key?(:base_branch)
@@ -128,7 +330,8 @@ module Hive
       data = normalized_data(raw)
       if key?(raw, "depends_on")
         begin
-          data[:depends_on] = Hive::Dependencies.parse_reference(fetch(raw, "depends_on")).to_s
+          parsed = Hive::Dependencies.parse_declaration(fetch(raw, "depends_on"))
+          data[:depends_on] = Hive::Dependencies.serialize_declaration(parsed)
         rescue Hive::Dependencies::InvalidReference => e
           return AdmissionRead.new(
             status: :invalid,
@@ -161,9 +364,13 @@ module Hive
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil, base_branch: nil,
               workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil,
               idempotency_key: nil, input_fingerprint: nil, completed_at: nil,
-              plan_review_required: nil)
-      FileUtils.mkdir_p(task_folder)
-      normalized_depends_on = normalize_string(depends_on)
+              plan_review_required: nil, create: true, observation: nil)
+      if create
+        FileUtils.mkdir_p(task_folder)
+      else
+        validate_observation!(task_folder, observation)
+      end
+      normalized_depends_on = Hive::Dependencies.normalize_declaration(depends_on)
       normalized_workflow = normalize_string(workflow)
       normalized_base_branch = normalize_string(base_branch)
       normalized_commit = normalize_string(workflow_commit)
@@ -199,9 +406,16 @@ module Hive
       data["input_fingerprint"] = normalized_input_fingerprint if normalized_input_fingerprint
       data["completed_at"] = normalized_completed_at if normalized_completed_at
       data["plan_review_required"] = true if normalized_plan_review_required
+      validate_observation!(task_folder, observation) unless create
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
+      validate_observation!(task_folder, observation) unless create
       File.rename(tmp, path(task_folder))
+      observation.refresh_identity!({
+        id: data["id"]&.to_s,
+        slug: normalize_string(data["slug"]),
+        workflow: normalize_string(data["workflow"])
+      }) unless create
       notify_stage_directory(task_folder)
       result = data.transform_keys(&:to_sym).merge(
         depends_on: normalized_depends_on, workflow: normalized_workflow
@@ -218,20 +432,23 @@ module Hive
       end
       result[:completed_at] = normalized_completed_at if normalized_completed_at
       result[:plan_review_required] = true if normalized_plan_review_required
-      result
+      create ? result : UpdateResult.new(status: :applied, value: result)
+    rescue StaleTask, Errno::ENOENT, Errno::ENOTDIR
+      raise if create
+
+      UpdateResult.new(status: :stale, value: nil)
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
 
-    def update_display_name(task_folder, name)
-      rewrite(task_folder, display_name: name)
+    def update_display_name(task_folder, name, observation: nil)
+      rewrite(task_folder, { display_name: name }, observation: observation)
     end
 
-    # Set the task id while preserving every other meta field. Used by the
-    # daemon's id backfiller to assign an id to a task created outside
-    # `hive new` (hand-made folder, `mv`-ed in) whose meta has none.
-    def update_id(task_folder, id)
-      rewrite(task_folder, id: id)
+    # Compatibility setter for callers that already own an existing task
+    # directory. No production metadata-repair path currently calls it.
+    def update_id(task_folder, id, observation: nil)
+      rewrite(task_folder, { id: id }, observation: observation)
     end
 
     # New coding tasks and pre-execute coding tasks touched by an offline agent conversion
@@ -249,22 +466,47 @@ module Hive
     # First-writer-wins completion clock. Supported task mutations enter the
     # shared task lease (or the project commit lock during bootstrap) before
     # calling this helper, so metadata has no second mutex.
-    def write_completed_at_once(task_folder, value = Time.now.utc)
-      current = read_for_update!(task_folder)
-      return current[:completed_at] if current[:completed_at]
+    def write_completed_at_once(task_folder, value = Time.now.utc, observation: nil)
+      with_observation(task_folder, observation) do |current_observation|
+        unless current_observation
+          raise StaleTask, "task directory is missing at #{File.expand_path(task_folder)}"
+        end
 
-      completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
-      updated = current.merge(completed_at: completed_at)
-      updated[:slug] ||= File.basename(task_folder)
-      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
-      completed_at
+        validate_observation!(task_folder, current_observation)
+        current = read_for_update!(task_folder)
+        validate_observation!(task_folder, current_observation)
+        return current[:completed_at] if current[:completed_at]
+
+        completed_at = normalize_completed_at(value, label: "completed_at", strict: true)
+        updated = current.merge(completed_at: completed_at)
+        updated[:slug] ||= File.basename(task_folder)
+        result = write(
+          task_folder, **updated.slice(*WRITABLE_FIELDS),
+          create: false, observation: current_observation
+        )
+        raise StaleTask, "task directory changed before completion write" if result.stale?
+
+        completed_at
+      end
     end
 
-    def rewrite(task_folder, changes)
-      current = read_for_update!(task_folder)
-      updated = current.merge(changes)
-      updated[:slug] ||= File.basename(task_folder)
-      write(task_folder, **updated.slice(*WRITABLE_FIELDS))
+    def rewrite(task_folder, changes = nil, observation: nil, **keyword_changes)
+      changes = (changes || {}).merge(keyword_changes)
+      with_observation(task_folder, observation) do |current_observation|
+        return UpdateResult.new(status: :stale, value: nil) unless current_observation
+
+        validate_observation!(task_folder, current_observation)
+        current = read_for_update!(task_folder)
+        validate_observation!(task_folder, current_observation)
+        updated = current.merge(changes)
+        updated[:slug] ||= File.basename(task_folder)
+        write(
+          task_folder, **updated.slice(*WRITABLE_FIELDS),
+          create: false, observation: current_observation
+        )
+      end
+    rescue StaleTask
+      UpdateResult.new(status: :stale, value: nil)
     end
 
     Snapshot = Data.define(:exists, :bytes)
@@ -275,18 +517,33 @@ module Hive
       Snapshot.new(exists: false, bytes: nil)
     end
 
-    def restore(task_folder, snapshot)
+    def restore(task_folder, snapshot, observation: nil, create: true)
+      if create && observation
+        raise ArgumentError, "explicit restore cannot use a guarded task observation"
+      end
+      unless create
+        raise ArgumentError, "guarded restore requires a task observation" unless observation
+        validate_observation!(task_folder, observation)
+      end
+
       if snapshot.exists
-        FileUtils.mkdir_p(task_folder)
-        write_raw_atomic(task_folder, snapshot.bytes)
+        FileUtils.mkdir_p(task_folder) if create
+        write_raw_atomic(task_folder, snapshot.bytes, observation: create ? nil : observation)
         notify_stage_directory(task_folder)
       else
         metadata_path = path(task_folder)
         if File.exist?(metadata_path)
+          validate_observation!(task_folder, observation) unless create
           File.delete(metadata_path)
+          observation.refresh_identity!(stable_identity(empty)) unless create
           notify_stage_directory(task_folder)
         end
       end
+      UpdateResult.new(status: :applied, value: nil)
+    rescue StaleTask, Errno::ENOENT, Errno::ENOTDIR
+      raise if create
+
+      UpdateResult.new(status: :stale, value: nil)
     end
 
     def empty
@@ -309,7 +566,7 @@ module Hive
         id: normalize_id(fetch(raw, "id")),
         slug: normalize_string(fetch(raw, "slug")),
         display_name: normalize_string(fetch(raw, "display_name")),
-        depends_on: normalize_string(fetch(raw, "depends_on")),
+        depends_on: normalize_dependency(fetch(raw, "depends_on"), preserve_invalid: true),
         workflow: normalize_string(fetch(raw, "workflow")),
         base_branch: normalize_string(fetch(raw, "base_branch")),
         workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
@@ -335,6 +592,14 @@ module Hive
       hash.key?(key) ? hash[key] : hash[key.to_sym]
     end
 
+    def stable_identity(data)
+      {
+        id: data[:id]&.to_s,
+        slug: normalize_string(data[:slug]),
+        workflow: normalize_string(data[:workflow])
+      }
+    end
+
     def normalize_id(value)
       return value if value.is_a?(Integer)
       return nil if value.nil? || value.to_s.strip.empty?
@@ -347,6 +612,27 @@ module Hive
     def normalize_string(value)
       string = value.to_s.strip
       string.empty? ? nil : string
+    end
+
+    def normalize_dependency(value, preserve_invalid: false)
+      Hive::Dependencies.normalize_declaration(value)
+    rescue Hive::Dependencies::InvalidReference
+      return json_safe_evidence(value) if preserve_invalid && value.is_a?(Array)
+
+      normalize_string(Hive::Dependencies.display_declaration(value))
+    end
+
+    # Invalid list evidence keeps its shape for diagnostics, but every
+    # projection that hashes or publishes it must stay JSON-serializable.
+    # YAML admits non-finite floats (`.nan`, `.inf`) that JSON rejects, so
+    # render those leaves as text at any nesting depth.
+    def json_safe_evidence(value)
+      case value
+      when Array then value.map { |element| json_safe_evidence(element) }
+      when Hash then value.to_h { |key, element| [ json_safe_evidence(key), json_safe_evidence(element) ] }
+      when Float then value.finite? ? value : value.to_s
+      else value
+      end
     end
 
     def normalize_plan_review_required(value, label:, allow_nil: false, strict: false)
@@ -408,10 +694,19 @@ module Hive
       raise InvalidMetadata, "refusing to rewrite invalid task metadata: #{e.message}"
     end
 
-    def write_raw_atomic(task_folder, bytes)
+    def write_raw_atomic(task_folder, bytes, observation: nil)
+      validate_observation!(task_folder, observation) if observation
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.binwrite(tmp, bytes)
+      validate_observation!(task_folder, observation) if observation
       File.rename(tmp, path(task_folder))
+      if observation
+        result = read_for_admission(task_folder)
+        unless result.ok?
+          raise InvalidMetadata, "cannot restore invalid task metadata: #{result.error}"
+        end
+        observation.refresh_identity!(stable_identity(result.data))
+      end
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end

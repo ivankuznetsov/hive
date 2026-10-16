@@ -1412,6 +1412,133 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_init_pass_uses_default_branch_for_dependency_lists
+    [ [ "base-task" ], %w[base-task other-task] ].each do |declaration|
+      with_tmp_dir do |dir|
+        task = build_task(dir, depends_on: declaration)
+        write_plan(task)
+        Hive::TaskMeta.write(
+          task.folder, id: 2, slug: task.slug, display_name: nil,
+          depends_on: declaration
+        )
+        declaration.each_with_index do |slug, index|
+          folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
+          FileUtils.mkdir_p(folder)
+          Hive::TaskMeta.write(folder, id: index + 1, slug: slug, display_name: nil)
+        end
+
+        fake_wt = FakeWorktree.new(path: File.join(dir, "worktrees", task.slug), create_calls: [])
+        project_git = Struct.new(:default_branch).new("master")
+        worktree_git = Struct.new(:head_sha).new("default-head")
+
+        with_replaced_singleton_method(
+          Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Worktree, :new, ->(_root, _slug, worktree_root:) { fake_wt }
+          ) do
+            with_replaced_singleton_method(
+              Hive::Stages::Execute, :run_pass,
+              ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }
+            ) do
+              Hive::Stages::Execute.run_init_pass(
+                task, { "worktree_root" => File.join(dir, "worktrees") }
+              )
+            end
+          end
+        end
+
+        assert_equal [
+          { branch_name: task.slug, default_branch: "master", base_override: nil }
+        ], fake_wt.create_calls
+      end
+    end
+  end
+
+  def test_run_init_pass_materializes_merged_prerequisite_commits_from_the_updated_default
+    with_tmp_dir do |dir|
+      remote = File.join(dir, "remote.git")
+      seed = File.join(dir, "seed")
+      project = File.join(dir, "project")
+      integrator = File.join(dir, "integrator")
+      worktree_root = File.join(dir, "worktrees")
+      prerequisites = %w[prerequisite-one prerequisite-two]
+
+      run!("git", "init", "--bare", "-b", "master", "--quiet", remote)
+      FileUtils.mkdir_p(seed)
+      run!("git", "-C", seed, "init", "-b", "master", "--quiet")
+      configure_git_identity(seed)
+      File.write(File.join(seed, "README.md"), "initial\n")
+      run!("git", "-C", seed, "add", "README.md")
+      run!("git", "-C", seed, "commit", "-m", "initial", "--quiet")
+      run!("git", "-C", seed, "remote", "add", "origin", remote)
+      run!("git", "-C", seed, "push", "-u", "origin", "master", "--quiet")
+
+      run!("git", "clone", "--quiet", remote, project)
+      run!("git", "clone", "--quiet", remote, integrator)
+      configure_git_identity(integrator)
+      stale_local_default = run!("git", "-C", project, "rev-parse", "master").strip
+
+      prerequisites.each do |slug|
+        run!("git", "-C", integrator, "checkout", "-b", slug, "--quiet")
+        File.write(File.join(integrator, "#{slug}.txt"), "#{slug} landed\n")
+        run!("git", "-C", integrator, "add", "#{slug}.txt")
+        run!("git", "-C", integrator, "commit", "-m", "implement #{slug}", "--quiet")
+        run!("git", "-C", integrator, "checkout", "master", "--quiet")
+        run!(
+          "git", "-C", integrator, "merge", "--no-ff", slug,
+          "-m", "merge #{slug}", "--quiet"
+        )
+      end
+      run!("git", "-C", integrator, "push", "origin", "master", "--quiet")
+      landed_default = run!("git", "-C", integrator, "rev-parse", "master").strip
+      refute_equal stale_local_default, landed_default
+      assert_equal stale_local_default,
+                   run!("git", "-C", project, "rev-parse", "master").strip,
+                   "the execution checkout must prove it refreshes origin, not reuse local master"
+
+      task = build_task(project, depends_on: prerequisites)
+      write_plan(task)
+      Hive::TaskMeta.write(
+        task.folder, id: task.id, slug: task.slug, display_name: nil,
+        depends_on: prerequisites
+      )
+      prerequisites.each_with_index do |slug, index|
+        folder = File.join(project, ".hive-state", "stages", "9-done", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(
+          folder, id: index + 10, slug: slug, display_name: nil,
+          completed_at: Time.utc(2026, 10, 14, 12, index)
+        )
+        File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Execute, :run_pass,
+        ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }
+      ) do
+        Hive::Stages::Execute.run_init_pass(
+          task,
+          { "default_branch" => "master", "worktree_root" => worktree_root },
+          nil
+        )
+      end
+
+      worktree = File.join(worktree_root, task.slug)
+      assert_equal({ commit: nil, status: :ok }, result)
+      assert_equal landed_default, run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      prerequisites.each do |slug|
+        assert_equal "#{slug} landed\n", File.read(File.join(worktree, "#{slug}.txt"))
+      end
+      pointer = YAML.safe_load(File.read(task.worktree_yml_path))
+      assert_equal "master", pointer.fetch("base_branch")
+      assert_equal landed_default, pointer.fetch("base_oid")
+      assert_equal stale_local_default,
+                   run!("git", "-C", project, "rev-parse", "master").strip,
+                   "list execution must not move the developer's local default branch"
+    end
+  end
+
   def test_append_implementation_output_inserts_before_terminal_marker
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -1836,6 +1963,12 @@ class HiveStagesExecuteTest < Minitest::Test
 
   def execute_cfg(agent)
     { "execute" => { "agent" => agent } }
+  end
+
+  def configure_git_identity(path)
+    run!("git", "-C", path, "config", "user.email", "test@example.com")
+    run!("git", "-C", path, "config", "user.name", "Test")
+    run!("git", "-C", path, "config", "commit.gpgsign", "false")
   end
 
   def with_fake_git_and_spawn(git, status: :ok, result: nil, on_spawn: nil)

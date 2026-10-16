@@ -109,6 +109,45 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # Regression (topgreendeals, task 1): a folder whose meta.yml id is bound
+  # to another registered task can never take its lease. The default safety
+  # probe must park it as an operator repair before the lease is attempted,
+  # instead of reporting `recovery_unavailable` on every daemon tick.
+  def test_foreign_task_id_blocks_recovery_for_the_operator_before_the_lease
+    with_tmp_dir do |state_home|
+      folder = File.join(state_home, "digest", ".hive-state", "stages", "2-discover", "preview")
+      FileUtils.mkdir_p(folder)
+      conflict = {
+        task_id: "1", project_id: "hive-project", project_name: "hive",
+        workflow_id: "root-cause-repair", task_slug: "fresh-rerun", observed_path: "/gone"
+      }
+      probe = Object.new
+      probe.define_singleton_method(:identity_conflict) { |path| path == folder ? conflict : nil }
+      original = Hive::Lock.instance_variable_get(:@task_lease_repository)
+      Hive::Lock.task_lease_repository = probe
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
+      coordinator.define_singleton_method(:durable_retry_count) { |_row| 0 }
+      coordinator.define_singleton_method(:resolve_task_for) { |_row| flunk "lease must not be attempted" }
+      row = FakeRow.new(
+        project: "digest", slug: "preview", folder: folder,
+        state_file: File.join(folder, "discovery.md"), stage: "2-discover",
+        workflow: "digest", marker: "error", marker_attrs: { "reason" => "limits_reached" },
+        state_file_mtime: NOW - 86_400, live_task_lock: false, attempt_id: nil,
+        task_generation: nil, suggested_command: nil, task_history_invalid: false
+      )
+
+      receipt = coordinator.request(row: row, requestor: "healer", now: NOW)
+
+      assert_equal "blocked", receipt.status
+      assert_equal "safety_blocked", receipt.reason
+      assert_equal "operator", receipt.owner
+      assert_includes receipt.remediation, "task id 1 is already bound to hive:fresh-rerun"
+      assert_includes receipt.remediation, "fresh unique id"
+    ensure
+      Hive::Lock.task_lease_repository = original
+    end
+  end
+
   def test_task_history_invalid_row_is_ineligible_for_request_and_resume
     with_tmp_dir do |state_home|
       row = FakeRow.new(

@@ -285,6 +285,9 @@ module Hive
           puts "RUNNING #{rows.length}"
           rows.each { |row| puts running_row_line(row) }
         end
+        # This view lists live work only; tasks waiting on an answer, a
+        # review, or a repair live in the operational view.
+        puts "Waiting, blocked, and queued work: hive status --operational"
 
         return if payload.fetch("complete")
 

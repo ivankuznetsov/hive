@@ -2141,4 +2141,71 @@ class RunReviewersTest < Minitest::Test
              "review must hard-error, not silently drop the reviewer and continue"
     end
   end
+
+  # A cooled retry of a provider-limited pass reuses an output the pass
+  # already produced (receipt digest still matches) and dispatches only the
+  # reviewer that has no reusable output.
+  def test_reuse_skips_dispatch_for_matching_output_and_reruns_the_rest
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "kept", "output_basename" => "kept" },
+            { "name" => "limited", "output_basename" => "limited" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      kept_path = File.join(dir, "reviews", "kept-01.md")
+      File.write(kept_path, "## Low\n\n- [ ] produced before the limit\n")
+      reuse = { "kept" => Digest::SHA256.file(kept_path).hexdigest }
+      dispatched = []
+      limited = LimitErroringReviewer.new(cfg["review"]["reviewers"][1], ctx)
+      succeeded = []
+
+      orig = Hive::Reviewers.method(:dispatch)
+      Hive::Reviewers.define_singleton_method(:dispatch) do |spec, _ctx, **_kwargs|
+        dispatched << spec["name"]
+        limited
+      end
+      begin
+        result = nil
+        _out, err = capture_io do
+          result = Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md")),
+            reuse: reuse, succeeded: succeeded
+          )
+        end
+        assert_equal :ok, result, "a reused output keeps the phase from reading as all-failed"
+        assert_equal [ "limited" ], dispatched, "only the reviewer without a reusable output re-runs"
+        assert_equal [ "kept" ], succeeded
+        assert_match(/reusing reviewer "kept" pass 01/, err)
+        assert_equal "## Low\n\n- [ ] produced before the limit\n", File.read(kept_path)
+      ensure
+        Hive::Reviewers.define_singleton_method(:dispatch, orig)
+      end
+    end
+  end
+
+  def test_reuse_reruns_a_reviewer_whose_output_changed_since_the_receipt
+    with_tmp_dir do |dir|
+      cfg = { "review" => { "reviewers" => [ { "name" => "ok", "output_basename" => "ok" } ] } }
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(File.join(dir, "reviews"))
+      File.write(File.join(dir, "reviews", "ok-01.md"), "triage edited this\n")
+      succeeded = []
+
+      with_stubbed_dispatch([ OkReviewer.new(cfg["review"]["reviewers"][0], ctx) ]) do
+        result = Hive::Stages::Review.run_reviewers(
+          cfg, ctx, Task.new(dir, File.join(dir, "task.md")),
+          reuse: { "ok" => "0" * 64 }, succeeded: succeeded
+        )
+        assert_equal :ok, result
+      end
+      assert_equal [ "ok" ], succeeded
+      assert_equal "## Low\n\n- [ ] looks fine\n", File.read(File.join(dir, "reviews", "ok-01.md")),
+                   "a digest mismatch must re-run the reviewer, not reuse the edited file"
+    end
+  end
 end

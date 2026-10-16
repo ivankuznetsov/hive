@@ -292,28 +292,62 @@ class McpCodexTest < Minitest::Test
 
   # --- native reviewer ------------------------------------------------------
 
-  def test_native_codex_review_logs_that_it_is_not_isolated
+  def native_review(dir, cfg)
+    ctx = Hive::Reviewers::Context.new(
+      worktree_path: dir, task_folder: File.join(dir, ".hive-state", "stages", "6-review", "t"),
+      default_branch: "main", pass: 1
+    )
+    FileUtils.mkdir_p(ctx.task_folder)
+    spec = {
+      "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex",
+      "output_basename" => "codex-native-review", "timeout_sec" => 5,
+      "prompt_template" => "reviewer_codex_native_review.md.erb"
+    }
+    result = Hive::AgentSupport.for(:codex)::Reviewer.new(spec, ctx, cfg: cfg).run!
+    assert result.ok?, result.error_message
+    [ File.read(File.join(dir, "argv.log")).lines.grep(/^arg=/).map { |line| line.sub(/^arg=/, "").chomp },
+      File.join(ctx.task_folder, "logs", "isolation-warnings.log") ]
+  end
+
+  # The native reviewer runs `codex exec review` with the same Hive MCP
+  # launch as every other Codex launch: one `--ignore-user-config`, granted
+  # servers as `-c` entries, carried personal settings, and the launch's
+  # notices logged since the adapter keeps no agent log.
+  def test_native_codex_review_takes_the_hive_mcp_launch
+    fake = File.expand_path("../../fixtures/fake-codex", __dir__)
+    with_catalog do
+      with_codex_home do
+        with_tmp_dir do |dir|
+          with_env("HIVE_CODEX_BIN" => fake, "HIVE_FAKE_CODEX_ARGV_LOG" => File.join(dir, "argv.log")) do
+            Hive::AgentProfile.reset_version_cache!
+            args, warnings = native_review(dir, { "review" => { "mcp" => { "use" => %w[linear screenote] } } })
+
+            assert_equal %w[exec review --ignore-user-config], args.first(3)
+            assert_equal 1, args.count("--ignore-user-config")
+            assert_includes args, 'mcp_servers.linear.url="https://mcp.linear.app/mcp"'
+            refute(args.any? { |arg| arg.start_with?("mcp_servers.screenote.") })
+            assert_includes args, "plugins.compound-engineering@compound-engineering-plugin.enabled=true"
+            assert_equal "gpt-5.6-terra", args[args.index("--model") + 1]
+            assert_includes File.read(warnings),
+                            "reviewer codex-native-review mcp notice: MCP server screenote skipped"
+            refute_includes File.read(warnings), "cannot ignore the operator's Codex config"
+          end
+        end
+      end
+    end
+  ensure
+    Hive::AgentProfile.reset_version_cache!
+  end
+
+  def test_native_codex_review_with_inherit_user_keeps_the_user_config
     fake = File.expand_path("../../fixtures/fake-codex", __dir__)
     with_tmp_dir do |dir|
       with_env("HIVE_CODEX_BIN" => fake, "HIVE_FAKE_CODEX_ARGV_LOG" => File.join(dir, "argv.log")) do
         Hive::AgentProfile.reset_version_cache!
-        ctx = Hive::Reviewers::Context.new(
-          worktree_path: dir, task_folder: File.join(dir, ".hive-state", "stages", "6-review", "t"),
-          default_branch: "main", pass: 1
-        )
-        FileUtils.mkdir_p(ctx.task_folder)
-        spec = {
-          "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex",
-          "output_basename" => "codex-native-review", "timeout_sec" => 5,
-          "prompt_template" => "reviewer_codex_native_review.md.erb"
-        }
-        result = Hive::AgentSupport.for(:codex)::Reviewer.new(spec, ctx).run!
-        assert result.ok?, result.error_message
-        warnings = File.join(ctx.task_folder, "logs", "isolation-warnings.log")
-        assert_includes File.read(warnings), "`codex review` cannot ignore the operator's Codex config"
+        args, warnings = native_review(dir, { "mcp" => { "inherit_user" => true } })
 
-        FileUtils.rm_f(warnings)
-        Hive::AgentSupport.for(:codex)::Reviewer.new(spec, ctx, cfg: { "mcp" => { "inherit_user" => true } }).run!
+        assert_equal %w[exec review -c sandbox_mode="read-only" --title], args.first(5)
+        refute_includes args, "--ignore-user-config"
         refute File.exist?(warnings)
       end
     end

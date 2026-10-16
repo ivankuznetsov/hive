@@ -193,6 +193,19 @@ class CommandsStatusTest < Minitest::Test
     assert_includes output, "STATUS PARTIAL — source incomplete"
   end
 
+  # Regression: a project with 14 tasks waiting on the operator rendered
+  # only "NO RUNNING TASKS", which reads as "nothing to do".
+  def test_default_human_view_points_idle_operators_at_the_operational_view
+    command = Hive::Commands::Status.new
+    payload = { "daemon" => { "running" => true }, "complete" => true, "tasks" => [] }
+
+    output, = capture_io { command.send(:render_running, payload) }
+
+    assert_equal [ "DAEMON RUNNING", "NO RUNNING TASKS",
+                   "Waiting, blocked, and queued work: hive status --operational" ],
+                 output.lines.map(&:chomp)
+  end
+
   def test_human_status_names_a_dogfood_runtime_before_service_state
     command = Hive::Commands::Status.new
     payload = {

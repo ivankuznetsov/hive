@@ -350,6 +350,17 @@ without creating an infinite loop.
   lookup is metadata-id-first, validates the registered project/state root,
   and updates the observed folder for legitimate stage moves. No ordinary task
   `.lock` file or compatibility reader remains. See [[modules/lock]].
+  Task ids are only unique within one state home: a task created under a
+  different `HIVE_HOME` (for example a throwaway one pointed at a real project)
+  takes ids from that home's own fresh counter, so its `meta.yml` id can already
+  be bound to another subject here. `TaskLeaseRepository#identity_conflict` is a
+  read-only probe that names the owning subject, and the lease's
+  `task_identity_conflict` error now carries that owner in its message,
+  `action`, and `details`. `Daemon::AutoRetrySafety` runs the probe before
+  automatic recovery takes the lease, so such a task is parked as an operator
+  repair (`safety_blocked`, owner `operator`) instead of `recovery_unavailable`
+  on every tick. The repair is to give the folder a fresh id from this home's
+  counter; nothing re-keys metadata automatically.
 - **Task-source admission fence**: dispatch computes the artifact/dependency
   fingerprint and input epoch outside SQLite, observes that exact identity in
   a short `task_subjects` transaction, then rechecks both fields inside final

@@ -1,4 +1,6 @@
 require "hive/brainstorm_parser"
+require "hive/lock"
+require "hive/runtime_control_plane/task_lease_repository"
 require "hive/secret_scanner"
 require "hive/task"
 require "hive/worktree"
@@ -30,6 +32,9 @@ module Hive
         if reason.end_with?("_tampered") && attrs["restored"].to_s != "true"
           return [ false, "protected files from the tampered run were not restored" ]
         end
+        if (identity_block = task_identity_block(row))
+          return identity_block
+        end
         if SECRET_REASONS.include?(reason)
           hits = Hive::SecretScanner.scan(File.binread(row.state_file.to_s))
           return [ false, "credential pattern remains in the local PR source" ] if hits.any?
@@ -50,6 +55,24 @@ module Hive
         end
       rescue StandardError => e
         [ false, "inspection failed: #{e.class}: #{e.message}" ]
+      end
+
+      # A retry must take the task lease, which refuses a folder whose
+      # metadata id is bound to another registered task. Report that as an
+      # operator repair instead of letting every tick attempt the lease. The
+      # probe is advisory: when it cannot run, lease acquisition still refuses.
+      def task_identity_block(row)
+        conflict = Hive::Lock.task_lease_repository.identity_conflict(row.folder.to_s)
+        return nil unless conflict
+
+        [
+          false,
+          "task id #{conflict.fetch(:task_id)} is already bound to " \
+          "#{conflict.fetch(:project_name)}:#{conflict.fetch(:task_slug)}; " \
+          "#{Hive::RuntimeControlPlane::TaskLeaseRepository::IDENTITY_CONFLICT_ACTION}"
+        ]
+      rescue StandardError
+        nil
       end
 
       def execute_safe?(row)
@@ -109,7 +132,7 @@ module Hive
       # singleton's public API so a future helper that forgot to return the
       # `[bool, reason]` tuple can't be called directly and silently
       # destructure `safety_reason = nil` at an external call site.
-      private_class_method :execute_safe?, :owned_worktree_safe?, :marker_attrs,
+      private_class_method :task_identity_block, :execute_safe?, :owned_worktree_safe?, :marker_attrs,
                            :brainstorm_safe?, :plan_safe?
     end
   end

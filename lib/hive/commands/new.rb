@@ -242,6 +242,10 @@ module Hive
       # keeps that per-project behavior instead of refusing every keyed call.
       # Busy or unreadable receipt storage still raises.
       def keyed_call!
+        # An unknown project is answered before receipt storage is probed, so
+        # a host without the runtime control plane still reports
+        # ProjectNotFound rather than a storage failure.
+        require_project!
         unless Hive::CommandOperation.receipts_installed?(receipt_store)
           warn RECEIPT_FALLBACK_NOTICE
           return perform_call!
@@ -256,14 +260,18 @@ module Hive
         @command_receipt_store ||= Hive::CommandReceiptStore.new
       end
 
-      def perform_call!
+      def require_project!
         project = Hive::Config.find_project(@project_name)
-        unless project
-          raise ProjectNotFound.new(
-            "project not initialized: #{@project_name} (run `hive init <path>` first)",
-            value: @project_name
-          )
-        end
+        return project if project
+
+        raise ProjectNotFound.new(
+          "project not initialized: #{@project_name} (run `hive init <path>` first)",
+          value: @project_name
+        )
+      end
+
+      def perform_call!
+        project = require_project!
 
         @idempotency_key = validate_idempotency_key!
         prepare_idempotent_attachments! if @idempotency_key

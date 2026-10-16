@@ -340,6 +340,28 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  # hivedev's compat suite asserts that an unknown project with a key reports
+  # ProjectNotFound. On a host without receipt storage that must not depend on
+  # opening the store first.
+  def test_unknown_project_with_a_key_reports_not_found_without_receipt_storage
+    with_initialized_project do |_project_root, _project|
+      untouchable = Object.new
+      untouchable.define_singleton_method(:method_missing) { |*| raise "receipt store must not be touched" }
+      untouchable.define_singleton_method(:respond_to_missing?) { |*| true }
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::New.new(
+          "no-such-project", "task", idempotency_key: "k1", json: true,
+          command_receipt_store: untouchable
+        ).call
+      end
+      payload = JSON.parse(out)
+      refute_equal 0, status
+      assert_equal false, payload.fetch("ok")
+      assert_match(/project not initialized/, payload.fetch("message"))
+    end
+  end
+
   def test_attachment_content_participates_in_the_fingerprint
     with_initialized_project do |project_root, project|
       with_tmp_dir do |dir|

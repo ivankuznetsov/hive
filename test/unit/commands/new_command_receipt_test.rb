@@ -22,6 +22,7 @@ class NewCommandReceiptTest < Minitest::Test
     store = Struct.new(:database).new(database)
     command = Hive::Commands::New.new("demo", "idea", idempotency_key: "stable")
     command.define_singleton_method(:receipt_store) { store }
+    command.define_singleton_method(:require_project!) { { "path" => "/tmp/demo" } }
     command.define_singleton_method(:perform_call!) { flunk "legacy task capture executed" }
 
     error = assert_raises(Hive::ConcurrentRunError) { command.call! }
@@ -41,6 +42,7 @@ class NewCommandReceiptTest < Minitest::Test
       command = Hive::Commands::New.new(
         "demo", "idea", idempotency_key: "stable", command_receipt_store: store
       )
+      command.define_singleton_method(:require_project!) { { "path" => "/tmp/demo" } }
       command.define_singleton_method(:command_operation) { flunk "receipt path used without receipts" }
       command.define_singleton_method(:perform_call!) do
         raise "fallback ran inside a command operation" if @inside_command_operation
@@ -64,6 +66,7 @@ class NewCommandReceiptTest < Minitest::Test
     command = Hive::Commands::New.new(
       "demo", "idea", idempotency_key: "stable", command_receipt_store: store
     )
+    command.define_singleton_method(:require_project!) { { "path" => "/tmp/demo" } }
     command.define_singleton_method(:command_operation) { operation }
     command.define_singleton_method(:perform_call!) do
       raise "command operation context was not active" unless @inside_command_operation

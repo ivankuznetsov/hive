@@ -88,9 +88,11 @@ before a single test runs, so a missed web relock shows up as every web job
 dying in seconds rather than as a test failure.
 
 The JSON 3.1.0 update widened `agent-cli-runtime`'s upper bound from `< 3.0`
-to `< 4.0`. Its web relock also moves the web-only RuboCop resolver from 1.87.0
-to 1.92.0 because the former required JSON 2.x; this is required for the
-frozen web bundle to materialize rather than an application behavior change.
+to `< 4.0`. The web bundle locks Rails 8.1.4 because Rails 8.1.3.1 passes JSON
+parser options positionally, which JSON 3 rejects; the newer Rails patch uses
+keywords. Its web relock also moves the web-only RuboCop resolver from 1.87.0
+to 1.92.0 because the former required JSON 2.x. These resolver changes keep
+the frozen web bundle materializable and session reads functional.
 
 ## Runtime gems
 

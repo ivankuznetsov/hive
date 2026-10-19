@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-10-19
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -86,6 +86,11 @@ version. The web jobs run `bundle install` in frozen mode, which refuses to
 update the lockfile and fails setup with "the gemspecs for path gems changed"
 before a single test runs, so a missed web relock shows up as every web job
 dying in seconds rather than as a test failure.
+
+The JSON 3.1.0 update widened `agent-cli-runtime`'s upper bound from `< 3.0`
+to `< 4.0`. Its web relock also moves the web-only RuboCop resolver from 1.87.0
+to 1.92.0 because the former required JSON 2.x; this is required for the
+frozen web bundle to materialize rather than an application behavior change.
 
 ## Runtime gems
 

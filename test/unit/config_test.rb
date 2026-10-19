@@ -2802,7 +2802,7 @@ class ConfigTest < Minitest::Test
       assert_equal "ci_fix_prompt.md.erb", cfg.dig("review", "ci", "prompt_template")
       # Other sibling blocks at review.* must also stay intact.
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
-      assert_equal 2,            cfg.dig("review", "max_passes")
+      assert_equal 3,            cfg.dig("review", "max_passes")
     end
   end
 
@@ -3724,7 +3724,7 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("review", "ci", "agent")
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
-      assert_equal 2,         cfg.dig("review", "max_passes")
+      assert_equal 3,         cfg.dig("review", "max_passes")
       assert_equal 28_800,    cfg.dig("review", "max_wall_clock_sec")
       assert_equal "claude",  cfg.dig("agents", "claude", "bin")
       assert_equal "codex",   cfg.dig("agents", "codex", "bin")

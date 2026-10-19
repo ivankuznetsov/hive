@@ -573,7 +573,7 @@ reference.
      "max_attempts" => 2},
    "github_publish" => {"enabled" => true, "max_attempts" => 2},
    "github_checks" => {"enabled" => true},
-   "max_passes" => 2,
+   "max_passes" => 3,
    "max_wall_clock_sec" => 28800},
  "daemon" =>
   {"enabled" => false,

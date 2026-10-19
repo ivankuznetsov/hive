@@ -2103,7 +2103,7 @@ class InitTest < Minitest::Test
 
         # Other defaults present.
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
-        assert_equal 2,            cfg.dig("review", "max_passes")
+        assert_equal 3,            cfg.dig("review", "max_passes")
         assert_equal 28_800,       cfg.dig("review", "max_wall_clock_sec")
 
         raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))

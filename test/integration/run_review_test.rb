@@ -215,8 +215,8 @@ class RunReviewTest < Minitest::Test
   # so a regression in branch ordering or in any call-site detail
   # surfaces here.
 
-  def setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true, include_head: true)
-    folder = setup_review_task(dir)
+  def setup_fix_guardrail_pause(dir, pass: 1, matches: 2, all_checked: true, include_head: true, cfg_overrides: {})
+    folder = setup_review_task(dir, cfg_overrides: cfg_overrides)
     worktree_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"]
     head_sha = `git -C #{worktree_path} rev-parse HEAD`.strip
 
@@ -2795,7 +2795,9 @@ class RunReviewTest < Minitest::Test
   def test_fix_guardrail_approval_on_final_pass_ci_gates_the_approved_head
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        folder, worktree, head = setup_fix_guardrail_pause(dir, pass: 2, matches: 1)
+        folder, worktree, head = setup_fix_guardrail_pause(
+          dir, pass: 2, matches: 1, cfg_overrides: { "review" => { "max_passes" => 2 } }
+        )
 
         reviewer_passes, ci_calls = drive_review_loop(folder, worktree, findings: {})
 
@@ -2813,7 +2815,9 @@ class RunReviewTest < Minitest::Test
   def test_fix_guardrail_approval_ci_repair_on_final_pass_gets_a_verify_pass
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        folder, worktree, head = setup_fix_guardrail_pause(dir, pass: 2, matches: 1)
+        folder, worktree, head = setup_fix_guardrail_pause(
+          dir, pass: 2, matches: 1, cfg_overrides: { "review" => { "max_passes" => 2 } }
+        )
         test_case = self
         ci_runner = lambda do |call|
           next nil unless call == 1

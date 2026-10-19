@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-09-02
+updated: 2026-10-14
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -22,7 +22,8 @@ ClawHub `hive-cli` listing whose installed slash command is `/hive`.
 module page is the sole authority for that command's syntax, behavior, schema,
 serialization policy, and exits; the surface summaries below are orientation,
 not competing contracts. OpenClaw does not add a second runtime and does not publish
-one ClawHub listing per Hive verb.
+one ClawHub listing per Hive verb. `hive mcp` is the Grok connector
+for that same operational contract; see [[commands/mcp]].
 
 ## Source Files
 
@@ -38,6 +39,9 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/setup_agents.rb`
 - `lib/hive/commands/watch.rb`
 - `lib/hive/commands/act.rb`
+- `lib/hive/commands/mcp.rb`
+- `lib/hive/mcp/`
+- `plugins/grok-hive/`
 - `lib/hive/operational_status.rb`
 - `lib/hive/operational_action.rb`
 - `skills/hive/`

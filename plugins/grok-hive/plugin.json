@@ -1,0 +1,5 @@
+{
+  "name": "hive",
+  "version": "0.7.4",
+  "description": "Operate local Hive workflows from Grok through a closed MCP connector."
+}

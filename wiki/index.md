@@ -13,8 +13,8 @@ local-first workflow engine for AI agents; software delivery is its flagship
 proof, while built-in content/bench, installable Honeycomb, and owner-authored
 workflows use the same folder-backed execution model.
 
-Page count: 117
-Updated: 2026-09-27
+Page count: 118
+Updated: 2026-10-14
 
 Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents compile provider-neutral invocations through `Hive::AgentRuntime` and configurable AgentProfile adapters (`claude` default, `codex`, `pi`, `grok`, `opencode`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. Agent operation is centered on bounded default liveness status, lock-checked memoized task-journal folds, the operational workflow contract, coherent daemon scheduler snapshots, bounded semantic `hive watch`, tokenized routine `hive act`, native semantic `hive task` inspection, a durable host-global [[commands/digest]] activity record, and stable-ID semantic E2E profiles; the former public full-fleet status graph is now internal-only pending consumer-specific projection extraction. Hive packages one canonical operating skill projected to OpenClaw `/hive`, Claude `/hive`, Codex `$hive`, Pi `/skill:hive`, and OpenCode `/hive`, with read-only `hive doctor`, consent-safe setup, deterministic trusted pre-release proof, and optional authenticated live diagnostics.
 
@@ -68,6 +68,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/init]] — `wiki/commands/init.md`
 - [[commands/markers]] — `wiki/commands/markers.md`
 - [[commands/metrics]] — `wiki/commands/metrics.md`
+- [[commands/mcp]] — `wiki/commands/mcp.md`
 - [[commands/migrate]] — `wiki/commands/migrate.md`
 - [[commands/module]] — `wiki/commands/module.md`
 - [[commands/new]] — `wiki/commands/new.md`

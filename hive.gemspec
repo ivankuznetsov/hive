@@ -39,6 +39,8 @@ Gem::Specification.new do |spec|
     "config/honeycomb-security-lint/*.yml",
     "config/honeycomb-security-lint/**/*",
     "skills/**/*",
+    "plugins/grok-hive/**/*",
+    "plugins/grok-hive/.mcp.json",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "lib/hive/assets/qmd/*",

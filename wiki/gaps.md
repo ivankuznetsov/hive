@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-09-28
+updated: 2026-10-14
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Grok connector placement
+
+`hive mcp` serves the closed operational tools on the machine that launches
+it. A Grok Bot cloud computer does not see this workstation's Hive state
+unless Hive is installed and configured there. The connector does not open
+a public HTTP endpoint. Daily digest reads stay on `hive digest --json`;
+the V1 digest contract still has no MCP wrapper, and this connector does
+not add one.
 
 ## Command-receipt external evidence gaps (2026-09-28)
 

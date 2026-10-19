@@ -350,6 +350,39 @@ module Hive
       ).call
     end
 
+    desc "mcp", "Serve the Grok Hive connector over MCP stdio"
+    long_desc <<~DESC
+      Speaks newline-delimited JSON-RPC on stdin/stdout for Grok Build and a
+      Grok Bot command connector. stderr is reserved for diagnostics. The
+      tools are a closed set: operational status, one task, doctor, brainstorm
+      inventory and write, and routine `hive act`. The server does not execute
+      arbitrary hive argv, and it does not refresh or send the daily digest.
+
+      The process uses the Hive state of the environment that launches it. A
+      cloud computer sees that state only when Hive is installed there.
+
+      Install the shipped Grok plugin, which registers `hive mcp`:
+
+        grok plugin install "$(hive mcp --plugin-path)" --trust
+
+      Or register the server without the skill:
+
+        grok mcp add hive -- hive mcp
+
+      --plugin-path prints the plugin directory and exits. Without it, mcp
+      serves until stdin closes.
+    DESC
+    option :plugin_path, type: :boolean, default: false,
+                         desc: "print the shipped Grok plugin directory and exit"
+    def mcp
+      require "hive/commands/mcp"
+      if options[:plugin_path]
+        puts Hive::Commands::Mcp.plugin_path
+      else
+        Hive::Commands::Mcp.new.call
+      end
+    end
+
     desc "setup-agents", "Provision managed skills for configured Claude, Codex, Pi, Grok, and OpenCode agents"
     long_desc <<~DESC
       Inspects every enabled, manifest-managed coding workflow capability,

@@ -417,7 +417,7 @@ module Hive
         "github_checks" => {
           "enabled" => true
         },
-        "max_passes" => 2,
+        "max_passes" => 3,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
         # fit a couple of Claude reviewers each running up to their
         # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code

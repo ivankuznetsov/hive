@@ -252,7 +252,7 @@ review:
   github_publish:
     enabled: true
     max_attempts: 2
-  max_passes: 2
+  max_passes: 3
   max_wall_clock_sec: 14400
   reviewers: []              # `hive init` writes the recommended set here
 

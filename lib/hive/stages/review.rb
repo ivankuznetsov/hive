@@ -238,7 +238,7 @@ module Hive
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
         on_disk_pass = max_review_pass(task.folder, cfg)
         pass = next_pass_for(task, marker, cfg, max_pass: on_disk_pass)
-        max_passes = cfg.dig("review", "max_passes") || 4
+        max_passes = cfg.dig("review", "max_passes") || 3
         # The configured cap bounds fix passes. `max_passes` below may widen
         # to admit review of unreviewed commits, but every pass beyond this
         # cap is verify-only and never spawns the fix agent.

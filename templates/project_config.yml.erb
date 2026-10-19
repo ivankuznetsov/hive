@@ -336,7 +336,7 @@ review:
   adhoc:
     reviewers: null
     fix: <%= adhoc_auto_fix ? "true" : "false" %>
-  max_passes: 2
+  max_passes: 3
   # Aggregate wall-clock cap across all phases of one `hive run` on a
   # 6-review folder. 28800s = 8h — generous headroom so the cap is not hit
   # on a normal multi-pass review (a couple of 1-2h reviewers + retries).

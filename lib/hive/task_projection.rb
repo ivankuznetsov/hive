@@ -105,8 +105,14 @@ module Hive
     def self.canonical(value)
       case value
       when Hash
-        value.keys.sort.to_h { |key| [ key.to_s, canonical(value[key]) ] }
+        value.keys.sort.to_h { |key| [ canonical(key.to_s), canonical(value[key]) ] }
       when Array then value.map { |child| canonical(child) }
+      when String
+        # Marker scanning is byte-oriented. Its UTF-8 attributes reach both
+        # cache identities and projection copies tagged ASCII-8BIT; JSON 3
+        # correctly refuses to transcode non-ASCII bytes from that encoding.
+        # Retag a copy, preserving exact bytes (and JSON's invalid-byte error).
+        value.encoding == Encoding::BINARY ? value.dup.force_encoding(Encoding::UTF_8) : value
       else value
       end
     end

@@ -6,6 +6,28 @@ class TaskProjectionTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 17, 11, 0, 0)
 
+  def test_canonical_marker_json_preserves_binary_tagged_utf8_without_mutating_inputs
+    key = "résumé".b.freeze
+    reason = "£7,500 — café".b.freeze
+    marker = { "attrs" => { key => [ reason ] }, "name" => "waiting" }
+
+    canonical = Hive::TaskProjection.canonical(marker)
+    assert_equal Encoding::UTF_8, canonical.fetch("attrs").keys.first.encoding
+    assert_equal Encoding::UTF_8, canonical.fetch("attrs").fetch("résumé").first.encoding
+    assert_equal reason.bytes, canonical.fetch("attrs").fetch("résumé").first.bytes
+    assert_equal Encoding::BINARY, reason.encoding
+    assert_equal Encoding::BINARY, key.encoding
+    assert_equal Hive::TaskProjection.canonical_json(
+      "attrs" => { "résumé" => [ "£7,500 — café" ] }, "name" => "waiting"
+    ), Hive::TaskProjection.canonical_json(marker)
+  end
+
+  def test_canonical_marker_json_does_not_silently_repair_invalid_bytes
+    assert_raises(JSON::GeneratorError) do
+      Hive::TaskProjection.canonical_json("reason" => "\xC2".b)
+    end
+  end
+
   def test_missing_observations_are_pending_and_later_stage_vocabulary_is_inactive
     projection = Hive::TaskProjection.project(records: [], cursor: 0, journal_hash: "empty")
 

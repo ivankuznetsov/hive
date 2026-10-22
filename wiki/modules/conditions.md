@@ -118,3 +118,12 @@ sanitized stale-wait golden replay.
 
 - [[state-model]] · [[modules/events]] · [[modules/attempts]]
 - [[modules/task_action]] · [[commands/status]] · [[stages/execute]]
+
+
+## Marker text encoding
+
+Routine projection cache keys and projection copies accept valid UTF-8 marker
+attributes even when the byte-oriented marker reader tags them ASCII-8BIT.
+Canonicalization retags copies without altering bytes or mutating the marker.
+Invalid UTF-8 is not scrubbed into a different identity. This keeps JSON 3
+serialization compatible with the existing valid-text fingerprints.

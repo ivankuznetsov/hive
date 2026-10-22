@@ -83,6 +83,7 @@ module Hive
         attempt_transient_retry
         attempt_patrol_retry_deferred
         attempt_capacity_deferred
+        attempt_identity_deferred
         attempt_route_unavailable
         attempt_legacy_backfilled
         answer_digest_failure_backoff

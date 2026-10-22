@@ -13,6 +13,7 @@ $LOAD_PATH.unshift(__dir__) unless $LOAD_PATH.include?(__dir__)
 require "optparse"
 require "fileutils"
 require "json"
+require "yaml"
 require "run_all"
 require "gate"
 require "lib/hive_driver"
@@ -37,7 +38,7 @@ module HiveBench
         abort("no corpus task #{opts[:task]}") if entries.empty?
       end
       abort("no corpus entries under #{opts[:corpus]}") if entries.empty?
-      candidates = select_candidates(opts[:candidate])
+      candidates = select_candidates(opts[:candidate], campaign: opts[:campaign])
 
       outcome = RunAll.new(runner: hive_runner(reuse_existing: opts[:reuse_existing],
                                                reuse_unverified: opts[:reuse_unverified]), gate: no_op_gate,
@@ -80,6 +81,7 @@ module HiveBench
         o.on("--corpus DIR") { |v| opts[:corpus] = v }
         o.on("--out DIR") { |v| opts[:out] = v }
         o.on("--candidate ID", "run only this candidate, e.g. all-opus-4.8") { |v| opts[:candidate] = v }
+        o.on("--campaign PATH", "registered campaign containing candidate_profiles") { |v| opts[:campaign] = v }
         o.on("--task SLUG", "run only this corpus task") { |v| opts[:task] = v }
         o.on("--corpus-version V") { |v| opts[:corpus_version] = v }
         o.on("--seeds N", Integer, "judge samples per judge (default 1; use >=3 for " \
@@ -116,13 +118,15 @@ module HiveBench
       end
     end
 
-    def select_candidates(id)
-      all = Candidates.all
+    def select_candidates(id, campaign: nil)
+      all = campaign ? Candidates.for_campaign(YAML.safe_load_file(campaign)) : Candidates.all
       return all unless id
 
       picked = all.select { |c| c.id == id }
       abort("unknown candidate #{id}; candidates are #{all.map(&:id).join(", ")}") if picked.empty?
       picked
+    rescue ArgumentError => e
+      abort(e.message)
     end
 
     def write_and_report(outcome, opts)

@@ -20,7 +20,7 @@ class MarkersTest < Minitest::Test
   def test_invalid_marker_attribute_bytes_are_preserved_not_scrubbed
     state = Hive::Markers.current_from_content("<!-- WAITING reason=\"\xFF\" -->".b)
 
-    assert_equal [255], state.attrs.fetch("reason").bytes
+    assert_equal [ 255 ], state.attrs.fetch("reason").bytes
     refute state.attrs.fetch("reason").valid_encoding?
   end
 

@@ -127,3 +127,7 @@ attributes even when the byte-oriented marker reader tags them ASCII-8BIT.
 Canonicalization retags copies without altering bytes or mutating the marker.
 Invalid UTF-8 is not scrubbed into a different identity. This keeps JSON 3
 serialization compatible with the existing valid-text fingerprints.
+
+Marker parsing also returns UTF-8-tagged attribute and raw-marker strings after
+the bounded binary scan, preserving invalid bytes without replacement. This
+protects other JSON and generation consumers that use markers directly.

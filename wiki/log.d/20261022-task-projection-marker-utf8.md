@@ -7,3 +7,7 @@ TaskProjection canonicalization now retags copied binary keys/values as UTF-8
 before JSON generation. Bytes, source objects and valid projection fingerprints
 are preserved. Invalid UTF-8 still fails rather than being scrubbed into an
 alternative identity. Regression tests cover nested keys/values and invalid bytes.
+
+Marker parsing also returns UTF-8-tagged attribute and raw-marker strings after
+the bounded binary scan, preserving invalid bytes without replacement. This
+protects other JSON and generation consumers that use markers directly.

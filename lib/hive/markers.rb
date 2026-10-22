@@ -74,7 +74,7 @@ module Hive
       State.new(
         name: last[:name].downcase.to_sym,
         attrs: parse_attrs(last[:attrs]),
-        raw: last[0]
+        raw: last[0].dup.force_encoding(Encoding::UTF_8)
       )
     end
 
@@ -339,7 +339,11 @@ module Hive
     def parse_attrs(raw_attrs)
       attrs = {}
       raw_attrs.to_s.scan(/(\w[\w-]*)=("[^"]*"|\S+)/).each do |k, v|
-        attrs[k] = v.start_with?('"') ? v[1..-2] : v
+        # Scanning stays binary so malformed artifact bodies cannot hide the
+        # marker. Expose text with its original UTF-8 encoding to JSON and
+        # generation consumers; do not transcode, scrub, or mutate source bytes.
+        text = v.start_with?('"') ? v[1..-2] : v
+        attrs[k.dup.force_encoding(Encoding::UTF_8)] = text.dup.force_encoding(Encoding::UTF_8)
       end
       attrs
     end

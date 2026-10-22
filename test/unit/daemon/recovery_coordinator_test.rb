@@ -910,7 +910,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
       assert_equal Encoding::UTF_8,
                    request.recovery.dig("expected_marker_attrs", "message").encoding
-      assert_equal Encoding::BINARY, current.attrs.fetch("message").encoding
+      assert_equal Encoding::UTF_8, current.attrs.fetch("message").encoding
       assert_equal attrs.fetch("message").bytes,
                    current.attrs.fetch("message").bytes
 

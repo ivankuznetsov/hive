@@ -33,6 +33,11 @@ fail closed; they are not a clean scan.
 
 ## GitHub Actions
 
+The main CI workflow pins its Linux jobs to `ubuntu-24.04`. This keeps the
+Ruby coverage, Bubblewrap sandbox, and Playwright system-test environment
+stable while `ubuntu-latest` advances independently; release and installation
+workflows likewise use explicit runner labels where their proof requires them.
+
 Every canonical and generated-mirror workflow pins `actions/checkout` v7.0.1
 to immutable commit `3d3c42e5aac5ba805825da76410c181273ba90b1`.
 The v7 line adds safer defaults for fork refs under `pull_request_target` and

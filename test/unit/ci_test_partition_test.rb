@@ -229,6 +229,14 @@ class CiTestPartitionTest < Minitest::Test
     end
   end
 
+  def test_ci_linux_jobs_pin_the_supported_ubuntu_runner
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    linux_jobs = workflow.fetch("jobs").values.filter_map { |job| job["runs-on"] }
+                                             .grep(/\Aubuntu-/)
+
+    assert_equal [ "ubuntu-24.04" ], linux_jobs.uniq
+  end
+
   def test_required_proofs_do_not_use_path_based_shortcuts
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")

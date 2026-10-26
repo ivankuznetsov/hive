@@ -61,6 +61,11 @@ archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.
 The downloads run on GitHub-hosted runners, satisfying the Node 24 floor.
 
+The Linux CI jobs explicitly use `ubuntu-24.04`. This holds the tested runner
+image steady while the pinned Playwright 1.60.0 system-test toolchain remains
+unsupported on Ubuntu 26.04; the pin applies equally to coverage and web jobs
+so their sandbox behavior stays comparable.
+
 The same workflow pins `actions/github-script` v9.0.0 to
 `3a2844b7e9c422d3c10d287c895573f7108da1b3` for its trusted Check Run
 publication step. Hive uses only the action-injected `github` and `context`

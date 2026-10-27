@@ -199,9 +199,15 @@ class HiveDaemonResumeTest < Minitest::Test
         deadline_monotonic: 200, boot_id: "boot-test", shutdown_grace_sec: 25
       )
 
+      # The monotonic clock is frozen so the whole 0.1s budget is still
+      # available when the restorer starts: the bound is enforced by
+      # Timeout.timeout interrupting the restorer, not by how long reopening
+      # admission happened to take on this machine. A real clock let slow CI
+      # spend the budget before reopen (failing the test) or before the
+      # restore (skipping the Timeout::Error branch and the coverage gate).
       result = Hive::Daemon::Resume.new(
         state_home: root, database: database, timeout_sec: 0.1,
-        service_restorer: ->(**) { sleep 1 }
+        monotonic: -> { 1_000.0 }, service_restorer: ->(**) { sleep 1 }
       ).call
 
       refute result.resumed
@@ -210,6 +216,33 @@ class HiveDaemonResumeTest < Minitest::Test
       assert_equal "deadline_exhausted", result.reason
       assert_equal "deadline_exhausted", result.services.first.fetch("reason")
       assert_equal "running", lifecycle(database).phase
+    end
+  end
+
+  def test_service_restore_is_skipped_when_the_deadline_is_already_spent
+    with_runtime do |root, database|
+      insert_quiesced_service(database, "hive-web")
+      assert_equal "running", lifecycle(database).phase
+      now = 1_000.0
+      proof_store = Object.new
+      # Resuming an already-running daemon goes straight to service restore
+      # after the proof is removed; spend the budget at that point so the
+      # restorer must not be started at all.
+      proof_store.define_singleton_method(:remove!) { now += 10 }
+
+      result = Hive::Daemon::Resume.new(
+        state_home: root, database: database, timeout_sec: 1,
+        monotonic: -> { now }, proof_store: proof_store,
+        service_restorer: ->(**) { flunk "restorer started after the deadline" }
+      ).call
+
+      refute result.resumed
+      assert_equal "partially_resumed", result.status
+      assert_equal "deadline_exhausted", result.reason
+      assert_equal(
+        [ { "service_identity" => "hive-web", "ok" => false, "reason" => "deadline_exhausted" } ],
+        result.services
+      )
     end
   end
 

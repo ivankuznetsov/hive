@@ -160,6 +160,29 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_unconstrained_package_accepts_commit_sha_version
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      install = File.join(dir, "claude", "plugins", "cache", "claude-plugins-official", "pr-review-toolkit", "fa59bc903774")
+      write(File.join(install, "commands", "review-pr.md"))
+      reviewer = { "name" => "toolkit", "kind" => "agent", "agent" => "claude", "skill" => "pr-review-toolkit:review-pr" }
+      %w[fa59bc903774 unknown].each do |version|
+        runner = FakeRunner.new(claude_responses(
+          bin: bin,
+          plugins: [ { "id" => "pr-review-toolkit@claude-plugins-official", "version" => version, "enabled" => true, "installPath" => install } ],
+          marketplaces: [ { "name" => "claude-plugins-official", "repo" => "anthropics/claude-plugins-official" } ]
+        ))
+
+        row = inspect_rows(cfg: config(bin: bin, reviewers: [ reviewer ]), project: dir, runner: runner,
+                           environment: { "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") })
+              .find { |r| r.capability_id == "pr-review-toolkit:review-pr" }
+
+        assert_equal "healthy", row.health, "#{version}: #{row.explanation}"
+      end
+    end
+  end
+
   def test_user_owned_plan_alias_and_project_shadow_are_conflicts
     with_tmp_dir do |dir|
       bin = File.join(dir, "claude")

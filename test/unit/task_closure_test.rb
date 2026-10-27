@@ -976,6 +976,44 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_owned_worktree_squash_delivered_to_default_branch_allows_closure
+    with_closure_project do |task, project|
+      root = Hive::Worktree.canonical_root(task.project_root)
+      worktree = Hive::Worktree.new(task.project_root, task.slug, worktree_root: root)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+
+      File.write(File.join(worktree.path, "task-change.txt"), "task work\n")
+      run!("git", "-C", worktree.path, "add", "task-change.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "task change", "--quiet")
+      File.write(File.join(worktree.path, "review-fix.txt"), "unpushed fix\n")
+      run!("git", "-C", worktree.path, "add", "review-fix.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "review fix", "--quiet")
+
+      # Main squashes the task PR and lands the review fix separately, then
+      # moves on with unrelated work; no task commit is an ancestor of main.
+      File.write(File.join(task.project_root, "task-change.txt"), "task work\n")
+      run!("git", "-C", task.project_root, "add", "task-change.txt")
+      run!("git", "-C", task.project_root, "commit", "-m", "squash", "--quiet")
+      blocked = service_for.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      refute blocked.valid?
+      assert(blocked.blockers.any? { |entry| entry["code"] == "unique_worktree_changes" })
+
+      File.write(File.join(task.project_root, "review-fix.txt"), "unpushed fix\n")
+      File.write(File.join(task.project_root, "unrelated.txt"), "later\n")
+      run!("git", "-C", task.project_root, "add", "review-fix.txt", "unrelated.txt")
+      run!("git", "-C", task.project_root, "commit", "-m", "follow-up", "--quiet")
+
+      preview = service_for.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+
+      assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
   def test_public_helpers_and_fallbacks_fail_closed
     with_closure_project do |task, project|
       input = input_for("acme/app#42")

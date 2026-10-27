@@ -909,9 +909,29 @@ module Hive
         local_git(path, "rev-list", "--count", "#{baseline}..HEAD"),
         exception: false
       ).to_i.positive?
-      unique ? [ blocker("unique_worktree_changes", "owned worktree has unique commits") ] : []
+      return [] unless unique
+      return [] if worktree_content_delivered?(path, baseline)
+
+      [ blocker("unique_worktree_changes", "owned worktree has unique commits") ]
     rescue Hive::Error, KeyError, SystemCallError, IOError => e
       [ blocker("worktree_unverifiable", e.message) ]
+    end
+
+    # A squash merge, or a review fix delivered through a follow-up pull
+    # request, leaves task commits that are not ancestors of the default
+    # branch even though their content landed. The work is delivered when
+    # merging HEAD into the baseline is a clean no-op: the merged tree equals
+    # the baseline tree. A conflict or any resulting change keeps the blocker.
+    def worktree_content_delivered?(path, baseline)
+      merged, _err, status = local_git_capture(
+        path, "merge-tree", "--write-tree", baseline, "HEAD"
+      )
+      return false unless status.success?
+
+      merged_tree = merged.to_s.lines.first.to_s.strip.downcase
+      return false unless merged_tree.match?(FULL_OID_RE)
+
+      merged_tree == local_git(path, "rev-parse", "#{baseline}^{tree}").strip.downcase
     end
 
     def worktree_head_delivered?(path, head, delivered_head)

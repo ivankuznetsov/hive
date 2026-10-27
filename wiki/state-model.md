@@ -173,6 +173,11 @@ of that head. This admits review-fix commits added later on the same PR branch,
 including squash merges where the task commits are not ancestors of the
 default branch; unrelated unique work remains blocked. If the verified PR head
 object is unavailable locally, the ancestry check fails closed.
+A worktree whose HEAD is neither is still delivered when merging it into the
+default branch (`origin/<default>` when present) is a clean no-op, checked with
+`git merge-tree --write-tree`: the merged tree equals the default branch tree.
+This covers a review fix committed but never pushed and later landed through a
+follow-up PR. A conflict or any resulting change keeps the blocker.
 That channel is not accepted by the public confirmation API and
 cannot take over an operator receipt. `closure.json` is mode 0600 and is
 written/fsynced before the centralized move to `9-done`; a restart resumes the

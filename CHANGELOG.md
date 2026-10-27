@@ -4,7 +4,7 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.8.0
 
-Hive now owns how its agents run. Claude runs every stage as a headless `claude -p` process, agents get only the MCP servers you grant in Hive config, and review no longer finishes on fixes nobody checked. Hive is installed natively or used as the hosted product at [hivedev.sh](https://hivedev.sh); the Hivebox Docker image is discontinued.
+Claude no longer runs in tmux: every Claude stage is now a plain `claude -p` process. Hive also controls which MCP servers its agents get: none unless you grant them in Hive config. Review now checks its own final fixes before finishing, and the Hivebox Docker image is gone; install Hive natively or use [hivedev.sh](https://hivedev.sh).
 
 ### Claude without tmux
 
@@ -55,7 +55,7 @@ Hive now owns how its agents run. Claude runs every stage as a headless `claude 
 - Let running Claude stages finish before you upgrade: the new version cannot see or stop a Claude session started in tmux by the old one. After upgrading, run `tmux ls` and stop any leftover Hive Claude session with `tmux kill-session -t <name>`.
 - If your stages relied on MCP servers from your personal agent configs, run `hive mcp import` and grant the ones you want.
 
-[All changes since 0.7.4](https://github.com/ivankuznetsov/hive/compare/v0.7.4...v0.8.0)
+[Full technical changelog](https://github.com/ivankuznetsov/hive/blob/v0.8.0/docs/releases/0.8.0-technical.md) · [All changes since 0.7.4](https://github.com/ivankuznetsov/hive/compare/v0.7.4...v0.8.0)
 
 ## 0.7.4
 

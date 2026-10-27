@@ -920,7 +920,7 @@ class HiveCliTest < Minitest::Test
         "--evidence", "acme/app#42"
       ])
     end
-    assert_match(/interactive terminal/, noninteractive_error.message)
+    assert_match(%r{y/N prompt or pass --yes}, noninteractive_error.message)
   end
 
   def test_archive_closure_interactive_confirmation_archives_exact_preview
@@ -939,7 +939,7 @@ class HiveCliTest < Minitest::Test
       }
     )
     confirmations = []
-    input = StringIO.new("CLOSE aaaaaaaaaaaa\n")
+    input = StringIO.new("y\n")
     input.define_singleton_method(:tty?) { true }
     previous_stdin = $stdin
     $stdin = input
@@ -970,7 +970,7 @@ class HiveCliTest < Minitest::Test
               ])
             end
 
-            assert_includes out, "Type CLOSE aaaaaaaaaaaa"
+            assert_includes out, "Archive task as already_delivered? [y/N]"
             assert_includes out, "archived task as already_delivered"
           end
         end
@@ -981,6 +981,45 @@ class HiveCliTest < Minitest::Test
     assert_equal "a" * 64, confirmations.first.fetch(:preview_digest)
     assert_equal "cli", confirmations.first.fetch(:channel)
     assert_equal true, confirmations.first.fetch(:authorized)
+  ensure
+    $stdin = previous_stdin
+  end
+
+  # --yes confirms without a terminal or prompt; the evidence preview
+  # still has to pass before anything is archived.
+  def test_archive_closure_yes_confirms_without_a_prompt
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = Struct.new(:preview_digest) do
+      def valid? = true
+      def to_h = { "ok" => true }
+    end.new("a" * 64)
+    confirmations = []
+    previous_stdin = $stdin
+    $stdin = StringIO.new("")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :confirm!,
+            lambda { |**kwargs| confirmations << kwargs; { "reason" => "already_delivered", "receipt_digest" => "b" * 64 } }
+          ) do
+            out, = capture_io do
+              Hive::CLI.start([
+                "archive", "task", "--reason", "already_delivered",
+                "--evidence", "https://github.com/acme/app/pull/42", "--yes"
+              ])
+            end
+            refute_includes out, "[y/N]"
+          end
+        end
+      end
+    end
+
+    assert_equal 1, confirmations.length
   ensure
     $stdin = previous_stdin
   end
@@ -997,7 +1036,7 @@ class HiveCliTest < Minitest::Test
       preview.define_singleton_method(:to_h) { payload }
       preview.define_singleton_method(:valid?) { valid }
     end
-    inputs = [ "ignored\n", "CLOSE wrong\n" ]
+    inputs = [ "ignored\n", "n\n" ]
     previous_stdin = $stdin
 
     with_replaced_singleton_method(

@@ -1111,6 +1111,8 @@ module Hive
                        desc: "registered project:slug that supersedes this task"
     option :attestation, type: :string,
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
+    option :yes, type: :boolean, default: false,
+                 desc: "confirm an evidence closure without the y/N prompt"
     option :idempotency_key, type: :string,
                              desc: "durably replay an identical targeted archive; invalid for listing"
     option :retry_horizon_expires_at, type: :string,
@@ -2546,9 +2548,9 @@ module Hive
       def close_task_interactively_unwrapped(target, emit_success:)
         require "hive/task_closure"
         require "hive/task_resolver"
-        unless options[:json] || $stdin.tty?
+        unless options[:json] || options[:yes] || $stdin.tty?
           raise Hive::TaskClosure::Unauthorized,
-                "evidence closure requires an interactive terminal and explicit confirmation"
+                "evidence closure needs confirmation: answer the y/N prompt or pass --yes"
         end
         task = resolve_closure_task(target)
         project = options[:project] || Hive::Config.registered_projects.find do |entry|
@@ -2576,11 +2578,12 @@ module Hive
                 "closure preview failed; correct its field errors and blockers"
         end
 
-        $stdout.print "Type CLOSE #{preview.preview_digest[0, 12]} to archive this task: "
-        $stdout.flush
-        confirmation = $stdin.gets.to_s.strip
-        unless confirmation == "CLOSE #{preview.preview_digest[0, 12]}"
-          raise Hive::TaskClosure::Unauthorized, "closure confirmation did not match; task left active"
+        unless options[:yes]
+          $stdout.print "Archive #{task.slug} as #{options[:reason]}? [y/N] "
+          $stdout.flush
+          unless %w[y yes].include?($stdin.gets.to_s.strip.downcase)
+            raise Hive::TaskClosure::Unauthorized, "closure not confirmed; task left active"
+          end
         end
         operator = ENV["USER"].to_s.strip
         operator = "local-operator" if operator.empty?

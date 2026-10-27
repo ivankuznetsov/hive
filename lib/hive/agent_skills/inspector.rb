@@ -475,7 +475,9 @@ module Hive
       def package_version_issues(package, native_package)
         return [] unless native_package
         version = native_package["version"].to_s
-        return [] if version == "unknown" && package.version == ">= 0"
+        # An unconstrained package accepts any installed version, including
+        # the commit-SHA versions agents report for git-sourced plugins.
+        return [] if !version.empty? && package.version == ">= 0"
         return [ [ "incompatible", "installed package version is unavailable" ] ] if version.empty? || version == "unknown"
 
         installed = Gem::Version.new(version)

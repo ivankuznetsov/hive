@@ -22,7 +22,7 @@ hive artifacts <slug>                     # promote 6-review → 7-artifacts, co
 hive finalize <slug>                      # promote 7-artifacts → 8-finalize, finalize PR
 hive archive <slug>                       # promote 8-finalize → 9-done, run archive
 hive archive <slug> --reason already_delivered \
-  --evidence owner/repo#42                # verify, preview, explicitly confirm, archive
+  --evidence owner/repo#42                # verify, preview, confirm y/N (or --yes), archive
 hive archive <slug> --reason superseded \
   --evidence other/repo#7 \
   --successor project:new-task \
@@ -44,12 +44,15 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 ## Evidence-bound delivered closure
 
 `--reason`, `--evidence`, `--successor`, or `--attestation` selects
-`Hive::TaskClosure`, not ordinary StageAction. Confirmation requires a local TTY;
-`--json` returns a read-only preview and noninteractive confirmation fails closed. Verification prints one
+`Hive::TaskClosure`, not ordinary StageAction. Verification prints one
 normalized preview and a digest bound to the current task/marker generation,
 registered repository identity, immutable GitHub facts, live owner state, and
-owned-worktree safety. The operator must type `CLOSE <digest-prefix>`.
-Confirmation re-reads every mutable fact before writing `closure.json`.
+owned-worktree safety. A failing preview never archives. A passing one asks
+`Archive <slug> as <reason>? [y/N]`; `--yes` confirms without the prompt (for
+scripts and agents), and without a terminal or `--yes` the closure fails closed.
+`--json` stays a read-only preview. The earlier `CLOSE <digest-prefix>` phrase
+was removed on 2026-10-27. Confirmation re-reads every mutable fact before
+writing `closure.json`.
 
 `already_delivered` requires at least one same-repository merged PR or full
 commit OID that is reachable from the repository default branch.

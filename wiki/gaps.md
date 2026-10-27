@@ -1832,3 +1832,12 @@ the ids, and there is no CLI command that re-keys a task (`hive migrate` no
 longer exists). Open question: whether `hive new` should refuse to write into
 a project registered in a different installation, or whether a supported
 re-key command should exist.
+
+## Ubuntu 26.04 CI compatibility (2026-10-26)
+
+CI is pinned back to Ubuntu 24.04 after the `ubuntu-latest` transition exposed
+Playwright 1.60.0's unsupported-platform error and two artifact-sandbox test
+failures. The Playwright cause is confirmed; the sandbox failures passed on the
+local host but have not been reproduced on Ubuntu 26.04, so their precise
+platform incompatibility remains unconfirmed. A future runner/Playwright
+upgrade should validate both paths before the pin is removed.

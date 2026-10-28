@@ -69,6 +69,48 @@ class TaskPresentationTest < ActionView::TestCase
     assert_select "a", text: "View diff", count: 0
   end
 
+  test "compact publication groups state with title, actions together and names GitHub state once" do
+    @task.define_singleton_method(:worktree?) { false }
+    render partial: "tasks/publication", locals: {
+      publication: {
+        "state" => "current", "publication_state" => "merged", "diagnostics" => [],
+        "pull_request" => { "url" => "https://github.com/acme/demo/pull/7", "number" => 7 },
+        "remote" => { "observed_at" => "2026-07-09T16:56:33Z", "observation" => { "state" => "MERGED" } }
+      },
+      refresh_available: false, refresh_notice: nil
+    }
+    assert_select ".publication-title h2", text: "Code changes"
+    assert_select ".publication-title .workspace-state-label", text: "Merged"
+    assert_select ".publication-actions a[href=?]", "https://github.com/acme/demo/pull/7", text: "PR #7"
+    assert_select ".publication-actions a[href=?]", "https://github.com/acme/demo/pull/7/files", text: "View diff on GitHub"
+    assert_select "h3", count: 0
+    assert_select ".publication-observed", text: /Checked on GitHub · 9 Jul 2026, 16:56 UTC/
+    assert_select ".publication-observed time[datetime=?]", "2026-07-09T16:56:33Z"
+    assert_equal 1, rendered.scan("Merged").size
+  end
+
+  test "publication names the GitHub state when it differs from the panel state" do
+    @task.define_singleton_method(:worktree?) { false }
+    render partial: "tasks/publication", locals: {
+      publication: {
+        "state" => "current", "publication_state" => "checks_failing", "diagnostics" => [],
+        "pull_request" => { "url" => "https://github.com/acme/demo/pull/7", "number" => 7 },
+        "remote" => { "observed_at" => "not-a-time", "observation" => { "state" => "OPEN", "checks" => [ { "name" => "ci", "status" => "COMPLETED", "conclusion" => "FAILURE" } ] } }
+      },
+      refresh_available: false, refresh_notice: nil
+    }
+    assert_select ".publication-title .workspace-state-label", text: "Checks failing"
+    assert_select ".publication-observed", text: /Open on GitHub · checked not-a-time/
+    assert_select "table caption", text: "Checks"
+  end
+
+  test "primary document section label is styled apart from the document title" do
+    render partial: "tasks/primary_result", locals: { result: { "primary" => { "name" => "task.md", "reference" => "task.md", "content" => "# Go CLI\n\nBody" } } }
+    assert_select "h2#workspace-primary-result-heading.document-section-label", text: "Implementation"
+    assert_select ".primary-markdown h1", text: "Go CLI"
+    assert_select ".primary-markdown h1.document-section-label", count: 0
+  end
+
   test "repository web url normalizes native and common repository spellings" do
     assert_equal "https://github.com/acme/demo", repository_web_url("github.com/acme/demo")
     assert_equal "https://github.com/acme/demo", repository_web_url("https://github.com/acme/demo.git")

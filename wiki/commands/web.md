@@ -1414,6 +1414,22 @@ link rather than an inline patch beside publication metadata. The local diff
 (`Hive::Web::TaskDiff`) reads only the live task worktree; when the worktree
 is gone but a PR is recorded, the panel links "View diff on GitHub"
 (`<pr url>/files`) instead.
+
+The panel is compact at every width (`tasks/_publication`): the Code changes
+title and its state badge form one wrapping row (`.publication-title`), the
+PR title follows, and the PR link and View diff link sit side by side as
+small buttons (`.publication-actions`). There are no Pull request / Pull
+request status subheadings. The GitHub observation is one muted line; it
+repeats GitHub's state only when it differs from the badge (for example
+"Open on GitHub · checked …" under Checks failing) and formats `observed_at`
+with `ApplicationHelper#publication_observed_label` while the raw ISO value
+stays in `<time datetime>`. Checks, PR description, Git details and
+Publication diagnostics remain, the last three as collapsed disclosures.
+
+The primary document's section label (Plan, Implementation, Review, …) uses
+`.document-section-label`: a small sans label in `--warn` mixed 80% toward
+`--ink` (about 5.3:1 light, 8:1 dark), so it is distinct from the document's
+own title. Document headings themselves are unchanged.
 Open-source Hive remains single-owner; future cloud multi-user concepts must
 not be introduced into this local UI implicitly.
 

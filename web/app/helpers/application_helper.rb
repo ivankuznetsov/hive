@@ -31,6 +31,14 @@ module ApplicationHelper
     tag.span("Time unavailable", class: "digest-meta")
   end
 
+  # Readable UTC time for the publication panel's GitHub observation; the raw
+  # ISO value stays in the <time datetime> attribute.
+  def publication_observed_label(value)
+    Time.iso8601(value.to_s).utc.strftime("%-d %b %Y, %H:%M UTC")
+  rescue ArgumentError
+    value.to_s
+  end
+
   # Turbo morphs by DOM identity. Use a digest of the full raw tuple so
   # project/workflow names that normalize to the same text cannot collide.
   def stable_dom_id(prefix, *parts)

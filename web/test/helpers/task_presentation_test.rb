@@ -130,6 +130,8 @@ class TaskPresentationTest < ActionView::TestCase
     assert_select "#workspace-supporting-artifacts-heading", text: "Documents"
     assert_select "summary", text: /\APlan\s+plan\.md\z/
     assert_select "summary", text: "notes.txt"
+    assert_select "summary > .document-section-label", text: "Plan"
+    assert_select ".artifact-body .document-section-label", count: 0
   end
 
   test "stale running status renders an idle dot" do

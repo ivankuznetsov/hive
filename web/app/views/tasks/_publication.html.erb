@@ -2,18 +2,17 @@
 <section id="workspace-publication"
          class="workspace-panel publication-panel publication-<%= publication.fetch("state") %> workspace-state-<%= publication.fetch("state") %>"
          aria-labelledby="publication-heading">
-  <div class="workspace-panel-heading">
-    <div>
+  <%# Title and state read as one group; the PR and diff actions sit together
+      below, and GitHub observation and Git facts stay secondary. %>
+  <div class="workspace-panel-heading publication-heading">
+    <div class="publication-title">
       <h2 id="publication-heading">Code changes</h2>
-      <p class="muted">
-        <span class="status-text workspace-state-label"><%= { "not_configured" => "No pull request", "not_observed" => "Not checked on GitHub", "local_unpushed" => "Ahead of last fetched origin" }.fetch(publication_state) { publication_state.humanize } %></span>
-
-      </p>
+      <span class="status-text workspace-state-label"><%= { "not_configured" => "No pull request", "not_observed" => "Not checked on GitHub", "local_unpushed" => "Ahead of last fetched origin" }.fetch(publication_state) { publication_state.humanize } %></span>
     </div>
     <% if refresh_available %>
       <%= button_to "Refresh GitHub",
             task_publication_path(@project.name, @task.slug, source: @task_source),
-            class: "btn-secondary",
+            class: "btn-secondary btn-sm",
             form: { data: { turbo_frame: stable_dom_id("task-publication", @project.name, @task.slug) } } %>
     <% end %>
   </div>
@@ -22,40 +21,31 @@
     <p class="state-banner"><%= refresh_notice %></p>
   <% end %>
 
-
   <% pr = publication["pull_request"].is_a?(Hash) ? publication["pull_request"] : {} %>
-  <% if pr["url"].present? %>
-    <p class="workspace-break-anywhere publication-links">
-      <%= link_to "PR ##{pr.fetch("number")}", pr.fetch("url"), rel: "noopener noreferrer" %>
+  <% if pr["url"].present? && pr["title"].present? %><p class="publication-pr-title workspace-break-anywhere"><%= pr["title"] %></p><% end %>
+  <% if pr["url"].present? || @task.worktree? %>
+    <div class="publication-actions">
+      <% if pr["url"].present? %>
+        <%= link_to "PR ##{pr.fetch("number")}", pr.fetch("url"), rel: "noopener noreferrer", class: "btn btn-secondary btn-sm" %>
+      <% end %>
       <%# The local diff reads the live task worktree only; once it is gone the
           pull request remains the historical diff. %>
       <% if @task.worktree? %>
-        · <%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), data: { turbo_frame: "_top" } %>
+        <%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), class: "btn btn-secondary btn-sm", data: { turbo_frame: "_top" } %>
       <% else %>
-        · <%= link_to "View diff on GitHub", "#{pr.fetch("url").delete_suffix("/")}/files", rel: "noopener noreferrer" %>
+        <%= link_to "View diff on GitHub", "#{pr.fetch("url").delete_suffix("/")}/files", rel: "noopener noreferrer", class: "btn btn-secondary btn-sm" %>
       <% end %>
-      <% if pr["title"].present? %>· <%= pr["title"] %><% end %>
-    </p>
-    <% if pr["body"].present? %>
-      <details data-workspace-disclosure-key="publication-description">
-        <summary>Pull request description</summary>
-        <pre class="publication-body"><%= pr["body"] %></pre>
-      </details>
-    <% end %>
-  <% else %>
-    <% if @task.worktree? %>
-      <p><%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), data: { turbo_frame: "_top" } %></p>
-    <% end %>
+    </div>
   <% end %>
 
   <% remote = publication.dig("remote", "observation") %>
   <% if remote %>
-    <h3>Pull request status</h3>
-    <p>
-      <%= remote.fetch("state").humanize %>
-      <% if publication.dig("remote", "observed_at") %>
-        · observed <time datetime="<%= publication.dig("remote", "observed_at") %>"><%= publication.dig("remote", "observed_at") %></time>
-      <% end %>
+    <% observed_at = publication.dig("remote", "observed_at") %>
+    <%# The badge already names the state; repeat GitHub's only when it differs. %>
+    <% remote_state = remote.fetch("state").to_s %>
+    <% same_state = remote_state.casecmp?(publication_state) %>
+    <p class="publication-observed">
+      <% if same_state %>Checked on GitHub<% else %><%= remote_state.humanize %> on GitHub<% end %><% if observed_at %> · <%= "checked " unless same_state %><time datetime="<%= observed_at %>"><%= publication_observed_label(observed_at) %></time><% end %>
     </p>
     <% if Array(remote["checks"]).any? %>
       <div class="workspace-table-scroll" tabindex="0" role="region" aria-label="Bounded pull request checks">
@@ -75,7 +65,13 @@
       </div>
     <% end %>
   <% elsif pr["url"].present? %>
-    <p class="muted">Pull request status has not been checked.</p>
+    <p class="publication-observed">Pull request status has not been checked.</p>
+  <% end %>
+  <% if pr["body"].present? %>
+    <details class="task-secondary" data-workspace-disclosure-key="publication-description">
+      <summary>Pull request description</summary>
+      <pre class="publication-body"><%= pr["body"] %></pre>
+    </details>
   <% end %>
 
   <% local = publication["local"].is_a?(Hash) ? publication["local"] : {} %>

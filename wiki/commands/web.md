@@ -1301,3 +1301,49 @@ demand. The all-project Archive remains the lossless fleet-wide history view.
 Completed terminal deliveries (for example writing workflow `7-deliver`) appear
 in a Done column on the project board. Pending delivery remains in Deliver;
 this grouping does not move task folders or alter workflow execution.
+
+### Document and diff presentation
+
+Document outlines, the panel label and primary Markdown share one left-aligned
+54rem reading column; headings and paragraphs no longer calculate independent
+font-relative widths. The outline summary has balanced padding and a 44px
+minimum target.
+
+The task status is one line, `Stage: Execute · Running`. Detail text follows
+only when it adds information (a blocker, a remediation, stale live status),
+not the generic "an agent is working" sentence.
+
+Primary and supporting documents are labelled by what they are
+(`ApplicationHelper#artifact_label`: Request, Plan, Implementation, Review, …)
+with the file name as secondary text. The supporting list is titled Documents
+and excludes only the primary document (`TaskWorkspace::Builder#semantic_result`),
+so unique documents are never dropped. In the rendered primary document only,
+the `## Implementation` stub that `Stages::Execute#write_initial_task_md` writes
+is hidden while it has no content, and an `h1` that merely repeats the task
+title is hidden; the captured `task.md` is never modified. A document with no
+visible content shows "Nothing has been written here yet."
+
+Git details link the repository, branch, base and head commit.
+`ApplicationHelper#repository_web_url` accepts the native publication form
+`host/owner/name` (github.com or a GitHub Enterprise host) and tolerates
+`https://…`, `.git` and `git@host:` spellings; anything else stays plain text.
+Facts with no observed value are omitted instead of shown as "Unavailable";
+the reasons remain listed under Publication diagnostics. Push state uses
+plain wording (Pushed, Not pushed, Local commits not pushed, Behind remote,
+Diverged from remote).
+
+Task diffs progressively enhance escaped raw patches using locally vendored
+diff2html 3.4.56 and highlight.js (`app/javascript/lib/diff_renderer.js`,
+licenses beside it): file list, line numbers, +/- counts, syntax colours,
+unified/split/raw modes. `lib/diff_renderer` is pinned with `preload: false`
+and imported only when a page contains a patch; a failed load leaves the raw
+text readable (`data-diff-ready="fallback"`). Patch text reaches the browser
+only as escaped `<pre>` text and diff2html/highlight.js escape it again when
+rendering. Only non-empty diff layers get a section; empty layers are listed
+in one "No changes: …" line. Partial/unavailable/empty indicators remain. No
+CDN or runtime service is required.
+
+The task workspace shows one full-width Code changes panel with a View diff
+link rather than an inline patch beside publication metadata.
+Open-source Hive remains single-owner; future cloud multi-user concepts must
+not be introduced into this local UI implicitly.

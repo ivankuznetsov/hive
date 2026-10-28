@@ -1,9 +1,7 @@
 <% display = TaskDisplay.new(@task, fresh: workspace.dig("status", "freshness") == "fresh" && workspace.dig("status", "state") == "current", archived: workspace.dig("task", "archived")) %>
-<section id="workspace-summary" class="workspace-summary task-summary task-state-<%= display.state %>"
-         aria-labelledby="workspace-summary-heading" data-task-workspace-target="summary">
-  <div>
-    <p class="workspace-eyebrow"><%= @task["stage"].to_s.sub(/\A\d+-/, "").humanize %></p>
-    <h2 id="workspace-summary-heading"><%= display.label %></h2>
-    <% if display.detail.present? %><p><%= display.detail %></p><% end %>
-  </div>
+<%# One compact line: stage and state. Detail appears only when it says more
+    than the label (a blocker, a remediation, stale live status). %>
+<section id="workspace-summary" class="task-status-line task-state-<%= display.state %>" aria-label="Task status" data-task-workspace-target="summary">
+  <span>Stage: <strong class="task-stage"><%= @task["stage"].to_s.sub(/\A\d+-/, "").humanize %></strong> · <span id="workspace-summary-heading"><%= display.label %></span></span>
+  <% if display.detail.present? && display.detail != "An agent is working on this step." %><span class="muted task-state-detail"><%= display.detail %></span><% end %>
 </section>

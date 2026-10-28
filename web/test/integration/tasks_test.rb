@@ -1326,6 +1326,12 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_select "a", { text: "Diff", count: 1 }, "an existing worktree must expose the Diff link"
+    assert_select "#workspace-publication", 1
+    assert_select "#workspace-publication a", text: "View diff", count: 1
+    assert_select "turbo-frame[id^='task-diff-']", 0
+    assert_select ".workspace-change-grid", 0
+    assert_match '"lib/diff_renderer"', response.body, "the diff renderer must stay importable on demand"
+    assert_select "link[rel=modulepreload][href*='diff_renderer']", 0
   ensure
     FileUtils.rm_rf(row["worktree_path"]) if row && row["worktree_path"].present?
   end
@@ -1546,7 +1552,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
     assert_select "#workspace-summary-heading", text: "Ready"
-    assert_select "#workspace-summary .workspace-eyebrow", text: "Inbox"
+    assert_select "#workspace-summary .task-stage", text: "Inbox"
     assert_select "#workspace-summary", text: /Current step/, count: 0
     assert_select "#workspace-usage", 0
     assert_select "#workspace-primary-result[data-primary-artifact=?]",
@@ -1674,6 +1680,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "github.com/acme/demo", remote_calls.first.fetch(:repository)
     assert_select "turbo-frame[id^='task-publication-']", 1
     assert_select "form[data-turbo-frame^='task-publication-']", 1
+    assert_select "a[href=?]", "https://github.com/acme/demo", text: "github.com/acme/demo"
+    assert_select "a[href=?]", "https://github.com/acme/demo/tree/#{@slug}", text: @slug
+    assert_select "a[href=?]", "https://github.com/acme/demo/commit/#{'a' * 40}", text: "a" * 12
   ensure
     Task.define_method(:publication, original_publication) if original_publication
   end

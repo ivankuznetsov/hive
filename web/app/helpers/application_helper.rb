@@ -5,11 +5,11 @@ module ApplicationHelper
   NAV_SECTIONS = {
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
     digests: ->(c) { c == "digests" },
-    repos: ->(c) { c == "repos" },
+    projects: ->(c) { c == "repos" },
     honeycombs: ->(c) { %w[workflows modules].include?(c) },
     patrol: ->(c) { c == "patrol" },
     agents: ->(c) { c == "agents" },
-    telegram: ->(c) { c == "telegram" }
+    integrations: ->(c) { c == "telegram" }
   }.freeze
 
   def nav_class(section)

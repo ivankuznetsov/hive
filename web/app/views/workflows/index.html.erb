@@ -3,8 +3,8 @@
 
 <% if @projects.empty? %>
   <div class="empty-state">
-    <p>Add a repository before managing its workflows.</p>
-    <p><%= link_to "Add a repository", repos_path %></p>
+    <p>Add a project before managing its workflows.</p>
+    <p><%= link_to "Add a project", projects_path %></p>
   </div>
 <% else %>
   <%= form_with url: workflows_path, method: :get, class: "repo-form workflow-project-form" do |f| %>

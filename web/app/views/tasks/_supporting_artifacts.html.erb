@@ -12,7 +12,7 @@
       <% records.each do |record| %>
         <details class="artifact" data-artifact-name="<%= record.fetch("name") %>"
                  data-workspace-disclosure-key="supporting-artifact-<%= record.fetch("reference") %>">
-          <summary><%= artifact_label(record) %><% if artifact_label(record) != record.fetch("name") %> <span class="artifact-file"><%= record.fetch("name") %></span><% end %><% if record["truncated"] %> <span class="workspace-state-label">Partial</span><% end %></summary>
+          <summary><span class="document-section-label"><%= artifact_label(record) %></span><% if artifact_label(record) != record.fetch("name") %> <span class="artifact-file"><%= record.fetch("name") %></span><% end %><% if record["truncated"] %> <span class="workspace-state-label">Partial</span><% end %></summary>
           <div class="artifact-body">
             <% if record["binary"] %>
               <p class="workspace-empty">Binary content is not rendered.</p>

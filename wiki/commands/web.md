@@ -1402,8 +1402,10 @@ Publication diagnostics remain, the last three as collapsed disclosures.
 
 The primary document's section label (Plan, Implementation, Review, …) uses
 `.document-section-label`: a small sans label in `--warn` mixed 80% toward
-`--ink` (about 5.3:1 light, 8:1 dark), so it is distinct from the document's
-own title. Document headings themselves are unchanged.
+`--ink` (about 5.3:1 on white, 5.0:1 on the ivory page, 6.5:1 dark), so it is
+distinct from the document's own title. Supporting Documents rows wrap their
+label in the same class but colour it only while the row is open; closed rows
+stay neutral. Markdown headings themselves are unchanged.
 Open-source Hive remains single-owner; future cloud multi-user concepts must
 not be introduced into this local UI implicitly.
 

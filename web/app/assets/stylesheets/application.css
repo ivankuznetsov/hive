@@ -843,6 +843,10 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   font: 700 0.95rem/1.4 var(--font-sans);
   letter-spacing: 0.02em;
 }
+/* An opened supporting document gets the same label colour, so its name
+   stays distinct from the document's own first heading; closed rows stay
+   neutral. */
+.artifact[open] > summary .document-section-label { color: color-mix(in srgb, var(--warn) 80%, var(--ink)); }
 
 .usage-summary,
 .primary-work-product { margin: 22px 0; }

@@ -331,6 +331,42 @@ class TasksTest < ActionDispatch::IntegrationTest
                   "/tasks/#{@project}/#{@slug}/approve", text: "Force approve", count: 0
   end
 
+  test "an actionable plan critique precedes the long plan; settled critique stays below" do
+    move_task_to_plan!
+    plan = stage_dir(@project, "3-plan").join(@slug, "plan.md")
+    plan.write("# Plan\n\n#{(1..8).map { |n| "## Section #{n}\n\n#{'Long plan prose. ' * 60}\n\n" }.join}<!-- WAITING -->\n")
+    order = lambda do |mutate|
+      details = plan_review_details_fixture
+      mutate.call(details.fetch("summary"))
+      with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+        get "/tasks/#{@project}/#{@slug}"
+      end
+      assert_response :success
+      assert_select "section.plan-review", 1, "the critique must render exactly once"
+      assert_select "#plan-review-title", 1
+      response.body.index('id="plan-review-title"') <=> response.body.index('id="workspace-primary-result"')
+    end
+
+    assert_equal(-1, order.call(->(_summary) { }), "awaiting decision: critique before plan")
+    assert_select "input[name=review_action][value=answer_finding]", 1
+    assert_operator response.body.index("value=\"answer_finding\""), :<, response.body.index("Long plan prose.")
+
+    assert_equal(-1, order.call(->(summary) { summary["freshness"] = { "status" => "stale", "reason" => "plan changed" } }),
+                 "stale awaiting decision keeps its reload warning above the plan")
+    assert_select "input[name=review_action][value=answer_finding]", 0
+
+    assert_equal(1, order.call(lambda do |summary|
+      summary["state"] = "running"
+      summary["required_action"] = nil
+    end), "a running critique without an operator action stays secondary")
+
+    assert_equal(1, order.call(lambda do |summary|
+      summary["state"] = "passed"
+      summary["required_action"] = nil
+      summary["execution_allowed"] = true
+    end), "settled historical critique stays secondary")
+  end
+
   test "verification blockers do not expose futile finding decisions" do
     move_task_to_plan!
     details = plan_review_details_fixture

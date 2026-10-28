@@ -1392,3 +1392,8 @@ the Documents list. Finished tasks (terminal stage or archive source) with a
 PR or worktree lead with Code changes before the document, so the observed PR
 state and delivered changes come first; the state label comes from the
 publication observation, never from the task merely being archived.
+A plan critique that needs the operator (`awaiting_decision`, or any
+`required_action`) renders once above the plan document, including when
+stale (its reload warning is the action); running or settled critique stays
+below as secondary evidence. The `_plan_review` partial and its exact-finding
+bindings, freshness and confirmation gates are unchanged.

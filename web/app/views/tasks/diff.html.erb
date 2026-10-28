@@ -25,7 +25,9 @@
 
 <section class="diff-result diff-result-<%= @diff_result.state %>"
          aria-labelledby="diff-state-heading">
-  <h2 id="diff-state-heading"><%= @diff_result.state.humanize %></h2>
+  <%# The page heading already states the outcome; keep the state name for
+      assistive technology only. %>
+  <h2 id="diff-state-heading" class="visually-hidden"><%= @diff_result.state.humanize %></h2>
   <p class="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
     Diff <%= @diff_result.state.humanize.downcase %>.
     <%= @diff_result.next_action %>
@@ -55,21 +57,21 @@
       </div>
     <% end %>
 
-    <% {
+    <% layers = {
       "committed" => "Committed task delta (base to HEAD)",
       "staged" => "Staged changes",
       "unstaged" => "Unstaged changes",
       "untracked" => "Untracked paths"
-    }.each do |key, heading| %>
+    } %>
+    <% empty_layers = layers.select { |key, _heading| @diff_result.sections.fetch(key).to_s.empty? } %>
+    <% layers.except(*empty_layers.keys).each do |key, heading| %>
       <section class="diff-section" data-diff-section="<%= key %>">
         <h3><%= heading %></h3>
-        <% content = @diff_result.sections.fetch(key).to_s %>
-        <% if content.empty? %>
-          <p class="muted">None.</p>
-        <% else %>
-          <pre><%= content %></pre>
-        <% end %>
+        <div data-diff-viewer><pre data-diff-raw><%= @diff_result.sections.fetch(key) %></pre></div>
       </section>
+    <% end %>
+    <% if empty_layers.any? %>
+      <p class="muted diff-empty-layers">No changes: <%= empty_layers.values.map { |heading| heading.sub(/ \(.*\)\z/, "") }.to_sentence.downcase.upcase_first %>.</p>
     <% end %>
   <% end %>
 

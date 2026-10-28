@@ -152,7 +152,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # replacing "Ready to open PR" while the task remains at the same gate.
     # The task page leads with a readable stage summary rather than a
     # duplicate stage badge.
-    assert_selector "#workspace-summary .workspace-eyebrow", text: /\AOpen[- ]pr\z/i, wait: 90
+    assert_selector "#workspace-summary .task-stage", text: /\AOpen[- ]pr\z/i, wait: 90
 
     # The fake agent must satisfy the same bounded authoring contract as a real
     # open-PR agent. Otherwise the daemon immediately enters authoring recovery

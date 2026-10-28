@@ -4,8 +4,7 @@
          <% if primary %>data-primary-artifact="<%= primary.fetch("reference") %>"<% end %>>
   <div class="workspace-panel-heading">
     <div>
-      <p class="workspace-eyebrow"><%= TaskDisplay.new(@task, archived: @task_source == "archive").completed? ? "Result" : "Current work" %></p>
-      <h2 id="workspace-primary-result-heading"><%= primary&.fetch("name", nil) || "Current document" %></h2>
+      <h2 id="workspace-primary-result-heading"><%= primary ? artifact_label(primary) : "Work product" %></h2>
     </div>
   </div>
 
@@ -31,7 +30,11 @@
         </ol>
       </details>
     <% end %>
-    <article class="markdown primary-markdown"><%= document.fetch(:html) %></article>
+    <% if document.fetch(:empty) %>
+      <p class="workspace-empty">Nothing has been written here yet.</p>
+    <% else %>
+      <article class="markdown primary-markdown"><%= document.fetch(:html) %></article>
+    <% end %>
   <% else %>
     <details data-workspace-disclosure-key="primary-file">
       <summary>View file contents</summary>

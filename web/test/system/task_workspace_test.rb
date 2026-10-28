@@ -386,4 +386,23 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_equal "advanced",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")
   end
+  test "task reference copies exactly and remains selectable if clipboard is denied" do
+    sign_in!
+    visit task_path(@project, @slug)
+    assert_selector ".task-header h1", text: "Keep exact attempt"
+    assert_selector ".task-reference code", text: @slug
+    page.execute_script(<<~JS)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async text => { window.copiedTaskReference = text; }
+      }});
+    JS
+    click_button "Copy task reference"
+    assert_selector ".task-reference [role='status']", text: "Copied"
+    assert_equal @slug, page.evaluate_script("window.copiedTaskReference")
+    page.execute_script("navigator.clipboard.writeText = async () => { throw new Error('denied'); }")
+    click_button "Copy task reference"
+    assert_selector ".task-reference [role='status']", text: "Select and copy the reference."
+    assert_equal @slug, page.evaluate_script("window.getSelection().toString()")
+  end
+
 end

@@ -36,11 +36,22 @@ class AgentsController < ApplicationController
   def load_agents_page
     @statuses = AgentLogin.statuses
     @projects = registered_projects
+    @roles = AgentRoles.fresh_init
     project_name = params[:project].to_s.strip
     return if project_name.empty?
 
     @selected_project = find_project!(project_name)
+    @roles = project_roles(@selected_project)
     @skill_health = agent_skills.health(@selected_project)
+  end
+
+  # A project whose config cannot load shows no roles rather than the
+  # fresh-init defaults, which would misstate what that project runs.
+  def project_roles(project)
+    AgentRoles.for_project(project)
+  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
+    @roles_error = "#{project.name} configuration could not be read: #{e.message.to_s.squish.first(200)}"
+    nil
   end
 
   def agent_skills

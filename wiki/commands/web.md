@@ -164,14 +164,26 @@ GET /digests/:date?project=NAME    # filtered view, same global identity
 record, or make a live GitHub/PRDigest request. Consequently every GET leaves
 bases, amendments, frontiers, and `last_materialized_at` unchanged.
 
-The page leads with persisted date/zone and distinct lifecycle, completeness,
-and content badges. Navigation follows the record's `previous_date` and
+The page leads with the persisted date; distinct lifecycle, completeness,
+content and zone badges remain available under Record details. Navigation follows the record's `previous_date` and
 `next_date` sequence links, including across time-zone cutovers; `today`
 resolves the persisted interval containing now. Filter choices come from the
 selected historical record rather than the current registry. A project filter
 hides only other projects' facts and retains applicable global/source gaps.
 
-The content hierarchy is attention first, then grouped project changes and
+Activity-only records (no saved written document) open with a short Summary
+computed by `DailyDigest#summary` from the recorded rows only: observed merges
+(`merge_observed`/`pr_merged`, distinct PRs), tasks completed or archived
+(`stage_transition` rows in the `completion` category), commits recorded,
+tasks created, failed agent runs (`failure` category) and other updates, plus
+attention and source-gap counts. Commits are never called shipped or merged,
+and incomplete records add "some activity may be missing". Saved written
+documents (`document?`) render unchanged. The header keeps a visible
+completeness badge when the record is not complete; lifecycle/content/zone
+badges, the time range, materialization time and record id move into a closed
+"Record details" disclosure.
+
+The content hierarchy is summary, then attention, then grouped project changes and
 clearly labeled late amendments/resolved gaps. Complete-empty, partial,
 stale, missing, pre-coverage, and pruned states use separate accessible copy.
 Missing feature-era pages name `hive digest refresh --date ...`; pre-coverage
@@ -222,7 +234,7 @@ config-editing step.
 `POST /auth/github` starts the flow with scope `repo`; the wait page polls at
 GitHub's interval (one poll per render, `slow_down`-aware). On grant the app
 keeps the login AND the token in the encrypted Rails session — the token
-powers the Repos page's listing of the operator's GitHub repositories and
+powers the Projects page's listing of the operator's GitHub repositories and
 authenticates `gh repo clone` (passed as `GH_TOKEN`, never persisted).
 Non-owner logins, denied grants, and expired codes render 403 pages. A
 dev/test-only `/dev_login` seam (route drawn only when `Rails.env.local?`,
@@ -349,7 +361,7 @@ Honeycomb projections.
   All projects deliberately keeps that composer choice. There is no filter
   observer, animation-frame reconciliation, DOM hiding, or History API state
   mirror. A
-  `+ Add project` link navigates to Repos because adding a project is a real
+  `+ Add project` link navigates to Projects because adding a project is a real
   page change. The composer supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract). It shares the
@@ -705,7 +717,9 @@ Honeycomb projections.
   primary header wraps to a second full-width row, keeping every section
   visible without document overflow while preserving the local GitHub-connect
   action.
-- **Repos** — registered projects, clone-by-URL (same allowlist as before:
+- **Projects** (`/projects`; `/repos` remains an alias and the form/redirect
+  target) — the navigation label and page heading say Projects, while Git
+  fields keep repository terminology. Registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
   notice when GitHub is unreachable or the grant was revoked). The setup form
@@ -738,7 +752,15 @@ Honeycomb projections.
   with token-fed https credentials (`gh` clones over ssh when the operator's
   `git_protocol` prefers it, and ssh pushes dead-end when the daemon has no
   keys or agent).
-- **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
+- **Agents** — cards use product names (`AgentRoles.display_name`: Claude
+  Code, Codex, Grok, OpenCode, Pi, GitHub CLI) and a compact Workflow roles list
+  (`AgentRoles`). With `?project=NAME` the roles come from that project's
+  loaded config (`brainstorm`/`plan`/`execute` agents and `review.reviewers`);
+  without one they are the labelled `hive init` fresh-project defaults
+  (`Init::Prompts`: Claude brainstorm/plan, Codex implement, Claude + Codex
+  review) — never `Config::DEFAULTS`, whose execute agent is a legacy
+  fallback. A project config that fails to load shows an error instead of
+  defaults. PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form. Login create/show/completion enter the dedicated
   `AgentLogin`, `Agents::LoginsController`, and
   `Agents::LoginCompletionsController` resources while keeping the existing
@@ -777,7 +799,9 @@ Honeycomb projections.
   operation messages (or residual health/stderr fallback), and the same bounded
   details are logged so transient registry failures are distinguishable from
   persistent configuration conflicts.
-- **Telegram** — first-timer setup guide (collapsible, open while the bot is
+- **Integrations** (`/integrations`; `/telegram` remains an alias and the
+  form/redirect target) — a Telegram section holds every real control; Slack
+  is listed as Planned with no controls. Telegram: first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
@@ -1358,3 +1382,13 @@ is gone but a PR is recorded, the panel links "View diff on GitHub"
 (`<pr url>/files`) instead.
 Open-source Hive remains single-owner; future cloud multi-user concepts must
 not be introduced into this local UI implicitly.
+
+### Task page order
+
+`tasks/show` renders one Code changes panel (the `task-publication-*` morph
+frame). Status, actions and open questions (`tasks/_state`) always come
+first. Active tasks then show the current document, then Code changes ahead of
+the Documents list. Finished tasks (terminal stage or archive source) with a
+PR or worktree lead with Code changes before the document, so the observed PR
+state and delivered changes come first; the state label comes from the
+publication observation, never from the task merely being archived.

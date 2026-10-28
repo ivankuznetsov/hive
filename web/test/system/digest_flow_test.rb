@@ -26,6 +26,7 @@ class DigestFlowTest < ApplicationSystemTestCase
     visit digest_path(@date)
     assert_selector "h1", text: @date
     assert_selector "article.digest-page[data-record-id='#{@record_id}']"
+    find(".digest-technical > summary").click
     assert_selector ".digest-record-reference", text: @record_id.first(12)
     assert_selector "nav[aria-label='Digest date']"
     assert_link "← Previous", href: digest_path("2026-08-29")

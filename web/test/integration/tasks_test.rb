@@ -1590,6 +1590,38 @@ class TasksTest < ActionDispatch::IntegrationTest
     Task.define_method(:publication, original) if original
   end
 
+  test "finished tasks lead with code changes while active tasks keep output first" do
+    original_publication = Task.instance_method(:publication)
+    original_worktree = Task.instance_method(:worktree?)
+    panel = publication_fixture
+    Task.define_method(:publication) { |cache: nil| panel }
+    Task.define_method(:worktree?) { true }
+
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_select "#workspace-publication", 1
+    body = response.body
+    assert_operator body.index('id="workspace-primary-result"'), :<, body.index('id="workspace-publication"'),
+                    "an active task shows its current output before code changes"
+    assert_operator body.index('id="task-state"'), :<, body.index('id="workspace-primary-result"')
+
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc)
+    get task_path(@project, @slug, source: "archive")
+    assert_response :success
+    assert_select "#workspace-publication", 1
+    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    body = response.body
+    assert_operator body.index('id="workspace-publication"'), :<, body.index('id="workspace-primary-result"'),
+                    "a finished task leads with its delivered changes"
+    assert_select "#workspace-publication", text: /Open/, minimum: 1
+    assert_select "#workspace-publication", text: /Merged/, count: 0
+  ensure
+    Task.define_method(:publication, original_publication) if original_publication
+    Task.define_method(:worktree?, original_worktree) if original_worktree
+  end
+
   test "timeline endpoint pages material events and expands bounded noise groups" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     records = 205.times.map do |index|

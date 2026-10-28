@@ -38,6 +38,25 @@
       error: @status_error %>
 <%= render "tasks/state" %>
 <%= render "tasks/diagnostic", diagnostic: @semantic_workspace.fetch("diagnostic") %>
+<%# One Code changes panel. Finished tasks lead with their outcome (the
+    observed PR state and delivered changes) ahead of long documents; active
+    tasks keep questions/actions above and the panel in the evidence grid. %>
+<% show_publication = @task["pr_url"].present? || @task.worktree? %>
+<% outcome_first = show_publication && (@task.terminal? || @task_source == "archive") %>
+<% publication_panel = capture do %>
+  <div class="workspace-wide" aria-label="Change and publication evidence">
+    <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
+          refresh: "morph" do %>
+      <%= render "tasks/publication",
+            publication: @workspace.dig("panels", "publication"),
+            refresh_available: @publication_refresh_available,
+            refresh_notice: nil %>
+    <% end %>
+  </div>
+<% end %>
+<% if outcome_first %>
+  <div class="task-outcome-first"><%= publication_panel %></div>
+<% end %>
 <%= render "tasks/primary_result", result: @semantic_workspace.fetch("result") %>
 <% if @semantic_workspace.dig("usage", "tokens") %>
   <details class="task-secondary" data-workspace-disclosure-key="task-usage">
@@ -69,6 +88,10 @@
 
 <div class="task-workspace" aria-label="Task evidence workspace">
   <div class="task-workspace-grid">
+    <% if show_publication && !outcome_first %>
+      <%= publication_panel %>
+    <% end %>
+
     <% if @semantic_workspace.dig("applicability", "supporting_artifacts") ||
           @semantic_workspace.dig("evidence", "supporting_artifacts", "state") == "current" %>
       <%= render "tasks/supporting_artifacts", result: @semantic_workspace.fetch("result") %>
@@ -76,22 +99,6 @@
 
     <% if @task["depends_on"].present? || Array(@workspace.dig("panels", "dependencies", "edges")).any? %>
       <%= render "tasks/dependencies", workspace: @workspace %>
-    <% end %>
-
-    <% show_diff = @task.worktree? %>
-    <% show_publication = @task["pr_url"].present? || @task.worktree? %>
-    <% if show_diff || show_publication %>
-      <div class="workspace-wide" aria-label="Change and publication evidence">
-        <% if show_publication %>
-          <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
-                refresh: "morph" do %>
-            <%= render "tasks/publication",
-                  publication: @workspace.dig("panels", "publication"),
-                  refresh_available: @publication_refresh_available,
-                  refresh_notice: nil %>
-          <% end %>
-        <% end %>
-      </div>
     <% end %>
 
     <% if @media && (@media["status"] == "failed" || Array(@media["items"]).any?) %>

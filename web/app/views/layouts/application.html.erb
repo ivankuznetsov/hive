@@ -41,11 +41,11 @@
           <nav aria-label="Primary">
             <%= link_to "Status", root_path, class: nav_class(:status) %>
             <%= link_to "Digest", digest_path("today"), class: nav_class(:digests) %>
-            <%= link_to "Repos", repos_path, class: nav_class(:repos) %>
+            <%= link_to "Projects", projects_path, class: nav_class(:projects) %>
             <%= link_to "Honeycombs", honeycombs_path, class: nav_class(:honeycombs) %>
             <%= link_to "Patrol", patrol_path, class: nav_class(:patrol) %>
             <%= link_to "Agents", agents_path, class: nav_class(:agents) %>
-            <%= link_to "Telegram", telegram_path, class: nav_class(:telegram) %>
+            <%= link_to "Integrations", integrations_path, class: nav_class(:integrations) %>
           </nav>
           <div class="topbar-session">
             <span class="session-identity">

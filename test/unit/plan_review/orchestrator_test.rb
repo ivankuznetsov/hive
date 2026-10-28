@@ -1115,10 +1115,11 @@ class PlanReviewOrchestratorTest < Minitest::Test
     safe = finding("safe_auto", "Safe residual", line: 2)
     manual = finding("manual", "Manual residual", line: 3)
     fyi = finding("fyi", "FYI residual", line: 4)
-    reopened = [ safe, manual, fyi ].map do |finding|
+    gated = finding("gated_auto", "Undecided residual", line: 5)
+    reopened = [ safe, manual, fyi, gated ].map do |finding|
       runner.send(:reopen_verification_finding, finding, finding)
     end
-    assert_equal %w[open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+    assert_equal %w[open open open open], reopened.map { |finding| finding.fetch("lifecycle") }
 
     declined = Hive::PlanReview::Finding.new(existing.to_h.merge(
       "lifecycle" => "incorporated", "decision_id" => "prd-#{'b' * 64}",

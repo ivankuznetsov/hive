@@ -3,25 +3,35 @@
     <p class="digest-kicker"><%= digest.document? ? "Daily digest" : "Daily activity" %></p>
     <h1 id="digest-heading"><%= digest.local_date %></h1>
     <% unless digest.document? %>
-      <div class="digest-badges" aria-label="Digest state">
-        <span class="digest-badge digest-badge-<%= digest.lifecycle %>"><%= digest.lifecycle.humanize %></span>
-        <span class="digest-badge digest-badge-<%= digest.completeness %>"><%= digest.completeness.humanize %></span>
-        <span class="digest-badge"><%= digest.content.humanize %></span>
-        <% if digest.attributes["time_zone"] %><span class="digest-badge"><%= digest.attributes["time_zone"] %></span><% end %>
-      </div>
-      <% if digest.attributes["starts_at"] && digest.attributes["ends_at"] %>
-        <p class="digest-meta">
-          <%= digest_time_tag(digest.attributes["starts_at"]) %> → <%= digest_time_tag(digest.attributes["ends_at"]) %>
-          <% if digest.attributes["last_materialized_at"] %>
-            · materialized <%= digest_time_tag(digest.attributes["last_materialized_at"]) %>
-          <% end %>
-        </p>
+      <%# Incompleteness stays visible; record identity and collection
+          timestamps are secondary detail. %>
+      <% if digest.completeness != "complete" %>
+        <div class="digest-badges" aria-label="Digest completeness">
+          <span class="digest-badge digest-badge-<%= digest.completeness %>"><%= digest.completeness.humanize %></span>
+        </div>
       <% end %>
-      <% if digest.record_reference %>
-        <p class="digest-meta digest-record-reference" title="<%= digest.record_reference %>">
-          Record <code><%= digest.record_reference.first(12) %></code>
-        </p>
-      <% end %>
+      <details class="digest-technical">
+        <summary>Record details</summary>
+        <div class="digest-badges" aria-label="Digest state">
+          <span class="digest-badge digest-badge-<%= digest.lifecycle %>"><%= digest.lifecycle.humanize %></span>
+          <span class="digest-badge digest-badge-<%= digest.completeness %>"><%= digest.completeness.humanize %></span>
+          <span class="digest-badge"><%= digest.content.humanize %></span>
+          <% if digest.attributes["time_zone"] %><span class="digest-badge"><%= digest.attributes["time_zone"] %></span><% end %>
+        </div>
+        <% if digest.attributes["starts_at"] && digest.attributes["ends_at"] %>
+          <p class="digest-meta">
+            <%= digest_time_tag(digest.attributes["starts_at"]) %> → <%= digest_time_tag(digest.attributes["ends_at"]) %>
+            <% if digest.attributes["last_materialized_at"] %>
+              · materialized <%= digest_time_tag(digest.attributes["last_materialized_at"]) %>
+            <% end %>
+          </p>
+        <% end %>
+        <% if digest.record_reference %>
+          <p class="digest-meta digest-record-reference" title="<%= digest.record_reference %>">
+            Record <code><%= digest.record_reference.first(12) %></code>
+          </p>
+        <% end %>
+      </details>
     <% end %>
   </div>
 

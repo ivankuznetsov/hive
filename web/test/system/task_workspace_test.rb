@@ -396,14 +396,14 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     FileUtils.mv(@folder, execute_folder)
     @folder = execute_folder
     project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project)
-    File.write(File.join(project_root, "example.rb"), "puts \"before\"\n")
+    File.write(File.join(project_root, "example.rb"), "puts \"before\"\n# old #{'wide ' * 80}\n")
     system("git", "-C", project_root, "add", "example.rb", exception: true)
     system("git", "-C", project_root, "commit", "-qm", "diff fixture", exception: true)
     base = IO.popen([ "git", "-C", project_root, "rev-parse", "HEAD" ], &:read).strip
     owned = Hive::Worktree.new(project_root, @slug)
     owned.create!(@slug, default_branch: "master")
     owned.write_pointer!(@folder, @slug, execute_base_head: base)
-    File.write(File.join(owned.path, "example.rb"), "puts \"after <img src=x onerror=alert(1)>\"\n")
+    File.write(File.join(owned.path, "example.rb"), "puts \"after <img src=x onerror=alert(1)>\"\n# new #{'wide ' * 80}\n")
     sign_in!
     visit task_diff_path(@project, @slug)
     assert_selector "[data-diff-ready='ready']", wait: 15
@@ -417,6 +417,31 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_selector "[data-diff-raw]", text: "diff --git"
     click_button "Unified", match: :first
     page.current_window.resize_to(390, 844)
+    assert page.evaluate_script("document.documentElement.scrollWidth <= innerWidth + 1")
+
+    # Split panes must scroll together: the element that overflows has to be
+    # the .d2h-file-side-diff pair diff2html synchronises, not an inner wrapper.
+    click_button "Split", match: :first
+    assert_selector ".d2h-file-side-diff[aria-label='File diff, before']", minimum: 1
+    panes = page.evaluate_script(<<~JS)
+      (() => {
+        const [left, right] = document.querySelectorAll('.d2h-files-diff .d2h-file-side-diff')
+        const inner = [...left.querySelectorAll('*'), ...right.querySelectorAll('*')]
+          .filter(el => el.scrollWidth > el.clientWidth + 1 && ['auto', 'scroll'].includes(getComputedStyle(el).overflowX))
+        right.scrollLeft = 200
+        return { overflow: left.scrollWidth > left.clientWidth + 200 && right.scrollWidth > right.clientWidth + 200, innerScrollers: inner.length }
+      })()
+    JS
+    assert panes.fetch("overflow"), "the long lines must make both split panes themselves scroll"
+    assert_equal 0, panes.fetch("innerScrollers"), "no inner element may own horizontal scrolling"
+    positions = nil
+    20.times do
+      positions = page.evaluate_script("Array.from(document.querySelectorAll('.d2h-files-diff .d2h-file-side-diff')).slice(0, 2).map(el => Math.round(el.scrollLeft))")
+      break if positions == [ 200, 200 ]
+
+      sleep 0.1
+    end
+    assert_equal [ 200, 200 ], positions, "scrolling the after pane must move the before pane"
     assert page.evaluate_script("document.documentElement.scrollWidth <= innerWidth + 1")
   end
 

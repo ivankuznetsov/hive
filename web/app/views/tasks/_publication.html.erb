@@ -6,7 +6,7 @@
     <div>
       <h2 id="publication-heading">Code changes</h2>
       <p class="muted">
-        <span class="status-text workspace-state-label"><%= { "not_configured" => "No pull request", "not_observed" => "Not checked on GitHub", "local_unpushed" => "Not pushed" }.fetch(publication_state) { publication_state.humanize } %></span>
+        <span class="status-text workspace-state-label"><%= { "not_configured" => "No pull request", "not_observed" => "Not checked on GitHub", "local_unpushed" => "Ahead of last fetched origin" }.fetch(publication_state) { publication_state.humanize } %></span>
 
       </p>
     </div>
@@ -27,8 +27,12 @@
   <% if pr["url"].present? %>
     <p class="workspace-break-anywhere publication-links">
       <%= link_to "PR ##{pr.fetch("number")}", pr.fetch("url"), rel: "noopener noreferrer" %>
+      <%# The local diff reads the live task worktree only; once it is gone the
+          pull request remains the historical diff. %>
       <% if @task.worktree? %>
         · <%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), data: { turbo_frame: "_top" } %>
+      <% else %>
+        · <%= link_to "View diff on GitHub", "#{pr.fetch("url").delete_suffix("/")}/files", rel: "noopener noreferrer" %>
       <% end %>
       <% if pr["title"].present? %>· <%= pr["title"] %><% end %>
     </p>
@@ -81,13 +85,15 @@
   <% head = local["head_oid"].to_s %>
   <% push_state = local.dig("push", "state").to_s %>
   <%# Missing values are omitted rather than shown as "Unavailable"; the
-      reasons stay visible in Publication diagnostics below. %>
+      reasons stay visible in Publication diagnostics below. Push compares
+      only against the local refs/remotes/origin/<branch>; an absent tracking
+      ref ("not_observed") proves nothing about the remote, so it is omitted. %>
   <% facts = [
        [ "Repository", repository.presence && (repository_url ? link_to(repository, repository_url, rel: "noopener noreferrer") : repository) ],
        [ "Branch", branch && (repository_url ? link_to(branch, repository_ref_url(repository_url, "tree", branch), rel: "noopener noreferrer") : branch) ],
        [ "Base", local["base_branch"].presence && (repository_url ? link_to(local["base_branch"], repository_ref_url(repository_url, "tree", local["base_branch"]), rel: "noopener noreferrer") : local["base_branch"]) ],
        [ "Head", head.presence && (repository_url && head.match?(/\A[0-9a-f]{7,40}\z/i) ? link_to(head.first(12), "#{repository_url}/commit/#{head}", rel: "noopener noreferrer") : tag.code(head.first(12))) ],
-       [ "Push", { "pushed" => "Pushed", "unpushed" => "Local commits not pushed", "behind" => "Behind remote", "divergent" => "Diverged from remote", "not_observed" => "Not pushed" }[push_state] ],
+       [ "Push", { "pushed" => "Matches last fetched origin", "unpushed" => "Local commits ahead of last fetched origin", "behind" => "Behind last fetched origin", "divergent" => "Diverged from last fetched origin" }[push_state] ],
        [ "Working tree", local["dirty"].nil? ? nil : (local["dirty"] ? "Uncommitted changes" : "Clean") ]
      ].select { |_label, value| value.present? } %>
   <% if facts.any? %>

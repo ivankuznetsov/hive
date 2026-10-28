@@ -1825,3 +1825,4 @@ pre {
 .task-status-line.task-state-running #workspace-summary-heading { color: var(--accent); }
 .task-status-line.task-state-attention #workspace-summary-heading { color: var(--danger); font-weight: 600; }
 .task-status-line .task-state-detail { margin: 0; }
+.markdown [hidden] { display: none; }

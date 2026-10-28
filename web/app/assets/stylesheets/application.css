@@ -819,6 +819,30 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .dependency-table { min-width: 660px; }
 
 .publication-body { max-height: 360px; }
+/* Compact publication panel: title and state are one group, PR and diff
+   actions sit together, and observation and Git facts stay secondary. The
+   heading stays a wrapping row at mobile widths instead of a tall stack. */
+.publication-panel > .publication-heading { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
+.publication-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.publication-title h2 { margin: 0; }
+.publication-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.publication-actions .btn { display: inline-flex; align-items: center; min-height: 36px; }
+.publication-pr-title { margin: 0 0 10px; }
+.publication-observed { margin: 10px 0 0; color: var(--ink-muted); font-size: 0.85rem; }
+.publication-panel .workspace-table-scroll { margin-top: 12px; }
+.publication-panel > .task-secondary,
+.publication-panel > .workspace-diagnostics { margin: 12px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); border-bottom: 0; font-size: 0.9rem; }
+.publication-panel > .task-secondary[open] > summary { margin-bottom: 12px; }
+
+/* The document's section label (Plan, Implementation, Review) is a quiet
+   amber label, distinct from the document's own title. Mixed toward ink so
+   it stays above 4.5:1 in both themes. */
+.workspace-panel-heading .document-section-label {
+  margin: 0;
+  color: color-mix(in srgb, var(--warn) 80%, var(--ink));
+  font: 700 0.95rem/1.4 var(--font-sans);
+  letter-spacing: 0.02em;
+}
 
 .usage-summary,
 .primary-work-product { margin: 22px 0; }

@@ -72,7 +72,7 @@ class DigestsTest < ActionDispatch::IntegrationTest
     assert_select "details.digest-technical:not([open]) .digest-record-reference", text: /#{stored.fetch("record_id")[0, 12]}/
     assert_select ".digest-header > div > .digest-badges .digest-badge", text: "Partial"
     assert_select ".digest-summary", text: /2 projects:\s+3 other updates\./
-    assert_select ".digest-summary strong", text: "1 task needs attention."
+    assert_select ".digest-summary strong", text: "1 item needs attention."
     assert_select ".digest-summary", text: /2 sources could not be checked/
     assert_select ".digest-summary", text: /some activity may be missing/
     assert_operator response.body.index("digest-summary"), :<, response.body.index("Needs attention")

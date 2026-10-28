@@ -404,5 +404,4 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_selector ".task-reference [role='status']", text: "Select and copy the reference."
     assert_equal @slug, page.evaluate_script("window.getSelection().toString()")
   end
-
 end

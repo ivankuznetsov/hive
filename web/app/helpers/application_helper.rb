@@ -82,7 +82,7 @@ module ApplicationHelper
   # "<!-- COMPLETE -->" keeps it; only real marker lines vanish, since the
   # stage badge owns that state). A fresh renderer per call: Redcarpet
   # instances are not thread-safe under Puma.
-  def render_markdown(text)
+  def render_markdown(text, task: @task)
     renderer = Redcarpet::Markdown.new(
       Redcarpet::Render::HTML.new(escape_html: true,
                                   link_attributes: { rel: "noopener noreferrer", target: "_blank" }),
@@ -91,7 +91,12 @@ module ApplicationHelper
     )
     body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
     body = body.gsub(/^[ \t]*#{Hive::Markers::MARKER_RE}[ \t]*(?:\r?\n|\z)/, "")
-    sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
+    html = sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
+    return html unless task
+
+    fragment = Nokogiri::HTML.fragment(html)
+    fragment.css("h1, h2, h3, h4, h5, h6").each { |heading| task_heading_label(heading, task) }
+    fragment.to_html.html_safe
   end
 
   # Primary work products add navigation after the existing renderer has
@@ -99,8 +104,8 @@ module ApplicationHelper
   # from sanitized heading text, and duplicate headings receive a stable
   # ordinal suffix. Four H2 sections is the point where an outline earns its
   # place; short documents still get linkable headings without extra chrome.
-  def render_markdown_document(text)
-    fragment = Nokogiri::HTML.fragment(render_markdown(text))
+  def render_markdown_document(text, task: @task)
+    fragment = Nokogiri::HTML.fragment(render_markdown(text, task: nil))
     occurrences = Hash.new(0)
     outline = []
 
@@ -109,6 +114,7 @@ module ApplicationHelper
       occurrences[base] += 1
       anchor = occurrences[base] == 1 ? base : "#{base}-#{occurrences[base]}"
       heading["id"] = anchor
+      task_heading_label(heading, task)
       outline << { id: anchor, label: heading.text.to_s.strip } if heading.name == "h2"
     end
 
@@ -116,6 +122,15 @@ module ApplicationHelper
       html: fragment.to_html.html_safe,
       outline: outline.length >= 4 ? outline.freeze : [].freeze
     }.freeze
+  end
+
+  def task_heading_label(heading, task)
+    return unless task && task.slug.present? && task.title.present? && task.title != task.slug
+
+    slug = /(?<![[:alnum:]_-])#{Regexp.escape(task.slug)}(?![[:alnum:]_-])/
+    heading.traverse do |node|
+      node.content = node.content.gsub(slug) { task.title } if node.text?
+    end
   end
 
   # Color the JSONL log tail by event class so errors jump out of the noise.

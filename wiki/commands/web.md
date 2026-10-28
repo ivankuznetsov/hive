@@ -1235,8 +1235,11 @@ worktree or PR. Closure receipt digests, duplicate action/quality fields and
 repeated slugs are omitted from ordinary content. Document outlines and review
 metadata and audit documents are collapsed; review findings and actions
 remain available. Structured primary files are disclosed on demand instead of
-showing raw JSON as the page body. Task references and manual
-closure remain under Advanced. Bounded publication and mutation guards remain
+showing raw JSON as the page body. Task titles lead the page; the machine reference appears in small secondary text
+with a Copy control (manual selection fallback if clipboard access is denied).
+Task-document headings substitute the human title for the exact task slug in
+the rendered view only; raw files, code samples, URLs and original heading
+anchors remain unchanged. Manual closure remains under Advanced. Bounded publication and mutation guards remain
 unchanged.
 
 The task log view extracts readable provider messages, results, errors and tool

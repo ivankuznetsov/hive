@@ -31,10 +31,19 @@ async function enhance(host) {
         for (const link of output.querySelectorAll('a[href^="#"]')) {
           link.setAttribute('href', `#${prefix}-${link.getAttribute('href').slice(1)}`);
         }
-        for (const table of output.querySelectorAll('.d2h-file-diff, .d2h-files-diff')) {
-          table.tabIndex = 0;
-          table.setAttribute('role', 'region');
-          table.setAttribute('aria-label', 'File diff');
+        // Keyboard focus belongs on the actual horizontal scrollers, which are
+        // also the elements diff2html keeps in sync in split mode.
+        for (const pane of output.querySelectorAll('.d2h-file-diff')) {
+          pane.tabIndex = 0;
+          pane.setAttribute('role', 'region');
+          pane.setAttribute('aria-label', 'File diff');
+        }
+        for (const wrapper of output.querySelectorAll('.d2h-files-diff')) {
+          wrapper.querySelectorAll(':scope > .d2h-file-side-diff').forEach((pane, index) => {
+            pane.tabIndex = 0;
+            pane.setAttribute('role', 'region');
+            pane.setAttribute('aria-label', index === 0 ? 'File diff, before' : 'File diff, after');
+          });
         }
       }
       output.hidden = mode === 'raw';

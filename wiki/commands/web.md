@@ -1317,10 +1317,12 @@ Primary and supporting documents are labelled by what they are
 (`ApplicationHelper#artifact_label`: Request, Plan, Implementation, Review, …)
 with the file name as secondary text. The supporting list is titled Documents
 and excludes only the primary document (`TaskWorkspace::Builder#semantic_result`),
-so unique documents are never dropped. In the rendered primary document only,
-the `## Implementation` stub that `Stages::Execute#write_initial_task_md` writes
-is hidden while it has no content, and an `h1` that merely repeats the task
-title is hidden; the captured `task.md` is never modified. A document with no
+so unique documents are never dropped. `render_markdown` (used by the
+primary document, the Documents list and every other Markdown view) hides the
+`## Implementation` stub that `Stages::Execute#write_initial_task_md` writes
+while it has no content; in the primary document an `h1` that merely repeats
+the task title is also hidden. Hidden headings keep their anchors, and the
+captured `task.md` is never modified. A document with no
 visible content shows "Nothing has been written here yet."
 
 Git details link the repository, branch, base and head commit.
@@ -1328,9 +1330,12 @@ Git details link the repository, branch, base and head commit.
 `host/owner/name` (github.com or a GitHub Enterprise host) and tolerates
 `https://…`, `.git` and `git@host:` spellings; anything else stays plain text.
 Facts with no observed value are omitted instead of shown as "Unavailable";
-the reasons remain listed under Publication diagnostics. Push state uses
-plain wording (Pushed, Not pushed, Local commits not pushed, Behind remote,
-Diverged from remote).
+the reasons remain listed under Publication diagnostics. Push state compares
+HEAD only with the local `refs/remotes/origin/<branch>`
+(`TaskWorkspace::Publication#observe_tracking`), so the labels say "last
+fetched origin". `not_observed` means only that the local tracking ref is
+absent — it does not query the remote — so it is omitted rather than shown as
+"Not pushed".
 
 Task diffs progressively enhance escaped raw patches using locally vendored
 diff2html 3.4.56 and highlight.js (`app/javascript/lib/diff_renderer.js`,
@@ -1339,11 +1344,17 @@ unified/split/raw modes. `lib/diff_renderer` is pinned with `preload: false`
 and imported only when a page contains a patch; a failed load leaves the raw
 text readable (`data-diff-ready="fallback"`). Patch text reaches the browser
 only as escaped `<pre>` text and diff2html/highlight.js escape it again when
-rendering. Only non-empty diff layers get a section; empty layers are listed
+rendering. Horizontal overflow stays on `.d2h-file-diff` (unified) and on
+each `.d2h-file-side-diff` (split): those are the elements diff2html's
+synchronised scroll binds to, so an inner scroller would let the before and
+after panes drift apart. They also carry the focus/region labels. Only non-empty diff layers get a section; empty layers are listed
 in one "No changes: …" line. Partial/unavailable/empty indicators remain. No
 CDN or runtime service is required.
 
 The task workspace shows one full-width Code changes panel with a View diff
-link rather than an inline patch beside publication metadata.
+link rather than an inline patch beside publication metadata. The local diff
+(`Hive::Web::TaskDiff`) reads only the live task worktree; when the worktree
+is gone but a PR is recorded, the panel links "View diff on GitHub"
+(`<pr url>/files`) instead.
 Open-source Hive remains single-owner; future cloud multi-user concepts must
 not be introduced into this local UI implicitly.

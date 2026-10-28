@@ -92,10 +92,11 @@ module ApplicationHelper
     body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
     body = body.gsub(/^[ \t]*#{Hive::Markers::MARKER_RE}[ \t]*(?:\r?\n|\z)/, "")
     html = sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
-    return html unless task
-
     fragment = Nokogiri::HTML.fragment(html)
-    fragment.css("h1, h2, h3, h4, h5, h6").each { |heading| task_heading_label(heading, task) }
+    fragment.css("h1, h2, h3, h4, h5, h6").each do |heading|
+      heading["hidden"] = "hidden" if empty_implementation_heading?(heading)
+      task_heading_label(heading, task)
+    end
     fragment.to_html.html_safe
   end
 
@@ -115,7 +116,7 @@ module ApplicationHelper
       anchor = occurrences[base] == 1 ? base : "#{base}-#{occurrences[base]}"
       heading["id"] = anchor
       task_heading_label(heading, task)
-      if empty_implementation_heading?(heading) || repeats_task_title?(heading, task)
+      if heading["hidden"] || repeats_task_title?(heading, task)
         heading["hidden"] = "hidden"
         next
       end

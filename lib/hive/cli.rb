@@ -962,7 +962,7 @@ module Hive
                                       desc: "current plan-review observation digest"
     option :target_fingerprint, type: :string,
                                 desc: "exact finding or coverage fingerprint"
-    option :answer, type: :string, desc: "answer for a manual finding"
+    option :answer, type: :string, desc: "answer for a manual finding, or the chosen alternative for a gated one"
     option :coverage, type: :string, desc: "named coverage item being waived"
     option :level, type: :string, enum: Hive::PlanReview::LEVELS,
                    desc: "new level for raise or audited downgrade"

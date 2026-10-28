@@ -1119,6 +1119,14 @@ class PlanReviewOrchestratorTest < Minitest::Test
       runner.send(:reopen_verification_finding, finding, finding)
     end
     assert_equal %w[open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+
+    declined = Hive::PlanReview::Finding.new(existing.to_h.merge(
+      "lifecycle" => "incorporated", "decision_id" => "prd-#{'b' * 64}",
+      "answer" => "Decline; keep the hold."
+    ))
+    reopened = runner.send(:reopen_verification_finding, declined, existing)
+    assert_equal "answered", reopened.fetch("lifecycle")
+    assert_equal "Decline; keep the hold.", reopened.fetch("answer")
   end
 
   def test_legacy_policy_approval_resets_terminal_verification_before_revising

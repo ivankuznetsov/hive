@@ -37,6 +37,25 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_gated_finding_answer_selects_an_alternative_instead_of_approving
+    with_service(finding: finding("gated_auto")) do |service, store, record|
+      target = record["findings"].first.fetch("fingerprint")
+      result = service.apply(**decision_arguments(
+        record, action: "answer_finding", target:,
+        value: { "answer" => "Decline; keep the hold for the owning task." }
+      ))
+
+      assert result.applied
+      answered = store.current["findings"].first
+      assert_equal "answered", answered.fetch("lifecycle")
+      assert_equal "Decline; keep the hold for the owning task.", answered.fetch("answer")
+      refute store.current.execution_allowed?
+      assert_raises(Hive::PlanReview::ConflictingDecision) do
+        service.apply(**decision_arguments(store.current, action: "approve_finding", target:))
+      end
+    end
+  end
+
   def test_conflicting_and_stale_decisions_are_rejected
     with_service(finding: finding("manual")) do |service, _store, record|
       target = record["findings"].first.fetch("fingerprint")
@@ -300,13 +319,15 @@ class PlanReviewDecisionServiceTest < Minitest::Test
         ))
       end
     end
-    with_service(finding: finding("gated_auto")) do |service, _store, record|
-      target = record["findings"].first.fetch("fingerprint")
+    with_service(finding: finding("safe_auto")) do |service, _store, record|
       assert_raises(Hive::PlanReview::ConflictingDecision) do
         service.apply(**decision_arguments(
-          record, action: "answer_finding", target:, value: { "answer" => "no" }
+          record, action: "answer_finding",
+          target: record["findings"].first.fetch("fingerprint"), value: { "answer" => "no" }
         ))
       end
+    end
+    with_service(finding: finding("gated_auto")) do |service, _store, record|
       assert_raises(Hive::PlanReview::InvalidAction) do
         service.apply(**decision_arguments(record, action: "answer_finding"))
       end

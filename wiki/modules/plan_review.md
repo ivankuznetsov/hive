@@ -479,6 +479,15 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
+`approve-finding` accepts an open gated finding with the reviewer's
+recommended change. `answer-finding` answers an open manual finding, or an open
+gated one with the operator's chosen alternative, including declining the
+recommendation. Decision triage lists alternatives for every gated finding;
+before this, approval was the only action that could clear one, so an operator
+who chose another alternative had no sanctioned path. An answered finding keeps
+`answered` when verification reopens it, and the planner revision prompt
+follows its `answer` exactly.
+
 The reviewer firewall excludes the controller-owned
 `task-projection.checkpoint.json` file. Historical checkpoint diagnostics are
 not a special automatic retry trigger; use the current guarded recovery action

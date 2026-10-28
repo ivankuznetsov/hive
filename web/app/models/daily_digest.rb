@@ -145,11 +145,13 @@ class DailyDigest
       ([ rows.length - counted, "other update", "other updates" ] if rows.length > counted)
     ].compact.map { |count, one, many| "#{count} #{count == 1 ? one : many}" }
     projects = rows.map { |row| row["project"] }.compact.uniq
+    # Attention rows are per question, hold or failed session (keyed by
+    # attention_id), not per task, so they are counted as items.
     attention_count = attention.length
     {
       scope: selected_project.present? ? selected_project : (projects.length > 1 ? "#{projects.length} projects" : projects.first),
       facts: facts,
-      attention: ("#{attention_count} #{attention_count == 1 ? 'task needs' : 'tasks need'} attention" if attention_count.positive?),
+      attention: ("#{attention_count} #{attention_count == 1 ? 'item needs' : 'items need'} attention" if attention_count.positive?),
       gaps: ("#{gaps.length} #{gaps.length == 1 ? 'source' : 'sources'} could not be checked" if gaps.any?),
       incomplete: completeness != "complete"
     }

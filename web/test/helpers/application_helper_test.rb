@@ -51,4 +51,22 @@ class ApplicationHelperTest < ActionView::TestCase
     refute_includes document.fetch(:html), "<script>"
     refute_includes document.fetch(:html), "javascript:"
   end
+  test "task document headings use titles while source anchors and code stay unchanged" do
+    task = Struct.new(:slug, :title).new("task-260708-edec", "CLI <script>alert(1)</script> & API")
+    source = "# task-260708-edec\n\n## Review task-260708-edec\n\n## Two\n\n## Three\n\n## Four\n\n`task-260708-edec`\n\n```sh\necho task-260708-edec\n```\n"
+    original = source.dup
+    document = render_markdown_document(source, task: task)
+    html = Nokogiri::HTML.fragment(document.fetch(:html))
+    assert_equal task.title, html.at_css("h1").text
+    assert_equal task.slug, html.at_css("h1")["id"]
+    assert_equal "Review #{task.title}", document.fetch(:outline).first.fetch(:label)
+    assert_equal "review-task-260708-edec", document.fetch(:outline).first.fetch(:id)
+    assert_equal task.slug, html.at_css("p code").text
+    assert_includes html.at_css("pre code").text, task.slug
+    assert_empty html.css("script")
+    assert_equal original, source
+    assert_includes render_markdown("# #{task.slug}-other", task: task), "#{task.slug}-other"
+    assert_includes render_markdown("# #{task.slug}"), task.slug
+  end
+
 end

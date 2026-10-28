@@ -14,6 +14,11 @@
 <div class="task-header">
   <h1><%= @task.title %></h1>
 </div>
+<div class="task-reference" data-controller="clipboard">
+  <code tabindex="0"><%= @task.slug %></code>
+  <button type="button" data-action="clipboard#copy" aria-label="Copy task reference">Copy</button>
+  <span role="status" aria-live="polite"></span>
+</div>
 <p class="muted"><%= link_to @project.name, grid_path(project: @project.name) %><% if @task["id"] %> · #<%= @task["id"] %><% end %> · <%= @task["workflow"].to_s.humanize %></p>
 
 <%# Live by PUSH, not poll: the page subscribes to the status channel and
@@ -103,7 +108,6 @@
 
 <details class="advanced" data-workspace-disclosure-key="advanced">
   <summary>Advanced</summary>
-  <p class="muted">Task reference: <code><%= @task.slug %></code></p>
   <% unless @task.terminal? || @task_source == "archive" %>
     <p><%= link_to "Close with evidence", new_task_closure_path(@project.name, @task.slug) %></p>
   <% end %>

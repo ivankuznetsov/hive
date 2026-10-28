@@ -14,3 +14,10 @@
 @media (max-width: 600px) { .task-summary { padding: 14px; } .task-state-filters { gap: 6px; } }
 
 .plan-review { min-width: 0; overflow-wrap: anywhere; }
+
+/* A task's machine reference is secondary to its title. */
+.task-reference { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; margin: 8px 0 12px; color: var(--ink-muted); font-size: 12px; }
+.task-reference code { min-width: 0; overflow-wrap: anywhere; user-select: all; font-size: inherit; }
+.task-reference button { flex: 0 0 auto; padding: 4px 9px; min-height: 30px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink-muted); background: var(--bg-sunken); font: inherit; cursor: pointer; }
+.task-reference button:hover { color: var(--ink); border-color: var(--ink-muted); }
+.task-reference [role="status"] { font-size: 12px; }

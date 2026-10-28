@@ -82,6 +82,11 @@ class ApplicationHelperTest < ActionView::TestCase
     running = render_markdown_document("# demo\n\n## Implementation\n\n<!-- AGENT_WORKING -->\n")
     assert_equal "hidden", Nokogiri::HTML.fragment(running.fetch(:html)).at_css("h2#implementation")["hidden"]
 
+    supporting = Nokogiri::HTML.fragment(render_markdown(source))
+    assert_equal "hidden", supporting.at_css("h2")["hidden"], "supporting documents share the suppression"
+    assert_includes supporting.text, "Built and tested."
+    assert_equal original, source
+
     with_content = render_markdown_document("## Implementation\n\nUseful implementation notes.\n\n## Execute Output\n\nDone.")
     assert_nil Nokogiri::HTML.fragment(with_content.fetch(:html)).at_css("h2#implementation")["hidden"]
   end

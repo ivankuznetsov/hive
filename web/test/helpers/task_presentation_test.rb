@@ -52,6 +52,23 @@ class TaskPresentationTest < ActionView::TestCase
     assert_select "*", text: /has not been checked/, count: 0
   end
 
+  test "absent local tracking ref with a known PR is not reported as unpushed" do
+    @task.define_singleton_method(:worktree?) { false }
+    render partial: "tasks/publication", locals: {
+      publication: {
+        "state" => "partial", "publication_state" => "not_observed", "diagnostics" => [],
+        "pull_request" => { "url" => "https://github.com/acme/demo/pull/7", "number" => 7 },
+        "local" => { "repository" => "github.com/acme/demo", "branch" => "feat", "push" => { "state" => "not_observed" } }
+      },
+      refresh_available: false, refresh_notice: nil
+    }
+    assert_select "dt", text: "Push", count: 0
+    assert_no_match(/not pushed/i, rendered)
+    assert_select "a[href=?]", "https://github.com/acme/demo/pull/7", text: "PR #7"
+    assert_select "a[href=?]", "https://github.com/acme/demo/pull/7/files", text: "View diff on GitHub"
+    assert_select "a", text: "View diff", count: 0
+  end
+
   test "repository web url normalizes native and common repository spellings" do
     assert_equal "https://github.com/acme/demo", repository_web_url("github.com/acme/demo")
     assert_equal "https://github.com/acme/demo", repository_web_url("https://github.com/acme/demo.git")

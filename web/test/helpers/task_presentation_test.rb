@@ -27,7 +27,50 @@ class TaskPresentationTest < ActionView::TestCase
       refresh_available: false, refresh_notice: nil
     }
     assert_select ".empty-state", text: /No pull request yet/, count: 0
-    assert_select ".empty-state", text: /Pull request details are unavailable/
+    assert_select ".workspace-state-label", text: "Worktree unavailable"
+    assert_select "details", text: /Git details/, count: 0
+  end
+
+  test "git details link native repository references and omit unknown facts" do
+    @task.define_singleton_method(:worktree?) { false }
+    render partial: "tasks/publication", locals: {
+      publication: {
+        "state" => "partial", "publication_state" => "not_configured", "diagnostics" => [],
+        "local" => {
+          "repository" => "github.com/acme/demo", "branch" => "feat/web-ui", "base_branch" => "main",
+          "head_oid" => "b" * 40, "push" => { "state" => "unavailable" }, "dirty" => nil
+        }
+      },
+      refresh_available: false, refresh_notice: nil
+    }
+    assert_select "a[href=?]", "https://github.com/acme/demo", text: "github.com/acme/demo"
+    assert_select "a[href=?]", "https://github.com/acme/demo/tree/feat/web-ui", text: "feat/web-ui"
+    assert_select "a[href=?]", "https://github.com/acme/demo/commit/#{'b' * 40}", text: "b" * 12
+    assert_select "dt", text: "Push", count: 0
+    assert_select "dt", text: "Working tree", count: 0
+    assert_select "*", text: "Unavailable", count: 0
+    assert_select "*", text: /has not been checked/, count: 0
+  end
+
+  test "repository web url normalizes native and common repository spellings" do
+    assert_equal "https://github.com/acme/demo", repository_web_url("github.com/acme/demo")
+    assert_equal "https://github.com/acme/demo", repository_web_url("https://github.com/acme/demo.git")
+    assert_equal "https://github.com/acme/demo", repository_web_url("git@github.com:acme/demo.git")
+    assert_equal "https://ghe.example.com/acme/demo", repository_web_url("ghe.example.com/acme/demo")
+    assert_nil repository_web_url("github.com/acme/demo/extra")
+    assert_nil repository_web_url("github.com/../demo")
+    assert_nil repository_web_url("javascript:alert(1)")
+    assert_nil repository_web_url("")
+  end
+
+  test "documents use meaningful labels with the file name as secondary text" do
+    render partial: "tasks/supporting_artifacts", locals: { result: { "supporting" => [
+      { "name" => "plan.md", "reference" => "plan.md", "content" => "# Plan" },
+      { "name" => "notes.txt", "reference" => "notes.txt", "content" => "hello" }
+    ] } }
+    assert_select "#workspace-supporting-artifacts-heading", text: "Documents"
+    assert_select "summary", text: /\APlan\s+plan\.md\z/
+    assert_select "summary", text: "notes.txt"
   end
 
   test "stale running status renders an idle dot" do

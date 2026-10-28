@@ -115,13 +115,71 @@ module ApplicationHelper
       anchor = occurrences[base] == 1 ? base : "#{base}-#{occurrences[base]}"
       heading["id"] = anchor
       task_heading_label(heading, task)
+      if empty_implementation_heading?(heading) || repeats_task_title?(heading, task)
+        heading["hidden"] = "hidden"
+        next
+      end
       outline << { id: anchor, label: heading.text.to_s.strip } if heading.name == "h2"
     end
 
     {
       html: fragment.to_html.html_safe,
+      empty: fragment.element_children.none? { |node| node["hidden"].nil? && node.text.strip.present? },
       outline: outline.length >= 4 ? outline.freeze : [].freeze
     }.freeze
+  end
+
+  # execute writes a bare "## Implementation" stub into task.md before any
+  # output exists. Hide it in the rendered view only; the source file stays
+  # byte-for-byte as captured.
+  def empty_implementation_heading?(heading)
+    following = heading.next_element
+    heading.name == "h2" && heading.text.strip == "Implementation" &&
+      (following.nil? || following.name.in?(%w[h1 h2]))
+  end
+
+  # Stage files open with "# <slug>"; once relabelled it only repeats the
+  # page title directly above the panel.
+  def repeats_task_title?(heading, task)
+    heading.name == "h1" && task&.title.present? &&
+      heading.text.strip.in?([ task.title, task.slug ].compact)
+  end
+
+  ARTIFACT_LABELS = {
+    "idea.md" => "Request", "brainstorm.md" => "Questions and decisions",
+    "plan.md" => "Plan", "task.md" => "Implementation", "pr.md" => "Pull request",
+    "artifact.md" => "Evidence", "summary.md" => "Summary"
+  }.freeze
+
+  # Stage files have generic names (task.md); readers want what the document is.
+  def artifact_label(record)
+    name = record.to_h["name"].to_s
+    ARTIFACT_LABELS.fetch(name) do
+      if record.to_h["reference"].to_s.include?("reviews/") || name.include?("review")
+        "Review"
+      else
+        name.presence || "Work product"
+      end
+    end
+  end
+
+  # Publication evidence stores repositories as "host/owner/name"
+  # (github.com/acme/demo, or a GitHub Enterprise host). Tolerate URL and
+  # .git spellings, but link only a well-formed owner/name.
+  def repository_web_url(repository)
+    value = repository.to_s.strip.sub(%r{\Ahttps?://}i, "").sub(/\.git\z/i, "").delete_suffix("/")
+    value = value.sub(/\Agit@([^:]+):/i, '\1/')
+    value = "github.com/#{value}" if value.count("/") == 1
+    host, owner, name = value.split("/", 3)
+    return unless host.to_s.match?(/\A[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?\z/i) &&
+                  "#{owner}/#{name}".match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z}) &&
+                  [ owner, name ].none? { |part| part.match?(/\A\.+\z/) }
+
+    "https://#{host.downcase}/#{owner}/#{name}"
+  end
+
+  def repository_ref_url(repository_url, kind, ref)
+    "#{repository_url}/#{kind}/#{ref.to_s.split("/").map { |part| ERB::Util.url_encode(part) }.join("/")}"
   end
 
   def task_heading_label(heading, task)

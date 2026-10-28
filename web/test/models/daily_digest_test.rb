@@ -58,9 +58,21 @@ class DailyDigestTest < ActiveSupport::TestCase
     assert_equal "alpha", summary.fetch(:scope)
     assert_equal [ "1 pull request merged", "1 task completed or archived", "2 commits recorded",
                    "1 task created", "1 failed agent run", "1 other update" ], summary.fetch(:facts)
-    assert_equal "1 task needs attention", summary.fetch(:attention)
+    assert_equal "1 item needs attention", summary.fetch(:attention)
     assert_equal "1 source could not be checked", summary.fetch(:gaps)
     assert summary.fetch(:incomplete)
+
+    questions = attributes.merge("attention" => [
+      { "attention_id" => "a1", "kind" => "unanswered", "project_id" => "p1", "task_slug" => "a" },
+      { "attention_id" => "a2", "kind" => "unanswered", "project_id" => "p1", "task_slug" => "a" },
+      { "attention_id" => "a3", "kind" => "hold", "project_id" => "p2", "task_slug" => "b" }
+    ])
+    multi = DailyDigest.new(questions, requested_date: "2026-08-30").summary
+    assert_equal "3 items need attention", multi.fetch(:attention),
+                 "attention rows are per question/hold, never reported as distinct tasks"
+    refute_match(/task/, multi.fetch(:attention))
+    assert_equal "1 source could not be checked", multi.fetch(:gaps)
+    assert multi.fetch(:incomplete)
 
     empty = DailyDigest.new({ "reader_status" => "ok", "completeness" => "complete", "items" => [] },
                             requested_date: "2026-08-30").summary

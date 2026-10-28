@@ -30,24 +30,39 @@ class AgentRoles
 
   def self.for_project(project)
     cfg = project.config
+    # Only the kinds Hive::Reviewers.dispatch runs: "agent" (the default when
+    # kind is absent) and "codex_review", whose adapter is always native
+    # Codex. "linter" is rejected by the dispatcher, so it is no role.
     reviewers = Array(cfg.dig("review", "reviewers")).filter_map do |row|
-      row["agent"] if row.is_a?(Hash) && row.fetch("kind", "agent") == "agent"
+      next unless row.is_a?(Hash)
+
+      case (row["kind"] || "agent").to_s
+      when "agent" then row["agent"]
+      when "codex_review" then "codex"
+      end
     end
     new(
       planning: [ cfg.dig("brainstorm", "agent"), cfg.dig("plan", "agent") ],
       execute: cfg.dig("execute", "agent"),
-      reviewers: reviewers, source: :project, project_name: project.name
+      reviewers: reviewers, source: :project, project_name: project.name,
+      default_workflow: cfg["default_workflow"]
     )
   end
 
-  attr_reader :source, :project_name
+  attr_reader :source, :project_name, :default_workflow
 
-  def initialize(planning:, execute:, reviewers:, source:, project_name: nil)
+  # These are the coding workflow's stage keys. A project whose default
+  # workflow is another one (content: research/outline/draft/…) still stores
+  # them, but its default tasks run that workflow's own stage agents.
+  def coding_default? = default_workflow.nil? || default_workflow == "coding"
+
+  def initialize(planning:, execute:, reviewers:, source:, project_name: nil, default_workflow: nil)
     @brainstorm, @plan = planning.map { |agent| agent.presence&.to_s }
     @execute = execute.presence&.to_s
     @reviewers = reviewers.compact.map(&:to_s).uniq
     @source = source
     @project_name = project_name
+    @default_workflow = default_workflow.presence&.to_s
   end
 
   def roles

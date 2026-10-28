@@ -176,7 +176,9 @@ computed by `DailyDigest#summary` from the recorded rows only: observed merges
 (`merge_observed`/`pr_merged`, distinct PRs), tasks completed or archived
 (`stage_transition` rows in the `completion` category), commits recorded,
 tasks created, failed agent runs (`failure` category) and other updates, plus
-attention and source-gap counts. Commits are never called shipped or merged,
+attention and source-gap counts. Attention rows are one per question, hold or
+failed session (keyed by `attention_id`), so they are reported as "items need
+attention", never as a task count. Commits are never called shipped or merged,
 and incomplete records add "some activity may be missing". Saved written
 documents (`document?`) render unchanged. The header keeps a visible
 completeness badge when the record is not complete; lifecycle/content/zone
@@ -753,9 +755,15 @@ Honeycomb projections.
   `git_protocol` prefers it, and ssh pushes dead-end when the daemon has no
   keys or agent).
 - **Agents** — cards use product names (`AgentRoles.display_name`: Claude
-  Code, Codex, Grok, OpenCode, Pi, GitHub CLI) and a compact Workflow roles list
-  (`AgentRoles`). With `?project=NAME` the roles come from that project's
-  loaded config (`brainstorm`/`plan`/`execute` agents and `review.reviewers`);
+  Code, Codex, Grok, OpenCode, Pi, GitHub CLI) and a compact **Coding workflow
+  roles** list (`AgentRoles`; card annotations are prefixed "Coding:"). With
+  `?project=NAME` the roles come from that project's loaded coding config
+  (`brainstorm`/`plan`/`execute` agents and `review.reviewers` of the kinds
+  `Hive::Reviewers.dispatch` runs: `agent`, default when absent, and
+  `codex_review`, which is always native Codex; `linter` is rejected there and
+  never shown). When the project's `default_workflow` is not coding (for
+  example `content`, whose stages run their own agents) the page says these
+  roles apply only to coding-workflow tasks;
   without one they are the labelled `hive init` fresh-project defaults
   (`Init::Prompts`: Claude brainstorm/plan, Codex implement, Claude + Codex
   review) — never `Config::DEFAULTS`, whose execute agent is a legacy

@@ -68,5 +68,4 @@ class ApplicationHelperTest < ActionView::TestCase
     assert_includes render_markdown("# #{task.slug}-other", task: task), "#{task.slug}-other"
     assert_includes render_markdown("# #{task.slug}"), task.slug
   end
-
 end

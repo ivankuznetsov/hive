@@ -38,6 +38,19 @@
       </div>
     <% end %>
 
+    <% summary = @digest.summary %>
+    <% if summary[:facts].any? || summary[:attention] || summary[:gaps] %>
+      <section class="digest-summary" aria-labelledby="digest-summary-heading">
+        <h2 id="digest-summary-heading">Summary</h2>
+        <p>
+          <% if summary[:scope] %><%= summary[:scope] %>: <% end %><%= summary[:facts].presence&.to_sentence || "no recorded changes" %>.
+          <% if summary[:attention] %><strong><%= summary[:attention].upcase_first %>.</strong><% end %>
+          <% if summary[:gaps] %><%= summary[:gaps].upcase_first %>.<% end %>
+        </p>
+        <p class="digest-meta">Counted from the recorded activity below<%= summary[:incomplete] ? "; some activity may be missing" : "" %>.</p>
+      </section>
+    <% end %>
+
     <%= render "digests/attention", digest: @digest %>
 
     <section class="digest-activity" aria-labelledby="digest-activity-heading">

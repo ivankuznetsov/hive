@@ -83,6 +83,9 @@ Rails.application.routes.draw do
     post "plan-review" => "tasks/plan_review_actions#create", as: :task_plan_review_action
   end
 
+  # User-facing names are Projects and Integrations; the original /repos and
+  # /telegram paths (and every form posting to them) keep working.
+  get  "projects" => "repos#index", as: :projects
   get  "repos" => "repos#index", as: :repos
   get  "repos/new" => "repos#new", as: :new_repo
   post "repos" => "repos#create", as: :create_repo
@@ -97,6 +100,7 @@ Rails.application.routes.draw do
        constraints: { agent: /claude|codex|grok|gh/ }
   post "agents/pi_token" => "agents#save_pi_token", as: :agent_pi_token
 
+  get  "integrations" => "telegram#show", as: :integrations
   get  "telegram" => "telegram#show", as: :telegram
   post "telegram" => "telegram#update", as: :update_telegram
   post "telegram/test" => "telegram/test_messages#create", as: :test_telegram

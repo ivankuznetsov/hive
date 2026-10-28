@@ -4,8 +4,8 @@
 
 <% if @projects.empty? %>
   <div class="empty-state">
-    <p>Add a repository before inspecting patrol results.</p>
-    <p><%= link_to "Add a repository", repos_path %></p>
+    <p>Add a project before inspecting patrol results.</p>
+    <p><%= link_to "Add a project", projects_path %></p>
   </div>
 <% else %>
   <%= form_with url: patrol_path, method: :get, class: "repo-form patrol-project-form" do |f| %>

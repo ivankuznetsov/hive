@@ -762,8 +762,8 @@ class KanbanBoardTest < ApplicationSystemTestCase
       }
     JS
 
-    click_link "Repos"
-    assert_current_path repos_path, wait: 10
+    click_link "Projects"
+    assert_current_path projects_path, wait: 10
     assert_no_selector "#status-stream-source", visible: :all
 
     with_status_catch_up_observer do |catch_ups|

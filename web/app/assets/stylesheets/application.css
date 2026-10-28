@@ -1826,3 +1826,17 @@ pre {
 .task-status-line.task-state-attention #workspace-summary-heading { color: var(--danger); font-weight: 600; }
 .task-status-line .task-state-detail { margin: 0; }
 .markdown [hidden] { display: none; }
+.integration-section + .integration-section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+.integration-section h2 .tag { margin-left: 8px; vertical-align: middle; font: 600 .75rem var(--font-sans); }
+.task-outcome-first { margin: 0 0 24px; }
+.digest-summary { margin: 0 0 24px; padding: 16px 20px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.digest-summary h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.digest-summary p { margin: 4px 0; }
+.digest-technical { margin-top: 8px; font-size: .85rem; color: var(--ink-muted); }
+.digest-technical > summary { cursor: pointer; }
+.agent-roles { margin: 0 0 24px; }
+.agent-role-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 8px 0; }
+.agent-role-list div { display: contents; }
+.agent-role-list dt { color: var(--ink-muted); }
+.agent-role-list dd { margin: 0; font-weight: 600; }
+.agent-card-roles { margin: 2px 0 8px; color: var(--ink-muted); font-size: .85rem; }

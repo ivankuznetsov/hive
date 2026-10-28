@@ -33,6 +33,41 @@ class DailyDigestTest < ActiveSupport::TestCase
     assert_equal "record-1", digest.record_reference
   end
 
+  test "summary counts only recorded outcomes and never calls commits merged" do
+    row = ->(kind, category, slug, extra = {}) do
+      { "fact_id" => "fact:#{kind}:#{slug}", "kind" => kind, "category" => category,
+        "project_id" => "p1", "project" => "alpha", "task_slug" => slug }.merge(extra)
+    end
+    attributes = {
+      "reader_status" => "ok", "completeness" => "partial", "content" => "non_empty",
+      "items" => [
+        row.call("merge_observed", "completion", "a", "pr" => { "url" => "https://github.com/acme/alpha/pull/1" }),
+        row.call("merge_observed", "completion", "a2", "pr" => { "url" => "https://github.com/acme/alpha/pull/1" }),
+        row.call("stage_transition", "completion", "b"),
+        row.call("stage_transition", "progress", "c"),
+        row.call("commit_observed", "progress", "c"),
+        row.call("commit_observed", "progress", "d"),
+        row.call("session_finished", "failure", "e"),
+        row.call("task_created", "progress", "f")
+      ],
+      "attention" => [ { "kind" => "unanswered" } ],
+      "gaps" => [ { "gap_id" => "g", "source" => "github" } ]
+    }
+    summary = DailyDigest.new(attributes, requested_date: "2026-08-30").summary
+
+    assert_equal "alpha", summary.fetch(:scope)
+    assert_equal [ "1 pull request merged", "1 task completed or archived", "2 commits recorded",
+                   "1 task created", "1 failed agent run", "1 other update" ], summary.fetch(:facts)
+    assert_equal "1 task needs attention", summary.fetch(:attention)
+    assert_equal "1 source could not be checked", summary.fetch(:gaps)
+    assert summary.fetch(:incomplete)
+
+    empty = DailyDigest.new({ "reader_status" => "ok", "completeness" => "complete", "items" => [] },
+                            requested_date: "2026-08-30").summary
+    assert_empty empty.fetch(:facts)
+    refute empty.fetch(:incomplete)
+  end
+
   test "recursively strips non-public item gap and amendment fields" do
     view = raw_view
     view["projects"][0]["path"] = "/private/project"

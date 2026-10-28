@@ -38,8 +38,12 @@ pre code.hljs{display:block;overflow-x:auto;padding:1em}code.hljs{padding:3px 5p
 .diff-rendered .d2h-file-list { padding: 0; }
 .diff-rendered .d2h-file-list-line { display: flex; gap: 10px; padding: 8px 0; }
 .diff-rendered .d2h-file-name { color: inherit; }
-.diff-rendered .d2h-code-wrapper { overflow-x: auto; }
-.diff-rendered .d2h-file-diff, .diff-rendered .d2h-files-diff { overflow: auto; }
+/* Overflow must stay on the elements diff2html synchronises: each split
+   side (.d2h-file-side-diff) scrolls, and the unified table's .d2h-file-diff.
+   An inner scroller would scroll one side alone and break alignment. */
+.diff-rendered .d2h-file-diff { overflow-x: auto; }
+.diff-rendered .d2h-files-diff { overflow: hidden; }
+.diff-rendered .d2h-file-side-diff { overflow-x: auto; }
 .diff-rendered table { margin: 0; border: 0; border-radius: 0; }
 .diff-rendered td { padding-top: 0; padding-bottom: 0; border-bottom: 0; }
 .diff-rendered .d2h-code-line-ctn { font-family: var(--font-mono); }

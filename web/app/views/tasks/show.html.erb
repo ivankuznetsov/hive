@@ -81,11 +81,7 @@
     <% show_diff = @task.worktree? %>
     <% show_publication = @task["pr_url"].present? || @task.worktree? %>
     <% if show_diff || show_publication %>
-      <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
-        <% if show_diff %>
-          <%= render "tasks/diff_frame",
-                project: @project, task: @task, task_source: @task_source %>
-        <% end %>
+      <div class="workspace-wide" aria-label="Change and publication evidence">
         <% if show_publication %>
           <%= turbo_frame_tag stable_dom_id("task-publication", @project.name, @task.slug),
                 refresh: "morph" do %>

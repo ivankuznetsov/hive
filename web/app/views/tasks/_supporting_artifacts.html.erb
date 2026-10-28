@@ -4,7 +4,7 @@
            aria-labelledby="workspace-supporting-artifacts-heading">
     <div class="workspace-panel-heading">
       <div>
-        <h2 id="workspace-supporting-artifacts-heading">Earlier documents</h2>
+        <h2 id="workspace-supporting-artifacts-heading">Documents</h2>
       </div>
       <span class="workspace-state-label"><%= records.length %></span>
     </div>
@@ -12,7 +12,7 @@
       <% records.each do |record| %>
         <details class="artifact" data-artifact-name="<%= record.fetch("name") %>"
                  data-workspace-disclosure-key="supporting-artifact-<%= record.fetch("reference") %>">
-          <summary><%= record.fetch("name") %><% if record["truncated"] %> <span class="workspace-state-label">Partial</span><% end %></summary>
+          <summary><%= artifact_label(record) %><% if artifact_label(record) != record.fetch("name") %> <span class="artifact-file"><%= record.fetch("name") %></span><% end %><% if record["truncated"] %> <span class="workspace-state-label">Partial</span><% end %></summary>
           <div class="artifact-body">
             <% if record["binary"] %>
               <p class="workspace-empty">Binary content is not rendered.</p>

@@ -6,7 +6,7 @@
     <div>
       <h2 id="publication-heading">Code changes</h2>
       <p class="muted">
-        <span class="status-text workspace-state-label"><%= publication_state.humanize %></span>
+        <span class="status-text workspace-state-label"><%= { "not_configured" => "No pull request", "not_observed" => "Not checked on GitHub", "local_unpushed" => "Not pushed" }.fetch(publication_state) { publication_state.humanize } %></span>
 
       </p>
     </div>
@@ -25,9 +25,11 @@
 
   <% pr = publication["pull_request"].is_a?(Hash) ? publication["pull_request"] : {} %>
   <% if pr["url"].present? %>
-    <h3>Pull request</h3>
-    <p class="workspace-break-anywhere">
+    <p class="workspace-break-anywhere publication-links">
       <%= link_to "PR ##{pr.fetch("number")}", pr.fetch("url"), rel: "noopener noreferrer" %>
+      <% if @task.worktree? %>
+        · <%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), data: { turbo_frame: "_top" } %>
+      <% end %>
       <% if pr["title"].present? %>· <%= pr["title"] %><% end %>
     </p>
     <% if pr["body"].present? %>
@@ -37,7 +39,9 @@
       </details>
     <% end %>
   <% else %>
-    <p class="empty-state">Pull request details are unavailable.</p>
+    <% if @task.worktree? %>
+      <p><%= link_to "View diff", task_diff_path(@project.name, @task.slug, source: @task_source), data: { turbo_frame: "_top" } %></p>
+    <% end %>
   <% end %>
 
   <% remote = publication.dig("remote", "observation") %>
@@ -66,23 +70,36 @@
         </table>
       </div>
     <% end %>
-  <% else %>
+  <% elsif pr["url"].present? %>
     <p class="muted">Pull request status has not been checked.</p>
   <% end %>
 
-  <details class="task-secondary" data-workspace-disclosure-key="publication-technical">
-    <summary>Git details</summary>
   <% local = publication["local"].is_a?(Hash) ? publication["local"] : {} %>
-  <dl class="workspace-facts">
-    <div><dt>Repository</dt><dd><%= local["repository"].presence || "Unavailable" %></dd></div>
-    <div><dt>Branch</dt><dd><%= local["branch"].presence || local["expected_branch"].presence || "Unavailable" %></dd></div>
-    <div><dt>Base</dt><dd><%= local["base_branch"].presence || "Unavailable" %></dd></div>
-    <div><dt>Head</dt><dd><code><%= local["head_oid"]&.first(12) || "Unavailable" %></code></dd></div>
-    <div><dt>Push</dt><dd><%= local.dig("push", "state").to_s.humanize.presence || "Unavailable" %></dd></div>
-    <div><dt>Working tree</dt><dd><%= local["dirty"].nil? ? "Unavailable" : (local["dirty"] ? "Dirty" : "Clean") %></dd></div>
-  </dl>
-
-  </details>
+  <% repository = local["repository"].to_s %>
+  <% repository_url = repository_web_url(repository) %>
+  <% branch = local["branch"].presence || local["expected_branch"].presence %>
+  <% head = local["head_oid"].to_s %>
+  <% push_state = local.dig("push", "state").to_s %>
+  <%# Missing values are omitted rather than shown as "Unavailable"; the
+      reasons stay visible in Publication diagnostics below. %>
+  <% facts = [
+       [ "Repository", repository.presence && (repository_url ? link_to(repository, repository_url, rel: "noopener noreferrer") : repository) ],
+       [ "Branch", branch && (repository_url ? link_to(branch, repository_ref_url(repository_url, "tree", branch), rel: "noopener noreferrer") : branch) ],
+       [ "Base", local["base_branch"].presence && (repository_url ? link_to(local["base_branch"], repository_ref_url(repository_url, "tree", local["base_branch"]), rel: "noopener noreferrer") : local["base_branch"]) ],
+       [ "Head", head.presence && (repository_url && head.match?(/\A[0-9a-f]{7,40}\z/i) ? link_to(head.first(12), "#{repository_url}/commit/#{head}", rel: "noopener noreferrer") : tag.code(head.first(12))) ],
+       [ "Push", { "pushed" => "Pushed", "unpushed" => "Local commits not pushed", "behind" => "Behind remote", "divergent" => "Diverged from remote", "not_observed" => "Not pushed" }[push_state] ],
+       [ "Working tree", local["dirty"].nil? ? nil : (local["dirty"] ? "Uncommitted changes" : "Clean") ]
+     ].select { |_label, value| value.present? } %>
+  <% if facts.any? %>
+    <details class="task-secondary" data-workspace-disclosure-key="publication-technical">
+      <summary>Git details</summary>
+      <dl class="workspace-facts">
+        <% facts.each do |label, value| %>
+          <div><dt><%= label %></dt><dd><%= value %></dd></div>
+        <% end %>
+      </dl>
+    </details>
+  <% end %>
 
   <% if publication.fetch("diagnostics").any? %>
     <details class="workspace-diagnostics" data-workspace-disclosure-key="publication-diagnostics">

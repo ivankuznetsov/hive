@@ -402,6 +402,20 @@ module Hive
         )
       end
 
+      # Audit view of payload_references for `hive runtime payloads`. It uses
+      # the same inspection policy as status: readonly (immutable only on a
+      # confirmed read-only mount), no WAL request, migration, or sidecar
+      # creation. Missing storage returns nil.
+      def payload_references_snapshot
+        ProcessGuard.checkout do
+          diagnosis = diagnostics_uncoordinated
+          return if diagnosis.status == :missing
+
+          raise_for_diagnosis!(diagnosis) unless diagnosis.ok?
+          inspect_database { |database| database[:payload_references].order(:payload_id).all }
+        end
+      end
+
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
       def disconnect
         connection = @connection

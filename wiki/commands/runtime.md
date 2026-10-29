@@ -1,9 +1,9 @@
 ---
 title: hive runtime
 type: command
-source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb
-updated: 2026-10-03
-tags: [command, sqlite, status, read-only]
+source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
+updated: 2026-10-29
+tags: [command, sqlite, status, read-only, audit]
 ---
 
 `hive runtime status [--json]` validates the current SQLite database read-only.
@@ -45,6 +45,41 @@ than a successful status document. JSON storage failures use the
 `hive-runtime-maintenance.v1` fields `runtime_code` and `next_action`. Because
 runtime status shares this policy, it should not be recommended as a recovery
 step for a path where the same inspection has already failed.
+
+## Audit listings: `projects` and `payloads`
+
+Two more read-only actions exist for external audits. The consumer is
+hivedev's read-only workspace audit, which mounts the state root read-only
+after booting Hive in a container. `hive status --json` refuses that root and
+`hive status --operational --json` lists only tasks.
+
+- `hive runtime projects [--json]` reads the global registry
+  (`Hive::Config.registered_projects`, `HIVE_HOME/config.yml` or the XDG
+  config home) without loading project config or writing. Result:
+  `registry_path` and `projects[]` with `name`, `project_id`, `path`,
+  `real_path` (null unless the registry recorded one) and the resolved
+  `hive_state_path`. Rows the loader treats as invalid are omitted. The
+  registry does not store `worktree_root`, which lives in project config.
+  It is not reported. A missing registry yields `projects: []`. An
+  unreadable one fails with `runtime_code: "config"` and a registry
+  `next_action`.
+- `hive runtime payloads [--json]` reads every `payload_references` row
+  through `Database#payload_references_snapshot`. That method uses the same
+  diagnostics and inspection policy as status: readonly, immutable only on a
+  confirmed read-only mount, and no WAL, migration or sidecar creation.
+  Result: `phase` (`active`/`absent`), `payload_root`
+  (`Hive::Paths.runtime_payload_root`) and `payloads[]` with `payload_id`,
+  `kind`, `state`, `task_id`, `attempt_id`, `relative_path`, `sha256`,
+  `bytes` and `path`. `path` is `File.expand_path(relative_path,
+  payload_root)`. It is reported, not validated, so the auditor can do its
+  own containment check. Missing storage is `phase: "absent"` with
+  `ok: true`, exit 0 and an empty list. Corrupt, unsupported or
+  unconfirmed-read-only storage fails with the usual runtime error envelope.
+
+Both actions return `ok: true` and are listed in
+`ActivationGate.strict_no_write_route?`, so process bootstrap does no
+scheduler reconciliation or other writes for them. The schema change is
+additive: new `ProjectsPayload`/`PayloadsPayload` branches, still v1.
 
 `Installation.setup` serializes explicit setup, builds a complete current database
 privately and publishes without replacing an existing destination. Repeated setup

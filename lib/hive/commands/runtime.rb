@@ -1,13 +1,16 @@
 require "json"
+require "hive/config"
 require "hive/paths"
 require "hive/runtime_control_plane/installation"
 require "hive/schemas"
 
 module Hive
   module Commands
-    # Read-only diagnosis of the current runtime database.
+    # Read-only diagnosis of the current runtime database, plus read-only
+    # listings of registered projects and runtime payload references for
+    # external audits (e.g. a container's read-only workspace audit).
     class Runtime
-      ACTIONS = %w[status].freeze
+      ACTIONS = %w[status projects payloads].freeze
 
       def initialize(action, json: false, output: $stdout,
                      state_home: Hive::Paths.state_home)
@@ -19,10 +22,14 @@ module Hive
 
       def call
         unless ACTIONS.include?(@action)
-          raise Hive::UsageError, "hive runtime: expected #{ACTIONS.join(' or ')}"
+          raise Hive::UsageError, "hive runtime: expected one of #{ACTIONS.join(', ')}"
         end
-        result = Hive::RuntimeControlPlane::Installation.status(state_home: @state_home)
-        healthy = result.fetch("phase") == "active"
+        result = case @action
+        when "status" then Hive::RuntimeControlPlane::Installation.status(state_home: @state_home)
+        when "projects" then projects
+        else Hive::RuntimeControlPlane::Installation.payloads(state_home: @state_home)
+        end
+        healthy = @action != "status" || result.fetch("phase") == "active"
         envelope = {
           "schema" => "hive-runtime-maintenance",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-runtime-maintenance"),
@@ -37,6 +44,17 @@ module Hive
 
       private
 
+      # Registry rows only; project config is not loaded, so a broken project
+      # cannot hide the paths an auditor needs to check.
+      def projects
+        {
+          "registry_path" => Hive::Config.global_config_path,
+          "projects" => Hive::Config.registered_projects.map do |project|
+            project.slice("name", "project_id", "path", "real_path", "hive_state_path")
+          end
+        }
+      end
+
       def wire(result)
         RuntimeControlPlane::Codec.normalize(result.respond_to?(:to_h) ? result.to_h : result)
       end
@@ -44,22 +62,31 @@ module Hive
       def emit_json_error(error)
         next_action = error.respond_to?(:action) ? error.action : nil
         if !error.is_a?(Hive::UsageError) && next_action.to_s.empty?
-          next_action = "repair the reported runtime database, then run hive runtime status"
+          target = @action == "projects" ? "global Hive registry" : "reported runtime database"
+          next_action = "repair the #{target}, then run hive runtime #{@action}"
         end
         @output.puts(JSON.generate(Hive::Schemas::ErrorEnvelope.build(
           schema: "hive-runtime-maintenance", error: error,
           error_kind: error.is_a?(Hive::UsageError) ? "usage" : "runtime",
           extras: {
             "action" => @action,
-            "runtime_code" => error.respond_to?(:code) ? error.code.to_s : "usage",
+            "runtime_code" => runtime_code(error),
             "next_action" => next_action,
             "details" => error.respond_to?(:details) ? RuntimeControlPlane::Codec.normalize(error.details) : {}
           }
         )))
       end
 
+      def runtime_code(error)
+        return error.code.to_s if error.respond_to?(:code)
+
+        error.is_a?(Hive::ConfigError) ? "config" : "usage"
+      end
+
       def render(result)
-        result.each { |key, value| @output.puts "#{key}: #{value.is_a?(Hash) ? JSON.generate(value) : value}" }
+        result.each do |key, value|
+          @output.puts "#{key}: #{value.is_a?(Hash) || value.is_a?(Array) ? JSON.generate(value) : value}"
+        end
       end
     end
   end

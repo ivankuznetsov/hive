@@ -4,6 +4,8 @@
   "title": "hive runtime maintenance output (v1)",
   "oneOf": [
     { "$ref": "#/$defs/StatusPayload" },
+    { "$ref": "#/$defs/ProjectsPayload" },
+    { "$ref": "#/$defs/PayloadsPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
@@ -21,6 +23,82 @@
       "if": { "properties": { "result": { "properties": { "phase": { "const": "active" } } } } },
       "then": { "properties": { "ok": { "const": true } } },
       "else": { "properties": { "ok": { "const": false } } }
+    },
+    "ProjectsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "result"],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "const": "projects" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["registry_path", "projects"],
+          "properties": {
+            "registry_path": { "type": "string" },
+            "projects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "project_id", "path", "real_path", "hive_state_path"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "project_id": { "type": "string" },
+                  "path": { "type": "string" },
+                  "real_path": { "type": ["string", "null"] },
+                  "hive_state_path": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "PayloadsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "result"],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "const": "payloads" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase", "payload_root", "payloads"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["absent", "active"] },
+            "payload_root": { "type": "string" },
+            "payloads": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "payload_id", "kind", "state", "task_id", "attempt_id",
+                  "relative_path", "path", "sha256", "bytes"
+                ],
+                "properties": {
+                  "payload_id": { "type": "string" },
+                  "kind": { "type": "string" },
+                  "state": { "type": "string", "enum": ["open", "sealed", "releasable"] },
+                  "task_id": { "type": ["string", "null"] },
+                  "attempt_id": { "type": ["string", "null"] },
+                  "relative_path": { "type": "string" },
+                  "path": { "type": "string" },
+                  "sha256": { "type": ["string", "null"] },
+                  "bytes": { "type": ["integer", "null"], "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
     },
     "ErrorPayload": {
       "type": "object",

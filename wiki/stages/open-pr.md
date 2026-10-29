@@ -64,8 +64,16 @@ The durable controller state stores identities and digests, never raw title,
 body, or diff bytes. A rework fast-forward keeps the first observed publication
 state as its immutable ownership anchor. Its expected-remote-OID push is safe to
 reconcile after a lost response, while a changed/ambiguous PR, non-fast-forward
-head, rewritten hosted history, remote mismatch, or terminal PR missing the new
+head, rewritten hosted history, remote mismatch, or merged PR missing the new
 revision fails closed.
+
+A controller-owned PR closed unmerged before the new revision was hosted (for
+example an owner closing a placeholder PR, then the task re-running) gets a
+successor publication. The controller records the closed PR as
+`superseded_pr`, leases the push to the branch's last published head (or to an
+absent branch), requires the new head to contain it, and creates a new PR.
+A branch that moved after the last publication still fails closed with
+`revision_hosted_terminal`.
 
 The pointer's creation OID remains provenance. The actual change range starts
 at the merge-base of the intended PR base branch and the exact candidate HEAD;
@@ -84,7 +92,8 @@ Revalidation still checks the exact candidate and change range before effects.
 
 - OPEN or DRAFT exact PR: write canonical `pr.md` and `pr_opened_draft`.
 - MERGED exact PR: write `pr.md`, `summary.md`, and downstream terminal markers.
-- CLOSED exact PR: fail closed.
+- CLOSED exact PR at the current head: fail closed. Closed before the current
+  head was hosted: publish a successor PR (see above).
 - Conflict, secret, ambiguous inventory, or unknown remote outcome: write an
   attributed `github_publication_*` error and leave the task retryable.
 

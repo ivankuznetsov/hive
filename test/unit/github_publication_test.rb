@@ -486,6 +486,62 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  # hivedev C4: its owner closed the PR unmerged; the re-run task reached
+  # open-pr with new commits and was blocked revision_hosted_terminal forever.
+  def test_new_commits_after_the_owned_pr_closed_unmerged_publish_a_successor_pr
+    with_published_revision do |repo, remote, original, revised, controller, github|
+      github.records.first["state"] = "CLOSED"
+
+      result = controller.publish!(revised, revalidate: ->(*) { true })
+
+      assert_equal 2, github.creates
+      assert_equal 42, result.fetch("number")
+      assert_equal revised.head_oid, result.fetch("head_oid")
+      assert_equal revised.head_oid, remote_oid(remote, revised.branch)
+      state = JSON.parse(File.read(state_path(repo)))
+      assert_equal "pr_observed", state.fetch("phase")
+      assert_equal original.head_oid, state.fetch("expected_remote_oid")
+      assert_equal({ "number" => 41, "url" => "https://github.com/acme/demo/pull/41",
+                     "published_head_oid" => original.head_oid }, state.fetch("superseded_pr"))
+
+      replay = controller.publish!(revised, revalidate: ->(*) { true })
+      assert_equal 42, replay.fetch("number")
+      assert_equal 2, github.creates
+    end
+  end
+
+  def test_successor_pr_recreates_a_deleted_branch_but_never_overwrites_a_moved_one
+    with_published_revision do |repo, remote, _original, revised, controller, github|
+      github.records.first["state"] = "CLOSED"
+      capture("git", "--git-dir", remote, "update-ref", "-d", "refs/heads/#{revised.branch}")
+
+      result = controller.publish!(revised, revalidate: ->(*) { true })
+
+      assert_equal 42, result.fetch("number")
+      assert_equal revised.head_oid, remote_oid(remote, revised.branch)
+      assert_nil JSON.parse(File.read(state_path(repo))).fetch("expected_remote_oid")
+    end
+
+    with_published_revision do |repo, remote, _original, revised, controller, github|
+      github.records.first["state"] = "CLOSED"
+      foreign = capture("git", "-C", repo, "commit-tree", "#{revised.head_oid}^{tree}", "-m", "foreign").strip
+      capture("git", "-C", repo, "push", "--force", "origin", "#{foreign}:refs/heads/#{revised.branch}")
+
+      assert_revision_error("revision_hosted_terminal", controller, revised)
+      assert_equal foreign, remote_oid(remote, revised.branch)
+      assert_equal 1, github.creates
+    end
+
+    with_published_revision do |_repo, _remote, _original, revised, controller, github|
+      github.records.first["state"] = "CLOSED"
+      controller.instance_variable_set(
+        :@git, sequence_git([ remote_observation(github.records.first.fetch("head_oid")) ], ancestor: false)
+      )
+      assert_revision_error("revision_non_fast_forward", controller, revised)
+      assert_equal 1, github.creates
+    end
+  end
+
   def test_owned_pr_survives_edits_to_its_title_and_body
     with_published_revision do |_repo, _remote, _original, revised, controller, github|
       github.records.first.merge!("title" => "Edited title", "body" => "Edited body without marker")

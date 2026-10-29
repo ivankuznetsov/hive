@@ -474,6 +474,8 @@ module Hive
         hosted_state = hosted_state(record)
         if %w[closed merged].include?(hosted_state)
           unless record.fetch("head_oid") == request.head_oid
+            return supersede_closed_pr(request, state, record, revalidate) if hosted_state == "closed"
+
             blocked!(
               "revision_hosted_terminal",
               "pull request became terminal before the publication revision was hosted"
@@ -541,6 +543,41 @@ module Hive
 
         revalidate!(revalidate, :final)
         revision_observation(state, request, record, head_oid: request.head_oid)
+      end
+
+      # hivedev C4: its owner closed the PR unmerged, and the re-run task
+      # reached open-pr again with new commits. A closed PR cannot host them,
+      # so blocking parked the task while the healer retried it forever.
+      # Start a successor publication on the same branch and create a new PR.
+      # The push stays leased: the branch must be absent or still at the last
+      # head this controller published, and the new head must contain it.
+      def supersede_closed_pr(request, state, record, revalidate)
+        published = state.fetch("published_head_oid", state.fetch("pr").fetch("head_oid"))
+        remote_oid = observe(request).fetch("oid")
+        unless remote_oid.nil? || remote_oid == published
+          blocked!(
+            "revision_hosted_terminal",
+            "pull request is closed and its branch moved after the last publication"
+          )
+        end
+        if remote_oid && !revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!(
+            "revision_non_fast_forward",
+            "local publication revision does not contain the closed pull-request branch"
+          )
+        end
+        successor = write_state(identity(request).merge(
+          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
+          "phase" => "prepared", "expected_remote_oid" => remote_oid,
+          "push_attempted_at" => nil, "push_observation" => nil,
+          "create_attempts" => 0, "create_attempted_at" => nil, "pr" => nil,
+          "superseded_pr" => {
+            "number" => record.fetch("number"), "url" => record.fetch("url"),
+            "published_head_oid" => published
+          },
+          "updated_at" => timestamp
+        ))
+        reconcile(request, successor, revalidate)
       end
 
       def observed_publication_revision?(state, request)
@@ -971,7 +1008,8 @@ module Hive
       end
 
       def validate_state(state)
-        unless state.is_a?(Hash) && (state.keys - %w[published_head_oid pending_rewrite]).sort == STATE_FIELDS.sort &&
+        unless state.is_a?(Hash) &&
+               (state.keys - %w[published_head_oid pending_rewrite superseded_pr]).sort == STATE_FIELDS.sort &&
                state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                PHASES.include?(state["phase"]) && state["publication_id"].to_s.match?(PUBLICATION_ID) &&
                state["creation_base_oid"].to_s.match?(OID) &&
@@ -981,7 +1019,7 @@ module Hive
                state["body_digest"].to_s.match?(DIGEST) &&
                state["marker_digest"].to_s.match?(DIGEST) &&
                [ true, false ].include?(state["draft"]) &&
-               state["expected_remote_oid"].nil? &&
+               valid_expected_remote_oid?(state) &&
                state["create_attempts"].is_a?(Integer) && state["create_attempts"] >= 0
           blocked!("state_corrupt", "publication state contract is invalid")
         end
@@ -1007,6 +1045,20 @@ module Hive
         state
       rescue ArgumentError, KeyError, TypeError
         blocked!("state_corrupt", "publication state contract is invalid")
+      end
+
+      # V1 pushes only to an absent branch, except that a successor to a
+      # closed PR may lease the branch at the head it last published there.
+      def valid_expected_remote_oid?(state)
+        expected = state["expected_remote_oid"]
+        superseded = state["superseded_pr"]
+        unless superseded.nil?
+          return false unless superseded.is_a?(Hash) &&
+                              superseded.keys.sort == %w[number published_head_oid url] &&
+                              superseded["number"].is_a?(Integer) && superseded["url"].is_a?(String) &&
+                              superseded["published_head_oid"].to_s.match?(OID)
+        end
+        expected.nil? || (!superseded.nil? && expected == superseded["published_head_oid"])
       end
 
       def validate_state_relations!(state)

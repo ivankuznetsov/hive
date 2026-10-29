@@ -1069,7 +1069,11 @@ module Hive
       def reopen_verification_finding(existing, observed)
         lifecycle = case existing.classification
         when "safe_auto" then "open"
-        when "gated_auto" then existing["decision_id"] ? "approved" : "open"
+        when "gated_auto"
+          if existing["answer"] then "answered"
+          elsif existing["decision_id"] then "approved"
+          else "open"
+          end
         when "manual" then existing["answer"] ? "answered" : "open"
         else existing.lifecycle
         end

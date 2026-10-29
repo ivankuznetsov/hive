@@ -287,8 +287,11 @@ module Hive
               "lifecycle" => "approved", "decision_id" => decision.decision_id
             )
           else
-            unless finding.classification == "manual" && finding.blocking?
-              raise ConflictingDecision, "finding is not an open manual finding"
+            # Decision triage gives every gated finding operator-facing
+            # alternatives. Approval takes the reviewer's recommendation; an
+            # answer selects another alternative or declines it.
+            unless %w[manual gated_auto].include?(finding.classification) && finding.blocking?
+              raise ConflictingDecision, "finding is not an open manual or gated finding"
             end
             finding.to_h.merge(
               "lifecycle" => "answered", "decision_id" => decision.decision_id,

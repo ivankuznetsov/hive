@@ -529,7 +529,18 @@ module Hive
       ).call
     end
 
-    desc "runtime ACTION", "Inspect the current runtime database"
+    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads)"
+    long_desc <<~DESC
+      Actions (all read-only; nothing is created, migrated, or repaired):
+        status      Validate the current runtime database (exit 1 when absent).
+        projects    List registered projects with their path, real_path and
+                    hive_state_path from the global registry.
+        payloads    List runtime payload references (kind, state, task/attempt
+                    id, relative_path and the absolute path resolved under the
+                    payload root). Missing storage reports phase "absent".
+
+      --json emits the hive-runtime-maintenance envelope.
+    DESC
     def runtime(action = "status")
       require "hive/commands/runtime"
       exit Hive::Commands::Runtime.new(action, json: options[:json]).call

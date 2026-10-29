@@ -37,6 +37,7 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
       [
         %w[runtime], %w[runtime --json], %w[runtime status],
         %w[runtime status --json], %w[runtime --json status], %w[--json runtime status],
+        %w[runtime projects --json], %w[runtime --json payloads], %w[runtime payloads],
         %w[daemon status], %w[daemon quiesce], %w[daemon resume],
         %w[daemon --timeout 2 quiesce],
         %w[daemon quiesce --json], %w[--json daemon resume],

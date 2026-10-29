@@ -78,6 +78,22 @@ module Hive
         database&.disconnect
       end
 
+      # Payload paths resolve under the payload root exactly as the store would
+      # join them; they are reported, not validated, so an auditor can check
+      # containment itself.
+      def payloads(state_home: Hive::Paths.state_home)
+        database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
+        rows = database.payload_references_snapshot
+        root = Hive::Paths.runtime_payload_root(state_home)
+        { "phase" => rows ? "active" : "absent", "payload_root" => root,
+          "payloads" => Array(rows).map do |row|
+            row.slice(:payload_id, :kind, :state, :task_id, :attempt_id, :relative_path, :sha256, :bytes)
+               .transform_keys(&:to_s).merge("path" => File.expand_path(row.fetch(:relative_path), root))
+          end }
+      ensure
+        database&.disconnect
+      end
+
       def lifecycle_status(row)
         return unless row
 

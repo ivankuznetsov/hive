@@ -52,7 +52,7 @@ module Hive
             subcommand_after(words, route, value_options: %w[--timeout])
           )
         end
-        return [ nil, "status" ].include?(subcommand_after(words, route)) if route == "runtime"
+        return [ nil, "status", "projects", "payloads" ].include?(subcommand_after(words, route)) if route == "runtime"
 
         if route == "init"
           return words.drop(words.index(route) + 1).any? do |argument|

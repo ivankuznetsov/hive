@@ -288,6 +288,22 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  # hivedev's bin/ci posts a `signoff` commit status for a commit already on
+  # the remote. Review runs it before publishing the new head, so the status
+  # exists only on the old head and must not hold the new head pending.
+  def test_runner_does_not_wait_for_baseline_commit_statuses_on_a_new_head
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      signoff = { "__typename" => "StatusContext", "context" => "signoff", "state" => "FAILURE", "targetUrl" => "" }
+      legacy = { "context" => "legacy", "state" => "SUCCESS", "targetUrl" => "" }
+      gh.rollups = [ rollup(head: head, checks: [ signoff, legacy, check(name: "unit") ]) ] +
+                   Array.new(6) { rollup(head: head, checks: [ check(name: "unit") ]) }
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 0, result.exit_code, result.respond_to?(:reason) ? result.reason : nil
+    end
+  end
+
   def test_runner_reports_an_exact_head_failure_at_the_settlement_deadline
     with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
       gh.rollups = [

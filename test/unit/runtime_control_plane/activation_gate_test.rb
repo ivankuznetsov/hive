@@ -32,6 +32,21 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
     end
   end
 
+  def test_default_status_policy_consumes_separate_json_boolean_values
+    gate = Hive::RuntimeControlPlane::ActivationGate
+    %w[--json --no-json --skip-json].each do |option|
+      %w[true TRUE t T false FALSE f F].each do |value|
+        argv = [ "status", option, value, "--project", "demo" ]
+        assert gate.default_status_route?(argv), argv.inspect
+      end
+    end
+    [ %w[status --json bogus], %w[status --json True],
+      %w[status --json=true false], %w[status --json true extra],
+      %w[status --json true --operational], %w[status --json true --write] ].each do |argv|
+      refute gate.default_status_route?(argv), argv.inspect
+    end
+  end
+
   def test_fresh_commands_remain_available_without_creating_storage
     with_tmp_dir do |root|
       %w[setup help init].each do |route|

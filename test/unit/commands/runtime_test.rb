@@ -124,9 +124,64 @@ class RuntimeCommandTest < Minitest::Test
       assert_equal [ "demo", root, nil, File.join(root, "state") ],
                    project.values_at("name", "path", "real_path", "hive_state_path")
       assert_kind_of String, project.fetch("project_id")
+      assert_nil project.fetch("worktree_root")
+      assert_match(/config\.yml at .* is missing/, project.fetch("worktree_root_error"))
+      refute_path_exists root
       text = StringIO.new
       assert_equal 0, Hive::Commands::Runtime.new("projects", output: text).call
       assert_match(/^projects: \[\{.*"name":"demo"/, text.string)
+    end
+  end
+
+  def test_projects_reports_each_effective_worktree_root_without_writing_project_state
+    with_tmp_global_config(runtime: false) do |home|
+      workspace = File.join(home, "workspace")
+      configs = {
+        "default" => "project_name: default\n",
+        "absolute" => { "worktree_root" => File.join(home, "trees") }.to_yaml,
+        "relative" => { "worktree_root" => "../rel-trees" }.to_yaml,
+        "invalid" => "worktree_root: [",
+        "typed" => { "worktree_root" => 5 }.to_yaml,
+        "tilde" => { "worktree_root" => "~hive-no-such-user-261030/trees" }.to_yaml
+      }
+      configs.each do |name, body|
+        FileUtils.mkdir_p(File.join(workspace, name, ".hive-state"))
+        File.write(File.join(workspace, name, ".hive-state", "config.yml"), body)
+      end
+      File.write(Hive::Config.global_config_path, {
+        "registered_projects" => configs.keys.map { |name| { "name" => name, "path" => File.join(workspace, name) } }
+      }.to_yaml)
+      before = Dir.glob(File.join(workspace, "**", "*"), File::FNM_DOTMATCH).sort
+      output = StringIO.new
+
+      Dir.chdir(File.join(workspace, "relative")) do
+        assert_equal 0, Hive::Commands::Runtime.new("projects", json: true, output: output).call
+      end
+
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      rows = payload.dig("result", "projects").to_h { |row| [ row.fetch("name"), row ] }
+      assert_equal File.join(ENV.fetch("HIVE_WORKTREE_BASE"), "default.worktrees"), rows.dig("default", "worktree_root")
+      assert_equal File.join(home, "trees"), rows.dig("absolute", "worktree_root")
+      # Hive expands a relative override against the current directory.
+      assert_equal File.join(workspace, "rel-trees"), rows.dig("relative", "worktree_root")
+      %w[default absolute relative].each { |name| refute rows.fetch(name).key?("worktree_root_error"), name }
+      {
+        "invalid" => /not valid YAML/, "typed" => /worktree_root .* must be a string/,
+        "tilde" => /hive-no-such-user-261030/
+      }.each do |name, reason|
+        assert_nil rows.dig(name, "worktree_root"), name
+        assert_match reason, rows.dig(name, "worktree_root_error"), name
+      end
+      assert_equal before, Dir.glob(File.join(workspace, "**", "*"), File::FNM_DOTMATCH).sort
+
+      # The schema pairs a null root with its reason, and a root with none.
+      [ [ "invalid", ->(row) { row.delete("worktree_root_error") } ],
+        [ "default", ->(row) { row["worktree_root_error"] = "unexpected" } ] ].each do |name, mutate|
+        broken = JSON.parse(output.string)
+        mutate.call(broken.dig("result", "projects").find { |row| row["name"] == name })
+        refute_empty runtime_schema.validate(broken).to_a, name
+      end
     end
   end
 

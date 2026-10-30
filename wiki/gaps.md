@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-16
+updated: 2026-10-30
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1796,6 +1796,20 @@ unrelated slugs. Full admission scans retain that broader ambiguity check.
   host capability; it does not treat unrelated command or storage failures as a
   valid degraded outcome. This documents the exclusion and does not claim that
   a degraded run was observed.
+
+## Read-only `worktree status` and `runtime projects` worktree roots (2026-10-30)
+
+- The real-mount Docker gate (`test/integration/status_read_only_test.rb`)
+  still covers only `runtime status` and `status --operational`. `worktree
+  status` under inspection is covered by a unit test with a stubbed mount
+  confirmation and a manual user-namespace read-only bind-mount run, not by
+  the Docker gate.
+- `hive runtime projects` reports a relative `worktree_root` override
+  expanded against the caller's current directory because that is what
+  `Hive::Worktree.canonical_root` does everywhere; whether Hive should
+  instead resolve relative overrides against the project root is undecided.
+- `worktree_root` is read from raw project config without full validation, so
+  a project whose config Hive would otherwise reject still reports a root.
 
 ## Multi-dependency review verification (2026-10-15)
 

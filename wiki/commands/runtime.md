@@ -1,8 +1,8 @@
 ---
 title: hive runtime
 type: command
-source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
-updated: 2026-10-29
+source: lib/hive/commands/runtime.rb, lib/hive/worktree.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
+updated: 2026-10-30
 tags: [command, sqlite, status, read-only, audit]
 ---
 
@@ -57,12 +57,23 @@ after booting Hive in a container. `hive status --json` refuses that root and
   (`Hive::Config.registered_projects`, `HIVE_HOME/config.yml` or the XDG
   config home) without loading project config or writing. Result:
   `registry_path` and `projects[]` with `name`, `project_id`, `path`,
-  `real_path` (null unless the registry recorded one) and the resolved
-  `hive_state_path`. Rows the loader treats as invalid are omitted. The
-  registry does not store `worktree_root`, which lives in project config.
-  It is not reported. A missing registry yields `projects: []`. An
-  unreadable one fails with `runtime_code: "config"` and a registry
+  `real_path` (null unless the registry recorded one), the resolved
+  `hive_state_path`, and the effective `worktree_root`. Rows the loader
+  treats as invalid are omitted. A missing registry yields `projects: []`.
+  An unreadable one fails with `runtime_code: "config"` and a registry
   `next_action`.
+- `worktree_root` (added 2026-10-30) comes from a raw read of
+  `<path>/.hive-state/config.yml` (`Config.read_project_config`: no
+  validation, workflow loading or managed-store reconciliation) resolved
+  through `Hive::Worktree.canonical_root`, the resolver `hive worktree` uses:
+  the config's `worktree_root`, else `<HIVE_WORKTREE_BASE or
+  ~/Dev>/<basename(path)>.worktrees`, then `File.expand_path`. A relative
+  override therefore expands against the caller's current directory, exactly
+  as Hive itself does. A missing, unreadable or invalid-YAML config.yml, a
+  non-string `worktree_root`, or an unexpandable value (unknown `~user`)
+  yields `worktree_root: null` plus a short `worktree_root_error` for that
+  project only; the listing still succeeds. Auditors should treat a null root
+  as incomplete evidence.
 - `hive runtime payloads [--json]` reads every `payload_references` row
   through `Database#payload_references_snapshot`. That method uses the same
   diagnostics and inspection policy as status: readonly, immutable only on a
@@ -79,7 +90,9 @@ after booting Hive in a container. `hive status --json` refuses that root and
 Both actions return `ok: true` and are listed in
 `ActivationGate.strict_no_write_route?`, so process bootstrap does no
 scheduler reconciliation or other writes for them. The schema change is
-additive: new `ProjectsPayload`/`PayloadsPayload` branches, still v1.
+additive: new `ProjectsPayload`/`PayloadsPayload` branches, still v1. The
+optional per-project `worktree_root`/`worktree_root_error` pair is also
+additive; the schema requires the error exactly when the root is null.
 
 `Installation.setup` serializes explicit setup, builds a complete current database
 privately and publishes without replacing an existing destination. Repeated setup

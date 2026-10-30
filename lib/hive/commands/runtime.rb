@@ -3,6 +3,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/runtime_control_plane/installation"
 require "hive/schemas"
+require "hive/worktree"
 
 module Hive
   module Commands
@@ -44,15 +45,33 @@ module Hive
 
       private
 
-      # Registry rows only; project config is not loaded, so a broken project
-      # cannot hide the paths an auditor needs to check.
+      # Registry rows plus each project's effective worktree root. Project
+      # config is not loaded (no validation, workflow loading, or managed-store
+      # reconciliation); only its raw `worktree_root` is read, so a broken
+      # project cannot hide the paths an auditor needs to check.
       def projects
         {
           "registry_path" => Hive::Config.global_config_path,
           "projects" => Hive::Config.registered_projects.map do |project|
             project.slice("name", "project_id", "path", "real_path", "hive_state_path")
+                   .merge(worktree_root(project.fetch("path")))
           end
         }
+      end
+
+      # Resolved through Worktree.canonical_root, the resolver Hive's worktree
+      # commands use (a relative value expands against the current directory,
+      # exactly as there). Per-project failures are reported, not raised.
+      def worktree_root(project_root)
+        config_path, data = Hive::Config.read_project_config(project_root)
+        raise Hive::ConfigError, "config.yml at #{config_path} is missing" unless File.file?(config_path)
+
+        value = data["worktree_root"]
+        raise Hive::ConfigError, "worktree_root in #{config_path} must be a string" unless value.nil? || value.is_a?(String)
+
+        { "worktree_root" => Hive::Worktree.canonical_root(project_root, config: data) }
+      rescue Hive::ConfigError, ArgumentError => error
+        { "worktree_root" => nil, "worktree_root_error" => error.message }
       end
 
       def wire(result)

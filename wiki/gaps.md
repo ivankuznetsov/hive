@@ -1855,3 +1855,17 @@ failures. The Playwright cause is confirmed; the sandbox failures passed on the
 local host but have not been reproduced on Ubuntu 26.04, so their precise
 platform incompatibility remains unconfirmed. A future runner/Playwright
 upgrade should validate both paths before the pin is removed.
+
+## Plan dependency adoption and legacy review generations (2026-10-30)
+
+`PlanDependencyAdoption` now runs at plan-review candidate promotion, and the
+plan-review task generation excludes `meta.yml`'s `depends_on`. A review
+recorded before this change carries the legacy raw-bytes generation; if its
+revised candidate adds a dependency, adoption at promotion changes the raw
+bytes and that one review goes stale and restarts critique once (no worse than
+the previous operator hand-edit). Not exercised against a live in-flight
+legacy review. Tasks already parked on `plan_dependency_missing` or
+`plan_dependency_mismatch` with a cleared review are not healed retroactively;
+the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
+that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
+`[b, a]`) are deliberately not adopted and still need a human.

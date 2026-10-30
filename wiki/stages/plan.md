@@ -1,9 +1,9 @@
 ---
 title: 3-plan stage
 type: stage
-source: lib/hive/stages/plan.rb, templates/plan_prompt.md.erb
+source: lib/hive/stages/plan.rb, lib/hive/plan_dependency_adoption.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-10-30
 tags: [stage, plan, llm-wiki, ce-plan, critique, dependencies]
 ---
 
@@ -71,12 +71,27 @@ plan-only, mismatched, malformed, or cyclic declaration becomes an admission
 error at status/run/forward-approve. Hive does not inspect plan prose for
 ordering, and the planner must not edit `meta.yml`.
 
-When a complete plan declares a dependency and metadata has none, the plan
-stage attempts the optional adoption through the task observation captured
-before the planner ran. A missing task, same-path replacement, or deletion
-between metadata read and persistence produces a concise stale-task diagnostic
-and leaves dependency admission active. Metadata corruption and write failures
-use a distinct diagnostic; unexpected programming failures still propagate.
+`Hive::PlanDependencyAdoption.adopt!` copies the plan's declaration into
+`meta.yml` when doing so can only add dependencies: metadata has no
+`depends_on`, or the plan's declaration is a strict superset of it. References
+are compared by target using admission's project rule
+(`Dependencies.reference_identity`), so `app:slug` and a bare `slug` in project
+`app` are one edge while `web:slug` is not. A plan that omits, replaces,
+re-spells, or reorders an existing metadata dependency is never adopted, so
+`plan_dependency_mismatch` still stops for a human; a declaration naming the
+task itself is never adopted. A scalar edge that grows into a list moves the
+task to list policy (`9-done`, project-default base). Admission still resolves
+every adopted target and reports `dependency_cycle` or invalid references.
+
+Adoption runs wherever `plan.md` is written: after the initial planner spawn
+for a complete plan, and when plan review promotes a revised candidate into
+`plan.md` at clearance (before the resolution is published). The second site
+closes the hivedev 2026-10-30 failures where a revision introduced or extended
+the dependency after the first adoption point. Both use the task observation
+the run captured; a missing task, same-path replacement, or deletion between
+metadata read and persistence produces a concise stale-task diagnostic and
+leaves dependency admission active. Metadata corruption and write failures use
+a distinct diagnostic; unexpected programming failures still propagate.
 
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 
@@ -136,6 +151,7 @@ retries, or downgrades.
   `test/unit/plan_review/` pin policy, critique, revision, verification,
   decisions, lineage, and clearance.
 - `test/unit/plan_frontmatter_test.rb` and `test/integration/dependency_admission_test.rb` pin structured dependency parsing and plan/metadata drift.
+- `test/unit/stages/plan_test.rb` pins dependency adoption (absence, strict superset, qualified/bare equality, never-replace, stale skips); `test/unit/plan_review/orchestrator_test.rb` pins adoption at candidate promotion with the review still current.
 
 ## Backlinks
 

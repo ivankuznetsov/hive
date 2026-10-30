@@ -6,6 +6,7 @@ require "hive/plan_review/projection"
 require "hive/plan_review/transition_guard"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
+require "hive/plan_dependency_adoption"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -176,56 +177,16 @@ module Hive
         Hive::Markers.seed_body_if_empty(task.state_file, DURABLE_CHECKPOINT)
       end
 
-      # A plan that declares `depends_on` in its frontmatter is stating a real
-      # scheduling constraint, but only meta.yml gates dispatch. Leaving the two
-      # out of step parked the task on an admission error whose only remedy was
-      # an operator copying one string between two files — toil that reviews
-      # nothing, since nobody re-derives whether the dependency is right before
-      # pasting it.
-      #
-      # So absence is adopted and conflict still blocks: when meta.yml has no
-      # dependency we persist the plan's, and when it has a different one the
-      # `plan_dependency_mismatch` gate still stops everything for a human. A
-      # dependency adopted here is not trusted blindly either — admission still
-      # resolves the target and still reports `dependency_cycle` with the
-      # offending path, which is a far better error than a copy instruction.
+      # Adopt the plan's frontmatter `depends_on` into meta.yml after the
+      # initial planner run, for a complete plan only. The rule (absence or a
+      # strict superset is adopted; anything that would drop or replace an
+      # existing meta dependency is left for `plan_dependency_mismatch`) lives
+      # in Hive::PlanDependencyAdoption, which plan-review candidate promotion
+      # reuses.
       def adopt_plan_dependency!(task, marker, observation:)
-        Hive::TaskMeta.validate_observation!(task.folder, observation)
         return unless marker.name == :complete
 
-        plan = Hive::PlanFrontmatter.read(File.join(task.folder, "plan.md"))
-        return unless plan.valid?
-
-        declared = plan.depends_on
-        return if declared.nil?
-        return unless Hive::TaskMeta.read(task.folder)[:depends_on].nil?
-
-        # PlanFrontmatter already parsed and validated this into a Reference
-        # or an array of References; malformed declarations never reach here.
-        return if Array(declared).any? do |reference|
-          same_slug = reference.task == task.slug
-          same_numeric_id = !reference.explicit_project && reference.task == task.id.to_s
-          same_qualified_identity = reference.explicit_project &&
-            reference.project == task.project_name && same_slug
-          (!reference.explicit_project && same_slug) || same_numeric_id || same_qualified_identity
-        end
-
-        result = Hive::TaskMeta.rewrite(
-          task.folder,
-          { depends_on: Hive::Dependencies.serialize_declaration(declared) },
-          observation: observation
-        )
-        if result.stale?
-          warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
-        end
-        nil
-      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR
-        warn "[hive] plan: stale task; dependency adoption skipped for #{task.slug}"
-        nil
-      rescue Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError => error
-        warn "[hive] plan: dependency adoption failed for #{task.slug} " \
-             "(#{error.class}: #{error.message.to_s.byteslice(0, 240)})"
-        nil
+        Hive::PlanDependencyAdoption.adopt!(task, observation: observation)
       end
 
       def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)

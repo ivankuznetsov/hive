@@ -6,6 +6,7 @@ require "tmpdir"
 require "hive/atomic_file"
 require "hive/canonical_json"
 require "hive/lock"
+require "hive/plan_dependency_adoption"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
@@ -101,7 +102,7 @@ module Hive
 
         current = @store.current_validated(optional: true)
         if current && current["candidate_plan_digest"] == canonical_digest &&
-           current.task_generation.to_s == task_generation.to_s &&
+           Identity.task_generation_current?(@task, current.task_generation) &&
            policy_configuration_fresh?(current)
           return Projection.new(current) if current.execution_allowed?
 
@@ -123,7 +124,7 @@ module Hive
         return nil unless policy.applicable?
 
         generation = task_generation
-        if current && current.task_generation.to_s == generation.to_s &&
+        if current && Identity.task_generation_current?(@task, current.task_generation) &&
            current.plan_digest == signals.plan_digest &&
            current.policy_fingerprint == policy.policy_fingerprint
           return Projection.new(current) if current.execution_allowed?
@@ -339,6 +340,10 @@ module Hive
         if clearance.execution_allowed && record["candidate_plan_digest"]
           with_task_mutation_lock do
             promote_candidate!(record, candidate_bytes)
+            # The revision can add a prerequisite the initial plan lacked;
+            # without this meta.yml never learns it and admission parks the
+            # task on plan_dependency_missing/mismatch after clearance.
+            Hive::PlanDependencyAdoption.adopt!(@task, observation: @task_observation)
             terminal(record, **terminal_args)
           end
         else

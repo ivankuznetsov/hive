@@ -31,7 +31,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
-    :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,
+    :folder, :project_root, :slug, :id, :workflow, :meta_yml_path, :project_name,
     keyword_init: true
   )
 
@@ -408,6 +408,64 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
       assert_equal "cleared", projection.record.state
       assert_equal [ true ], observed
+    end
+  end
+
+  # hivedev f2-follow-up: the dependency first appeared in a plan-review
+  # revision, after the planner-run adoption point, so meta.yml never learned
+  # it and admission parked the cleared task on plan_dependency_missing. The
+  # operator's hand copy then staled the review and restarted critique.
+  # Promotion now adopts it, and the cleared review stays current.
+  def test_candidate_promotion_adopts_a_dependency_added_by_the_revision
+    revised = standard_plan.sub("files:", "depends_on: hivedev:base-task\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
+      assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: cfg
+      ).fetch("status")
+    end
+  end
+
+  # hivedev c5: meta.yml already carried one dependency and the revision added
+  # a second, spelled with the project qualifier.
+  def test_candidate_promotion_adopts_a_strict_superset_of_meta_dependencies
+    revised = standard_plan.sub(
+      "files:", "depends_on:\n  - hivedev:base-task\n  - other-task\nfiles:"
+    )
+    with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal %w[hivedev:base-task other-task],
+                   YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+    end
+  end
+
+  def test_candidate_promotion_never_replaces_an_existing_meta_dependency
+    revised = standard_plan.sub("files:", "depends_on: other-task\nfiles:")
+    with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal "base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
     end
   end
 
@@ -2058,17 +2116,18 @@ class PlanReviewOrchestratorTest < Minitest::Test
     )
   end
 
-  def with_task(plan)
+  def with_task(plan, meta_depends_on: nil)
     Dir.mktmpdir("hive-plan-orchestrator") do |project|
       folder = File.join(project, ".hive-state", "stages", "3-plan", "demo-task")
       FileUtils.mkdir_p(folder)
       meta = File.join(folder, "meta.yml")
-      File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n")
+      dependency = meta_depends_on ? "depends_on: #{meta_depends_on}\n" : ""
+      File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n#{dependency}")
       prepare_test_task_lease_repository(folder)
       File.write(File.join(folder, "plan.md"), plan)
       task = Task.new(
         folder:, project_root: project, slug: "demo-task", id: "task-1",
-        workflow: Workflow.new(id: :coding), meta_yml_path: meta
+        workflow: Workflow.new(id: :coding), meta_yml_path: meta, project_name: "hivedev"
       )
       cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
       cfg["project_root"] = project

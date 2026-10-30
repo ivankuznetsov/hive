@@ -484,7 +484,7 @@ module Hive
       end
 
       def resolve_project(current_project, reference)
-        name = reference.explicit_project ? reference.project : current_project
+        name = Hive::Dependencies.reference_project(reference, current_project)
         project = unique_project(name)
         return validation_failure(project.validation_error, name) if project&.validation_error
         return project if project

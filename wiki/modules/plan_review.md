@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-10-02
+updated: 2026-10-30
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -406,6 +406,16 @@ receipt under the task lock immediately before movement. `StageAction`,
 `Approve`, daemon plan approval, and execute entry all use this guard. A stale,
 missing, corrupt, blocked, or changed observation raises a typed
 `PlanReview::TransitionBlocked`; `--force` does not bypass it.
+
+The task generation digests task id, slug, workflow, and `meta.yml` with its
+`depends_on` key removed (unparseable or non-mapping metadata falls back to raw
+bytes). Dependency edits are scheduling metadata that admission gates on its
+own, and including them meant adopting a revised plan's dependency at candidate
+promotion, or an operator copying it by hand, staled the review it completed
+and restarted critique (observed on hivedev f2-follow-up, 2026-10-30).
+`Identity.task_generation_current?` also accepts the legacy raw-bytes
+generation, so reviews recorded before the change stay current while metadata
+is byte-identical.
 
 The benchmark-only configuration grant documented in [[modules/config]] also
 disables this transition boundary. With the grant and `enabled: false`, plan to

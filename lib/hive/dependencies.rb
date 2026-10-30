@@ -112,6 +112,21 @@ module Hive
       parsed.is_a?(Array) ? parsed : Array(parsed)
     end
 
+    # The project a reference names. A bare reference always means the
+    # depending task's own project; it never searches other projects.
+    # Admission resolves targets with this rule, so anything that compares
+    # references outside admission must use it too.
+    def reference_project(reference, current_project)
+      reference.explicit_project ? reference.project : current_project
+    end
+
+    # What a reference points at, independent of spelling: `app:slug` and a
+    # bare `slug` written in project `app` are the same edge. A bare numeric
+    # id stays distinct from every slug because only admission can resolve it.
+    def reference_identity(reference, current_project)
+      [ reference_project(reference, current_project), reference.task ].freeze
+    end
+
     def list_declaration?(value)
       value.is_a?(Array)
     end

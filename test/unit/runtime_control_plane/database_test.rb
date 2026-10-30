@@ -52,7 +52,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       database.define_singleton_method(:inspect_database) do |**_options, &_block|
         raise SQLite3::BusyException
       end
-      [:diagnostics, :installation_identity, :quiescence_status_snapshot].each do |operation|
+      [ :diagnostics, :installation_identity, :quiescence_status_snapshot ].each do |operation|
         assert_raises(Hive::RuntimeControlPlane::Busy) { database.public_send(operation) }
       end
     end
@@ -644,6 +644,21 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       end
       assert_same source, error.cause
       assert database.disconnected?
+    end
+  end
+
+  def test_unrelated_connection_errors_are_reraised_after_disconnect
+    with_database do |database|
+      database.disconnect
+      database.define_singleton_method(:validate_database_custody!) { true }
+      [ SQLite3::CorruptException.new("corrupt"), IOError.new("connection failed") ].each do |source|
+        replacement = ->(**) { raise source }
+        error = with_replaced_singleton_method(Sequel, :connect, replacement) do
+          assert_raises(source.class) { database.send(:connect!) }
+        end
+        assert_same source, error
+        assert database.disconnected?
+      end
     end
   end
 

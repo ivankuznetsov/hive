@@ -34,7 +34,7 @@ class RunningStatusTest < Minitest::Test
         original.call(sql, *args, &block)
       end
       producer = status
-      payload = producer.payload([project], now: NOW)
+      payload = producer.payload([ project ], now: NOW)
       assert producer.runtime_busy
       refute payload.fetch("complete")
       refute payload.fetch("observed_count_exact")
@@ -62,7 +62,7 @@ class RunningStatusTest < Minitest::Test
       Hive::RuntimeControlPlane::ContentionBudget.with(clock: -> { now }, wait: ->(seconds) { now += seconds }) do |budget|
         budget.retry_busy while budget.waited < 0.4 # earlier invocation phases
         before_scan = budget.waited
-        payload = producer.payload([project], now: NOW)
+        payload = producer.payload([ project ], now: NOW)
         assert producer.runtime_busy
         assert_in_delta 1, budget.waited
         assert_in_delta 0.6, budget.waited - before_scan, 0.02
@@ -72,7 +72,7 @@ class RunningStatusTest < Minitest::Test
         assert_schema_valid(payload)
       end
       adapter.define_singleton_method(:query, original)
-      assert producer.payload([project], now: NOW).fetch("complete")
+      assert producer.payload([ project ], now: NOW).fetch("complete")
       refute producer.runtime_busy
       assert_nil Hive::RuntimeControlPlane::ContentionBudget.current
     end

@@ -4,6 +4,13 @@ require "hive/runtime_control_plane"
 class RuntimeContentionBudgetTest < Minitest::Test
   Budget = Hive::RuntimeControlPlane::ContentionBudget
 
+  def test_default_clock_and_wait_exhaust_the_busy_budget
+    budget = Budget.new(seconds: 0.001)
+    refute budget.retry_busy
+    assert_operator budget.waited, :>=, 0.001
+    refute budget.retry_busy
+  end
+
   def test_waiting_is_shared_and_computation_is_free
     now = 0.0
     budget = Budget.new(seconds: 0.025, clock: -> { now }, wait: ->(time) { now += time })
@@ -16,7 +23,7 @@ class RuntimeContentionBudgetTest < Minitest::Test
   end
 
   def test_sub_resolution_wait_terminates_without_spinning
-    budget = Budget.new(clock: -> { 0.0 }, wait: ->(_) {})
+    budget = Budget.new(clock: -> { 0.0 }, wait: ->(_) { })
     refute budget.retry_busy
     refute budget.retry_busy
     assert_equal 0, budget.waited
@@ -50,8 +57,8 @@ class RuntimeContentionBudgetTest < Minitest::Test
       end
     end
     assert support.busy_error?(wrapped)
-    [SQLite3::CorruptException, SQLite3::ReadOnlyException, SQLite3::CantOpenException,
-     Sequel::DatabaseError].each { |type| refute support.busy_error?(type.new) }
+    [ SQLite3::CorruptException, SQLite3::ReadOnlyException, SQLite3::CantOpenException,
+     Sequel::DatabaseError ].each { |type| refute support.busy_error?(type.new) }
     busy = assert_raises(Hive::RuntimeControlPlane::Busy) { support.raise_if_busy!(wrapped) }
     assert_equal 75, busy.exit_code
     assert_equal :runtime_database_busy, busy.code

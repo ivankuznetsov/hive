@@ -141,7 +141,7 @@ class CommandsStatusTest < Minitest::Test
       def json_payload(*) = raise("full graph must not be built")
       def operational_payload(*) = raise("operational graph must not be built")
       def running_payload(*)
-        [{
+        [ {
           "daemon" => { "running" => true, "pid" => 42, "uptime_sec" => 12 },
           "complete" => true,
           "count" => 1,
@@ -151,7 +151,7 @@ class CommandsStatusTest < Minitest::Test
             "project" => "demo", "slug" => "live-task", "display_name" => "Live task",
             "stage" => "4-execute", "liveness" => { "source" => "task_lock" }
           } ]
-        }, false]
+        }, false ]
       end
     end
 

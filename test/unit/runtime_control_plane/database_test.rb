@@ -9,6 +9,55 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     super
   end
 
+  def test_budget_reinstalls_real_adapter_handler_after_transaction_and_checkpoint
+    with_database do |database|
+      database.open!
+      raw = database.instance_variable_get(:@connection).synchronize { |connection| connection }
+      original = raw.method(:busy_handler)
+      handler = nil
+      installs = 0
+      raw.define_singleton_method(:busy_handler) do |&block|
+        handler = block
+        installs += 1
+        original.call(&block)
+      end
+      now = 0.0
+      budget_class = Hive::RuntimeControlPlane::ContentionBudget
+      budget_class.with(seconds: 0.03, clock: -> { now }, wait: ->(seconds) { now += seconds }) do |budget|
+        database.transaction(timeout_sec: 2) { assert handler.call(0) }
+        after_transaction = installs
+        database.checkpoint!(timeout_sec: 2)
+        assert_operator installs, :>, after_transaction
+        database.read { assert handler.call(0) }
+        other = Hive::RuntimeControlPlane::Database.new(path: database.path)
+        begin
+          other.read do |connection|
+            connection.synchronize do |adapter|
+              assert_equal 0, adapter.get_first_value("PRAGMA busy_timeout")
+            end
+            refute handler.call(0)
+          end
+          assert_in_delta 0.03, budget.waited
+        ensure
+          other.disconnect
+        end
+      end
+      assert_equal 15_000, raw.get_first_value("PRAGMA busy_timeout")
+      budget_class.with { |budget| assert_equal 0, budget.waited }
+    end
+  end
+
+  def test_runtime_boundaries_preserve_busy_instead_of_corruption
+    with_database do |database|
+      database.define_singleton_method(:inspect_database) do |**_options, &_block|
+        raise SQLite3::BusyException
+      end
+      [:diagnostics, :installation_identity, :quiescence_status_snapshot].each do |operation|
+        assert_raises(Hive::RuntimeControlPlane::Busy) { database.public_send(operation) }
+      end
+    end
+  end
+
   def test_explicit_migration_creates_exact_database_and_normal_open_is_lazy
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime-control-plane.sqlite3")
@@ -572,17 +621,16 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
-  def test_non_storage_query_and_connection_errors_keep_their_existing_types
+  def test_busy_query_and_connection_errors_keep_their_transient_identity
     with_database do |database|
       database.define_singleton_method(:inspect_database) do |**|
         raise SQLite3::BusyException, "busy status"
       end
 
-      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+      error = assert_raises(Hive::RuntimeControlPlane::Busy) do
         database.quiescence_status_snapshot
       end
-      assert_equal :database_corrupt, error.code
-      assert_match(/busy status/, error.message)
+      assert_equal :runtime_database_busy, error.code
     end
 
     with_database do |database|
@@ -592,9 +640,9 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       replacement = ->(**) { raise source }
 
       error = with_replaced_singleton_method(Sequel, :connect, replacement) do
-        assert_raises(SQLite3::BusyException) { database.send(:connect!) }
+        assert_raises(Hive::RuntimeControlPlane::Busy) { database.send(:connect!) }
       end
-      assert_same source, error
+      assert_same source, error.cause
       assert database.disconnected?
     end
   end
@@ -952,7 +1000,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       blocker.execute("BEGIN IMMEDIATE")
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-      assert_raises(Sequel::DatabaseError) do
+      assert_raises(Hive::RuntimeControlPlane::Busy) do
         database.transaction(timeout_sec: 0.05) do |connection|
           connection[:installations].update(next_task_id: 1)
         end

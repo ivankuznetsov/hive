@@ -31,6 +31,8 @@ module Hive
       # errors or grant observation behavior to a write-capable diagnosis.
       def default_status_route?(argv)
         words = Array(argv).map(&:to_s)
+        return false unless words.all? { |word| word.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
+
         route_index = words.index("status")
         return false unless route_index && command(words) == "status"
         return false unless words.first(route_index).all? { |word| Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(word) }

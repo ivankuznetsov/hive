@@ -580,6 +580,16 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     error = assert_raises(Hive::CommandCapacityError) { pruner.prune(project_root: "/project") }
     assert_equal "command_prune_busy", error.reason
 
+    typed_busy = Object.new
+    typed_busy.define_singleton_method(:read_only) { raise Hive::RuntimeControlPlane::Busy.new }
+    typed_busy.define_singleton_method(:transaction) { raise Hive::RuntimeControlPlane::Busy.new }
+    pruner = Hive::CommandReceiptPruner.new(database: typed_busy, authority: authority)
+    error = assert_raises(Hive::CommandCapacityError) { pruner.preview }
+    assert_equal "command_prune_busy", error.reason
+    pruner.define_singleton_method(:resolve_namespace) { |**| "namespace" }
+    error = assert_raises(Hive::CommandCapacityError) { pruner.prune(project_root: "/project") }
+    assert_equal "command_prune_busy", error.reason
+
     with_receipts do |project, database, store, owner|
       claim = terminal_receipt(store, project, "busy")
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)

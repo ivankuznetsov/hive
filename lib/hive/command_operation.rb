@@ -256,7 +256,7 @@ module Hive
         else
           @store.fail_applied(claim, result: stored, status: status)
         end
-      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => persistence_error
+      rescue Hive::RuntimeControlPlane::Busy, Sequel::Error, SQLite3::Exception, SystemCallError, IOError => persistence_error
         persist_uncertainty(claim, effect, persistence_error)
         persistence_failed = true
         raise Hive::CommandUnresolved.new(

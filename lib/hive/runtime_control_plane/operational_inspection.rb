@@ -111,7 +111,6 @@ module Hive
           end
         end.compact.last
       end
-      private_class_method :boolean_option_value
 
       def boolean_literal(value)
         return true if %w[true t].include?(value.to_s.downcase)

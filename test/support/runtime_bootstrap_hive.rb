@@ -48,6 +48,11 @@ module Hive
 
     class Error < Hive::Error; end
     class Unavailable < Error; end
+    class Busy < Error; end
+
+    module ContentionBudget
+      def self.clear! = nil
+    end
 
     def self.storage_error
       Unavailable.new(
@@ -66,6 +71,7 @@ module Hive
 
       def command(argv) = Array(argv).find { |word| !word.start_with?("-") }
       def strict_no_write_route?(_argv) = false
+      def default_status_route?(_argv) = false
     end
 
     class Registration
@@ -124,6 +130,7 @@ module Hive
 
   module CliJsonOptions
     BOOLEAN_OPTIONS = [].freeze
+    def self.requested?(argv) = argv.include?("--json")
   end
 
   module CliArgvPolicy

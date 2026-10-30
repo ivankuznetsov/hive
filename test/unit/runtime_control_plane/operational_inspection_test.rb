@@ -96,6 +96,51 @@ class RuntimeControlPlaneOperationalInspectionTest < Minitest::Test
     end
   end
 
+  def test_worktree_status_is_the_only_eligible_worktree_route
+    [
+      %w[worktree status demo-task],
+      %w[worktree status demo-task --project demo --json],
+      %w[--json worktree status demo-task --stage=6-review],
+      %w[worktree --project status status demo-task],
+      %w[worktree --stage review status demo-task --project=demo]
+    ].each do |argv|
+      assert Hive::RuntimeControlPlane::OperationalInspection.eligible_route?(argv), argv.inspect
+    end
+
+    [
+      %w[worktree commit-residue demo-task],
+      %w[worktree discard-residue demo-task --paths a.txt],
+      %w[worktree repair demo-task --strategy discard],
+      %w[worktree --project status repair demo-task],
+      %w[worktree --stage status commit-residue demo-task],
+      %w[worktree status demo-task --paths status],
+      %w[worktree status demo-task --message m],
+      %w[worktree status demo-task --strategy commit],
+      %w[worktree status demo-task --complete-execute],
+      %w[worktree demo-task status],
+      %w[worktree],
+      %w[status worktree --operational=false]
+    ].each do |argv|
+      refute Hive::RuntimeControlPlane::OperationalInspection.eligible_route?(argv), argv.inspect
+    end
+
+    with_tmp_dir do |root|
+      failure = Hive::RuntimeControlPlane::Unavailable.new(
+        "read only", code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      database = FakeDatabase.new(Hive::Paths.runtime_control_plane_path(root), true)
+      refute Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: failure, argv: %w[worktree repair demo-task --strategy commit], state_home: root,
+        database: database
+      )
+      assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: failure, argv: %w[worktree status demo-task --json], state_home: root,
+        database: database
+      )
+    end
+  end
+
   def test_clear_is_scoped_to_the_current_process
     with_tmp_dir do |root|
       error = Hive::RuntimeControlPlane::Unavailable.new(

@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-03
+updated: 2026-10-30
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -169,7 +169,9 @@ dispatch. Only the one-shot CLI operational observation may fall back to
 inspection, and only after that ordinary path raises a typed read-only storage
 error before registration is completed. Other status modes, inherited launch
 reservations, mutating option combinations, daemons, Web, and in-process status
-callers do not acquire this exemption.
+callers do not acquire this exemption. The one other eligible route is
+`hive worktree status TARGET [--project P] [--stage S] [--json]`
+(`OperationalInspection.eligible_route?`; see [[modules/worktree]]).
 
 The fallback is Linux-only. Hive must resolve the actual state path and find an
 available, unambiguous read-only mount in `/proc/self/mountinfo`; mode bits,

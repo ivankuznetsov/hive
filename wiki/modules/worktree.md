@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-09-02
+updated: 2026-10-30
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -228,8 +228,24 @@ credentials or agent output.
 `hive worktree status <slug> [--json]` exposes the owned worktree's porcelain
 entries, residue paths, branch, HEAD, and untracked count. Paths remain exact
 for internal recovery operations, while every JSON, text, and diagnostic
-surface bounds and redacts secret-shaped path text. The
-mutating verbs are admitted only while the task carries `ERROR
+surface bounds and redacts secret-shaped path text.
+
+`status` is a pure observation: task resolution, raw project config, the
+`worktree.yml` pointer, and read-only Git (`worktree list`, `branch
+--show-current`, `rev-parse`, and `--no-optional-locks status`). It takes no
+task lock, writes no marker, opens no runtime transaction, and never prunes.
+Plain `git status` opportunistically rewrites the index stat cache, which is
+why the porcelain read passes `--no-optional-locks` (for every subcommand).
+Because of that, `worktree status` is the second route eligible for the
+read-only [[commands/status]] operational-inspection fallback: on a
+procfs-confirmed read-only state root, startup's typed
+`state_storage_read_only` failure activates the one-shot inspection authority
+instead of exiting 69. The route matcher fails closed on any switch other
+than `--json`, `--project`, and `--stage`, so `commit-residue`,
+`discard-residue`, and `repair` stay ineligible. The consumer is hivedev's
+read-only workspace audit.
+
+The mutating verbs are admitted only while the task carries `ERROR
 reason=ensure_clean_on_exit_failed`, the current execute contract's `ERROR
 reason=dirty_worktree`, or the historical `EXECUTE_WAITING
 reason=dirty_worktree`, and they run under the task lock:

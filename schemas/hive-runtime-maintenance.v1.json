@@ -50,8 +50,19 @@
                   "project_id": { "type": "string" },
                   "path": { "type": "string" },
                   "real_path": { "type": ["string", "null"] },
-                  "hive_state_path": { "type": "string" }
-                }
+                  "hive_state_path": { "type": "string" },
+                  "worktree_root": {
+                    "type": ["string", "null"],
+                    "description": "Effective worktree root (project config worktree_root, else <HIVE_WORKTREE_BASE or ~/Dev>/<basename>.worktrees); null when project config could not be read"
+                  },
+                  "worktree_root_error": {
+                    "type": "string",
+                    "description": "Why worktree_root is null; present only then"
+                  }
+                },
+                "if": { "properties": { "worktree_root": { "type": "null" } }, "required": ["worktree_root"] },
+                "then": { "required": ["worktree_root_error"] },
+                "else": { "not": { "required": ["worktree_root_error"] } }
               }
             }
           }

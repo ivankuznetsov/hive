@@ -285,9 +285,13 @@ module Hive
         }
       end
 
+      # --no-optional-locks: plain `git status` opportunistically rewrites the
+      # index stat cache, which would make this observation a write (and fail
+      # silently on a read-only mount audited via operational inspection).
       def worktree_status(worktree_path)
         raw = git_capture(
-          worktree_path, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+          worktree_path, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+          "--no-renames",
           label: "git status --porcelain"
         )
         entries = raw.split("\0").filter_map do |record|

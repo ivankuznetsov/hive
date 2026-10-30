@@ -2,7 +2,8 @@ require "hive/paths"
 
 module Hive
   module RuntimeControlPlane
-    # One-shot CLI authority for the operational-status read-only fallback.
+    # One-shot CLI authority for the read-only fallback of observation routes
+    # (`hive status --operational` and `hive worktree status`).
     # The one-shot authority is fiber-local (via Thread.current storage), bound
     # to the activating PID and one runtime database. It is intentionally not
     # propagated to worker threads or long-lived in-process Status callers.
@@ -35,8 +36,11 @@ module Hive
       # higher-level agent/work-ledger dependencies into every database user.
       def eligible_route?(argv)
         words = Array(argv).map(&:to_s)
+        route = words.find { |argument| !argument.start_with?("-") }
+        return worktree_status_route?(words) if route == "worktree"
+        return false unless route == "status"
+
         switches = words.map { |word| word.start_with?("--") ? word.tr("_", "-") : word }
-        return false unless words.find { |argument| !argument.start_with?("-") } == "status"
         return false unless boolean_option_value(switches, "operational") == true
         return false if %w[diagnose daemon-task].any? do |name|
           switches.any? { |argument| argument == "--#{name}" || argument.start_with?("--#{name}=") }
@@ -68,6 +72,31 @@ module Hive
 
       def current = Thread.current[THREAD_KEY]
       private_class_method :current
+
+      # `hive worktree status` reads the task pointer and `git status` only
+      # (no task lock, marker, DB, or index write). Fail closed on any switch
+      # outside the status vocabulary so a mutating subcommand, or an option
+      # value spelled "status", can never borrow the inspection authority.
+      WORKTREE_STATUS_VALUE_OPTIONS = %w[--project --stage].freeze
+
+      def worktree_status_route?(words)
+        positionals = []
+        skip_value = false
+        words.each do |argument|
+          if skip_value
+            skip_value = false
+          elsif WORKTREE_STATUS_VALUE_OPTIONS.include?(argument)
+            skip_value = true
+          elsif argument.start_with?("-")
+            return false unless argument == "--json" ||
+              WORKTREE_STATUS_VALUE_OPTIONS.any? { |option| argument.start_with?("#{option}=") }
+          else
+            positionals << argument
+          end
+        end
+        positionals[0, 2] == %w[worktree status]
+      end
+      private_class_method :worktree_status_route?
 
       def boolean_option_value(words, name)
         Array(words).each_with_index.map do |argument, index|

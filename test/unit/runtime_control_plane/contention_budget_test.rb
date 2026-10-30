@@ -2,11 +2,13 @@ require "test_helper"
 require "hive/runtime_control_plane"
 
 class RuntimeContentionBudgetTest < Minitest::Test
+  include HiveTestHelper
+
   Budget = Hive::RuntimeControlPlane::ContentionBudget
 
   def test_default_clock_and_wait_exhaust_the_busy_budget
     budget = Budget.new(seconds: 0.001)
-    refute budget.retry_busy
+    assert budget.retry_busy
     assert_operator budget.waited, :>=, 0.001
     refute budget.retry_busy
   end
@@ -17,9 +19,38 @@ class RuntimeContentionBudgetTest < Minitest::Test
     assert budget.retry_busy
     now += 100 # unrelated work
     assert budget.retry_busy
-    refute budget.retry_busy
+    assert budget.retry_busy
     refute budget.retry_busy
     assert_in_delta 0.025, budget.waited
+  end
+
+  def test_sqlite_retries_when_the_lock_is_released_during_the_final_wait_slice
+    with_tmp_dir do |root|
+      path = File.join(root, "locked.sqlite3")
+      locker = SQLite3::Database.new(path)
+      locker.execute("CREATE TABLE present (id INTEGER)")
+      connection = SQLite3::Database.new(path)
+      locker.execute("BEGIN EXCLUSIVE")
+      now = 0.0
+      budget = Budget.new(clock: -> { now }, wait: lambda { |time|
+        finished = now + time
+        if now < 0.995 && finished >= 0.995
+          now = 0.995
+          locker.execute("ROLLBACK")
+        end
+        now = finished
+      })
+      budget.install(connection)
+
+      assert_equal 0, connection.get_first_value("SELECT COUNT(*) FROM present")
+      assert_in_delta 1.0, budget.waited
+      refute budget.retry_busy
+      assert_in_delta 1.0, budget.waited
+    ensure
+      budget&.close
+      connection&.close
+      locker&.close
+    end
   end
 
   def test_sub_resolution_wait_terminates_without_spinning

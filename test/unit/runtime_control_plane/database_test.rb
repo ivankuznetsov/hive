@@ -35,6 +35,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
             connection.synchronize do |adapter|
               assert_equal 0, adapter.get_first_value("PRAGMA busy_timeout")
             end
+            assert handler.call(0)
             refute handler.call(0)
           end
           assert_in_delta 0.03, budget.waited

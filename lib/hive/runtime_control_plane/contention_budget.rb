@@ -59,7 +59,9 @@ module Hive
         # Derive the remainder from the total, avoiding accumulated subtraction
         # error. A sub-resolution wait must terminate rather than spin forever.
         @remaining = elapsed.positive? ? [ @seconds - @waited, 0.0 ].max : 0.0
-        @remaining > 0
+        # Let SQLite check the lock after the final wait; the next callback
+        # refuses further waiting once the allowance is exhausted.
+        elapsed.positive?
       end
 
       def install(connection, restore_timeout_ms: nil)

@@ -75,6 +75,9 @@ activation checks, process registration, lease reads, and exit cleanup. Ruby
 startup, scheduler work, and ordinary SQL execution do not consume that
 allowance. Connections opened or reused during the invocation use the same
 budget; directly invoked default status scopes and clears its own budget.
+SQLite retries the operation after the final bounded wait, so a lock released
+during that slice can still recover; an exhausted budget permits no further
+waiting on the next busy callback.
 
 If contention clears within the allowance, normal registration and observation
 continue. On exhaustion before dispatch, Hive goes directly to the same status

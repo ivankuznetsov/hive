@@ -140,6 +140,8 @@ jobs:
             task: test:setup_agents_integration
           - name: operational status read-only mounts
             task: test:status_read_only
+          - name: runtime database contention
+            task: test:runtime_database_contention
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:

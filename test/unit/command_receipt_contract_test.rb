@@ -1607,6 +1607,7 @@ class CommandReceiptContractTest < Minitest::Test
     )
     {
       SQLite3::BusyException.new("database is locked") => "command_prune_busy",
+      Hive::RuntimeControlPlane::Busy.new => "command_prune_busy",
       SQLite3::FullException.new("database or disk is full") => "command_prune_storage_unavailable"
     }.each do |failure, reason|
       database = Object.new

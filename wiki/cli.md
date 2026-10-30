@@ -175,10 +175,27 @@ contracts retain their established unversioned or schema-less shapes.
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
 | 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
-| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError` |
+| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError`; `Hive::RuntimeControlPlane::Busy` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
 
 Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb`. See [CONTRIBUTING.md](../CONTRIBUTING.md) "CLI contract for agent callers".
+
+Runtime SQLite startup contention is retryable. Ordinary commands preserve the
+15-second busy timeout **per operation**, including registration; they have no
+new cumulative startup deadline. On exhaustion, startup stops before the
+requested action, exits `75`, and emits exactly one stderr line:
+`runtime database busy, retry`. A JSON request also receives a schema-valid
+`hive-runtime-maintenance.v1` error document (`ok: false`, `exit_code: 75`,
+`error_kind: runtime`, `runtime_code: runtime_database_busy`, the requested
+command as `action`, and a populated `next_action`).
+
+Default `hive status` and `hive status --json` instead share one second of SQLite
+busy waiting through activation, registration, observation, and cleanup. They
+return partial status with exit `0` when the source is unavailable. The v2 JSON
+contract uses `complete: false` and false count-exactness flags without new
+fields. Human output retains independent daemon/runtime information and says
+`RUNNING TASKS UNAVAILABLE` plus `STATUS PARTIAL — runtime database busy`.
+Other status modes retain their existing contracts. See [[commands/status]].
 
 ## Authentication / preconditions
 

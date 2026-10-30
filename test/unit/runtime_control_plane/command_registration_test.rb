@@ -5,6 +5,41 @@ require "hive/runtime_control_plane/lifecycle_repository"
 class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
   include HiveTestHelper
 
+  def test_busy_diagnostics_cannot_silently_skip_registration
+    with_runtime do |root, database|
+      database.define_singleton_method(:diagnostics) { raise SQLite3::BusyException }
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**_) { database }) do
+        assert_raises(Hive::RuntimeControlPlane::Busy) do
+          Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[new demo task], state_home: root)
+        end
+      end
+      assert_nil Hive::RuntimeControlPlane::CommandRegistration.current
+      assert database.disconnected?
+    end
+  end
+
+  def test_inherited_busy_adoption_retains_evidence_without_admitting_command_work
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(database: database, state_home: root)
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      registry.register!(reservation.id, pid: Process.pid)
+      reservation.release_fence!
+      registry.define_singleton_method(:adopt!) { |*_, **_| raise SQLite3::BusyException }
+      with_env("HIVE_RUNTIME_CHILD_RESERVATION_ID" => reservation.id) do
+        with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**_) { database }) do
+          with_replaced_singleton_method(Hive::RuntimeControlPlane::ProcessRegistry, :new, ->(**_) { registry }) do
+            assert_raises(Hive::RuntimeControlPlane::Busy) do
+              Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status], state_home: root)
+            end
+          end
+        end
+      end
+      assert_nil Hive::RuntimeControlPlane::CommandRegistration.current
+      refute Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+      assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }
+    end
+  end
+
   def test_busy_after_reserve_retains_evidence_releases_fence_and_never_registers
     with_runtime do |root, database|
       registry = Hive::RuntimeControlPlane::ProcessRegistry.new(database: database, state_home: root)

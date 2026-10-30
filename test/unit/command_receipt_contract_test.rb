@@ -1029,7 +1029,7 @@ class CommandReceiptContractTest < Minitest::Test
     capacity = Object.new
     capacity.define_singleton_method(:where) { |**| capacity_update }
     db = Object.new
-    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
+    catalog = Sequel.mock(fetch: [ { name: "command_dispatch_contexts" } ])[:sqlite_master]
     db.define_singleton_method(:[]) do |name|
       { sqlite_master: catalog, command_dispatch_contexts: table, command_receipts: receipts,
         command_capacity: capacity }.fetch(name)
@@ -1405,7 +1405,7 @@ class CommandReceiptContractTest < Minitest::Test
     receipts = Object.new
     receipts.define_singleton_method(:[]) { |**_query| nil }
     bound_db = Object.new
-    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
+    catalog = Sequel.mock(fetch: [ { name: "command_dispatch_contexts" } ])[:sqlite_master]
     bound_db.define_singleton_method(:[]) do |name|
       { sqlite_master: catalog, command_dispatch_contexts: contexts,
         command_receipts: receipts }.fetch(name)
@@ -1651,7 +1651,7 @@ class CommandReceiptContractTest < Minitest::Test
     table = Object.new
     table.define_singleton_method(:[]) { |_query| nil }
     table.define_singleton_method(:insert) { |_payload| true }
-    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
+    catalog = Sequel.mock(fetch: [ { name: "command_dispatch_contexts" } ])[:sqlite_master]
     db.define_singleton_method(:[]) do |name|
       { sqlite_master: catalog, command_dispatch_contexts: table }.fetch(name)
     end
@@ -1683,7 +1683,7 @@ class CommandReceiptContractTest < Minitest::Test
     capacity.define_singleton_method(:where) { |**_query| capacity }
     capacity.define_singleton_method(:update) { |**_values| 0 }
     capacity_db = Object.new
-    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
+    catalog = Sequel.mock(fetch: [ { name: "command_dispatch_contexts" } ])[:sqlite_master]
     capacity_db.define_singleton_method(:[]) do |name|
       { sqlite_master: catalog, command_dispatch_contexts: contexts, command_receipts: receipts,
         command_capacity: capacity }.fetch(name)

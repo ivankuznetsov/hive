@@ -104,16 +104,18 @@ class AttemptsContextTest < Minitest::Test
       }
       command_contexts = Object.new
       command_contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+      catalog = Sequel.mock(fetch: { name: "command_dispatch_contexts" })[:sqlite_master]
       real_database = store.database
       database = Object.new
       database.define_singleton_method(:read) do |&block|
         real_database.read do |real_connection|
           connection = Object.new
-          connection.define_singleton_method(:table_exists?) do |name|
-            name == :command_dispatch_contexts || real_connection.table_exists?(name)
-          end
           connection.define_singleton_method(:[]) do |name|
-            name == :command_dispatch_contexts ? command_contexts : real_connection[name]
+            case name
+            when :command_dispatch_contexts then command_contexts
+            when :sqlite_master then catalog
+            else real_connection[name]
+            end
           end
           block.call(connection)
         end
@@ -142,9 +144,9 @@ class AttemptsContextTest < Minitest::Test
     }
     contexts = Object.new
     contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+    catalog = Sequel.mock(fetch: { name: "command_dispatch_contexts" })[:sqlite_master]
     connection = Object.new
-    connection.define_singleton_method(:table_exists?) { |_name| true }
-    connection.define_singleton_method(:[]) { |_name| contexts }
+    connection.define_singleton_method(:[]) { |name| name == :sqlite_master ? catalog : contexts }
     database = Object.new
     database.define_singleton_method(:read) { |&block| block.call(connection) }
     repository = Struct.new(:database).new(database)
@@ -162,9 +164,9 @@ class AttemptsContextTest < Minitest::Test
     [ false, true ].each do |table_exists|
       contexts = Object.new
       contexts.define_singleton_method(:[]) { |**| nil }
+      catalog = Sequel.mock(fetch: table_exists ? { name: "command_dispatch_contexts" } : [])[:sqlite_master]
       connection = Object.new
-      connection.define_singleton_method(:table_exists?) { |_name| table_exists }
-      connection.define_singleton_method(:[]) { |_name| contexts }
+      connection.define_singleton_method(:[]) { |name| name == :sqlite_master ? catalog : contexts }
       database = Object.new
       database.define_singleton_method(:read) { |&block| block.call(connection) }
       repository = Struct.new(:database).new(database)

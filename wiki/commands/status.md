@@ -98,6 +98,12 @@ contracts; `--diagnose ... --write` cannot enter the observation fallback.
 Only SQLite busy errors take this path. Custody, schema, storage, admission,
 and launch-fence failures retain their existing handling.
 
+Runtime table-presence checks query SQLite's catalog directly so a busy probe
+reaches the same contention handler. A transient probe failure cannot become
+`missing_schema`, omit lifecycle/process evidence, or skip command-context
+and receipt-pin handling as though the relevant table were absent. Quiescence
+upgrade copying uses the same probe.
+
 Ordinary commands retain the existing 15-second SQLite busy timeout for each
 startup operation, rather than sharing a startup deadline. Exhaustion before
 command dispatch exits `75`, with exactly `runtime database busy, retry` on

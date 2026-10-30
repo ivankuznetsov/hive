@@ -478,7 +478,7 @@ module Hive
       end
 
       def table_has_columns?(database, table, *columns)
-        database.table_exists?(table) &&
+        SQLiteSupport.table_exists?(database, table) &&
           columns.all? { |column| database.schema(table).any? { |entry| entry.first == column } }
       rescue Sequel::Error => error
         SQLiteSupport.raise_if_busy!(error)
@@ -492,7 +492,7 @@ module Hive
       end
 
       def first_row(database, table)
-        return unless database.table_exists?(table)
+        return unless SQLiteSupport.table_exists?(database, table)
 
         database[table].first
       rescue Sequel::Error => error
@@ -1042,7 +1042,7 @@ module Hive
             target[table].delete
           end
           retained.each do |table|
-            next unless source.table_exists?(table)
+            next unless SQLiteSupport.table_exists?(source, table)
 
             source_columns = source.schema(table).map(&:first)
             target_columns = target.schema(table).map(&:first)
@@ -1213,7 +1213,7 @@ module Hive
       end
 
       def schema_version_for(database)
-        return unless database.table_exists?(:schema_info)
+        return unless SQLiteSupport.table_exists?(database, :schema_info)
         value = database[:schema_info].get(:version)
         value.nil? ? nil : Integer(value)
       rescue ArgumentError, TypeError, Sequel::Error => error

@@ -28,14 +28,26 @@ module Hive
     class MalformedLock < StandardError; end
     class OversizedFile < MalformedLock; end
 
-    def initialize(daemon_state: nil, daemon_report: nil,
+    attr_reader :runtime_busy
+
+    def initialize(daemon_state: nil, daemon_report: nil, runtime_unavailable: false,
                    runtime_identity: Hive::RuntimeIdentity.new.to_h)
+      @runtime_unavailable = runtime_unavailable
       @daemon_state = daemon_state
       @daemon_report = daemon_report
       @runtime_identity = runtime_identity
     end
 
     def payload(projects, now: Time.now.utc)
+      Hive::RuntimeControlPlane::ContentionBudget.with do
+        snapshot(projects, now: now)
+      end
+    end
+
+    private
+
+    def snapshot(projects, now:)
+      @runtime_busy = @runtime_unavailable
       counters = source_counters(projects.length)
       rows = []
       seen = Set.new
@@ -62,6 +74,8 @@ module Hive
     private
 
     def each_active_lease_row(projects, counters)
+      return if @runtime_unavailable
+
       by_state_root = {}
       projects.each do |project|
         begin
@@ -109,6 +123,8 @@ module Hive
           counters["malformed_locks"] += 1
         end
       end
+    rescue Hive::RuntimeControlPlane::Busy
+      @runtime_busy = true
     rescue Hive::RuntimeControlPlane::Error, SystemCallError, IOError, ArgumentError
       counters["projects_unavailable"] += by_state_root&.size.to_i
     end
@@ -220,6 +236,7 @@ module Hive
       incomplete_source = counters.values_at(
         "projects_unavailable", "malformed_locks", "transition_skips"
       ).any?(&:positive?)
+      source_uncertain = incomplete_source || @runtime_busy
       scan_truncated = counters.fetch("scan_truncated")
       {
         "schema" => "hive-running-status",
@@ -228,13 +245,13 @@ module Hive
         "runtime" => runtime_identity_for(state),
         "generated_at" => now.iso8601(6),
         "daemon" => daemon_payload(state),
-        "complete" => !incomplete_source && !scan_truncated && omitted_count.zero?,
+        "complete" => !source_uncertain && !scan_truncated && omitted_count.zero?,
         "count" => rows.length,
         "observed_count" => observed_count,
-        "observed_count_exact" => !scan_truncated,
+        "observed_count_exact" => !source_uncertain && !scan_truncated,
         "truncated" => scan_truncated || omitted_count.positive?,
         "omitted_count" => omitted_count,
-        "omitted_count_exact" => !scan_truncated,
+        "omitted_count_exact" => !source_uncertain && !scan_truncated,
         "limits" => {
           "max_tasks" => MAX_TASKS,
           "max_output_bytes" => MAX_OUTPUT_BYTES,

@@ -11,6 +11,12 @@ module Hive
         Integer(connection.fetch("PRAGMA #{name}").first.values.first)
       end
 
+      # Sequel's table_exists? rescues DatabaseError, including SQLite busy.
+      # Query the catalog so contention cannot masquerade as a missing table.
+      def table_exists?(connection, name)
+        !connection[:sqlite_master].where(type: "table", name: name.to_s).get(:name).nil?
+      end
+
       def busy_error?(error)
         caused_by?(error) do |current|
           (defined?(Busy) && current.is_a?(Busy)) ||

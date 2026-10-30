@@ -1880,3 +1880,6 @@ The runtime-contention CI gate now proves bounded default status, retained
 15-second ordinary registration, transient release beyond five seconds, and
 conservative cleanup/reconciliation against isolated real databases. Historical
 lock attribution remains unverified and is not a prerequisite for this policy.
+Transient busy errors during table-presence probes are covered at startup and
+quiescence read boundaries, plus a real exclusive-lock catalog-query test;
+these establish error propagation, not the original lock holder's identity.

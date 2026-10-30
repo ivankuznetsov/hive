@@ -58,6 +58,38 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_schema_table_probe_preserves_transient_busy_at_startup_boundaries
+    %i[diagnostics open! installation_identity quiescence_upgrade_source].each do |operation|
+      with_database do |database|
+        inject_busy_table_probe(database, :schema_info)
+
+        error = assert_raises(Hive::RuntimeControlPlane::Busy, operation.to_s) do
+          database.public_send(operation)
+        end
+        assert_equal :runtime_database_busy, error.code
+        assert_equal :ok, database.diagnostics.status
+      end
+    end
+  end
+
+  def test_quiescence_table_probes_preserve_transient_busy_instead_of_omitting_data
+    probes = %i[installations runtime_lifecycle launch_reservations owned_processes attempts]
+      .map { |table| [ :quiescence_status_snapshot, table ] }
+    probes += [ [ :quiescence_upgrade_source, :runtime_lifecycle ],
+                [ :quiescence_upgrade_running_attempts, :attempts ] ]
+
+    probes.each do |operation, table|
+      with_database do |database|
+        inject_busy_table_probe(database, table)
+
+        assert_raises(Hive::RuntimeControlPlane::Busy, "#{operation}: #{table}") do
+          database.public_send(operation)
+        end
+        assert database.quiescence_status_snapshot.fetch(:lifecycle)
+      end
+    end
+  end
+
   def test_explicit_migration_creates_exact_database_and_normal_open_is_lazy
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime-control-plane.sqlite3")
@@ -1124,9 +1156,11 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       fake.define_singleton_method(:[]) { |_| raise Sequel::DatabaseError, "schema unreadable" }
       refute database.send(:exact_schema?, fake)
 
-      dataset = Struct.new(:value) { def get(*) = value }.new("bad")
+      dataset = Struct.new(:value) do
+        def where(*) = self
+        def get(*) = value
+      end.new("bad")
       schema = Object.new
-      schema.define_singleton_method(:table_exists?) { |_| true }
       schema.define_singleton_method(:[]) { |_| dataset }
       assert_nil database.send(:schema_version_for, schema)
     end
@@ -1258,6 +1292,28 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
   end
 
   private
+
+  def inject_busy_table_probe(database, table)
+    inspect = database.method(:inspect_database)
+    pending = true
+    database.define_singleton_method(:inspect_database) do |**options, &block|
+      inspect.call(**options) do |connection|
+        execute = connection.method(:execute)
+        connection.define_singleton_method(:execute) do |sql, *args, &rows|
+          catalog_probe = sql.include?("FROM `sqlite_master`") &&
+            sql.include?("`name` = '#{table}'")
+          sequel_probe = sql.start_with?("SELECT NULL AS 'nil' FROM `#{table}`")
+          if pending && (catalog_probe || sequel_probe)
+            pending = false
+            raise Sequel::DatabaseError.new("busy table probe"),
+                  cause: SQLite3::BusyException.new("database is locked")
+          end
+          execute.call(sql, *args, &rows)
+        end
+        block.call(connection)
+      end
+    end
+  end
 
   def database_with_mountinfo(path, mountinfo:, platform: "linux")
     proc_root = File.join(File.dirname(path), ".proc")

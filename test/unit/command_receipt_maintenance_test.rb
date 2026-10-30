@@ -573,6 +573,12 @@ class CommandReceiptMaintenanceTest < Minitest::Test
     end
     assert_equal "command_prune_busy", error.reason
 
+    wrapped_busy.define_singleton_method(:transaction) { read_only }
+    pruner = Hive::CommandReceiptPruner.new(database: wrapped_busy, authority: authority)
+    pruner.define_singleton_method(:resolve_namespace) { |**| "namespace" }
+    error = assert_raises(Hive::CommandCapacityError) { pruner.prune(project_root: "/project") }
+    assert_equal "command_prune_busy", error.reason
+
     locked = Object.new
     locked.define_singleton_method(:transaction) { raise Sequel::DatabaseLockTimeout, "locked" }
     pruner = Hive::CommandReceiptPruner.new(database: locked, authority: authority)

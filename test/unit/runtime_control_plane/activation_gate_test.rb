@@ -7,27 +7,27 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
 
   def test_default_status_policy_defers_invalid_encoding_to_cli_validation
     gate = Hive::RuntimeControlPlane::ActivationGate
-    ["bad\xFF".b, "bad\xFF".dup.force_encoding(Encoding::UTF_8)].each do |invalid|
-      refute gate.default_status_route?(["status", "--json", invalid])
-      refute gate.default_status_route?(["status", "--diagnose", "task", "--json", invalid])
+    [ "bad\xFF".b, "bad\xFF".dup.force_encoding(Encoding::UTF_8) ].each do |invalid|
+      refute gate.default_status_route?([ "status", "--json", invalid ])
+      refute gate.default_status_route?([ "status", "--diagnose", "task", "--json", invalid ])
     end
   end
 
   def test_default_status_policy_respects_modes_and_boolean_spellings
     gate = Hive::RuntimeControlPlane::ActivationGate
-    [%w[status], %w[status --json], %w[--json=true status],
+    [ %w[status], %w[status --json], %w[--json=true status],
      %w[status --no-write], %w[status --skip-write], %w[status --write=false],
      %w[status --operational=false], %w[status --no-internal_task_graph],
      %w[status --project demo --stage 4-execute], %w[status --project=demo],
-     %w[status --write false]].each do |argv|
+     %w[status --write false] ].each do |argv|
       assert gate.default_status_route?(argv), argv.inspect
     end
-    [%w[new project status], %w[status --diagnose task --write],
+    [ %w[new project status], %w[status --diagnose task --write],
      %w[status --diagnose=true --write=true], %w[status --diagnose task --no-write],
      %w[status --skip-write --diagnose=task], %w[status --operational],
      %w[status --internal_task_graph=true], %w[status --full], %w[status --archive],
      %w[status --write], %w[status --help], %w[status --json=bogus],
-     %w[status -- extra], %w[status --project], %w[status --write=invalid], []].each do |argv|
+     %w[status -- extra], %w[status --project], %w[status --write=invalid], [] ].each do |argv|
       refute gate.default_status_route?(argv), argv.inspect
     end
   end

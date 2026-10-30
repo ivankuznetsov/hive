@@ -17,7 +17,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
 
   def test_persistent_registration_lock_gives_partial_human_and_json_status
     with_fixture do |home, _project, _name|
-      [[], ["--json"]].each do |flags|
+      [ [], [ "--json" ] ].each do |flags|
         with_lock(home) do
           result = cli("status", *flags)
           assert_equal 0, result[:exit], result.inspect
@@ -53,7 +53,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
 
   def test_ordinary_registration_exhausts_retained_fifteen_second_timeout_without_action
     with_fixture do |home, project, name|
-      [[], ["--json=true"]].each do |flags|
+      [ [], [ "--json=true" ] ].each do |flags|
         with_lock(home) do
           result = cli(*flags, "new", name, "busy acceptance task")
           assert_equal 75, result[:exit], result.inspect
@@ -101,7 +101,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
           # The BEGIN trace proves the target operation has started. Release
           # the held lock on a monotonic deadline after the old 5s window.
           deadline = started + 5.2
-          sleep([deadline - monotonic, 0].max) while monotonic < deadline
+          sleep([ deadline - monotonic, 0 ].max) while monotonic < deadline
           released_after = monotonic - started
           release.call
         end
@@ -117,7 +117,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
 
   def test_uncontended_commands_preserve_success
     with_fixture do |_home, project, name|
-      [[], ["--json"]].each do |flags|
+      [ [], [ "--json" ] ].each do |flags|
         result = cli("status", *flags)
         assert_equal 0, result[:exit], result.inspect
         assert_clean_errors(result)
@@ -187,7 +187,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
       database = Hive::RuntimeControlPlane.database.open!
       connection = database.read { |db| db }
       blocker = nil
-      [:transaction, :checkpoint].each do |operation|
+      [ :transaction, :checkpoint ].each do |operation|
         blocker = SQLite3::Database.new(database.path)
         if operation == :transaction
           blocker.execute("BEGIN IMMEDIATE")
@@ -286,9 +286,9 @@ class RuntimeDatabaseContentionTest < Minitest::Test
           reserve_started_at ||= monotonic if event == "reserve_begin"
           yield event, control_write if block_given?
         end
-        result = {stdout: stdout.value, stderr: stderr.value, exit: process.value.exitstatus,
+        result = { stdout: stdout.value, stderr: stderr.value, exit: process.value.exitstatus,
                   events: events, duration: monotonic - started, finished_at: monotonic,
-                  reserve_started_at: reserve_started_at}
+                  reserve_started_at: reserve_started_at }
       end
     rescue Exception
       Process.kill("KILL", process.pid) if process.alive?
@@ -296,7 +296,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
     end
     result
   ensure
-    [events_read, events_write, control_read, control_write].each { |io| io&.close unless io&.closed? }
+    [ events_read, events_write, control_read, control_write ].each { |io| io&.close unless io&.closed? }
   end
 
   def assert_budget(result, expected)

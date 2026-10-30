@@ -281,7 +281,7 @@ module Hive
         require "hive/running_status"
         producer = Hive::RunningStatus.new(runtime_unavailable: @runtime_unavailable)
         payload = producer.payload(projects, now: now)
-        [payload, producer.runtime_busy]
+        [ payload, producer.runtime_busy ]
       end
 
       def render_running(payload, runtime_busy: false)

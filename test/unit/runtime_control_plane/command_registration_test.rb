@@ -75,9 +75,9 @@ class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
       end
       with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**_) { database }) do
         registration = Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[new demo task], state_home: root)
-        assert_equal [15_000, 15_000], timeouts
+        assert_equal [ 15_000, 15_000 ], timeouts
         registration.finish!
-        assert_equal [15_000, 15_000, 15_000], timeouts
+        assert_equal [ 15_000, 15_000, 15_000 ], timeouts
       end
     end
   end

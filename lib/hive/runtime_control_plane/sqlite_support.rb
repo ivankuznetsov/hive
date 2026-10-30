@@ -19,6 +19,10 @@ module Hive
         end
       end
 
+      def raise_if_busy!(error)
+        raise Busy.new if busy_error?(error)
+      end
+
       def storage_exhaustion_error?(error)
         caused_by?(error) do |current|
           current.is_a?(SQLite3::FullException) || current.is_a?(Errno::ENOSPC) ||

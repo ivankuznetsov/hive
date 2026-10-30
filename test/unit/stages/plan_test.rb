@@ -58,6 +58,103 @@ class HiveStagesPlanTest < Minitest::Test
     end
   end
 
+  def plan_list(*references)
+    "---\ndepends_on:\n#{references.map { |reference| "  - #{reference}\n" }.join}---\n\n# Plan\n"
+  end
+
+  # hivedev c11/c5: meta.yml carried the dependency named at task creation and
+  # the plan added one more. Adding a prerequisite only makes scheduling
+  # stricter, so a strict superset is adopted instead of parking the task on
+  # plan_dependency_mismatch.
+  def test_plan_superset_of_meta_dependency_is_adopted
+    with_planned_task(plan_list("rails-task", "api-task"), meta_depends_on: "rails-task") do |task, dir|
+      adopt_dependency(task, Marker.new(:complete))
+
+      assert_equal %w[rails-task api-task], Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
+  # Admission resolves a bare reference in the task's own project, so
+  # `app:rails-task` and `rails-task` are one edge in project `app` whichever
+  # side spells it qualified.
+  def test_superset_compares_qualified_and_bare_same_project_references_as_equal
+    [
+      [ "rails-task", plan_list("app:rails-task", "api-task"), %w[app:rails-task api-task] ],
+      [ "app:rails-task", plan_list("rails-task", "api-task"), %w[rails-task api-task] ]
+    ].each do |meta, plan, adopted|
+      with_planned_task(plan, meta_depends_on: meta) do |task, dir|
+        adopt_dependency(task, Marker.new(:complete))
+
+        assert_equal adopted, Hive::TaskMeta.read(dir)[:depends_on], meta
+      end
+    end
+  end
+
+  # A same-named slug in another project is a different edge, so the plan is
+  # not a superset of meta and the conflict stays a human decision.
+  def test_cross_project_reference_with_the_same_slug_is_not_the_same_edge
+    with_planned_task(plan_list("web:rails-task", "api-task"), meta_depends_on: "rails-task") do |task, dir|
+      adopt_dependency(task, Marker.new(:complete))
+
+      assert_equal "rails-task", Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
+  # Never drop or replace: a plan that changes, omits, or merely re-spells an
+  # existing meta dependency leaves meta.yml alone so admission still reports
+  # plan_dependency_mismatch.
+  def test_plan_that_changes_omits_or_respells_meta_dependencies_is_not_adopted
+    [
+      [ %w[rails-task operator-choice], plan_list("rails-task", "api-task") ],
+      [ %w[rails-task api-task], plan_list("rails-task") ],
+      [ %w[rails-task api-task], plan_doc("rails-task") ],
+      [ "rails-task", plan_doc("app:rails-task") ],
+      [ %w[rails-task api-task], plan_list("api-task", "rails-task") ]
+    ].each do |meta, plan|
+      with_planned_task(plan, meta_depends_on: meta) do |task, dir|
+        adopt_dependency(task, Marker.new(:complete))
+
+        assert_equal meta, Hive::TaskMeta.read(dir)[:depends_on], plan
+      end
+    end
+  end
+
+  def test_superset_adoption_is_skipped_for_a_stale_observation
+    with_planned_task(plan_list("rails-task", "api-task"), meta_depends_on: "rails-task") do |task, dir|
+      observation = Hive::TaskMeta.observe(dir)
+      meta = File.binread(Hive::TaskMeta.path(dir))
+      FileUtils.rm_rf(dir)
+      FileUtils.mkdir_p(dir)
+      File.binwrite(Hive::TaskMeta.path(dir), meta)
+      File.write(File.join(dir, "plan.md"), plan_list("rails-task", "api-task"))
+
+      _out, err = capture_io do
+        assert_nil adopt_dependency(task, Marker.new(:complete), observation: observation)
+      end
+
+      assert_equal "rails-task", Hive::TaskMeta.read(dir)[:depends_on]
+      assert_includes err, "stale task"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_superset_self_dependency_is_refused
+    with_planned_task(plan_list("rails-task", "app:cli-task"), meta_depends_on: "rails-task") do |task, dir|
+      adopt_dependency(task, Marker.new(:complete))
+
+      assert_equal "rails-task", Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
+  def test_malformed_plan_frontmatter_is_not_adopted
+    with_planned_task("---\ndepends_on: [rails-task\n---\n\n# Plan\n") do |task, dir|
+      adopt_dependency(task, Marker.new(:complete))
+
+      assert_nil Hive::TaskMeta.read(dir)[:depends_on]
+    end
+  end
+
   def test_incomplete_plan_is_not_adopted
     with_planned_task(plan_doc("rails-task")) do |task, dir|
       adopt_dependency(task, Marker.new(:waiting))

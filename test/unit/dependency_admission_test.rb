@@ -115,6 +115,22 @@ class DependencyAdmissionTest < Minitest::Test
     ]))
     assert matching_context.verdict(project: "app", slug: "matching-list").clear?
 
+    # Admission itself stays exact: a plan superset is only healed by plan
+    # stage adoption, and a plan that omits a meta edge is never healed.
+    superset = task(
+      "app", "superset", depends_on: "base", plan_status: :ok,
+      plan_dependency: %w[base other]
+    )
+    assert_error context(project(tasks: [ superset ]))
+      .verdict(project: "app", slug: "superset"), "plan_dependency_mismatch"
+
+    omission = task(
+      "app", "omission", depends_on: %w[base other], plan_status: :ok,
+      plan_dependency: %w[base]
+    )
+    assert_error context(project(tasks: [ omission ]))
+      .verdict(project: "app", slug: "omission"), "plan_dependency_mismatch"
+
     reordered_list = task(
       "app", "reordered-list", depends_on: %w[first second], plan_status: :ok,
       plan_dependency: %w[second first]

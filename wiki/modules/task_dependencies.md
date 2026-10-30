@@ -1,9 +1,9 @@
 ---
 title: Task dependencies
 type: module
-source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
+source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb
 created: 2026-06-18
-updated: 2026-10-14
+updated: 2026-10-30
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -71,6 +71,14 @@ assertion, mismatch, or malformed frontmatter is an admission error. Duplicate
 top-level `depends_on` keys are invalid here too. Frontmatter scanning stops at
 its closing delimiter and is capped at 64 KiB, so admission never reads an
 unbounded plan body. Hive never scans plan prose for prerequisites.
+
+Admission's comparison stays exact. The plan stage heals the two safe drifts
+before admission sees them: `Hive::PlanDependencyAdoption` writes the plan's
+declaration into metadata when metadata has none or when the plan is a strict
+superset of it (compared by target via `Dependencies.reference_identity`, the
+same bare-means-own-project rule `resolve_project` uses). It runs after the
+initial planner and again when plan review promotes a revised candidate. It
+never drops or replaces an existing metadata edge; see [[stages/plan]].
 
 This cross-check closes the ordering failure observed in the Honeycomb work:
 the plan named a prerequisite that scheduling metadata did not carry. The

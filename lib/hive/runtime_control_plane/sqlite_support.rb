@@ -13,13 +13,15 @@ module Hive
 
       def busy_error?(error)
         caused_by?(error) do |current|
-          current.is_a?(SQLite3::BusyException) ||
+          (defined?(Busy) && current.is_a?(Busy)) ||
+            current.is_a?(SQLite3::BusyException) ||
             (defined?(Sequel::DatabaseLockTimeout) &&
              current.is_a?(Sequel::DatabaseLockTimeout))
         end
       end
 
       def raise_if_busy!(error)
+        raise error if error.is_a?(Busy)
         raise Busy.new if busy_error?(error)
       end
 

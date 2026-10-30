@@ -65,7 +65,7 @@ module Hive
           identity_cursor: cursor, identity_limit: bounded
         )
       end
-    rescue Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
+    rescue Hive::RuntimeControlPlane::Busy, Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
     rescue Errno::ENOSPC, Errno::EDQUOT => error
@@ -162,7 +162,7 @@ module Hive
           batch_id: batch_id, fixed_cutoff: fixed_cutoff
         )
       end
-    rescue Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
+    rescue Hive::RuntimeControlPlane::Busy, Sequel::DatabaseLockTimeout, SQLite3::BusyException => error
       maintenance_failure!(:command_prune_busy,
                            "resolve database contention, then rerun; free disk if storage is exhausted", error)
     rescue Errno::ENOSPC, Errno::EDQUOT => error

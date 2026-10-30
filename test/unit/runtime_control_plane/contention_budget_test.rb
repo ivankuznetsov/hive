@@ -15,6 +15,13 @@ class RuntimeContentionBudgetTest < Minitest::Test
     assert_in_delta 0.025, budget.waited
   end
 
+  def test_sub_resolution_wait_terminates_without_spinning
+    budget = Budget.new(clock: -> { 0.0 }, wait: ->(_) {})
+    refute budget.retry_busy
+    refute budget.retry_busy
+    assert_equal 0, budget.waited
+  end
+
   def test_scope_nests_and_clears_on_exception
     assert_nil Budget.current
     assert_raises(RuntimeError) do
@@ -29,6 +36,9 @@ class RuntimeContentionBudgetTest < Minitest::Test
 
   def test_only_busy_errors_are_classified
     support = Hive::RuntimeControlPlane::SQLiteSupport
+    typed = Hive::RuntimeControlPlane::Busy.new
+    assert support.busy_error?(typed)
+    assert_same typed, assert_raises(Hive::RuntimeControlPlane::Busy) { support.raise_if_busy!(typed) }
     assert support.busy_error?(SQLite3::BusyException.new)
     wrapped = begin
       raise SQLite3::BusyException

@@ -40,7 +40,8 @@ module Hive
       def initialize(seconds: STATUS_SECONDS,
                      clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      wait: ->(seconds) { sleep seconds })
-        @remaining = Float(seconds)
+        @seconds = Float(seconds)
+        @remaining = @seconds
         @clock = clock
         @wait = wait
         @waited = 0.0
@@ -55,7 +56,9 @@ module Hive
         @wait.call([@remaining, RETRY_SECONDS].min)
         elapsed = [@clock.call - started, 0.0].max
         @waited += elapsed
-        @remaining = [@remaining - elapsed, 0.0].max
+        # Derive the remainder from the total, avoiding accumulated subtraction
+        # error. A sub-resolution wait must terminate rather than spin forever.
+        @remaining = elapsed.positive? ? [@seconds - @waited, 0.0].max : 0.0
         @remaining > 0
       end
 

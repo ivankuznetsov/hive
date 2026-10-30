@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-10-15
+updated: 2026-10-28
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -164,14 +164,28 @@ GET /digests/:date?project=NAME    # filtered view, same global identity
 record, or make a live GitHub/PRDigest request. Consequently every GET leaves
 bases, amendments, frontiers, and `last_materialized_at` unchanged.
 
-The page leads with persisted date/zone and distinct lifecycle, completeness,
-and content badges. Navigation follows the record's `previous_date` and
+The page leads with the persisted date; distinct lifecycle, completeness,
+content and zone badges remain available under Record details. Navigation follows the record's `previous_date` and
 `next_date` sequence links, including across time-zone cutovers; `today`
 resolves the persisted interval containing now. Filter choices come from the
 selected historical record rather than the current registry. A project filter
 hides only other projects' facts and retains applicable global/source gaps.
 
-The content hierarchy is attention first, then grouped project changes and
+Activity-only records (no saved written document) open with a short Summary
+computed by `DailyDigest#summary` from the recorded rows only: observed merges
+(`merge_observed`/`pr_merged`, distinct PRs), tasks completed or archived
+(`stage_transition` rows in the `completion` category), commits recorded,
+tasks created, failed agent runs (`failure` category) and other updates, plus
+attention and source-gap counts. Attention rows are one per question, hold or
+failed session (keyed by `attention_id`), so they are reported as "items need
+attention", never as a task count. Commits are never called shipped or merged,
+and incomplete records add "some activity may be missing". Saved written
+documents (`document?`) render unchanged. The header keeps a visible
+completeness badge when the record is not complete; lifecycle/content/zone
+badges, the time range, materialization time and record id move into a closed
+"Record details" disclosure.
+
+The content hierarchy is summary, then attention, then grouped project changes and
 clearly labeled late amendments/resolved gaps. Complete-empty, partial,
 stale, missing, pre-coverage, and pruned states use separate accessible copy.
 Missing feature-era pages name `hive digest refresh --date ...`; pre-coverage
@@ -222,7 +236,7 @@ config-editing step.
 `POST /auth/github` starts the flow with scope `repo`; the wait page polls at
 GitHub's interval (one poll per render, `slow_down`-aware). On grant the app
 keeps the login AND the token in the encrypted Rails session — the token
-powers the Repos page's listing of the operator's GitHub repositories and
+powers the Projects page's listing of the operator's GitHub repositories and
 authenticates `gh repo clone` (passed as `GH_TOKEN`, never persisted).
 Non-owner logins, denied grants, and expired codes render 403 pages. A
 dev/test-only `/dev_login` seam (route drawn only when `Rails.env.local?`,
@@ -349,7 +363,7 @@ Honeycomb projections.
   All projects deliberately keeps that composer choice. There is no filter
   observer, animation-frame reconciliation, DOM hiding, or History API state
   mirror. A
-  `+ Add project` link navigates to Repos because adding a project is a real
+  `+ Add project` link navigates to Projects because adding a project is a real
   page change. The composer supports new ideas with image attach (clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract). It shares the
@@ -705,7 +719,9 @@ Honeycomb projections.
   primary header wraps to a second full-width row, keeping every section
   visible without document overflow while preserving the local GitHub-connect
   action.
-- **Repos** — registered projects, clone-by-URL (same allowlist as before:
+- **Projects** (`/projects`; `/repos` remains an alias and the form/redirect
+  target) — the navigation label and page heading say Projects, while Git
+  fields keep repository terminology. Registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
   notice when GitHub is unreachable or the grant was revoked). The setup form
@@ -738,7 +754,21 @@ Honeycomb projections.
   with token-fed https credentials (`gh` clones over ssh when the operator's
   `git_protocol` prefers it, and ssh pushes dead-end when the daemon has no
   keys or agent).
-- **Agents** — PTY login relay (ADR-035) with a polled turbo-frame instead of
+- **Agents** — cards use product names (`AgentRoles.display_name`: Claude
+  Code, Codex, Grok, OpenCode, Pi, GitHub CLI) and a compact **Coding workflow
+  roles** list (`AgentRoles`; card annotations are prefixed "Coding:"). With
+  `?project=NAME` the roles come from that project's loaded coding config
+  (`brainstorm`/`plan`/`execute` agents and `review.reviewers` of the kinds
+  `Hive::Reviewers.dispatch` runs: `agent`, default when absent, and
+  `codex_review`, which is always native Codex; `linter` is rejected there and
+  never shown). When the project's `default_workflow` is not coding (for
+  example `content`, whose stages run their own agents) the page says these
+  roles apply only to coding-workflow tasks;
+  without one they are the labelled `hive init` fresh-project defaults
+  (`Init::Prompts`: Claude brainstorm/plan, Codex implement, Claude + Codex
+  review) — never `Config::DEFAULTS`, whose execute agent is a legacy
+  fallback. A project config that fails to load shows an error instead of
+  defaults. PTY login relay (ADR-035) with a polled turbo-frame instead of
   meta-refresh; pi token form. Login create/show/completion enter the dedicated
   `AgentLogin`, `Agents::LoginsController`, and
   `Agents::LoginCompletionsController` resources while keeping the existing
@@ -777,7 +807,9 @@ Honeycomb projections.
   operation messages (or residual health/stderr fallback), and the same bounded
   details are logged so transient registry failures are distinguishable from
   persistent configuration conflicts.
-- **Telegram** — first-timer setup guide (collapsible, open while the bot is
+- **Integrations** (`/integrations`; `/telegram` remains an alias and the
+  form/redirect target) — a Telegram section holds every real control; Slack
+  is listed as Planned with no controls. Telegram: first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
@@ -1235,8 +1267,11 @@ worktree or PR. Closure receipt digests, duplicate action/quality fields and
 repeated slugs are omitted from ordinary content. Document outlines and review
 metadata and audit documents are collapsed; review findings and actions
 remain available. Structured primary files are disclosed on demand instead of
-showing raw JSON as the page body. Task references and manual
-closure remain under Advanced. Bounded publication and mutation guards remain
+showing raw JSON as the page body. Task titles lead the page; the machine reference appears in small secondary text
+with a Copy control (manual selection fallback if clipboard access is denied).
+Task-document headings substitute the human title for the exact task slug in
+the rendered view only; raw files, code samples, URLs and original heading
+anchors remain unchanged. Manual closure remains under Advanced. Bounded publication and mutation guards remain
 unchanged.
 
 The task log view extracts readable provider messages, results, errors and tool
@@ -1298,3 +1333,93 @@ demand. The all-project Archive remains the lossless fleet-wide history view.
 Completed terminal deliveries (for example writing workflow `7-deliver`) appear
 in a Done column on the project board. Pending delivery remains in Deliver;
 this grouping does not move task folders or alter workflow execution.
+
+### Document and diff presentation
+
+Document outlines, the panel label and primary Markdown share one left-aligned
+54rem reading column; headings and paragraphs no longer calculate independent
+font-relative widths. The outline summary has balanced padding and a 44px
+minimum target.
+
+The task status is one line, `Stage: Execute · Running`. Detail text follows
+only when it adds information (a blocker, a remediation, stale live status),
+not the generic "an agent is working" sentence.
+
+Primary and supporting documents are labelled by what they are
+(`ApplicationHelper#artifact_label`: Request, Plan, Implementation, Review, …)
+with the file name as secondary text. The supporting list is titled Documents
+and excludes only the primary document (`TaskWorkspace::Builder#semantic_result`),
+so unique documents are never dropped. `render_markdown` (used by the
+primary document, the Documents list and every other Markdown view) hides the
+`## Implementation` stub that `Stages::Execute#write_initial_task_md` writes
+while it has no content; in the primary document an `h1` that merely repeats
+the task title is also hidden. Hidden headings keep their anchors, and the
+captured `task.md` is never modified. A document with no
+visible content shows "Nothing has been written here yet."
+
+Git details link the repository, branch, base and head commit.
+`ApplicationHelper#repository_web_url` accepts the native publication form
+`host/owner/name` (github.com or a GitHub Enterprise host) and tolerates
+`https://…`, `.git` and `git@host:` spellings; anything else stays plain text.
+Facts with no observed value are omitted instead of shown as "Unavailable";
+the reasons remain listed under Publication diagnostics. Push state compares
+HEAD only with the local `refs/remotes/origin/<branch>`
+(`TaskWorkspace::Publication#observe_tracking`), so the labels say "last
+fetched origin". `not_observed` means only that the local tracking ref is
+absent — it does not query the remote — so it is omitted rather than shown as
+"Not pushed".
+
+Task diffs progressively enhance escaped raw patches using locally vendored
+diff2html 3.4.56 and highlight.js (`app/javascript/lib/diff_renderer.js`,
+licenses beside it): file list, line numbers, +/- counts, syntax colours,
+unified/split/raw modes. `lib/diff_renderer` is pinned with `preload: false`
+and imported only when a page contains a patch; a failed load leaves the raw
+text readable (`data-diff-ready="fallback"`). Patch text reaches the browser
+only as escaped `<pre>` text and diff2html/highlight.js escape it again when
+rendering. Horizontal overflow stays on `.d2h-file-diff` (unified) and on
+each `.d2h-file-side-diff` (split): those are the elements diff2html's
+synchronised scroll binds to, so an inner scroller would let the before and
+after panes drift apart. They also carry the focus/region labels. Only non-empty diff layers get a section; empty layers are listed
+in one "No changes: …" line. Partial/unavailable/empty indicators remain. No
+CDN or runtime service is required.
+
+The task workspace shows one full-width Code changes panel with a View diff
+link rather than an inline patch beside publication metadata. The local diff
+(`Hive::Web::TaskDiff`) reads only the live task worktree; when the worktree
+is gone but a PR is recorded, the panel links "View diff on GitHub"
+(`<pr url>/files`) instead.
+
+The panel is compact at every width (`tasks/_publication`): the Code changes
+title and its state badge form one wrapping row (`.publication-title`), the
+PR title follows, and the PR link and View diff link sit side by side as
+small buttons (`.publication-actions`). There are no Pull request / Pull
+request status subheadings. The GitHub observation is one muted line; it
+repeats GitHub's state only when it differs from the badge (for example
+"Open on GitHub · checked …" under Checks failing) and formats `observed_at`
+with `ApplicationHelper#publication_observed_label` while the raw ISO value
+stays in `<time datetime>`. Checks, PR description, Git details and
+Publication diagnostics remain, the last three as collapsed disclosures.
+
+The primary document's section label (Plan, Implementation, Review, …) uses
+`.document-section-label`: a small sans label in `--warn` mixed 80% toward
+`--ink` (about 5.3:1 on white, 5.0:1 on the ivory page, 6.5:1 dark), so it is
+distinct from the document's own title. Supporting Documents rows wrap their
+label in the same class but colour it only while the row is open; closed rows
+stay neutral. Markdown headings themselves are unchanged.
+Open-source Hive remains single-owner; future cloud multi-user concepts must
+not be introduced into this local UI implicitly.
+
+### Task page order
+
+`tasks/show` renders one Code changes panel (the `task-publication-*` morph
+frame). Status, actions and open questions (`tasks/_state`) always come
+first. Active tasks then show the current document, then Code changes ahead of
+the Documents list. Finished tasks (terminal stage or archive source) with a
+PR or worktree lead with Code changes before the document, so the observed PR
+state and delivered changes come first; the state label comes from the
+publication observation, never from the task merely being archived.
+A plan critique that needs the operator (`awaiting_decision`, or any
+`required_action`) renders once above the plan document, including when
+stale (its reload warning is the action); running or settled critique stays
+below as secondary evidence. The `_plan_review` partial and its exact-finding
+bindings, freshness and confirmation gates are unchanged.

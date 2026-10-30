@@ -69,7 +69,13 @@ class DigestsTest < ActionDispatch::IntegrationTest
     assert_select "nav[aria-label='Digest date']"
     assert_select ".digest-badge", text: "Closed"
     assert_select ".digest-badge", text: "Partial"
-    assert_select ".digest-record-reference", text: /#{stored.fetch("record_id")[0, 12]}/
+    assert_select "details.digest-technical:not([open]) .digest-record-reference", text: /#{stored.fetch("record_id")[0, 12]}/
+    assert_select ".digest-header > div > .digest-badges .digest-badge", text: "Partial"
+    assert_select ".digest-summary", text: /2 projects:\s+3 other updates\./
+    assert_select ".digest-summary strong", text: "1 item needs attention."
+    assert_select ".digest-summary", text: /2 sources could not be checked/
+    assert_select ".digest-summary", text: /some activity may be missing/
+    assert_operator response.body.index("digest-summary"), :<, response.body.index("Needs attention")
     assert_select ".digest-attention", text: /Needs attention/
     assert_select ".digest-activity", text: /Project activity/
     assert_operator response.body.index("Needs attention"), :<, response.body.index("Project activity")

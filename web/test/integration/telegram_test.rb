@@ -23,6 +23,22 @@ class TelegramTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "integrations presents telegram as a section and slack only as planned" do
+    sign_in!
+    get "/integrations"
+    assert_response :success
+    assert_select "h1", text: "Integrations"
+    assert_select "nav a.nav-link-active[href='/integrations']", text: "Integrations"
+    assert_select "section#telegram h2", text: "Telegram"
+    assert_select "section#telegram form[action='#{update_telegram_path}']", 1
+    assert_select "section#telegram form[action='#{test_telegram_path}']", 1
+    assert_select "section#telegram #pairing-heading", text: "Pairing requests"
+    assert_select "#slack-heading", text: /Slack\s+Planned/
+    assert_select "section.integration-planned form, section.integration-planned button", 0
+    get "/telegram"
+    assert_select "h1", text: "Integrations"
+  end
+
   test "the page walks a first-timer through bot setup" do
     sign_in!
     get "/telegram"
@@ -118,7 +134,7 @@ class TelegramTest < ActionDispatch::IntegrationTest
     end
 
     assert_response :success
-    assert_select "nav a.nav-link-active", text: "Telegram"
+    assert_select "nav a.nav-link-active", text: "Integrations"
     assert_select ".flash-notice", text: /Sent a test message to 2 chat\(s\)/
   end
 

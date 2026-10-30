@@ -51,4 +51,43 @@ class ApplicationHelperTest < ActionView::TestCase
     refute_includes document.fetch(:html), "<script>"
     refute_includes document.fetch(:html), "javascript:"
   end
+  test "task document headings use titles while source anchors and code stay unchanged" do
+    task = Struct.new(:slug, :title).new("task-260708-edec", "CLI <script>alert(1)</script> & API")
+    source = "# task-260708-edec\n\n## Review task-260708-edec\n\n## Two\n\n## Three\n\n## Four\n\n`task-260708-edec`\n\n```sh\necho task-260708-edec\n```\n"
+    original = source.dup
+    document = render_markdown_document(source, task: task)
+    html = Nokogiri::HTML.fragment(document.fetch(:html))
+    assert_equal task.title, html.at_css("h1").text
+    assert_equal task.slug, html.at_css("h1")["id"]
+    assert_equal "Review #{task.title}", document.fetch(:outline).first.fetch(:label)
+    assert_equal "review-task-260708-edec", document.fetch(:outline).first.fetch(:id)
+    assert_equal task.slug, html.at_css("p code").text
+    assert_includes html.at_css("pre code").text, task.slug
+    assert_empty html.css("script")
+    assert_equal original, source
+    assert_includes render_markdown("# #{task.slug}-other", task: task), "#{task.slug}-other"
+    assert_includes render_markdown("# #{task.slug}"), task.slug
+  end
+
+  test "empty implementation stub is hidden but content and useful sections stay" do
+    source = "## Implementation\n\n## Execute Output\n\nBuilt and tested.\n\n## Checks\nPassed.\n"
+    original = source.dup
+    result = render_markdown_document(source)
+    html = Nokogiri::HTML.fragment(result.fetch(:html))
+    assert_equal "hidden", html.at_css("h2#implementation")["hidden"]
+    assert_nil html.at_css("h2#execute-output")["hidden"]
+    assert_includes html.text, "Built and tested."
+    assert_equal original, source
+
+    running = render_markdown_document("# demo\n\n## Implementation\n\n<!-- AGENT_WORKING -->\n")
+    assert_equal "hidden", Nokogiri::HTML.fragment(running.fetch(:html)).at_css("h2#implementation")["hidden"]
+
+    supporting = Nokogiri::HTML.fragment(render_markdown(source))
+    assert_equal "hidden", supporting.at_css("h2")["hidden"], "supporting documents share the suppression"
+    assert_includes supporting.text, "Built and tested."
+    assert_equal original, source
+
+    with_content = render_markdown_document("## Implementation\n\nUseful implementation notes.\n\n## Execute Output\n\nDone.")
+    assert_nil Nokogiri::HTML.fragment(with_content.fetch(:html)).at_css("h2#implementation")["hidden"]
+  end
 end

@@ -818,14 +818,35 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .workspace-table th { font-weight: 650; }
 .dependency-table { min-width: 660px; }
 
-.workspace-change-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-  align-items: start;
-}
-.workspace-change-grid > turbo-frame { display: block; min-width: 0; }
 .publication-body { max-height: 360px; }
+/* Compact publication panel: title and state are one group, PR and diff
+   actions sit together, and observation and Git facts stay secondary. The
+   heading stays a wrapping row at mobile widths instead of a tall stack. */
+.publication-panel > .publication-heading { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px; }
+.publication-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; min-width: 0; }
+.publication-title h2 { margin: 0; }
+.publication-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.publication-actions .btn { display: inline-flex; align-items: center; min-height: 36px; }
+.publication-pr-title { margin: 0 0 10px; }
+.publication-observed { margin: 10px 0 0; color: var(--ink-muted); font-size: 0.85rem; }
+.publication-panel .workspace-table-scroll { margin-top: 12px; }
+.publication-panel > .task-secondary,
+.publication-panel > .workspace-diagnostics { margin: 12px 0 0; padding: 8px 0 0; border-top: 1px solid var(--line); border-bottom: 0; font-size: 0.9rem; }
+.publication-panel > .task-secondary[open] > summary { margin-bottom: 12px; }
+
+/* The document's section label (Plan, Implementation, Review) is a quiet
+   amber label, distinct from the document's own title. Mixed toward ink so
+   it stays above 4.5:1 in both themes. */
+.workspace-panel-heading .document-section-label {
+  margin: 0;
+  color: color-mix(in srgb, var(--warn) 80%, var(--ink));
+  font: 700 0.95rem/1.4 var(--font-sans);
+  letter-spacing: 0.02em;
+}
+/* An opened supporting document gets the same label colour, so its name
+   stays distinct from the document's own first heading; closed rows stay
+   neutral. */
+.artifact[open] > summary .document-section-label { color: color-mix(in srgb, var(--warn) 80%, var(--ink)); }
 
 .usage-summary,
 .primary-work-product { margin: 22px 0; }
@@ -849,30 +870,40 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
   border-color: var(--line-strong);
 }
 .document-outline {
-  width: min(82ch, 100%);
-  margin: 0 auto clamp(22px, 3vw, 34px);
-  padding: 14px 18px;
+  width: min(54rem, 100%);
+  margin: 0 0 24px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   background: var(--bg-sunken);
 }
-.document-outline-title { margin: 0 0 8px; color: var(--ink-muted); font-weight: 700; }
+.document-outline-title {
+  margin: 0;
+  padding: 12px 16px;
+  min-height: 44px;
+  color: var(--ink-muted);
+  font: 600 0.9rem/1.4 var(--font-sans);
+}
+summary.document-outline-title { cursor: pointer; }
+summary.document-outline-title:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.document-outline[open] > .document-outline-title { border-bottom: 1px solid var(--line); }
 .document-outline ol {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 6px 24px;
   margin: 0;
-  padding-left: 20px;
+  padding: 12px 16px 14px 36px;
 }
 .document-outline a { overflow-wrap: anywhere; }
+/* Set the reading width once, not in each child's font-relative ch units. */
 .primary-markdown {
-  max-width: min(1200px, 100%);
-  margin-inline: auto;
-  padding: clamp(18px, 4vw, 48px) clamp(0px, 3vw, 38px);
+  width: min(54rem, 100%);
+  margin-inline: 0;
+  padding: 0;
 }
 .primary-markdown > :not(pre):not(table):not(img) {
-  width: min(82ch, 100%);
-  margin-inline: auto;
+  width: 100%;
+  margin-inline: 0;
 }
 .primary-markdown h1,
 .primary-markdown h2,
@@ -884,17 +915,15 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .diagnostic-log turbo-frame { display: block; min-width: 0; margin-top: 12px; }
 
 .artifact { margin-bottom: 22px; }
-/* The summary is UI chrome (a filename tab), not part of the document it
-   opens — mono + muted like .task-slug, so the document's own serif
-   headings clearly belong to the content below. */
+/* The summary names what the document is (Plan, Review); the file name
+   follows as small mono secondary text. */
 .artifact summary {
   cursor: pointer;
-  font-weight: 500;
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  color: var(--ink-muted);
+  font: 600 0.95rem/1.4 var(--font-sans);
+  color: var(--ink);
   padding: 4px 0;
 }
+.artifact-file { margin-left: 6px; font: 400 0.8rem var(--font-mono); color: var(--ink-muted); }
 .artifact summary:hover { color: var(--ink); }
 .artifact-body { margin-top: 8px; }
 
@@ -924,8 +953,8 @@ pre {
   padding: clamp(24px, 4vw, 48px) clamp(18px, 5vw, 56px);
 }
 .artifact-body .markdown > :not(pre):not(table):not(img) {
-  width: min(82ch, 100%);
-  margin-inline: auto;
+  width: 100%;
+  margin-inline: 0;
 }
 .outcome-evidence {
   margin: 26px 0;
@@ -1598,7 +1627,6 @@ pre {
   .permission-grid dd { margin-bottom: 8px; }
   main { padding: 20px 14px 48px; }
   .task-workspace-grid,
-  .workspace-change-grid,
   .workspace-summary,
   .dependency-layout { grid-template-columns: minmax(0, 1fr); }
   .workspace-panel { padding: 15px; }
@@ -1819,3 +1847,24 @@ pre {
 
 .digest-loc-added { color: var(--ok); }
 .digest-loc-deleted { color: var(--danger); }
+
+.task-status-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; margin: 12px 0 20px; font-size: .9rem; }
+.task-status-line #workspace-summary-heading { color: var(--ink-muted); }
+.task-status-line.task-state-running #workspace-summary-heading { color: var(--accent); }
+.task-status-line.task-state-attention #workspace-summary-heading { color: var(--danger); font-weight: 600; }
+.task-status-line .task-state-detail { margin: 0; }
+.markdown [hidden] { display: none; }
+.integration-section + .integration-section { margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--line); }
+.integration-section h2 .tag { margin-left: 8px; vertical-align: middle; font: 600 .75rem var(--font-sans); }
+.task-outcome-first { margin: 0 0 24px; }
+.digest-summary { margin: 0 0 24px; padding: 16px 20px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); }
+.digest-summary h2 { margin: 0 0 6px; font-size: 1.05rem; }
+.digest-summary p { margin: 4px 0; }
+.digest-technical { margin-top: 8px; font-size: .85rem; color: var(--ink-muted); }
+.digest-technical > summary { cursor: pointer; }
+.agent-roles { margin: 0 0 24px; }
+.agent-role-list { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 8px 0; }
+.agent-role-list div { display: contents; }
+.agent-role-list dt { color: var(--ink-muted); }
+.agent-role-list dd { margin: 0; font-weight: 600; }
+.agent-card-roles { margin: 2px 0 8px; color: var(--ink-muted); font-size: .85rem; }

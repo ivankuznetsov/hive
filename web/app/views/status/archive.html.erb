@@ -22,7 +22,7 @@
       <% if @visible_projects.empty? %>
         <div class="empty-state">
           <p>No projects yet.</p>
-          <p class="hint"><%= link_to "Add a repository", repos_path %> to start the pipeline.</p>
+          <p class="hint"><%= link_to "Add a project", projects_path %> to start the pipeline.</p>
         </div>
       <% else %>
         <% @visible_projects.each do |project| %>

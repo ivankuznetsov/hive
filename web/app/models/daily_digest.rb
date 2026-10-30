@@ -118,6 +118,45 @@ class DailyDigest
 
   def outcome_label(row) = Hive::DailyDigest::PublicView.outcome_label(row)
 
+  # Plain-language overview of recorded rows only (no generated prose): what
+  # merged, completed, was committed or failed, counted from each row's
+  # recorded kind and category. Commits are not called shipped; only an
+  # observed merge counts as merged.
+  def summary
+    rows = items
+    merged = rows.select { |row| %w[merge_observed pr_merged].include?(row["kind"]) }
+                 .map { |row| pr_url(row) || row["fact_id"] }.uniq.length
+    completed = rows.select { |row| row["kind"] == "stage_transition" && row["category"] == "completion" }
+                    .map { |row| [ row["project_id"], row["task_slug"] || row["fact_id"] ] }.uniq.length
+    created = rows.count { |row| row["kind"] == "task_created" }
+    commits = rows.count { |row| row["kind"] == "commit_observed" }
+    failed = rows.count { |row| row["category"] == "failure" }
+    counted = rows.count do |row|
+      %w[merge_observed pr_merged task_created commit_observed].include?(row["kind"]) ||
+        row["category"] == "failure" ||
+        (row["kind"] == "stage_transition" && row["category"] == "completion")
+    end
+    facts = [
+      ([ merged, "pull request merged", "pull requests merged" ] if merged.positive?),
+      ([ completed, "task completed or archived", "tasks completed or archived" ] if completed.positive?),
+      ([ commits, "commit recorded", "commits recorded" ] if commits.positive?),
+      ([ created, "task created", "tasks created" ] if created.positive?),
+      ([ failed, "failed agent run", "failed agent runs" ] if failed.positive?),
+      ([ rows.length - counted, "other update", "other updates" ] if rows.length > counted)
+    ].compact.map { |count, one, many| "#{count} #{count == 1 ? one : many}" }
+    projects = rows.map { |row| row["project"] }.compact.uniq
+    # Attention rows are per question, hold or failed session (keyed by
+    # attention_id), not per task, so they are counted as items.
+    attention_count = attention.length
+    {
+      scope: selected_project.present? ? selected_project : (projects.length > 1 ? "#{projects.length} projects" : projects.first),
+      facts: facts,
+      attention: ("#{attention_count} #{attention_count == 1 ? 'item needs' : 'items need'} attention" if attention_count.positive?),
+      gaps: ("#{gaps.length} #{gaps.length == 1 ? 'source' : 'sources'} could not be checked" if gaps.any?),
+      incomplete: completeness != "complete"
+    }
+  end
+
   private
 
   def sanitize_attention!

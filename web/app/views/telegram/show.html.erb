@@ -1,5 +1,8 @@
-<% content_for(:title, "#{web_product_name} — telegram") %>
-<h1>Telegram</h1>
+<% content_for(:title, "#{web_product_name} — integrations") %>
+<h1>Integrations</h1>
+
+<section class="integration-section" id="telegram" aria-labelledby="telegram-heading">
+<h2 id="telegram-heading">Telegram</h2>
 <p class="muted">Connect the hive bot so you can drive the pipeline from Telegram. The token is validated against the real API before anything is saved.</p>
 
 <%# Open while unconfigured, tucked away once the bot works. %>
@@ -51,7 +54,7 @@
 <% end %>
 
 <section class="pairing-section" aria-labelledby="pairing-heading">
-  <h2 id="pairing-heading">Pairing requests</h2>
+  <h3 id="pairing-heading">Pairing requests</h3>
   <% if @telegram_bot.pairing_enabled? %>
     <p class="muted">Ask the person to send <code>/start</code> to your bot, then match the code shown in their chat. Refresh this page to check for new requests.</p>
     <% if @pairing_error %>
@@ -83,7 +86,7 @@
   <% end %>
 </section>
 
-<h2>Round trip</h2>
+<h3>Round trip</h3>
 <p class="muted">Sends a real message to every allowed chat with the saved token.</p>
 <%= button_to "Send test message", test_telegram_path, class: "btn-secondary",
       disabled: @telegram_bot.chat_ids.empty?,
@@ -91,3 +94,9 @@
 <% if @telegram_bot.chat_ids.empty? %>
   <p class="faint">Approve a pairing request or add a chat ID before sending a test.</p>
 <% end %>
+</section>
+
+<section class="integration-section integration-planned" aria-labelledby="slack-heading">
+  <h2 id="slack-heading">Slack <span class="tag">Planned</span></h2>
+  <p class="muted">Not available yet. Telegram is the supported messenger today.</p>
+</section>

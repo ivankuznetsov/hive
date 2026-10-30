@@ -171,10 +171,15 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
                     "section headings must establish a clear document hierarchy"
     assert_operator desktop.fetch("readingWidth"), :<=, 900,
                     "long lines must be capped at a comfortable reading measure"
-    assert_operator desktop.fetch("panelWidth"), :>, desktop.fetch("readingWidth"),
-                    "the document panel should leave desktop room for wide evidence"
-    assert_operator desktop.fetch("evidenceWidth"), :>, desktop.fetch("readingWidth"),
-                    "tables should use available desktop width without widening prose"
+    assert_in_delta desktop.fetch("panelWidth"), desktop.fetch("readingWidth"), 1,
+                    "prose must use the shared document column"
+    assert_in_delta desktop.fetch("evidenceWidth"), desktop.fetch("readingWidth"), 1,
+                    "tables and prose must share the same outer alignment"
+    edges = page.evaluate_script(<<~JS)
+      [document.querySelector('#workspace-primary-result-heading'), document.querySelector('.document-outline'), ...document.querySelector('.primary-markdown').querySelectorAll(':scope > h1, :scope > h2, :scope > p, :scope > pre')]
+        .map(el => el.getBoundingClientRect().left)
+    JS
+    edges.each { |edge| assert_in_delta edges.first, edge, 1 }
     assert_operator desktop.fetch("documentWidth"), :<=, desktop.fetch("viewport") + 1
 
     page.current_window.resize_to(375, 812)
@@ -385,5 +390,77 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert find("details[data-workspace-disclosure-key='advanced']")[:open]
     assert_equal "advanced",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")
+  end
+  test "native diff assets enhance files with syntax and working split and raw controls" do
+    execute_folder = stage_dir(@project, "4-execute").join(@slug)
+    FileUtils.mv(@folder, execute_folder)
+    @folder = execute_folder
+    project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project)
+    File.write(File.join(project_root, "example.rb"), "puts \"before\"\n# old #{'wide ' * 80}\n")
+    system("git", "-C", project_root, "add", "example.rb", exception: true)
+    system("git", "-C", project_root, "commit", "-qm", "diff fixture", exception: true)
+    base = IO.popen([ "git", "-C", project_root, "rev-parse", "HEAD" ], &:read).strip
+    owned = Hive::Worktree.new(project_root, @slug)
+    owned.create!(@slug, default_branch: "master")
+    owned.write_pointer!(@folder, @slug, execute_base_head: base)
+    File.write(File.join(owned.path, "example.rb"), "puts \"after <img src=x onerror=alert(1)>\"\n# new #{'wide ' * 80}\n")
+    sign_in!
+    visit task_diff_path(@project, @slug)
+    assert_selector "[data-diff-ready='ready']", wait: 15
+    assert_selector ".d2h-file-wrapper", minimum: 1
+    assert_selector ".hljs-string", minimum: 1
+    assert_selector ".diff-rendered", text: "<img src=x onerror=alert(1)>"
+    assert_no_selector ".diff-rendered img", visible: :all
+    click_button "Split", match: :first
+    assert_selector ".d2h-file-side-diff", minimum: 1
+    click_button "Raw", match: :first
+    assert_selector "[data-diff-raw]", text: "diff --git"
+    click_button "Unified", match: :first
+    page.current_window.resize_to(390, 844)
+    assert page.evaluate_script("document.documentElement.scrollWidth <= innerWidth + 1")
+
+    # Split panes must scroll together: the element that overflows has to be
+    # the .d2h-file-side-diff pair diff2html synchronises, not an inner wrapper.
+    click_button "Split", match: :first
+    assert_selector ".d2h-file-side-diff[aria-label='File diff, before']", minimum: 1
+    panes = page.evaluate_script(<<~JS)
+      (() => {
+        const [left, right] = document.querySelectorAll('.d2h-files-diff .d2h-file-side-diff')
+        const inner = [...left.querySelectorAll('*'), ...right.querySelectorAll('*')]
+          .filter(el => el.scrollWidth > el.clientWidth + 1 && ['auto', 'scroll'].includes(getComputedStyle(el).overflowX))
+        right.scrollLeft = 200
+        return { overflow: left.scrollWidth > left.clientWidth + 200 && right.scrollWidth > right.clientWidth + 200, innerScrollers: inner.length }
+      })()
+    JS
+    assert panes.fetch("overflow"), "the long lines must make both split panes themselves scroll"
+    assert_equal 0, panes.fetch("innerScrollers"), "no inner element may own horizontal scrolling"
+    positions = nil
+    20.times do
+      positions = page.evaluate_script("Array.from(document.querySelectorAll('.d2h-files-diff .d2h-file-side-diff')).slice(0, 2).map(el => Math.round(el.scrollLeft))")
+      break if positions == [ 200, 200 ]
+
+      sleep 0.1
+    end
+    assert_equal [ 200, 200 ], positions, "scrolling the after pane must move the before pane"
+    assert page.evaluate_script("document.documentElement.scrollWidth <= innerWidth + 1")
+  end
+
+  test "task reference copies exactly and remains selectable if clipboard is denied" do
+    sign_in!
+    visit task_path(@project, @slug)
+    assert_selector ".task-header h1", text: "Keep exact attempt"
+    assert_selector ".task-reference code", text: @slug
+    page.execute_script(<<~JS)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        writeText: async text => { window.copiedTaskReference = text; }
+      }});
+    JS
+    click_button "Copy task reference"
+    assert_selector ".task-reference [role='status']", text: "Copied"
+    assert_equal @slug, page.evaluate_script("window.copiedTaskReference")
+    page.execute_script("navigator.clipboard.writeText = async () => { throw new Error('denied'); }")
+    click_button "Copy task reference"
+    assert_selector ".task-reference [role='status']", text: "Select and copy the reference."
+    assert_equal @slug, page.evaluate_script("window.getSelection().toString()")
   end
 end

@@ -2,11 +2,38 @@
 <h1>Agents</h1>
 <p class="muted">Authenticate the agents the pipeline runs. Credentials persist in Hive's data home on this machine.</p>
 
+<section class="agent-roles" aria-labelledby="agent-roles-heading">
+  <h2 id="agent-roles-heading">Coding workflow roles</h2>
+  <% if @roles %>
+    <dl class="agent-role-list">
+      <% @roles.roles.each do |role| %>
+        <div><dt><%= role.label %></dt><dd><%= role.agents.map { |agent| AgentRoles.display_name(agent) }.join(", ") %></dd></div>
+      <% end %>
+    </dl>
+    <p class="faint">
+      <% if @roles.source == :project %>
+        Coding workflow configuration for <strong><%= @roles.project_name %></strong>.
+        <% unless @roles.coding_default? %>
+          Its default workflow is <strong><%= @roles.default_workflow %></strong>, whose stages run their own agents; these roles apply only to coding-workflow tasks.
+        <% end %>
+      <% else %>
+        Defaults for a new project (<code>hive init</code>). Each project can change them; choose one under Managed skills to see its roles.
+      <% end %>
+    </p>
+  <% else %>
+    <div class="flash flash-alert"><%= @roles_error %></div>
+  <% end %>
+</section>
+
+<% role_labels = @roles&.by_agent || {} %>
 <div class="agent-cards">
   <% @statuses.each do |agent, status| %>
     <% logged_in = status["logged_in"] %>
-    <div class="card agent-card">
-      <h3><%= agent %></h3>
+    <div class="card agent-card" data-agent="<%= agent %>">
+      <h3><%= AgentRoles.display_name(agent) %></h3>
+      <% if role_labels.key?(agent.to_s) %>
+        <p class="agent-card-roles">Coding: <%= role_labels[agent.to_s].join(" · ") %></p>
+      <% end %>
       <p class="agent-state">
         <span class="status-dot <%= logged_in ? "status-dot-running" : "status-dot-idle" %>"></span>
         <%= logged_in ? "Logged in" : "Not logged in" %>
@@ -28,8 +55,8 @@
 
   <% if @projects.empty? %>
     <div class="empty-state">
-      <p>Add a repository before checking its agent skills.</p>
-      <p><%= link_to "Add a repository", repos_path %></p>
+      <p>Add a project before checking its agent skills.</p>
+      <p><%= link_to "Add a project", projects_path %></p>
     </div>
   <% else %>
     <%= form_with url: agents_path, method: :get, class: "repo-form skill-check-form" do |f| %>

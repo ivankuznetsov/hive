@@ -5,11 +5,11 @@ module ApplicationHelper
   NAV_SECTIONS = {
     status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
     digests: ->(c) { c == "digests" },
-    repos: ->(c) { c == "repos" },
+    projects: ->(c) { c == "repos" },
     honeycombs: ->(c) { %w[workflows modules].include?(c) },
     patrol: ->(c) { c == "patrol" },
     agents: ->(c) { c == "agents" },
-    telegram: ->(c) { c == "telegram" }
+    integrations: ->(c) { c == "telegram" }
   }.freeze
 
   def nav_class(section)
@@ -29,6 +29,14 @@ module ApplicationHelper
     time_tag(timestamp)
   rescue ArgumentError, TypeError
     tag.span("Time unavailable", class: "digest-meta")
+  end
+
+  # Readable UTC time for the publication panel's GitHub observation; the raw
+  # ISO value stays in the <time datetime> attribute.
+  def publication_observed_label(value)
+    Time.iso8601(value.to_s).utc.strftime("%-d %b %Y, %H:%M UTC")
+  rescue ArgumentError
+    value.to_s
   end
 
   # Turbo morphs by DOM identity. Use a digest of the full raw tuple so
@@ -82,7 +90,7 @@ module ApplicationHelper
   # "<!-- COMPLETE -->" keeps it; only real marker lines vanish, since the
   # stage badge owns that state). A fresh renderer per call: Redcarpet
   # instances are not thread-safe under Puma.
-  def render_markdown(text)
+  def render_markdown(text, task: @task)
     renderer = Redcarpet::Markdown.new(
       Redcarpet::Render::HTML.new(escape_html: true,
                                   link_attributes: { rel: "noopener noreferrer", target: "_blank" }),
@@ -91,7 +99,13 @@ module ApplicationHelper
     )
     body = text.to_s.sub(/\A---\n.*?\n---\n/m, "")
     body = body.gsub(/^[ \t]*#{Hive::Markers::MARKER_RE}[ \t]*(?:\r?\n|\z)/, "")
-    sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
+    html = sanitize(renderer.render(body), tags: MARKDOWN_TAGS, attributes: MARKDOWN_ATTRS)
+    fragment = Nokogiri::HTML.fragment(html)
+    fragment.css("h1, h2, h3, h4, h5, h6").each do |heading|
+      heading["hidden"] = "hidden" if empty_implementation_heading?(heading)
+      task_heading_label(heading, task)
+    end
+    fragment.to_html.html_safe
   end
 
   # Primary work products add navigation after the existing renderer has
@@ -99,8 +113,8 @@ module ApplicationHelper
   # from sanitized heading text, and duplicate headings receive a stable
   # ordinal suffix. Four H2 sections is the point where an outline earns its
   # place; short documents still get linkable headings without extra chrome.
-  def render_markdown_document(text)
-    fragment = Nokogiri::HTML.fragment(render_markdown(text))
+  def render_markdown_document(text, task: @task)
+    fragment = Nokogiri::HTML.fragment(render_markdown(text, task: nil))
     occurrences = Hash.new(0)
     outline = []
 
@@ -109,13 +123,81 @@ module ApplicationHelper
       occurrences[base] += 1
       anchor = occurrences[base] == 1 ? base : "#{base}-#{occurrences[base]}"
       heading["id"] = anchor
+      task_heading_label(heading, task)
+      if heading["hidden"] || repeats_task_title?(heading, task)
+        heading["hidden"] = "hidden"
+        next
+      end
       outline << { id: anchor, label: heading.text.to_s.strip } if heading.name == "h2"
     end
 
     {
       html: fragment.to_html.html_safe,
+      empty: fragment.element_children.none? { |node| node["hidden"].nil? && node.text.strip.present? },
       outline: outline.length >= 4 ? outline.freeze : [].freeze
     }.freeze
+  end
+
+  # execute writes a bare "## Implementation" stub into task.md before any
+  # output exists. Hide it in the rendered view only; the source file stays
+  # byte-for-byte as captured.
+  def empty_implementation_heading?(heading)
+    following = heading.next_element
+    heading.name == "h2" && heading.text.strip == "Implementation" &&
+      (following.nil? || following.name.in?(%w[h1 h2]))
+  end
+
+  # Stage files open with "# <slug>"; once relabelled it only repeats the
+  # page title directly above the panel.
+  def repeats_task_title?(heading, task)
+    heading.name == "h1" && task&.title.present? &&
+      heading.text.strip.in?([ task.title, task.slug ].compact)
+  end
+
+  ARTIFACT_LABELS = {
+    "idea.md" => "Request", "brainstorm.md" => "Questions and decisions",
+    "plan.md" => "Plan", "task.md" => "Implementation", "pr.md" => "Pull request",
+    "artifact.md" => "Evidence", "summary.md" => "Summary"
+  }.freeze
+
+  # Stage files have generic names (task.md); readers want what the document is.
+  def artifact_label(record)
+    name = record.to_h["name"].to_s
+    ARTIFACT_LABELS.fetch(name) do
+      if record.to_h["reference"].to_s.include?("reviews/") || name.include?("review")
+        "Review"
+      else
+        name.presence || "Work product"
+      end
+    end
+  end
+
+  # Publication evidence stores repositories as "host/owner/name"
+  # (github.com/acme/demo, or a GitHub Enterprise host). Tolerate URL and
+  # .git spellings, but link only a well-formed owner/name.
+  def repository_web_url(repository)
+    value = repository.to_s.strip.sub(%r{\Ahttps?://}i, "").sub(/\.git\z/i, "").delete_suffix("/")
+    value = value.sub(/\Agit@([^:]+):/i, '\1/')
+    value = "github.com/#{value}" if value.count("/") == 1
+    host, owner, name = value.split("/", 3)
+    return unless host.to_s.match?(/\A[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d+)?\z/i) &&
+                  "#{owner}/#{name}".match?(%r{\A[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z}) &&
+                  [ owner, name ].none? { |part| part.match?(/\A\.+\z/) }
+
+    "https://#{host.downcase}/#{owner}/#{name}"
+  end
+
+  def repository_ref_url(repository_url, kind, ref)
+    "#{repository_url}/#{kind}/#{ref.to_s.split("/").map { |part| ERB::Util.url_encode(part) }.join("/")}"
+  end
+
+  def task_heading_label(heading, task)
+    return unless task && task.slug.present? && task.title.present? && task.title != task.slug
+
+    slug = /(?<![[:alnum:]_-])#{Regexp.escape(task.slug)}(?![[:alnum:]_-])/
+    heading.traverse do |node|
+      node.content = node.content.gsub(slug) { task.title } if node.text?
+    end
   end
 
   # Color the JSONL log tail by event class so errors jump out of the noise.

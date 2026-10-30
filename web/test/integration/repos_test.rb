@@ -15,6 +15,19 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_select "a[href='/login']", text: "Reconnect GitHub"
   end
 
+  test "projects is the user-facing name and the legacy repos path still works" do
+    sign_in!
+    get "/projects"
+    assert_response :success
+    assert_select "h1", text: "Projects"
+    assert_select "title", text: /projects\z/
+    assert_select "nav a.nav-link-active[href='/projects']", text: "Projects"
+    assert_match @project, response.body
+    get "/repos"
+    assert_select "h1", text: "Projects"
+    assert_select "nav a.nav-link-active", text: "Projects"
+  end
+
   test "github listing degrades to an inline error on a bad token" do
     # A real HTTPS round-trip to api.github.com with a junk token → 401 →
     # the page must still render the registered list with a notice, never

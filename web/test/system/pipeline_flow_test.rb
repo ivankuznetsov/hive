@@ -161,7 +161,8 @@ class PipelineFlowTest < ApplicationSystemTestCase
     destination = stage_dir(@project, "3-plan").join(slug)
     destination.dirname.mkpath
     FileUtils.mv(source, destination)
-    destination.join("plan.md").write("# Plan\n\n<!-- WAITING -->\n")
+    long_plan = (1..10).map { |n| "## Section #{n}\n\n#{'An ordinary, long plan paragraph. ' * 40}\n\n" }.join
+    destination.join("plan.md").write("# Plan\n\n#{long_plan}<!-- WAITING -->\n")
 
     details = system_plan_review_details
     with_replaced_task_method(:plan_review_details, -> { details }) do
@@ -177,6 +178,23 @@ class PipelineFlowTest < ApplicationSystemTestCase
         assert_selector "input[name=expected_artifact_digest][value='#{'e' * 64}']",
                         visible: :all
       end
+      # The bound decision is the page's action: it precedes the long plan
+      # and is reachable in the first viewport, without scrolling the plan.
+      positions = page.evaluate_script(<<~JS)
+        (() => {
+          const action = [...document.querySelectorAll("section.plan-review input[type=submit], section.plan-review button")]
+            .find(el => (el.value || el.textContent).trim() === "Record answer")
+          const plan = document.querySelector("#workspace-primary-result")
+          return { action: action.getBoundingClientRect().top + scrollY, plan: plan.getBoundingClientRect().top + scrollY,
+                   critique: document.querySelector("#plan-review-title").getBoundingClientRect().top, viewport: innerHeight,
+                   order: action.compareDocumentPosition(plan) & Node.DOCUMENT_POSITION_FOLLOWING }
+        })()
+      JS
+      assert_operator positions.fetch("action"), :<, positions.fetch("plan")
+      assert_operator positions.fetch("order"), :>, 0
+      assert_operator positions.fetch("critique"), :<, positions.fetch("viewport"),
+                      "the critique heading must be visible without scrolling past the plan"
+      assert_selector "section.plan-review", count: 1
       find(".advanced summary").click
       assert_no_button "Force approve", wait: 0
     end
@@ -436,7 +454,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "the attachment preserved across filtering must remain submittable"
 
     click_link "+ Add project"
-    assert_current_path "/repos"
+    assert_current_path "/projects"
   end
 
   test "a project deep link lands filtered with the composer preselected" do

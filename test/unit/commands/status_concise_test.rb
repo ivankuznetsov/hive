@@ -23,10 +23,10 @@ class CommandsStatusConciseTest < Minitest::Test
 
     def running_payload(_projects, **)
       @routes << :running_payload
-      [{
+      [ {
         "daemon" => { "running" => false, "pid" => nil, "uptime_sec" => nil },
         "complete" => true, "source" => {}, "tasks" => []
-      }, false]
+      }, false ]
     end
 
     def render_running(_payload, **)

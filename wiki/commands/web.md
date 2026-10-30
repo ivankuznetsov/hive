@@ -931,8 +931,11 @@ project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful
 composer text/chip/file reset before Turbo renders with project-context
-retention, failed-submit
-draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
+retention, and project-rail submission followed by a forced live refresh.
+That submission check verifies the task row, stored attachment, and cleared
+composer; a later GET can consume the one-request success flash. Coverage also
+includes failed-submit draft/file retention on a 422-shaped Turbo event and
+attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
 image, eight-image/10 MB browser enforcement with bounded batch transport,
 constant-memory non-decoding chips, staged-File cleanup after a true disconnect

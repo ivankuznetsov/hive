@@ -8,6 +8,76 @@ class RunningStatusTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 24, 12, 0, 0)
 
+  def test_startup_busy_is_partial_even_without_projects_and_never_reads_runtime
+    producer = Hive::RunningStatus.new(daemon_state: daemon_state, runtime_unavailable: true)
+    with_replaced_singleton_method(Hive::Lock, :task_lease_repository, -> { flunk "fallback must not read runtime" }) do
+      payload = producer.payload([], now: NOW)
+      assert producer.runtime_busy
+      refute payload.fetch("complete")
+      refute payload.fetch("observed_count_exact")
+      refute payload.fetch("omitted_count_exact")
+      refute payload.fetch("truncated")
+      refute payload.dig("source", "scan_truncated")
+      %w[count observed_count omitted_count].each { |name| assert_equal 0, payload.fetch(name) }
+      assert_equal 0, payload.dig("source", "projects_unavailable")
+      assert_schema_valid(payload)
+    end
+  end
+
+  def test_busy_from_actual_lease_read_is_unavailable_without_counting_projects_twice
+    with_project do |project, _|
+      database = Hive::Lock.task_lease_repository.instance_variable_get(:@database)
+      connection = database.read { |db| db }
+      original = connection.method(:execute)
+      connection.define_singleton_method(:execute) do |sql, *args, &block|
+        raise SQLite3::BusyException if sql.include?("task_leases")
+        original.call(sql, *args, &block)
+      end
+      producer = status
+      payload = producer.payload([ project ], now: NOW)
+      assert producer.runtime_busy
+      refute payload.fetch("complete")
+      refute payload.fetch("observed_count_exact")
+      refute payload.fetch("omitted_count_exact")
+      assert_equal 0, payload.dig("source", "projects_unavailable")
+      assert_schema_valid(payload)
+    end
+  end
+
+  def test_lease_scan_uses_only_remaining_invocation_wait_and_does_not_leak_busy_metadata
+    with_project do |project, _|
+      producer = status
+      database = Hive::Lock.task_lease_repository.database
+      adapter = database.read { |db| db.synchronize { |raw| raw } }
+      original = adapter.method(:query)
+      adapter.define_singleton_method(:query) do |sql, *args, &block|
+        if sql.include?("task_leases")
+          budget = Hive::RuntimeControlPlane::ContentionBudget.current
+          loop { break unless budget.retry_busy }
+          raise SQLite3::BusyException
+        end
+        original.call(sql, *args, &block)
+      end
+      now = 0.0
+      Hive::RuntimeControlPlane::ContentionBudget.with(clock: -> { now }, wait: ->(seconds) { now += seconds }) do |budget|
+        budget.retry_busy while budget.waited < 0.4 # earlier invocation phases
+        before_scan = budget.waited
+        payload = producer.payload([ project ], now: NOW)
+        assert producer.runtime_busy
+        assert_in_delta 1, budget.waited
+        assert_in_delta 0.6, budget.waited - before_scan, 0.02
+        assert_equal 123, payload.dig("daemon", "pid")
+        assert_equal "release", payload.dig("runtime", "channel")
+        refute payload.fetch("observed_count_exact")
+        assert_schema_valid(payload)
+      end
+      adapter.define_singleton_method(:query, original)
+      assert producer.payload([ project ], now: NOW).fetch("complete")
+      refute producer.runtime_busy
+      assert_nil Hive::RuntimeControlPlane::ContentionBudget.current
+    end
+  end
+
   def test_empty_snapshot_is_small_complete_and_schema_valid
     with_project do |project, _hive_state|
       payload = status.payload([ project ], now: NOW)

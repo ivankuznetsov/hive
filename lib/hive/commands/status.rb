@@ -111,7 +111,8 @@ module Hive
       ].freeze
 
       def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
-                     operational: false, full: false, daemon_tasks: nil, warning_sink: nil)
+                     operational: false, full: false, daemon_tasks: nil, warning_sink: nil, runtime_unavailable: false)
+        @runtime_unavailable = runtime_unavailable
         @json = json
         @diagnose = diagnose
         @project = project
@@ -140,7 +141,11 @@ module Hive
           if @write && @diagnose.nil?
             raise Hive::Error, "--write requires --diagnose <task>"
           end
-          @diagnose ? diagnose_call : do_call
+          if status_schema_for_call == "hive-running-status"
+            Hive::RuntimeControlPlane::ContentionBudget.with { do_call }
+          else
+            @diagnose ? diagnose_call : do_call
+          end
         end
       end
 
@@ -207,12 +212,12 @@ module Hive
           return
         end
 
-        payload = running_payload(projects, now: refresh_now)
+        payload, runtime_busy = running_payload(projects, now: refresh_now)
         if @json
           puts JSON.generate(payload)
           @stdout_written = true
         else
-          render_running(payload)
+          render_running(payload, runtime_busy: runtime_busy)
         end
       end
 
@@ -274,10 +279,12 @@ module Hive
 
       def running_payload(projects, now: Time.now.utc)
         require "hive/running_status"
-        Hive::RunningStatus.new.payload(projects, now: now)
+        producer = Hive::RunningStatus.new(runtime_unavailable: @runtime_unavailable)
+        payload = producer.payload(projects, now: now)
+        [ payload, producer.runtime_busy ]
       end
 
-      def render_running(payload)
+      def render_running(payload, runtime_busy: false)
         render_runtime_identity(payload["runtime"])
         daemon = payload.fetch("daemon")
         if daemon.fetch("running")
@@ -292,7 +299,7 @@ module Hive
 
         rows = payload.fetch("tasks")
         if rows.empty?
-          puts "NO RUNNING TASKS"
+          puts(runtime_busy ? "RUNNING TASKS UNAVAILABLE" : "NO RUNNING TASKS")
         else
           puts "RUNNING #{rows.length}"
           rows.each { |row| puts running_row_line(row) }
@@ -305,6 +312,7 @@ module Hive
 
         source = payload.fetch("source")
         reasons = []
+        reasons << "runtime database busy" if runtime_busy
         reasons << "scan limit reached" if source["scan_truncated"]
         reasons << "#{source['projects_unavailable']} projects unavailable" if source["projects_unavailable"].to_i.positive?
         reasons << "#{source['malformed_locks']} malformed locks" if source["malformed_locks"].to_i.positive?

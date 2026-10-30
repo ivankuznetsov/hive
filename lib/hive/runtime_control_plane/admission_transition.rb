@@ -164,7 +164,7 @@ module Hive
 
       def bind_command_context!(db, request_id, context)
         tagged = request_id.to_s.start_with?("command-dispatch:v1:")
-        table_available = db.table_exists?(:command_dispatch_contexts)
+        table_available = SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
         existing = db[:command_dispatch_contexts][request_id: request_id.to_s] if table_available
         if context.nil?
           if tagged && existing.nil?

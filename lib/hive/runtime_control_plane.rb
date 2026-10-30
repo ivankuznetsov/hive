@@ -23,6 +23,15 @@ module Hive
       end
     end
 
+    class Busy < Error
+      def initialize
+        super("runtime database busy, retry", code: :runtime_database_busy,
+              action: "retry the command when runtime database contention clears")
+      end
+
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
+
     class MigrationRequired < Error; def exit_code = Hive::ExitCodes::CONFIG; end
     class Unavailable < Error; def exit_code = Hive::ExitCodes::UNAVAILABLE; end
     class IntegrityError < Error; def exit_code = Hive::ExitCodes::SOFTWARE; end
@@ -110,6 +119,8 @@ end
 
 require "hive/runtime_control_plane/process_guard"
 require "hive/runtime_control_plane/codec"
+require "hive/runtime_control_plane/sqlite_support"
+require "hive/runtime_control_plane/contention_budget"
 require "hive/runtime_control_plane/database"
 require "hive/runtime_control_plane/operational_inspection"
 require "hive/runtime_control_plane/operational_repository"

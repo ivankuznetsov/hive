@@ -68,6 +68,58 @@ errors exit `78`.
 | `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v5`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 | `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 
+## Runtime database contention
+
+Default human and JSON status share one second of SQLite busy waiting across
+activation checks, process registration, lease reads, and exit cleanup. Ruby
+startup, scheduler work, and ordinary SQL execution do not consume that
+allowance. Connections opened or reused during the invocation use the same
+budget; directly invoked default status scopes and clears its own budget.
+SQLite retries the operation after the final bounded wait, so a lock released
+during that slice can still recover; an exhausted budget permits no further
+waiting on the next busy callback.
+
+If contention clears within the allowance, normal registration and observation
+continue. On exhaustion before dispatch, Hive goes directly to the same status
+producer with the runtime source unavailable, then exits `0`. It does not
+reconcile the scheduler, execute command work, migrate, or repair the database
+as a contention recovery measure. Daemon PID/runtime evidence remains visible.
+Human output says `RUNNING TASKS UNAVAILABLE` and emits one
+`STATUS PARTIAL` line containing `runtime database busy`; unavailable lease data
+never justifies `NO RUNNING TASKS`.
+
+JSON remains `hive-running-status.v2`, with `ok: true`, `complete: false`,
+`observed_count_exact: false`, and `omitted_count_exact: false`. Busy metadata is
+internal to the producer and renderer. It adds no JSON properties or fabricated
+project failures. With no observed rows, all row counts remain zero and
+`truncated` and `source.scan_truncated` remain false, including with zero
+configured projects. Actual project failures still have their own counters.
+
+The one-second policy applies only to default running status. Operational,
+internal task-graph, archive, and diagnostic modes keep their existing
+contracts; `--diagnose ... --write` cannot enter the observation fallback.
+Only SQLite busy errors take this path. Custody, schema, storage, admission,
+and launch-fence failures retain their existing handling.
+
+Runtime table-presence checks query SQLite's catalog directly so a busy probe
+reaches the same contention handler. A transient probe failure cannot become
+`missing_schema`, omit lifecycle/process evidence, or skip command-context
+and receipt-pin handling as though the relevant table were absent. Quiescence
+upgrade copying uses the same probe.
+
+Ordinary commands retain the existing 15-second SQLite busy timeout for each
+startup operation, rather than sharing a startup deadline. Exhaustion before
+command dispatch exits `75`, with exactly `runtime database busy, retry` on
+stderr. JSON requests additionally receive the existing
+`hive-runtime-maintenance.v1` runtime error envelope on stdout. Cleanup after a
+status result uses the same remaining allowance. A failed cleanup leaves durable
+ownership evidence for existing lifecycle reconciliation and does not mask the
+status exit code.
+
+The real-lock subprocess proof runs separately as
+`bundle exec rake test:runtime_database_contention`, a named CI merge gate
+excluded from the default suite and coverage shards.
+
 ## Bounded running-task contract
 
 `Hive::RunningStatus` validates at most 256 registered projects, then performs

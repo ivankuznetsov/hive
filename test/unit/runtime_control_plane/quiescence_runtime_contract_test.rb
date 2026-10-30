@@ -31,7 +31,6 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
 
     def run(*) = true
     def tables = [ :schema_info ]
-    def table_exists?(_table) = false
     def transaction(*) = yield
     def fetch(statement)
       values = statement.include?("foreign_key_check") ? violations : []
@@ -168,7 +167,7 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
   def test_database_status_helpers_fail_closed_on_query_errors
     database = Hive::RuntimeControlPlane::Database.new(path: "/tmp/not-opened.sqlite3")
     broken = Object.new
-    broken.define_singleton_method(:table_exists?) { |_| raise Sequel::Error, "bad schema" }
+    broken.define_singleton_method(:[]) { |_| raise Sequel::Error, "bad schema" }
     refute database.send(:table_has_columns?, broken, :attempts, :state)
 
     dataset = Object.new
@@ -176,7 +175,7 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
     dataset.define_singleton_method(:where) { |**| self }
     dataset.define_singleton_method(:exclude) { |**| self }
     dataset.define_singleton_method(:all) { raise Sequel::Error, "bad rows" }
-    broken.define_singleton_method(:table_exists?) { |_| true }
+    dataset.define_singleton_method(:get) { |_| "attempts" }
     broken.define_singleton_method(:schema) { |_| [ [ :state ] ] }
     broken.define_singleton_method(:[]) { |_| dataset }
 

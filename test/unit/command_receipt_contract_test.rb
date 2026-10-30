@@ -1029,9 +1029,9 @@ class CommandReceiptContractTest < Minitest::Test
     capacity = Object.new
     capacity.define_singleton_method(:where) { |**| capacity_update }
     db = Object.new
-    db.define_singleton_method(:table_exists?) { |name| name == :command_dispatch_contexts }
+    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
     db.define_singleton_method(:[]) do |name|
-      { command_dispatch_contexts: table, command_receipts: receipts,
+      { sqlite_master: catalog, command_dispatch_contexts: table, command_receipts: receipts,
         command_capacity: capacity }.fetch(name)
     end
     request_id = "command-dispatch:v1:#{'a' * 64}"
@@ -1388,8 +1388,7 @@ class CommandReceiptContractTest < Minitest::Test
     transition = Hive::RuntimeControlPlane::AdmissionTransition.new(
       repository: Struct.new(:database).new(nil)
     )
-    db = Object.new
-    db.define_singleton_method(:table_exists?) { |_name| false }
+    db = Sequel.mock(fetch: [])
     context = Hive::CommandOperation::Context.new(
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
       principal_source: "test", ordinal: 0, receipt_generation: 1,
@@ -1406,9 +1405,10 @@ class CommandReceiptContractTest < Minitest::Test
     receipts = Object.new
     receipts.define_singleton_method(:[]) { |**_query| nil }
     bound_db = Object.new
-    bound_db.define_singleton_method(:table_exists?) { |_name| true }
+    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
     bound_db.define_singleton_method(:[]) do |name|
-      name == :command_dispatch_contexts ? contexts : receipts
+      { sqlite_master: catalog, command_dispatch_contexts: contexts,
+        command_receipts: receipts }.fetch(name)
     end
     assert_raises(Hive::Attempts::RepositoryError) do
       transition.send(:bind_command_context!, bound_db, context.transport_request_id, context)
@@ -1637,8 +1637,7 @@ class CommandReceiptContractTest < Minitest::Test
 
   def test_dispatch_repository_command_context_guards_and_comparison
     repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: Object.new)
-    db = Object.new
-    db.define_singleton_method(:table_exists?) { |_name| false }
+    db = Sequel.mock(fetch: [])
     context = {
       receipt_id: "receipt", effect_id: "effect", principal: "owner",
       principal_source: "test", ordinal: 0, receipt_generation: 1,
@@ -1652,8 +1651,10 @@ class CommandReceiptContractTest < Minitest::Test
     table = Object.new
     table.define_singleton_method(:[]) { |_query| nil }
     table.define_singleton_method(:insert) { |_payload| true }
-    db.define_singleton_method(:table_exists?) { |_name| true }
-    db.define_singleton_method(:[]) { |_name| table }
+    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
+    db.define_singleton_method(:[]) do |name|
+      { sqlite_master: catalog, command_dispatch_contexts: table }.fetch(name)
+    end
     assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
       repository.send(:bind_command_context!, db, "plain", context)
     end
@@ -1682,9 +1683,9 @@ class CommandReceiptContractTest < Minitest::Test
     capacity.define_singleton_method(:where) { |**_query| capacity }
     capacity.define_singleton_method(:update) { |**_values| 0 }
     capacity_db = Object.new
-    capacity_db.define_singleton_method(:table_exists?) { |_name| true }
+    catalog = Sequel.mock(fetch: [{ name: "command_dispatch_contexts" }])[:sqlite_master]
     capacity_db.define_singleton_method(:[]) do |name|
-      { command_dispatch_contexts: contexts, command_receipts: receipts,
+      { sqlite_master: catalog, command_dispatch_contexts: contexts, command_receipts: receipts,
         command_capacity: capacity }.fetch(name)
     end
     error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do

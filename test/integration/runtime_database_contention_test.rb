@@ -17,14 +17,14 @@ class RuntimeDatabaseContentionTest < Minitest::Test
 
   def test_persistent_registration_lock_gives_partial_human_and_json_status
     with_fixture do |home, _project, _name|
-      [ [], [ "--json" ] ].each do |flags|
+      [ [], [ "--json" ], %w[--json true], %w[--json false] ].each do |flags|
         with_lock(home) do
           result = cli("status", *flags)
           assert_equal 0, result[:exit], result.inspect
           assert_includes result[:events], "reserve_begin"
           assert_budget(result, 1.0)
           assert_clean_errors(result)
-          if flags.empty?
+          if flags.empty? || flags == %w[--json false]
             assert_includes result[:stdout], "RUNNING TASKS UNAVAILABLE"
             refute_includes result[:stdout], "NO RUNNING TASKS"
             assert_equal 1, result[:stdout].scan("runtime database busy").length

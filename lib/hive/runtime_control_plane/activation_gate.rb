@@ -47,7 +47,9 @@ module Hive
           if %w[--project --stage].include?(word)
             index += 1
             return false unless switches[index] && !switches[index].start_with?("-")
-          elsif word.match?(/\A--(?:project|stage)=.+\z/) || Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(word)
+          elsif Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(word)
+            index += 1 if Hive::CliJsonOptions.separate_value?(word, switches[index + 1])
+          elsif word.match?(/\A--(?:project|stage)=.+\z/)
             # Existing default-status options.
           elsif names.any? { |name| word.match?(/\A--(?:(?:no-|skip-)?#{name}|#{name}=(?:true|false|t|f))\z/i) }
             index += 1 if switches[index + 1]&.match?(/\A(?:true|false|t|f)\z/i)

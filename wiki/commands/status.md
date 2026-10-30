@@ -80,6 +80,14 @@ activation checks, process registration, lease reads, and exit cleanup. Ruby
 startup, scheduler work, and ordinary SQL execution do not consume that
 allowance. Connections opened or reused during the invocation use the same
 budget; directly invoked default status scopes and clears its own budget.
+
+Separate JSON boolean values, such as `hive status --json true` and
+`hive status --json false`, receive the same bounded policy and preserve the
+selected JSON or human output. Recognition accepts Thor's exact `true`, `TRUE`,
+`t`, `T`, `false`, `FALSE`, `f`, and `F` literals, including explicit values
+after `--no-json` and `--skip-json`; invalid or extra arguments stay on ordinary
+CLI validation.
+
 SQLite retries the operation after the final bounded wait, so a lock released
 during that slice can still recover; an exhausted budget permits no further
 waiting on the next busy callback.

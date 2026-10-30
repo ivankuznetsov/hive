@@ -5,6 +5,23 @@ require "open3"
 class RuntimeControlPlaneActivationGateTest < Minitest::Test
   include HiveTestHelper
 
+  def test_default_status_policy_respects_modes_and_boolean_spellings
+    gate = Hive::RuntimeControlPlane::ActivationGate
+    [%w[status], %w[status --json], %w[--json=true status],
+     %w[status --no-write], %w[status --skip-write], %w[status --write=false],
+     %w[status --operational=false], %w[status --no-internal_task_graph]].each do |argv|
+      assert gate.default_status_route?(argv), argv.inspect
+    end
+    [%w[new project status], %w[status --diagnose task --write],
+     %w[status --diagnose=true --write=true], %w[status --diagnose task --no-write],
+     %w[status --skip-write --diagnose=task], %w[status --operational],
+     %w[status --internal_task_graph=true], %w[status --full], %w[status --archive],
+     %w[status --write], %w[status --help], %w[status --json=bogus],
+     %w[status -- extra]].each do |argv|
+      refute gate.default_status_route?(argv), argv.inspect
+    end
+  end
+
   def test_fresh_commands_remain_available_without_creating_storage
     with_tmp_dir do |root|
       %w[setup help init].each do |route|

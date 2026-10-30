@@ -14,16 +14,24 @@ module Hive
         context if context&.owner_pid == Process.pid
       end
 
+      def self.start!(**options)
+        current || (Thread.current[THREAD_KEY] = new(**options))
+      end
+
+      def self.clear!
+        current&.close
+      ensure
+        Thread.current[THREAD_KEY] = nil
+      end
+
       def self.with(**options)
         return yield current if current
 
-        budget = new(**options)
-        Thread.current[THREAD_KEY] = budget
+        budget = start!(**options)
         begin
           yield budget
         ensure
-          budget.close
-          Thread.current[THREAD_KEY] = nil
+          clear!
         end
       end
 

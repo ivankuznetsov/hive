@@ -1,4 +1,6 @@
 require "hive/runtime_control_plane/installation"
+require "hive/runtime_control_plane/operational_inspection"
+require "hive/cli_json_options"
 
 module Hive
   module RuntimeControlPlane
@@ -23,6 +25,37 @@ module Hive
       end
 
       def command(argv) = argv.find { |arg| !arg.start_with?("-") }
+
+      # Conservative recognition of the bounded running-status surface. Unknown
+      # options stay on normal dispatch so startup fallback cannot hide usage
+      # errors or grant observation behavior to a write-capable diagnosis.
+      def default_status_route?(argv)
+        words = Array(argv).map(&:to_s)
+        route_index = words.index("status")
+        return false unless route_index && command(words) == "status"
+        return false unless words.first(route_index).all? { |word| Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(word) }
+
+        switches = words.drop(route_index + 1).map { |word| word.tr("_", "-") }
+        names = %w[write force operational internal-task-graph]
+        return false if names.any? { |name| OperationalInspection.boolean_option_value(switches, name) == true }
+
+        index = 0
+        while index < switches.length
+          word = switches[index]
+          if %w[--project --stage].include?(word)
+            index += 1
+            return false unless switches[index] && !switches[index].start_with?("-")
+          elsif word.match?(/\A--(?:project|stage)=.+\z/) || Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(word)
+            # Existing default-status options.
+          elsif names.any? { |name| word.match?(/\A--(?:(?:no-|skip-)?#{name}|#{name}=(?:true|false|t|f))\z/i) }
+            index += 1 if switches[index + 1]&.match?(/\A(?:true|false|t|f)\z/i)
+          else
+            return false
+          end
+          index += 1
+        end
+        true
+      end
 
       def subcommand_after(argv, route, value_options: [])
         skip_value = false

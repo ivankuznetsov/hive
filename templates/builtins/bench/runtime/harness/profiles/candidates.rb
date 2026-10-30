@@ -16,7 +16,8 @@ module HiveBench
                             :opencode_models, :opencode_effort,
                             :codex_effort, :codex_model, :codex_models, :codex_efforts,
                             :grok_model, :grok_effort, :model_version,
-                            :review_max_passes, :review_wall_clock_sec, :reviewers, :ci_command)
+                            :review_max_passes, :review_wall_clock_sec, :reviewers, :ci_command,
+                            :stage_routes, :plan_review, :credential_env, :pi_catalog)
 
     # pi --model patterns verified against the local pi + OpenRouter (2026-07-03).
     GLM = "openrouter/z-ai/glm-5.2"
@@ -47,10 +48,104 @@ module HiveBench
       all.find { |c| c.id == id }
     end
 
+    # Campaign-owned profiles extend, but never redefine, historical identities.
+    # The routes compile to native Hive configuration, not harness-specific argv.
+    def for_campaign(data)
+      profiles = data.fetch("candidate_profiles", {})
+      raise ArgumentError, "candidate_profiles must be a mapping" unless profiles.is_a?(Hash)
+
+      custom = profiles.map { |id, profile| from_profile(id, profile) }
+      available = all + custom
+      Array(data.fetch("candidates")).map do |id|
+        available.find { |candidate| candidate.id == id } ||
+          raise(ArgumentError, "unknown candidate #{id}")
+      end
+    end
+
+    def from_profile(id, profile)
+      unless id.is_a?(String) && id.match?(/\A[a-z0-9][a-z0-9@._-]{0,127}\z/)
+        raise ArgumentError, "candidate profile id must be a safe slug"
+      end
+      raise ArgumentError, "candidate profile #{id} shadows a historical candidate" if by_id(id)
+      unless profile.is_a?(Hash) && (profile.keys - %w[model_version stages plan_review reviewers credential_env pi_catalog]).empty?
+        raise ArgumentError, "candidate profile #{id} has unsupported fields"
+      end
+      version = profile["model_version"]
+      raise ArgumentError, "candidate #{id} requires model_version" unless scalar?(version)
+
+      stages = profile["stages"]
+      unless stages.is_a?(Hash) && stages.keys.sort == %w[execute plan review]
+        raise ArgumentError, "candidate #{id} requires plan, execute and review stages"
+      end
+      stages.each_value { |route| validate_route!(route) }
+      plan_review = profile.fetch("plan_review", { "enabled" => false })
+      unless plan_review.is_a?(Hash) && [true, false].include?(plan_review["enabled"])
+        raise ArgumentError, "candidate #{id} plan_review requires enabled: true or false"
+      end
+      if plan_review["enabled"]
+        routes = plan_review["routes"]
+        unless routes.is_a?(Hash) && %w[primary adversarial verification].all? { |role| routes.key?(role) }
+          raise ArgumentError, "candidate #{id} must explicitly route every plan reviewer"
+        end
+        %w[primary adversarial verification].each { |role| validate_route!(routes[role], family: true) }
+        Array(routes["fallbacks"]).each { |route| validate_route!(route, family: true) }
+      end
+      reviewers = profile.fetch("reviewers", [])
+      unless reviewers.is_a?(Array) && reviewers.all? { |reviewer| reviewer.is_a?(Hash) }
+        raise ArgumentError, "candidate #{id} reviewers must be an array of mappings"
+      end
+      credentials = profile.fetch("credential_env", [])
+      unless credentials.is_a?(Array) && credentials.all? { |name| name.is_a?(String) && name.match?(/\A[A-Z][A-Z0-9_]*_(?:API_KEY|TOKEN)\z/) }
+        raise ArgumentError, "credential_env must contain environment variable names, never secret values"
+      end
+      catalog = profile["pi_catalog"]
+      validate_pi_catalog!(catalog, credentials) if catalog
+      base(id, plan: stages.dig("plan", "agent"), execute: stages.dig("execute", "agent"),
+           review: stages.dig("review", "agent"), model_version: version, reviewers: reviewers,
+           stage_routes: stages, plan_review: plan_review, credential_env: credentials, pi_catalog: catalog)
+    end
+
+    def validate_pi_catalog!(catalog, credentials)
+      providers = catalog.is_a?(Hash) && catalog["providers"]
+      raise ArgumentError, "pi_catalog requires a providers mapping" unless providers.is_a?(Hash) && !providers.empty?
+
+      providers.each_value do |provider|
+        unless provider.is_a?(Hash) && credentials.any? { |name| provider["apiKey"] == "$#{name}" } &&
+               !provider.key?("headers") && provider["baseUrl"].to_s.match?(%r{\Ahttps://[^/@\s]+/[^\s]*\z})
+          raise ArgumentError, "pi_catalog providers require HTTPS and a declared $ENV credential reference; headers are unsupported"
+        end
+      end
+    end
+
+    def scalar?(value)
+      value.is_a?(String) && !value.strip.empty? && !value.match?(/[\r\n\x00]/)
+    end
+
+    def agent_ids(candidate)
+      stage_agents = [candidate.plan, candidate.execute, candidate.review]
+      reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
+        reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
+      end
+      plan_agents = (candidate.plan_review || {}).fetch("routes", {}).values.flatten.filter_map do |route|
+        route["agent"] if route.is_a?(Hash)
+      end
+      (stage_agents + reviewer_agents + plan_agents).compact.map(&:to_s).uniq
+    end
+
+    def validate_route!(route, family: false)
+      allowed = family ? %w[agent model effort family route] : %w[agent model effort]
+      unless route.is_a?(Hash) && (route.keys - allowed).empty? &&
+             %w[claude codex pi grok opencode].include?(route["agent"]) && scalar?(route["model"]) &&
+             (!route.key?("effort") || scalar?(route["effort"])) && (!family || scalar?(route["family"]))
+        raise ArgumentError, "invalid candidate route: require agent, model#{family ? ', family' : ''} and optional effort"
+      end
+    end
+
     def base(id, plan:, execute:, review:, model_version:, claude_model: nil, claude_effort: nil,
              pi_models: nil, opencode_models: nil, opencode_effort: nil,
              codex_effort: nil, codex_model: nil, codex_models: nil,
-             codex_efforts: nil, grok_model: nil, grok_effort: nil, reviewers: [])
+             codex_efforts: nil, grok_model: nil, grok_effort: nil, reviewers: [],
+             stage_routes: nil, plan_review: nil, credential_env: nil, pi_catalog: nil)
       Candidate.new(id: id, plan: plan, execute: execute, review: review,
                     claude_model: claude_model, claude_effort: claude_effort, pi_models: pi_models,
                     opencode_models: opencode_models, opencode_effort: opencode_effort,
@@ -59,7 +154,8 @@ module HiveBench
                     grok_model: grok_model, grok_effort: grok_effort,
                     model_version: model_version,
                     review_max_passes: 2, review_wall_clock_sec: 7200,
-                    reviewers: reviewers, ci_command: nil)
+                    reviewers: reviewers, ci_command: nil, stage_routes: stage_routes,
+                    plan_review: plan_review, credential_env: credential_env, pi_catalog: pi_catalog)
     end
 
     def sole_codex_ce_reviewer

@@ -134,7 +134,7 @@ module Hive
             unless remote_head == identity.fetch(:remote_head)
               raise Hive::GhError, "pull-request head changed during identity validation"
             end
-            @expected_checks.merge(check_keys(baseline))
+            @expected_checks.merge(carried_check_keys(baseline))
             guard_publication!(local_head)
             publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
             @published_head = local_head
@@ -264,7 +264,7 @@ module Hive
                     stable_signature = signature
                     stable_since = now
                   elsif now - stable_since >= required_quiet
-                    @expected_checks.merge(keys)
+                    @expected_checks.merge(carried_check_keys(latest))
                     @settled_head = local_head
                     return Hive::Stages::Review::CiFix::Run.new(
                       "GitHub checks settled for exact head #{local_head}\n", 0
@@ -316,6 +316,26 @@ module Hive
             Array(rollup["statusCheckRollup"]).filter_map do |entry|
               check_key(entry) if entry.is_a?(Hash) && !check_name(entry).empty?
             end.to_set
+          end
+
+          # Only push-triggered check runs must reappear on a new head. A commit
+          # status (StatusContext) names one exact SHA and is posted by whoever
+          # checked it, often local tooling after the run (hivedev's bin/ci
+          # posts `signoff` for a commit already on the remote). A push never
+          # re-triggers it, so carrying it over left the gate pending until the
+          # settlement timeout on every review of such a project.
+          def carried_check_keys(rollup)
+            Array(rollup["statusCheckRollup"]).filter_map do |entry|
+              next unless entry.is_a?(Hash) && !check_name(entry).empty?
+              next if status_context?(entry)
+
+              check_key(entry)
+            end.to_set
+          end
+
+          def status_context?(entry)
+            entry["__typename"] == "StatusContext" ||
+              (entry["__typename"].nil? && entry["name"].to_s.empty? && !entry["context"].to_s.empty?)
           end
 
           def check_key(entry)

@@ -5,6 +5,59 @@ require "hive/runtime_control_plane/lifecycle_repository"
 class RuntimeControlPlaneCommandRegistrationTest < Minitest::Test
   include HiveTestHelper
 
+  def test_busy_after_reserve_retains_evidence_releases_fence_and_never_registers
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(database: database, state_home: root)
+      registry.define_singleton_method(:register!) { |*_, **_| raise SQLite3::BusyException }
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**_) { database }) do
+        with_replaced_singleton_method(Hive::RuntimeControlPlane::ProcessRegistry, :new, ->(**_) { registry }) do
+          assert_raises(Hive::RuntimeControlPlane::Busy) do
+            Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[new demo task], state_home: root)
+          end
+        end
+      end
+      assert_nil Hive::RuntimeControlPlane::CommandRegistration.current
+      refute Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure?
+      assert_equal "reserved", database.read { |db| db[:launch_reservations].get(:state) }
+      assert_equal 0, database.read { |db| db[:owned_processes].count }
+      fence = Hive::RuntimeControlPlane::LaunchFence.new(state_home: root, timeout_sec: 0)
+      assert fence.acquire_exclusive!
+      fence.release!
+    end
+  end
+
+  def test_ordinary_registration_operations_keep_individual_default_timeouts
+    with_runtime do |root, database|
+      original = database.method(:transaction)
+      timeouts = []
+      database.define_singleton_method(:transaction) do |**options, &block|
+        assert_budget = Hive::RuntimeControlPlane::ContentionBudget.current
+        raise "ordinary registration received a cumulative budget" if assert_budget
+        original.call(**options) do |db|
+          timeouts << db.fetch("PRAGMA busy_timeout").first.values.first
+          block.call(db)
+        end
+      end
+      with_replaced_singleton_method(Hive::RuntimeControlPlane::Database, :new, ->(**_) { database }) do
+        registration = Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[new demo task], state_home: root)
+        assert_equal [15_000, 15_000], timeouts
+        registration.finish!
+        assert_equal [15_000, 15_000, 15_000], timeouts
+      end
+    end
+  end
+
+  def test_finish_disconnects_and_preserves_running_evidence_on_busy
+    with_runtime do |root, database|
+      registration = Hive::RuntimeControlPlane::CommandRegistration.start!(argv: %w[status], state_home: root)
+      registry = registration.instance_variable_get(:@registry)
+      registry.define_singleton_method(:mark_stopped_by_reservation!) { |*_, **_| raise Hive::RuntimeControlPlane::Busy.new }
+      assert_raises(Hive::RuntimeControlPlane::Busy) { registration.finish! }
+      assert registration.instance_variable_get(:@database).disconnected?
+      assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }
+    end
+  end
+
   def test_timeout_option_values_do_not_hide_lifecycle_subcommands
     assert Hive::RuntimeControlPlane::CommandRegistration.exempt?(
       %w[daemon --timeout 30 quiesce]

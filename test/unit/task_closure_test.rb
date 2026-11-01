@@ -986,9 +986,13 @@ class TaskClosureTest < Minitest::Test
       File.write(File.join(worktree.path, "task-change.txt"), "task work\n")
       run!("git", "-C", worktree.path, "add", "task-change.txt")
       run!("git", "-C", worktree.path, "commit", "-m", "task change", "--quiet")
+      pr_head = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{pr_head}\n---\n")
       File.write(File.join(worktree.path, "review-fix.txt"), "unpushed fix\n")
       run!("git", "-C", worktree.path, "add", "review-fix.txt")
       run!("git", "-C", worktree.path, "commit", "-m", "review fix", "--quiet")
+
+      fix_head = Hive::GitOps.new(worktree.path).head_sha
 
       # Main squashes the task PR and lands the review fix separately, then
       # moves on with unrelated work; no task commit is an ancestor of main.
@@ -999,7 +1003,13 @@ class TaskClosureTest < Minitest::Test
         task: task, project: project, input: input_for("acme/app#42")
       )
       refute blocked.valid?
-      assert(blocked.blockers.any? { |entry| entry["code"] == "unique_worktree_changes" })
+      diagnostic = blocked.blockers.find { |entry| entry["code"] == "unique_worktree_changes" }
+      assert_equal [ fix_head ], diagnostic.fetch("details").fetch("local_fix_shas")
+      assert_equal pr_head, diagnostic["details"]["reference_head"]
+      assert_equal "content_absent_from_default", diagnostic["details"]["delivery"]
+      assert_includes Hive::TaskClosure.format_diagnostic(diagnostic), fix_head
+      assert File.directory?(worktree.path)
+      assert_equal fix_head, Hive::GitOps.new(worktree.path).head_sha
 
       File.write(File.join(task.project_root, "review-fix.txt"), "unpushed fix\n")
       File.write(File.join(task.project_root, "unrelated.txt"), "later\n")
@@ -1011,6 +1021,98 @@ class TaskClosureTest < Minitest::Test
       )
 
       assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
+  def test_retained_fix_diagnostics_survive_preview_and_all_archive_error_consumers
+    with_closure_project do |task, project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      reference = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{reference}\n---\n")
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      receipt = service.send(:build_receipt, preview, operator: "tester", channel: "cli")
+      shas = 3.times.map do |n|
+        File.write(File.join(worktree.path, "retained-fix"), n.to_s)
+        run!("git", "-C", worktree.path, "add", "retained-fix")
+        run!("git", "-C", worktree.path, "commit", "-qm", "fix #{n}")
+        Hive::GitOps.new(worktree.path).head_sha
+      end
+      blocked = service.preview(task: task, project: project, input: input)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input"))))
+      assert_empty schema.validate(blocked.to_h).to_a
+      operations = [
+        -> { service.send(:validate_preview!, blocked) },
+        -> { service.send(:validate_final_transition!, task, project, receipt) },
+        -> { service.send(:resume_existing!, task: task, project: project, input: input,
+          preview_digest: preview.preview_digest, receipt: receipt) }
+      ]
+      operations.each do |operation|
+        error = assert_raises(Hive::TaskClosure::VerificationFailed, &operation)
+        shas.each { |sha| assert_includes error.message, sha }
+        assert_includes error.message, worktree.path
+        assert_includes error.message, "new change"
+      end
+      assert_equal shas.last, Hive::GitOps.new(worktree.path).head_sha
+    end
+  end
+
+  def test_retained_fixes_with_missing_pr_reference_are_unknown_without_open_pr_calls
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "local-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "local-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "local fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      [ nil, "e" * 40 ].each do |reference|
+        File.write(File.join(task.folder, "pr.md"), "---\nhead_oid: #{reference}\n---\n")
+        # Object.new has no GitHub adapter methods. Classification stays local.
+        entry = service_for(gh: Object.new).send(:worktree_blockers, task).first
+        details = entry.fetch("details")
+        assert_equal "unknown", details["publication"]
+        assert_equal "unknown", details["classification"]
+        assert_nil details["local_fix_shas"]
+        assert_equal [ head ], details["candidate_shas"]
+        assert_includes Hive::TaskClosure.format_diagnostic(entry), "publication unknown"
+      end
+    end
+  end
+
+  def test_retained_fix_reference_requires_publication_evidence_bound_to_owned_worktree
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      reference = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      File.write(File.join(worktree.path, "local-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "local-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "local fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      evidence = { "publication" => "published", "pr_url" => "https://github.com/acme/app/pull/42",
+        "worktree" => worktree.path, "branch" => task.slug, "local_head" => reference, "remote_head" => reference }
+      [ {}, { "worktree" => "/another/worktree" }, { "branch" => "another-branch" },
+        { "local_head" => head }, { "pr_url" => "https://github.com/another/repo/pull/42" } ].each do |change|
+        Hive::Markers.set(task.state_file, :review_error, **Hive::ReviewPublicationRecovery.encode(evidence.merge(change)))
+        details = service_for(gh: Object.new).send(:worktree_blockers, task).first.fetch("details")
+        if change.empty?
+          assert_equal reference, details["reference_head"]
+          assert_equal [ head ], details["local_fix_shas"]
+        else
+          assert_nil details["reference_head"], "must not trust mismatched evidence: #{change}"
+          assert_equal "unknown", details["publication"]
+          assert_equal [ head ], details["candidate_shas"]
+        end
+      end
     end
   end
 

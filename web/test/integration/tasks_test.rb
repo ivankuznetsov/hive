@@ -63,6 +63,24 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal 0, audit_reads, "ordinary task navigation must not read hidden audit panels"
   end
 
+  test "closure blocker renders full retained commit details" do
+    sha = "a" * 40
+    entry = { "code" => "unique_worktree_changes", "message" => "PR already merged; unique commits retained", "owner" => "operator",
+      "details" => { "worktree" => "/owned/path with spaces", "branch" => "task", "reference_head" => "b" * 40,
+        "publication" => "unpublished", "local_fix_shas" => [ sha ], "candidate_shas" => [],
+        "classification" => "ahead", "delivery" => "content_absent_from_default", "guidance" => "Deliver through a new change." } }
+    preview = Hive::TaskClosure::Preview.new(input: { "reason" => "already_delivered", "evidence" => [] }, task: {},
+      task_repository: nil, evidence: [], successor: nil, authority: "remote_merge", evidence_digest: "c" * 64,
+      preview_digest: "d" * 64, errors: [], blockers: [ entry ])
+    with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: { reason: "already_delivered", evidence: [] }
+    end
+    assert_response :unprocessable_entity
+    assert_includes response.body, sha
+    assert_includes response.body, "/owned/path with spaces"
+    assert_includes response.body, "new change"
+  end
+
   test "closure entry requires authentication" do
     post "/logout"
 

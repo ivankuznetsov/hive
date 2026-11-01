@@ -1044,7 +1044,7 @@ module Hive
         elsif row["claude_pid_alive"] == true && row["claude_pid"]
           "agent process #{row.fetch('claude_pid')} is alive"
         else
-          "task has a verified live runner"
+          "task is running"
         end
         reasons << reason("live_runner", message, "liveness")
       elsif stale_liveness?(row)

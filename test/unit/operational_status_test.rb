@@ -297,15 +297,16 @@ class OperationalStatusTest < Minitest::Test
           project_context: { "demo" => { "daemon_enabled" => true } },
           scheduler_snapshot: snapshot
         )
-        projected = assert_live_liveness(result, pid: pid, message: message)
+        label = "#{row.fetch('slug')}/#{decision}"
+        projected = assert_live_liveness(result, pid: pid, message: message, label: label)
 
-        assert_equal [ "running", "agent" ], classify_row(row, daemon_enabled: true)
-        assert_equal "current", projected.dig("freshness", "scheduler_status")
-        assert_equal decision, projected.dig("reasons", 0, "code")
-        assert_equal "scheduler", projected.dig("reasons", 0, "source")
-        assert_equal scheduler_message, projected.dig("reasons", 0, "message")
-        assert_equal scheduler_message, projected.fetch("reason")
-        assert_equal "live_runner", projected.dig("reasons", 1, "code")
+        assert_equal [ "running", "agent" ], classify_row(row, daemon_enabled: true), label
+        assert_equal "current", projected.dig("freshness", "scheduler_status"), label
+        assert_equal decision, projected.dig("reasons", 0, "code"), label
+        assert_equal "scheduler", projected.dig("reasons", 0, "source"), label
+        assert_equal scheduler_message, projected.dig("reasons", 0, "message"), label
+        assert_equal scheduler_message, projected.fetch("reason"), label
+        assert_equal "live_runner", projected.dig("reasons", 1, "code"), label
       end
     end
   end
@@ -315,15 +316,17 @@ class OperationalStatusTest < Minitest::Test
       [ "both-live", true, 4242, true, 777, 4242, "task runner holds the live lock (pid 4242)" ],
       [ "missing-lock-pid", true, nil, true, 777, 777, "agent process 777 is alive" ],
       [ "missing-agent-pid", true, 4242, true, nil, 4242, "task runner holds the live lock (pid 4242)" ],
-      [ "missing-both-pids", true, nil, true, nil, nil, "task has a verified live runner" ],
-      [ "lock-flag-only", true, nil, false, 777, nil, "task has a verified live runner" ],
-      [ "agent-flag-only", false, 4242, true, nil, nil, "task has a verified live runner" ]
+      [ "missing-both-pids", true, nil, true, nil, nil, "task is running" ],
+      [ "lock-flag-only", true, nil, false, 777, nil, "task is running" ],
+      [ "agent-flag-only", false, 4242, true, nil, nil, "task is running" ]
     ]
     cases.each do |slug, lock_live, lock_pid, agent_live, agent_pid, expected_pid, message|
       row = task(
         action: "agent_running", slug: slug, live_task_lock: lock_live, task_lock_pid: lock_pid
       ).merge("claude_pid" => agent_pid, "claude_pid_alive" => agent_live)
-      projected = assert_live_liveness(project(status_payload(row)), pid: expected_pid, message: message)
+      projected = assert_live_liveness(
+        project(status_payload(row)), pid: expected_pid, message: message, label: slug
+      )
 
       assert_equal message, projected.fetch("reason"), slug
       assert_equal "live_runner", projected.dig("reasons", 0, "code"), slug
@@ -342,35 +345,38 @@ class OperationalStatusTest < Minitest::Test
       end
 
       result = project(status_payload(row))
-      assert_operational_schema(result)
+      assert_operational_schema(result, label: flag.inspect)
       projected = result.fetch("tasks").first
       assert_nil projected.dig("liveness", "pid"), flag.inspect
-      assert_equal "current-attempt", projected.dig("liveness", "attempt_id")
-      assert_equal "generation-1", projected.dig("liveness", "task_generation")
+      assert_equal "current-attempt", projected.dig("liveness", "attempt_id"), flag.inspect
+      assert_equal "generation-1", projected.dig("liveness", "task_generation"), flag.inspect
       if flag == false
-        assert_equal "needs_repair", projected.fetch("state")
-        assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+        assert_equal "needs_repair", projected.fetch("state"), flag.inspect
+        assert_equal "stale_runner", projected.dig("reasons", 0, "code"), flag.inspect
       else
-        assert_equal "running", projected.fetch("state")
-        assert_equal "task has a verified live runner", projected.fetch("reason")
+        assert_equal "running", projected.fetch("state"), flag.inspect
+        assert_equal "task is running", projected.fetch("reason"), flag.inspect
       end
 
       live_lock = row.merge("live_task_lock" => true)
       assert_live_liveness(
         project(status_payload(live_lock)), pid: 4242,
-        message: "task runner holds the live lock (pid 4242)"
+        message: "task runner holds the live lock (pid 4242)", label: flag.inspect
       )
       live_agent = row.merge("claude_pid_alive" => true)
       assert_live_liveness(
-        project(status_payload(live_agent)), pid: 777, message: "agent process 777 is alive"
+        project(status_payload(live_agent)), pid: 777,
+        message: "agent process 777 is alive", label: flag.inspect
       )
 
       historical = row.merge("action" => "ready_to_plan")
       historical_result = project(status_payload(historical))
-      assert_operational_schema(historical_result)
+      assert_operational_schema(historical_result, label: flag.inspect)
       historical_liveness = historical_result.fetch("tasks").first.fetch("liveness")
-      assert_equal "not_running", historical_liveness.fetch("status")
-      %w[pid attempt_id task_generation].each { |key| assert_nil historical_liveness.fetch(key) }
+      assert_equal "not_running", historical_liveness.fetch("status"), flag.inspect
+      %w[pid attempt_id task_generation].each do |key|
+        assert_nil historical_liveness.fetch(key), "#{flag.inspect}/#{key}"
+      end
     end
   end
 
@@ -379,10 +385,10 @@ class OperationalStatusTest < Minitest::Test
       "attempt_id" => "current-attempt", "task_generation" => "generation-1"
     )
     projected = assert_live_liveness(
-      project(status_payload(row)), pid: nil, message: "task has a verified live runner"
+      project(status_payload(row)), pid: nil, message: "task is running"
     )
 
-    assert_equal "task has a verified live runner", projected.fetch("reason")
+    assert_equal "task is running", projected.fetch("reason")
     assert_equal "current-attempt", projected.dig("liveness", "attempt_id")
     assert_equal "generation-1", projected.dig("liveness", "task_generation")
   end
@@ -2043,30 +2049,30 @@ class OperationalStatusTest < Minitest::Test
     )
   end
 
-  def assert_operational_schema(result)
+  def assert_operational_schema(result, label: nil)
     schema = JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
     )
-    assert_empty schema.validate(result).to_a
+    assert_empty schema.validate(result).to_a, label
   end
 
-  def assert_live_liveness(result, pid:, message:)
-    assert_operational_schema(result)
+  def assert_live_liveness(result, pid:, message:, label: nil)
+    assert_operational_schema(result, label: label)
     projected = result.fetch("tasks").first
-    assert_equal "running", projected.fetch("state")
-    assert_equal "agent", projected.fetch("blocker_owner")
-    assert_equal "running", projected.dig("liveness", "status")
+    assert_equal "running", projected.fetch("state"), label
+    assert_equal "agent", projected.fetch("blocker_owner"), label
+    assert_equal "running", projected.dig("liveness", "status"), label
     if pid.nil?
-      assert_nil projected.dig("liveness", "pid")
+      assert_nil projected.dig("liveness", "pid"), label
     else
-      assert_equal pid, projected.dig("liveness", "pid")
+      assert_equal pid, projected.dig("liveness", "pid"), label
     end
     live_reason = projected.fetch("reasons").find { |entry| entry.fetch("source") == "liveness" }
-    refute_nil live_reason
-    assert_equal "live_runner", live_reason.fetch("code")
-    assert_equal "liveness", live_reason.fetch("source")
-    assert_equal message, live_reason.fetch("message")
-    refute_includes projected.fetch("reasons").map { |entry| entry.fetch("code") }, "stale_runner"
+    refute_nil live_reason, label
+    assert_equal "live_runner", live_reason.fetch("code"), label
+    assert_equal "liveness", live_reason.fetch("source"), label
+    assert_equal message, live_reason.fetch("message"), label
+    refute_includes projected.fetch("reasons").map { |entry| entry.fetch("code") }, "stale_runner", label
     projected
   end
 

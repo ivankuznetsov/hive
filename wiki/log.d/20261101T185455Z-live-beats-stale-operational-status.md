@@ -1,14 +1,17 @@
 ---
-title: Prefer verified live evidence in operational status
+title: Prefer live flags in operational status
 date: 2026-11-01
 tags: [operational-status, liveness, status, regression]
 ---
 
-- Either verified-live signal now outranks stale evidence in operational state,
+- Either true liveness flag now outranks stale evidence in operational state,
   ownership, liveness reasons, and liveness status. Material scheduler reasons
-  still precede the live explanation; purely stale runners still need repair.
-- `tasks[].liveness.pid` now publishes only an available verified-live PID,
-  preferring the live lock PID, then the live agent PID, otherwise null.
+  still precede the live explanation; stale-only rows need repair when their
+  action is `agent_running` or marker is `agent_working` or `review_working`.
+- `tasks[].liveness.pid` now publishes only an available PID whose liveness
+  flag is true, preferring the lock PID, then the agent PID, otherwise null.
+  Lock checks match process start time when recorded; agent checks test PID
+  existence only and can accept a reused PID.
   Stale-only rows now publish null instead of a historical PID, changing field
   semantics without changing the schema.
 - Added mixed-direction regressions for a live lock with a stale agent PID and

@@ -212,19 +212,27 @@ status` as a remedy when it is failing under this same inspection policy.
 A failure before command dispatch uses the existing
 `hive-runtime-maintenance.v1` envelope and exposes `runtime_code` plus
 `next_action`. A failure reached after operational dispatch uses the additive
-optional `code` and `next_action` fields in `hive-operational-status.v4`.
+optional `code` and `next_action` fields in `hive-operational-status.v5`.
 Those fields are not added to plain, running, full/archive, daemon-task, or
-diagnostic status errors. Successful operational v4 documents are unchanged.
+diagnostic status errors. Successful operational v5 documents do not include
+these error-only fields.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
 Classification precedence is running, repair, human input, provider/scheduler,
-completion, unknown, then idle. Either verified-live signal (a live task lock or
-live agent process) outranks simultaneous stale evidence in state,
-liveness-source reasons, and liveness status; without a verified-live signal,
-stale-runner evidence still requests repair. Material scheduler reasons remain
-ahead of the live explanation. `tasks[].liveness.pid` selects the available
+completion, unknown, then idle. Either true liveness flag (`live_task_lock` or
+`claude_pid_alive`) outranks simultaneous stale evidence in state,
+liveness-source reasons, and liveness status. The task-lock check requires a
+live PID and matches its process start time when the lock records one; without
+a recorded start time it checks PID existence only. The agent check tests PID
+existence only, so a reused PID can read as live. Without either true flag,
+a dead recorded PID requests stale-runner repair only when the action is
+`agent_running` or the marker is `agent_working` or `review_working`. An
+`agent_running` action without stale evidence can still classify as running;
+when no live PID is available, its generic reason is "task is running".
+Material scheduler reasons remain ahead of the live explanation.
+`tasks[].liveness.pid` selects the available
 task-lock PID only when `live_task_lock == true`, otherwise the available agent
 PID only when `claude_pid_alive == true`, otherwise null. Both-live rows prefer
 the lock PID. Stale-only rows now publish null instead of a historical PID;

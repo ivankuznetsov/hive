@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-01
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -215,7 +215,17 @@ The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
 Classification precedence is running, repair, human input, provider/scheduler,
-completion, unknown, then idle. The human renderer deliberately displays
+completion, unknown, then idle. Either verified-live signal (a live task lock or
+live agent process) outranks simultaneous stale evidence in state,
+liveness-source reasons, and liveness status; without a verified-live signal,
+stale-runner evidence still requests repair. Material scheduler reasons remain
+ahead of the live explanation. `tasks[].liveness.pid` selects the available
+task-lock PID only when `live_task_lock == true`, otherwise the available agent
+PID only when `claude_pid_alive == true`, otherwise null. Both-live rows prefer
+the lock PID. Stale-only rows now publish null instead of a historical PID;
+this is a consumer-visible field-semantics change without a schema change.
+The same PID rule applies when a material scheduler reason precedes the live
+explanation. The human renderer deliberately displays
 running, human input, repair, provider/scheduler, completion, unknown, then
 idle; it caps each band at five rows and directs overflow to `hive tui`. The
 human view prints active/archive counts, exact project/slug

@@ -14,6 +14,12 @@
       ],
       "additionalProperties": false,
       "properties": {
+        "unavailable_fields": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
+        "recovery_reason": { "type": ["string", "null"] },
+        "local_ci": { "type": ["string", "null"] },
+        "local_ci_head": { "type": ["string", "null"] },
+        "hosted_ci_head": { "type": ["string", "null"] },
+        "hosted_ci": { "type": ["string", "null"] },
         "worktree": {
           "type": [
             "string",

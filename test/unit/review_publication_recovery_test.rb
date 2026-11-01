@@ -6,6 +6,13 @@ class ReviewPublicationRecoveryTest < Minitest::Test
   include HiveTestHelper
   Recovery = Hive::ReviewPublicationRecovery
 
+  def test_oversized_executable_field_is_unavailable_without_truncating_it
+    evidence = Recovery.decode(Recovery.encode("publication" => "published", "push_command" => "x" * (Recovery::MAX_BYTES + 1)))
+    assert_equal "published", evidence["publication"]
+    assert_nil evidence["push_command"]
+    assert_includes evidence["unavailable_fields"], "push_command"
+  end
+
   def test_readiness_is_conditional_and_commands_are_not_silently_redacted
     base = { "publication" => "published", "verification" => "pending", "pr_state" => "OPEN",
       "is_draft" => true, "ready_command" => "gh pr ready 42" }
@@ -70,7 +77,9 @@ class ReviewPublicationRecoveryTest < Minitest::Test
       capture = File.join(dir, "capture")
       action = { "action_id" => "workflow.retry", "target" => "app:task", "observation_token" => "a" * 64 }
       row = { "identity" => { "project" => "app", "slug" => "task" }, "action" => action }
-      recipe = Recovery.retry_recipe(target: "app:task", worktree: dir)
+      scoped_worktree = File.join(dir, "work tree;literal")
+      FileUtils.mkdir_p(scoped_worktree)
+      recipe = Recovery.retry_recipe(target: "app:task", worktree: scoped_worktree)
       env = { "RUBYOPT" => nil, "RUBYLIB" => nil, "PATH" => "#{bin}:#{File.dirname(RbConfig.ruby)}:/usr/bin:/bin", "SNAPSHOT" => snapshot, "CAPTURE" => capture }
       ENV.keys.grep(/\ABUNDL/).each { |key| env[key] = nil }
       File.write(snapshot, JSON.generate("ok" => true, "tasks" => [ row ]))

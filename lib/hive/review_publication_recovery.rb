@@ -12,18 +12,26 @@ module Hive
     VERSION = "1".freeze
     FIELDS = %w[worktree branch pr_url pr_number pr_state is_draft local_head remote_head
                 publication verification unpushed_shas candidate_shas classification failure_reason
-                push_command verification_recipe observed_at ready_command origin_reason reviewer_files].freeze
+                push_command verification_recipe observed_at ready_command origin_reason reviewer_files unavailable_fields local_ci hosted_ci local_ci_head hosted_ci_head recovery_reason].freeze
     OID = /\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
     MAX_BYTES = 48 * 1024
     module_function
 
     def encode(evidence)
-      evidence.each_with_object({ "rp_version" => VERSION }) do |(key, value), attrs|
+      unavailable = []
+      result = evidence.each_with_object({ "rp_version" => VERSION }) do |(key, value), attrs|
         next unless FIELDS.include?(key.to_s)
         json = JSON.generate(value)
-        raise ArgumentError, "review publication field exceeds bound: #{key}" if json.bytesize > MAX_BYTES
+        if json.bytesize > MAX_BYTES
+          unavailable << key.to_s
+          json = "null"
+        end
         attrs["rp_#{key}"] = Base64.urlsafe_encode64(json, padding: false)
       end
+      unless unavailable.empty?
+        result["rp_unavailable_fields"] = Base64.urlsafe_encode64(JSON.generate(unavailable), padding: false)
+      end
+      result
     end
 
     def decode(attrs)
@@ -38,6 +46,8 @@ module Hive
         valid = case key
         when "unpushed_shas", "candidate_shas"
           value.nil? || (value.is_a?(Array) && value.size <= 256 && value.all? { |oid| oid.is_a?(String) && oid.match?(OID) })
+        when "unavailable_fields"
+          value.is_a?(Array) && value.size <= FIELDS.size && value.all? { |v| FIELDS.include?(v) }
         when "reviewer_files"
           value.is_a?(Array) && value.size <= 100 && value.all? { |v| v.is_a?(String) && v.match?(%r{\Areviews/[^/\x00-\x1f]+\.md\z}) }
         when "is_draft" then value.nil? || value == true || value == false
@@ -65,7 +75,7 @@ module Hive
       resolved = git(worktree, "rev-parse", "--verify", "#{reference}^{commit}")&.strip
       return unknown unless resolved == reference
 
-      commits = git(worktree, "rev-list", "--reverse", "#{reference}..#{local}")
+      commits = git(worktree, "rev-list", "--max-count=257", "--reverse", "#{reference}..#{local}")
       return unknown unless commits
       shas = commits.lines.map(&:strip)
       return unknown.merge("failure_reason" => "commit_evidence_exceeds_bound") if shas.size > 256
@@ -101,11 +111,11 @@ module Hive
 
     def lines(evidence)
       return [] unless evidence
-      labels = { "publication" => "Publication", "verification" => "Verification", "local_head" => "Local head",
+      labels = { "publication" => "Publication", "verification" => "Verification", "local_ci" => "Local CI", "hosted_ci" => "Hosted CI", "local_ci_head" => "Last local CI head", "hosted_ci_head" => "Last hosted CI head", "unavailable_fields" => "Fields unavailable (bounded or redacted evidence)", "local_head" => "Local head",
         "remote_head" => "Observed PR head", "observed_at" => "Observed at", "worktree" => "Worktree", "branch" => "Branch",
         "failure_reason" => "Failure", "unpushed_shas" => "Commits absent from PR", "candidate_shas" => "Local candidates",
         "remediation" => "Remediation", "push_command" => "Push", "retry_command" => "Current retry",
-        "verification_recipe" => "Refresh and retry (refuses ineligible actions)", "recovery_guidance" => "Recovery",
+        "verification_recipe" => "Refresh and retry (refuses ineligible actions)", "recovery_guidance" => "Recovery", "recovery_reason" => "Recovery command unavailable",
         "readiness_guidance" => "Draft readiness prerequisites", "ready_command" => "Conditional manual ready" }
       labels.filter_map do |key, label|
         value = evidence[key]
@@ -121,11 +131,13 @@ module Hive
       end
       return nil unless evidence
       result = evidence.dup
-      result.each do |key, value|
+      result.keys.each do |key|
+        value = result[key]
         if value.is_a?(String)
           redacted = Hive::SecretPatterns.redact(value).gsub(/[\x00-\x08\x0b-\x1f\x7f]/, "")
           if key.end_with?("command", "recipe") && (value.bytesize > MAX_BYTES || redacted != value)
             result[key] = nil
+            result["unavailable_fields"] = (Array(result["unavailable_fields"]) + [ key ]).uniq
           else
             result[key] = redacted
           end
@@ -135,14 +147,28 @@ module Hive
         Shellwords.join([ "hive", "act", "workflow.retry", action.fetch("target"),
                           "--observation", action.fetch("observation_token"), "--json" ])
       end
-      if attrs["reason"] == "final_fix_unverified"
+      if attrs["reason"] == "final_fix_unverified" || evidence["origin_reason"] == "final_fix_unverified"
         suffix = format("%02d", attrs["pass"].to_i)
         result["remediation"] = "Resolve escalations=#{attrs['escalations'].to_i} and accepted=#{attrs['accepted'].to_i} findings in #{Array(evidence["reviewer_files"]).empty? ? "reviews/*-#{suffix}.md (reviewer file list unavailable)" : evidence["reviewer_files"].join(", ")}. Commit fixes locally before explicit operator/coordinator verification retry. Editing review checkboxes does not apply fixes. Raising review.max_passes explicitly authorizes a changed repair budget."
       else
-        result["remediation"] = "Retain local commits. Reconcile divergence or identity failures before publication; then refresh the canonical recovery action."
+        result["remediation"] = case evidence["publication"]
+        when "published"
+          evidence["verification"] == "verified" ?
+            "Exact published head verified. Continue through the normal workflow to finalize." :
+            "Published head retained. Resolve the reported review, CI or infrastructure failure before retrying exact-head verification."
+        when "unpublished"
+          "Local commits are retained. Resolve the publication failure, verify repository identity, then publish and retry verification."
+        when "not_applicable"
+          "Publication is not applicable to this review."
+        else
+          "Publication is unknown. Inspect the PR branch and reconcile divergence or identity failures before another push."
+        end
       end
       result["recovery_guidance"] = result["retry_command"] ? "Use the current observation-bound workflow.retry action." :
         "Routine retry is ineligible. Use the existing explicit operator/coordinator recovery path after remediation."
+      if evidence["verification"] == "verified"
+        %w[push_command verification_recipe retry_command recovery_guidance].each { |key| result.delete(key) }
+      end
       unless evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
         result.delete("ready_command")
         result.delete("readiness_guidance")

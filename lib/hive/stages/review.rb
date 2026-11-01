@@ -94,7 +94,7 @@ module Hive
       # that finds one of them bound to HEAD resumes into a review pass
       # rather than Phase 5. `clean` and `approved` (the operator
       # approved a guardrail trip) may resume at Phase 5.
-      FIX_SUCCESS_UNREVIEWED_KINDS = %w[fixed ci_repaired].freeze
+      FIX_SUCCESS_UNREVIEWED_KINDS = %w[fixed ci_repaired approved].freeze
       # Outcome of the exact-head CI gate that guards every route into
       # Phase 5: a terminal result hash, or the proven head plus whether a
       # CI fixer moved it.
@@ -139,6 +139,7 @@ module Hive
         @review_publisher = nil
         @publication_attempt_head = nil
         @reviewed_head = nil
+        @review_ci_evidence = {}
         result = run_review_body!(task, cfg)
         finalize_review_outcome(task, cfg, result)
       rescue StandardError
@@ -217,7 +218,8 @@ module Hive
         if completed_pass_receipt?(task.folder, initial_disk_pass) &&
            (fix_success_head(task.folder, initial_disk_pass).nil? || fix_success_head(task.folder, initial_disk_pass) == @admissible_head)
           @withheld_reason = nil unless marker.attrs["reason"] == "fix_guardrail"
-        elsif pass_completion_status(task.folder, initial_pass) == :fix_incomplete
+        elsif initial_pass <= (cfg.dig("review", "max_passes") || 3) &&
+              pass_completion_status(task.folder, initial_pass) == :fix_incomplete
           @withheld_reason ||= "fix_guardrail_receipt_required"
         end
         @verify_mode = initial_pass > (cfg.dig("review", "max_passes") || 3)
@@ -241,6 +243,19 @@ module Hive
         # the review is still produced). This mirrors the Phase 4
         # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
         # review would still write fix commits here.
+        if @verify_mode && @withheld_reason.nil?
+          receipt_pass = initial_disk_pass.downto(1).find { |n| fix_success_head(task.folder, n) }
+          receipt_head = receipt_pass && fix_success_head(task.folder, receipt_pass)
+          if receipt_head && receipt_head != @admissible_head
+            recovery_ctx = ctx.with(pass: initial_pass)
+            guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: recovery_ctx,
+              base_sha: receipt_head, head_sha: @admissible_head)
+            if guardrail.status == :tripped
+              @withheld_reason = "guardrail_approval_required"
+              return ci_guardrail_terminal_result(task, guardrail, ctx: recovery_ctx, gate: "verification_recovery", pass: initial_pass)
+            end
+          end
+        end
         if @verify_mode
           publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: initial_pass))
           return publication_stop if publication_stop
@@ -369,8 +384,7 @@ module Hive
           #
           # Two safety checks before advancing:
           # worktree_dirty? catches manual edits between trip and
-          # approval; the max_passes-boundary check breaks to Phase 5
-          # instead of writing REVIEW_STALE on an approved pass. The
+          # approval; approval at the cap admits a verify-only pass. The
           # pass-match is handled by the enclosing `resuming_from_waiting?`
           # entry guard, so it's a precondition for entering this branch
           # rather than an additional check.
@@ -436,12 +450,7 @@ module Hive
               return publication_stop if publication_stop
               marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
               fix_retry_pass = nil
-              # If we approved the very last pass-cap-N pass, advancing
-              # to pass N+1 would immediately hit the `pass > max_passes`
-              # guard above and write REVIEW_STALE — masking the
-              # approval. Head to Phase 5 (browser test) instead, but
-              # only once CI has settled on the exact approved HEAD: the
-              # approved commits never passed the clean-boundary gate.
+              # Review the approved commits without granting another fix pass.
               max_passes = pass + 1 if pass >= max_passes
 
               pass += 1
@@ -1033,6 +1042,14 @@ module Hive
             "worktree" => ctx.worktree_path, "local_head" => git_head(ctx.worktree_path),
             "failure_reason" => "no_mutating_pr_identity", "observed_at" => Time.now.utc.iso8601 }
         end
+        evidence.merge!(@review_ci_evidence || {})
+        %w[local_ci hosted_ci].each do |gate|
+          if evidence[gate] != "skipped" && evidence["#{gate}_head"] != evidence["local_head"]
+            evidence[gate] = "pending"
+          end
+        end
+        evidence["local_ci"] = "skipped" if cfg.dig("review", "ci", "command").to_s.strip.empty?
+        evidence["hosted_ci"] = "skipped" if cfg.dig("review", "github_checks", "enabled") == false
         evidence["origin_reason"] = original_attrs["reason"] if stop
         if original_attrs["reason"] == "final_fix_unverified"
           evidence["reviewer_files"] = Hive::Stages::Review::Triage.discover_reviewer_files(ctx).map { |path| "reviews/#{File.basename(path)}" }
@@ -1040,15 +1057,21 @@ module Hive
         if !waiting && @withheld_reason
           evidence["publication"] = "unpublished"
           evidence["failure_reason"] = @withheld_reason
-        elsif !waiting && original_name == :review_complete && @review_publisher && !stop
+        elsif !waiting && @review_publisher && !stop
           begin
             @review_publisher.confirm!(evidence.fetch("local_head"))
-            evidence["verification"] = "verified"
+            evidence.merge!(@review_publisher.evidence)
           rescue Publication::Stop => e
+            evidence.merge!(@review_publisher.evidence)
             evidence["verification"] = "pending"
             evidence["failure_reason"] = e.reason
-            stop = review_head_moved(task, ctx.pass)
+            Hive::Markers.set(task.state_file, :review_error,
+              reason: "review_publication_confirmation_failed", publication_reason: e.reason, pass: ctx.pass)
+            stop = { commit: "review_publication_confirmation_failed", status: :review_error }
           end
+        end
+        if stop
+          evidence["origin_reason"] = original_attrs["reason"]
         elsif original_name == :review_complete
           evidence["verification"] = "verified"
         elsif %i[review_stale review_ci_stale].include?(original_name)
@@ -1060,7 +1083,7 @@ module Hive
           marker = Hive::Markers.current(task.state_file)
           result = stop if stop
         end
-        Hive::Markers.set(task.state_file, marker.name, **marker.attrs.merge(Hive::ReviewPublicationRecovery.encode(evidence)))
+        Hive::Markers.set(task.state_file, marker.name, **original_attrs.merge(marker.attrs).merge(Hive::ReviewPublicationRecovery.encode(evidence)))
         if marker.name == :review_complete && evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
           guidance = Hive::ReviewPublicationRecovery.project(Hive::ReviewPublicationRecovery.encode(evidence))
           warn guidance["readiness_guidance"]
@@ -2251,6 +2274,10 @@ module Hive
               started_at: started_at,
               max_wall_clock_sec: max_wall_clock_sec,
               publication_base_head: before_head, no_repair: no_repair,
+              publication_observer: ->(publisher) {
+                @review_publisher = publisher
+                @publication_attempt_head = publisher.evidence["local_head"]
+              },
               admit_head: ->(head) {
                 write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
                 @admissible_head = head
@@ -2262,7 +2289,15 @@ module Hive
 
         gates.each do |gate, run_gate|
           result = run_gate.call
+          @review_ci_evidence ||= {}
+          @review_ci_evidence[gate == "local" ? "local_ci" : "hosted_ci"] = case result.status
+          when :green then "passed"
+          when :skipped then "skipped"
+          when :stale then "failed"
+          else "pending"
+          end
           current_head = git_head(ctx.worktree_path)
+          @review_ci_evidence[gate == "local" ? "local_ci_head" : "hosted_ci_head"] = current_head
           if current_head != before_head
             return review_head_moved(task, pass) if no_repair
             guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: ctx,

@@ -1,5 +1,6 @@
 require "hive/agent_git_gate"
 require "hive/gh"
+require "hive/config"
 require "hive/worktree"
 require "hive/review_publication_recovery"
 
@@ -27,6 +28,12 @@ module Hive
         def publish!(expected_head:, withheld: nil)
           @evidence["local_head"] = expected_head
           if withheld
+            pointer = Hive::Worktree.read_owned_pointer(@task.folder, project_root: @task.project_root,
+              slug: @task.slug, expected_root: Hive::Worktree.canonical_root(@task.project_root))
+            unless File.realpath(pointer.fetch("path")) == File.realpath(@ctx.worktree_path)
+              raise Hive::WorktreeError, "review context does not match the owned worktree"
+            end
+            @evidence["branch"] = pointer.fetch("branch")
             @evidence.merge!("publication" => "unpublished", "failure_reason" => withheld)
             return self
           end
@@ -45,7 +52,7 @@ module Hive
           # it can never turn operator guidance into a forceful rewrite.
           receipt = @gate.publish_local_branch(
             repository_path: @ctx.worktree_path, branch: identity[:branch],
-            expected_remote_oid: identity[:remote_head]
+            expected_remote_oid: identity[:remote_head], expected_local_oid: expected_head
           )
           raise Stop, "publication_receipt_mismatch" unless receipt.after_oid == expected_head
           @evidence.merge!("publication" => "published", "remote_head" => receipt.after_oid,
@@ -77,6 +84,8 @@ module Hive
         def confirm!(head)
           verify_local!(head)
           current = resolve_identity!
+          @evidence["remote_head"] = current[:remote_head]
+          @evidence["observed_at"] = Time.now.utc.iso8601
           raise Stop, "pr_head_moved" unless current[:remote_head] == head
           if @identity && current.values_at(:number, :url, :branch) != @identity.values_at(:number, :url, :branch)
             raise Stop, "pr_identity_moved"
@@ -98,15 +107,20 @@ module Hive
         end
 
         def confirm_absence(head)
-          observation = @gate.observe_remote_branch(repository_path: @ctx.worktree_path, branch: @identity.fetch(:branch),
-            remote: @gh.origin_push_url(@ctx.worktree_path, cfg: @cfg, managed: true))
+          target = @gh.origin_push_url(@ctx.worktree_path, cfg: @cfg, managed: true)
+          remote_identity = Hive::Gh.repository_identity_from_remote(target)
+          pr_identity = Hive::Gh.parse_pull_request_url(@pr_url)
+          return unless remote_identity.fetch("host").downcase == pr_identity.fetch("host") &&
+                        remote_identity.fetch("repository").downcase == pr_identity.fetch("repository")
+          observation = @gate.observe_remote_branch(repository_path: @ctx.worktree_path,
+            branch: @identity.fetch(:branch), remote: target)
           return unless observation.oid && observation.oid != head
           data = Hive::ReviewPublicationRecovery.classify(worktree: @ctx.worktree_path,
             reference_oid: observation.oid, head: head)
           @evidence.merge!(data.reject { |k, _| k == "head_delivered" })
           @evidence["remote_head"] = observation.oid
           @evidence["publication"] = "unpublished" if data["classification"] == "ahead"
-        rescue Hive::AgentGitGate::Error, KeyError
+        rescue Hive::AgentGitGate::Error, Hive::GhError, Hive::WorktreeError, KeyError, SystemCallError, IOError, ArgumentError
           nil
         end
 
@@ -119,67 +133,79 @@ module Hive
             @evidence["push_command"] = "cd #{Shellwords.escape(path)} && test \"$(git rev-parse #{Shellwords.escape("refs/heads/#{branch}")})\" = #{Shellwords.escape(head)} && " +
               Shellwords.join([ "git", "push", "origin", "#{head}:refs/heads/#{branch}" ])
           end
-          project = @task.respond_to?(:project_name) ? @task.project_name : nil
-          project = File.basename(@task.project_root) if project.to_s.empty?
-          @evidence["verification_recipe"] = Hive::ReviewPublicationRecovery.retry_recipe(target: "#{project}:#{@task.slug}", worktree: path)
-          if @identity[:is_draft] == true && @identity[:state] == "OPEN"
+          registrations = Hive::Config.registered_projects.select do |entry|
+            File.expand_path(entry.fetch("path")) == File.expand_path(@task.project_root)
+          end
+          if registrations.one?
+            target = "#{registrations.first.fetch('name')}:#{@task.slug}"
+            @evidence["verification_recipe"] = Hive::ReviewPublicationRecovery.retry_recipe(target: target, worktree: path)
+          else
+            @evidence["recovery_reason"] = "project_registration_missing_or_ambiguous"
+          end
+          if @evidence["is_draft"] == true && @evidence["pr_state"] == "OPEN"
             @evidence["ready_command"] = "cd #{Shellwords.escape(path)} && " + Shellwords.join([ "gh", "pr", "ready", @identity[:number].to_s, "--repo", @pr_url.sub(%r{/pull/\d+\z}, "") ])
           end
+        rescue Hive::ConfigError, KeyError, SystemCallError, IOError
+          @evidence["recovery_reason"] = "project_registration_unavailable"
         end
 
-          def resolve_identity!
-            parsed = @gh.parse_pull_request_url(@pr_url)
-            raise Hive::GhError, "pr.md contains an invalid pull-request URL" unless parsed
+        def resolve_identity!
+          parsed = @gh.parse_pull_request_url(@pr_url)
+          raise Hive::GhError, "pr.md contains an invalid pull-request URL" unless parsed
 
-            root = Hive::Worktree.canonical_root(@task.project_root)
-            pointer = Hive::Worktree.read_owned_pointer(
-              @task.folder,
-              project_root: @task.project_root,
-              slug: @task.slug,
-              expected_root: root
-            )
-            unless File.realpath(pointer.fetch("path")) == File.realpath(@ctx.worktree_path)
-              raise Hive::WorktreeError, "review context does not match the owned worktree"
-            end
-
-            repository = @gh.repository_identity(@ctx.worktree_path, cfg: @cfg)
-            unless parsed.fetch("host") == repository.fetch("host").downcase &&
-                   parsed.fetch("repository") == repository.fetch("repository").downcase
-              raise Hive::GhError, "pull request is outside the task repository"
-            end
-
-            metadata = @gh.pr_metadata(
-              parsed.fetch("number"), cfg: @cfg, chdir: @ctx.worktree_path
-            )
-            unless metadata.number == parsed.fetch("number") &&
-                   @gh.parse_pull_request_url(metadata.url) == parsed &&
-                   metadata.state.to_s.upcase == "OPEN" &&
-                   metadata.is_cross_repository == false
-              raise Hive::GhError, "pull-request identity is stale or unsupported"
-            end
-
-            branch = pointer.fetch("branch")
-            matches = @gh.lookup_prs_for_branch(
-              @ctx.worktree_path, branch, cfg: @cfg
-            ).select do |candidate|
-              candidate["number"].to_i == parsed.fetch("number") &&
-                candidate["state"].to_s.upcase == "OPEN" &&
-                candidate["headRefName"].to_s == branch &&
-                @gh.parse_pull_request_url(candidate["url"]) == parsed
-            end
-            raise Hive::GhError, "task branch does not resolve to one open pull request" unless matches.one?
-
-            remote_head = metadata.head_ref_oid.to_s.downcase
-            unless remote_head.match?(/\A[0-9a-f]{40,64}\z/)
-              raise Hive::GhError, "pull-request head OID is unavailable"
-            end
-
-            {
-              number: parsed.fetch("number"), url: parsed.fetch("url"),
-              branch: branch, remote_head: remote_head, state: metadata.state.to_s.upcase,
-              is_draft: metadata.is_draft
-            }
+          root = Hive::Worktree.canonical_root(@task.project_root)
+          pointer = Hive::Worktree.read_owned_pointer(
+            @task.folder,
+            project_root: @task.project_root,
+            slug: @task.slug,
+            expected_root: root
+          )
+          unless File.realpath(pointer.fetch("path")) == File.realpath(@ctx.worktree_path)
+            raise Hive::WorktreeError, "review context does not match the owned worktree"
           end
+
+          @evidence["branch"] = pointer.fetch("branch")
+          @evidence["pr_number"] = parsed.fetch("number")
+          repository = @gh.repository_identity(@ctx.worktree_path, cfg: @cfg)
+          unless parsed.fetch("host") == repository.fetch("host").downcase &&
+                 parsed.fetch("repository") == repository.fetch("repository").downcase
+            raise Hive::GhError, "pull request is outside the task repository"
+          end
+
+          metadata = @gh.pr_metadata(
+            parsed.fetch("number"), cfg: @cfg, chdir: @ctx.worktree_path
+          )
+          @evidence["pr_state"] = metadata.state.to_s.upcase
+          @evidence["is_draft"] = metadata.is_draft
+          unless metadata.number == parsed.fetch("number") &&
+                 @gh.parse_pull_request_url(metadata.url) == parsed &&
+                 metadata.state.to_s.upcase == "OPEN" &&
+                 metadata.is_cross_repository == false
+            raise Hive::GhError, "pull-request identity is stale or unsupported"
+          end
+
+          branch = pointer.fetch("branch")
+          matches = @gh.lookup_prs_for_branch(
+            @ctx.worktree_path, branch, cfg: @cfg
+          ).select do |candidate|
+            candidate["number"].to_i == parsed.fetch("number") &&
+              candidate["state"].to_s.upcase == "OPEN" &&
+              candidate["headRefName"].to_s == branch &&
+              @gh.parse_pull_request_url(candidate["url"]) == parsed
+          end
+          raise Hive::GhError, "task branch does not resolve to one open pull request" unless matches.one?
+
+          remote_head = metadata.head_ref_oid.to_s.downcase
+          unless remote_head.match?(/\A[0-9a-f]{40,64}\z/)
+            raise Hive::GhError, "pull-request head OID is unavailable"
+          end
+
+          {
+            number: parsed.fetch("number"), url: parsed.fetch("url"),
+            branch: branch, remote_head: remote_head, state: metadata.state.to_s.upcase,
+            is_draft: metadata.is_draft
+          }
+        end
 
         public :resolve_identity!
       end

@@ -139,9 +139,10 @@ class ReviewRemoteCiTest < Minitest::Test
           ->(*, **) { { "path" => repo, "branch" => task.slug } }
         ) do
           test_case = self
-          gate = lambda do |repository_path:, branch:, expected_remote_oid:|
+          gate = lambda do |repository_path:, branch:, expected_remote_oid:, expected_local_oid:|
             gh.pushes << [ repository_path, branch, { expected_remote_oid: expected_remote_oid } ]
             raise Hive::AgentGitGate::RemoteConflict unless gh.push_result.success?
+            test_case.assert_equal expected_local_oid, Hive::ReviewPublicationRecovery.git(repo, "rev-parse", "HEAD").strip
             current = test_case.run!("git", "-C", repo, "rev-parse", "HEAD").strip
             gh.metadata = gh.metadata.with(head_ref_oid: current)
             Struct.new(:after_oid).new(current)
@@ -495,6 +496,49 @@ class ReviewRemoteCiTest < Minitest::Test
       gh.rollups = [ rollup(head: head, checks: [ unknown ]), rollup(head: head, checks: [ unknown ]) ]
       failed = runner.call(max_bytes: 10, timeout_sec: 1)
       assert_equal 1, failed.exit_code
+    end
+  end
+
+  def test_verification_recipe_uses_the_registered_project_alias
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      registration = -> { [ { "name" => "registered-alias", "path" => repo } ] }
+      with_replaced_singleton_method(Hive::Config, :registered_projects, registration) do
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_includes result.evidence["verification_recipe"], "registered-alias:demo-task"
+        assert_equal "published", result.evidence["publication"]
+      end
+    end
+  end
+
+  def test_receipt_confirmed_publication_detects_local_head_movement_without_retry
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      calls = 0
+      test_case = self
+      gate = Object.new
+      gate.define_singleton_method(:publish_local_branch) do |**|
+        calls += 1
+        test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "concurrent movement")
+        Struct.new(:after_oid).new(head)
+      end
+      result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, gate: gate).publish!(expected_head: head)
+      assert_equal "published", result.evidence["publication"]
+      assert_equal "local_head_moved", result.evidence["failure_reason"]
+      assert_equal 1, calls
+    end
+  end
+
+  def test_cross_repository_and_merged_pr_refuse_publication
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      [ gh.metadata.with(is_cross_repository: true), gh.metadata.with(state: "MERGED") ].each do |metadata|
+        gh.metadata = metadata
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "unknown", result.evidence["publication"]
+        assert_equal "publication_identity_unavailable", result.evidence["failure_reason"]
+        assert_empty gh.pushes
+      end
     end
   end
 

@@ -331,6 +331,7 @@ class GhUnitTest < Minitest::Test
       [
         {
           "number" => 197,
+          "isDraft" => true,
           "url" => "https://github.com/o/r/pull/197",
           "baseRefName" => "main",
           "headRefOid" => "abc123",
@@ -345,6 +346,7 @@ class GhUnitTest < Minitest::Test
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
       metadata = Hive::Gh.pr_metadata(197)
 
+      assert_equal true, metadata.is_draft
       assert_equal 197, metadata.number
       assert_equal "https://github.com/o/r/pull/197", metadata.url
       assert_equal "main", metadata.base_ref_name

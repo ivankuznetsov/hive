@@ -37,7 +37,7 @@ module Hive
     # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
     # single validated constructor and the result is tamper-proof downstream.
     # Keyword construction + field readers are unchanged for consumers.
-    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
+    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state, :is_draft)
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
@@ -237,7 +237,7 @@ module Hive
     # run from another repo queries the right PR instead of cwd's repo.
     def pr_metadata(number, cfg: nil, chdir: nil)
       ensure_authenticated!(cfg)
-      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
+      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state,isDraft"
       out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
       unless status.success?
         raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
@@ -252,7 +252,8 @@ module Hive
         base_ref_name: doc["baseRefName"].to_s,
         head_ref_oid: doc["headRefOid"].to_s,
         is_cross_repository: doc["isCrossRepository"] == true,
-        state: doc["state"].to_s
+        state: doc["state"].to_s,
+        is_draft: [ true, false ].include?(doc["isDraft"]) ? doc["isDraft"] : nil
       )
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"

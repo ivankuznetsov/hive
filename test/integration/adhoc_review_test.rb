@@ -18,7 +18,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
       base_ref_name: "main",
       head_ref_oid: head,
       is_cross_repository: false,
-      state: "OPEN"
+      state: "OPEN", is_draft: nil
     )
   end
 
@@ -51,7 +51,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
         base_ref_name: "main",
         head_ref_oid: head,
         is_cross_repository: false,
-        state: "OPEN"
+        state: "OPEN", is_draft: nil
       )
     }) do
       with_replaced_singleton_method(Hive::Worktree, :materialize_pr, lambda { |**kwargs|
@@ -161,7 +161,7 @@ class AdhocReviewIntegrationTest < Minitest::Test
             base_ref_name: "main",
             head_ref_oid: "head-197",
             is_cross_repository: true,
-            state: "OPEN"
+            state: "OPEN", is_draft: nil
           )
         }) do
           _out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197" ]) }

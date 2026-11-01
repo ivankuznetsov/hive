@@ -1,4 +1,5 @@
 require "time"
+require "hive/review_publication_recovery"
 require "hive/attempts/storage_status"
 require "hive/operational_action"
 require "hive/model_unsupported"
@@ -439,6 +440,7 @@ module Hive
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
+        "review_publication" => Hive::ReviewPublicationRecovery.project(row["attrs"] || {}, action: action, marker: row["marker"]),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],

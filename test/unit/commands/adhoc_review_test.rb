@@ -11,7 +11,7 @@ class AdhocReviewCommandTest < Minitest::Test
       base_ref_name: "main",
       head_ref_oid: head,
       is_cross_repository: fork,
-      state: "OPEN"
+      state: "OPEN", is_draft: nil
     )
   end
 

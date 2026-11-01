@@ -47,7 +47,7 @@ module Hive
         module_function
 
         def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 command: nil, command_runner: nil)
+                 command: nil, command_runner: nil, no_repair: false)
           command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
@@ -134,7 +134,7 @@ module Hive
               )
             end
 
-            if attempts >= max_attempts
+            if no_repair || attempts >= max_attempts
               return Result.new(
                 status: :stale,
                 attempts: attempts,

@@ -113,7 +113,7 @@ module Hive
             input: payload.fetch("input")
           )
           unless preview.valid?
-            details = (preview.errors + preview.blockers).map { |entry| entry.fetch("message") }
+            details = (preview.errors + preview.blockers).map { |entry| Hive::TaskClosure.format_diagnostic(entry) }
             return closure_edit_result("Closure blocked:\n#{details.join("\n")}")
           end
 

@@ -2584,6 +2584,7 @@ module Hive
         end
         preview = Hive::TaskClosure.preview(task: task, project: project, input: input)
         puts JSON.pretty_generate(preview.to_h)
+        preview.blockers.each { |entry| puts Hive::TaskClosure.format_diagnostic(entry) }
         unless preview.valid?
           raise Hive::TaskClosure::VerificationFailed,
                 "closure preview failed; correct its field errors and blockers"

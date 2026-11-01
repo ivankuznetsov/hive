@@ -1116,6 +1116,26 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_published_commits_absent_from_default_still_require_an_operator_decision
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "published-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "published-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "published fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{head}\n---\n")
+      blocker = service_for.send(:worktree_blockers, task).first
+      assert_equal "unique_worktree_changes", blocker["code"]
+      assert_equal "published", blocker.dig("details", "publication")
+      assert_equal [], blocker.dig("details", "local_fix_shas")
+      assert_equal "content_absent_from_default", blocker.dig("details", "delivery")
+      assert File.directory?(worktree.path)
+    end
+  end
+
   def test_public_helpers_and_fallbacks_fail_closed
     with_closure_project do |task, project|
       input = input_for("acme/app#42")

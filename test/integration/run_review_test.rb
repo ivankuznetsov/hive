@@ -2865,6 +2865,70 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_verification_recovery_approval_remains_restartable_without_more_fixes
+    [ :interrupted, :findings, :reviewer_error ].each do |outcome|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir, cfg_overrides: {
+            "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+          })
+          worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+          previous = review_head(worktree)
+          seed_completed_review_pass(folder, 1, head: previous)
+          File.write(File.join(folder, "reviews", "stub-reviewer-02.md"), "## High\n- [x] fix manually\n")
+          FileUtils.mkdir_p(File.join(worktree, ".github", "workflows"))
+          File.write(File.join(worktree, ".github", "workflows", "ci.yml"), "name: changed\n")
+          run!("git", "-C", worktree, "add", ".github/workflows/ci.yml")
+          run!("git", "-C", worktree, "commit", "-qm", "manual workflow change")
+          head = review_head(worktree)
+          fix_spawns = install_committing_fix_driver(worktree)
+
+          drive_review_loop(folder, worktree, findings: {})
+          state_file = File.join(folder, "task.md")
+          marker = Hive::Markers.current(state_file)
+          assert_equal :review_waiting, marker.name
+          assert_equal "verification_recovery", marker.attrs.fetch("gate")
+          guardrail = File.join(folder, "reviews", "fix-guardrail-02.md")
+          File.write(guardrail, File.read(guardrail).gsub("[ ]", "[x]"))
+
+          case outcome
+          when :interrupted
+            interrupt = ->(*) { raise Interrupt, "stopped after reviewer output" }
+            with_replaced_singleton_method(Hive::Stages::Review, :run_triage_with_retries, interrupt) do
+              assert_raises(Interrupt) { drive_review_loop(folder, worktree, findings: {}) }
+            end
+          when :findings
+            passes, = drive_review_loop(folder, worktree, findings: { 3 => "## High\n- [x] still broken\n" })
+            assert_equal [ 3 ], passes
+            marker = Hive::Markers.current(state_file)
+            assert_equal :review_stale, marker.name
+            assert_equal "final_fix_unverified", marker.attrs.fetch("reason")
+          when :reviewer_error
+            passes, = drive_review_loop(folder, worktree, findings: {},
+              reviewer_errors: { 3 => "# Reviewer errors\n- other-reviewer: quota\n" }, expect_error: true)
+            assert_equal [ 3 ], passes
+            assert_equal :review_error, Hive::Markers.current(state_file).name
+          end
+          assert File.file?(File.join(folder, "reviews", "stub-reviewer-03.md"))
+          assert_match(/kind=approved/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
+
+          # Explicit operator/coordinator recovery clears the terminal marker.
+          Hive::Markers.clear_current(state_file,
+            expected_name: Hive::Markers.current(state_file).name, purge_history: true)
+          FileUtils.rm_f(File.join(folder, "reviews", "errors-03.md"))
+          passes, = drive_review_loop(folder, worktree, findings: {})
+
+          marker = Hive::Markers.current(state_file)
+          assert_equal :review_complete, marker.name, "#{outcome}: #{marker.attrs.inspect}"
+          assert_equal "3", marker.attrs.fetch("pass")
+          assert_equal [ 3 ], passes, "retry the admitted verification pass in place"
+          assert_equal 0, fix_spawns.call, "approval and retry must not grant another fix"
+          assert_equal head, review_head(worktree)
+        end
+      end
+    end
+  end
+
   def test_verification_rejects_head_movement_during_reviewers_or_triage
     [ :reviewers, :triage ].each do |phase|
       with_tmp_global_config do

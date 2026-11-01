@@ -299,6 +299,11 @@ module Hive
         # to admit review of unreviewed commits, but every pass beyond this
         # cap is verify-only and never spawns the fix agent.
         fix_pass_cap = max_passes
+        # Persisted approval/repair receipts also admit their verification
+        # passes after restart, even if guardrail recovery preceded triage
+        # and the approved pass has no escalations file.
+        admitted_ceiling = admitted_pass_ceiling(task.folder, fix_pass_cap)
+        max_passes = admitted_ceiling if admitted_ceiling > fix_pass_cap + 1
         # A task can be intentionally rewound into review after exhausting its
         # configured pass cap. If the entry CI gate repairs that previously
         # reviewed head, admit exactly the next on-disk pass so the repair is
@@ -1624,13 +1629,13 @@ module Hive
 
       # Highest pass number the runner can legitimately have on disk. The
       # verify pass (max_passes + 1) is always admissible. Beyond it, a pass
-      # exists only because the previous pass completed through a CI repair
-      # (`kind=ci_repaired` sentinel), which admits exactly one more reviewer
+      # exists because the previous pass completed through a CI repair or
+      # guardrail approval, each of which admits exactly one more reviewer
       # pass. Walk that chain of controller-written receipts so a retry can
-      # resume a CI-admitted pass; the first pass without one bounds it.
+      # resume that verify-only pass; the first pass without one bounds it.
       def admitted_pass_ceiling(task_folder, max_passes)
         ceiling = max_passes + 1
-        ceiling += 1 while fix_success_kind(task_folder, ceiling) == "ci_repaired"
+        ceiling += 1 while %w[ci_repaired approved].include?(fix_success_kind(task_folder, ceiling))
         ceiling
       end
 

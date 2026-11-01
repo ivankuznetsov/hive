@@ -3,7 +3,7 @@ title: hive proposal
 type: command
 source: lib/hive/commands/proposal.rb, lib/hive/cli.rb, lib/hive/proposals/
 created: 2026-08-30
-updated: 2026-09-08
+updated: 2026-11-01
 tags: [command, proposals, skills, workflows, evidence]
 ---
 
@@ -90,7 +90,8 @@ receipt inside the input document.
 Successful source and lifecycle mutations use `hive-proposal-mutation.v1`.
 JSON failures retain the selected proposal schema and one of the stable kinds
 `unauthorized`, `stale`, `conflict`, `quota`, `quarantine`,
-`source_unavailable`, `config`, or `invalid`.
+`source_unavailable`, `config`, `invalid`, or `usage`. Pre-dispatch argument
+errors use `usage`; command-level validation uses `invalid`.
 
 ## Generated views
 

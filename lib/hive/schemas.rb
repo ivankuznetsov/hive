@@ -212,6 +212,7 @@ module Hive
       SOURCE_UNAVAILABLE = "source_unavailable".freeze
       CONFIG             = "config".freeze
       INVALID            = "invalid".freeze
+      USAGE              = "usage".freeze
       ALL = constants(false).reject { |constant| constant == :ALL }
         .map { |constant| const_get(constant) }.freeze
     end

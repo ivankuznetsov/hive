@@ -58,3 +58,12 @@
   Both snapshot diffs identify only the runner's concurrently written
   `tmp/test-parallel-*/worker-2.log`. This unchanged parallel-harness failure
   is outside the filter-policy fix; the standalone read-only checks pass.
+- Review scope correction: removed the unrelated Addressable/sqlite3 lockfile
+  patch from this PR's final diff and removed its second source fragment.
+  Commit `1b0e6a615f` retains the remediation for a separate change. The
+  original root lockfile failed the live advisory audit at database commit
+  `79c0e052ade15d29d3ecc1e8d4fa59c337a86383`; Addressable 2.9.0, root sqlite3
+  2.10.1, and web sqlite3 2.9.6 remain locked here. The CI audit fetches the live
+  database, so its
+  Addressable GHSA-4w5q-wg7v-w6gp / GHSA-539f-xcgw-2gjg and sqlite3
+  GHSA-4fqr-96q8-xrfx failures remain a separate dependency unblock.

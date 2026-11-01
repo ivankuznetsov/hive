@@ -67,3 +67,19 @@
   database, so its
   Addressable GHSA-4w5q-wg7v-w6gp / GHSA-539f-xcgw-2gjg and sqlite3
   GHSA-4fqr-96q8-xrfx failures remain a separate dependency unblock.
+- Review proof corrections: both launchers now establish a recorded ordinary
+  `cat-file` read before checking no handoff for denied tokens, with independent
+  skip logs per launcher. Every allowed fixture case requires no skip record;
+  glued object-filter output checks use the fixture's recorded exit status.
+  Independent leading-global classification and literal hardened argv checks
+  cover `log`, `show`, and glued `cat-file` object filtering. Acceptance audit
+  assertions now explain failures, and the policy comment names the dependence
+  of excluded `--f` / `--filters=<value>` forms on Git's current parsing.
+- Review verification: `bin/test` with the policy, dry-run environment, and
+  acceptance files passed (88 tests, 1,973 assertions, no failures/errors; the
+  CI-only security matrix remains skipped in this ordinary run). The three
+  compatibility/helper tests passed again on Git 2.45.4 (568 assertions) and
+  2.55.0 (572 assertions), without skips. RuboCop passed all four Ruby files.
+  Removed the disposable Git build directories and source archives after
+  verification; retained characterization/test logs and the dirty isolated
+  verification checkout for the documented broad-suite evidence.

@@ -75,8 +75,10 @@ class BabysitterAcceptanceDryRunTest < Minitest::Test
                       "the PR comment must be intercepted, not posted to GitHub"
       assert_includes skipped, "gh --repo=owner/repo pr close 42",
                       "the PR close must be intercepted, not applied on GitHub"
-      assert_includes skipped, "git cat-file --fi HEAD:README.md skipped"
-      refute_includes skipped, "git log --ext"
+      assert_includes skipped, "git cat-file --fi HEAD:README.md skipped",
+                      "the abbreviated cat-file token must have a skip audit record"
+      refute_includes skipped, "git log --ext",
+                      "the rejected ext-diff prefix must pass through without a skip audit record"
       assert File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md")),
              "the dry-run plan artifact must still be written by the stubbed agent"
       assert babysitter_events(project).any? { |event|

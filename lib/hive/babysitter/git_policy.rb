@@ -152,6 +152,8 @@ module Hive
         # Fixed bare-token boundary, independent of Git version: newer Git makes
         # four spellings ambiguous and --filter an object-filter option. Deliberately
         # over-block those errors/reads; glued --filter=<spec> remains outside this set.
+        # Excluded --f and --filters=<value> are inert only while Git keeps --f
+        # ambiguous and --filters valueless; that parsing dependency can change.
         return true if subcommand == "cat-file" && CAT_FILE_FILTER_TOKENS.include?(arg)
         # `--submodule=diff` expands nested diffs inside submodule repositories; the top-level
         # `--no-ext-diff --no-textconv` flags do not harden those nested git invocations.

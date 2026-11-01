@@ -1004,6 +1004,7 @@ class HiveCliTest < Minitest::Test
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     preview = Struct.new(:preview_digest, :payload) do
       def valid? = true
+      def blockers = []
       def to_h = payload
     end.new(
       "a" * 64,
@@ -1068,6 +1069,7 @@ class HiveCliTest < Minitest::Test
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     preview = Struct.new(:preview_digest) do
       def valid? = true
+      def blockers = []
       def to_h = { "ok" => true }
     end.new("a" * 64)
     confirmations = []
@@ -1105,12 +1107,16 @@ class HiveCliTest < Minitest::Test
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     preview_class = Struct.new(:preview_digest, :payload, :valid)
     previews = [
-      preview_class.new("a" * 64, { "ok" => false }, false),
+      preview_class.new("a" * 64, { "ok" => false, "blockers" => [ {
+        "code" => "unique_worktree_changes", "message" => "PR already merged; retained fixes",
+        "details" => { "local_fix_shas" => [ "b" * 40 ], "worktree" => "/owned/a b" }
+      } ] }, false),
       preview_class.new("a" * 64, { "ok" => true }, true)
     ]
     previews.each do |preview|
       preview.define_singleton_method(:to_h) { payload }
       preview.define_singleton_method(:valid?) { valid }
+      preview.define_singleton_method(:blockers) { payload.fetch("blockers", []) }
     end
     inputs = [ "ignored\n", "n\n" ]
     previous_stdin = $stdin
@@ -1132,13 +1138,17 @@ class HiveCliTest < Minitest::Test
             expected = preview.valid? ?
               Hive::TaskClosure::Unauthorized :
               Hive::TaskClosure::VerificationFailed
-            assert_raises(expected) do
-              capture_io do
+            output, = capture_io do
+              assert_raises(expected) do
                 Hive::CLI.start([
                   "archive", "task", "--reason", "already_delivered",
                   "--evidence", "acme/app#42"
                 ])
               end
+            end
+            unless preview.valid?
+              assert_includes output, "b" * 40
+              assert_includes output, "/owned/a b"
             end
           end
         end

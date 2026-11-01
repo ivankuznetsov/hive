@@ -177,3 +177,25 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 - [[state-model]]
 - [[modules/agent]]
 - [[stages/execute]]
+
+## Review publication attributes
+
+New review terminal markers retain ordinary `reason`, `pass`, `accepted`,
+`escalations` and occurrence IDs. Waiting guardrail markers also retain their
+exact `matches` and `head` approval bindings. `rp_version=1` selects a flat set of
+`rp_*` fields whose values are URL-safe base64 JSON. This narrow codec avoids
+Markers' lossy quote/comment-delimiter formatting without changing legacy attrs.
+`Hive::ReviewPublicationRecovery` alone decodes and projects these fields.
+
+Evidence names the owned worktree/branch, PR URL/number/state/draft metadata,
+local and observed remote full heads, publication (`published`, `unpublished`,
+`unknown`, `not_applicable`) and verification (`pending`, `failed`, `verified`),
+commit classification and full unpushed SHAs, observation time and failure reason.
+CI evidence includes its head and explicitly labels configured-out gates skipped.
+Oversized fields are unavailable with named diagnostics; executable strings and
+commit identifiers are never shortened into different values.
+
+Push guidance is an ordinary task-specific, immutable-source push and is withheld
+on divergence/remote conflict. Verification recipes refresh the current canonical
+`workflow.retry` action for the exact task; no token is embedded in the marker.
+Tokens hash marker evidence and mtime, so only a fresh action can be invoked.

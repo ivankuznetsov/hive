@@ -717,8 +717,8 @@ module Hive
 
     def classify(project, row)
       return [ "unknown", "unknown" ] if invalid_task?(row)
-      return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      return [ "needs_repair", "hive" ] if stale_liveness?(row)
       if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
         return [ "waiting_on_you", "operator" ]
       end
@@ -1038,19 +1038,19 @@ module Hive
       reasons = []
       if invalid_task?(row)
         reasons << reason("invalid_task", row.dig("attrs", "message") || "task metadata is invalid", "task")
-      elsif stale_liveness?(row)
-        message = row.dig("diagnostic", "summary") || row.dig("attrs", "message") ||
-                  "recorded task runner is no longer alive"
-        reasons << reason("stale_runner", message, "liveness")
       elsif running?(row)
-        message = if row["task_lock_pid"]
+        message = if row["live_task_lock"] == true && row["task_lock_pid"]
           "task runner holds the live lock (pid #{row.fetch('task_lock_pid')})"
-        elsif row["claude_pid"]
+        elsif row["claude_pid_alive"] == true && row["claude_pid"]
           "agent process #{row.fetch('claude_pid')} is alive"
         else
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif stale_liveness?(row)
+        message = row.dig("diagnostic", "summary") || row.dig("attrs", "message") ||
+                  "recorded task runner is no longer alive"
+        reasons << reason("stale_runner", message, "liveness")
       elsif row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
         reasons << reason(
           Hive::PatrolFix::PublicationBlockReceipt::CODE,
@@ -1201,9 +1201,14 @@ module Hive
     def liveness_payload(row)
       status = liveness_status(row)
       owned = status != "not_running"
+      pid = if row["live_task_lock"] == true && row["task_lock_pid"]
+        row["task_lock_pid"]
+      elsif row["claude_pid_alive"] == true && row["claude_pid"]
+        row["claude_pid"]
+      end
       {
         "status" => status,
-        "pid" => owned ? row["task_lock_pid"] || row["claude_pid"] : nil,
+        "pid" => owned ? pid : nil,
         "attempt_id" => owned ? row["attempt_id"] : nil,
         "task_generation" => owned ? row["task_generation"] : nil
       }

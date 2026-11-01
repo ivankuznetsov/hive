@@ -34,7 +34,7 @@ module Hive
         module_function
 
         def run!(task:, cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 publication_base_head: nil, runner: nil)
+                 publication_base_head: nil, runner: nil, no_repair: false, admit_head: nil)
           return skipped_result if cfg.dig("review", "github_checks", "enabled") == false
 
           pr_path = File.join(task.folder, "pr.md")
@@ -45,7 +45,7 @@ module Hive
 
           runner ||= Runner.new(
             task: task, cfg: cfg, ctx: ctx, pr_url: pr_url,
-            publication_base_head: publication_base_head
+            publication_base_head: publication_base_head, no_repair: no_repair, admit_head: admit_head
           )
           result = Hive::Stages::Review::CiFix.run!(
             cfg: cfg,
@@ -53,7 +53,7 @@ module Hive
             started_at: started_at,
             max_wall_clock_sec: max_wall_clock_sec,
             command: runner.command_label,
-            command_runner: runner
+            command_runner: runner, no_repair: no_repair
           )
           if result.status == :green && runner.settled_head
             Hive::Gh.persist_pr_identity!(
@@ -97,12 +97,14 @@ module Hive
           attr_reader :guardrail_result, :settled_head
 
           def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh,
-                         publication_base_head: nil,
+                         publication_base_head: nil, no_repair: false, admit_head: nil,
                          clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                          sleeper: ->(seconds) { sleep(seconds) },
                          poll_interval_sec: POLL_INTERVAL_SEC,
                          quiet_settlement_sec: QUIET_SETTLEMENT_SEC,
                          no_checks_grace_sec: NO_CHECKS_GRACE_SEC)
+            @admit_head = admit_head
+            @no_repair = no_repair
             @task = task
             @cfg = cfg
             @ctx = ctx
@@ -137,7 +139,11 @@ module Hive
             end
             @expected_checks.merge(carried_check_keys(baseline))
             guard_publication!(local_head)
-            publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
+            if @no_repair
+              raise Hive::GhError, "verification requires the published exact head" unless remote_head == local_head
+            else
+              publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
+            end
             @published_head = local_head
             wait_for_settlement!(
               identity,
@@ -169,7 +175,10 @@ module Hive
               base_sha: @published_head, head_sha: local_head
             )
             @guardrail_result = guardrail if guardrail.status == :tripped
-            return unless @guardrail_result
+            unless @guardrail_result
+              @admit_head&.call(local_head)
+              return
+            end
 
             raise Hive::GhError,
                   "CI repair requires fix-guardrail approval before publication"

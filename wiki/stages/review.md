@@ -302,3 +302,21 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 - [[modules/patrol]]
 - [[modules/markers]] · [[modules/agent]] · [[modules/config]]
 - [[state-model]] · [[decisions]] · [[architecture]]
+
+## Publication and immutable final verification
+
+A successful, guardrail-cleared `fixed` or `approved` receipt now publishes its
+exact head before the next reviewer pass, including the final verify-only pass.
+Publication is mandatory for mutating PR reviews even when hosted CI is disabled.
+Every newly terminal outcome carries publication/recovery evidence; existing
+terminal markers are not rerun by status. Waiting pauses preserve their reason,
+pass, matches and guarded head. Unapproved or partial fixes remain local.
+
+Final verification determines its mode before entry CI on restart. Local and
+hosted checks run once without repair agents; settlement polling is still allowed.
+A moved head invalidates verification, including movement during browser testing.
+Completion rechecks the open PR identity and exact head. Accepted findings or
+escalations after the final fix leave a published `final_fix_unverified` stale.
+That reason is always operator-owned, even without an escalations file: locally
+commit fixes before explicit coordinator retry. Checkbox edits alone do not apply
+fixes; explicitly increasing `review.max_passes` changes the repair budget.

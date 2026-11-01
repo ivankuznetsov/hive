@@ -137,6 +137,18 @@ module Hive
       end
 
       def run!(task, cfg)
+        @publication_context = nil
+        @review_publisher = nil
+        @publication_attempt_head = nil
+        @reviewed_head = nil
+        result = run_review_body!(task, cfg)
+        finalize_review_outcome(task, cfg, result)
+      rescue StandardError
+        finalize_review_outcome(task, cfg, nil) if @publication_context
+        raise
+      end
+
+      def run_review_body!(task, cfg)
         pre_effect_routing_validation = false
         # Track the current phase in a module-instance variable so the
         # top-level rescue at the end of this method can record it on
@@ -197,6 +209,24 @@ module Hive
           pass: 0 # placeholder; per-pass calls override
         )
 
+        @publication_context = ctx
+        @admissible_head = git_head(worktree_path)
+        @withheld_reason = if marker.attrs["reason"] == "fix_guardrail"
+          "guardrail_approval_required"
+        elsif marker.attrs["phase"] == "fix"
+          "fix_guardrail_receipt_required"
+        end
+        # Determine restart mode before entry CI can dispatch a repair agent.
+        initial_disk_pass = max_review_pass(task.folder, cfg)
+        initial_pass = next_pass_for(task, marker, cfg, max_pass: initial_disk_pass)
+        if completed_pass_receipt?(task.folder, initial_disk_pass) &&
+           (fix_success_head(task.folder, initial_disk_pass).nil? || fix_success_head(task.folder, initial_disk_pass) == @admissible_head)
+          @withheld_reason = nil unless marker.attrs["reason"] == "fix_guardrail"
+        elsif pass_completion_status(task.folder, initial_pass) == :fix_incomplete
+          @withheld_reason ||= "fix_guardrail_receipt_required"
+        end
+        @verify_mode = initial_pass > (cfg.dig("review", "max_passes") || 3)
+
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
 
@@ -216,6 +246,10 @@ module Hive
         # the review is still produced). This mirrors the Phase 4
         # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
         # review would still write fix commits here.
+        if @verify_mode
+          publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: initial_pass))
+          return publication_stop if publication_stop
+        end
         entry_ci_repaired = false
         if marker.name != :review_waiting && adhoc_fix_enabled?(cfg, task)
           @current_phase = :ci
@@ -224,10 +258,11 @@ module Hive
           terminal = run_ci_gates(
             task, cfg, ctx,
             started_at: started_at, max_wall_clock_sec: max_wall_clock,
-            pass: 1
+            pass: 1, no_repair: @verify_mode
           )
           return terminal if terminal
           entry_ci_repaired = git_head(worktree_path) != before_entry_ci_head
+          @admissible_head = git_head(worktree_path) unless @withheld_reason
         end
 
         # HEAD proven by the entry gate. Normal REVIEW_WAITING resumes
@@ -318,6 +353,11 @@ module Hive
           # or answered escalations: a retry of it (including one after its
           # own REVIEW_STALE) re-runs the reviewers against the current HEAD.
           verify_only = pass > fix_pass_cap
+          @verify_mode = verify_only
+          if verify_only
+            publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+            return publication_stop if publication_stop
+          end
 
           # U5 — fix-guardrail approval-on-resume. When the user has
           # ticked [x] on every line of reviews/fix-guardrail-NN.md
@@ -395,6 +435,10 @@ module Hive
               end
 
               write_fix_success(ctx_pass, kind: "approved")
+              @admissible_head = git_head(worktree_path)
+              @withheld_reason = nil
+              publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+              return publication_stop if publication_stop
               marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
               fix_retry_pass = nil
               # If we approved the very last pass-cap-N pass, advancing
@@ -403,21 +447,7 @@ module Hive
               # approval. Head to Phase 5 (browser test) instead, but
               # only once CI has settled on the exact approved HEAD: the
               # approved commits never passed the clean-boundary gate.
-              if pass >= max_passes
-                gate = completion_ci_gate(
-                  task, cfg, ctx_pass, ci_validated_head,
-                  started_at: started_at, max_wall_clock_sec: max_wall_clock
-                )
-                return gate.terminal if gate.terminal
-
-                ci_validated_head = gate.head
-                break unless gate.repaired
-
-                # A CI fixer committed on top of the approval; that repair
-                # must be reviewed, so admit one more (verify-only) pass.
-                write_fix_success(ctx_pass, kind: "ci_repaired")
-                max_passes += 1
-              end
+              max_passes = pass + 1 if pass >= max_passes
 
               pass += 1
               next
@@ -470,6 +500,7 @@ module Hive
             # outputs that pass already produced at this exact HEAD, so only
             # the reviewers that failed re-spend provider quota.
             reviewed_head = git_head(worktree_path)
+            @reviewed_head = reviewed_head
             reusable_outputs = Hive::Stages::Review::ReviewerReuse.consume(ctx_pass, head: reviewed_head)
             succeeded_reviewers = []
             reviewers_result = run_reviewers(
@@ -479,6 +510,9 @@ module Hive
               reuse: reusable_outputs, succeeded: succeeded_reviewers,
               unsupported_texts: reviewer_unsupported_texts
             )
+            if verify_only && git_head(worktree_path) != reviewed_head
+              return review_head_moved(task, pass)
+            end
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
             end
@@ -642,6 +676,9 @@ module Hive
             break
           end
 
+          if verify_only && git_head(worktree_path) != @reviewed_head
+            return review_head_moved(task, pass)
+          end
           if verify_only
             # The verify pass reviews commits that already used the final
             # fix pass. Any accepted finding or escalation means those
@@ -679,6 +716,7 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          @withheld_reason = "fix_guardrail_receipt_required"
           pre_effect_routing_validation = true
           fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           pre_effect_routing_validation = false
@@ -848,6 +886,10 @@ module Hive
           # reviewers) recognises pass N as done and advances to N+1
           # rather than retrying the fix on already-applied [x] marks.
           write_fix_success(ctx_pass, kind: "fixed")
+          @admissible_head = after_fix_head
+          @withheld_reason = nil
+          publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+          return publication_stop if publication_stop
 
           # The fixes just applied have not been reviewed or CI-gated yet.
           # After the final fix pass, admit exactly one verify-only pass
@@ -869,7 +911,10 @@ module Hive
         # --- Phase 5: browser test ---
         @current_phase = :browser
         mark_working(task, phase: :browser, pass: pass)
+        @reviewed_head ||= git_head(worktree_path)
         browser_result = Hive::Stages::Review::BrowserTest.run!(cfg: cfg, ctx: ctx.with(pass: pass))
+
+        return review_head_moved(task, pass) if git_head(worktree_path) != @reviewed_head
 
         case browser_result.status
         when :passed, :skipped, :warned
@@ -895,7 +940,10 @@ module Hive
         # `reason=runner_exception exception_class=Hive::ConfigError`,
         # discarding the message. Surface it as a config-phase error
         # marker that preserves the message in the `reason` attr.
-        raise if pre_effect_routing_validation
+        if pre_effect_routing_validation
+          @publication_context = nil
+          raise
+        end
 
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
@@ -939,6 +987,89 @@ module Hive
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
         close_phase_event!(task) if @open_phase_event
+      end
+
+      def review_head_moved(task, pass)
+        Hive::Markers.set(task.state_file, :review_error, reason: "verification_head_moved", pass: pass)
+        { commit: "verification_head_moved", status: :review_error }
+      end
+
+      def publish_review_head(task:, cfg:, ctx:)
+        return nil unless adhoc_fix_enabled?(cfg, task)
+        pr_path = File.join(task.folder, "pr.md")
+        return nil unless File.file?(pr_path)
+        url = Hive::Gh.pr_frontmatter(pr_path)["pr_url"].to_s
+        return nil if url.empty?
+        head = git_head(ctx.worktree_path)
+        withheld = @withheld_reason
+        withheld ||= "unapproved_head_movement" if @admissible_head != head
+        if @publication_attempt_head != head || !@review_publisher
+          @review_publisher = Publication.new(task: task, cfg: cfg, ctx: ctx, pr_url: url)
+          @publication_attempt_head = head
+          @review_publisher.publish!(expected_head: head, withheld: withheld)
+        end
+        evidence = @review_publisher.evidence
+        if withheld
+          return nil unless Hive::Markers.current(task.state_file).name == :review_complete
+          Hive::Markers.set(task.state_file, :review_error, reason: "review_publication_withheld", publication_reason: withheld, pass: ctx.pass)
+          return { commit: "review_publication_withheld", status: :review_error }
+        end
+        return nil if evidence["publication"] == "published" && evidence["failure_reason"].nil?
+
+        Hive::Markers.set(task.state_file, :review_error, reason: "review_publication_failed",
+                          publication_reason: evidence["failure_reason"], pass: ctx.pass)
+        { commit: "review_publication_failed", status: :review_error }
+      end
+
+      def finalize_review_outcome(task, cfg, result)
+        return result unless @publication_context
+        marker = Hive::Markers.current(task.state_file)
+        return result unless %i[review_complete review_stale review_ci_stale review_error review_waiting].include?(marker.name)
+        original_attrs = marker.attrs.dup
+        original_name = marker.name
+        ctx = @publication_context.with(pass: marker.attrs["pass"].to_i)
+        waiting = marker.name == :review_waiting
+        @withheld_reason ||= "guardrail_approval_required" if waiting && marker.attrs["reason"] == "fix_guardrail"
+        # Pauses retain every resume attr; publication evidence cannot replace
+        # them with an error. A new admissible fix was already published at its
+        # receipt boundary; this handles deadlines and exceptional exits too.
+        stop = publish_review_head(task: task, cfg: cfg, ctx: ctx)
+        evidence = if @review_publisher
+          @review_publisher.evidence.dup
+        else
+          { "publication" => "not_applicable", "verification" => "pending",
+            "worktree" => ctx.worktree_path, "local_head" => git_head(ctx.worktree_path),
+            "failure_reason" => "no_mutating_pr_identity", "observed_at" => Time.now.utc.iso8601 }
+        end
+        evidence["origin_reason"] = original_attrs["reason"] if stop
+        if original_attrs["reason"] == "final_fix_unverified"
+          evidence["reviewer_files"] = Hive::Stages::Review::Triage.discover_reviewer_files(ctx).map { |path| "reviews/#{File.basename(path)}" }
+        end
+        if !waiting && @withheld_reason
+          evidence["publication"] = "unpublished"
+          evidence["failure_reason"] = @withheld_reason
+        elsif !waiting && original_name == :review_complete && @review_publisher && !stop
+          begin
+            @review_publisher.confirm!(evidence.fetch("local_head"))
+            evidence["verification"] = "verified"
+          rescue Publication::Stop => e
+            evidence["verification"] = "pending"
+            evidence["failure_reason"] = e.reason
+            stop = review_head_moved(task, ctx.pass)
+          end
+        elsif original_name == :review_complete
+          evidence["verification"] = "verified"
+        elsif %i[review_stale review_ci_stale].include?(original_name)
+          evidence["verification"] = "failed"
+        end
+        if waiting
+          marker = Hive::Markers::State.new(name: original_name, attrs: original_attrs, raw: nil)
+        else
+          marker = Hive::Markers.current(task.state_file)
+          result = stop if stop
+        end
+        Hive::Markers.set(task.state_file, marker.name, **marker.attrs.merge(Hive::ReviewPublicationRecovery.encode(evidence)))
+        result
       end
 
       # Marker attr values are scanned by the internal task graph and read by
@@ -1394,6 +1525,9 @@ module Hive
       # through a fresh reviewer pass.
       def completion_ci_gate(task, cfg, ctx, validated_head, started_at:, max_wall_clock_sec:)
         before_head = git_head(ctx.worktree_path)
+        if @verify_mode && @reviewed_head && before_head != @reviewed_head
+          return CompletionCiGate.new(terminal: review_head_moved(task, ctx.pass), head: nil, repaired: false)
+        end
         if validated_head == before_head
           return CompletionCiGate.new(terminal: nil, head: before_head, repaired: false)
         end
@@ -1403,11 +1537,15 @@ module Hive
         terminal = run_ci_gates(
           task, cfg, ctx,
           started_at: started_at, max_wall_clock_sec: max_wall_clock_sec,
-          pass: ctx.pass
+          pass: ctx.pass, no_repair: @verify_mode
         )
         return CompletionCiGate.new(terminal: terminal, head: nil, repaired: false) if terminal
 
         after_head = git_head(ctx.worktree_path)
+        if @verify_mode && after_head != before_head
+          return CompletionCiGate.new(terminal: review_head_moved(task, ctx.pass), head: nil, repaired: false)
+        end
+        @admissible_head = after_head
         CompletionCiGate.new(terminal: nil, head: after_head, repaired: after_head != before_head)
       end
 
@@ -2120,14 +2258,14 @@ module Hive
       # again before a reviewer-clean head may complete. The local project
       # command remains optional; the hosted gate is independently enabled
       # whenever the task owns a GitHub PR.
-      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:)
+      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:, no_repair: false)
         before_head = git_head(ctx.worktree_path)
         gates = [
           [ "local", lambda {
             Hive::Stages::Review::CiFix.run!(
               cfg: cfg, ctx: ctx,
               started_at: started_at,
-              max_wall_clock_sec: max_wall_clock_sec
+              max_wall_clock_sec: max_wall_clock_sec, no_repair: no_repair
             )
           } ],
           [ "github", lambda {
@@ -2135,13 +2273,34 @@ module Hive
               task: task, cfg: cfg, ctx: ctx,
               started_at: started_at,
               max_wall_clock_sec: max_wall_clock_sec,
-              publication_base_head: before_head
+              publication_base_head: before_head, no_repair: no_repair,
+              admit_head: ->(head) {
+                write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
+                @admissible_head = head
+                @withheld_reason = nil
+              }
             )
           } ]
         ]
 
         gates.each do |gate, run_gate|
           result = run_gate.call
+          current_head = git_head(ctx.worktree_path)
+          if current_head != before_head
+            return review_head_moved(task, pass) if no_repair
+            guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: ctx,
+              base_sha: before_head, head_sha: current_head)
+            emit_guardrail_waivers(task, pass, guardrail.waived_matches)
+            if guardrail.status == :tripped
+              @withheld_reason = "guardrail_approval_required"
+              return ci_guardrail_terminal_result(task, guardrail, ctx: ctx, gate: gate, pass: pass)
+            end
+            write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
+            @admissible_head = current_head
+            @withheld_reason = nil
+            publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: pass))
+            return publication_stop if publication_stop
+          end
           if wall_clock_exceeded?(started_at, max_wall_clock_sec)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
           end

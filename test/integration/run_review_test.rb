@@ -1790,7 +1790,7 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_entry_ci_repair_reopens_one_pass_after_existing_reviews_exhaust_the_cap
+  def test_entry_ci_after_exhausted_reviews_is_verify_only
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir, cfg_overrides: {
@@ -1838,14 +1838,10 @@ class RunReviewTest < Minitest::Test
           )
         end
         test_case = self
-        remote_runner = lambda do |**_kwargs|
-          repair = File.join(worktree, "test", "entry-ci-repair.txt")
-          FileUtils.mkdir_p(File.dirname(repair))
-          File.write(repair, "hosted repair\n")
-          test_case.run!("git", "-C", worktree, "add", "test/entry-ci-repair.txt")
-          test_case.run!("git", "-C", worktree, "commit", "-m", "fix entry CI", "--quiet")
+        remote_runner = lambda do |**kwargs|
+          test_case.assert_equal true, kwargs.fetch(:no_repair)
           Hive::Stages::Review::CiFix::Result.new(
-            status: :green, attempts: 1, last_output: "green",
+            status: :stale, attempts: 1, last_output: "failed",
             error_message: nil, limit_text: nil
           )
         end
@@ -1865,10 +1861,9 @@ class RunReviewTest < Minitest::Test
         end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_complete, marker.name
-        assert_equal "3", marker.attrs.fetch("pass")
-        assert_equal [ 3 ], reviewer_passes
-        assert File.file?(File.join(worktree, "test", "entry-ci-repair.txt"))
+        assert_equal :review_ci_stale, marker.name
+        assert_empty reviewer_passes
+        refute File.file?(File.join(worktree, "test", "entry-ci-repair.txt"))
       end
     end
   end
@@ -2658,11 +2653,12 @@ class RunReviewTest < Minitest::Test
   # `findings`), a triage that writes an empty escalations digest, and a
   # recording CI gate. Returns [reviewer_passes, ci_calls] where ci_calls
   # holds [pass, head] for every run_ci_gates invocation.
-  def drive_review_loop(folder, worktree, findings:, reviewer_errors: {}, ci_runner: nil, expect_error: false)
+  def drive_review_loop(folder, worktree, findings:, reviewer_errors: {}, ci_runner: nil, expect_error: false, verify_observer: nil)
     reviewer_passes = []
     ci_calls = []
     review_runner = lambda do |_cfg, ctx, _task, **_kwargs|
       reviewer_passes << ctx.pass
+      verify_observer&.call if ctx.pass > 1
       suffix = format("%02d", ctx.pass)
       reviews = File.join(ctx.task_folder, "reviews")
       FileUtils.mkdir_p(reviews)
@@ -2729,6 +2725,86 @@ class RunReviewTest < Minitest::Test
         assert_match(/head=#{final_head} kind=fixed/,
                      File.read(File.join(folder, "reviews", "fix-success-02.md")))
         assert_match(/kind=clean/, File.read(File.join(folder, "reviews", "fix-success-03.md")))
+      end
+    end
+  end
+
+  def with_review_pr(folder, worktree, reject: false)
+    url = "https://github.com/acme/app/pull/42"
+    branch = File.basename(folder)
+    remote = review_head(worktree)
+    # pr.md is YAML frontmatter, not a mutable test publication receipt.
+    File.write(File.join(folder, "pr.md"), "---\npr_url: #{url}\n---\n")
+    published = []
+    test_case = self
+    metadata = lambda do |*args, **kwargs|
+      Hive::Gh::PrMetadata.new(number: 42, url: url, base_ref_name: "main",
+        head_ref_oid: remote, is_cross_repository: false, state: "OPEN", is_draft: true)
+    end
+    gate = lambda do |repository_path:, branch:, expected_remote_oid:|
+      raise Hive::AgentGitGate::RemoteConflict if reject
+      head = test_case.review_head(worktree)
+      raise "publication precedes guardrail receipt" unless Dir[File.join(folder, "reviews", "fix-success-*.md")].any? { |p| File.read(p).include?("head=#{head}") }
+      published << head
+      remote = head
+      Hive::AgentGitGate::PublicationReceipt.new(remote_fingerprint: "a" * 64, branch: branch,
+        expected_oid: expected_remote_oid, before_oid: expected_remote_oid, published_oid: head, after_oid: head)
+    end
+    with_replaced_singleton_method(Hive::Gh, :repository_identity, ->(*) { { "host" => "github.com", "repository" => "acme/app" } }) do
+      with_replaced_singleton_method(Hive::Gh, :pr_metadata, metadata) do
+        with_replaced_singleton_method(Hive::Gh, :lookup_prs_for_branch, ->(*) { [ { "number" => 42, "url" => url, "state" => "OPEN", "headRefName" => branch } ] }) do
+          with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, gate) do
+            yield published
+          end
+        end
+      end
+    end
+  end
+
+  def test_final_fix_is_published_before_verify_findings_even_without_hosted_checks
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ],
+                        "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree) do |published|
+          passes, = drive_review_loop(folder, worktree, findings: {
+            1 => "## High\n- [x] broken\n", 2 => "## High\n- [x] still broken\n"
+          }, verify_observer: -> { assert_includes published, review_head(worktree) })
+          assert_equal [ 1, 2 ], passes
+          assert_equal [ review_head(worktree) ], published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_stale, marker.name
+        evidence = Hive::ReviewPublicationRecovery.decode(marker.attrs)
+        assert_equal "published", evidence["publication"]
+        assert_equal "failed", evidence["verification"]
+      end
+    end
+  end
+
+  def test_rejected_final_fix_stops_before_verify_reviewers_and_retains_sha
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        spawns = install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree, reject: true) do |published|
+          passes, = drive_review_loop(folder, worktree, findings: { 1 => "## High\n- [x] broken\n" }, expect_error: true)
+          assert_equal [ 1 ], passes
+          assert_empty published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal "review_publication_failed", marker.attrs["reason"]
+        evidence = Hive::ReviewPublicationRecovery.decode(marker.attrs)
+        assert_equal "unknown", evidence["publication"]
+        assert_includes evidence["unpushed_shas"], review_head(worktree)
+        assert_equal 1, spawns.call
       end
     end
   end
@@ -2803,16 +2879,16 @@ class RunReviewTest < Minitest::Test
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name, marker.attrs.inspect
-        assert_equal "2", marker.attrs.fetch("pass")
-        assert_empty reviewer_passes
-        assert_equal [ [ 2, head ] ], ci_calls,
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal [ 3 ], reviewer_passes
+        assert_equal [ [ 3, head ] ], ci_calls,
                      "the approved HEAD must pass CI before Phase 5"
         assert_match(/kind=approved/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
       end
     end
   end
 
-  def test_fix_guardrail_approval_ci_repair_on_final_pass_gets_a_verify_pass
+  def test_fix_guardrail_approval_ci_repair_on_final_pass_is_rejected
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, worktree, head = setup_fix_guardrail_pause(
@@ -2828,15 +2904,34 @@ class RunReviewTest < Minitest::Test
           nil
         end
 
-        reviewer_passes, ci_calls = drive_review_loop(folder, worktree, findings: {}, ci_runner: ci_runner)
+        reviewer_passes, ci_calls = drive_review_loop(folder, worktree, findings: {}, ci_runner: ci_runner, expect_error: true)
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :review_complete, marker.name, marker.attrs.inspect
-        assert_equal "3", marker.attrs.fetch("pass")
-        assert_equal [ 3 ], reviewer_passes, "a CI repair of the approved head must be reviewed"
-        assert_equal [ [ 2, head ] ], ci_calls,
-                     "the repaired head was proven by the gate that produced it"
-        assert_match(/kind=ci_repaired/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
+        assert_equal :review_error, marker.name
+        assert_equal "verification_head_moved", marker.attrs["reason"]
+        assert_equal [ 3 ], reviewer_passes
+        assert_equal [ [ 3, head ] ], ci_calls
+        assert_match(/kind=approved/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
+      end
+    end
+  end
+
+  def test_final_pass_restart_entry_ci_cannot_dispatch_a_repair
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "ci" => { "command" => "false", "max_attempts" => 3 } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        head = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: head)
+        File.write(File.join(folder, "reviews", "fix-success-01.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{head} kind=fixed -->\n")
+        spawns = install_committing_fix_driver(worktree)
+        capture_io { Hive::Commands::Run.new(folder).call }
+        assert_equal 0, spawns.call
+        assert_equal head, review_head(worktree)
+        assert_equal :review_ci_stale, Hive::Markers.current(File.join(folder, "task.md")).name
       end
     end
   end
@@ -2922,51 +3017,25 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def test_retry_of_ci_admitted_verify_pass_beyond_the_verify_pass_reruns_reviewers
-    # max_passes=1: pass 1 fixes, verify pass 2 is clean but its CI gate
-    # repairs, which admits verify pass 3 (= max_passes + 2). Pass 3 stops
-    # at REVIEW_STALE; a retry must resume it instead of tripping the
-    # on-disk pass guard with config_error.
+  def test_legacy_ci_admitted_verify_pass_still_resumes_without_new_fixes
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir, cfg_overrides: {
           "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
         })
         worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        head = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: head)
+        seed_completed_review_pass(folder, 2, head: head)
+        File.write(File.join(folder, "reviews", "fix-success-02.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{head} kind=ci_repaired -->\n")
+        File.write(File.join(folder, "reviews", "stub-reviewer-03.md"), "## High\n- [x] unresolved\n")
         fix_spawns = install_committing_fix_driver(worktree)
-        test_case = self
-        ci_runner = lambda do |call|
-          next nil unless call == 2
-
-          File.write(File.join(worktree, "ci-repair.txt"), "repair\n")
-          test_case.run!("git", "-C", worktree, "add", "ci-repair.txt")
-          test_case.run!("git", "-C", worktree, "commit", "-m", "fix CI", "--quiet")
-          nil
-        end
-
-        reviewer_passes, ci_calls = drive_review_loop(
-          folder, worktree,
-          findings: { 1 => "## High\n- [x] broken\n", 3 => "## High\n- [x] repair regressed\n" },
-          ci_runner: ci_runner
-        )
-
-        task_md = File.join(folder, "task.md")
-        marker = Hive::Markers.current(task_md)
-        assert_equal :review_stale, marker.name, marker.attrs.inspect
-        assert_equal "final_fix_unverified", marker.attrs.fetch("reason")
-        assert_equal "3", marker.attrs.fetch("pass")
-        assert_equal [ 1, 2, 3 ], reviewer_passes
-        assert_equal [ 1, 2 ], ci_calls.map(&:first)
-        assert_match(/kind=ci_repaired/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
-
-        Hive::Markers.clear_current(task_md, expected_name: :review_stale)
         reviewer_passes, = drive_review_loop(folder, worktree, findings: {})
-
-        marker = Hive::Markers.current(task_md)
-        assert_equal :review_complete, marker.name, marker.attrs.inspect
-        assert_equal "3", marker.attrs.fetch("pass")
-        assert_equal [ 3 ], reviewer_passes, "the retry re-runs the CI-admitted verify pass's reviewers"
-        assert_equal 1, fix_spawns.call, "verify passes never spawn the fix agent"
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert_equal [ 3 ], reviewer_passes
+        assert_equal 0, fix_spawns.call
       end
     end
   end

@@ -113,7 +113,7 @@ module Hive
         def commands!
           return unless @identity
           path, branch, head = @ctx.worktree_path, @identity[:branch], @evidence["local_head"]
-          if @evidence["classification"] == "ahead" && head.to_s.match?(Hive::ReviewPublicationRecovery::OID)
+          if @evidence["failure_reason"] != "remote_conflict" && @evidence["classification"] == "ahead" && head.to_s.match?(Hive::ReviewPublicationRecovery::OID)
             # Immutable source and ordinary (non-force) push, after checking
             # the task branch still names the retained commit.
             @evidence["push_command"] = "cd #{Shellwords.escape(path)} && test \"$(git rev-parse #{Shellwords.escape("refs/heads/#{branch}")})\" = #{Shellwords.escape(head)} && " +

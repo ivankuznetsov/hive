@@ -288,6 +288,15 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_final_fix_unverified_without_escalations_has_no_routine_action
+    with_tmp_dir do |folder|
+      row = { "marker" => "review_stale", "attrs" => { "reason" => "final_fix_unverified", "pass" => "3", "accepted" => "1", "escalations" => "0" },
+              "folder" => folder, "slug" => "task", "action" => "recover_review" }
+      assert_equal :operator, Hive::Recovery.review_stale_recovery_state(marker: row["marker"], attrs: row["attrs"], folder: folder)
+      assert_nil Hive::OperationalAction.descriptor(project: "app", row: row)
+    end
+  end
+
   def test_review_intervention_check_fails_closed_when_receipt_mtime_is_unreadable
     with_tmp_dir do |folder|
       reviews = File.join(folder, "reviews")

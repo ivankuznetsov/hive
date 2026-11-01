@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "shellwords"
 require "time"
+require "hive/secret_patterns"
 
 module Hive
   # Durable, lossless marker evidence. Projection is local: it never consults
@@ -11,7 +12,7 @@ module Hive
     VERSION = "1".freeze
     FIELDS = %w[worktree branch pr_url pr_number pr_state is_draft local_head remote_head
                 publication verification unpushed_shas candidate_shas classification failure_reason
-                push_command verification_recipe observed_at ready_command origin_reason].freeze
+                push_command verification_recipe observed_at ready_command origin_reason reviewer_files].freeze
     OID = /\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/
     MAX_BYTES = 48 * 1024
     module_function
@@ -33,7 +34,20 @@ module Hive
         encoded = attrs["rp_#{key}"]
         next unless encoded
         raise ArgumentError if encoded.bytesize > MAX_BYTES * 2
-        out[key] = JSON.parse(Base64.urlsafe_decode64(encoded))
+        value = JSON.parse(Base64.urlsafe_decode64(encoded))
+        valid = case key
+        when "unpushed_shas", "candidate_shas"
+          value.nil? || (value.is_a?(Array) && value.size <= 256 && value.all? { |oid| oid.is_a?(String) && oid.match?(OID) })
+        when "reviewer_files"
+          value.is_a?(Array) && value.size <= 100 && value.all? { |v| v.is_a?(String) && v.match?(%r{\Areviews/[^/\x00-\x1f]+\.md\z}) }
+        when "is_draft" then value.nil? || value == true || value == false
+        when "pr_number" then value.nil? || (value.is_a?(Integer) && value.positive?)
+        when "publication" then %w[unpublished published unknown not_applicable].include?(value)
+        when "verification" then %w[pending failed verified].include?(value)
+        else value.nil? || value.is_a?(String)
+        end
+        raise ArgumentError unless valid
+        out[key] = value
       end
     rescue ArgumentError, JSON::ParserError
       { "publication" => "unknown", "failure_reason" => "invalid_publication_evidence" }
@@ -85,17 +99,45 @@ module Hive
       "cd #{Shellwords.escape(worktree)} && hive status --operational --json | ruby -rjson -e #{Shellwords.escape(program)} -- #{Shellwords.escape(target)}"
     end
 
-    def project(attrs, action: nil)
+    def lines(evidence)
+      return [] unless evidence
+      labels = { "publication" => "Publication", "verification" => "Verification", "local_head" => "Local head",
+        "remote_head" => "Observed PR head", "observed_at" => "Observed at", "worktree" => "Worktree", "branch" => "Branch",
+        "failure_reason" => "Failure", "unpushed_shas" => "Commits absent from PR", "candidate_shas" => "Local candidates",
+        "remediation" => "Remediation", "push_command" => "Push", "retry_command" => "Current retry",
+        "verification_recipe" => "Refresh and retry (refuses ineligible actions)", "recovery_guidance" => "Recovery",
+        "readiness_guidance" => "Draft readiness prerequisites", "ready_command" => "Conditional manual ready" }
+      labels.filter_map do |key, label|
+        value = evidence[key]
+        next if value.nil? || value == "" || value == []
+        "#{label}: #{value.is_a?(Array) ? value.join(', ') : value}"
+      end
+    end
+
+    def project(attrs, action: nil, marker: nil)
       evidence = decode(attrs)
+      if !evidence && marker.to_s.match?(/\Areview_(?:complete|error|stale|ci_stale|waiting)\z/)
+        evidence = { "publication" => "unknown", "verification" => "pending", "failure_reason" => "legacy_publication_evidence_unavailable" }
+      end
       return nil unless evidence
       result = evidence.dup
+      result.each do |key, value|
+        if value.is_a?(String)
+          redacted = Hive::SecretPatterns.redact(value).gsub(/[\x00-\x08\x0b-\x1f\x7f]/, "")
+          if key.end_with?("command", "recipe") && (value.bytesize > MAX_BYTES || redacted != value)
+            result[key] = nil
+          else
+            result[key] = redacted
+          end
+        end
+      end
       result["retry_command"] = if action && action["action_id"] == "workflow.retry"
         Shellwords.join([ "hive", "act", "workflow.retry", action.fetch("target"),
                           "--observation", action.fetch("observation_token"), "--json" ])
       end
       if attrs["reason"] == "final_fix_unverified"
         suffix = format("%02d", attrs["pass"].to_i)
-        result["remediation"] = "Resolve escalations=#{attrs['escalations'].to_i} and accepted=#{attrs['accepted'].to_i} findings in reviews/*-#{suffix}.md. Commit fixes locally before explicit operator/coordinator verification retry. Editing review checkboxes does not apply fixes. Raising review.max_passes explicitly authorizes a changed repair budget."
+        result["remediation"] = "Resolve escalations=#{attrs['escalations'].to_i} and accepted=#{attrs['accepted'].to_i} findings in #{Array(evidence["reviewer_files"]).empty? ? "reviews/*-#{suffix}.md (reviewer file list unavailable)" : evidence["reviewer_files"].join(", ")}. Commit fixes locally before explicit operator/coordinator verification retry. Editing review checkboxes does not apply fixes. Raising review.max_passes explicitly authorizes a changed repair budget."
       else
         result["remediation"] = "Retain local commits. Reconcile divergence or identity failures before publication; then refresh the canonical recovery action."
       end

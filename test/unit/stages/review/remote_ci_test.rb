@@ -498,6 +498,18 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  def test_final_verification_settles_without_another_publication
+    with_fixture do |_repo, head, task, ctx, gh, clock, _runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, no_repair: true,
+        clock: -> { clock.now }, sleeper: ->(seconds) { clock.now += seconds },
+        poll_interval_sec: 1, quiet_settlement_sec: 1)
+      assert_equal 0, runner.call(max_bytes: 1024, timeout_sec: 3).exit_code
+      assert_empty gh.pushes
+    end
+  end
+
   def test_publication_receipt_survives_failed_pr_cross_check
     with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
       calls = 0

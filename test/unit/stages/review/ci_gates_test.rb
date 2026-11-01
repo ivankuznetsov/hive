@@ -119,7 +119,7 @@ class ReviewCiGatesTest < Minitest::Test
       marker = Hive::Markers.current(task.state_file)
       assert_equal :review_waiting, marker.name
       assert_equal "ci", marker.attrs.fetch("source")
-      assert_equal "combined", marker.attrs.fetch("gate")
+      assert_equal "local", marker.attrs.fetch("gate")
       assert File.file?(File.join(task.folder, "reviews", "fix-guardrail-02.md"))
     end
   end

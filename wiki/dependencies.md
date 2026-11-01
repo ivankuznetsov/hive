@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-01
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -116,7 +116,7 @@ dying in seconds rather than as a test failure.
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
-| `sqlite3` | `~> 2.0` (locked 2.9.6) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
+| `sqlite3` | `~> 2.0` (locked 2.10.2 in root and web) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.10.2 or newer to avoid GHSA-mwm8-39rw-8826 and GHSA-4fqr-96q8-xrfx (SQL query truncation for strings of 4 GiB or larger). |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -139,6 +139,11 @@ The root bundle locks transitive Rack at 3.2.8 or newer. The
 `bundler-audit` CI job runs against the current advisory database, which flags
 3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
 change for the compatible patch update.
+
+Both root and packaged-web bundles lock transitive `addressable` at 2.9.2.
+Version 2.9.1 is the security floor for the URI template,
+normalization, and misleading-host advisories; 2.9.2 is the resolved patch
+release. The CI audit checks both lockfiles against the same advisory database.
 
 ## Web app bundle
 

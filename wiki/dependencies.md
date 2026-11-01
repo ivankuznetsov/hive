@@ -176,6 +176,11 @@ Rails/Capybara and the web integration upload tests use
 2026-11 advisory refresh requires those patch levels for the active
 `bundler-audit` database.
 
+The web lock resolves Capybara's transitive `addressable` to 2.9.2 and every
+platform-specific `sqlite3` package to 2.10.2. Those floors satisfy the
+Addressable URI and SQLite query-truncation advisories checked by the dedicated
+web `bundler-audit` CI job without changing declared dependency ranges.
+
 Rails 8.1.4.1 is the minimum locked web release. 8.1.3.1 carried the
 CVE-2026-66066 Active Storage/libvips security fix. 8.1.4.1 adds the
 2026-11-04 Active Support fixes: MessagePack serializer XSS

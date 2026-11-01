@@ -28,9 +28,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def test_git_option_spellings_match_recorded_real_git_outcomes_and_passthrough
     with_git_option_repo do |dir, binary, version, marker|
       recording_git, real_log = recording_git_delegate(dir, binary)
+      skip_log = File.join(dir, "skipped.log")
       env = git_option_environment.merge(
         "HIVE_BABYSITTER_REAL_GIT" => recording_git,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log
       )
       GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
         args = entry.fetch("argv")
@@ -43,12 +44,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
         FileUtils.rm_f(marker)
         FileUtils.rm_f(real_log)
+        FileUtils.rm_f(skip_log)
         out, err, status = Open3.capture3(env, stub_path("git"), *args, chdir: dir, unsetenv_others: true)
         assert_git_option_outcome expected, out, err, status, marker, "passthrough #{version} #{args.inspect}"
         refute_includes err, "[dry-run]"
+        refute_path_exists skip_log, "allowed command wrote a skip record: #{args.inspect}"
         calls = File.readlines(real_log).map { |line| JSON.parse(line) }
-        assert_equal [ Hive::Babysitter::GitPolicy.hardened_passthrough_argv(args, args) ], calls
-        if entry.fetch("id") == "cat-object-filter-glued" && status.success?
+        decision = Hive::Babysitter::GitPolicy.classify(args, environment: env)
+        assert_equal [ Hive::Babysitter::GitPolicy.hardened_passthrough_argv(args, decision.rest) ], calls
+        if entry.fetch("id") == "cat-object-filter-glued" && expected.fetch("exit_status").zero?
           assert out.lines.any? { |line| line.include?(" commit ") }, out
           assert out.lines.any? { |line| line.include?(" tree ") }, out
           refute_match(/ blob /, out)
@@ -76,6 +80,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
         dir, real_git: recording_git, real_gh: "/unused/gh", skip_log: skip_log
       )
       [ stub_path("git"), File.join(overlay, "git") ].each do |launcher|
+        FileUtils.rm_f(skip_log)
+        out, err, status = Open3.capture3(env, launcher, "cat-file", "-p", "HEAD:README.md",
+                                        chdir: dir, unsetenv_others: true)
+        assert status.success?, err
+        assert_equal "test\n", out
+        assert_path_exists real_log, "#{launcher} must record an allowed read before the deny checks"
+        calls = File.readlines(real_log).map { |line| JSON.parse(line) }
+        assert_equal %w[cat-file -p HEAD:README.md], calls.fetch(0).last(3)
+        refute_path_exists marker
+        refute_path_exists skip_log, "#{launcher} must not audit an allowed read as skipped"
+        FileUtils.rm_f(real_log)
+
         GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
           next unless entry.fetch("hive_policy") == "deny"
 

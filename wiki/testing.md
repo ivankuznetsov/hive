@@ -876,6 +876,13 @@ cases fail with a characterization diagnostic; this is an evidence boundary
 in tests, never a production Git-version gate. Repeated overlay invocations
 produce one complete audit record each.
 
+Each launcher first records a successful ordinary `cat-file` read to control
+the real-binary log, and clears its skip log before the denied-token loop.
+Allowed fixture cases also require no skip audit file. Pure classification
+checks independently pin the command boundary after leading global options;
+hardening checks preserve the global selectors and glued `cat-file` object
+filter while inserting the diff guards after `log`/`show`.
+
 The named `test:babysitter_dry_run_security_matrix` gate selects the existing
 matrix method itself, which consumes the same fixture with recording binaries.
 `test/babysitter/acceptance/dry_run_test.rb` checks the normal babysitter flow:

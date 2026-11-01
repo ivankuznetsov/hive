@@ -195,7 +195,8 @@ class ProposalCompilerTest < Minitest::Test
         "outcome" => "rejected", "considered_evaluation_ids" => [ evaluation.event_id ],
         "considered_evaluations" => [ {
           "evaluation_id" => evaluation.event_id, "evaluator_id" => "reviewer",
-          "method" => "held-out", "outcome" => "fail", "result_digest" => "f" * 64
+          "method" => "held-out", "outcome" => "fail",
+          "result_digest" => Hive::Proposals.digest(evaluation.data.fetch("result"))
         } ],
         "rationale_category" => "evaluated", "rationale" => "Do not retain",
         "authority" => authority,

@@ -114,6 +114,50 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
+  def test_restores_committed_proposal_state_before_admitting_a_new_source
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root)
+      orphan_id = "pse-#{'d' * 64}"
+      orphan = Hive::Proposals::SourceEvent.submission(
+        source_event_id: orphan_id, proposal_id: proposal_id,
+        proposal_binding:, task_binding: {
+          "project" => File.basename(dir), "task_id" => "43059",
+          "task_slug" => "proposal-task", "workflow_id" => "coding",
+          "stage" => "4-execute", "task_generation" => 1,
+          "ownership_generation" => "owner-1", "attempt_id" => "attempt-1"
+        },
+        proposed_change: "Orphaned change", motivation: "Interrupted admission",
+        evidence: [ evidence ], lineage: {}, created_at: Time.utc(2026, 8, 30, 12)
+      )
+      source_store.admit!(orphan)
+      assert_includes source_store.pending_ids, orphan_id
+
+      producer = Hive::Proposals::Producer.new(
+        project_root: dir, git_ops: ops, activity:,
+        attempt: FakeAttempt.new(proposal_binding), source_store:, store:,
+        proposal_id_generator: -> { proposal_id }
+      )
+      accepted_id = "pse-#{'e' * 64}"
+      result = producer.submit(
+        proposed_change: "Committed change", motivation: "Recover safely",
+        evidence: [ evidence ], source_event_id: accepted_id
+      )
+
+      assert_equal accepted_id, result.source_event_id
+      assert_nil source_store.fetch(orphan_id)
+      refute_includes source_store.pending_ids, orphan_id
+      refute ops.read_hive_state_blob_at(
+        ops.hive_state_head_sha, "proposals/v1/inbox/#{orphan_id}.json",
+        max_bytes: Hive::Proposals::SourceEventStore::MAX_FILE_BYTES + 1
+      )
+    end
+  end
+
   def test_requires_the_committed_receipt_to_match_before_ingestion
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

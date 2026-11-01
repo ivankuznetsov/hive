@@ -1,4 +1,5 @@
 require "digest"
+require "fileutils"
 require "json"
 require "time"
 require "tmpdir"
@@ -166,6 +167,38 @@ module Hive
       nil
     rescue Hive::GitError
       nil
+    end
+
+    def restore_committed_proposal_state!(git_ops)
+      output = git_ops.run_git!(
+        "-C", git_ops.hive_state_path, "status", "--porcelain=v1", "-z",
+        "--untracked-files=all", "--", "proposals/v1"
+      )
+      cleaned = 0
+      output.split("\0").reject(&:empty?).each do |entry|
+        relative = entry[3..]
+        next unless relative&.start_with?("proposals/v1/") &&
+                    !relative.split("/").include?("..")
+
+        if entry[0, 2] == "??"
+          path = File.join(git_ops.hive_state_path, relative)
+          status = File.lstat(path)
+          if status.directory? && !status.symlink?
+            FileUtils.rm_rf(path)
+          else
+            File.unlink(path)
+          end
+        else
+          git_ops.run_git!(
+            "-C", git_ops.hive_state_path, "restore", "--source=HEAD",
+            "--staged", "--worktree", "--", relative
+          )
+        end
+        cleaned += 1
+      rescue Errno::ENOENT
+        nil
+      end
+      cleaned
     end
 
     def deep_copy_freeze(value)
@@ -403,6 +436,13 @@ module Hive
                  (entry.nil? || [ true, false ].include?(entry) || entry.is_a?(Numeric))
              end
         raise error, "#{label} metrics must contain only bounded typed facts"
+      end
+      result["metrics"] = metrics.each_with_object({}) do |(key, entry), normalized|
+        safe_key = label!(key, label: "#{label} metric name", error:)
+        if normalized.key?(safe_key)
+          raise error, "#{label} metric names collide after redaction"
+        end
+        normalized[safe_key] = entry
       end
       if result["details_digest"]
         result["details_digest"] = digest!(

@@ -122,6 +122,7 @@ module Hive
         end
         snapshot = nil
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          Proposals.restore_committed_proposal_state!(@git_ops)
           ensure_safe_task_journal!
           snapshot = Ingestor::PathSnapshot.capture(snapshot_roots(paths))
           index_snapshot = Proposals::GitIndexSnapshot.capture(@git_ops)

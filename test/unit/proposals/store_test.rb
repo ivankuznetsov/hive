@@ -62,6 +62,17 @@ class ProposalStoreTest < Minitest::Test
     FileUtils.mkdir_p(directory)
     File.symlink("missing.json", File.join(directory, "pse-#{'a' * 64}.json"))
     File.write(File.join(directory, "pse-#{'b' * 64}.json"), "{malformed")
+    %w[e f].each_with_index do |character, index|
+      File.write(
+        File.join(directory, "pse-#{character * 64}.json"),
+        Hive::Proposals.canonical(
+          "schema" => "hive-proposal-source-status", "schema_version" => 1,
+          "state" => "quarantine", "source_event_id" => "pse-#{character * 64}",
+          "proposal_id" => "prp-00000000-0000-4000-8000-000000000099",
+          "reason" => index.zero? ? [ "invalid" ] : "invalid"
+        )
+      )
+    end
     secret = "sk-#{'c' * 32}"
     File.write(
       File.join(directory, "#{secret}.json"),
@@ -78,6 +89,7 @@ class ProposalStoreTest < Minitest::Test
 
     assert_includes codes, "symlink"
     assert_includes codes, "invalid_source_quarantine"
+    assert_equal 3, codes.count("invalid_source_quarantine")
     source = diagnostics.find { |item| item.code == "source_invalid" }
     assert_includes source.path, "[REDACTED:openai_api_key]"
     refute_includes source.path, secret

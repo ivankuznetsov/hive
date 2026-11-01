@@ -165,6 +165,7 @@ remote_base_ref="refs/llm-wiki/remotes/base"
 lock_owner_oid=""
 global_lock_fd=""
 global_lock_keeper_pid=""
+global_provider_lock_acquired=0
 BATCH_PROPOSAL_ONLY=0
 mkdir -p "$pending_dir" "$failed_dir"
 
@@ -328,6 +329,12 @@ acquire_global_provider_lock() {
   global_lock_keeper_pid="$HIVE_GLOBAL_LOCK_KEEPER_PID"
   IFS= read -r lock_status <&"${HIVE_GLOBAL_LOCK_KEEPER[0]}" || lock_status=""
   [ "$lock_status" = "locked" ]
+}
+
+ensure_global_provider_lock() {
+  [ "$global_provider_lock_acquired" -eq 1 ] && return 0
+  acquire_global_provider_lock || return 1
+  global_provider_lock_acquired=1
 }
 
 lock_owner_stale() {
@@ -914,6 +921,9 @@ latest_proposal_source() {
       esac
     done < <(sed -n '2,$p' "$file")
     if [ "$saw_canonical" -eq 1 ]; then
+      if [ -z "$selected" ]; then
+        selected="$(generated_proposal_source)"
+      fi
       if [ -z "$selected" ] || git merge-base --is-ancestor "$selected" "$queued_sha"; then
         selected="$queued_sha"
       elif git merge-base --is-ancestor "$queued_sha" "$selected"; then
@@ -928,6 +938,19 @@ latest_proposal_source() {
     fi
   done
   printf '%s\n' "$selected"
+}
+
+generated_proposal_source() {
+  local source="" index="$refresh_root/wiki/proposals.json"
+  [ -f "$index" ] || return 0
+  source="$(
+    sed -nE 's/.*"source_commit":"([0-9a-fA-F]{40,64})".*/\1/p' "$index" |
+      head -n 1
+  )"
+  if [[ "$source" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
+     git cat-file -e "${source}^{commit}" 2>/dev/null; then
+    printf '%s\n' "$source"
+  fi
 }
 
 protect_generated_proposals() {
@@ -1165,6 +1188,9 @@ PROMPT
 )"
 
   if [ "$proposal_only" -eq 0 ]; then
+    if ! ensure_global_provider_lock; then
+      return 3
+    fi
     if ! run_refresh_agent "$prompt"; then
       log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
       return 1
@@ -1286,6 +1312,7 @@ if [ "$proposal_only_run" -eq 0 ]; then
     fi
     exit 0
   fi
+  global_provider_lock_acquired=1
 fi
 configure_qmd_environment
 if ! prepare_refresh_worktree; then
@@ -1309,7 +1336,14 @@ max_drain_batches="$(positive_integer_or_default "${LLM_WIKI_MAX_DRAIN_BATCHES:-
 while snapshot_queue; do
   batch_status=0
   process_queue_batch || batch_status=$?
-  if [ "$batch_status" -eq 2 ]; then
+  if [ "$batch_status" -eq 3 ]; then
+    log_line "refresh remains queued; machine-wide provider lock was busy"
+    if [ -n "$retry_selector" ]; then
+      printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
+      exit 1
+    fi
+    exit 0
+  elif [ "$batch_status" -eq 2 ]; then
     log_line "refresh publication deferred; it will retry without opening the provider circuit"
     if [ -n "$retry_selector" ]; then
       printf 'llm-wiki: retry generated the refresh but publication is still deferred; see %s\n' "$log_file" >&2

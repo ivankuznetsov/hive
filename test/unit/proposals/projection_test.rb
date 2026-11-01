@@ -10,10 +10,7 @@ class ProposalProjectionTest < Minitest::Test
       {
         "outcome" => "accepted", "considered_evaluation_ids" => [ evaluation.event_id ],
         "considered_evaluations" => [
-          {
-            "evaluation_id" => evaluation.event_id, "evaluator_id" => "reviewer",
-            "method" => "recall", "outcome" => "pass", "result_digest" => "c" * 64
-          }
+          considered_snapshot(evaluation)
         ],
         "rationale_category" => "evaluated", "rationale" => "Passed",
         "authority" => authority, "links" => [],
@@ -78,6 +75,25 @@ class ProposalProjectionTest < Minitest::Test
     end
   end
 
+  def test_rejects_considered_evaluation_snapshots_that_contradict_history
+    evaluation = build_event(1, "evaluation", evaluation_data("pass", 0.91))
+    base_snapshot = considered_snapshot(evaluation)
+
+    {
+      "evaluator_id" => "another-reviewer",
+      "method" => "precision",
+      "outcome" => "fail",
+      "result_digest" => "f" * 64
+    }.each do |field, contradictory_value|
+      snapshot = base_snapshot.merge(field => contradictory_value)
+      decision = build_event(2, "decision", decision_data(evaluation, snapshot:))
+
+      assert_raises(Hive::Proposals::InconsistentHistory, field) do
+        Hive::Proposals::Projection.new(record: build_record, events: [ evaluation, decision ])
+      end
+    end
+  end
+
   def test_ignores_reserved_slots_after_the_last_valid_event
     event = build_event(1, "evaluation", evaluation_data("pass", 0.9))
 
@@ -128,10 +144,7 @@ class ProposalProjectionTest < Minitest::Test
       {
         "outcome" => "accepted", "considered_evaluation_ids" => [ evaluation.event_id ],
         "considered_evaluations" => [
-          {
-            "evaluation_id" => evaluation.event_id, "evaluator_id" => "reviewer",
-            "method" => "recall", "outcome" => "pass", "result_digest" => "c" * 64
-          }
+          considered_snapshot(evaluation)
         ],
         "rationale_category" => "evaluated", "rationale" => "Passed",
         "authority" => authority, "links" => [],
@@ -186,6 +199,28 @@ class ProposalProjectionTest < Minitest::Test
       "method" => { "kind" => "benchmark", "label" => "recall" },
       "result" => { "outcome" => outcome, "metrics" => { "recall" => score } },
       "rationale" => "Measured", "evidence" => [], "links" => []
+    }
+  end
+
+  def considered_snapshot(evaluation)
+    {
+      "evaluation_id" => evaluation.event_id,
+      "evaluator_id" => evaluation.data.dig("evaluator", "id"),
+      "method" => evaluation.data.dig("method", "label"),
+      "outcome" => evaluation.data.dig("result", "outcome"),
+      "result_digest" => Hive::Proposals.digest(evaluation.data.fetch("result"))
+    }
+  end
+
+  def decision_data(evaluation, snapshot: considered_snapshot(evaluation))
+    {
+      "outcome" => "accepted", "considered_evaluation_ids" => [ evaluation.event_id ],
+      "considered_evaluations" => [ snapshot ],
+      "rationale_category" => "evaluated", "rationale" => "Passed",
+      "authority" => authority, "links" => [],
+      "observed_head" => {
+        "version" => 0, "digest" => Hive::Proposals::Projection.empty_head_digest(build_record.proposal_id)
+      }
     }
   end
 

@@ -285,6 +285,7 @@ module Hive
 
       def with_lifecycle_commit(proposal_id, action)
         runner = lambda do
+          Proposals.restore_committed_proposal_state!(@git_ops) if @git_ops
           snapshot = Ingestor::ImmutableAppendSnapshot.capture(
             File.join(@store.events_root, proposal_id)
           )

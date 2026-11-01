@@ -369,6 +369,7 @@ module Hive
             document["schema_version"] == 1 && document["state"] == "quarantine" &&
             document["source_event_id"].to_s.match?(SOURCE_EVENT_ID) &&
             document["proposal_id"].to_s.match?(PROPOSAL_ID) &&
+            document["reason"].is_a?(Hash) &&
             document.dig("reason", "code").is_a?(String)
           raise InvalidRecord unless valid
 

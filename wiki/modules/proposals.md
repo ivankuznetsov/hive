@@ -40,7 +40,9 @@ authority-approved `supersedes` facts express lineage.
 `Store` reads every bounded regular file independently with no-follow semantics.
 Invalid JSON, unsafe files, unknown versions, duplicate identity, broken event
 versions, and inconsistent histories become safe logical quarantine diagnostics;
-valid neighbors remain queryable and compilable. Malformed event filenames
+valid neighbors remain queryable and compilable. Malformed source-quarantine
+reason values are rejected as isolated diagnostics instead of aborting discovery.
+Malformed event filenames
 reserve their numeric version so recovery never overwrites unknown bytes. Both
 the canonical store and source inbox use bounded lock acquisition.
 
@@ -68,7 +70,10 @@ recovery data, persistent project/proposal usage counters, and a pruned one-hour
 actor window; a missing legacy index performs one bounded canonical bootstrap
 scan. It rejects an oversized replacement before writing a receipt. Terminal
 receipts use `hive-proposal-source-status.v1`. Lifecycle mutations use the same
-aggregate and authority-rate ceilings. Source IDs are idempotency keys: the
+aggregate and authority-rate ceilings. Before either Producer admission or a
+lifecycle mutation reads that shared index, the service restores the committed
+proposal namespace while holding the Git commit lock; reconciliation uses the
+same restoration primitive. Source IDs are idempotency keys: the
 exact retry is a no-op and changed bytes under an existing ID are a conflict.
 
 ## Authority and lifecycle
@@ -85,8 +90,10 @@ policy authority. Every operation compares the caller's observed lifecycle head
 version/digest. A decision additionally names the exact evaluation IDs it
 considered together with each caller-observed result digest. Unrelated
 evaluation appends do not stale the decision, while a changed lifecycle fact or
-missing/changed considered evaluation does. Lifecycle success requires the
-immutable event bytes to be visible at the committed Hive-state head. One
+missing/changed considered evaluation does. Projection revalidates every stored
+snapshot against the referenced evaluation's evaluator, method, outcome, and
+result digest, quarantining contradictory histories. Lifecycle success requires
+the immutable event bytes to be visible at the committed Hive-state head. One
 accepted/rejected decision wins—there is no last-writer-wins path.
 
 An empty considered set is valid only for an authority-authored rejection with
@@ -104,6 +111,9 @@ configured operator capability; stronger identity separation is outside v1.
 ## Privacy, retention, and rendering
 
 Project-visible text is bounded and secret-redacted before persistence.
+Evaluation metric names pass through the same redaction boundary, and names
+that collide after redaction are rejected rather than silently overwriting one
+another.
 Producer-requested visibility or retention may only narrow configured policy.
 Unclassified evidence defaults to restricted/digest-only; restricted/private
 evidence persists only safe labels, digests, byte/media metadata, classification,

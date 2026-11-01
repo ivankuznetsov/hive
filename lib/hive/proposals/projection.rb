@@ -110,8 +110,20 @@ module Hive
         if decision_event
           known = events.select { |event| event.type == "evaluation" && event.version < decision_event.version }
                         .to_h { |event| [ event.event_id, event ] }
-          decision_event.data.fetch("considered_evaluation_ids").each do |event_id|
-            raise InconsistentHistory, "decision references a missing evaluation" unless known.key?(event_id)
+          decision_event.data.fetch("considered_evaluations").each do |snapshot|
+            evaluation = known[snapshot.fetch("evaluation_id")]
+            raise InconsistentHistory, "decision references a missing evaluation" unless evaluation
+
+            expected = {
+              "evaluation_id" => evaluation.event_id,
+              "evaluator_id" => evaluation.data.dig("evaluator", "id"),
+              "method" => evaluation.data.dig("method", "label"),
+              "outcome" => evaluation.data.dig("result", "outcome"),
+              "result_digest" => Proposals.digest(evaluation.data.fetch("result"))
+            }
+            unless snapshot == expected
+              raise InconsistentHistory, "decision evaluation snapshot does not match its evaluation"
+            end
           end
         end
         rollback_event = events.find { |event| event.type == "rollback" }

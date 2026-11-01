@@ -378,6 +378,58 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_commit_restores_committed_state_before_updating_the_source_index
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        source_store = Hive::Proposals::SourceEventStore.new(root:)
+        orphan_id = source_id("orphan")
+        source_store.admit!(Hive::Proposals::SourceEvent.submission(
+          source_event_id: orphan_id, proposal_id:,
+          proposal_binding: {
+            "schema_version" => 1,
+            "subject" => {
+              "kind" => "skill", "reference" => "agent-skills/reviewer",
+              "revision" => "v2", "proposal_id" => nil
+            },
+            "actor" => author, "evaluator" => nil,
+            "configuration_fingerprint" => "c" * 64, "policy" => policy
+          },
+          task_binding: {
+            "project" => File.basename(dir), "task_id" => "43059",
+            "task_slug" => "proposal-task", "workflow_id" => "coding",
+            "stage" => "4-execute", "task_generation" => 1,
+            "ownership_generation" => "owner-1", "attempt_id" => "attempt-1"
+          },
+          proposed_change: "Orphaned change", motivation: "Interrupted admission",
+          evidence: [ evidence ], created_at: Time.utc(2026, 8, 30, 12)
+        ))
+        assert_includes source_store.pending_ids, orphan_id
+        service = Hive::Proposals::DecisionService.new(
+          store:, authority: @authority, git_ops: ops, source_store:,
+          clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+        )
+
+        result = service.decide(
+          proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+          rationale_category: "evaluated", rationale: "accept", links: [],
+          expected_head: store.projection(proposal_id).lifecycle_head,
+          **authority_args("clean-lifecycle")
+        )
+
+        assert result.applied
+        assert_nil source_store.fetch(orphan_id)
+        refute_includes source_store.pending_ids, orphan_id
+      end
+    end
+  end
+
   def test_lifecycle_commit_and_index_restore_failures_are_visible
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

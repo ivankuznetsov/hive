@@ -112,28 +112,7 @@ module Hive
       end
 
       def clean_uncommitted_state!
-        output = @git_ops.run_git!(
-          "-C", @git_ops.hive_state_path, "status", "--porcelain=v1", "-z",
-          "--untracked-files=all", "--", "proposals/v1"
-        )
-        entries = output.split("\0").reject(&:empty?)
-        cleaned = 0
-        entries.each do |entry|
-          status = entry[0, 2]
-          path = entry[3..]
-          next unless safe_proposal_path?(path)
-
-          if status == "??"
-            remove_untracked!(path)
-          else
-            @git_ops.run_git!(
-              "-C", @git_ops.hive_state_path, "restore", "--source=HEAD",
-              "--staged", "--worktree", "--", path
-            )
-          end
-          cleaned += 1
-        end
-        cleaned
+        Proposals.restore_committed_proposal_state!(@git_ops)
       end
 
       def remove_untracked!(relative)
@@ -146,11 +125,6 @@ module Hive
         end
       rescue Errno::ENOENT
         nil
-      end
-
-      def safe_proposal_path?(path)
-        path.is_a?(String) && path.start_with?("proposals/v1/") &&
-          !path.split("/").include?("..")
       end
     end
   end

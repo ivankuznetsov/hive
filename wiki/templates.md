@@ -74,6 +74,13 @@ mixed batch first publishes and receipts retained sources, then launches the
 agent only for new sources. Even a no-diff generation gets an empty commit with
 source trailers when remote publication is required, so publication retries do
 not repeat the provider call.
+
+Bounded proposal batches seed source selection from the already generated
+`wiki/proposals.json` source commit. An ancestor encountered in a later
+SHA-ordered batch therefore cannot replace a compiled descendant. Proposal-only
+batches still avoid the machine-wide provider lock, but the runner acquires that
+lock lazily before any later ordinary batch launches a provider.
+
 If merging the published refresh branch or current default branch conflicts,
 the runner aborts the merge and writes `publication-blocked`. Later automatic
 runs keep queuing sources but do not relaunch the agent. After resolving the

@@ -92,6 +92,22 @@ class ProposalsTest < Minitest::Test
     )
     assert_raises(Hive::Proposals::InvalidEvent) { Hive::Proposals.evaluation_facts!(invalid_metrics) }
 
+    secret = "sk-#{'a' * 32}"
+    redacted = Hive::Proposals.evaluation_result!(
+      { "outcome" => "pass", "metrics" => { secret => 0.91 } }, label: "evaluation"
+    )
+    assert_equal({ "[REDACTED:openai_api_key]" => 0.91 }, redacted.fetch("metrics"))
+    refute_includes Hive::Proposals.canonical(redacted), secret
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals.evaluation_result!(
+        {
+          "outcome" => "pass",
+          "metrics" => { secret => 0.91, "sk-#{'b' * 32}" => 0.92 }
+        },
+        label: "evaluation"
+      )
+    end
+
     normalized = Hive::Proposals.evaluation_result!(
       { "outcome" => "pass", "metrics" => {}, "details_digest" => "d" * 64 },
       label: "evaluation"

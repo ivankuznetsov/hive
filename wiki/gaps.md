@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-01
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1869,3 +1869,27 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+## Babysitter Git option compatibility evidence (2026-11-01)
+
+The fixed six-token `cat-file` boundary (`--filters`, `--fi`, `--fil`, `--filt`,
+`--filte`, `--filter`) intentionally over-blocks some errors and reads with
+synthetic success and empty stdout, independently of Git version. Only exact
+`--ext-diff` is denied in that family; its recorded rejected prefixes remain
+Git's responsibility on otherwise allowlisted reads.
+
+Only the exact versions and cases recorded in
+`test/fixtures/babysitter/git_option_spellings.v1.json` are proven: Git 2.45.4,
+2.55.0, and host 2.56.0 were re-probed locally with executable helper markers.
+The latest successful security-matrix CI run reports `/usr/bin/git` 2.56.0;
+that version identity is recorded separately from locally reproduced parsing.
+Unrecorded versions/cases fail the compatibility test with a characterization
+request, while production continues to deny the same six bare tokens.
+Fixture coverage cannot prove every future Git parsing behavior.
+
+A broader multi-version compatibility matrix and an audit of other
+abbreviation-dependent option execution seams remain deferred. Git launchers
+outside the babysitter policy's direct stub/overlay consumers also remain
+outside this fix. Exact `--filters` is the sole raw smudge positive control;
+ambiguous spellings and object-filter options are not claimed as helper seams
+on versions that reject them or use them for ordinary reads.

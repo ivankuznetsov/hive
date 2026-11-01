@@ -2606,11 +2606,17 @@ class RunReviewTest < Minitest::Test
         SH
         File.chmod(0o755, @driver_bin)
 
-        _out, _err, _status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+        with_review_pr(folder, worktree) do |published|
+          with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_empty published, "guardrail-rejected commits must remain local"
+        end
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_waiting, marker.name
         assert_equal "fix_guardrail", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+        assert_operator marker.attrs["matches"].to_i, :>, 0
+        assert_equal review_head(worktree), marker.attrs["head"]
+        assert_equal "unpublished", Hive::ReviewPublicationRecovery.decode(marker.attrs)["publication"]
         guardrail_path = File.join(folder, "reviews", "fix-guardrail-01.md")
         assert File.exist?(guardrail_path), "fix-guardrail-01.md must be written"
         assert_includes File.read(guardrail_path), "shell_pipe_to_interpreter"
@@ -2729,22 +2735,25 @@ class RunReviewTest < Minitest::Test
     end
   end
 
-  def with_review_pr(folder, worktree, reject: false)
+  def with_review_pr(folder, worktree, reject: false, remote_head: nil, operator_commits: false)
     url = "https://github.com/acme/app/pull/42"
     branch = File.basename(folder)
     remote = review_head(worktree)
     # pr.md is YAML frontmatter, not a mutable test publication receipt.
     File.write(File.join(folder, "pr.md"), "---\npr_url: #{url}\n---\n")
     published = []
+    attempts = []
     test_case = self
     metadata = lambda do |*args, **kwargs|
       Hive::Gh::PrMetadata.new(number: 42, url: url, base_ref_name: "main",
         head_ref_oid: remote, is_cross_repository: false, state: "OPEN", is_draft: true)
     end
-    gate = lambda do |repository_path:, branch:, expected_remote_oid:|
+    gate = lambda do |repository_path:, branch:, expected_remote_oid:, expected_local_oid:|
+      attempts << expected_local_oid
       raise Hive::AgentGitGate::RemoteConflict if reject
       head = test_case.review_head(worktree)
-      raise "publication precedes guardrail receipt" unless Dir[File.join(folder, "reviews", "fix-success-*.md")].any? { |p| File.read(p).include?("head=#{head}") }
+      test_case.assert_equal head, expected_local_oid
+      raise "publication precedes guardrail receipt" unless operator_commits || Dir[File.join(folder, "reviews", "fix-success-*.md")].any? { |p| File.read(p).include?("head=#{head}") }
       published << head
       remote = head
       Hive::AgentGitGate::PublicationReceipt.new(remote_fingerprint: "a" * 64, branch: branch,
@@ -2754,7 +2763,7 @@ class RunReviewTest < Minitest::Test
       with_replaced_singleton_method(Hive::Gh, :pr_metadata, metadata) do
         with_replaced_singleton_method(Hive::Gh, :lookup_prs_for_branch, ->(*) { [ { "number" => 42, "url" => url, "state" => "OPEN", "headRefName" => branch } ] }) do
           with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, gate) do
-            yield published
+            yield published, ->(oid) { remote = oid }, -> { attempts.size }
           end
         end
       end
@@ -2786,6 +2795,78 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_explicit_final_verification_retry_publishes_manual_commits_without_faking_a_receipt
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ], "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        previous = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: previous)
+        File.write(File.join(folder, "reviews", "fix-success-01.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{previous} kind=fixed -->\n")
+        File.write(File.join(folder, "reviews", "stub-reviewer-02.md"), "## High\n- [x] fix manually\n")
+        # Coordinator recovery has cleared the operator-owned final stale.
+        # No escalations file and no fake pass-2 completion receipt exist.
+        File.write(File.join(worktree, "manual-fix.txt"), "operator fix\n")
+        run!("git", "-C", worktree, "add", "manual-fix.txt")
+        run!("git", "-C", worktree, "commit", "-qm", "manual fix")
+        current = review_head(worktree)
+        spawns = install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree, remote_head: previous, operator_commits: true) do |published|
+          passes, = drive_review_loop(folder, worktree, findings: {},
+            verify_observer: -> { assert_includes published, current })
+          assert_equal [ 2 ], passes
+          assert_equal [ current ], published
+        end
+        assert_equal 0, spawns.call
+        assert_equal :review_complete, Hive::Markers.current(File.join(folder, "task.md")).name
+      end
+    end
+  end
+
+  def test_remote_movement_after_final_review_cannot_leave_an_apparently_published_stale
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree) do |published, move_remote|
+          drive_review_loop(folder, worktree, findings: {
+            1 => "## High\n- [x] fix\n", 2 => "## High\n- [x] still broken\n"
+          }, verify_observer: -> { move_remote.call("b" * 40) }, expect_error: true)
+          assert_equal 1, published.size, "never push again after remote movement"
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal "review_publication_confirmation_failed", marker.attrs["reason"]
+        diagnostic = Hive::ReviewPublicationRecovery.decode(marker.attrs)
+        assert_equal "published", diagnostic["publication"]
+        assert_equal "pending", diagnostic["verification"]
+        assert_equal "final_fix_unverified", diagnostic["origin_reason"]
+      end
+    end
+  end
+
+  def test_restart_after_final_approval_still_requires_reviewers
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        head = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: head)
+        File.write(File.join(folder, "reviews", "fix-success-01.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{head} kind=approved -->\n")
+        passes, = drive_review_loop(folder, worktree, findings: {})
+        assert_equal [ 2 ], passes
+      end
+    end
+  end
+
   def test_published_final_clean_head_completes_with_conditional_draft_guidance
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2803,8 +2884,33 @@ class RunReviewTest < Minitest::Test
         diagnostic = Hive::ReviewPublicationRecovery.project(marker.attrs)
         assert_equal "published", diagnostic["publication"]
         assert_equal "verified", diagnostic["verification"]
+        assert_equal "skipped", diagnostic["local_ci"]
+        assert_equal "skipped", diagnostic["hosted_ci"]
         assert_includes diagnostic["ready_command"], "gh pr ready 42"
         assert_includes diagnostic["readiness_guidance"], "successful current secret scan"
+      end
+    end
+  end
+
+  def test_hosted_publication_failure_is_not_retried_by_terminal_finalization
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        with_review_pr(folder, worktree, reject: true) do |_published, _move_remote, attempts|
+          remote = lambda do |task:, cfg:, ctx:, publication_observer:, **|
+            publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+              pr_url: "https://github.com/acme/app/pull/42")
+            publisher.publish!(expected_head: Hive::ReviewPublicationRecovery.git(ctx.worktree_path, "rev-parse", "HEAD").strip)
+            publication_observer.call(publisher)
+            Hive::Stages::Review::CiFix::Result.new(status: :error, attempts: 1, last_output: nil,
+              error_message: "publication unavailable", limit_text: nil)
+          end
+          with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
+            assert_raises(Hive::TaskInErrorState) { capture_io { Hive::Commands::Run.new(folder).call } }
+          end
+          assert_equal 1, attempts.call, "terminal finalization must retain the failed attempt instead of pushing again"
+        end
       end
     end
   end

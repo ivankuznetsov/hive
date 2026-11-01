@@ -34,7 +34,7 @@ module Hive
         module_function
 
         def run!(task:, cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 publication_base_head: nil, runner: nil, no_repair: false, admit_head: nil)
+                 publication_base_head: nil, runner: nil, no_repair: false, admit_head: nil, publication_observer: nil)
           return skipped_result if cfg.dig("review", "github_checks", "enabled") == false
 
           pr_path = File.join(task.folder, "pr.md")
@@ -45,7 +45,7 @@ module Hive
 
           runner ||= Runner.new(
             task: task, cfg: cfg, ctx: ctx, pr_url: pr_url,
-            publication_base_head: publication_base_head, no_repair: no_repair, admit_head: admit_head
+            publication_base_head: publication_base_head, no_repair: no_repair, admit_head: admit_head, publication_observer: publication_observer
           )
           result = Hive::Stages::Review::CiFix.run!(
             cfg: cfg,
@@ -97,12 +97,13 @@ module Hive
           attr_reader :guardrail_result, :settled_head
 
           def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh,
-                         publication_base_head: nil, no_repair: false, admit_head: nil,
+                         publication_base_head: nil, no_repair: false, admit_head: nil, publication_observer: nil,
                          clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                          sleeper: ->(seconds) { sleep(seconds) },
                          poll_interval_sec: POLL_INTERVAL_SEC,
                          quiet_settlement_sec: QUIET_SETTLEMENT_SEC,
                          no_checks_grace_sec: NO_CHECKS_GRACE_SEC)
+            @publication_observer = publication_observer
             @admit_head = admit_head
             @no_repair = no_repair
             @task = task
@@ -186,6 +187,7 @@ module Hive
 
           def publish_head!(_branch, expected_remote_oid:)
             publication.publish!(expected_head: git_head!)
+            @publication_observer&.call(publication)
             evidence = publication.evidence
             unless evidence["publication"] == "published" && evidence["failure_reason"].nil?
               raise Hive::GhError, "review head publication failed: #{evidence['failure_reason']}"

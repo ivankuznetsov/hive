@@ -135,6 +135,11 @@ OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
 `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
+The root bundle locks transitive Rack at 3.2.8 or newer. The
+`bundler-audit` CI job runs against the current advisory database, which flags
+3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
+change for the compatible patch update.
+
 ## Web app bundle
 
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`

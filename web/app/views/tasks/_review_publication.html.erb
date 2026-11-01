@@ -1,0 +1,12 @@
+<% if publication %>
+  <details class="task-detail-disclosure" open>
+    <summary>Review publication and verification</summary>
+    <dl>
+      <% Hive::ReviewPublicationRecovery.lines(publication).each do |line| %>
+        <% label, value = line.split(": ", 2) %>
+        <dt><%= label %></dt>
+        <dd style="white-space: pre-wrap; overflow-wrap: anywhere"><%= value %></dd>
+      <% end %>
+    </dl>
+  </details>
+<% end %>

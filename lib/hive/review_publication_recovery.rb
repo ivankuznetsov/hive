@@ -143,6 +143,10 @@ module Hive
       end
       result["recovery_guidance"] = result["retry_command"] ? "Use the current observation-bound workflow.retry action." :
         "Routine retry is ineligible. Use the existing explicit operator/coordinator recovery path after remediation."
+      unless evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
+        result.delete("ready_command")
+        result.delete("readiness_guidance")
+      end
       if evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
         result["readiness_guidance"] = "Use normal finalize by default: it owns scan-before-ready and pr_observed. Manual ready requires confirmed publication, successful exact-head verification, and a successful current secret scan. Manual ready bypasses Hive's scan_pr_for_secrets (including hit blocking and body scrubbing) and the finalize pr_observed activity record."
       end

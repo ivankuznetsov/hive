@@ -3,6 +3,19 @@ require "stringio"
 require_relative "../support/outcome_evidence_helper"
 
 class TaskTest < ActiveSupport::TestCase
+  test "review publication distinguishes verified draft completion from non draft and merged states" do
+    project = Project.new("name" => "app", "path" => "/tmp/app", "hive_state_path" => "/tmp/app/.hive-state")
+    evidence = { "publication" => "published", "verification" => "verified", "is_draft" => true,
+                 "pr_state" => "OPEN", "ready_command" => "gh pr ready 42" }
+    attributes = { "slug" => "task", "action" => "ready_to_artifacts", "marker" => "review_complete",
+                   "attrs" => Hive::ReviewPublicationRecovery.encode(evidence) }
+    assert_includes Task.new(project: project, attributes: attributes).review_publication["readiness_guidance"], "pr_observed"
+    attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence.merge("is_draft" => false))
+    refute Task.new(project: project, attributes: attributes).review_publication.key?("ready_command")
+    attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence.merge("pr_state" => "MERGED"))
+    refute Task.new(project: project, attributes: attributes).review_publication.key?("ready_command")
+  end
+
   test "correlated log reads an integrity-bearing bounded frame tail and fails inert" do
     root = Dir.mktmpdir("hive-web-attempt-log")
     previous_home = ENV["HIVE_HOME"]

@@ -2786,6 +2786,29 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_published_final_clean_head_completes_with_conditional_draft_guidance
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ], "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree) do |published|
+          drive_review_loop(folder, worktree, findings: { 1 => "## High\n- [x] fix\n" })
+          assert_equal [ review_head(worktree) ], published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        diagnostic = Hive::ReviewPublicationRecovery.project(marker.attrs)
+        assert_equal "published", diagnostic["publication"]
+        assert_equal "verified", diagnostic["verification"]
+        assert_includes diagnostic["ready_command"], "gh pr ready 42"
+        assert_includes diagnostic["readiness_guidance"], "successful current secret scan"
+      end
+    end
+  end
+
   def test_rejected_final_fix_stops_before_verify_reviewers_and_retains_sha
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

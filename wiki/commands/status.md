@@ -911,3 +911,23 @@ action completes that repair and reports the existing canonical outcome without
 charging another retry or launching a duplicate. A subsequent fresh descriptor
 can authorize the next retry against the repaired failure marker. Ambiguous
 request bindings are refused before repair; status does not select one by age.
+
+Review terminal rows expose `review_publication`, a local projection of versioned
+marker evidence. It includes publication and verification state, owned worktree
+and branch, full commits absent from the validated PR head, observation time,
+failure reason and recovery commands. `unknown` is distinct from `unpublished`;
+no commit list is invented from the default branch after a squash merge.
+
+Operational text, authenticated task detail and TUI detail share this projection.
+Small TUI screens explicitly omit long commands and direct operators to
+`hive status --operational --json`. Projection performs no GitHub requests or
+Git-history scans. Current routine retry commands come only from the canonical
+action producer. The durable refresh recipe refuses absent/ineligible retry
+recommendations and cannot advance another stage. Findings-only final stales
+require locally committed fixes and explicit operator/coordinator recovery.
+
+Draft guidance remains visible after successful review even without a recovery
+request. Normal finalize owns secret scanning and the publication activity record.
+The displayed manual `gh pr ready N` alternative requires publication, exact-head
+verification and a successful current scan, and explains the Hive checks and
+activity record it bypasses. Non-draft and merged PRs have no ready instruction.

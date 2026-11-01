@@ -3,6 +3,7 @@ require "open3"
 require "set"
 require "yaml"
 require "hive/gh"
+require "hive/stages/review/publication"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/context"
 require "hive/stages/review/fix_guardrail"
@@ -152,57 +153,12 @@ module Hive
 
           private
 
+          def publication
+            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh)
+          end
+
           def resolve_identity!
-            parsed = @gh.parse_pull_request_url(@pr_url)
-            raise Hive::GhError, "pr.md contains an invalid pull-request URL" unless parsed
-
-            root = Hive::Worktree.canonical_root(@task.project_root)
-            pointer = Hive::Worktree.read_owned_pointer(
-              @task.folder,
-              project_root: @task.project_root,
-              slug: @task.slug,
-              expected_root: root
-            )
-            unless File.realpath(pointer.fetch("path")) == File.realpath(@ctx.worktree_path)
-              raise Hive::WorktreeError, "review context does not match the owned worktree"
-            end
-
-            repository = @gh.repository_identity(@ctx.worktree_path, cfg: @cfg)
-            unless parsed.fetch("host") == repository.fetch("host").downcase &&
-                   parsed.fetch("repository") == repository.fetch("repository").downcase
-              raise Hive::GhError, "pull request is outside the task repository"
-            end
-
-            metadata = @gh.pr_metadata(
-              parsed.fetch("number"), cfg: @cfg, chdir: @ctx.worktree_path
-            )
-            unless metadata.number == parsed.fetch("number") &&
-                   @gh.parse_pull_request_url(metadata.url) == parsed &&
-                   metadata.state.to_s.upcase == "OPEN" &&
-                   metadata.is_cross_repository == false
-              raise Hive::GhError, "pull-request identity is stale or unsupported"
-            end
-
-            branch = pointer.fetch("branch")
-            matches = @gh.lookup_prs_for_branch(
-              @ctx.worktree_path, branch, cfg: @cfg
-            ).select do |candidate|
-              candidate["number"].to_i == parsed.fetch("number") &&
-                candidate["state"].to_s.upcase == "OPEN" &&
-                candidate["headRefName"].to_s == branch &&
-                @gh.parse_pull_request_url(candidate["url"]) == parsed
-            end
-            raise Hive::GhError, "task branch does not resolve to one open pull request" unless matches.one?
-
-            remote_head = metadata.head_ref_oid.to_s.downcase
-            unless remote_head.match?(/\A[0-9a-f]{40,64}\z/)
-              raise Hive::GhError, "pull-request head OID is unavailable"
-            end
-
-            {
-              number: parsed.fetch("number"), url: parsed.fetch("url"),
-              branch: branch, remote_head: remote_head
-            }
+            publication.resolve_identity!
           end
 
           def guard_publication!(local_head)
@@ -219,17 +175,12 @@ module Hive
                   "CI repair requires fix-guardrail approval before publication"
           end
 
-          def publish_head!(branch, expected_remote_oid:)
-            result = @gh.push_branch(
-              @ctx.worktree_path, branch, cfg: @cfg,
-              expected_remote_oid: expected_remote_oid,
-              set_upstream: false
-            )
-            return if result.success?
-
-            detail = result.stderr.to_s.strip
-            detail = result.stdout.to_s.strip if detail.empty?
-            raise Hive::GhError, "review head publication failed#{": #{detail}" unless detail.empty?}"
+          def publish_head!(_branch, expected_remote_oid:)
+            publication.publish!(expected_head: git_head!)
+            evidence = publication.evidence
+            unless evidence["publication"] == "published" && evidence["failure_reason"].nil?
+              raise Hive::GhError, "review head publication failed: #{evidence['failure_reason']}"
+            end
           end
 
           def wait_for_settlement!(identity, local_head, max_bytes:, timeout_sec:)

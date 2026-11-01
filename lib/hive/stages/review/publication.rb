@@ -95,6 +95,7 @@ module Hive
           if @identity && current.values_at(:number, :url, :branch) != @identity.values_at(:number, :url, :branch)
             raise Stop, "pr_identity_moved"
           end
+          verify_local!(head)
           @identity = current
           @evidence["failure_reason"] = nil
           true

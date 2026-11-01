@@ -566,6 +566,34 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  def test_publication_confirmation_rejects_local_movement_during_remote_lookup
+    [ :head, :branch ].each do |movement|
+      with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+        lookups = 0
+        candidates = gh.candidates
+        test_case = self
+        gh.define_singleton_method(:lookup_prs_for_branch) do |*|
+          lookups += 1
+          if lookups == 2
+            if movement == :head
+              test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "concurrent edit")
+            else
+              test_case.run!("git", "-C", repo, "checkout", "-qb", "concurrent-branch")
+            end
+          end
+          candidates
+        end
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", result.evidence["publication"]
+        assert_equal "pending", result.evidence["verification"]
+        assert_equal "local_#{movement}_moved", result.evidence["failure_reason"]
+        assert_equal head, result.evidence["remote_head"]
+        assert_equal 1, gh.pushes.size
+      end
+    end
+  end
+
   def test_cross_repository_and_merged_pr_refuse_publication
     with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
       [ gh.metadata.with(is_cross_repository: true), gh.metadata.with(state: "MERGED") ].each do |metadata|

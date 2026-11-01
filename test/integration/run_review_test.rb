@@ -2982,6 +2982,46 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_local_movement_during_final_identity_lookup_rejects_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ], "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        state_file = File.join(folder, "task.md")
+        install_committing_fix_driver(worktree)
+        moved = false
+        test_case = self
+        with_review_pr(folder, worktree) do |published|
+          lookup = Hive::Gh.method(:lookup_prs_for_branch)
+          move_during_lookup = lambda do |*args, **kwargs|
+            candidates = lookup.call(*args, **kwargs)
+            if Hive::Markers.current(state_file).name == :review_complete
+              test_case.run!("git", "-C", worktree, "commit", "--allow-empty", "-qm", "concurrent edit")
+              moved = true
+            end
+            candidates
+          end
+          with_replaced_singleton_method(Hive::Gh, :lookup_prs_for_branch, move_during_lookup) do
+            drive_review_loop(folder, worktree, findings: { 1 => "## High\n- [x] fix\n" }, expect_error: true)
+          end
+          assert moved, "move HEAD during the final remote identity lookup"
+          assert_equal 1, published.size, "do not publish the unreviewed concurrent commit"
+          refute_equal published.first, review_head(worktree)
+          marker = Hive::Markers.current(state_file)
+          assert_equal :review_error, marker.name
+          assert_equal "review_publication_confirmation_failed", marker.attrs["reason"]
+          diagnostic = Hive::ReviewPublicationRecovery.decode(marker.attrs)
+          assert_equal "published", diagnostic["publication"]
+          assert_equal "pending", diagnostic["verification"]
+          assert_equal "local_head_moved", diagnostic["failure_reason"]
+          assert_equal published.first, diagnostic["remote_head"]
+        end
+      end
+    end
+  end
+
   def test_restart_after_final_approval_still_requires_reviewers
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

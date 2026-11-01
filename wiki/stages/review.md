@@ -321,8 +321,11 @@ hosted checks run once without repair agents; settlement polling is still allowe
 A moved head invalidates verification, including movement during browser testing.
 Publication attempts are cached by both HEAD and withholding reason, so approval of an unchanged HEAD triggers publication with the new receipt. Reusing a publisher for a different HEAD starts fresh publication evidence.
 
-Completion rechecks the open PR identity and exact head. Accepted findings or
-escalations after the final fix leave a published `final_fix_unverified` stale.
+Completion rechecks the open PR identity and exact head, then rechecks the local
+HEAD and branch after the remote identity lookups. Movement during those lookups
+leaves verification pending and records a publication confirmation error.
+Accepted findings or escalations after the final fix leave a published
+`final_fix_unverified` stale.
 That reason is always operator-owned, even without an escalations file: locally
 commit fixes before explicit coordinator retry. Checkbox edits alone do not apply
 fixes; explicitly increasing `review.max_passes` changes the repair budget.

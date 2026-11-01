@@ -66,6 +66,9 @@ The owned path/branch and open, same-repository PR identity must agree. Only an
 ahead-only branch is publishable; divergence requires operator reconciliation.
 A gate receipt proves the exact branch ref reached the requested head. A failed
 PR API cross-check retains that publication proof but leaves verification pending.
+Confirmation checks local HEAD and branch both before and after remote identity
+validation. Concurrent local movement retains publication proof but prevents
+verified completion.
 Rejected publication is `unpublished` only after an independent remote observation;
 unobservable failures remain `unknown`.
 

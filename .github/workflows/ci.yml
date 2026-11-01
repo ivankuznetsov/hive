@@ -470,6 +470,9 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - run: bundle exec bundler-audit check --update
+      # The Rails app ships its own lockfile; auditing only the root bundle
+      # let crass/mail advisories in web/Gemfile.lock go unnoticed.
+      - run: bundle exec bundler-audit check --gemfile-lock web/Gemfile.lock
 
   # The launchd path in Commands::ServiceInstaller::Base (plist write +
   # `launchctl load` + the `launchctl list <label>` enabled-probe, plus the

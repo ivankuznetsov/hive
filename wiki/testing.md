@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-01
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -855,6 +855,33 @@ the blocked invocation is not appended, and stderr reports both the permission
 refusal and normal skip marker. `babysitter/passthrough_policy_test.rb` pins the
 side-effect-free `GitPolicy` / `GhPolicy` classification tables and the shared
 runner's skip, absolute-binary, environment-hook, handoff, and failure mapping.
+
+`test/fixtures/babysitter/git_option_spellings.v1.json` pins exact argv and
+separates version-independent Hive policy from reproduced Git 2.45.4, 2.55.0,
+and 2.56.0 outcomes (exit status, first diagnostic, stdout presence, and helper
+marker). Pure policy tests cover the six bare `cat-file` tokens `--filters`,
+`--fi`, `--fil`, `--filt`, `--filte`, and `--filter`, both `--path` orderings,
+repeatability with mutable/frozen inputs, and the exact `--ext-diff` boundary.
+Only exact `--ext-diff` is denied in that family; rejected prefixes pass policy
+on allowlisted `log`/`show` reads and are rejected by real Git.
+
+Ordinary, non-skipped `babysitter/dry_run_env_test.rb` cases require exact
+`cat-file --filters` to execute the configured smudge helper before proving
+that the direct stub and generated overlay stop every denied spelling. They
+assert synthetic success, empty stdout, skip auditing, no real-binary handoff,
+and no helper marker, including deliberate over-blocks of ambiguous errors and
+legitimate separate-word object-filter reads. Glued `--filter=blob:none` retains
+its per-version Git outcome and output checks. Unrecorded versions or missing
+cases fail with a characterization diagnostic; this is an evidence boundary
+in tests, never a production Git-version gate. Repeated overlay invocations
+produce one complete audit record each.
+
+The named `test:babysitter_dry_run_security_matrix` gate selects the existing
+matrix method itself, which consumes the same fixture with recording binaries.
+`test/babysitter/acceptance/dry_run_test.rb` checks the normal babysitter flow:
+all three mutations and four reads run through its overlay, `cat-file --fi`
+is skipped, and `log --ext` reaches the recording binary. These paths prove
+policy and stopped effects separately from raw Git compatibility evidence.
 
 Implementation ownership has focused unit coverage in `implementation_identity/{resolver,store,reconstructor}_test.rb`, `task_journal_test.rb`, `task_projection_test.rb`, `attempts/generation_test.rb`, `protected_files_test.rb`, agent/profile argv tests, the three implementation-owning stage launch tests, status/schema correspondence, and the TUI detail view. These tests pin the shared identity event builder across capture and legacy reconstruction, durable-before-spawn ordering, journal/projection tamper detection, fail-closed downstream generation reads, project/task/generation-bound legacy reconstruction, persisted-provider failure attribution, generation idempotency/conflicts, raw partial overrides, legacy precedence, exact Claude/Codex argv, provider-default pi/grok behavior, and honest unsupported effort.
 

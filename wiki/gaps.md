@@ -2152,3 +2152,11 @@ outside the babysitter policy's direct stub/overlay consumers also remain
 outside this fix. Exact `--filters` is the sole raw smudge positive control;
 ambiguous spellings and object-filter options are not claimed as helper seams
 on versions that reject them or use them for ordinary reads.
+
+## Addressable and sqlite3 audit patch validation (2026-11-01)
+
+Both lockfiles pass bundler-audit against advisory database commit
+`79c0e052ade15d29d3ecc1e8d4fa59c337a86383` after locking Addressable 2.9.2 and
+sqlite3 2.10.2. Existing runtime database, usage database, and gemspec tests
+passed on Linux x86_64. Other locked platform binaries and the Rails suite
+were not exercised locally; the exact PR-head GitHub checks remain pending.

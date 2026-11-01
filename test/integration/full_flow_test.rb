@@ -269,10 +269,20 @@ class FullFlowTest < Minitest::Test
 
         ENV["HIVE_FLOW_FOLDER"] = review_dir
         ENV["HIVE_FLOW_PHASE"] = "review"
-        capture_io { Hive::Commands::Run.new(review_dir).call }
+        # Review publication is mandatory even with hosted CI disabled. Keep
+        # the PR adapter scoped to this fixture and exercise the actual leased
+        # gate against its disposable local bare origin.
+        publish_branch = Hive::AgentGitGate.method(:publish_local_branch)
+        local_publication = ->(**arguments) { publish_branch.call(**arguments, allow_local_transport: true) }
+        with_replaced_singleton_method(Hive::Gh, :repository_identity, ->(*, **) { identity }) do
+          with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, local_publication) do
+            capture_io { Hive::Commands::Run.new(review_dir).call }
+          end
+        end
         marker = Hive::Markers.current(File.join(review_dir, "task.md"))
         assert_equal :review_complete, marker.name
         assert_equal "skipped", marker.attrs["browser"]
+        assert_equal "published", Hive::ReviewPublicationRecovery.decode(marker.attrs)["publication"]
 
         # 6-review → 7-artifacts
         artifacts_dir = File.join(dir, ".hive-state", "stages", "7-artifacts", slug)

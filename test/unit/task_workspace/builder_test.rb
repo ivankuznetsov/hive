@@ -46,6 +46,18 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_review_recovery_uses_the_tasks_canonical_operational_action
+    with_fixture do |native, task|
+      action = { "action_id" => "workflow.retry", "target" => "demo:task", "observation_token" => "a" * 64 }
+      task.define_singleton_method(:operational_action) { action }
+      task.instance_variable_get(:@attributes)["attrs"] = Hive::ReviewPublicationRecovery.encode(
+        "publication" => "unpublished", "verification" => "pending")
+      snapshot = builder(native, task, questions: 0).call
+      assert_equal "hive act workflow.retry demo:task --observation #{'a' * 64} --json",
+        snapshot.dig("operator", "review_publication", "retry_command")
+    end
+  end
+
   def test_review_recovery_preserves_trusted_paths_commands_and_draft_completion_guidance
     with_fixture do |native, task|
       evidence = { "publication" => "published", "verification" => "verified",

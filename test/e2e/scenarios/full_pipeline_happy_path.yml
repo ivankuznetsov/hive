@@ -39,15 +39,38 @@ steps:
     path: "{task_dir:4-execute}/task.md"
     marker: { current: EXECUTE_COMPLETE }
   # AC1: PR-first pipeline routes through 5-open-pr BEFORE 6-review.
-  # This scenario stays network-free (no fake-gh in PATH), so it seeds
-  # 5-open-pr's pr.md directly instead of running `hive open-pr` (which
-  # would call `gh auth status` / `gh pr create`). The seed proves the
-  # stage transition contract; run_open_pr_test.rb covers the runner.
+  # Seed PR creation, then exercise real Git publication over loopback with
+  # exact scripted GitHub identity responses. No hosted PR is created.
   - kind: cli
     args: [approve, "{slug}", --from, 4-execute, --to, 5-open-pr]
   - kind: write_file
     path: "{task_dir:5-open-pr}/pr.md"
-    content: "---\npr_url: https://example.com/pr/1\npr_number: 1\n---\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=true -->\n"
+    content: "---\npr_url: https://127.0.0.1/acme/app/pull/1\npr_number: 1\n---\n\n<!-- COMPLETE pr_url=https://127.0.0.1/acme/app/pull/1 is_draft=true -->\n"
+  - kind: ruby_block
+    block: |
+      require_relative "../lib/git_remote"
+      root = File.join(run_home, "remote")
+      bare = File.join(root, "acme", "app.git")
+      FileUtils.mkdir_p(File.dirname(bare))
+      system("git", "init", "--bare", "--quiet", bare, exception: true)
+      remote = Hive::E2E::GitRemote.new(root: root)
+      (@ctx.harness_state[:background] ||= {})["git-remote"] = remote
+      system("git", "-C", sandbox, "remote", "add", "origin", remote.url, exception: true)
+      folder = File.join(sandbox, ".hive-state", "stages", "5-open-pr", slug)
+      worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+      head, status = Open3.capture2("git", "-C", worktree, "rev-parse", "HEAD")
+      raise "missing review head" unless status.success?
+      system("git", "-C", worktree, "push", "--quiet", "origin", "HEAD:refs/heads/#{slug}", exception: true)
+      url = "https://127.0.0.1/acme/app/pull/1"
+      metadata = { "number" => 1, "url" => url, "baseRefName" => "master", "headRefOid" => head.strip,
+        "isCrossRepository" => false, "state" => "OPEN", "isDraft" => true }
+      identity = [
+        { "args" => ["auth", "status"] },
+        { "args" => ["pr", "view", "1", "--json", "number,url,baseRefName,headRefOid,isCrossRepository,state,isDraft"], "response" => metadata },
+        { "args" => ["pr", "list", "--head", slug, "--state", "all", "--json", "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,baseRefOid,headRepository"],
+          "response" => [metadata.merge("headRefName" => slug)] }
+      ]
+      @gh_stub.install(identity * 3)
   - kind: cli
     args: [review, "{slug}", --from, 5-open-pr]
   - kind: state_assert
@@ -64,7 +87,7 @@ steps:
     args: [approve, "{slug}", --from, 7-artifacts, --to, 8-finalize]
   - kind: write_file
     path: "{task_dir:8-finalize}/pr.md"
-    content: "# PR\n\n<!-- COMPLETE pr_url=https://example.com/pr/1 -->\n"
+    content: "# PR\n\n<!-- COMPLETE pr_url=https://127.0.0.1/acme/app/pull/1 -->\n"
   - kind: cli
     args: [archive, "{slug}", --from, 8-finalize]
   - kind: json_assert

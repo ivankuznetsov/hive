@@ -511,6 +511,43 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  def test_withheld_publication_rejects_a_context_outside_the_owned_worktree
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      Dir.mktmpdir do |other|
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg,
+          ctx: ctx.with(worktree_path: other), pr_url: gh.metadata.url, gh: gh)
+        publisher.publish!(expected_head: head, withheld: "guardrail_approval_required")
+        assert_equal "unknown", publisher.evidence["publication"]
+        assert_equal "publication_identity_unavailable", publisher.evidence["failure_reason"]
+        assert_empty gh.pushes
+      end
+    end
+  end
+
+  def test_confirmation_rejects_pr_identity_movement_even_at_the_same_head
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+      identity = publisher.identity.merge(number: 43)
+      publisher.define_singleton_method(:resolve_identity!) { identity }
+      error = assert_raises(Hive::Stages::Review::Publication::Stop) { publisher.confirm!(head) }
+      assert_equal "pr_identity_moved", error.reason
+      assert_equal "published", publisher.evidence["publication"]
+    end
+  end
+
+  def test_project_registration_failure_retains_publication_but_omits_retry_recipe
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { raise Hive::ConfigError, "unreadable" }) do
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", publisher.evidence["publication"]
+        assert_equal "project_registration_unavailable", publisher.evidence["recovery_reason"]
+        assert_nil publisher.evidence["verification_recipe"]
+      end
+    end
+  end
+
   def test_receipt_confirmed_publication_detects_local_head_movement_without_retry
     with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
       calls = 0

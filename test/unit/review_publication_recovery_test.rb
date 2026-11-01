@@ -6,6 +6,27 @@ class ReviewPublicationRecoveryTest < Minitest::Test
   include HiveTestHelper
   Recovery = Hive::ReviewPublicationRecovery
 
+  def test_invalid_marker_evidence_fails_closed
+    [ "!", Base64.urlsafe_encode64("{broken"), Base64.urlsafe_encode64('"invalid"') ].each do |value|
+      result = Recovery.decode("rp_version" => "1", "rp_publication" => value)
+      assert_equal "unknown", result["publication"]
+      assert_equal "invalid_publication_evidence", result["failure_reason"]
+    end
+  end
+
+  def test_git_process_failure_leaves_classification_unknown
+    with_replaced_singleton_method(Open3, :capture3, ->(*) { raise Errno::ENOENT }) do
+      result = Recovery.classify(worktree: "/missing", reference_oid: "a" * 40)
+      assert_equal "unknown", result["classification"]
+      assert_nil result["unpushed_shas"]
+    end
+  end
+
+  def test_review_only_evidence_explains_that_publication_is_not_applicable
+    result = Recovery.project(Recovery.encode("publication" => "not_applicable"))
+    assert_equal "Publication is not applicable to this review.", result["remediation"]
+  end
+
   def test_oversized_executable_field_is_unavailable_without_truncating_it
     evidence = Recovery.decode(Recovery.encode("publication" => "published", "push_command" => "x" * (Recovery::MAX_BYTES + 1)))
     assert_equal "published", evidence["publication"]

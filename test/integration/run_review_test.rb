@@ -2826,6 +2826,74 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_interrupted_fix_phase_with_no_findings_records_a_clean_pass
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        Hive::Markers.set(File.join(folder, "task.md"), :review_working, phase: "fix", pass: 1)
+        capture_io { Hive::Commands::Run.new(folder).call }
+        assert_equal :review_complete, Hive::Markers.current(File.join(folder, "task.md")).name
+        assert File.file?(File.join(folder, "reviews", "fix-success-01.md"))
+      end
+    end
+  end
+
+  def test_verification_retry_guardrails_manual_workflow_edits_before_publication
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        previous = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: previous)
+        File.write(File.join(folder, "reviews", "stub-reviewer-02.md"), "## High\n- [x] fix manually\n")
+        FileUtils.mkdir_p(File.join(worktree, ".github", "workflows"))
+        File.write(File.join(worktree, ".github", "workflows", "ci.yml"), "name: changed\n")
+        run!("git", "-C", worktree, "add", ".github/workflows/ci.yml")
+        run!("git", "-C", worktree, "commit", "-qm", "manual workflow change")
+        with_review_pr(folder, worktree, remote_head: previous, operator_commits: true) do |published|
+          passes, = drive_review_loop(folder, worktree, findings: {})
+          assert_empty passes
+          assert_empty published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_waiting, marker.name
+        assert_equal "verification_recovery", marker.attrs["gate"]
+        assert_equal "guardrail_approval_required", Hive::ReviewPublicationRecovery.decode(marker.attrs)["failure_reason"]
+      end
+    end
+  end
+
+  def test_verification_rejects_head_movement_during_reviewers_or_triage
+    [ :reviewers, :triage ].each do |phase|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir, cfg_overrides: {
+            "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+          })
+          worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+          install_committing_fix_driver(worktree)
+          move_head = -> { run!("git", "-C", worktree, "commit", "--allow-empty", "-qm", "concurrent edit") }
+          original = Hive::Stages::Review::Suppression.method(:seed_from_triage!)
+          seed = lambda do |**args|
+            move_head.call if phase == :triage && args.fetch(:ctx).pass == 2
+            original.call(**args)
+          end
+          with_replaced_singleton_method(Hive::Stages::Review::Suppression, :seed_from_triage!, seed) do
+            passes, = drive_review_loop(folder, worktree,
+              findings: { 1 => "## High\n- [x] broken\n", 2 => "## High\n- [x] still broken\n" },
+              verify_observer: phase == :reviewers ? move_head : nil, expect_error: true)
+            assert_equal [ 1, 2 ], passes
+          end
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "verification_head_moved", marker.attrs["reason"]
+        end
+      end
+    end
+  end
+
   def test_remote_movement_after_final_review_cannot_leave_an_apparently_published_stale
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

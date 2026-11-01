@@ -216,4 +216,96 @@ class ReviewCiGatesTest < Minitest::Test
       assert_equal "github", marker.attrs.fetch("gate")
     end
   end
+
+  def with_review_state(**values)
+    review = Hive::Stages::Review
+    previous = values.to_h { |key, _| [ key, [ review.instance_variable_defined?("@#{key}"), review.instance_variable_get("@#{key}") ] ] }
+    values.each { |key, value| review.instance_variable_set("@#{key}", value) }
+    yield
+  ensure
+    previous.each do |key, (defined, value)|
+      defined ? review.instance_variable_set("@#{key}", value) : review.remove_instance_variable("@#{key}")
+    end
+  end
+
+  def test_completion_gate_rejects_movement_after_the_verified_review
+    with_fixture do |repo, task, ctx, cfg|
+      before = Hive::Stages::Review.git_head(repo)
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "concurrent edit")
+      with_review_state(verify_mode: true, reviewed_head: before) do
+        gate = Hive::Stages::Review.completion_ci_gate(task, cfg, ctx, before,
+          started_at: Time.now, max_wall_clock_sec: 60)
+        assert_equal :review_error, gate.terminal[:status]
+        assert_nil gate.head
+        refute gate.repaired
+        assert_equal "verification_head_moved", Hive::Markers.current(task.state_file).attrs["reason"]
+      end
+    end
+  end
+
+  def test_withheld_publication_cannot_leave_a_complete_marker
+    with_fixture do |repo, task, ctx, cfg|
+      head = Hive::Stages::Review.git_head(repo)
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      Hive::Markers.set(task.state_file, :review_complete)
+      publisher = Struct.new(:evidence).new({ "publication" => "unpublished" })
+      with_review_state(admissible_head: head, publication_attempt_head: head,
+        review_publisher: publisher, withheld_reason: "guardrail_approval_required") do
+        terminal = Hive::Stages::Review.publish_review_head(task: task, cfg: cfg, ctx: ctx)
+        assert_equal :review_error, terminal[:status]
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal "review_publication_withheld", marker.attrs["reason"]
+        assert_equal "guardrail_approval_required", marker.attrs["publication_reason"]
+      end
+    end
+  end
+
+  def test_hosted_ci_admission_records_the_repaired_head_before_publication
+    with_fixture do |repo, task, ctx, cfg|
+      test_case = self
+      green = result(:green)
+      remote = lambda do |admit_head:, **|
+        test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "CI repair")
+        admit_head.call(Hive::Stages::Review.git_head(repo))
+        test_case.assert_includes File.read(File.join(task.folder, "reviews", "fix-success-01.md")), "kind=ci_repaired"
+        green
+      end
+      with_review_state(admissible_head: nil, withheld_reason: "fix_guardrail_receipt_required") do
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**) { green }) do
+          with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
+            assert_nil Hive::Stages::Review.run_ci_gates(task, cfg, ctx,
+              started_at: Time.now, max_wall_clock_sec: 60, pass: 1)
+          end
+        end
+        assert_equal Hive::Stages::Review.git_head(repo), Hive::Stages::Review.instance_variable_get(:@admissible_head)
+        assert_nil Hive::Stages::Review.instance_variable_get(:@withheld_reason)
+      end
+    end
+  end
+
+  def test_final_combined_guardrail_catches_movement_after_both_ci_observations
+    with_fixture do |repo, task, ctx, cfg|
+      test_case = self
+      original = Hive::Stages::Review.method(:git_head)
+      reads = 0
+      head = lambda do |path|
+        reads += 1
+        if reads == 4
+          FileUtils.mkdir_p(File.join(repo, ".github", "workflows"))
+          File.write(File.join(repo, ".github", "workflows", "ci.yml"), "name: concurrent\n")
+          test_case.run!("git", "-C", repo, "add", ".github/workflows/ci.yml")
+          test_case.run!("git", "-C", repo, "commit", "-qm", "concurrent workflow edit")
+        end
+        original.call(path)
+      end
+      with_replaced_singleton_method(Hive::Stages::Review, :git_head, head) do
+        terminal = with_ci_results(local: -> { result(:green) }, remote: -> { result(:green) }) do
+          Hive::Stages::Review.run_ci_gates(task, cfg, ctx,
+            started_at: Time.now, max_wall_clock_sec: 60, pass: 1)
+        end
+        assert_equal :review_waiting, terminal[:status]
+        assert_equal "combined", Hive::Markers.current(task.state_file).attrs["gate"]
+      end
+    end
+  end
 end

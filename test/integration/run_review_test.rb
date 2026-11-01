@@ -3085,6 +3085,29 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_verify_only_guardrail_approval_publishes_the_unchanged_head
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, worktree, head = setup_fix_guardrail_pause(dir, pass: 2, matches: 1,
+          cfg_overrides: { "review" => { "max_passes" => 1,
+            "reviewers" => [ STUB_REVIEWER_SPEC ], "github_checks" => { "enabled" => false } } })
+        # A legacy CI-repair receipt admits this already-started verify pass.
+        File.write(File.join(folder, "reviews", "fix-success-01.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{head} kind=ci_repaired -->\n")
+        File.write(File.join(folder, "reviews", "stub-reviewer-02.md"), "")
+        with_review_pr(folder, worktree) do |published|
+          reviewer_passes, = drive_review_loop(folder, worktree, findings: {})
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_complete, marker.name, marker.attrs.inspect
+          assert_equal [ 3 ], reviewer_passes
+          assert_equal [ head ], published
+          assert_equal "published", Hive::ReviewPublicationRecovery.decode(marker.attrs)["publication"]
+          assert_match(/kind=approved/, File.read(File.join(folder, "reviews", "fix-success-02.md")))
+        end
+      end
+    end
+  end
+
   def test_fix_guardrail_approval_ci_repair_on_final_pass_is_rejected
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

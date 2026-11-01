@@ -41,7 +41,9 @@ class ReviewCiGatesTest < Minitest::Test
         },
         "timeout_sec" => { "review_ci" => 5 }
       }
-      yield(repo, task, ctx, cfg)
+      with_review_state(withheld_reason: nil, review_ci_evidence: {}) do
+        yield(repo, task, ctx, cfg)
+      end
     end
   end
 
@@ -250,7 +252,8 @@ class ReviewCiGatesTest < Minitest::Test
       Hive::Markers.set(task.state_file, :review_complete)
       publisher = Struct.new(:evidence).new({ "publication" => "unpublished" })
       with_review_state(admissible_head: head, publication_attempt_head: head,
-        review_publisher: publisher, withheld_reason: "guardrail_approval_required") do
+        review_publisher: publisher, publication_attempt_withheld: "guardrail_approval_required",
+        withheld_reason: "guardrail_approval_required") do
         terminal = Hive::Stages::Review.publish_review_head(task: task, cfg: cfg, ctx: ctx)
         assert_equal :review_error, terminal[:status]
         marker = Hive::Markers.current(task.state_file)
@@ -270,7 +273,7 @@ class ReviewCiGatesTest < Minitest::Test
         test_case.assert_includes File.read(File.join(task.folder, "reviews", "fix-success-01.md")), "kind=ci_repaired"
         green
       end
-      with_review_state(admissible_head: nil, withheld_reason: "fix_guardrail_receipt_required") do
+      with_review_state(admissible_head: nil, withheld_reason: nil) do
         with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**) { green }) do
           with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
             assert_nil Hive::Stages::Review.run_ci_gates(task, cfg, ctx,
@@ -279,6 +282,96 @@ class ReviewCiGatesTest < Minitest::Test
         end
         assert_equal Hive::Stages::Review.git_head(repo), Hive::Stages::Review.instance_variable_get(:@admissible_head)
         assert_nil Hive::Stages::Review.instance_variable_get(:@withheld_reason)
+      end
+    end
+  end
+
+  def test_hosted_repair_requires_local_proof_of_the_new_head_without_repair
+    [ :green, :stale ].each do |local_status|
+      with_fixture do |repo, task, ctx, cfg|
+        test_case = self
+        calls = []
+        original_head = Hive::Stages::Review.git_head(repo)
+        local = lambda do |no_repair:, **|
+          calls << [ :local, Hive::Stages::Review.git_head(repo), no_repair ]
+          test_case.result(calls.size == 1 ? :green : local_status)
+        end
+        remote = lambda do |no_repair:, **|
+          calls << [ :remote, Hive::Stages::Review.git_head(repo), no_repair ]
+          test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "hosted repair")
+          test_case.result(:green)
+        end
+        with_review_state(review_ci_evidence: {}, withheld_reason: nil) do
+          with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, local) do
+            with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
+              terminal = Hive::Stages::Review.run_ci_gates(task, cfg, ctx,
+                started_at: Time.now, max_wall_clock_sec: 60, pass: 1)
+              repaired_head = Hive::Stages::Review.git_head(repo)
+              assert_equal [ [ :local, original_head, false ], [ :remote, original_head, false ],
+                [ :local, repaired_head, true ] ], calls
+              if local_status == :green
+                assert_nil terminal
+                assert Hive::Stages::Review.ci_gate_proven?("local_ci", repaired_head)
+                assert Hive::Stages::Review.ci_gate_proven?("hosted_ci", repaired_head)
+              else
+                assert_equal :review_ci_stale, terminal[:status]
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_incomplete_fix_withholding_reaches_hosted_gate_without_allowing_local_repair
+    with_fixture do |repo, task, ctx, cfg|
+      test_case = self
+      head = Hive::Stages::Review.git_head(repo)
+      local = lambda do |no_repair:, **|
+        test_case.assert no_repair
+        test_case.result(:green)
+      end
+      remote = lambda do |publication_withheld:, publication_base_head:, **|
+        test_case.assert_equal "fix_guardrail_receipt_required", publication_withheld
+        test_case.assert_equal head, publication_base_head
+        test_case.result(:skipped, attempts: 0)
+      end
+      with_review_state(admissible_head: head, withheld_reason: "fix_guardrail_receipt_required", review_ci_evidence: {}) do
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, local) do
+          with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
+            assert_nil Hive::Stages::Review.run_ci_gates(task, cfg, ctx,
+              started_at: Time.now, max_wall_clock_sec: 60, pass: 1)
+          end
+        end
+        refute Hive::Stages::Review.ci_gate_proven?("hosted_ci", head)
+        assert_equal "fix_guardrail_receipt_required", Hive::Stages::Review.instance_variable_get(:@withheld_reason)
+        refute File.exist?(File.join(task.folder, "reviews", "fix-success-01.md"))
+      end
+    end
+  end
+
+  def test_publication_retries_the_same_head_after_withholding_is_cleared
+    with_fixture do |repo, task, ctx, cfg|
+      head = Hive::Stages::Review.git_head(repo)
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      calls = []
+      publisher_class = Struct.new(:evidence, :calls) do
+        def publish!(expected_head:, withheld:)
+          calls << [ expected_head, withheld ]
+          evidence["publication"] = withheld ? "unpublished" : "published"
+          evidence["failure_reason"] = withheld
+        end
+      end
+      factory = ->(**) { publisher_class.new({}, calls) }
+      with_review_state(admissible_head: head, withheld_reason: "guardrail_approval_required",
+        review_publisher: nil, publication_attempt_head: nil, publication_attempt_withheld: nil) do
+        with_replaced_singleton_method(Hive::Stages::Review::Publication, :new, factory) do
+          assert_nil Hive::Stages::Review.publish_review_head(task: task, cfg: cfg, ctx: ctx)
+          Hive::Stages::Review.instance_variable_set(:@withheld_reason, nil)
+          assert_nil Hive::Stages::Review.publish_review_head(task: task, cfg: cfg, ctx: ctx)
+          assert_nil Hive::Stages::Review.publish_review_head(task: task, cfg: cfg, ctx: ctx)
+          assert_equal [ [ head, "guardrail_approval_required" ], [ head, nil ] ], calls
+        end
       end
     end
   end
@@ -305,6 +398,7 @@ class ReviewCiGatesTest < Minitest::Test
         end
         assert_equal :review_waiting, terminal[:status]
         assert_equal "combined", Hive::Markers.current(task.state_file).attrs["gate"]
+        assert_equal "guardrail_approval_required", Hive::Stages::Review.instance_variable_get(:@withheld_reason)
       end
     end
   end

@@ -142,6 +142,13 @@ wait for an operator retry instead of retrying hourly. Only this Codex sentence
 is matched; other providers' "unknown model" errors still take their
 generic error path (`provider_error`/`exit_code`) and the normal backoff.
 
+## Review recovery publication proof (2026-11-01)
+
+Focused tests cover incomplete-fix withholding through entry CI, approval on an
+unchanged HEAD, per-gate proof after a hosted repair, and publisher reuse after
+conflicting or unobservable publication. These paths have not been exercised
+against a live hosted PR in this fix pass.
+
 ## Review verify-pass follow-ups (2026-10-15)
 
 The final fix pass now gets a verify-only pass (see [[stages/review]]). Open

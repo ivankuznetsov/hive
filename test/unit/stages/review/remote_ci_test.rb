@@ -631,6 +631,54 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  def test_withholding_skips_hosted_ci_before_any_repair_or_publication
+    with_fixture do |_repo, _head, task, ctx, _gh, _clock, _runner|
+      runner = Object.new
+      runner.define_singleton_method(:command_label) { raise "withheld CI must not start" }
+      result = Hive::Stages::Review::RemoteCi.run!(task: task, cfg: cfg, ctx: ctx,
+        runner: runner, publication_withheld: "fix_guardrail_receipt_required")
+      assert_equal :skipped, result.status
+      assert_equal 0, result.attempts
+    end
+  end
+
+  def test_hosted_runner_cannot_publish_a_withheld_baseline
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, publication_base_head: head,
+        publication_withheld: "fix_guardrail_receipt_required")
+      result = runner.call(max_bytes: 1024, timeout_sec: 3)
+      assert_match(/publication withheld/, result.reason)
+      assert_empty gh.pushes
+      assert_nil runner.settled_head
+    end
+  end
+
+  def test_reused_publisher_does_not_carry_publication_proof_to_a_different_head
+    [ :conflict, :unobservable, :identity_unavailable ].each do |failure|
+      with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", publisher.evidence["publication"]
+        run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "next fix")
+        new_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        gate = Object.new
+        gate.define_singleton_method(:publish_local_branch) do |**|
+          raise(failure == :conflict ? Hive::AgentGitGate::RemoteConflict : Hive::AgentGitGate::PublicationFailed)
+        end
+        gate.define_singleton_method(:observe_remote_branch) { |**| raise Hive::AgentGitGate::CommandFailed }
+        publisher.instance_variable_set(:@gate, gate)
+        gh.metadata = gh.metadata.with(state: "MERGED") if failure == :identity_unavailable
+        publisher.publish!(expected_head: new_head)
+        assert_equal new_head, publisher.evidence["local_head"]
+        assert_equal "unknown", publisher.evidence["publication"], failure.to_s
+        assert_equal "pending", publisher.evidence["verification"]
+        refute_nil publisher.evidence["failure_reason"]
+      end
+    end
+  end
+
   def test_runner_default_clock_and_sleeper_are_callable
     with_fixture do |_repo, _head, task, ctx, gh, _clock, _runner|
       runner = Hive::Stages::Review::RemoteCi::Runner.new(

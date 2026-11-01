@@ -26,6 +26,11 @@ module Hive
         end
 
         def publish!(expected_head:, withheld: nil)
+          if @evidence["local_head"] != expected_head
+            @evidence = { "worktree" => @ctx.worktree_path, "publication" => "unknown",
+                          "verification" => "pending", "pr_url" => @pr_url }
+            @identity = nil
+          end
           @evidence["local_head"] = expected_head
           if withheld
             pointer = Hive::Worktree.read_owned_pointer(@task.folder, project_root: @task.project_root,

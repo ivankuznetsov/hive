@@ -34,7 +34,10 @@ module Hive
         module_function
 
         def run!(task:, cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 publication_base_head: nil, runner: nil, no_repair: false, admit_head: nil, publication_observer: nil)
+                 publication_base_head: nil, publication_withheld: nil, runner: nil, no_repair: false, admit_head: nil, publication_observer: nil)
+          # An incomplete fix still owes its receipt. Entry CI must leave that
+          # recovery to the fix phase rather than publish or repair its HEAD.
+          return skipped_result if publication_withheld
           return skipped_result if cfg.dig("review", "github_checks", "enabled") == false
 
           pr_path = File.join(task.folder, "pr.md")
@@ -45,7 +48,8 @@ module Hive
 
           runner ||= Runner.new(
             task: task, cfg: cfg, ctx: ctx, pr_url: pr_url,
-            publication_base_head: publication_base_head, no_repair: no_repair, admit_head: admit_head, publication_observer: publication_observer
+            publication_base_head: publication_base_head, publication_withheld: publication_withheld,
+            no_repair: no_repair, admit_head: admit_head, publication_observer: publication_observer
           )
           result = Hive::Stages::Review::CiFix.run!(
             cfg: cfg,
@@ -97,13 +101,14 @@ module Hive
           attr_reader :guardrail_result, :settled_head
 
           def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh,
-                         publication_base_head: nil, no_repair: false, admit_head: nil, publication_observer: nil,
+                         publication_base_head: nil, publication_withheld: nil, no_repair: false, admit_head: nil, publication_observer: nil,
                          clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                          sleeper: ->(seconds) { sleep(seconds) },
                          poll_interval_sec: POLL_INTERVAL_SEC,
                          quiet_settlement_sec: QUIET_SETTLEMENT_SEC,
                          no_checks_grace_sec: NO_CHECKS_GRACE_SEC)
             @publication_observer = publication_observer
+            @publication_withheld = publication_withheld
             @admit_head = admit_head
             @no_repair = no_repair
             @task = task
@@ -169,6 +174,7 @@ module Hive
           end
 
           def guard_publication!(local_head)
+            raise Hive::GhError, "review publication withheld: #{@publication_withheld}" if @publication_withheld
             return unless @published_head && @published_head != local_head
 
             guardrail = Hive::Stages::Review::FixGuardrail.run!(

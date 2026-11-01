@@ -140,6 +140,7 @@ module Hive
         @publication_context = nil
         @review_publisher = nil
         @publication_attempt_head = nil
+        @publication_attempt_withheld = nil
         @reviewed_head = nil
         @review_ci_evidence = {}
         result = run_review_body!(task, cfg)
@@ -284,7 +285,7 @@ module Hive
         # deliberately skip that gate, so leave this nil and require an
         # exact-head gate at the all-clean boundary. Review-only ad-hoc tasks
         # stay non-mutating and retain the historical CI skip contract.
-        ci_validated_head = if marker.name == :review_waiting && adhoc_fix_enabled?(cfg, task)
+        ci_validated_head = if @withheld_reason || (marker.name == :review_waiting && adhoc_fix_enabled?(cfg, task))
           nil
         else
           git_head(worktree_path)
@@ -1012,9 +1013,10 @@ module Hive
         head = git_head(ctx.worktree_path)
         withheld = @withheld_reason
         withheld ||= "unapproved_head_movement" if @admissible_head != head
-        if @publication_attempt_head != head || !@review_publisher
+        if @publication_attempt_head != head || @publication_attempt_withheld != withheld || !@review_publisher
           @review_publisher = Publication.new(task: task, cfg: cfg, ctx: ctx, pr_url: url)
           @publication_attempt_head = head
+          @publication_attempt_withheld = withheld
           @review_publisher.publish!(expected_head: head, withheld: withheld)
         end
         evidence = @review_publisher.evidence
@@ -2286,7 +2288,8 @@ module Hive
       # again before a reviewer-clean head may complete. The local project
       # command remains optional; the hosted gate is independently enabled
       # whenever the task owns a GitHub PR.
-      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:, no_repair: false)
+      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:, no_repair: false, only_missing: false)
+        no_repair ||= !!@withheld_reason
         before_head = git_head(ctx.worktree_path)
         gates = [
           [ "local", lambda {
@@ -2302,9 +2305,11 @@ module Hive
               started_at: started_at,
               max_wall_clock_sec: max_wall_clock_sec,
               publication_base_head: before_head, no_repair: no_repair,
+              publication_withheld: @withheld_reason,
               publication_observer: ->(publisher) {
                 @review_publisher = publisher
                 @publication_attempt_head = publisher.evidence["local_head"]
+                @publication_attempt_withheld = nil
               },
               admit_head: ->(head) {
                 write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
@@ -2316,6 +2321,9 @@ module Hive
         ]
 
         gates.each do |gate, run_gate|
+          evidence_key = gate == "local" ? "local_ci" : "hosted_ci"
+          next if only_missing && ci_gate_proven?(evidence_key, before_head)
+
           result = run_gate.call
           @review_ci_evidence ||= {}
           @review_ci_evidence[gate == "local" ? "local_ci" : "hosted_ci"] = case result.status
@@ -2326,6 +2334,7 @@ module Hive
           end
           current_head = git_head(ctx.worktree_path)
           @review_ci_evidence[gate == "local" ? "local_ci_head" : "hosted_ci_head"] = current_head
+          @review_ci_evidence[evidence_key] = "pending" if gate == "github" && @withheld_reason
           if current_head != before_head
             return review_head_moved(task, pass) if no_repair
             guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: ctx,
@@ -2352,18 +2361,36 @@ module Hive
         end
 
         after_head = git_head(ctx.worktree_path)
-        return nil if after_head == before_head
+        return review_head_moved(task, pass) if no_repair && after_head != before_head
 
-        guardrail = Hive::Stages::Review::FixGuardrail.run!(
-          cfg: cfg, ctx: ctx,
-          base_sha: before_head, head_sha: after_head
-        )
-        emit_guardrail_waivers(task, pass, guardrail.waived_matches)
-        return nil unless guardrail.status == :tripped
+        if after_head != before_head
+          guardrail = Hive::Stages::Review::FixGuardrail.run!(
+            cfg: cfg, ctx: ctx,
+            base_sha: before_head, head_sha: after_head
+          )
+          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
+          if guardrail.status == :tripped
+            @withheld_reason = "guardrail_approval_required"
+            return ci_guardrail_terminal_result(
+              task, guardrail, ctx: ctx, gate: "combined", pass: pass
+            )
+          end
+        end
 
-        ci_guardrail_terminal_result(
-          task, guardrail, ctx: ctx, gate: "combined", pass: pass
+        # A later gate can repair the head already checked by an earlier
+        # gate. Complete its missing proof without dispatching another fixer.
+        return nil if @withheld_reason || %w[local_ci hosted_ci].all? { |key| ci_gate_proven?(key, after_head) }
+
+        run_ci_gates(
+          task, cfg, ctx, started_at: started_at,
+          max_wall_clock_sec: max_wall_clock_sec, pass: pass,
+          no_repair: true, only_missing: true
         )
+      end
+
+      def ci_gate_proven?(key, head)
+        evidence = @review_ci_evidence || {}
+        %w[passed skipped].include?(evidence[key]) && evidence["#{key}_head"] == head
       end
 
       def ci_terminal_result(task, ci_result, gate:, pass:, ctx:)

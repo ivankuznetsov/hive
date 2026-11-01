@@ -59,6 +59,9 @@ marker is not evidence that its agent failed to produce one.
 ## Review publication evidence
 
 Review publication uses the safe Agent Git Gate independently from hosted CI.
+Evidence belongs to the attempted HEAD: a changed-HEAD attempt clears prior
+publication and identity evidence even when the new attempt fails. Clearing
+guardrail withholding invalidates the cached attempt at the same HEAD.
 The owned path/branch and open, same-repository PR identity must agree. Only an
 ahead-only branch is publishable; divergence requires operator reconciliation.
 A gate receipt proves the exact branch ref reached the requested head. A failed

@@ -608,6 +608,12 @@ error/default branches such as invalid Screenote JSON, default Net::HTTP
 transport, manifest upload exceptions, missing media directories, screenote
 config type errors, and dry-run digest completion failures.
 
+Runtime contention coverage includes the default monotonic clock and sleep
+callbacks, wrapped SQLite busy errors during receipt pruning, and preservation
+of unrelated connection errors after disconnect. These paths belong to the
+default unit suite because the real-lock integration proof runs outside the
+coverage shards.
+
 Coverage-included tests that only need a generic stdout/stderr subprocess should avoid `RbConfig.ruby` children unless they are explicitly testing Ruby coverage propagation. Those nested Ruby processes inherit the coverage `RUBYOPT`, which can make startup latency part of otherwise unrelated timeout assertions; use a tiny executable fixture script for generic capture/timeout seams.
 
 Hosted coverage collectors load sources lazily through their assigned tests.

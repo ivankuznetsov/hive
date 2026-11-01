@@ -1869,3 +1869,17 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+
+## Historical status lock holder remains unknown (2026-10-30)
+
+The original reported status crash has no retained lock-holder or duration
+capture. A separate SQLite writer reproduces the raw Sequel/SQLite busy escape
+in the prior implementation; it does not establish that historical cause.
+The runtime-contention CI gate now proves bounded default status, retained
+15-second ordinary registration, transient release beyond five seconds, and
+conservative cleanup/reconciliation against isolated real databases. Historical
+lock attribution remains unverified and is not a prerequisite for this policy.
+Transient busy errors during table-presence probes are covered at startup and
+quiescence read boundaries, plus a real exclusive-lock catalog-query test;
+these establish error propagation, not the original lock holder's identity.

@@ -102,7 +102,7 @@ module Hive
           return nil if request_id.empty?
           tagged = request_id.start_with?("command-dispatch:v1:")
           row = repository.respond_to?(:database) && repository.database.read do |db|
-            unless db.table_exists?(:command_dispatch_contexts)
+            unless RuntimeControlPlane::SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
               raise RepositoryError, "tagged command dispatch context schema is unavailable" if tagged
               next nil
             end

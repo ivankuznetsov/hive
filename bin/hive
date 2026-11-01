@@ -28,9 +28,10 @@ require "hive"
 require "hive/runtime_control_plane/activation_gate"
 require "hive/runtime_control_plane/command_registration"
 require "hive/runtime_control_plane/operational_inspection"
+require "hive/cli_json_options"
 
 runtime_startup_error = lambda do |e|
-  if ARGV.include?("--json")
+  if Hive::CliJsonOptions.requested?(ARGV)
     require "json"
     require "hive/schemas"
     puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
@@ -42,9 +43,38 @@ runtime_startup_error = lambda do |e|
       }
     ))
   end
+  if e.is_a?(Hive::RuntimeControlPlane::Busy)
+    warn "runtime database busy, retry"
+    exit e.exit_code
+  end
   warn "hive: #{e.message}"
   warn "hive: next action: #{e.action}" if e.action
   exit e.exit_code
+end
+
+default_running_status = Hive::RuntimeControlPlane::ActivationGate.default_status_route?(ARGV)
+Hive::RuntimeControlPlane::ContentionBudget.start! if default_running_status
+
+at_exit do
+  begin
+    Hive::RuntimeControlPlane::CommandRegistration.current&.finish!
+  rescue Hive::RuntimeControlPlane::Error, Sequel::Error, SQLite3::Exception
+    nil
+  ensure
+    Hive::RuntimeControlPlane::OperationalInspection.clear!
+    Hive::RuntimeControlPlane::ContentionBudget.clear!
+  end
+end
+
+runtime_busy = lambda do |error|
+  if default_running_status
+    require "hive/commands/status"
+    Hive::Commands::Status.new(
+      json: Hive::CliJsonOptions.requested?(ARGV), runtime_unavailable: true
+    ).call
+    exit 0
+  end
+  runtime_startup_error.call(error)
 end
 
 inherited_runtime_reservation = ENV.key?(
@@ -54,6 +84,8 @@ operational_inspection = false
 
 begin
   Hive::RuntimeControlPlane::ActivationGate.check!(argv: ARGV)
+rescue Hive::RuntimeControlPlane::Busy => e
+  runtime_busy.call(e)
 rescue Hive::RuntimeControlPlane::Error => e
   operational_inspection = Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
     error: e, argv: ARGV, state_home: Hive::Paths.state_home,
@@ -65,6 +97,8 @@ end
 unless operational_inspection
   begin
     Hive::RuntimeControlPlane::CommandRegistration.start!(argv: ARGV)
+  rescue Hive::RuntimeControlPlane::Busy => e
+    runtime_busy.call(e)
   rescue Hive::RuntimeControlPlane::Error => e
     operational_inspection =
       Hive::RuntimeControlPlane::CommandRegistration.fallback_safe_after_failure? &&
@@ -73,16 +107,6 @@ unless operational_inspection
         inherited_reservation: inherited_runtime_reservation
       )
     runtime_startup_error.call(e) unless operational_inspection
-  end
-end
-
-at_exit do
-  begin
-    Hive::RuntimeControlPlane::CommandRegistration.current&.finish!
-  rescue Hive::RuntimeControlPlane::Error, Sequel::Error
-    nil
-  ensure
-    Hive::RuntimeControlPlane::OperationalInspection.clear!
   end
 end
 

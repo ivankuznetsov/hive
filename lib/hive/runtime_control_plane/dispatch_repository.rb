@@ -186,7 +186,7 @@ module Hive
 
       def command_context(request_id)
         database.read do |db|
-          next nil unless db.table_exists?(:command_dispatch_contexts)
+          next nil unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
           row = db[:command_dispatch_contexts][request_id: request_id.to_s]
           row && row.transform_keys(&:to_s)
         end
@@ -538,8 +538,8 @@ module Hive
       private
 
       def close_acknowledged_command_pins!(db, request_ids, now:)
-        return unless db.table_exists?(:command_dispatch_contexts) &&
-          db.table_exists?(:command_receipt_pins)
+        return unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts) &&
+          SQLiteSupport.table_exists?(db, :command_receipt_pins)
 
         db[:command_dispatch_contexts].where(request_id: request_ids).all.each do |context|
           db[:command_receipt_pins].where(
@@ -563,7 +563,7 @@ module Hive
           ) if tagged
           return
         end
-        unless db.table_exists?(:command_dispatch_contexts)
+        unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
           raise Hive::ConfigError,
                 "command dispatch context requires the installed command receipt schema"
         end
@@ -643,7 +643,7 @@ module Hive
 
       def rebind_existing_command_context?(request_id, context)
         database.transaction do |db|
-          existing = if db.table_exists?(:command_dispatch_contexts)
+          existing = if SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
             db[:command_dispatch_contexts][request_id: request_id.to_s]
           end
           next existing.nil? if context.nil?

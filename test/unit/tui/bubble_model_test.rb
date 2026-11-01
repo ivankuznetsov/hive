@@ -770,8 +770,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
       assert output.lines.any? { |line| line.start_with?("╭") || line.start_with?("+") },
              "rendered detail should include a bordered panel"
       assert_includes output, "Why:"
-      assert_includes output, "Log · last 7 of 8 lines"
-      assert_includes output, "line-2"
+      assert_includes output, "Log · last 6 of 8 lines"
+      assert_includes output, "Publication evidence unavailable (legacy marker)."
+      assert_includes output, "line-3"
       assert_includes output, "line-8"
       assert_includes output, artifact
       assert_includes output, "[Enter] Recover"
@@ -787,7 +788,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       reason_idx = lines.find_index { |line| line.include?("Why:") }
       action_idx = lines.find_index { |line| line.include?("[Enter] Recover") }
       artifact_idx = lines.find_index { |line| line.include?(artifact) }
-      log_idx = lines.find_index { |line| line.include?("Log · last 7 of 8 lines") }
+      log_idx = lines.find_index { |line| line.include?("Log · last 6 of 8 lines") }
 
       assert_operator header_idx, :<, reason_idx, "header must come before the reason summary"
       assert_operator reason_idx, :<, action_idx, "reason summary must come before actions"

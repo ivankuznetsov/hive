@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "hive/review_publication_recovery"
+require "hive/operational_action"
 require "time"
 require "hive/attempts/repository"
 require "hive/markers"
@@ -22,7 +23,8 @@ module Hive
     # Composes one exact, already-resolved task into the normalized workspace
     # document used by Rails HTML and JSON. Every source is isolated behind a
     # panel boundary; the builder never enters fleet discovery or a remote
-    # transport and never exposes an executable action token or command.
+    # transport. Named review-publication fields intentionally retain scoped
+    # operator commands; ordinary workspace text keeps its redaction policy.
     class Builder
       DependencyTask = Data.define(:folder, :project_root, :slug)
 
@@ -770,7 +772,7 @@ module Hive
           @task.operational_action
         elsif task_value("slug") && task_value("action")
           Hive::OperationalAction.descriptor(project: @project,
-            row: %w[slug action marker attrs folder workflow stage mtime observation_mtime condition_task_generation commit_generation current_attempt held blocked].to_h { |key| [ key, task_value(key) ] })
+            row: %w[slug action marker attrs folder state_file workflow stage mtime observation_mtime state_file_mtime task_generation attempt_id condition_task_generation commit_generation current_attempt held blocked].to_h { |key| [ key, task_value(key) ] })
         end
         Hive::ReviewPublicationRecovery.project(task_value("attrs") || {}, action: action, marker: task_value("marker"))
       end

@@ -165,7 +165,7 @@ module Hive
         end
       end
       result["recovery_guidance"] = result["retry_command"] ? "Use the current observation-bound workflow.retry action." :
-        "Routine retry is ineligible. Use the existing explicit operator/coordinator recovery path after remediation."
+        "Routine retry is ineligible. After remediation, select this task in hive tui and press r to submit an explicit review retry through the existing recovery coordinator."
       if evidence["verification"] == "verified"
         %w[push_command verification_recipe retry_command recovery_guidance].each { |key| result.delete(key) }
       end

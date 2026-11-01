@@ -925,6 +925,8 @@ Git-history scans. Current routine retry commands come only from the canonical
 action producer. The durable refresh recipe refuses absent/ineligible retry
 recommendations and cannot advance another stage. Findings-only final stales
 require locally committed fixes and explicit operator/coordinator recovery.
+After remediation, select a final-stale task in `hive tui` and press `r` to
+submit that explicit retry. Its routine `workflow.retry` action remains absent.
 
 Draft guidance remains visible after successful review even without a recovery
 request. Normal finalize owns secret scanning and the publication activity record.

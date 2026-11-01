@@ -32,6 +32,20 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     def active_attempts = raise("workspace attempted a global attempt query")
   end
 
+  def test_review_retry_command_preserves_canonical_attempt_and_generation_precedence
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes.merge!("marker" => "review_error", "action" => "recover_review", "folder" => native.folder,
+        "state_file" => File.join(native.folder, "task.md"), "stage" => "6-review",
+        "mtime" => "2026-11-01T12:00:00Z", "task_generation" => 17, "condition_task_generation" => 3,
+        "attempt_id" => "explicit-attempt", "current_attempt" => "fallback-attempt",
+        "attrs" => Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending"))
+      canonical = Hive::OperationalAction.descriptor(project: "demo", row: attributes)
+      snapshot = builder(native, task, questions: 0).call
+      assert_includes snapshot.dig("operator", "review_publication", "retry_command"), canonical.fetch("observation_token")
+    end
+  end
+
   def test_review_recovery_preserves_trusted_paths_commands_and_draft_completion_guidance
     with_fixture do |native, task|
       evidence = { "publication" => "published", "verification" => "verified",

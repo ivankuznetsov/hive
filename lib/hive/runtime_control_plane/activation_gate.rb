@@ -52,7 +52,15 @@ module Hive
           elsif word.match?(/\A--(?:project|stage)=.+\z/)
             # Existing default-status options.
           elsif names.any? { |name| word.match?(/\A--(?:(?:no-|skip-)?#{name}|#{name}=(?:true|false|t|f))\z/i) }
-            index += 1 if switches[index + 1]&.match?(/\A(?:true|false|t|f)\z/i)
+            if switches[index + 1]&.match?(/\A(?:true|false|t|f)\z/i)
+              # Thor reads `--no-x VALUE` / `--skip-x VALUE` as an explicit
+              # value for x (`--no-operational true` enables operational), so
+              # a negated switch with a separate value is not provably default
+              # status; take the full route rather than the fallback.
+              return false if word.match?(/\A--(?:no|skip)-/i)
+
+              index += 1
+            end
           else
             return false
           end

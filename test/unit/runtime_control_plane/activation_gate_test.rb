@@ -27,7 +27,9 @@ class RuntimeControlPlaneActivationGateTest < Minitest::Test
      %w[status --skip-write --diagnose=task], %w[status --operational],
      %w[status --internal_task_graph=true], %w[status --full], %w[status --archive],
      %w[status --write], %w[status --help], %w[status --json=bogus],
-     %w[status -- extra], %w[status --project], %w[status --write=invalid], [] ].each do |argv|
+     %w[status -- extra], %w[status --project], %w[status --write=invalid],
+     %w[status --no-operational true --json], %w[status --skip-operational true],
+     %w[status --no-write true], %w[status --skip-write false], [] ].each do |argv|
       refute gate.default_status_route?(argv), argv.inspect
     end
   end

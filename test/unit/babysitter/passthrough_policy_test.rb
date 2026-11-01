@@ -50,6 +50,7 @@ class BabysitterPassthroughPolicyTest < Minitest::Test
       %w[status --short],
       %w[log -p -1],
       %w[log -- --filters],
+      %w[rev-list --filter blob:none --objects HEAD],
       %w[remote -v]
     ]
     denied = [

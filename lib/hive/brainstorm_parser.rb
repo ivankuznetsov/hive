@@ -235,7 +235,12 @@ module Hive
       return line unless line.start_with?(ANSWER_ESCAPE_PREFIX)
 
       encoded = line.delete_prefix(ANSWER_ESCAPE_PREFIX)
-      Base64.urlsafe_decode64(encoded)
+      # Base64 decodes to binary bytes. Answers are UTF-8 text, and binary
+      # non-ASCII bytes made every later JSON render of the task fail with
+      # JSON::GeneratorError (an answer quoting `<!--` next to an ellipsis
+      # locked `hive answer` out of the task).
+      decoded = Base64.urlsafe_decode64(encoded).force_encoding(Encoding::UTF_8)
+      decoded.valid_encoding? ? decoded : line
     rescue ArgumentError
       line
     end

@@ -264,6 +264,29 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal invalid, question.answer
   end
 
+  def test_encoded_non_ascii_answer_restores_as_utf8
+    text = "Quote <!-- BEGIN LLM WIKI \u2026 --> verbatim, caf\u00e9"
+    line = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{Base64.urlsafe_encode64(text, padding: false)}"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{line}\n"
+    ).first
+
+    assert_equal text, question.answer
+    assert_equal Encoding::UTF_8, question.answer.encoding
+    assert JSON.generate(answer: question.answer)
+  end
+
+  def test_encoded_answer_with_invalid_utf8_falls_back_literally
+    line = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{Base64.urlsafe_encode64("\xFF\xFE".b, padding: false)}"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{line}\n"
+    ).first
+
+    assert_equal line, question.answer
+  end
+
   def test_legacy_answer_backslashes_and_escaped_text_are_preserved_verbatim
     answer = "\\\\server\\share\n\\&lt;!-- COMPLETE -->\n\\### Q9. literal heading\n" \
              "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}bGVnYWN5"

@@ -91,6 +91,7 @@ module Hive
       SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
       SHOW_SIGNATURE_SUBCOMMANDS = %w[log show rev-list].freeze
       REMERGE_DIFF_FORMATS = %w[remerge r].freeze
+      CAT_FILE_FILTER_TOKENS = %w[--fi --fil --filt --filte --filter].freeze
 
       def command_option_consumes_next?(subcommand, arg)
         # Only `git grep`'s value-taking options (`-e PATTERN`, `--file FILE`, ...) consume the
@@ -148,6 +149,10 @@ module Hive
         # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
         # hardening never sees, since cat-file stays a plain allowlisted passthrough.
         return true if arg == "--filters"
+        # Fixed bare-token boundary, independent of Git version: newer Git makes
+        # four spellings ambiguous and --filter an object-filter option. Deliberately
+        # over-block those errors/reads; glued --filter=<spec> remains outside this set.
+        return true if subcommand == "cat-file" && CAT_FILE_FILTER_TOKENS.include?(arg)
         # `--submodule=diff` expands nested diffs inside submodule repositories; the top-level
         # `--no-ext-diff --no-textconv` flags do not harden those nested git invocations.
         return true if submodule_diff_option?(arg, next_arg)

@@ -1,18 +1,61 @@
 require "test_helper"
+require "json"
 require "hive/babysitter/git_policy"
 require "hive/babysitter/gh_policy"
 require "hive/babysitter/passthrough_runner"
 
 class BabysitterPassthroughPolicyTest < Minitest::Test
+  GIT_OPTION_SPELLINGS = JSON.parse(File.read(
+    File.expand_path("../../fixtures/babysitter/git_option_spellings.v1.json", __dir__)
+  )).freeze
+
+  def test_git_policy_matches_the_version_independent_option_contract
+    assert_equal 1, GIT_OPTION_SPELLINGS.fetch("schema_version")
+    GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+      decision = Hive::Babysitter::GitPolicy.classify(entry.fetch("argv"), environment: {})
+      assert_equal entry.fetch("hive_policy") == "allow", decision.allowed?, entry.fetch("id")
+    end
+  end
+
+  def test_git_policy_repeated_classification_preserves_mutable_and_frozen_inputs
+    GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+      [ false, true ].each do |frozen|
+        argv = entry.fetch("argv").map(&:dup)
+        environment = { "GIT_CONFIG_COUNT" => "0", "GIT_EXTERNAL_DIFF" => "" }
+        original_argv = Marshal.load(Marshal.dump(argv))
+        original_environment = Marshal.load(Marshal.dump(environment))
+        if frozen
+          argv.each(&:freeze)
+          argv.freeze
+          environment.each do |key, value|
+            key.freeze
+            value.freeze
+          end
+          environment.freeze
+        end
+
+        first = Hive::Babysitter::GitPolicy.classify(argv, environment: environment)
+        second = Hive::Babysitter::GitPolicy.classify(argv, environment: environment)
+
+        assert_equal first, second, entry.fetch("id")
+        assert_equal original_argv, argv
+        assert_equal original_environment, environment
+        assert_equal [ :allowed?, :rest ], first.members
+      end
+    end
+  end
+
   def test_git_policy_classifies_reads_without_side_effects
     allowed = [
       %w[status --short],
       %w[log -p -1],
+      %w[log -- --filters],
       %w[remote -v]
     ]
     denied = [
       %w[push origin main],
       %w[log --output=/tmp/leak],
+      %w[log --pretty -- --filters],
       %w[-c core.pager=cat status]
     ]
 

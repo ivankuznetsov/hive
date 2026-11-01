@@ -318,6 +318,7 @@ class OperationalStatusTest < Minitest::Test
       [ "missing-agent-pid", true, 4242, true, nil, 4242, "task runner holds the live lock (pid 4242)" ],
       [ "missing-both-pids", true, nil, true, nil, nil, "task has a verified live runner" ],
       [ "lock-flag-only", true, nil, false, 777, nil, "task has a verified live runner" ],
+      # Synthetic projector invariant: the producer retains only a live lock holder.
       [ "agent-flag-only", false, 4242, true, nil, nil, "task has a verified live runner" ]
     ]
     cases.each do |slug, lock_live, lock_pid, agent_live, agent_pid, expected_pid, message|
@@ -334,6 +335,7 @@ class OperationalStatusTest < Minitest::Test
   end
 
   def test_unverified_pid_flags_do_not_publish_or_narrate_historical_pids
+    # Synthetic projector invariant: the producer retains only a live lock holder.
     [ false, nil, :missing ].each do |flag|
       row = task(action: "agent_running", slug: "unverified-#{flag}", task_lock_pid: 4242).merge(
         "claude_pid" => 777, "live_task_lock" => flag, "claude_pid_alive" => flag,
@@ -2070,7 +2072,6 @@ class OperationalStatusTest < Minitest::Test
     live_reason = projected.fetch("reasons").find { |entry| entry.fetch("source") == "liveness" }
     refute_nil live_reason, label
     assert_equal "live_runner", live_reason.fetch("code"), label
-    assert_equal "liveness", live_reason.fetch("source"), label
     assert_equal message, live_reason.fetch("message"), label
     refute_includes projected.fetch("reasons").map { |entry| entry.fetch("code") }, "stale_runner", label
     projected

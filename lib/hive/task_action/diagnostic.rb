@@ -71,6 +71,7 @@ module Hive
         synthesized = synthetic_stale_agent_diagnostic
         return synthesized if synthesized
         return nil unless diagnostic_action?
+        return manual_fix if marker.name == :review_stale && marker.attrs["reason"] == "final_fix_unverified"
 
         artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
         primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs)

@@ -7,6 +7,195 @@
     { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
+    "ReviewPublication": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "worktree": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "pr_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "pr_number": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "pr_state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "is_draft": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "local_head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "remote_head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "publication": {
+          "enum": [
+            "unpublished",
+            "published",
+            "unknown",
+            "not_applicable"
+          ]
+        },
+        "verification": {
+          "enum": [
+            "pending",
+            "failed",
+            "verified"
+          ]
+        },
+        "unpushed_shas": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+          }
+        },
+        "candidate_shas": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+          }
+        },
+        "classification": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "push_command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "verification_recipe": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "observed_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "ready_command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "origin_reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "reviewer_files": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 100,
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        },
+        "remediation": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "recovery_guidance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "readiness_guidance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        },
+        "retry_command": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 49152
+        }
+      }
+    },
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -311,6 +500,7 @@
         "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
+        "review_publication": { "$ref": "#/$defs/ReviewPublication" },
         "identity": {
           "type": "object",
           "additionalProperties": false,

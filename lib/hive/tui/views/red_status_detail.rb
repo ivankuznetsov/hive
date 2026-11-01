@@ -1,4 +1,6 @@
 require "lipgloss"
+require "hive/review_publication_recovery"
+require "hive/operational_action"
 require "hive/tui/model"
 require "hive/tui/red_status_detail_keys"
 require "hive/tui/red_status_detail_layout"
@@ -65,6 +67,18 @@ module Hive
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
+          publication = Hive::ReviewPublicationRecovery.project(row.attrs || {}, marker: row.marker,
+            action: Hive::OperationalAction.descriptor(project: row.project_name,
+              row: row.to_h.transform_keys(&:to_s).merge("action" => row.action_key.to_s)))
+          publication_lines = Hive::ReviewPublicationRecovery.lines(publication).flat_map { |line| wrapped(safe(line), inner_width) }
+          if publication && publication["failure_reason"] == "legacy_publication_evidence_unavailable"
+            body_lines.concat(wrapped("Publication evidence unavailable (legacy marker).", inner_width))
+          elsif body_lines.size + publication_lines.size + 5 <= inner_body_height
+            body_lines.concat(publication_lines)
+          elsif publication
+            body_lines.concat(wrapped("Publication: #{publication['publication']}; verification: #{publication['verification']}", inner_width))
+            body_lines.concat(wrapped("Recovery details and exact commands omitted at this screen size; use hive status --operational --json.", inner_width))
+          end
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
           body_lines.concat(action_bar(state.agent_label, inner_width).lines.map(&:chomp))

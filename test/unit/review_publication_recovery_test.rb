@@ -6,6 +6,22 @@ class ReviewPublicationRecoveryTest < Minitest::Test
   include HiveTestHelper
   Recovery = Hive::ReviewPublicationRecovery
 
+  def test_readiness_is_conditional_and_commands_are_not_silently_redacted
+    base = { "publication" => "published", "verification" => "pending", "pr_state" => "OPEN",
+      "is_draft" => true, "ready_command" => "gh pr ready 42" }
+    draft = Recovery.project(Recovery.encode(base))
+    assert_includes draft["readiness_guidance"], "normal finalize"
+    assert_includes draft["readiness_guidance"], "Manual ready requires"
+    [ false, nil ].each do |state|
+      refute Recovery.project(Recovery.encode(base.merge("is_draft" => state))).key?("ready_command")
+    end
+    refute Recovery.project(Recovery.encode(base.merge("pr_state" => "MERGED"))).key?("ready_command")
+    hostile = Recovery.project(Recovery.encode("push_command" => "echo \e[31msecret"))
+    assert_nil hostile["push_command"], "never turn a redacted command into a different executable command"
+    unknown = Recovery.project({}, marker: "review_complete")
+    assert_equal "unknown", unknown["publication"]
+  end
+
   def test_lossless_marker_round_trip_for_commands_and_paths
     with_tmp_dir do |dir|
       path = File.join(dir, "state.md")

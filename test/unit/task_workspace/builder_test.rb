@@ -32,6 +32,23 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     def active_attempts = raise("workspace attempted a global attempt query")
   end
 
+  def test_review_recovery_preserves_trusted_paths_commands_and_draft_completion_guidance
+    with_fixture do |native, task|
+      evidence = { "publication" => "published", "verification" => "verified",
+        "worktree" => "/owned/work tree", "branch" => "task", "is_draft" => true, "pr_state" => "OPEN",
+        "ready_command" => "cd /owned/work\\ tree && gh pr ready 42", "local_head" => "a" * 40 }
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["marker"] = "review_complete"
+      attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence)
+      snapshot = builder(native, task, questions: 0).call
+      projected = snapshot.dig("operator", "review_publication")
+      assert_equal evidence["worktree"], projected["worktree"]
+      assert_equal evidence["ready_command"], projected["ready_command"]
+      assert_includes projected["readiness_guidance"], "successful current secret scan"
+      assert_includes projected["readiness_guidance"], "pr_observed"
+    end
+  end
+
   def test_builds_one_schema_valid_snapshot_and_projects_answer_posture
     with_fixture do |native, task|
       snapshot = builder(native, task, questions: 2).call

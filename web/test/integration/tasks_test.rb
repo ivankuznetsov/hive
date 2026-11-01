@@ -16,6 +16,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     sign_in!
   end
 
+  test "review publication recovery retains usable commands and escapes hostile paths" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), stage_dir(@project, "6-review").join(@slug))
+    path = stage_dir(@project, "6-review").join(@slug, "task.md")
+    path.write("# Review\n")
+    Hive::Markers.set(path, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1, escalations: 0,
+      **Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending",
+        "worktree" => "/owned/a b<script>alert(1)</script>", "branch" => "fix", "is_draft" => true,
+        "pr_state" => "OPEN", "ready_command" => "gh pr ready 42", "local_head" => "a" * 40))
+    refresh_status_feed!
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_includes response.body, "Review publication and verification"
+    assert_includes response.body, "/owned/a b&lt;script&gt;"
+    assert_includes response.body, "Commit fixes locally"
+    assert_includes response.body, "gh pr ready 42"
+    assert_includes response.body, "successful current secret scan"
+    assert_includes response.body, "normal finalize"
+    assert_select "dd script", 0
+  end
+
   test "status grid lists the task" do
     get "/grid"
     assert_response :success

@@ -1,4 +1,6 @@
 require "digest"
+require "hive/operational_action"
+require "hive/review_publication_recovery"
 require "json_schemer"
 require "pathname"
 require "shellwords"
@@ -370,6 +372,15 @@ class Task
     YAML.safe_load(front, permitted_classes: [ Time, Date ])&.dig("original_text").to_s.strip.presence
   rescue StandardError
     nil
+  end
+
+  def operational_action
+    return nil unless project
+    Hive::OperationalAction.descriptor(project: project.name, row: @attributes)
+  end
+
+  def review_publication
+    Hive::ReviewPublicationRecovery.project(self["attrs"] || {}, action: operational_action, marker: self["marker"])
   end
 
   def recovery_action?

@@ -365,7 +365,12 @@ module Hive
           next if rows.empty?
 
           puts label
-          rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
+          rows.first(OPERATIONAL_BAND_LIMIT).each do |row|
+            puts operational_row_line(row)
+            Hive::ReviewPublicationRecovery.lines(row["review_publication"]).each do |line|
+              puts "    #{line.gsub(/[\x00-\x08\x0b-\x1f\x7f]/, '')}"
+            end
+          end
           overflow = rows.size - OPERATIONAL_BAND_LIMIT
           puts "  +#{overflow} more — run `hive tui`" if overflow.positive?
         end

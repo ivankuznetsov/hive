@@ -1061,6 +1061,11 @@ module Hive
           result = stop if stop
         end
         Hive::Markers.set(task.state_file, marker.name, **marker.attrs.merge(Hive::ReviewPublicationRecovery.encode(evidence)))
+        if marker.name == :review_complete && evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
+          guidance = Hive::ReviewPublicationRecovery.project(Hive::ReviewPublicationRecovery.encode(evidence))
+          warn guidance["readiness_guidance"]
+          warn "Conditional manual alternative: #{guidance['ready_command']}" if guidance["ready_command"]
+        end
         result
       end
 

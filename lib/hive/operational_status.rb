@@ -1043,6 +1043,8 @@ module Hive
           "task runner holds the live lock (pid #{row.fetch('task_lock_pid')})"
         elsif row["claude_pid_alive"] == true && row["claude_pid"]
           "agent process #{row.fetch('claude_pid')} is alive"
+        elsif row["live_task_lock"] == true || row["claude_pid_alive"] == true
+          "task has a verified live runner"
         else
           "task is running"
         end

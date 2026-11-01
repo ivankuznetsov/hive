@@ -316,9 +316,9 @@ class OperationalStatusTest < Minitest::Test
       [ "both-live", true, 4242, true, 777, 4242, "task runner holds the live lock (pid 4242)" ],
       [ "missing-lock-pid", true, nil, true, 777, 777, "agent process 777 is alive" ],
       [ "missing-agent-pid", true, 4242, true, nil, 4242, "task runner holds the live lock (pid 4242)" ],
-      [ "missing-both-pids", true, nil, true, nil, nil, "task is running" ],
-      [ "lock-flag-only", true, nil, false, 777, nil, "task is running" ],
-      [ "agent-flag-only", false, 4242, true, nil, nil, "task is running" ]
+      [ "missing-both-pids", true, nil, true, nil, nil, "task has a verified live runner" ],
+      [ "lock-flag-only", true, nil, false, 777, nil, "task has a verified live runner" ],
+      [ "agent-flag-only", false, 4242, true, nil, nil, "task has a verified live runner" ]
     ]
     cases.each do |slug, lock_live, lock_pid, agent_live, agent_pid, expected_pid, message|
       row = task(

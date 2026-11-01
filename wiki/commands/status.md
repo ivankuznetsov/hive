@@ -230,7 +230,9 @@ existence only, so a reused PID can read as live. Without either true flag,
 a dead recorded PID requests stale-runner repair only when the action is
 `agent_running` or the marker is `agent_working` or `review_working`. An
 `agent_running` action without stale evidence can still classify as running;
-when no live PID is available, its generic reason is "task is running".
+without either true liveness flag, its generic reason is "task is running".
+A true liveness flag without an available verified PID instead reports
+"task has a verified live runner".
 Material scheduler reasons remain ahead of the live explanation.
 `tasks[].liveness.pid` selects the available
 task-lock PID only when `live_task_lock == true`, otherwise the available agent

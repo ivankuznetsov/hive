@@ -66,4 +66,18 @@ class DependencyEditTest < Minitest::Test
     assert_equal ["base"], Hive::DependencyEdit.request(references: ["base", "base"], clear: false)
     assert_nil Hive::DependencyEdit.request(references: [], clear: true)
   end
+
+  def test_request_rejects_missing_or_conflicting_edit_options
+    [ [ [], false ], [ [ "base" ], true ] ].each do |references, clear|
+      error = assert_raises(ArgumentError) { Hive::DependencyEdit.request(references: references, clear: clear) }
+      assert_equal "supply --depends-on (repeatable) or --clear, exclusively", error.message
+    end
+  end
+
+  def test_merge_and_complex_yaml_keys_are_rejected_before_mutation
+    [ "<<: old\n", "? [a, b]\n: old\n", "nested: {<<: old}\n" ].each do |bytes|
+      error = assert_raises(ArgumentError) { Hive::DependencyEdit::Document.new(bytes) }
+      assert_equal "ambiguous YAML mapping key", error.message
+    end
+  end
 end

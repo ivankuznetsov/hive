@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -145,6 +145,12 @@ advisory database flags 2.9.0 for seven 2026 advisories, including template
 regular-expression denial of service and URI host/path normalization flaws.
 
 ## Web app bundle
+
+The web lockfile resolves Nokogiri 1.19.7, rails-html-sanitizer 1.7.2,
+and its required Loofah 2.25.3 dependency. These compatible patch updates
+clear the November 2, 2026 advisory findings without changing direct gem
+constraints or the supported lockfile platforms. CI audits this lockfile
+separately from the root bundle against the current advisory database.
 
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
 execs the Rails app from the managed bundle or a source checkout, and

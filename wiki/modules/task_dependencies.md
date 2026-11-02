@@ -271,8 +271,9 @@ bounded relationship set. See [[modules/task_workspace]].
 
 ## Recovery
 
-Dependency edit preparation uses `DependencyEdit::Document` to validate safe YAML
-and reject duplicate mapping keys and anchors before changing files. It edits
+Dependency edit preparation requires either dependency references or an exclusive
+clear request. `DependencyEdit::Document` validates safe YAML and rejects
+duplicate, merge and complex mapping keys, plus anchors, before changing files. It edits
 only source spans belonging to the dependency entry. Existing-task admission
 overlays retain the task's numeric identity, workflow and proposed destination
 stage, replacing its disk snapshot while checking the complete reachable graph.

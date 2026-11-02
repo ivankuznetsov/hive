@@ -22,5 +22,9 @@ Full-file `cmp` checks pass for canonical and packaged `isolation.sh` and
 with its explicit owning config and parent exclusions disabled; the initial
 invocation inherited Hive's unavailable Rails lint dependency. Both diffs pass
 `git diff --check`. U4's delivery evidence and gaps now record the canonical
-revision and this U3 proof. Hosted Ubuntu/macOS confirmation and upstream
-publication remain pending; the original dirty canonical checkout is untouched.
+revision and this U3 proof. Subsequent Hive hosted confirmation is recorded in
+`20261102T135954Z-bench-hosted-proof-confirmed.md`. Canonical publication is now
+[hive-bench PR #16](https://github.com/ivankuznetsov/hive-bench/pull/16), at
+`c1e5696944f590ea58985e174b8aff3409191f24`, including this CPU correction.
+Canonical hosted checks and merge remain pending; the original dirty canonical
+checkout is untouched.

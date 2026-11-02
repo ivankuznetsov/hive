@@ -16,9 +16,16 @@ Outside that boundary, the baselines already differ in 37 harness files,
 including `hive_driver.rb`, `hive_stages.sh`, campaign/judge code and Slate
 comments. Those differences are retained; this is not a wholesale runtime sync.
 The original canonical checkout contains unrelated uncommitted changes and is
-untouched. Canonical implementation commits live on `fix/profile-credential-isolation`
-in the independent `tmp/bench-credential-canonical` clone within this execution
-worktree. Upstream publication is outside this commit-only execution stage.
+untouched. The credential changes from the original local branch, including
+the CPU proof follow-up, are now published as canonical commit
+[`c1e5696944f590ea58985e174b8aff3409191f24`](https://github.com/ivankuznetsov/hive-bench/commit/c1e5696944f590ea58985e174b8aff3409191f24)
+in [hive-bench PR #16](https://github.com/ivankuznetsov/hive-bench/pull/16), on
+`fix/profile-credential-isolation-delivery`. The branch starts at upstream
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326`, excluding unrelated unpublished
+benchmark-results commits from the original clone. Both delivered isolation
+files still match Hive's packaged copies byte-for-byte. Publication is complete;
+the canonical PR remains open, with its own hosted proof pending in
+[CI run 41463576434](https://github.com/ivankuznetsov/hive-bench/actions/runs/41463576434).
 
 Actual GNU Bash 3.2.57 and 5.3.20 passed locally, together with real Docker
 credential probes. Both hosted `bench credential isolation` lanes passed on
@@ -39,8 +46,9 @@ Canonical follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies the same
 override in `tmp/bench-credential-canonical`. Both local proof gates passed
 under a four-CPU rejection shim with actual Bash 3.2.57/5.3.20 and real Docker,
 with zero skips (canonical 3 tests/40 assertions; Hive 3/55). That simulation
-is separate from the hosted evidence above. Canonical upstream publication
-remains pending.
+is separate from the hosted evidence above. The correction is included in the
+published canonical commit and PR linked above; canonical hosted proof and
+merge remain pending.
 
 ## Task observation boundary (2026-10-02)
 

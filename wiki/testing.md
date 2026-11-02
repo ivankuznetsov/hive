@@ -65,6 +65,12 @@ custody, and the U15 live runner now composes them into the final passing claim.
 The default local test remains credential-free and skipped; only an explicitly
 authorized run on the unchanged exact head can produce authenticated evidence.
 
+The registered-process quiescence integration test uses a ten-second timeout
+so its 15% finalization reserve allows real SQLite checkpoint and proof I/O on
+shared CI runners. Deadline enforcement remains covered by the controlled-clock
+tests in `test/unit/daemon/quiescence_test.rb` and
+`test/unit/daemon/quiescence_failure_paths_test.rb`.
+
 ## Local feedback loop
 
 Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`

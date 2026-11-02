@@ -318,60 +318,48 @@ class HiveCommandsDoctorTest < Minitest::Test
   end
 
   def test_claude_auth_warns_when_api_key_env_is_exported
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      out = StringIO.new
-      environment = ENV.to_h.merge("ANTHROPIC_API_KEY" => "test-key").except("CLAUDE_API_KEY")
-
-      Hive::Commands::Doctor.new(
-        config: base_config, project_root: nil, json: true, output: out, environment: environment
-      ).call
-
-      env = JSON.parse(out.string)
-      assert_equal 0, env.fetch("summary").fetch("legacy_failures"),
-                   "an exported key is a warning, not a failing check"
-      assert_doctor_schema_valid(env)
-      warnings = env.fetch("checks").select { |check| check["status"] == "warning" }
+    %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].each do |key|
+      result = doctor_in_child(environment: { key => "supplied-secret-value" }, json: true)
+      payload = JSON.parse(result.fetch("output"))
+      assert_equal 0, result.fetch("exit_code")
+      assert_equal 0, payload.dig("summary", "legacy_failures")
+      assert_doctor_schema_valid(payload)
+      warnings = payload.fetch("checks").select { |check| check["status"] == "warning" }
       assert_equal 1, warnings.length
-      assert_equal 1, env.fetch("summary").fetch("warnings")
+      assert_equal 1, payload.dig("summary", "warnings")
       warning = warnings.first
       assert_equal "claude/auth", warning.fetch("label")
       assert_equal "billing-auth", warning.fetch("configured_skill")
-      assert_equal "ANTHROPIC_API_KEY", warning.fetch("skill")
-      assert_match(/ANTHROPIC_API_KEY is exported.*Hive unsets it before launching Claude.*subscription/,
-                   warning.fetch("message"))
-      refute(env.fetch("checks").any? { |check| check["label"].to_s.include?("tmux") })
+      assert_equal key, warning.fetch("skill")
+      assert_includes warning.fetch("message"), "#{key} is exported"
+      assert_match(/Hive unsets it before launching Claude.*subscription/, warning.fetch("message"))
+      refute_includes result.fetch("output"), "supplied-secret-value"
+      refute payload.fetch("checks").any? { |check| check["label"].to_s.include?("tmux") }
     end
   end
 
   def test_claude_auth_names_both_exported_keys_in_one_row
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      out = StringIO.new
-      environment = { "ANTHROPIC_API_KEY" => "a", "CLAUDE_API_KEY" => "b", "HOME" => home }
-
-      Hive::Commands::Doctor.new(
-        config: base_config, project_root: nil, output: out, environment: environment
-      ).call
-
-      assert_match(%r{claude/auth.*ANTHROPIC_API_KEY and CLAUDE_API_KEY is exported}, out.string)
-    end
+    result = doctor_in_child(environment: {
+      "ANTHROPIC_API_KEY" => "first-secret-value", "CLAUDE_API_KEY" => "second-secret-value"
+    })
+    assert_equal 0, result.fetch("exit_code")
+    assert_match(%r{claude/auth.*ANTHROPIC_API_KEY and CLAUDE_API_KEY is exported}, result.fetch("output"))
+    refute_includes result.fetch("output"), "first-secret-value"
+    refute_includes result.fetch("output"), "second-secret-value"
+    assert_equal 1, result.fetch("rows").count { |row| row["label"] == "claude/auth" }
   end
 
-  def test_claude_auth_is_silent_without_exported_keys
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      out = StringIO.new
-      environment = ENV.to_h.except("ANTHROPIC_API_KEY").merge("CLAUDE_API_KEY" => "")
-
-      Hive::Commands::Doctor.new(
-        config: base_config, project_root: nil, json: true, output: out, environment: environment
-      ).call
-
-      env = JSON.parse(out.string)
-      assert_doctor_schema_valid(env)
-      refute(env.fetch("checks").any? { |check| check["label"] == "claude/auth" })
-      assert_equal 0, env.fetch("summary").fetch("warnings")
+  def test_claude_auth_is_silent_without_supplied_keys_despite_host_keys
+    [ {}, { "ANTHROPIC_API_KEY" => "", "CLAUDE_API_KEY" => "" } ].each do |environment|
+      result = doctor_in_child(
+        environment: environment, json: true,
+        host_environment: { "ANTHROPIC_API_KEY" => "host-secret", "CLAUDE_API_KEY" => "host-secret" }
+      )
+      assert_equal 0, result.fetch("exit_code")
+      payload = JSON.parse(result.fetch("output"))
+      assert_doctor_schema_valid(payload)
+      refute payload.fetch("checks").any? { |check| check["label"] == "claude/auth" }
+      assert_equal 0, payload.dig("summary", "warnings")
     end
   end
 
@@ -465,7 +453,8 @@ class HiveCommandsDoctorTest < Minitest::Test
 
   # Only this Ruby child inherits the test/coverage runtime. Doctor's QMD probe
   # gets the supplied environment, while host-driven checks see scratch state.
-  def doctor_in_child(project_root: nil, environment: {}, host_environment: {}, json: false)
+  def doctor_in_child(project_root: nil, environment: {}, host_environment: {}, json: false,
+                      simulate_timeout: false)
     parent_environment = ENV.to_h
     with_tmp_dir do |home|
       host = {
@@ -479,23 +468,31 @@ class HiveCommandsDoctorTest < Minitest::Test
         input = JSON.parse(STDIN.read)
         inspector = Object.new
         inspector.define_singleton_method(:inspect) { [] }
-        output = StringIO.new
-        doctor = Hive::Commands::Doctor.new(
-          config: input.fetch("config"), project_root: input["project_root"],
-          environment: input.fetch("environment"), inspector: inspector,
-          mcp_discover: nil, json: input.fetch("json"), output: output
-        )
         before = ENV.to_h
+        output = StringIO.new
+        environment_options = input.key?("environment") ? { environment: input.fetch("environment") } : {}
+        doctor = Hive::Commands::Doctor.new(
+          config: input.fetch("config"), project_root: input["project_root"], inspector: inspector,
+          mcp_discover: nil, json: input.fetch("json"), output: output, **environment_options
+        )
+        if input.fetch("simulate_timeout")
+          Timeout.define_singleton_method(:timeout) do |seconds, &block|
+            raise "unexpected QMD deadline" unless seconds == 15
+
+            raise Timeout::Error, "simulated probe timeout"
+          end
+        end
         exit_code = doctor.call
         puts JSON.generate(
-          exit_code: exit_code, rows: doctor.rows, output: output.string,
+          exit_code: exit_code, rows: doctor.rows, output: output.string, process_path: ENV["PATH"],
           environment_unchanged: before == ENV.to_h
         )
       RUBY
+      input = { config: base_config, project_root: project_root, json: json, simulate_timeout: simulate_timeout }
+      input[:environment] = environment unless environment == :default
       out, err, status = Open3.capture3(
         host, RbConfig.ruby, "-I", File.expand_path("../../../lib", __dir__), "-e", script,
-        stdin_data: JSON.generate(config: base_config, project_root: project_root,
-                                  environment: environment, json: json)
+        stdin_data: JSON.generate(input)
       )
       assert status.success?, "Doctor child failed: #{err}\n#{out}"
       result = JSON.parse(out)
@@ -505,13 +502,42 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def qmd_row(result)
+    row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
+    refute_nil row
+    row
+  end
+
   def assert_qmd_present(result, qmd, version = "qmd 2.1.0")
     assert_equal 0, result.fetch("exit_code"), result.fetch("output")
-    row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
+    row = qmd_row(result)
     assert_equal "dependency", row.fetch("kind")
     assert_equal "present", row.fetch("status")
     assert_equal "#{qmd} #{version}", row.fetch("message")
-    assert_match(%r{wiki/qmd.*✓ present}, result.fetch("output"))
+    assert_qmd_rendered(result, row, "✓ present")
+  end
+
+  def assert_qmd_warning(result, diagnostic)
+    assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+    row = qmd_row(result)
+    assert_equal "warning", row.fetch("kind")
+    assert_equal "warning", row.fetch("status")
+    assert_includes row.fetch("message"), diagnostic
+    assert_qmd_rendered(result, row, "! warning")
+    row
+  end
+
+  def assert_qmd_rendered(result, row, human_status)
+    output = result.fetch("output")
+    if output.start_with?("{")
+      payload = JSON.parse(output)
+      assert_doctor_schema_valid(payload)
+      assert_equal row, payload.fetch("checks").find { |check| check["label"] == "wiki/qmd" }
+    else
+      assert_match(/wiki\/qmd.*#{Regexp.escape(human_status)}/, output)
+      assert_includes output, row.fetch("message") if row.fetch("status") == "warning"
+    end
+    refute result.fetch("rows").any? { |entry| entry["label"].to_s.include?("tmux") }
   end
 
   def test_qmd_discovery_precedence_and_override_fallthrough
@@ -705,12 +731,17 @@ class HiveCommandsDoctorTest < Minitest::Test
   def test_llm_wiki_qmd_warning_when_binary_fails_to_start
     with_tmp_dir do |root|
       FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
-      qmd = qmd_executable(File.join(root, "qmd"), 'echo "NODE_MODULE_VERSION mismatch" >&2; exit 1')
-      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd })
-      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
-      assert_match(%r{wiki/qmd.*! warning}, result.fetch("output"))
-      assert_includes result.fetch("output"), "NODE_MODULE_VERSION mismatch"
-      assert_includes result.fetch("output"), "npm rebuild better-sqlite3"
+      qmd = qmd_executable(File.join(root, "qmd"), <<~'SH')
+        printf '\n  NODE_MODULE_VERSION mismatch  \nignored stderr line\n' >&2
+        printf 'ignored stdout line\n'
+        exit 1
+      SH
+      [ false, true ].each do |json|
+        result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd }, json: json)
+        row = assert_qmd_warning(result, "failed to start (NODE_MODULE_VERSION mismatch);")
+        assert_includes row.fetch("message"), "npm rebuild better-sqlite3"
+        refute_includes row.fetch("message"), "ignored"
+      end
     end
   end
 
@@ -720,10 +751,97 @@ class HiveCommandsDoctorTest < Minitest::Test
       qmd = File.join(root, "qmd")
       write_file(qmd, "#!/nonexistent/xyz\n")
       File.chmod(0o755, qmd)
+      [ false, true ].each do |json|
+        result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd }, json: json)
+        assert_qmd_warning(result, "qmd at #{qmd} timed out or could not be executed")
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_version_probe_receives_only_supplied_environment
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = qmd_executable(File.join(root, "qmd"), <<~'SH')
+        printf 'marker=%s|home=%s|path=%s|data=%s|host=%s|argc=%s|arg=%s\n' \
+          "${HIVE_DOCTOR_QMD_MARKER-unset}" "${HOME-unset}" "${PATH-unset}" \
+          "${XDG_DATA_HOME-unset}" "${HIVE_DOCTOR_HOST_ONLY-unset}" "$#" "$1"
+      SH
+      host = {
+        "HIVE_QMD_BIN" => qmd_executable(File.join(root, "host-qmd"), "echo wrong-binary"),
+        "HOME" => File.join(root, "host-home"), "PATH" => File.join(root, "host-bin"),
+        "XDG_DATA_HOME" => File.join(root, "host-data"), "HIVE_DOCTOR_QMD_MARKER" => "host-marker",
+        "HIVE_DOCTOR_HOST_ONLY" => "host-only"
+      }
+      environment = {
+        "HIVE_QMD_BIN" => qmd, "HOME" => File.join(root, "supplied-home"),
+        "PATH" => File.join(root, "supplied-bin"), "XDG_DATA_HOME" => File.join(root, "supplied-data"),
+        "HIVE_DOCTOR_QMD_MARKER" => "supplied-marker"
+      }
+      expected = "marker=supplied-marker|home=#{environment['HOME']}|path=#{environment['PATH']}|" \
+                 "data=#{environment['XDG_DATA_HOME']}|host=unset|argc=1|arg=--version"
+      result = doctor_in_child(project_root: root, environment: environment, host_environment: host, json: true)
+      assert_qmd_present(result, qmd, expected)
+
+      # The same fixture proves that callers omitting environment: still use ENV.
+      host["HIVE_QMD_BIN"] = qmd
+      result = doctor_in_child(project_root: root, environment: :default, host_environment: host)
+      expected = "marker=host-marker|home=#{host['HOME']}|path=#{result.fetch('process_path')}|" \
+                 "data=#{host['XDG_DATA_HOME']}|host=host-only|argc=1|arg=--version"
+      assert_qmd_present(result, qmd, expected)
+
+      # Omitted HOME, XDG and marker values must not leak from the Ruby child's host.
+      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd, "PATH" => "" },
+                               host_environment: host)
+      assert_qmd_present(result, qmd, "marker=unset|home=unset|path=|data=unset|host=unset|argc=1|arg=--version")
+    end
+  end
+
+  def test_llm_wiki_qmd_probe_does_not_inherit_omitted_path
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = File.join(root, "qmd")
+      # Ruby reports ENV directly; a shell can initialize its own default PATH.
+      write_file(qmd, "#!#{RbConfig.ruby}\nputs ENV.key?('PATH') ? 'inherited PATH' : 'PATH absent'\n")
+      File.chmod(0o755, qmd)
+      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd },
+                               host_environment: { "PATH" => File.join(root, "host-bin") })
+      assert_qmd_present(result, qmd, "PATH absent")
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_not_found
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      [ false, true ].each do |json|
+        result = doctor_in_child(project_root: root, environment: {}, json: json)
+        assert_qmd_warning(result, "qmd is not installed or not discoverable")
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_probe_times_out
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = qmd_executable(File.join(root, "qmd"))
+      [ false, true ].each do |json|
+        result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd },
+                                 json: json, simulate_timeout: true)
+        assert_qmd_warning(result, "timed out or could not be executed (simulated probe timeout)")
+      end
+    end
+  end
+
+  def test_llm_wiki_qmd_uses_first_nonblank_stdout_diagnostic_when_stderr_is_blank
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = qmd_executable(File.join(root, "qmd"), <<~'SH')
+        printf '\n  \n' >&2
+        printf '\n  intended stdout diagnostic  \nignored stdout line\n'
+        exit 1
+      SH
       result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd })
-      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
-      assert_match(%r{wiki/qmd.*! warning}, result.fetch("output"))
-      assert_includes result.fetch("output"), "timed out or could not be executed"
+      row = assert_qmd_warning(result, "failed to start (intended stdout diagnostic);")
+      refute_includes row.fetch("message"), "ignored stdout line"
     end
   end
 

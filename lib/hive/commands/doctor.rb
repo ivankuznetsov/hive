@@ -22,10 +22,9 @@ module Hive
       MANAGED_HEALTH_PRECEDENCE =
         %w[conflicting incompatible unavailable stale missing healthy].freeze
 
-      # Exposes the row set after `#call` has run. Lets in-process
-      # callers (e.g., `Hive::Commands::Init`'s preflight) read the
-      # probe results directly without re-running the renderer or the
-      # JSON encoder. Returns `nil` before `#call` has populated it.
+      # Exposes the row set after `#call` has run. Lets in-process callers
+      # read the probe results directly without re-running the renderer or
+      # the JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
       # `mcp_discover` compares personal agent MCP configs with Hive's catalog
@@ -169,7 +168,9 @@ module Hive
         end
 
         begin
-          out, err, status = Timeout.timeout(15) { Open3.capture3(qmd, "--version") }
+          out, err, status = Timeout.timeout(15) do
+            Open3.capture3(@environment.to_h, qmd, "--version", unsetenv_others: true)
+          end
         rescue Timeout::Error, SystemCallError => e
           return [ warning_row(
             stage: "wiki",

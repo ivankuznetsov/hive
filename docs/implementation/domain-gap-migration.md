@@ -448,23 +448,23 @@ Total: 176242 source-body bytes. Fallback: 0 logical items / 0 bytes; largest ow
 
 | ID | Baseline location | Form | Classification | Disposition / destination |
 | --- | --- | --- | --- | --- |
-| I01 | `wiki/active-areas.md:71` | `[[gaps]]` | substantive evidence pointer | retarget release follow-ups; [Release install follow-ups](update-flow.md#release-install-follow-ups) |
+| I01 | `wiki/active-areas.md:71` | `[[gaps]]` | substantive evidence pointer | retarget release follow-ups; [Release install follow-ups](../../wiki/update-flow.md#release-install-follow-ups) |
 | I02 | `wiki/active-areas.md:101` | `[[gaps]]` | see-also navigation | retain generic unresolved-index navigation; [[gaps]] |
-| I03 | `wiki/commands/bench-submit.md:71` | `[[gaps]]` | substantive evidence pointer | retarget exact owner on same page; [bench live proof](#hive-bench-submit-is-unit-pinned-but-not-live-smoked) |
+| I03 | `wiki/commands/bench-submit.md:71` | `[[gaps]]` | substantive evidence pointer | retarget exact owner on same page; [bench live proof](../../wiki/commands/bench-submit.md#hive-bench-submit-is-unit-pinned-but-not-live-smoked) |
 | I04 | `wiki/commands/init.md:94` | `wiki/gaps.md` | literal bootstrap-path documentation | retain scaffold filename, which still exists; `wiki/gaps.md` |
-| I05 | `wiki/commands/screenote.md:117` | `[[gaps]]` | substantive evidence pointer | retarget shared capture limitation; [capture reliability](../stages/artifacts.md#automatic-outcome-capture-remains-unreliable-2026-09-06) |
-| I06 | `wiki/commands/setup-agents.md:233` | `[[gaps]]` | see-also navigation | retarget specific activation evidence; [activation proof](../modules/agent_profile.md#authenticated-four-agent-activation-remains-optional-and-unproven-for-the-current-candidate) |
-| I07 | `wiki/decisions.md:1003` | `[[gaps]]` | substantive evidence pointer | retarget MCP isolation context and open follow-ups; [MCP follow-ups](modules/mcp.md#pi-floor-lives-only-on-the-hive-side-2026-10-15) |
-| I08 | `wiki/e2e.md:173` | `[[gaps]]` | substantive evidence pointer | retarget shared outcome controller proof; [outcome evidence](stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14) |
+| I05 | `wiki/commands/screenote.md:117` | `[[gaps]]` | substantive evidence pointer | retarget shared capture limitation; [capture reliability](../../wiki/stages/artifacts.md#automatic-outcome-capture-remains-unreliable-2026-09-06) |
+| I06 | `wiki/commands/setup-agents.md:233` | `[[gaps]]` | see-also navigation | retarget specific activation evidence; [activation proof](../../wiki/modules/agent_profile.md#authenticated-four-agent-activation-remains-optional-and-unproven-for-the-current-candidate) |
+| I07 | `wiki/decisions.md:1003` | `[[gaps]]` | substantive evidence pointer | retarget MCP isolation context and open follow-ups; [MCP follow-ups](../../wiki/modules/mcp.md#pi-floor-lives-only-on-the-hive-side-2026-10-15) |
+| I08 | `wiki/e2e.md:173` | `[[gaps]]` | substantive evidence pointer | retarget shared outcome controller proof; [outcome evidence](../../wiki/stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14) |
 | I09 | `wiki/index.md:103` | `[[gaps]]` | catalog entry | retain stable index catalog entry; [[gaps]] — `wiki/gaps.md` |
 | I10 | `wiki/index.md:103` | `wiki/gaps.md` | catalog entry | retain stable index catalog entry; [[gaps]] — `wiki/gaps.md` |
-| I11 | `wiki/modules/daemon.md:57` | `[[gaps]]` | substantive evidence pointer | retarget cutover evidence; no generic index detour; [ten-table deployment](attempts.md#ten-table-runtime-deployment-proof) |
-| I12 | `wiki/modules/git_ops.md:112` | `[[gaps]]` | substantive evidence pointer | retarget exact first-initialization evidence; [first initialization](#hive-state-runtime-commit-serialization-is-process-tested-but-first-time-bootstrap-and-the-original-live-workload-remain-separate-gaps) |
-| I13 | `wiki/modules/mcp.md:65` | `[[gaps]]` | see-also navigation | replace redundant root link with local ownership navigation; [Known gaps](#known-gaps) |
-| I14 | `wiki/modules/plan_review.md:571` | `[[gaps]]` | see-also navigation | retarget local live-proof gap; [native route proof](#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12) |
-| I15 | `wiki/modules/task_workspace.md:442` | `[[gaps]]` | see-also navigation | retarget local forward-evidence gap; [workspace evidence](#task-workspace-forward-evidence-and-live-provider-gaps-2026-08-12) |
-| I16 | `wiki/testing.md:1477` | `[[gaps]]` | see-also navigation | replace redundant root link with local test-evidence navigation; [Known gaps](#known-gaps) |
-| I17 | `wiki/token-usage.md:245` | `[[gaps]]` | see-also navigation | retarget local usage-stream gap; [stream refinement](#codex-and-pi-token-usage-payloads-need-real-stream-refinement) |
+| I11 | `wiki/modules/daemon.md:57` | `[[gaps]]` | substantive evidence pointer | retarget cutover evidence; no generic index detour; [ten-table deployment](../../wiki/modules/attempts.md#ten-table-runtime-deployment-proof) |
+| I12 | `wiki/modules/git_ops.md:112` | `[[gaps]]` | substantive evidence pointer | retarget exact first-initialization evidence; [first initialization](../../wiki/modules/git_ops.md#hive-state-runtime-commit-serialization-is-process-tested-but-first-time-bootstrap-and-the-original-live-workload-remain-separate-gaps) |
+| I13 | `wiki/modules/mcp.md:65` | `[[gaps]]` | see-also navigation | replace redundant root link with local ownership navigation; [Known gaps](../../wiki/modules/mcp.md#known-gaps) |
+| I14 | `wiki/modules/plan_review.md:571` | `[[gaps]]` | see-also navigation | retarget local live-proof gap; [native route proof](../../wiki/modules/plan_review.md#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12) |
+| I15 | `wiki/modules/task_workspace.md:442` | `[[gaps]]` | see-also navigation | retarget local forward-evidence gap; [workspace evidence](../../wiki/modules/task_workspace.md#task-workspace-forward-evidence-and-live-provider-gaps-2026-08-12) |
+| I16 | `wiki/testing.md:1477` | `[[gaps]]` | see-also navigation | replace redundant root link with local test-evidence navigation; [Known gaps](../../wiki/testing.md#known-gaps) |
+| I17 | `wiki/token-usage.md:245` | `[[gaps]]` | see-also navigation | retarget local usage-stream gap; [stream refinement](../../wiki/token-usage.md#codex-and-pi-token-usage-payloads-need-real-stream-refinement) |
 ## Destination overlaps (additive follow-ups)
 
 Existing owner text is retained verbatim except the separately inventoried inbound-pointer edits. Navigation is added immediately after the existing section heading named below. These overlaps remain follow-ups for later reconciliation; migration does not consolidate, modernize, or correct historical claims.

@@ -435,8 +435,28 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert folder&.join("assets", "image1.png")&.file?,
            "the attachment preserved across filtering must remain submittable"
 
+    # A late filesystem broadcast must not erase the submission acknowledgement.
+    execute_script <<~JS
+      window.noticeRefreshFinished = false
+      document.addEventListener("turbo:morph", () => {
+        window.noticeRefreshFinished = true
+      }, { once: true })
+      const stream = document.createElement("turbo-stream")
+      stream.setAttribute("action", "refresh")
+      document.documentElement.appendChild(stream)
+    JS
+    Timeout.timeout(5) do
+      sleep 0.01 until page.evaluate_script("window.noticeRefreshFinished")
+    end
+    assert_selector ".flash-notice", text: "Idea added", wait: 0
+
+    compose_idea "Next idea"
+    submit_idea
+    assert_selector ".flash-notice", text: "Idea added to #{@project}", wait: 5
+
     click_link "+ Add project"
     assert_current_path "/repos"
+    assert_no_selector ".flash-notice", wait: 0
   end
 
   test "a project deep link lands filtered with the composer preselected" do

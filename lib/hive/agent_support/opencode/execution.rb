@@ -93,7 +93,8 @@ module Hive
             raw_cli_arguments: @cli_flags,
             trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd ],
             executable:,
-            command_prefix: @runtime_policy&.command_prefix || []
+            command_prefix: @runtime_policy&.command_prefix || [],
+            denied_commands: %w[review 6-review].include?(@task.stage_name) ? [ "review-grant" ] : []
           ))
           NativeLaunch.new(
             invocation:,
@@ -178,6 +179,9 @@ module Hive
             bash_patterns: @bash_patterns,
             plugins: skill_invocations.empty? ? [] : [ "native" ]
           )
+          if permission && permission["bash"].is_a?(Hash)
+            permission["bash"]["*review-grant*"] = "deny"
+          end
           environment["OPENCODE_PERMISSION"] = JSON.generate(permission) if permission
           environment.freeze
         end

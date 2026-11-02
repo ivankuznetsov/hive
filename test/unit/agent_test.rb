@@ -124,7 +124,7 @@ class AgentTest < Minitest::Test
         *Hive::Agent::SCRUBBED_CHILD_ENV.keys,
         *Hive::AgentProfiles.lookup(:claude).credential_environment_keys
       ]
-      assert_equal policy.environment,
+      assert_equal policy.environment.merge(Hive::AgentSupport::OperatorAuthority::LAUNCH_ENVIRONMENT),
                    agent.child_environment.reject { |key, _| expected_scrubbed.include?(key) }
       assert_nil agent.child_environment.fetch("HIVE_SCREENOTE_BASE_URL")
       Hive::AgentProfiles.lookup(:claude).credential_environment_keys.each do |key|

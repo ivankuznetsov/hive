@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-review-grant.v1.json",
+  "title": "hive review-grant output (v1)",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "state",
+        "decision_id",
+        "passes",
+        "reason",
+        "caller",
+        "source",
+        "decided_at",
+        "audit_path",
+        "remediation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-review-grant"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "state": {
+          "enum": [
+            "applied",
+            "replayed"
+          ]
+        },
+        "decision_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "passes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "caller": {
+          "type": "string"
+        },
+        "source": {
+          "const": "operator_cli"
+        },
+        "decided_at": {
+          "type": "string"
+        },
+        "audit_path": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-review-grant"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "enum": [
+            "usage",
+            "ambiguous_target",
+            "invalid_task_path",
+            "concurrent_run",
+            "agent_denied",
+            "source_unverified",
+            "evidence_unavailable",
+            "stale_evidence",
+            "decision_conflict",
+            "unsafe_state",
+            "config",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "holder": {
+          "type": "object"
+        },
+        "lock_path": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array"
+        },
+        "refusal_reason": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

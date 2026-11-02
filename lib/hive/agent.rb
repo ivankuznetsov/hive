@@ -10,6 +10,7 @@ require "hive/agent_limit"
 require "hive/model_unsupported"
 require "hive/agent/message_extractor"
 require "hive/agent_support"
+require "hive/agent_support/operator_authority"
 require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
@@ -180,7 +181,8 @@ module Hive
       @child_environment ||= begin
         launch = mcp_launch
         base = launch ? launch.environment_for(@base_child_environment) : @base_child_environment
-        base.merge(@controller_environment_scrub).freeze
+        base.merge(@controller_environment_scrub)
+          .merge(Hive::AgentSupport::OperatorAuthority.launch_environment).freeze
       end
     end
 
@@ -907,7 +909,8 @@ module Hive
           raw_cli_arguments: @cli_flags,
           trusted_cli_arguments: @runtime_cli_flags + mcp_arguments,
           executable: @runtime_policy&.executable,
-          command_prefix: @runtime_policy&.command_prefix
+          command_prefix: @runtime_policy&.command_prefix,
+          denied_commands: %w[review 6-review].include?(@task.stage_name) ? [ "review-grant" ] : []
         )
       ))
     end

@@ -1,3 +1,5 @@
+require "hive/agent_support/operator_authority"
+
 module Hive::Reviewers::Runtime
   MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
@@ -12,7 +14,8 @@ module Hive::Reviewers::Runtime
     # stdin is /dev/null: `codex exec` otherwise waits on an inherited
     # stdin for "additional input" before it starts the review.
     pid = Process.spawn(
-      environment, *argv, chdir:, pgroup: true, in: File::NULL, out: pipe_w, err: pipe_w
+      environment.merge(Hive::AgentSupport::OperatorAuthority.launch_environment),
+      *argv, chdir:, pgroup: true, in: File::NULL, out: pipe_w, err: pipe_w
     )
     pipe_w.close
 

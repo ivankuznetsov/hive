@@ -832,6 +832,27 @@ module Hive
     end
     map "publication-reconcile" => :publication_reconcile
 
+    desc "review-grant TARGET", "Grant 1–3 extra fix passes to one final-fix-unverified review"
+    long_desc <<~DESC
+      Record an operator decision for an evidenced final_fix_unverified review.
+      Get --evidence-token from `hive status --operational --json`. This token
+      differs from `hive act --observation`. The reason is required, stripped,
+      bounded to 1024 UTF-8 bytes, control-free and secret-scanned.
+      Identical decisions replay without adding passes. Verification is free
+      and mandatory after the final fix. Other scheduler and recovery holds apply.
+    DESC
+    option :project, type: :string, required: true, desc: "registered project"
+    option :passes, type: :string, required: true, desc: "explicit integer from 1 through 3"
+    option :reason, type: :string, required: true, desc: "operator audit reason"
+    option :evidence_token, type: :string, required: true, desc: "grant evidence token from operational status"
+    def review_grant(target)
+      require "hive/commands/review_grant"
+      Hive::Commands::ReviewGrant.new(target, project: options[:project],
+        passes: options[:passes], reason: options[:reason],
+        evidence_token: options[:evidence_token], json: options[:json]).call
+    end
+    map "review-grant" => :review_grant
+
     desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
     long_desc <<~DESC
       Subcommands:

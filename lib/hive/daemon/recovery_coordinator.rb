@@ -19,6 +19,8 @@ require "hive/runtime_identity"
 require "hive/task"
 require "hive/task_projection"
 require "hive/task_resolver"
+require "hive/review_budget"
+require "hive/agent_support/operator_authority"
 
 module Hive
   module Daemon
@@ -188,6 +190,55 @@ module Hive
 
       def retry_delay_sec(retry_count)
         Hive::Recovery::RetryPolicy.delay_sec(retry_count)
+      end
+
+      # A separate operator-attested decision, outside routine retry admission.
+      # The receipt and audit precede the sole exact-marker destructive edge.
+      def grant_review!(task:, project:, passes:, reason:, evidence_token:)
+        attribution = Hive::AgentSupport::OperatorAuthority.assert_operator!
+        decision = Hive::ReviewBudget.normalize_decision(passes: passes, reason: reason)
+        Hive::Lock.with_task_lock(task.folder, op: "review.grant", create: false) do
+          locked_task = @task_resolver.call(project: project, slug: task.slug,
+            folder: task.folder, stage: nil)
+          unless same_task_identity?(task, locked_task)
+            raise Hive::ReviewBudget::Refused.new("stale_evidence", "task identity changed; refresh operational status")
+          end
+          Hive::AgentSupport::OperatorAuthority.assert_operator!
+          budget = Hive::ReviewBudget.new(task: locked_task, project: project)
+          existing = budget.replay(evidence_token: evidence_token, **decision)
+          receipt = existing
+          unless receipt
+            observation = budget.observe
+            unless observation.eligible? && observation.evidence_token == evidence_token
+              raise Hive::ReviewBudget::Refused.new("stale_evidence",
+                observation.remediation || "review evidence changed; refresh operational status")
+            end
+            row = SafetyObservation.new(marker: "review_stale",
+              marker_attrs: observation.evidence.fetch("marker").fetch("attrs"),
+              state_file: locked_task.state_file, stage: "6-review", folder: locked_task.folder)
+            safe, detail = @safety.call(row)
+            raise Hive::ReviewBudget::Refused.new("unsafe_state", detail.to_s) unless safe == true
+
+            receipt = budget.record_grant!(snapshot: observation, **decision,
+              caller: attribution.fetch("caller"), source: attribution.fetch("source"))
+          end
+          apply_review_grant!(locked_task, budget, receipt)
+          review_grant_result(budget, receipt, replayed: !existing.nil?)
+        end
+      end
+
+      # The stage runner already owns this task's lock. Reconciliation can
+      # finish durable intent; it cannot create a decision or clear a new park.
+      def reconcile_review_grant!(task:, project:)
+        unless Hive::Lock.task_lock_held?(task.folder)
+          raise Hive::ReviewBudget::Refused.new("unsafe_state", "review grant reconciliation requires the task lock")
+        end
+        budget = Hive::ReviewBudget.new(task: task, project: project)
+        receipt = budget.store.grants.last
+        return nil unless receipt
+
+        apply_review_grant!(task, budget, receipt)
+        budget.observe
       end
 
       # Requests carry their own charge; a request without one is its first.
@@ -1150,6 +1201,39 @@ module Hive
       end
 
       private
+
+      def apply_review_grant!(task, budget, receipt)
+        budget.reconcile_audit!(receipt)
+        state = budget.application_state(receipt)
+        return state if %w[applied historical].include?(state)
+        unless state == "pending"
+          raise Hive::ReviewBudget::Refused.new("stale_evidence", "grant evidence or marker changed; no marker was cleared")
+        end
+        expected = receipt.fetch("evidence").fetch("marker")
+        marker = Hive::Markers.current(task.state_file)
+        unless marker.name.to_s == expected.fetch("name") &&
+               Hive::Recovery.canonical_marker_attrs(marker.attrs) == expected.fetch("attrs") &&
+               Hive::Recovery.canonical_wire_value(marker.raw) == expected.fetch("raw")
+          raise Hive::ReviewBudget::Refused.new("stale_evidence", "the exact granted stale marker is no longer current")
+        end
+        unless clear_recoverable_marker(task.state_file,
+          expected_name: "review_stale", match_attrs: expected.fetch("attrs"))
+          raise Hive::ReviewBudget::Refused.new("stale_evidence", "stale marker changed while applying the recorded grant")
+        end
+        "applied"
+      end
+
+      def review_grant_result(budget, receipt, replayed:)
+        {
+          "state" => replayed ? "replayed" : "applied",
+          "decision_id" => receipt.fetch("decision_id"),
+          "passes" => receipt.fetch("amount"), "reason" => receipt.fetch("reason"),
+          "caller" => receipt.fetch("caller"), "source" => receipt.fetch("source"),
+          "decided_at" => receipt.fetch("recorded_at"), "audit_path" => budget.audit_path,
+          "remediation" => replayed ? "Historical decision returned; no additional passes allocated. Existing recovery holds still apply." :
+            "Normal daemon admission may resume this review. Verification and existing recovery holds still apply."
+        }
+      end
 
       def request_queue
         @request_queue ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(

@@ -5,6 +5,7 @@ require "json_schemer"
 require "pathname"
 require "hive/commands/answer_digest"
 require "hive/commands/approve"
+require "hive/commands/review_grant"
 require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
@@ -37,6 +38,22 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_review_grant_closed_schema_and_error_registry_agree
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-review-grant")
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-review-grant")))
+    assert_equal Hive::Schemas::ReviewGrantErrorKind::ALL.sort,
+      doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    schema = JSONSchemer.schema(doc)
+    Hive::Schemas::ReviewGrantErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(schema: "hive-review-grant",
+        error: Hive::UsageError.new("refused"), error_kind: kind)
+      assert schema.valid?(payload), "review grant error kind #{kind} must be published"
+    end
+    payload = Hive::Schemas::ErrorEnvelope.build(schema: "hive-review-grant",
+      error: Hive::UsageError.new("refused"), error_kind: "invented")
+    refute schema.valid?(payload)
+  end
+
   def test_one_shot_schema_is_registered_closed_and_accepts_all_report_arms
     path = Hive::Schemas.schema_path("hive-one-shot")
     document = JSON.parse(File.read(path))

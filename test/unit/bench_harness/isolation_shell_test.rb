@@ -15,6 +15,9 @@ class BenchIsolationShellTest < Minitest::Test
 
       assert_equal [ key ], credential_names(record)
       assert_equal "decoy-#{key}", record.fetch("env").fetch(key)
+      env_args = record.fetch("argv").each_cons(2).filter_map { |flag, value| value if flag == "-e" }
+
+      assert_equal [ key, "HOME=/tmp" ].sort, env_args.sort
       assert_equal [ "#{@work}:/work" ], mounts(record)
       assert_no_secrets(out + err)
       assert_hardened(record)
@@ -39,6 +42,7 @@ class BenchIsolationShellTest < Minitest::Test
       record = docker_record
 
       assert_empty credential_names(record)
+      assert_equal [ "HOME" ], record.fetch("env").keys
       assert_equal [ "#{auth}:#{target}:ro", "#{@work}:/work" ], mounts(record)
       assert_equal harness == "CODEX" ? "/root" : "/tmp", record.fetch("env").fetch("HOME")
       assert_includes record.fetch("argv"), harness == "CODEX" ? "seccomp=unconfined" : "no-new-privileges"
@@ -70,6 +74,7 @@ class BenchIsolationShellTest < Minitest::Test
     record = docker_record
 
     assert_empty credential_names(record)
+    assert_equal({ "HOME" => "/tmp" }, record.fetch("env"))
     assert_equal [ "#{@work}:/work" ], mounts(record)
     assert_includes record.fetch("argv").each_cons(2).to_a, [ "--network", "none" ]
     assert_no_secrets(out + err)

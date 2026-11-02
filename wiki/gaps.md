@@ -3,9 +3,29 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Direct benchmark isolation delivery (2026-11-02)
+
+The canonical hive-bench baseline is `432e730ea7812246496726fcc9153e98be58eb30`;
+Hive's execution baseline is `966211001e76d53da50879a582668b5b2e381607`.
+The two isolation files agreed before this fix and agree byte-for-byte after it.
+Outside that boundary, the baselines already differ in 37 harness files,
+including `hive_driver.rb`, `hive_stages.sh`, campaign/judge code and Slate
+comments. Those differences are retained; this is not a wholesale runtime sync.
+The original canonical checkout contains unrelated uncommitted changes and is
+untouched. Canonical implementation commits live on `fix/profile-credential-isolation`
+in the independent `tmp/bench-credential-canonical` clone within this execution
+worktree. Upstream publication is outside this commit-only execution stage.
+
+Actual GNU Bash 3.2.57 and 5.3.20 passed locally, together with real Docker
+credential probes. Hosted `macos-15` execution is pending; the new CI lane
+requires `/bin/bash` 3.2 and fails absent/wrong interpreters. This local Linux
+proof does not claim a macOS result. `minimax-3` and `qwen-2.6-coder` remain
+unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
+`failed` and exit 2 until their routes are verified and configured.
 
 ## Task observation boundary (2026-10-02)
 

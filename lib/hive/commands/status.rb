@@ -365,7 +365,17 @@ module Hive
           next if rows.empty?
 
           puts label
-          rows.first(OPERATIONAL_BAND_LIMIT).each { |row| puts operational_row_line(row) }
+          rows.first(OPERATIONAL_BAND_LIMIT).each do |row|
+            puts operational_row_line(row)
+            grant = row["review_grant"]
+            if grant
+              puts "    review grant #{terminal_safe(grant['state'])}: #{grant.fetch('remaining')} fix pass(es) remaining"
+              puts "    #{terminal_safe(grant['command'])}" if grant["state"] == "eligible"
+              puts "    #{terminal_safe(grant['remediation'])}"
+            elsif (diagnostic = row.dig("evidence", "review_grant_diagnostic"))
+              puts "    #{terminal_safe(diagnostic['remediation'])}"
+            end
+          end
           overflow = rows.size - OPERATIONAL_BAND_LIMIT
           puts "  +#{overflow} more — run `hive tui`" if overflow.positive?
         end

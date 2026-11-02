@@ -38,6 +38,16 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_review_grant_status_is_required_nullable_and_its_action_is_advertisement_only
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    assert_includes doc.dig("$defs", "Task", "required"), "review_grant"
+    assert_equal [ { "type" => "null" }, { "$ref" => "#/$defs/ReviewGrant" } ],
+      doc.dig("$defs", "Task", "properties", "review_grant", "oneOf")
+    refute_includes doc.dig("$defs", "Action", "properties", "action_id", "enum"), "workflow.grant_fix_passes"
+    assert_equal %w[workflow.advance workflow.retry], Hive::OperationalAction::EXECUTABLE_ACTION_IDS
+    assert_equal 5, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status")
+  end
+
   def test_review_grant_closed_schema_and_error_registry_agree
     assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-review-grant")
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-review-grant")))

@@ -31,9 +31,11 @@ class DaemonQuiescenceCoordinatorIntegrationTest < Minitest::Test
         )
       end
 
+      # Finalization gets only 15% of the timeout. Allow real SQLite checkpoint
+      # and proof I/O enough time on shared CI runners; unit tests cover deadlines.
       result = Hive::Daemon::Quiescence.new(
         state_home: root, database: database, registry: registry,
-        capability: capability, timeout_sec: 1,
+        capability: capability, timeout_sec: 10,
         boot_id_reader: -> { "integration-boot" }
       ).call
 

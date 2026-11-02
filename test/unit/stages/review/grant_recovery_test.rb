@@ -7,11 +7,11 @@ class ReviewGrantRecoveryTest < Minitest::Test
   include HiveTestHelper
   include ReviewGrantFixture
 
-  def grant(task)
+  def grant(task, passes: 1)
     budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
     capture_io do
       Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
-        passes: 1, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+        passes: passes, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
     end
     budget
   end
@@ -160,6 +160,56 @@ class ReviewGrantRecoveryTest < Minitest::Test
       assert_equal [ [ completion.fetch("input_head"), completion.fetch("head") ] ], calls
       assert File.exist?(Hive::Stages::Review.fix_success_path(task.folder, 4))
       assert_equal [ completion ], budget.observe.completions
+    end
+  end
+
+  def test_pending_guardrail_refuses_changed_head_or_dirty_worktree_before_ci
+    [ :head, :dirty ].each do |change|
+      with_review_grant_task do |task, cfg|
+        budget = grant(task)
+        head = Hive::Stages::Review.git_head(task.worktree_path)
+        completion = budget.complete_fix!(snapshot: budget.observe, pass: 4, head: head)
+        if change == :head
+          run!("git", "-C", task.worktree_path, "commit", "--quiet", "--allow-empty", "-m", "Change after sealed completion")
+        else
+          File.write(File.join(task.worktree_path, "unreviewed.txt"), "Unreviewed edits\n")
+        end
+
+        stderr = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :run_ci_gates, ->(*, **) { flunk "changed completion must stop before CI" }) do
+          _stdout, stderr = capture_io do
+            Hive::Lock.with_task_lock(task.folder, create: false) do
+              assert_equal :review_error, Hive::Stages::Review.run!(task, cfg).fetch(:status)
+            end
+          end
+        end
+        assert_includes stderr, "review grant refused"
+        assert_includes stderr, "awaiting guardrail admission has changed HEAD or dirty worktree edits"
+        assert_equal [ completion ], budget.store.records.last
+        refute File.exist?(Hive::Stages::Review.fix_success_path(task.folder, 4))
+      end
+    end
+  end
+
+  def test_standalone_escalation_reader_finds_later_answers_with_an_unused_slot
+    with_review_grant_task do |task, _cfg|
+      path = File.join(task.reviews_dir, "escalations-04.md")
+      original = "### Q1. Apply the additional fix?\n### A1.\n\n"
+      File.write(path, original)
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 1)
+      budget = grant(task, passes: 2)
+      head = Hive::Stages::Review.git_head(task.worktree_path)
+      completion = budget.complete_fix!(snapshot: budget.observe, pass: 4, head: head)
+      File.write(path, original.sub("### A1.\n", "### A1.\nYes, apply it.\n"))
+
+      old_budget = Hive::Stages::Review.instance_variable_get(:@grant_budget)
+      Hive::Stages::Review.instance_variable_set(:@grant_budget, nil)
+      assert_equal [ 0 ], Hive::Stages::Review.pending_granted_escalation_answers(task.folder, completion)
+      assert_equal [ completion ], budget.store.records.last
+      assert_equal 1, budget.observe.remaining
+    ensure
+      Hive::Stages::Review.instance_variable_set(:@grant_budget, old_budget)
     end
   end
 

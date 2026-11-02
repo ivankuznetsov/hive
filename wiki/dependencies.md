@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -15,6 +15,11 @@ execution. The web bundle owns
 Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
+
+The web lockfile pins Nokogiri 1.19.6, Loofah 2.25.3, and
+rails-html-sanitizer 1.7.2 to address the November 2, 2026 HTML parsing and
+sanitization advisories. These are patch updates within the existing bundle
+constraints; CI audits both the root and web lockfiles.
 
 ## Bundled secret detection
 

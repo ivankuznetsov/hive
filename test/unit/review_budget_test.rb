@@ -708,6 +708,24 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_completion_refuses_malformed_or_wrong_pass_escalation_proof
+    [ { "unexpected" => "shape" }, Hive::ReviewBudget::EscalationProof.capture("escalations-05.md", "# Escalations\n") ].each do |proof|
+      with_fixture do |budget, task|
+        receipt = record(budget)
+        clear(task)
+        completion = budget.complete_fix!(snapshot: budget.observe, pass: 4, head: HEAD)
+        path = File.join(task.folder, "reviews", "review-completion-#{receipt.fetch('decision_id')}-01.json")
+        File.write(path, JSON.generate(completion.merge("escalation_proof" => proof)) + "\n")
+        before = tree_bytes(task.folder)
+
+        error = assert_raises(Hive::ReviewBudget::Refused) { budget.store.records }
+        assert_equal "unsafe_state", error.reason
+        assert_equal "review-budget completion escalation proof is invalid", error.message
+        assert_equal before, tree_bytes(task.folder)
+      end
+    end
+  end
+
   def test_a_later_grant_cannot_bypass_an_unspent_predecessor_even_with_recomputed_digests
     with_fixture do |budget, task|
       first = record(budget)

@@ -1,3 +1,5 @@
+require "hive/review_pass"
+
 module Hive
   module Stages
     module Review
@@ -32,7 +34,8 @@ module Hive
       # True for filenames that originate from a reviewer (not the
       # orchestrator). Used by every consumer of `reviews/*.md`.
       def reviewer_file?(name)
-        ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
+        !Hive::ReviewPass.budget_receipt?(name) &&
+          ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
       end
     end
   end

@@ -56,6 +56,8 @@ operator. The same observation plus identical normalized amount and reason
 returns the stored decision, including its original timestamp and attribution,
 without allocating again. A different amount or reason conflicts. Replaying
 an expired or archived decision returns history without reactivating it.
+That replay also remains inert after the reset review becomes eligible or
+receives its own grant; its marker and allowance belong to the new decision.
 
 The first resumed fix uses the accepted findings already present at the
 exhausted pass. Operators may fill originally empty answer slots during the
@@ -63,9 +65,15 @@ normal escalation pause; immutable framing and answer hashes reject changed
 questions or rewritten original answers. Verification, triage, CI repairs and escalation-only pauses
 spend no granted fix slot. Each successful granted fix has a sealed immutable
 `kind=fixed` completion receipt tied to its decision and logical slot;
-guardrail approval cannot make an actual fix free. Spending alone does not
+if an operator then fills another previously empty answer before the next
+review starts, only that new answer uses the next available logical slot.
+The reviewer pass number may stay the same; the original completion remains
+sealed. New completions retain answer hashes to distinguish already applied
+decisions from later answers without depending on file timestamps.
+Guardrail approval cannot make an actual fix free. Spending alone does not
 admit the diff: the pass also requires a `kind=fixed` success sentinel bound
-to the completion HEAD. A restart before that sentinel rechecks the recorded
+to the completion HEAD and, for later slots, its decision and slot identity.
+A restart before that sentinel rechecks the recorded
 input/output HEAD diff before CI or reviewers advance, preserving an existing
 guardrail approval pause. Changed HEAD or dirty worktree edits refuse recovery.
 The final fix always owes another review and normal exact-head CI and

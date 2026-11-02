@@ -222,6 +222,7 @@ module Hive
       def validate!(document, name)
         grant = name.match?(GRANT_FILE)
         keys = grant ? GRANT_KEYS : COMPLETION_KEYS
+        keys = keys + [ "escalation_proof" ] if !grant && document.is_a?(Hash) && document.key?("escalation_proof")
         schema = grant ? GRANT_SCHEMA : COMPLETION_SCHEMA
         unless document.is_a?(Hash) && document.keys.sort == keys.sort && document["schema"] == schema && document["schema_version"] == 1 &&
             document["project"] == @budget.project && document["task"] == @budget.task.slug.to_s && document["task_id"] == @budget.task.id.to_s &&
@@ -285,6 +286,11 @@ module Hive
         @budget.valid_oid!(document.fetch("head"), "fixed HEAD")
         @budget.valid_oid!(document.fetch("input_head"), "fix input HEAD")
         validate_artifacts!(document.fetch("input_artifacts"))
+        if document.key?("escalation_proof") && !document["escalation_proof"].nil? &&
+            (!ReviewBudget::EscalationProof.valid?(document["escalation_proof"]) ||
+              document["escalation_proof"].fetch("name") != "escalations-#{format('%02d', document.fetch('pass'))}.md")
+          raise Refused.new("unsafe_state", "review-budget completion escalation proof is invalid")
+        end
         unless document.fetch("kind") == "fixed" && name == "review-completion-#{document.fetch('decision_id')}-#{format('%02d', slot)}.json"
           raise Refused.new("unsafe_state", "review-budget completion identity is invalid")
         end

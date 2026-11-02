@@ -238,6 +238,38 @@ class ReviewGrantCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_archived_replay_preserves_an_eligible_or_active_new_review
+    with_review_grant_task do |task, _cfg|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      token = budget.observe.evidence_token
+      applied = grant(task, token: token)
+      budget.record_expiry!(reason: "review_reset")
+      archive = File.join(task.reviews_dir, "archive", "rework-01")
+      FileUtils.mkdir_p(archive)
+      Dir[File.join(task.reviews_dir, "*")].select { |path| File.file?(path) }.each { |path| FileUtils.mv(path, archive) }
+      # A reset review has new controller completion bytes and hence a new scope.
+      Dir[File.join(archive, "*.md")].each { |path| FileUtils.cp(path, task.reviews_dir) }
+      File.open(File.join(task.reviews_dir, "fix-success-01.md"), "a") { |file| file.puts "new review scope" }
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 0)
+
+      [ "eligible", "applied" ].each do |state|
+        fresh = budget.observe
+        assert_equal state, fresh.state, fresh.remediation
+        before = task_bytes(task)
+        replay = grant(task, token: token)
+        assert_equal "replayed", replay.fetch("state")
+        assert_equal applied.fetch("decision_id"), replay.fetch("decision_id")
+        assert_equal "historical", budget.application_state(budget.replay(evidence_token: token, passes: 1, reason: "Finish accepted fixes"))
+        assert_equal before, task_bytes(task)
+        assert_equal fresh, budget.observe
+        grant(task, token: fresh.evidence_token) if state == "eligible"
+      end
+      assert_equal 1, budget.store.grants.length
+      assert_equal 1, budget.observe.remaining
+    end
+  end
+
   def test_nonfinal_park_remains_suspended_when_daemon_reconciles_budget
     with_review_grant_task do |task, _cfg|
       grant(task, passes: 3)

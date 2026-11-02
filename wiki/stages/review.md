@@ -280,6 +280,15 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 - **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
 - **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, AND one of: (a) neither the sentinel nor pass `N+1` reviewer files exist (fix never finished), OR (b) the sentinel exists but the operator edited `escalations-NN.md` strictly after the sentinel was written (`escalations.mtime > fix-success.mtime`). `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's current `[x]` marks (mirrors a `REVIEW_WAITING` resume).
 
+Granted fixes use sealed answer proofs instead of the mtime rule. With an
+unused slot, filling an originally empty escalation answer after completion
+returns `:fix_incomplete` for that pass and sends only newly answered work to
+the next logical slot. Earlier accepted findings and answers stay applied;
+their completion receipt is immutable. Completion lookup and guardrail
+recovery use the latest slot for a pass. Later-slot success sentinels also bind
+the decision and slot, so an earlier no-op fix at the same HEAD cannot supply
+the new fix's guardrail disposition.
+
 The operator-edit detection (branch b above) is what makes the TUI's `r` gesture useful on max_passes-hit `REVIEW_STALE` rows: pressing Enter opens `escalations-NN.md` in `$EDITOR`, the operator edits + saves (which bumps the file's mtime past `fix-success-NN.md`'s), then pressing `r` clears the marker + dispatches `hive run`; the runner sees the edited mtime, treats the pass as `:fix_incomplete` instead of advancing to N+1 (which would hit the `max_passes` cap and re-write `REVIEW_STALE` immediately), and re-runs Phase 4 with the operator's edits as authoritative input. Comparison is strict `>` (not `>=`) so back-to-back same-second writes don't spuriously trigger retries; `File.mtime` errors fail-closed (return false) so a transient stat failure cannot surprise-retry the fix phase.
 
 The sentinel `reviews/fix-success-NN.md` is written by the runner at each "pass N is done, advance" point: the Phase 2 zero-findings short-circuit to Phase 5 (`kind=clean`), a clean-boundary CI repair (`kind=ci_repaired`), post-guardrail-not-tripped continuation (`kind=fixed`), and guardrail approval (`kind=approved`). Its controller-owned comment records `head=<OID> kind=<kind>`. `fixed` and `ci_repaired` mark commits no reviewer has seen: a restart that finds one bound to the current HEAD on a pass at the cap resumes into the verify pass, never Phase 5. A legacy sentinel without `kind=` counts as `fixed` when that pass's reviewer files carry accepted `[x]` findings. `fix-success-` is in `ORCHESTRATOR_OWNED_PREFIXES` so it does not count as a reviewer file, and the current pass's sentinel path is protected during the fix-agent spawn so the agent cannot forge completion.

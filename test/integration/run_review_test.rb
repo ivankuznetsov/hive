@@ -238,6 +238,63 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_review_grant_restart_spends_a_fresh_slot_only_on_newly_answered_escalations
+    [ :qa, :checkbox ].each do |format|
+      with_review_grant_task do |task, cfg|
+        path = File.join(task.reviews_dir, "escalations-04.md")
+        body = if format == :qa
+          "### Q1. Earlier decision?\n### A1.\nEarlier approved fix.\n\n### Q2. Remaining decision?\n### A2.\n\n"
+        else
+          "- [x] Earlier approved fix.\n- [ ] Remaining approved fix.\n"
+        end
+        File.write(path, body)
+        Hive::Markers.set(task.state_file, :review_stale,
+          reason: "final_fix_unverified", pass: 4, accepted: 2, escalations: 1)
+        budget = apply_granted_review(task, passes: 2)
+        snapshot = budget.observe
+        head = Hive::Stages::Review.git_head(task.worktree_path)
+        first = budget.complete_fix!(snapshot: snapshot, pass: 4, head: head)
+        ctx = Hive::Stages::Review::Context.new(worktree_path: task.worktree_path,
+          task_folder: task.folder, default_branch: "main", pass: 4)
+        Hive::Stages::Review.write_fix_success(ctx, kind: "fixed")
+        receipt_path = File.join(task.reviews_dir, "review-completion-#{first.fetch('decision_id')}-01.json")
+        sealed = File.binread(receipt_path)
+        assert_empty budget.new_escalation_answers(first)
+        updated = format == :qa ? body.sub("### A2.\n", "### A2.\nRemaining approved fix.\n") : body.sub("[ ]", "[x]")
+        File.write(path, updated)
+        assert_equal [ 1 ], budget.new_escalation_answers(first.reject { |key, _| key == "escalation_proof" })
+        # Keep mtimes equal: immutable answer proofs, rather than timestamps,
+        # must identify the new work after a process restart.
+        stamp = File.mtime(Hive::Stages::Review.fix_success_path(task.folder, 4))
+        File.utime(stamp, stamp, path)
+        Hive::Markers.set(task.state_file, :review_working, phase: :fix, pass: 4)
+        task = Hive::Task.new(task.folder)
+        fixes = []
+        reviews = []
+        with_granted_agents(findings: ->(pass) { reviews << pass; "# Clean\n" }, fix: lambda { |context, accepted|
+          fixes << context.pass
+          assert_equal "2", Hive::Markers.current(task.state_file).attrs.fetch("grant_slot")
+          assert_includes accepted, "Remaining approved fix."
+          refute_includes accepted, "Earlier approved fix."
+          refute_includes accepted, "Preserve this exact accepted finding"
+          File.write(File.join(context.worktree_path, "answer.txt"), "approved change\n")
+          run!("git", "-C", context.worktree_path, "add", "answer.txt")
+          run!("git", "-C", context.worktree_path, "commit", "--quiet", "-m", "apply answer")
+          { status: :ok }
+        }) do
+          assert_equal :review_complete, run_granted_review(task, cfg).fetch(:status)
+        end
+        assert_equal [ 4 ], fixes
+        assert_equal [ 5 ], reviews
+        assert_equal sealed, File.binread(receipt_path)
+        completions = budget.observe.completions
+        assert_equal [ 1, 2 ], completions.map { |entry| entry.fetch("slot") }
+        assert_equal first, completions.first
+        refute_equal first.fetch("head"), completions.last.fetch("head")
+      end
+    end
+  end
+
   def test_review_grant_escalation_question_rewrite_refuses_without_marker_or_slot_mutation
     with_review_grant_task do |task, cfg|
       File.write(File.join(task.reviews_dir, "codex-04.md"), "# An operator decision is required\n")
@@ -254,6 +311,42 @@ class RunReviewTest < Minitest::Test
       end
       assert_equal before, File.binread(task.state_file)
       assert_empty budget.store.records.last
+    end
+  end
+
+  def test_review_grant_new_answer_without_a_commit_still_recovers_its_own_guardrail
+    with_review_grant_task do |task, cfg|
+      path = File.join(task.reviews_dir, "escalations-04.md")
+      File.write(path, "### Q1. Remaining decision?\n### A1.\n\n")
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 1)
+      budget = apply_granted_review(task, passes: 2)
+      budget.complete_fix!(snapshot: budget.observe, pass: 4, head: Hive::Stages::Review.git_head(task.worktree_path))
+      ctx = Hive::Stages::Review::Context.new(worktree_path: task.worktree_path,
+        task_folder: task.folder, default_branch: "main", pass: 4)
+      Hive::Stages::Review.write_fix_success(ctx, kind: "fixed")
+      File.write(path, "### Q1. Remaining decision?\n### A1.\nNo code change is needed.\n")
+      Hive::Markers.set(task.state_file, :review_working, phase: :fix, pass: 4)
+      with_granted_agents do
+        with_replaced_singleton_method(Hive::Stages::Review, :check_fix_guardrail, ->(*) { throw :restart }) do
+          catch(:restart) { run_granted_review(task, cfg); flunk "expected interruption before guardrail admission" }
+        end
+      end
+      completions = budget.observe.completions
+      assert_equal [ 1, 2 ], completions.map { |entry| entry.fetch("slot") }
+      assert_equal completions.first.fetch("head"), completions.last.fetch("head")
+      assert_equal :guardrail_incomplete, Hive::Stages::Review.pass_completion_status(task.folder, 4)
+      guardrails = []
+      with_granted_agents(fix: ->(*) { flunk "neither completed slot may be fixed again" }) do
+        with_replaced_singleton_method(Hive::Stages::Review, :check_fix_guardrail, lambda { |_task, _cfg, context, **|
+          guardrails << context.pass
+          nil
+        }) do
+          assert_equal :review_complete, run_granted_review(task, cfg).fetch(:status)
+        end
+      end
+      assert_equal [ 4 ], guardrails
+      assert_equal completions, budget.observe.completions
     end
   end
 

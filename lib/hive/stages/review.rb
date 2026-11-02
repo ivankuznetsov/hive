@@ -213,7 +213,8 @@ module Hive
         # A sealed receipt spends the slot before guardrail admission. Recover
         # that boundary before CI can mutate/publish HEAD or reviewers advance.
         if budget_snapshot&.applicable?
-          budget_snapshot.completions.each do |completion|
+          budget_snapshot.completions.group_by { |entry| entry.fetch("pass") }.each_value do |entries|
+            completion = entries.last
             next if granted_guardrail_disposed?(task.folder, completion)
             next if resuming_from_waiting?(marker, completion.fetch("pass")) &&
               marker.attrs["reason"] == "fix_guardrail"
@@ -1361,11 +1362,16 @@ module Hive
       #                         and re-runs Phase 4 on the operator's
       #                         current [x] marks.
       #
+      # Granted completions use sealed answer proofs: newly answered work
+      # may make the pass fix-incomplete, but spends a fresh logical slot.
       # Pass < 1 or an empty reviews/ dir → :complete (nothing to retry).
       def pass_completion_status(task_folder, pass)
         return :complete if pass < 1
         if (completion = granted_completion_for(task_folder, pass))
-          return granted_guardrail_disposed?(task_folder, completion) ? :complete : :guardrail_incomplete
+          return :guardrail_incomplete unless granted_guardrail_disposed?(task_folder, completion)
+          return :fix_incomplete if pending_granted_escalation_answers(task_folder, completion)&.any?
+
+          return :complete
         end
 
         pass_suffix = format("%02d", pass)
@@ -1561,13 +1567,29 @@ module Hive
         snapshot = review_budget_snapshot_for(task_folder)
         return nil unless snapshot&.applicable? || snapshot&.eligible?
 
-        snapshot.completions.find { |entry| entry.fetch("pass") == pass }
+        snapshot.completions.reverse.find { |entry| entry.fetch("pass") == pass }
+      end
+
+      def pending_granted_escalation_answers(task_folder, completion)
+        snapshot = review_budget_snapshot_for(task_folder)
+        return nil unless snapshot&.remaining.to_i.positive?
+
+        budget = if @grant_budget && @grant_budget.folder == File.expand_path(task_folder)
+          @grant_budget
+        else
+          Hive::ReviewBudget.new(task: Hive::Task.new(task_folder), project: snapshot.evidence.fetch("project"))
+        end
+        budget.new_escalation_answers(completion)
       end
 
       # The immutable completion records spending; only the post-guardrail
       # sentinel records admission (including explicit approval) of that HEAD.
       def granted_guardrail_disposed?(task_folder, completion)
         line = File.open(fix_success_path(task_folder, completion.fetch("pass")), &:gets).to_s
+        if completion.key?("escalation_proof") && completion.fetch("slot") > 1
+          return false unless line[/\bgrant_decision=([0-9a-f]{64})\b/, 1] == completion.fetch("decision_id") &&
+            line[/\bgrant_slot=(\d+)\b/, 1].to_i == completion.fetch("slot")
+        end
         line[/\bhead=([0-9a-f]{40,64})\b/, 1] == completion.fetch("head") &&
           line[/\bkind=([a-z_]+)\b/, 1] == "fixed"
       rescue SystemCallError, IOError
@@ -2023,6 +2045,11 @@ module Hive
       end
 
       def collect_accepted_findings_with_count(ctx)
+        if (completion = granted_completion_for(ctx.task_folder, ctx.pass)) &&
+            (answers = pending_granted_escalation_answers(ctx.task_folder, completion))
+          return collect_answered_escalation_findings_with_count(ctx, only: answers)
+        end
+
         out = +""
         count = 0
         Hive::Stages::Review::Triage.discover_reviewer_files(ctx).each do |path|
@@ -2042,12 +2069,12 @@ module Hive
         AcceptedFindings.new(text: out, count: count + answered.count)
       end
 
-      def collect_answered_escalation_findings_with_count(ctx)
+      def collect_answered_escalation_findings_with_count(ctx, only: nil)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
-        return collect_legacy_checked_escalations_with_count(path) if questions.empty?
+        return collect_legacy_checked_escalations_with_count(path, only: only) if questions.empty?
 
-        answered = questions.select { |q| q[:answer].strip != "" }
+        answered = questions.each_with_index.filter_map { |q, index| q if q[:answer].strip != "" && (only.nil? || only.include?(index)) }
         return AcceptedFindings.new(text: "", count: 0) if answered.empty?
 
         name = File.basename(path)
@@ -2063,11 +2090,12 @@ module Hive
         AcceptedFindings.new(text: out, count: answered.size)
       end
 
-      def collect_legacy_checked_escalations_with_count(path)
+      def collect_legacy_checked_escalations_with_count(path, only: nil)
         return AcceptedFindings.new(text: "", count: 0) unless File.exist?(path)
 
         name = File.basename(path)
-        lines = File.readlines(path).select { |line| auto_fix_finding_line?(line) }
+        lines = File.readlines(path).grep(Hive::ReviewBudget::EscalationProof::CHECKBOX)
+          .each_with_index.filter_map { |line, index| line if auto_fix_finding_line?(line) && (only.nil? || only.include?(index)) }
         return AcceptedFindings.new(text: "", count: 0) if lines.empty?
 
         out = +"\n# Accepted legacy escalations from #{name}\n"
@@ -2528,6 +2556,10 @@ module Hive
         FileUtils.mkdir_p(File.dirname(path))
         head = git_head(ctx.worktree_path)
         head_binding = head.to_s.match?(/\A[0-9a-f]{40,64}\z/) ? " head=#{head}" : ""
+        completion = granted_completion_for(ctx.task_folder, ctx.pass) if kind == "fixed"
+        if completion
+          head_binding += " grant_decision=#{completion.fetch('decision_id')} grant_slot=#{completion.fetch('slot')}"
+        end
         body = +"<!-- HIVE: fix-success sentinel for pass " \
                "#{format('%02d', ctx.pass)};#{head_binding} kind=#{kind} do not edit. " \
                "Removing this file makes the next markerless `hive run` " \

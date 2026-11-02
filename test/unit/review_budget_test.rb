@@ -864,6 +864,31 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_completed_answer_proof_preserves_answers_filled_after_the_grant
+    with_fixture do |budget, task|
+      path = File.join(task.folder, "reviews", "escalations-04.md")
+      original = "### Q1. First decision?\n### A1.\n\n### Q2. Second decision?\n### A2.\n\n"
+      File.write(path, original)
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 2)
+      record(budget, passes: 2)
+      Hive::Markers.set(task.state_file, :review_waiting, pass: 4, escalations: 2)
+      answered = original.sub("### A1.\n", "### A1.\nKeep the first decision.\n")
+      File.write(path, answered)
+      input = budget.observe
+      assert_equal "suspended", input.state, input.remediation
+      completion = budget.complete_fix!(snapshot: input.with(state: "applied"), pass: 4, head: HEAD)
+      assert_equal [ false, true ], completion.fetch("escalation_proof").fetch("answers").map { |entry| entry.fetch("empty") }
+      later = answered.sub("### A2.\n", "### A2.\nApply the second decision.\n")
+      File.write(path, later)
+      assert_equal [ 1 ], budget.new_escalation_answers(completion)
+      File.write(path, later.sub("Keep the first decision.", "Rewrite the first decision."))
+      error = assert_raises(Hive::ReviewBudget::Refused) { budget.new_escalation_answers(completion) }
+      assert_equal "evidence_changed", error.reason
+      assert_equal [ completion ], budget.store.records.last
+    end
+  end
+
   private
 
   def record(budget, passes: 1)

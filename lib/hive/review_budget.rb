@@ -221,6 +221,10 @@ module Hive
     def application_state(receipt)
       current = observe
       return "historical" if %w[expired completed unavailable].include?(current.state)
+      if current.state != "refused" && current.receipts.none? { |entry| entry.fetch("decision_id") == receipt.fetch("decision_id") } &&
+          store.archived_grant(receipt.fetch("observation_digest")) == receipt
+        return "historical"
+      end
       return "changed" if current.state == "refused" || current.original_scope != receipt.fetch("scope")
       return "historical" unless current.receipts.last&.fetch("decision_id") == receipt.fetch("decision_id")
       if current.state == "pending"
@@ -331,12 +335,36 @@ module Hive
         "slot" => logical.fetch("slot"), "kind" => "fixed", "pass" => positive_integer!(pass, "pass"),
         "head" => valid_oid!(head, "completed fix HEAD"), "input_head" => fix_input_head(snapshot: snapshot),
         "input_artifacts" => snapshot.evidence.fetch("artifacts"),
+        "escalation_proof" => escalation_proof(snapshot.evidence.fetch("artifacts"), pass),
         "previous_receipt_digest" => chain_digest(current.receipts, current.completions),
         "recorded_at" => @clock.call.utc.iso8601(6)
       }
       completion = store.write_completion!(document)
       store.append_audit!(receipts.last, completion: completion)
       completion
+    end
+
+    # A later operator answer owns a new logical slot, even when it belongs
+    # to the same reviewer pass. The sealed input distinguishes it from work
+    # that the previous fix already applied.
+    def new_escalation_answers(completion)
+      name = "escalations-#{format('%02d', completion.fetch('pass'))}.md"
+      bytes = store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES)
+      return [] if Digest::SHA256.hexdigest(bytes) == completion.fetch("input_artifacts")[name]
+
+      before = completion["escalation_proof"]
+      unless before
+        grant = store.grants.find { |entry| entry.fetch("decision_id") == completion.fetch("decision_id") }
+        original = grant.fetch("evidence")
+        before = original["escalation_proof"] if original.fetch("artifacts")[name] == completion.fetch("input_artifacts")[name]
+      end
+      after = EscalationProof.capture(name, bytes)
+      unless before && EscalationProof.fills_only?(before, after)
+        raise Refused.new("evidence_changed", "completed fix escalation questions or original answers changed")
+      end
+      before.fetch("answers").each_index.select do |index|
+        before.fetch("answers")[index].fetch("empty") && !after.fetch("answers")[index].fetch("empty")
+      end
     end
 
     def chain_digest(grants, completions)

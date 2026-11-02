@@ -16,7 +16,10 @@ of the original incident's retained HEAD, pass and task-history evidence is
 unknown. The command reports specific missing or contradictory evidence
 instead of adopting an incomplete review. Native provider execution is
 covered by deterministic adapter/launch tests; no live-provider run was part
-of the local acceptance evidence.
+of the local acceptance evidence. Guardrail restart regressions simulate
+process loss after sealing a granted fix, after writing its trip report, and
+before writing the post-guardrail sentinel; physical power-loss durability
+was not exercised.
 
 ## Task observation boundary (2026-10-02)
 

@@ -21,6 +21,30 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_eligibility_counts_only_runner_accepted_reviewer_and_legacy_escalation_lines
+    with_fixture do |budget, task|
+      excluded = <<~MARKDOWN
+        - [x] SUPPRESSED: already covered
+        - [x] RESOLVED/NO-FIX: intentional
+        - [x] RESOLVED: obsolete
+        - [x] NO-FIX: accepted behavior
+        - [x] suppressed: case insensitive exclusion
+        * [x] Not a runner finding
+        - [X] Not a runner finding either
+      MARKDOWN
+      File.open(File.join(task.folder, "reviews", "codex-04.md"), "a") { |file| file.write(excluded) }
+      File.write(File.join(task.folder, "reviews", "escalations-04.md"),
+        "- [x] AUTO-FIX: accepted legacy escalation\n" + excluded)
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 2, escalations: 0)
+      before = tree_bytes(task.folder)
+      assert_equal "eligible", budget.observe.state
+      receipt = record(budget)
+      assert_equal 1, receipt.fetch("amount")
+      before.each { |path, bytes| assert_equal bytes, tree_bytes(task.folder).fetch(path) }
+    end
+  end
+
   def test_missing_history_and_unbound_or_missing_head_proof_refuse_without_writes
     changes = [
       ->(task) { File.unlink(File.join(task.folder, "task-journal.jsonl")) },

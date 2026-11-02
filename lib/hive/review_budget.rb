@@ -516,12 +516,14 @@ module Hive
         raise Refused.new("head_changed", "reviews/#{predecessor} does not prove this exhausted review HEAD")
       end
       accepted = reviewer_files.sum do |name|
-        store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES).scan(/^\s*[-*]\s+\[x\]\s+/i).length
+        store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES).lines.count do |line|
+          Hive::Stages::Review.auto_fix_finding_line?(line)
+        end
       end
       escalations_body = store.read_regular(File.join(reviews, escalation), max_bytes: MAX_ARTIFACT_BYTES)
       questions = escalations_body.split(/^\s*###\s+Q\d+\.\s*/).drop(1)
       if questions.empty?
-        accepted += escalations_body.scan(/^\s*-\s+\[x\]\s+/i).length
+        accepted += escalations_body.lines.count { |line| Hive::Stages::Review.auto_fix_finding_line?(line) }
         unanswered = escalations_body.scan(/^\s*-\s+\[\s*\]\s+/).length
       else
         answered = questions.count { |question| !question.split(/^\s*###\s+A\d+\.\s*/, 2).last.to_s.strip.empty? && question.match?(/^\s*###\s+A\d+\./) }

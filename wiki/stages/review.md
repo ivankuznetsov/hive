@@ -57,9 +57,13 @@ supply its grant-specific token, an explicit 1–3 passes and a non-sensitive
 reason. The first resumed fix uses the preserved accepted findings without
 rerunning reviewers/triage. Sealed controller `kind=fixed` completion receipts
 spend logical grant slots; verification, CI repairs and escalation-only work
-are free. A guardrail-approved granted fix still spends its slot and owes
-verification. The final fix always receives another review; new findings
-then create a fresh eligible exhaustion. No global cap or configuration is
+are free. Spending and guardrail admission are separate: a granted pass
+needs a `kind=fixed` success sentinel bound to its sealed completion HEAD.
+A restart without it rechecks the receipt's input/output diff before CI or
+reviewers advance, or preserves the existing guardrail approval pause.
+Changed HEAD or dirty worktree edits refuse that recovery. A guardrail-approved
+granted fix still spends its slot and owes verification. The final fix always
+receives another review; new findings then create a fresh eligible exhaustion. No global cap or configuration is
 changed, and `hive act` cannot grant allowance.
 
 Unused slots survive ordinary commits, restarts and non-final parks inside
@@ -266,6 +270,7 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 `Stages::Review#pass_completion_status(folder, N)` classifies the highest-pass on disk as one of:
 
 - **`:complete`** — `reviews/fix-success-NN.md` sentinel exists AND its mtime is ≥ `escalations-NN.md`'s mtime, OR pass `N+1` reviewer files exist. `next_pass_for` advances to `N+1`. New sentinels also record the exact completion HEAD and a `kind=` (`clean`, `fixed`, `ci_repaired`, `approved`).
+- **`:guardrail_incomplete`** — a sealed granted-fix completion exists without a matching `kind=fixed` success sentinel at its output HEAD. The slot stays spent; the runner recovers the guardrail disposition before any CI or reviewer work. This takes precedence over other pass artifacts, including later reviewer files.
 - **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
 - **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, AND one of: (a) neither the sentinel nor pass `N+1` reviewer files exist (fix never finished), OR (b) the sentinel exists but the operator edited `escalations-NN.md` strictly after the sentinel was written (`escalations.mtime > fix-success.mtime`). `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's current `[x]` marks (mirrors a `REVIEW_WAITING` resume).
 

@@ -31,6 +31,14 @@ module Hive
 
       module_function
 
+      # Shared by the runner and the standalone grant evidence reader.
+      def auto_fix_finding_line?(line)
+        return false unless line =~ /^\s*-\s+\[x\]\s+/
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
+
+        true
+      end
+
       # True for filenames that originate from a reviewer (not the
       # orchestrator). Used by every consumer of `reviews/*.md`.
       def reviewer_file?(name)

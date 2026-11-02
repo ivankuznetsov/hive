@@ -210,6 +210,28 @@ module Hive
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
 
+        # A sealed receipt spends the slot before guardrail admission. Recover
+        # that boundary before CI can mutate/publish HEAD or reviewers advance.
+        if budget_snapshot&.applicable?
+          budget_snapshot.completions.each do |completion|
+            next if granted_guardrail_disposed?(task.folder, completion)
+            next if resuming_from_waiting?(marker, completion.fetch("pass")) &&
+              marker.attrs["reason"] == "fix_guardrail"
+
+            unless git_head(worktree_path) == completion.fetch("head") && !worktree_dirty?(worktree_path)
+              raise Hive::ReviewBudget::Refused.new("evidence_changed",
+                "the granted fix awaiting guardrail admission has changed HEAD or dirty worktree edits")
+            end
+            @current_phase = :fix
+            completed_ctx = ctx.with(pass: completion.fetch("pass"))
+            terminal = check_fix_guardrail(task, cfg, completed_ctx,
+              base_sha: completion.fetch("input_head"), head_sha: completion.fetch("head"))
+            return terminal if terminal
+
+            write_fix_success(completed_ctx, kind: "fixed")
+          end
+        end
+
         # --- Phase 1: CI fix ---
         # Resume rule: if marker is :review_waiting, the CI was already
         # green when we got there (otherwise we'd be at :review_ci_stale).
@@ -876,30 +898,9 @@ module Hive
             @granted_fix_started = false
           end
 
-          # Post-fix diff guardrail (U13 stub today).
-          guardrail = Hive::Stages::Review::FixGuardrail.run!(
-            cfg: cfg, ctx: ctx_pass,
-            base_sha: before_fix_head,
-            head_sha: after_fix_head
-          )
-          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
-          if guardrail.status == :tripped
-            write_fix_guardrail_findings(ctx_pass, guardrail.matches)
-            # Record the guarded HEAD SHA on the marker so the
-            # approval-on-resume path can verify the
-            # commits the user is approving still match the diff the
-            # guardrail flagged. Without this, a user (or an automated
-            # editor) who amends/squashes/rebases the worktree between
-            # the trip and the approval can launder a different diff
-            # past the guardrail using stale [x] ticks.
-            Hive::Markers.set(task.state_file, :review_waiting,
-                              reason: "fix_guardrail",
-                              matches: guardrail.matches.size,
-                              head: after_fix_head,
-                              pass: pass)
-            return { commit: "review_waiting_fix_guardrail_pass_#{format('%02d', pass)}",
-                     status: :review_waiting }
-          end
+          terminal = check_fix_guardrail(task, cfg, ctx_pass,
+            base_sha: before_fix_head, head_sha: after_fix_head)
+          return terminal if terminal
 
           # Phase 4 fix succeeded AND guardrail passed: pass N is
           # complete. Drop the sentinel so a subsequent re-entry (e.g.
@@ -1316,7 +1317,7 @@ module Hive
           # Retry pass N when it's not yet complete (either triage
           # didn't write escalations-NN.md, or fix didn't finish before
           # the runner exited / was interrupted). pass_completion_status
-          # returns :complete, :triage_incomplete, or :fix_incomplete.
+          # also keeps a sealed fix awaiting guardrail admission on pass N.
           pass_completion_status(task.folder, max) == :complete ? max + 1 : max
         end
       end
@@ -1331,6 +1332,9 @@ module Hive
       #                         `fix-success-NN.md` sentinel exists AND
       #                         the operator has not edited escalations
       #                         since; the runner moved past pass N cleanly.
+      #   :guardrail_incomplete — a granted fix spent its slot, but its
+      #                         bound post-guardrail sentinel is absent.
+      #                         Recovery scans the sealed diff before CI.
       #   :triage_incomplete  — reviewer files for pass N exist but no
       #                         `escalations-NN.md`, or escalations exist
       #                         without a completed fix while
@@ -1356,7 +1360,9 @@ module Hive
       # Pass < 1 or an empty reviews/ dir → :complete (nothing to retry).
       def pass_completion_status(task_folder, pass)
         return :complete if pass < 1
-        return :complete if granted_completion_for(task_folder, pass)
+        if (completion = granted_completion_for(task_folder, pass))
+          return granted_guardrail_disposed?(task_folder, completion) ? :complete : :guardrail_incomplete
+        end
 
         pass_suffix = format("%02d", pass)
         reviews_dir = File.join(task_folder, "reviews")
@@ -1406,9 +1412,8 @@ module Hive
       end
 
       def completed_pass_receipt?(task_folder, pass)
-        granted_completion_for(task_folder, pass) || (File.exist?(fix_success_path(task_folder, pass)) &&
+        (granted_completion_for(task_folder, pass) || File.exist?(fix_success_path(task_folder, pass))) &&
           pass_completion_status(task_folder, pass) == :complete
-        )
       end
 
       def fix_success_head(task_folder, pass)
@@ -1553,6 +1558,16 @@ module Hive
         return nil unless snapshot&.applicable? || snapshot&.eligible?
 
         snapshot.completions.find { |entry| entry.fetch("pass") == pass }
+      end
+
+      # The immutable completion records spending; only the post-guardrail
+      # sentinel records admission (including explicit approval) of that HEAD.
+      def granted_guardrail_disposed?(task_folder, completion)
+        line = File.open(fix_success_path(task_folder, completion.fetch("pass")), &:gets).to_s
+        line[/\bhead=([0-9a-f]{40,64})\b/, 1] == completion.fetch("head") &&
+          line[/\bkind=([a-z_]+)\b/, 1] == "fixed"
+      rescue SystemCallError, IOError
+        false
       end
 
       def granted_fix_resume_attrs
@@ -2030,13 +2045,6 @@ module Hive
         AcceptedFindings.new(text: out, count: count + answered.count)
       end
 
-      def auto_fix_finding_line?(line)
-        return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
-
-        true
-      end
-
       def collect_answered_escalation_findings_with_count(ctx)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
@@ -2354,6 +2362,21 @@ module Hive
           #{ci_result.last_output}
           ```
         MD
+      end
+
+      def check_fix_guardrail(task, cfg, ctx, base_sha:, head_sha:)
+        guardrail = Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg, ctx: ctx, base_sha: base_sha, head_sha: head_sha
+        )
+        emit_guardrail_waivers(task, ctx.pass, guardrail.waived_matches)
+        return nil unless guardrail.status == :tripped
+
+        write_fix_guardrail_findings(ctx, guardrail.matches)
+        Hive::Markers.set(task.state_file, :review_waiting,
+          reason: "fix_guardrail", matches: guardrail.matches.size,
+          head: head_sha, pass: ctx.pass)
+        { commit: "review_waiting_fix_guardrail_pass_#{format('%02d', ctx.pass)}",
+          status: :review_waiting }
       end
 
       def write_fix_guardrail_findings(ctx, matches)

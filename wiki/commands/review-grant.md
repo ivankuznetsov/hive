@@ -37,8 +37,11 @@ and ordinary pass-cap exhaustion retain their existing recovery routes.
 Old tasks qualify without a scheduler recovery observation when their
 identity, task journal, worktree, retained reviewer/triage artifacts and
 preceding HEAD-bound completion receipt prove the exhaustion. A marker's
-counters alone are insufficient. Missing evidence produces a specific repair
-or refresh instruction; there is no incomplete-evidence adoption command.
+counters alone are insufficient. Accepted counts use the runner's predicate
+for both reviewer files and legacy escalations: checked `SUPPRESSED`,
+`RESOLVED/NO-FIX`, `RESOLVED` and `NO-FIX` lines do not count.
+Missing evidence produces a specific repair or refresh instruction; there is
+no incomplete-evidence adoption command.
 
 The coordinator re-resolves the task under its lock, validates the operator
 source and exact evidence, creates an immutable private
@@ -60,8 +63,13 @@ normal escalation pause; immutable framing and answer hashes reject changed
 questions or rewritten original answers. Verification, triage, CI repairs and escalation-only pauses
 spend no granted fix slot. Each successful granted fix has a sealed immutable
 `kind=fixed` completion receipt tied to its decision and logical slot;
-guardrail approval cannot make an actual fix free. The final fix always owes
-another review and normal exact-head CI and completion gates. Findings after
+guardrail approval cannot make an actual fix free. Spending alone does not
+admit the diff: the pass also requires a `kind=fixed` success sentinel bound
+to the completion HEAD. A restart before that sentinel rechecks the recorded
+input/output HEAD diff before CI or reviewers advance, preserving an existing
+guardrail approval pause. Changed HEAD or dirty worktree edits refuse recovery.
+The final fix always owes another review and normal exact-head CI and
+completion gates. Findings after
 the last slot create a fresh eligible exhaustion. There is no cumulative
 grant policy cap and no global configuration change.
 

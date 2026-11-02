@@ -16,14 +16,150 @@ class ReviewGrantRecoveryTest < Minitest::Test
     budget
   end
 
-  def test_sealed_completion_supplies_restart_receipt_and_head_before_markdown_sentinel
+  def test_sealed_completion_spends_slot_but_requires_guardrail_disposition_before_advancing
     with_review_grant_task do |task, _cfg|
       budget = grant(task)
       head = Hive::Stages::Review.git_head(task.worktree_path)
       budget.complete_fix!(snapshot: budget.observe, pass: 4, head: head)
-      assert Hive::Stages::Review.completed_pass_receipt?(task.folder, 4)
+      refute Hive::Stages::Review.completed_pass_receipt?(task.folder, 4)
+      assert_equal :guardrail_incomplete, Hive::Stages::Review.pass_completion_status(task.folder, 4)
+      assert_equal 4, Hive::Stages::Review.next_pass_for(task, Hive::Markers.current(task.state_file))
+      assert_equal [ 1, 0 ], [ budget.observe.spent, budget.observe.remaining ]
       assert_equal head, Hive::Stages::Review.fix_success_head(task.folder, 4)
-      refute File.exist?(Hive::Stages::Review.fix_success_path(task.folder, 4))
+      path = Hive::Stages::Review.fix_success_path(task.folder, 4)
+      refute File.exist?(path)
+      [ [ "a" * 40, "fixed" ], [ head, "clean" ] ].each do |bound_head, kind|
+        File.write(path, "<!-- HIVE: head=#{bound_head} kind=#{kind} -->\n")
+        assert_equal :guardrail_incomplete, Hive::Stages::Review.pass_completion_status(task.folder, 4)
+      end
+      File.write(path, "<!-- HIVE: head=#{head} kind=fixed -->\n")
+      assert Hive::Stages::Review.completed_pass_receipt?(task.folder, 4)
+      assert_equal 5, Hive::Stages::Review.next_pass_for(task, Hive::Markers.current(task.state_file))
+    end
+  end
+
+  def test_restart_recovers_guardrail_after_receipt_or_report_before_advancing
+    [ :check_fix_guardrail, :write_fix_guardrail_findings ].each do |boundary|
+      with_review_grant_task do |task, cfg|
+        budget = grant(task)
+        base = Hive::Stages::Review.git_head(task.worktree_path)
+        git_command = method(:run!)
+        fix = lambda do |*, agent_custody:, **|
+          agent_custody.call do
+            path = File.join(task.worktree_path, ".github", "workflows", "check.yml")
+            FileUtils.mkdir_p(File.dirname(path))
+            File.write(path, "name: Check\n")
+            git_command.call("git", "-C", task.worktree_path, "add", ".github/workflows/check.yml")
+            git_command.call("git", "-C", task.worktree_path, "commit", "--quiet", "-m", "Update workflow")
+            { status: :ok }
+          end
+        end
+        original = Hive::Stages::Review.method(boundary)
+        crash = lambda do |*args, **kwargs|
+          original.call(*args, **kwargs) if boundary == :write_fix_guardrail_findings
+          raise SystemExit, "simulated crash before durable guardrail disposition"
+        end
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, fix) do
+          with_replaced_singleton_method(Hive::Stages::Review, boundary, crash) do
+            capture_io do
+              Hive::Lock.with_task_lock(task.folder, create: false) do
+                assert_raises(SystemExit) { Hive::Stages::Review.run!(task, cfg) }
+              end
+            end
+          end
+        end
+        completion = budget.observe.completions.fetch(0)
+        assert_equal base, completion.fetch("input_head")
+        assert_equal :guardrail_incomplete, Hive::Stages::Review.pass_completion_status(task.folder, 4)
+        refute Hive::Stages::Review.completed_pass_receipt?(task.folder, 4)
+        refute File.exist?(Hive::Stages::Review.fix_success_path(task.folder, 4))
+
+        # Recovery must scan the sealed diff before even the entry CI gate.
+        with_replaced_singleton_method(Hive::Stages::Review, :run_ci_gates, ->(*, **) { flunk "CI before guardrail admission" }) do
+          with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(*, **) { flunk "review before guardrail admission" }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, **) { flunk "spent slot must not launch another fix" }) do
+              2.times do
+                capture_io do
+                  Hive::Lock.with_task_lock(task.folder, create: false) do
+                    assert_equal :review_waiting, Hive::Stages::Review.run!(task, cfg).fetch(:status)
+                  end
+                end
+              end
+            end
+          end
+        end
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal "fix_guardrail", marker.attrs.fetch("reason")
+        assert_equal completion.fetch("head"), marker.attrs.fetch("head")
+        assert_equal "4", marker.attrs.fetch("pass")
+        assert_equal [ 1, 0 ], [ budget.observe.spent, budget.observe.remaining ]
+        report = File.join(task.reviews_dir, "fix-guardrail-04.md")
+        assert_includes File.read(report), ".github/workflows/check.yml"
+        assert_includes File.read(report), "- [ ]"
+
+        File.write(report, File.read(report).gsub("- [ ]", "- [x]"))
+        reviewed_passes = []
+        review = lambda do |_cfg, ctx, _task, **|
+          # Only the fresh verify pass may be reviewed after approval.
+          reviewed_passes << ctx.pass
+          File.write(File.join(task.reviews_dir, "codex-05.md"), "No findings.\n")
+          :ok
+        end
+        triage = lambda do |cfg:, ctx:|
+          path = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+          File.write(path, "# Escalations\n")
+          Hive::Stages::Review::Triage::Result.new(status: :ok, escalations_path: path,
+            error_message: nil, tampered_files: [], limit_text: nil)
+        end
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, review) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage) do
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, **) { flunk "approval must preserve spent slot" }) do
+              capture_io do
+                Hive::Lock.with_task_lock(task.folder, create: false) do
+                  assert_equal :review_complete, Hive::Stages::Review.run!(task, cfg).fetch(:status), File.read(task.state_file)
+                end
+              end
+            end
+          end
+        end
+        assert_equal [ 5 ], reviewed_passes
+        assert_equal [ completion ], budget.observe.completions
+      end
+    end
+  end
+
+  def test_restart_after_clean_guardrail_before_sentinel_rechecks_then_verifies_without_fixing
+    with_review_grant_task do |task, cfg|
+      budget = grant(task)
+      with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, agent_custody:, **) {
+        agent_custody.call { { status: :ok } }
+      }) do
+        with_replaced_singleton_method(Hive::Stages::Review, :write_fix_success, ->(*, **) { raise SystemExit, "before sentinel" }) do
+          capture_io do
+            Hive::Lock.with_task_lock(task.folder, create: false) do
+              assert_raises(SystemExit) { Hive::Stages::Review.run!(task, cfg) }
+            end
+          end
+        end
+      end
+      completion = budget.observe.completions.fetch(0)
+      calls = []
+      original = Hive::Stages::Review::FixGuardrail.method(:run!)
+      with_replaced_singleton_method(Hive::Stages::Review::FixGuardrail, :run!, ->(**args) {
+        calls << args.values_at(:base_sha, :head_sha)
+        original.call(**args)
+      }) do
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, **) { flunk "spent slot must not launch another fix" }) do
+          capture_io do
+            Hive::Lock.with_task_lock(task.folder, create: false) do
+              assert_equal :review_complete, Hive::Stages::Review.run!(task, cfg).fetch(:status), File.read(task.state_file)
+            end
+          end
+        end
+      end
+      assert_equal [ [ completion.fetch("input_head"), completion.fetch("head") ] ], calls
+      assert File.exist?(Hive::Stages::Review.fix_success_path(task.folder, 4))
+      assert_equal [ completion ], budget.observe.completions
     end
   end
 

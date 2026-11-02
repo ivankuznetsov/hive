@@ -21,20 +21,26 @@ in the independent `tmp/bench-credential-canonical` clone within this execution
 worktree. Upstream publication is outside this commit-only execution stage.
 
 Actual GNU Bash 3.2.57 and 5.3.20 passed locally, together with real Docker
-credential probes. Hosted `macos-15` execution is pending; the new CI lane
-requires `/bin/bash` 3.2 and fails absent/wrong interpreters. This local Linux
-proof does not claim a macOS result. `minimax-3` and `qwen-2.6-coder` remain
+credential probes. Both hosted `bench credential isolation` lanes passed on
+`ubuntu-24.04` and `macos-15` in
+[CI run 41454797098](https://github.com/ivankuznetsov/hive/actions/runs/41454797098)
+at `715cbeeeb72ce15e51278a155e40a4c43f6b51d8`. Only wiki documents changed
+between that tested commit and the reviewed HEAD. The macOS lane requires
+`/bin/bash` 3.2 and fails absent/wrong interpreters.
+`minimax-3` and `qwen-2.6-coder` remain
 unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
 `failed` and exit 2 until their routes are verified and configured.
 
 The first hosted Ubuntu credential proof failed before probe execution because
 the shared fixture requested eight CPUs on a four-CPU daemon. The real Docker
-matrix now requests one CPU; hosted confirmation of that correction is pending.
+matrix now requests one CPU; the successful hosted run above confirms that
+correction.
 Canonical follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies the same
 override in `tmp/bench-credential-canonical`. Both local proof gates passed
 under a four-CPU rejection shim with actual Bash 3.2.57/5.3.20 and real Docker,
 with zero skips (canonical 3 tests/40 assertions; Hive 3/55). That simulation
-does not establish a hosted CI result; upstream publication remains pending.
+is separate from the hosted evidence above. Canonical upstream publication
+remains pending.
 
 ## Task observation boundary (2026-10-02)
 

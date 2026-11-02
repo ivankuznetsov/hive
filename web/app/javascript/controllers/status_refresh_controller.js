@@ -88,20 +88,10 @@ function beforeVisit(event) {
   event.preventDefault()
 }
 
-// Rails consumes flash on the redirect GET. A later background morph has no
-// flash markup, but must leave the mutation acknowledgement visible. New
-// messages still morph normally, and ordinary navigation clears the old one.
-function beforeMorphElement(event) {
-  if (event.target.id === "flash-messages" && !event.detail?.newElement?.textContent.trim()) {
-    event.preventDefault()
-  }
-}
-
 document.addEventListener("turbo:submit-start", submitting)
 document.addEventListener("turbo:submit-end", submitted)
 document.addEventListener("turbo:before-stream-render", beforeStreamRender)
 document.addEventListener("turbo:before-visit", beforeVisit)
-document.addEventListener("turbo:before-morph-element", beforeMorphElement)
 
 // A status refresh has no Turbo request ID because it comes from a background
 // filesystem subscriber. Submission admission above prevents it from aborting

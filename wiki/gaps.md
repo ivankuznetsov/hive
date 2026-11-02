@@ -2152,20 +2152,3 @@ outside the babysitter policy's direct stub/overlay consumers also remain
 outside this fix. Exact `--filters` is the sole raw smudge positive control;
 ambiguous spellings and object-filter options are not claimed as helper seams
 on versions that reject them or use them for ordinary reads.
-
-The Addressable/sqlite3 audit remediation was initially removed to preserve
-the filter-policy scope. By the 2026-11-02 CI repair, `origin/main` already
-locked Addressable 2.9.2 and sqlite3 2.10.2 in both bundles, so retaining the
-older pins would downgrade main. The CI repair restores those versions; both
-local advisory checks pass. Future advisory-database changes remain outside
-that evidence.
-
-## Web submission acknowledgement evidence (2026-11-02)
-
-The original project-rail scenario passed locally with CI seed 4996, so its
-exact CI event timing was not recovered. A forced post-submission refresh
-deterministically reproduced the missing flash notice after the completed
-`turbo:morph`. A stable flash container and empty-refresh morph prevention
-preserve the notice, while the same browser scenario proves subsequent-message
-replacement and normal-navigation clearing. The next exact-head CI run remains the check
-of the original runner timing.

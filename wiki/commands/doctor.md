@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
@@ -123,6 +123,50 @@ files. It never launches `openclaw` or writes the OpenClaw skill directory.
 - Conflicting/incompatible: inspect `openclaw skills info hive --json`; Hive
   will not replace foreign content.
 
+## QMD environment boundary
+
+Doctor checks QMD only when the project contains a `.llm-wiki` directory.
+For Ruby callers supplying `environment:`, that environment determines both
+QMD discovery and the `--version` subprocess. The CLI omits this argument and
+keeps the default `environment: ENV`, preserving normal `hive doctor` behavior.
+
+Discovery selects the first eligible candidate in this order:
+
+1. Nonempty `HIVE_QMD_BIN`, if executable. This override does not require a
+   regular file; a directory can be selected and then produce a launch warning.
+2. `qmd` on the supplied `PATH`, using `Hive::InvokedBinary.which`. Missing or
+   empty `PATH` searches no directories.
+3. `<data-home>/hive/qmd/bin/qmd`.
+4. `<HOME>/.local/share/hive/qmd/bin/qmd`.
+5. `<prefix>/hive/qmd/bin/qmd`, where the prefix is the stripped first line of
+   `<data-home>/hive/install-prefix`. A blank first line contributes no candidate,
+   even if later lines are nonempty.
+
+Data home is nonempty supplied `XDG_DATA_HOME`, otherwise nonempty supplied
+`HOME` plus `.local/share`. Missing or empty `HOME` omits the separate home
+fallback, while a supplied XDG root still supports its managed binary and
+sidecar. If both roots are missing or empty, there are no managed candidates
+or sidecar lookup. Doctor does not expand `~`, consult the account database,
+or turn missing roots into relative paths. Managed and sidecar candidates
+must be executable regular files; absent, empty, or non-executable overrides
+fall through to the remaining candidates.
+
+The version probe receives only the supplied environment, without inheriting
+omitted host variables or changing global `ENV`. Callers must include variables
+the selected executable needs, such as `PATH` for Node or interpreter lookup.
+The probe retains its 15-second timeout. Missing QMD, nonzero exit, launch
+failure, and timeout remain optional warning rows and do not change the exit
+code. Human output and the `hive-doctor.v2` JSON contract remain unchanged.
+
+Other Doctor checks retain their own environment boundaries. Auth, managed-skill
+inspection, and web checks retain their existing injected-environment contracts.
+Default MCP discovery still uses `Dir.home` and global `ENV` to inspect personal
+agent configuration and run its listing commands; direct callers can disable
+that comparison with `mcp_discover: nil`. Runtime-control-plane checks still
+resolve state through global `HIVE_HOME`, `XDG_STATE_HOME`, and `HOME`, with
+`HIVE_HOME` taking precedence. Injecting an environment does not isolate those
+host-driven checks.
+
 ## Legacy rows and exit codes
 
 Doctor retains these legacy rows: a `claude/auth` warning when the shell
@@ -209,7 +253,12 @@ project.
   provenance from workspace and managed roots, legacy projection evidence,
   drift, missing binaries/skills, and an always-empty command audit.
 - `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy
-  dependency rows, control-plane integrity, and corrupt-manifest diagnosis.
+  dependency rows, QMD discovery precedence and missing roots, isolated real
+  version probes, default ENV behavior, exact warning diagnostics, auth key
+  redaction, control-plane integrity, and corrupt-manifest diagnosis. QMD and
+  auth full-call fixtures run in Ruby children with scratch HOME/HIVE_HOME,
+  injected inspectors, and MCP discovery disabled; they preserve coverage
+  instrumentation and assert that global ENV remains unchanged.
   `doctor_managed_skills_test.rb` covers managed remediation,
   non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
   even when every available agent runner would mutate if called.

@@ -3,7 +3,7 @@ title: Hive-owned MCP (Hive::Mcp)
 type: module
 source: lib/hive/mcp.rb, lib/hive/mcp/*.rb, lib/hive/agent_support/*/mcp.rb
 created: 2026-10-15
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [module, mcp, agent, config, decision]
 ---
 
@@ -35,6 +35,8 @@ execute: { mcp: { use: [context7, linear] } }   # a stage block replaces it
 
 ## Launch path
 
+For the retained uncertainty and historical evidence, see [Pi floor lives only on the Hive side (2026-10-15)](#pi-floor-lives-only-on-the-hive-side-2026-10-15).
+
 `Hive::Mcp.prepare(profile:, policy:, cwd:, version:)` returns a `Launch` (argv, default argv, env, passthrough env names, config overlay, cleanup paths, isolation, notices) from the agent's facet `AgentSupport::<Agent>::Mcp` (`Hive::Mcp.adapter`). Each facet also declares `ISOLATES` and `ACCEPTS_GRANTS`, implements `discover` for `hive mcp import`, and Codex/Claude implement `login_argv`; agent-specific code stays under `lib/hive/agent_support/<agent>/`:
 
 | Agent | Isolation | Granted servers |
@@ -62,4 +64,57 @@ Wiring:
 
 ## Backlinks
 
-- [[commands/mcp]] · [[commands/doctor]] · [[modules/config]] · [[modules/agent_profile]] · [[decisions]] · [[gaps]]
+- [[commands/mcp]] · [[commands/doctor]] · [[modules/config]] · [[modules/agent_profile]] · [[decisions]] · [Known gaps](#known-gaps)
+
+## Known gaps
+
+### Pi floor lives only on the Hive side (2026-10-15)
+
+#### Source S04, lines 60–62: Hive-owned MCP follow-ups (2026-10-15)
+
+Hive now renders MCP for every agent it launches (plan
+2026-10-15-001; [[modules/mcp]]). Open items:
+
+#### Source S04, lines 63–67: Hive-owned MCP follow-ups (2026-10-15)
+
+- **Pi floor lives only on the Hive side.** `agents.pi.min_version` defaults to
+  `1.0.4` (the first Pi with `--no-mcp`), but the `agent-cli-runtime`
+  component's `PI` profile still says `0.70.2`. Raising it needs its own
+  package change and release (`docs/RELEASING.md`, "Releasing
+  agent-cli-runtime"); until then cfg-less profile lookups keep the old floor.
+
+### Bench harness Pi profiles (2026-10-15)
+
+#### Source S04, lines 74–75: Hive-owned MCP follow-ups (2026-10-15)
+
+- **Bench harness Pi profiles** (`templates/builtins/bench/runtime/harness/`)
+  launch Pi outside Hive and still declare `0.70.2`; they pass no `--no-mcp`.
+
+### Native Codex reviewer parser and live-pass evidence (2026-10-16)
+
+The unresolved qualifications remain verbatim in the [native reviewer isolation history](#native-codex-reviewer-isolation-2026-10-16).
+
+### Resolved
+
+#### Live-skills workflow Pi package (2026-10-15)
+
+##### Source S04, lines 68–73: Hive-owned MCP follow-ups (2026-10-15)
+
+- **Closed 2026-10-15: live-skills workflow Pi package.** The
+  live-agent-skills workflow installed the deprecated
+  `@mariozechner/pi-coding-agent` (latest 0.73.1, below the new floor); it now
+  installs `@earendil-works/pi-coding-agent`, which the npm registry names as
+  its replacement. (The Hivebox image that pinned `@mariozechner/pi@0.70.2` was
+  removed by ADR-055.)
+
+#### Native Codex reviewer isolation (2026-10-16)
+
+##### Source S04, lines 76–83: Hive-owned MCP follow-ups (2026-10-15)
+
+- **Closed 2026-10-16: native Codex reviewer isolation.** The `codex_review`
+  reviewer ran top-level `codex review`, which has no `--ignore-user-config`,
+  so it kept personal MCP servers. It now runs `codex exec review` with the
+  standard Codex MCP launch ([[modules/reviewers]]). Still open: the parser's
+  fixtures are one real codex-cli 0.162.1 findings run; the clean-verdict and
+  usage-limit fixtures are derived from it, not captured, and no live patrol
+  pass has run on the new argv yet.

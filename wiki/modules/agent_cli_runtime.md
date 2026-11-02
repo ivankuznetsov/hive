@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-24
+updated: 2026-11-02
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -288,6 +288,8 @@ here.
 
 ## Compatibility
 
+For the retained uncertainty and historical evidence, see [Portable managed Grok execution is Linux-only (2026-07-26)](#portable-managed-grok-execution-is-linux-only-2026-07-26).
+
 The 0.2.x line runs on Ruby 3.4 or newer and is tested on Linux and macOS.
 Version 0.2.0 accounts for the additive OpenCode prepared-invocation,
 route-probe, strict-parser, identity, and usage contracts. Removing or changing
@@ -297,3 +299,108 @@ forward; yanking or ownership changes are separate operator decisions.
 
 Related context: [[component-boundaries]], [[modules/agent_profile]], and
 ADR-038 in [[decisions]].
+
+## Known gaps
+
+- [Typed budget and Brainstorm artifact repair](../stages/brainstorm.md#typed-budget-and-brainstorm-artifact-repair-need-live-dogfood-2026-07-25)
+
+### Headless soak for brainstorm, execute, and review-fix (2026-10-14)
+
+#### Source S05, lines 86–88: Claude headless-only follow-ups (2026-10-14)
+
+The Claude tmux launch mode was removed (ADR-053 in [[decisions]]). Open items
+found while updating docs:
+
+#### Source S05, lines 93–95: Claude headless-only follow-ups (2026-10-14)
+
+- **Headless soak for brainstorm, execute, and review-fix.** These stages ran
+  mostly under tmux (the old default), so they have little production soak on
+  the headless path. Watch the first real tasks after the change.
+
+### Review token cost of independent Claude reviewers is unmeasured (2026-10-14)
+
+#### Source S05, lines 89–92: Claude headless-only follow-ups (2026-10-14)
+
+- **Review token cost of independent Claude reviewers is unmeasured.** Claude
+  reviewers no longer share one session per pass, so prompt-cache reuse within a
+  pass is lost. The plan expects review token use to rise slightly; no
+  before/after measurement exists in-tree.
+
+### Existing tasks still on a pre-upgrade tmux Claude (2026-10-14)
+
+#### Source S05, lines 96–101: Claude headless-only follow-ups (2026-10-14)
+
+- **Existing tasks still on a pre-upgrade tmux Claude.** Recovery relies on the
+  operator letting Claude stages finish before upgrading, then killing leftover
+  Hive Claude tmux sessions; the new code cannot see such a session. The step is
+  recorded in the `## 0.8.0` section of `CHANGELOG.md`, staged ahead of the
+  version bump; release prep keeps that section when it bumps to 0.8.0.
+
+### OpenCode live validation (updated 2026-08-21)
+
+#### Source S18, lines 358–368: OpenCode live validation (updated 2026-08-21)
+
+OpenCode `1.18.16+` now has deterministic fixtures, a guarded installed-CLI
+offline smoke, fake-CLI Hive execute and native Compound Engineering plan
+integration, installed-candidate lifecycle proof, and independently
+reconstructed mirror projection proof. The component release workflow makes
+the real installed-CLI offline smoke mandatory instead of accepting a skip.
+The authenticated atomic-edit smoke is intentionally gated
+on an explicit backend/model, selected config, credential environment key, and
+operator opt-in. Until that gate is supplied, real model transport and live
+provider permission behavior remain unverified; an offline inventory check is
+not equivalent to a model request.
+
+### Invocation-token custody limitations
+
+#### Source S18, lines 434–444: OpenCode live validation (updated 2026-08-21)
+
+Invocation-token custody now cleans ordinary inherited descendants even after
+`setsid` and reparenting, which is the leak observed during live Webmail
+dogfood. It is lifecycle cleanup, not hostile-process containment: a command
+that deliberately erases the custody environment or delegates a service to an
+external manager without forwarding it can evade the inventory. The same
+limit applies when a descendant becomes non-dumpable: an unreadable process
+environment cannot prove ownership. Unreadable same-user rows are skipped
+because unrelated service managers can legitimately have that property. A dedicated
+cgroup/namespace owner that preserves OpenCode's required repository writes,
+network, and cross-platform support remains a deeper isolation follow-up.
+
+### Claude launch flags should be live-checked against current Claude Code.
+
+#### Source S28, lines 785–785: Open questions about the codebase
+
+11. **Claude launch flags should be live-checked against current Claude Code.** Config, init prompts/schema, and headless argv tests now cover `claude.permission_mode` plus the new `claude.model` / `claude.effort` pins. There is still no recorded live run proving every accepted permission mode, `--model default`, and explicit `--effort low|medium|high` still match the installed Claude CLI's current behavior.
+
+### Portable managed Grok execution is Linux-only (2026-07-26)
+
+#### Source S53, lines 1279–1288: Portable managed Grok execution is Linux-only (2026-07-26)
+
+Bounded current-generation Honeycomb actors can now run through Codex or Grok
+without granting either provider direct task writes. Codex relies on its named
+filesystem permission profiles; Grok is confined by bubblewrap because its
+native read-only tool rules do not prevent undeclared reads. The Grok adapter
+therefore fails closed when `/usr/bin/bwrap` is unavailable. No macOS or Windows
+equivalent is implemented yet, and future Codex/Grok CLI changes still require
+the focused policy probes and live managed-workflow dogfood before those
+platform/version combinations are treated as proven.
+
+### Resolved
+
+#### Tmux-session disappearance is unit-pinned but not live-smoked.
+
+##### Source S28, lines 793–793: Open questions about the codebase
+
+17. ~~**Tmux-session disappearance is unit-pinned but not live-smoked.**~~ — closed 2026-10-14. The Claude tmux launch runtime was deleted (Claude launches only as headless `claude -p`; see ADR-053 in [[decisions]]); no Claude stage runs in a tmux session, so the live smoke can no longer be performed. `daemon/stale_agent_healer.rb` still reads the legacy `tmux_session_terminated` reason for task records written before the upgrade. Original record: Commit `71db09c7` added `test/unit/claude_launcher_test.rb` coverage proving that `Hive::ClaudeLauncher.wait_for_terminal_marker` stamps `ERROR reason=tmux_session_terminated` when `runner.session_exists?` turns false before a marker arrives, and reports a pane-readability error if the tmux session check itself fails. Current recovery tests prove that this marker follows the same cooldown, coordinator admission, marker-id guard, and workflow-derived retry argv as every other `ERROR`; there is no TUI auto-healer or `3-plan`-specific clear/requeue branch. Branch `fix-claude-tmux-ready-detector-260629-50cc` documents the correct local-gem validation path for Claude tmux launcher-script packaging fixes in [[operating]], and source/tests show the gemspec includes `lib/hive/scripts/**/*.sh`; this refresh still found no in-tree artifact of a locally built `hive-cli` install replaying the affected Claude tmux task to `WAITING` or later. No in-tree artifact was found for the full live path: kill a real managed tmux session during a Claude-backed brainstorm/plan/execute/artifacts/finalize run, observe the marker through `hive status`, let the daemon submit it to the coordinator, and verify repeated cooled retries eventually advance after the external fault is repaired.
+
+#### Claude/tmux orphan-sweep server skip is unit-pinned but not post-fix parallel live-smoked.
+
+##### Source S28, lines 809–809: Open questions about the codebase
+
+34. ~~**Claude/tmux orphan-sweep server skip is unit-pinned but not post-fix parallel live-smoked.**~~ — closed 2026-10-14. The Claude tmux launch runtime was deleted (Claude launches only as headless `claude -p`; see ADR-053 in [[decisions]]); `sweep_orphan_processes` was deleted with it. Original record: Commit `024b29b0` changes `Hive::ClaudeLauncher.sweep_orphan_processes` from a blanket `pkill -f` to `pgrep` plus per-PID `TERM`, skipping matched `tmux` commands because the tmux server can retain the first session's full `new-session ... --add-dir <task.folder>` argv. `test/unit/stages/brainstorm_tmux_sentinel_test.rb` covers the observed shape: one matched tmux server line plus one matched Claude line must kill only the Claude PID and log `skipped=1`. The 2026-06-11 refreshes did not find an in-tree artifact showing two real Claude/tmux-backed Hive tasks running in parallel after the fix, one finishing, and the sibling session surviving without `tmux_session_terminated`.
+
+#### Tmux large-prompt settle is unit-pinned, not live-Claude-smoked.
+
+##### Source S29, lines 917–918: 2026-06-16/17 refresh uncertainty
+
+- ~~**Tmux large-prompt settle is unit-pinned, not live-Claude-smoked.**~~ — closed 2026-10-14. The Claude tmux launch runtime was deleted (Claude launches only as headless `claude -p`; see ADR-053 in [[decisions]]); `Hive::TmuxRunner` is gone and headless Claude receives the whole prompt on stdin. Original record: Commit `f25896a2` makes `Hive::TmuxRunner#send_prompt` wait for a stable pane tail before sending Enter. `test/unit/tmux_runner_test.rb` covers settle/deadline/failure paths with fake tmux, but this refresh did not find a live Claude/tmux run with a large review/triage prompt proving the prompt no longer sits staged in the input box.

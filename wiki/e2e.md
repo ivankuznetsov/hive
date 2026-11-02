@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-08-11
+updated: 2026-11-02
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -170,7 +170,7 @@ controller: the fixture recognizes inference, producer, and reviewer prompts,
 writes a two-file document package only inside the controller-issued root, and
 returns provider-shaped result events with exact hashes for independent review.
 Multi-reviewer queueing outside this closed role protocol is post-v1; see
-[[gaps]].
+[outcome evidence](stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14).
 
 ### Scenario statuses
 
@@ -312,3 +312,105 @@ in the artifact bundle instead of crashing unrelated CLI scenarios. If
 - [[dependencies]]
 - [[commands/tui]]
 - [[decisions]]
+
+## Known gaps
+
+### Incident timing calibration (2026-10-14)
+
+#### Source S07, lines 135–142: Incident timing calibration (2026-10-14)
+
+The 36-second aggregate advisory cap covers observed hosted totals of 30.577,
+30.643, 32.543, and 32.146 seconds while preserving the 16-second
+per-scenario ceiling. These runs do not establish a long-run percentile or
+separate budgets for each runner class. Revisit the cap after representative
+hosted timing history exists; timing remains advisory and does not replace
+functional E2E coverage.
+
+### E2E surface matrix
+
+#### Source S28, lines 780–780: Open questions about the codebase
+
+6. **E2E surface matrix** — `bin/hive-e2e run` is green locally on Linux with tmux 3.6a, but the follow-up matrix across macOS and a different tmux minor version is still open.
+
+### R2 misdiagnosis artifact validation
+
+#### Source S28, lines 782–782: Open questions about the codebase
+
+8. **R2 misdiagnosis artifact validation** — e2e artifacts exist, but the "fresh agent course-corrects from a wrong first diagnosis" case needs the first organic failure or a third-party synthetic failure.
+
+### `bin/hive-e2e` executable JSON/usage contract is focused-test pinned but not live-wrapper smoked.
+
+#### Source S28, lines 803–803: Open questions about the codebase
+
+27. **`bin/hive-e2e` executable JSON/usage contract is focused-test pinned but not live-wrapper smoked.** Commit `d51455e6` starts Thor in `debug: true` and maps `Thor::Error` through the outer rescue so human unknown-command and missing-argument invocations exit `64`, matching the JSON envelope path. Commit `96242e97` removes a duplicate `Hive::E2E::Binary.start` call so successful `list --json`, `clean --json`, and `clean --json --dry-run` invocations emit exactly one top-level JSON document on stdout. Commit `cb986b33` changes `hive-e2e replay` so an existing `repro.sh` must be a regular executable file before `exec`; non-executable repro scripts now exit `78` with JSON `error_kind: unusable_repro` instead of falling through to a generic process failure. Branch HEAD keeps `--json --help run` / `--json -h run` on the human command-help path while preserving JSON envelopes for non-command help trailers such as `--json --help missing` and option trailers such as `--json --help --filter tui`. `test/e2e/lib/hive_e2e_binary_test.rb` covers the source-tree executable, including a temp-run `repro.sh` with mode `0644` and the recognized-command help variants. This refresh did not find an in-tree artifact showing a live patrol/babysitter wrapper consuming those `bin/hive-e2e` JSON surfaces, the `unusable_repro` replay path, or the leading-JSON command-help path; `bin/hive-e2e` is a checkout-only harness rather than a packaged `hive-cli` executable.
+
+### `bin/hive-eval` scenario selector hardening is source-tested but not live-smoked outside the checkout tests.
+
+#### Source S28, lines 860–860: Open questions about the codebase
+
+46. **`bin/hive-eval` scenario selector hardening is source-tested but not live-smoked outside the checkout tests.** Commit `822a23bf` adds `SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9_-]+\z/`, keeps slash/backslash rejection before lookup, strips a trailing `_test`, joins the safe basename under `HIVE_EVAL_SCENARIO_ROOT` or the default `test/eval/scenarios`, and exits 64 before writing a report on invalid selectors. `test/eval/support/reporter_test.rb` covers traversal, Windows-style separators, dotted unsafe names, stray positional scenario args, unknown/missing option usage errors, ambient `TEST` isolation, all-scenario scenario-only filtering, successful report writes, and deliberate failing-scenario report shape. This refresh did not find an in-tree artifact showing a live patrol-triggered or other non-test `bin/hive-eval --scenario ...` invocation after the hardened selector landed.
+
+#### Source S28, lines 864–864: Open questions about the codebase
+
+46. **`bin/hive-eval` CLI contract is source/test-pinned but not judge-smoked.** Commit `ffa51d56` hardens the checkout-only eval runner's usage surface: positional scenario names are rejected before report creation, `--scenario` is confined to safe basenames under `test/eval/scenarios/`, and path separators/traversal/dotted names exit 64. `test/eval/support/reporter_test.rb` pins those structural paths plus inherited `TEST` isolation and successful report writing; `bundle exec ruby -Itest test/eval/support/reporter_test.rb` passed locally during this refresh. Remaining uncertainty: no in-tree artifact shows a full judge-enabled `bin/hive-eval` run after the hardening; the pinned structural path can run with `--no-judge` without exercising Codex judge subprocesses.
+
+#### Source S28, lines 865–865: Open questions about the codebase
+
+47. **`bin/hive-eval` usage/env contract is focused-test pinned but not full judged-eval smoked.** The eval-wrapper follow-up changes the checkout-local eval wrapper's usage text so one unexpected positional argument prints `unexpected argument: ...`, multiple positional arguments print `unexpected arguments: ...`, path separators report `scenario basename must not contain path separators`, and unsafe separator-free names report a generic safe-basename error without echoing the value. Commit `ed404213` then changes environment propagation so inherited `HIVE_EVAL_NO_JUDGE=1` is cleared unless `--no-judge` is passed, preventing caller environment from silently disabling Codex judge assertions. The patrol follow-up also rejects inherited `RAKEOPT=-n`/`--dry-run`, clears `RAKEOPT` before launching Rake, and refuses a zero child exit unless the report is parseable, identifies itself as `hive-eval-report` version 1, contains at least one scenario, and includes the requested scenario when filtered. The current focused tests pin the first positional scenario argument, a trailing extra argument, the stray positional scenario argument, path separators, unsafe names, invalid options, missing option values, ambient `TEST` isolation, all-scenario filtering, successful report writes, deliberate failing-scenario report shape, the judge-enabled env-clear fixture, inherited Rake dry-run rejection, child `RAKEOPT` scrubbing, missing reports after a successful child, malformed/wrong-schema reports, empty reports, and filtered reports naming the wrong scenario. This refresh did not find an in-tree artifact from a full `bin/hive-eval` run with real Codex judge/persona calls enabled after `ed404213`; the verified surface is the local structural wrapper/test path.
+
+#### Source S28, lines 897–902: Open questions about the codebase
+
+The focused eval-wrapper guard now recognizes bundled, abbreviated, underscored,
+and shell-quoted Rake dry-run options; validates complete passing scenario
+records; and isolates concurrent report generation before atomic publication.
+The remaining gap is still a real judge-enabled run, not structural report
+integrity.
+
+### Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
+
+#### Source S34, lines 965–983: Three incident e2e fixtures remain sibling-gated (updated 2026-08-11)
+
+All six production-incident sequences are synthetic and parseable. The #9771
+plan-only dependency and repository-routing fixtures now execute as ordinary
+green results against the merged fail-closed contracts. The #9770
+provider-limit fixture is also green: it now proves a trusted account-scoped
+failure, one durable health transition, and one charged
+`RecoveryCoordinator` successor on the next route. Three remain visible as
+pending entries rather than claimed passes because the current tree does not
+expose the exact sibling-owned contracts needed to activate them: #9767's
+durable attempt lease and adoption reason, #9768's generation identity and
+reconciliation reason, and #9769's finalize lifecycle terminal reason. The
+harness deliberately does not infer those formats or strings.
+
+Close this gap one fixture at a time after the corresponding sibling lands:
+replace its activation guard with real CLI reconciliation and exact
+state/reason assertions, remove `pending: true`, and keep the report-measured
+runtime below eleven seconds. Full incident coverage is not complete until the
+incident report contains six ordinary green results and zero pending entries.
+
+### Build and Content launch fixtures lack clean live timing (2026-07-21)
+
+#### Source S46, lines 1162–1177: Build and Content launch fixtures lack clean live timing (2026-07-21)
+
+The public first-run guide and deterministic fixtures preserve memorable Build
+and Content inputs, stage artifacts, native state labels, recovery boundaries,
+and explicit next actions. They do not prove provider completion or the
+five-minute first-artifact target. Two private live Content tasks initially
+failed at the `1-inbox` approval transition under installed Hive 0.6.4 because
+durable attempt context resolved `approve` as a workflow verb (`key not found:
+"approve"`). Exact supported approval recovered both tasks. At the
+2026-07-21T15:23:25Z observation, one research stage had stopped at its provider
+budget with its artifact preserved, while one outline stage was running after a
+single bounded retry. Private task identifiers, attempt identifiers, costs, and
+artifact sizes are intentionally absent from this public gap record. A reviewed
+terminal article and measured first-artifact/full-completion times were not yet
+available. Keep the fixture and live evidence classes separate until clean
+replays close this gap.
+
+### Resolved
+
+#### Asciinema local verification
+
+##### Source S28, lines 781–781: Open questions about the codebase
+
+7. ~~**Asciinema local verification**~~ — closed 2026-04-30. `/usr/bin/asciinema` 3.2.0 is visible on this shell's PATH, and a smoke run created an asciicast v2 file. `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema` remains the fallback for installs outside PATH.

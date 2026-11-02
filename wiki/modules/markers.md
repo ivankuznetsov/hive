@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-02
 tags: [marker, protocol, flock, recovery, migration, binary, filesystem-safety]
 ---
 
@@ -177,3 +177,23 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 - [[state-model]]
 - [[modules/agent]]
 - [[stages/execute]]
+
+## Known gaps
+
+### Two patterns for marker writes
+
+#### Source S31, lines 950–951: Patterns detected in code but not yet documented
+
+3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
+
+### Hand-edited marker examples remain ambiguous
+
+The residual manual-edit caveat remains verbatim in the [closed tmux-pane-capture history](#markerscurrent-can-mis-read-example-markers-embedded-in-a-tmux-pane-capture-taskmd).
+
+### Resolved
+
+#### `Markers.current` can mis-read example markers embedded in a tmux-pane-capture `task.md`.
+
+##### Source S28, lines 788–788: Open questions about the codebase
+
+14. ~~**`Markers.current` can mis-read example markers embedded in a tmux-pane-capture `task.md`.**~~ — closed 2026-10-14. The Claude tmux launch runtime was deleted (Claude launches only as headless `claude -p`; see ADR-053 in [[decisions]]), so no stage writes a pane capture carrying the stage prompt into `task.md` any more; `Hive::Agent` writes only markers there. `Markers.current` still returns the last marker in the file, so a hand-edited `task.md` that contains example markers would still mis-read. Original record: `MARKER_RE` in `lib/hive/markers.rb` scans the *entire* state file and `current` returns the *last* match (and `set` -> `replace_last_marker` rewrites the last match). In tmux-mode stages, `task.md` is a pane capture that includes the stage prompt, whose instructions contain literal example markers (e.g. ``the hive runner sets `<!-- REVIEW_COMPLETE pass=1 browser=skipped -->` after...``). Normally the real terminal marker is appended after the capture, so `current` returns it. But the documented manual re-review recovery (`markers.rb:21` - "hand-edit `task.md` and delete the marker comment") removes that trailing marker, after which `current` falls back to an embedded *example* marker and mis-classifies the task - e.g. a reset 6-review task reads as `review_complete`, so the daemon dispatches `hive artifacts` (advance) instead of re-reviewing, and `hive run` short-circuits "already complete". Observed 2026-05-26 forcing a re-review on writero tasks; worked around by appending an authoritative `<!-- EXECUTE_COMPLETE -->` at EOF. Fix options: anchor markers to a sentinel region / dedicated trailing block, strip prompt bodies from the state file, or have `current`/`set` only honor markers outside fenced/quoted prompt content. See [[modules/markers]].

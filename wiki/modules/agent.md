@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-02
 tags: [agent, claude, subprocess]
 ---
 
@@ -299,3 +299,13 @@ The final result and usage projection carry that main identity while retaining
 aggregate token totals. A single-model terminal usage map remains a fallback;
 a multi-model map alone leaves identity unknown. Provider-emitted main assistant
 or message-start identity supersedes the initial model announcement.
+
+## Known gaps
+
+### Display-name agent emits activity labels (2026-06-12)
+
+#### Source S40, lines 1035–1039: Display-name agent emits activity labels (2026-06-12)
+
+On a real run the display-name agent named the task "Agent Work In
+Progress" — an activity description, not a name. The prompt should pin
+"a short noun-phrase name for the TASK" with an example or two.

@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -965,6 +965,8 @@ to consume it; it never deletes `plan.md` or foreground-runs the plan stage.
 
 ## Outcome-evidence capture runtime
 
+For the retained uncertainty and historical evidence, see [Web projection reuse and memory measurement limits (2026-09-23)](#web-projection-reuse-and-memory-measurement-limits-2026-09-23).
+
 The managed capture toolkit pins Hive's exact native `agent-browser` plus
 managed Chrome, Hive's Ruby PTY recorder for terminal casts/text, and
 `ffmpeg`/`ffprobe`/Tesseract for media admission. It does not ship or discover
@@ -1298,3 +1300,248 @@ demand. The all-project Archive remains the lossless fleet-wide history view.
 Completed terminal deliveries (for example writing workflow `7-deliver`) appear
 in a Done column on the project board. Pending delivery remains in Deliver;
 this grouping does not move task folders or alter workflow execution.
+
+## Known gaps
+
+### Project-filter history recording evidence (2026-09-28)
+
+#### Source S06, lines 127–133: Command-receipt external evidence gaps (2026-09-28)
+
+The project-filter history behavior has a passing real Playwright system test
+and an ordered storyboard in
+`docs/implementation/browser-history-project-proof.md`, but this execution
+context exposes no admitted video-capture channel. The absence of a recording
+does not imply a browser failure and is not represented as accepted video
+evidence.
+
+### Web projection reuse and memory measurement limits (2026-09-23)
+
+#### Source S14, lines 234–262: Web projection reuse and memory measurement limits (2026-09-23)
+
+Web still invokes the active status producer on its five-second polling cycle;
+the shared source has a three-second liveness fallback. Extending that fallback
+without a complete input stamp would miss in-place journal/review/artifact
+changes, referenced terminal dependencies, process exits, and time-dependent
+actions. Runtime SQLite/WAL timestamps also change for unrelated observations,
+so they do not identify meaningful task changes. Safe reuse needs observations
+captured with the projection, or a before/after validation of those inputs.
+
+The existing daemon SQLite status cache is a completed full-tick observation,
+not a live display feed. Local observation on 2026-09-23 found a median full
+tick duration of 22 seconds and a 50-second interval between starts; one frame
+was already 18.59 seconds old when published. A five-second cache-age limit
+would not reuse that frame. Incremental ticks check only known state files,
+omit raw partial display payloads, and inject dependency-validation holds;
+they cannot simply replace the complete Web frame. Useful shared display
+reuse needs complete source invalidation, distinct full/row observation times,
+and separation from scheduler authority before removing Web's fallback scans.
+
+Exact task admission now limits project policy reads as well as task metadata
+and journals to the selected roots and reachable prerequisites. The complete
+enrollment index remains available for ambiguity and repository checks.
+
+Routine-cache memory measurements isolate retained Ruby objects after GC;
+they do not establish long-running Puma RSS or swap savings. The startup and
+request-blocking regressions have deterministic tests. Sustained local Web
+memory, snapshot age, and task response times still need measurement after
+deployment of this change.
+
+### Published native package service readiness
+
+#### Source S25, lines 603–611: Current release gap
+
+- Native package-layout integration now proves that an installed gem plus
+  authenticated, real `git archive` managed bundle resolves `hive-cli` from
+  the package root and reaches the setup service seam without a parent
+  checkout. The tag workflow also runs the installed proven gem through setup
+  against the exact archive bytes later signed and published. There is still
+  no checked-in artifact from a newly published Homebrew/AUR/install.sh release
+  proving a real service manager reaches ready state on both Linux and macOS,
+  nor a live measurement establishing whether the current mutating cold-boot
+  readiness window is sufficient on constrained hosts.
+
+### Hive web-tier residuals after the Rails rewrite (ADR-037)
+
+#### Source S28, lines 810–848: Open questions about the codebase
+
+35. Hive web-tier residuals after the Rails rewrite (ADR-037): browser-level coverage of agents/telegram/repos pages beyond the pipeline system test (the Telegram page now has source-level integration coverage for its first-run setup guide, strict numeric chat-ID validation, and blank/@handle refusals, but no browser smoke; repos has source-level coverage for the first-run questionnaire, SSH-origin normalization, and non-directory clone-target refusal, but no live GitHub smoke; task-page red recovery now has source/Rails integration coverage and commit-message live verification, and oversized diff rendering is capped by source/Rails integration coverage, but no checked-in browser-system artifact); Action Cable behavior under many tabs; diff happy-path tests; cross-round brainstorm answer-numbering semantics (see `Task#answer_questions!`). The former action-to-verb ownership gap is closed: `TaskAction::READY_COMMANDS` is derived from the classifier table, the bot consumes it directly, and the web projects it through the daemon queue allowlist. Commits `eb971b55`, `463fff29`, `0dea8aa6`, `d7ce55a9`, `70d60980`, `24c41980`, `b47f6627`, `9d0fc9ef`, `65e90ebe`, and `c0630426` add Playwright/system or Rails integration coverage for the task log tail's follow/pause/resume behavior, node-preserving log-frame morph reloads, artifact open-state preservation across pushed morphs, status-grid scroll plus composer draft preservation across a live broadcast, project-rail filtering with URL/composer sync, `+ Add project` routing, and re-application after a live broadcast, Telegram first-timer setup guide open-state/BotFather/userinfobot/three-step rendering and strict chat-ID validation, red-task diagnostic banner plus Retry route queueing, Q&A round replacement without permanent stale forms, finalize-first artifact ordering, chronological ordering for earlier stages, Artifacts-before-Log layout, sanitized markdown rendering, non-directory repo-target refusal, plain-vs-deep health, and bounded diff output. `StatusBroadcaster` is source/model-test pinned for self-healing after a raising broadcast, and commit `65e90ebe` moves the task-page refresh signal before the fallible grid render, but this refresh did not find a focused test or live artifact proving task pages still refresh when the projects partial itself raises. Commit `c52e4e83` styles artifact summaries as filename-tab chrome and rendered markdown as a bordered document panel, but this refresh found no screenshot or visual-regression artifact proving that distinction in a browser. Commit `279a9380` adds `web/script/record_box_demo.rb` for a staged real Rails + daemon + Playwright demo recording, and commit `c0630426` adds a real-resume helper path that reruns a stranded `3-plan` stage through the product CLI before resuming filming, but this refresh only source-inspected the recorder scripts; no checked-in `box-demo` artifact or local run evidence proves the recorder currently completes with Playwright and ffmpeg. Apart from commit `9d0fc9ef`'s live-verified stuck-review recovery note, this refresh also did not find an in-tree live long-running-agent artifact proving the same behavior against a deployed Hive web instance while real agents are appending logs/artifacts and status updates.
+The 2026-07-22 subscriber-owned status-feed refactor supersedes gap 35's older
+partial-render note: the complete Turbo Stream message is rendered before one
+Cable send, canonical snapshot tokens remove process-local counter collisions,
+and focused model/browser coverage pins the one-request catch-up and server
+lease contracts. The 2026-08-30 client-owner hardening replaces the remaining
+shared-client recovery assumptions: each application attempt now owns a
+dedicated consumer and transport, transport reconnect stays on that attempt,
+and setup or terminal failures retire into `retry_wait` before a fresh attempt.
+Focused lifecycle coverage pins confirmation-ordered release, the bounded
+transport-before-unsubscribe fallback, exact-once normal close, conditional
+`OPEN`/`CONNECTING` fallbacks, first-error preservation, failure-complete DOM
+cleanup, queued-open fencing, both reconnect modes, and retry/supersession
+recovery. Channel coverage still forces adapter registration to finish after
+teardown and proves the late handler removes itself, then forces deferred
+registration to raise and proves the lease releases before the transport
+reconnects.
+
+The filtered-history composer correction is locally Playwright-smoked; hosted
+system-test confirmation is still pending for that repair.
+
+Dedicated client ownership intentionally changes allocation from turbo-rails'
+shared consumer to one Cable connection per simultaneously live status source.
+Deterministic browser coverage proves one transport for one source, two
+isolated transports for two sources, at most a successor plus one bounded
+retiring predecessor during repeated supersession, one replacement transport
+after cross-URL Turbo navigation, and zero after detach or its bounded pending-
+release timeout. Because a permanent element's cross-URL move still invokes
+disconnect/connect, every navigation now pays a fresh WebSocket and Action
+Cable subscription handshake before `connected` and catch-up instead of
+reusing turbo-rails' cached consumer. The older
+isolated four-tab profile against the real 15-project registry still confirms
+one shared server poller and no idle DOM/HTTP loop, but predates this client
+transport allocation and is not current connection-capacity evidence. A fresh
+many-tab/load profile under dedicated ownership, real multi-worker Puma
+convergence, and live-Docker evidence remain open; last-subscriber shutdown
+also retains an unbounded Ruby thread join if a filesystem call becomes
+uninterruptible.
+
+### Hive web Advanced Drop is source/unit/integration-pinned but not live-browser-smoked.
+
+#### Source S28, lines 851–851: Open questions about the codebase
+
+38. **Hive web Advanced Drop is source/unit/integration-pinned but not live-browser-smoked.** Commit `4a09cdb9` adds `POST /tasks/:project/:slug/drop`, now handled by `Tasks::DropsController#create` through the filesystem-backed `Task#drop!`, plus the Advanced Drop card and tests proving the card is not a primary action, successful posts delete the task folder, and stale `from` stages return 422 without deletion. Existing `Commands::Drop` tests cover agent kill, folder/log/worktree/branch cleanup, draft-PR close, JSON/error contracts, and TUI Shift+X dispatch; commit `65e90ebe` pins the in-process return payload and the clarified `pr_closed` contract (`true` for no recorded PR, `false` only when a recorded PR could not be closed) so the web notice can stay honest. Commit `279a9380` bumps the current `hive-drop` schema to v2 while preserving v1 for pinned validators; commit `c0630426` fixes the copied v1 `$id`/title in `schemas/hive-drop.v2.json` and adds a schema-identity regression covering every exported schema file. This refresh did not find an in-tree artifact showing a real browser confirmation flow against a running Hive web instance that exercises full cleanup of an active worktree/branch/draft PR.
+
+### Local setup/web install repair is source/test-pinned, with a real systemd-user source-deployment smoke but no published-release/launchd proof.
+
+#### Source S28, lines 875–896: Open questions about the codebase
+
+52. **Local setup/web install repair is source/test-pinned, with a real
+systemd-user source-deployment smoke but no published-release/launchd proof.**
+Branch `add-local-hive-web-install-260629-f4ca` documents `hive setup`, managed
+web-bundle refresh/install safety, daemon/web same-binary service install, web
+loopback/no-auth gating, and `hive web start --detach` systemd reload behavior.
+The 2026-07-26 current-main dogfood installed the exact checkout binary and
+managed Rails app through real systemd-user, served `/up`, and held zero
+restarts, but exposed that a healthy `0.6.9` version stamp could hide newer web
+content after another same-version merge. Explicit `hive web install --force`
+now bypasses only that healthy-bundle early return and reuses the existing
+staged dependency/asset preparation plus rollback-safe activation path; ordinary
+bootstrap stays a no-op. Focused tests cover that split, phase-exit semantics,
+AppBundle extraction/stamping, service-installer rendering/parsing, and queue
+allowlisting. The remaining release gap is a real Homebrew/AUR/install.sh
+published archive running setup and same-version forced repair on systemd-user,
+plus equivalent launchd evidence. The 2026-07-20 agent-first setup change
+restored `--yes` as the explicit unattended consent boundary, added the
+agent-skills-first phase, and pinned zero mutation for JSON/non-TTY runs without
+consent. The native-default work adds default-on web-service setup, versioned
+service/readiness schemas, release-layout dependency resolution,
+signed-manifest/digest enforcement, and a package-layout integration fixture.
+
+### Hive web Agents-page login fixes are source/Rails-integration-pinned, not live-provider-smoked.
+
+#### Source S29, lines 915–915: 2026-06-16/17 refresh uncertainty
+
+- **Hive web Agents-page login fixes are source/Rails-integration-pinned, not live-provider-smoked.** Commits `5c645734`, `b08703a3`, `c5cd70a9`, `c75f4039`, `70e6ff14`, and `b370e7c3` cover binary PTY output scrubbing, Codex `--device-auth`, URL sanitize behavior, operator-ward Codex/gh polling UI, Claude paste-back preservation, and favicon/icon serving. This refresh did not find an in-tree artifact from a running Hive web instance completing real Codex and `gh` logins against providers, then using the resulting `gh` credentials for a daemon-owned push.
+
+### Rails-native kanban live-update proof (2026-07-21)
+
+#### Source S35, lines 985–999: Rails-native kanban live-update proof (2026-07-21)
+
+The Board model, route preference, shared task actions, workflow-derived
+columns, unknown-stage retention, mobile containment, and affected Turbo morph
+flows are covered by focused Rails and Playwright tests. The same coverage now
+pins URL-addressed server rendering for project filters, exclusion of
+unrelated project markup, canonical handling of stale project names, and
+selection preservation across view changes and live refreshes. This branch has not
+yet produced a long-running external-browser artifact with two simultaneous
+clients watching different Board/Grid/project URLs while a real daemon advances
+tasks across both built-in and project-authored workflows. The implementation
+deliberately relies on the existing URL-aware Turbo refresh instead of custom
+patch cursors, so that live smoke is confidence evidence rather than a missing
+contract; retain the gap until post-merge dogfood observes the multi-client
+case.
+
+### Task-local web and worktree capture need installed dogfood (2026-07-25)
+
+#### Source S54, lines 1290–1303: Task-local web and worktree capture need installed dogfood (2026-07-25)
+
+Focused source/Rails tests now pin one single-flight status owner, explicit
+unavailable/latest-good degraded rendering, zero fleet scans on task routes,
+bounded typed Git diff results, and abortable chained browser polling. Capture
+unit tests pin clean-source and lockfile identity, private immutable Ruby bundle
+caches, deny-by-default runtime environment, empty-or-same-owner runtime
+admission, ownership-verified lifecycle teardown, fail-closed applicability
+when implementation evidence is unavailable, required-capture enforcement, and
+the three v1 schemas. The
+authenticated supplied diff URL, 15-minute CPU/RSS/scan sample, packaged
+bootstrap from committed `HEAD`, and one real clean ordinary-worktree
+Playwright capture with retained media remain U9 dogfood evidence; source tests
+do not close those live checks.
+
+### Managed web Bundler resolution needs installed-main replay (2026-07-26)
+
+#### Source S56, lines 1318–1343: Managed web Bundler resolution needs installed-main replay (2026-07-26)
+
+Dogfood of merged recovery follow-ups reproduced the artifacts-stage failure
+against an immutable deployment: `hive web install` could run the CLI while
+still failing its internal bare `bundle install` because the Bundler wrapper
+was absent from `PATH`. Unit coverage now pins the exact Ruby/locked-Bundler
+argv, and the packaged-gem bootstrap passes with `PATH=/usr/bin:/bin` while
+installing the real Rails bundle and compiling assets. Exact-head CI then
+exposed the second half of the boundary: an isolated candidate `GEM_HOME` did
+not contain Bundler at all. The gemspec now makes the web lock's exact Bundler
+a runtime dependency, while the package fixture exposes that dependency's gem
+home without restoring any executable wrapper. Local replay then caught Rails
+activating a newer host Bundler during asset compilation; that phase now runs
+through locked `bundle exec` and the current Ruby too. The remaining evidence
+is one installed-main service upgrade from the merged fix, followed by a real
+worktree capture; keep those operational checks distinct from the packaged
+fixture.
+
+Latest refresh (2026-07-26): same-version dogfood also showed that a successful
+forced reprovision did not restart an already-running service when its unit was
+unchanged. The implementation now serializes refreshes, restores the previous
+bundle if activation fails, and restarts a running service exactly once after a
+successful refresh. Focused tests cover those contracts. The remaining evidence
+is still the installed-main replay: use an explicit checkout bundle URL for
+unreleased dogfood, verify the unchanged-unit restart receipt, then confirm the
+managed lockfile and live service both identify the merged generation.
+
+### Hidden Web tabs (2026-09-24)
+
+#### Source S83, lines 1768–1772: Hidden Web tabs (2026-09-24)
+
+- Browser regressions simulate document visibility and exercise real Cable
+  subscriptions and feed scans. CPU and memory savings in the installed local
+  service have not yet been measured for this change.
+
+### Deprecated native-web `HIVEBOX_*` aliases (2026-10-15)
+
+#### Source S88, lines 1823–1834: Deprecated native-web `HIVEBOX_*` aliases (2026-10-15)
+
+ADR-055 removed the Hivebox Docker distribution and every container-only
+`HIVEBOX_*` read, but kept the six deprecated native-web aliases
+(`HIVEBOX_WEB_APP_DIR`, `HIVEBOX_ORIGIN`, `HIVEBOX_STORAGE_DIR`,
+`HIVEBOX_LOCAL_LOOPBACK`, `HIVEBOX_DIFF_TIMEOUT_SEC`,
+`HIVEBOX_CLONE_TIMEOUT_SEC`) because native installs may still set them and
+their warning promises support through the next major release. Open question:
+whether to drop them in that next major release or earlier now that the
+container is gone. The built-in capture manifest's evidence type also keeps the
+literal `hivebox` value because `hive-artifact-capture.v2` is a closed
+published contract; renaming it needs a new schema version.
+
+### Resolved
+
+#### Resolved 2026-07-20: root README/FAQ no longer claims there is no built-in web UI.
+
+##### Source S28, lines 849–849: Open questions about the codebase
+
+36. **Resolved 2026-07-20: root README/FAQ no longer claims there is no built-in web UI.** Maintained onboarding presents native Hive web first, explains that it shares the TUI/CLI file-backed state model, and (until ADR-055 removed it) reserved Hivebox for the container distribution. Loopback, login, service, and proxy details are delegated to [[commands/web]]; the old wording remains relevant only as historical evidence in this gap record.
+
+#### Brakeman registry-laundered task-log ignore is scanner-clean but manually justified.
+
+##### Source S28, lines 857–857: Open questions about the codebase
+
+43. ~~**Brakeman registry-laundered task-log ignore is scanner-clean but manually justified.**~~ — closed 2026-07-20. `Tasks::LogsController#show` now resolves the registered project and task, while `Task#latest_log` owns the bounded filesystem read. Brakeman no longer reports the old controller sink, so its obsolete ignore was removed. Focused integration coverage now proves both an unknown project and a valid-shaped unknown task return 404 on `GET /tasks/:project/:slug/log` before a path can be read.
+
+##### Source S28, lines 861–861: Open questions about the codebase
+
+43. ~~**Brakeman registry-laundered task-log ignore is scanner-clean but manually justified.**~~ — closed 2026-07-20. `Tasks::LogsController#show` now resolves the registered project and task, while `Task#latest_log` owns the bounded filesystem read. Brakeman no longer reports the old controller sink, so its obsolete ignore was removed. Focused integration coverage now proves both an unknown project and a valid-shaped unknown task return 404 on `GET /tasks/:project/:slug/log` before a path can be read.

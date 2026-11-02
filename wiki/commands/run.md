@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-02
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -252,3 +252,11 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 - [[cli]] · [[commands/init]] · [[commands/status]] · [[commands/approve]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/lock]] · [[modules/markers]] · [[modules/git_ops]]
+
+## Known gaps
+
+### Has `hive run` been smoke-tested against a live `claude` v2.1.118?
+
+#### Source S28, lines 775–775: Open questions about the codebase
+
+1. **Has `hive run` been smoke-tested against a live `claude` v2.1.118?** The plan calls for this before declaring the MVP done. No evidence in tree (no `docs/solutions/` notes, no `docs/smoke-results.md`).

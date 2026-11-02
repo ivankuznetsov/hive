@@ -3,7 +3,7 @@ title: 3-plan stage
 type: stage
 source: lib/hive/stages/plan.rb, lib/hive/plan_dependency_adoption.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [stage, plan, llm-wiki, ce-plan, critique, dependencies]
 ---
 
@@ -158,3 +158,21 @@ retries, or downgrades.
 - [[stages/brainstorm]] · [[stages/execute]]
 - [[modules/agent]] · [[modules/markers]] · [[modules/plan_review]]
 - [[state-model]]
+
+## Known gaps
+
+### Plan dependency adoption and legacy review generations (2026-10-30)
+
+#### Source S91, lines 1860–1871: Plan dependency adoption and legacy review generations (2026-10-30)
+
+`PlanDependencyAdoption` now runs at plan-review candidate promotion, and the
+plan-review task generation excludes `meta.yml`'s `depends_on`. A review
+recorded before this change carries the legacy raw-bytes generation; if its
+revised candidate adds a dependency, adoption at promotion changes the raw
+bytes and that one review goes stale and restarts critique once (no worse than
+the previous operator hand-edit). Not exercised against a live in-flight
+legacy review. Tasks already parked on `plan_dependency_missing` or
+`plan_dependency_mismatch` with a cleared review are not healed retroactively;
+the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
+that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
+`[b, a]`) are deliberately not adopted and still need a human.

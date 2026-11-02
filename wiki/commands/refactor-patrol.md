@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-09-25
+updated: 2026-11-02
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -176,3 +176,7 @@ contract.
 Scheduled completion waits a full configured poll interval before the next attempt,
 including failures and empty slices. Empty or allowance-exhausted children emit
 `architecture_patrol_skipped` with a reason, rather than claiming a review closed.
+
+## Related gap evidence
+
+- [Patrol live execution and discovery evidence](../modules/patrol.md#unified-patrol-fix-live-execution)

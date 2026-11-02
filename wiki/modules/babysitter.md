@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-09-26
+updated: 2026-11-02
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -123,3 +123,43 @@ to block the command.
 - [[state-model]]
 - [[modules/config]] · [[modules/agent_profile]] · [[modules/daemon]] · [[modules/events]] · [[modules/worktree]]
 - [[operating]]
+
+## Known gaps
+
+### Managed babysitter service lifecycle proof
+
+#### Source S25, lines 567–571: Current release gap
+
+- Managed babysitter installation is source- and focused-test-pinned for
+  systemd and launchd, including detached-process takeover and safe uninstall
+  delegation. A live systemd user-service dogfood is the immediate post-merge
+  proof target. Native launchd lifecycle proof remains pending on macOS.
+
+### Babysitter dry-run default-deny stubs are unit-pinned but not live-agent-smoked.
+
+#### Source S27, lines 749–750: Source-file coverage (representative map)
+
+Latest refresh note (2026-06-16): the babysitter gh-hostname dry-run audit remains source- and unit-pinned only. This refresh found no in-tree artifact for a full live-agent `hive babysit --once PROJECT --dry-run` run after commits `a86ca033` and `ede81ac7`.
+
+#### Source S28, lines 789–791: Open questions about the codebase
+
+15. **Babysitter dry-run default-deny stubs are unit-pinned but not live-agent-smoked.** As of the 2026-06-24 relative real-binary hardening, `Hive::Babysitter::DryRunEnv` generates `git` / `gh` wrapper launchers that overwrite `HIVE_BABYSITTER_REAL_GIT` / `HIVE_BABYSITTER_REAL_GH` with parent-resolved absolute realpaths and `HIVE_BABYSITTER_DRY_RUN_LOG` with the worktree-root skip log before invoking the shared stubs, so command-local overrides cannot redirect allowlisted passthrough or skipped-command audit records. The shared stubs also exit 127 on unset or non-absolute real-binary handoffs, so relative values such as `bin/git` and `bin/gh` cannot be re-resolved inside the PR worktree. The `gh` stub deletes command-local `HOME`, `GH_CONFIG_DIR`, `XDG_CONFIG_HOME`, `HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR`, `GH_HOST`, `GH_REPO`, and enterprise-token env before passthrough, then points both `HOME` and `GH_CONFIG_DIR` at a fresh empty temp dir so `gh` cannot read caller/user config while still having a writable state location. The stubs allow only known read-only `git` / `gh` commands, skip implicit-write `gh api` payload calls unless the method is explicitly GET, still skip explicit-GET local file/input/cache writes, pass plain/non-token `gh auth status` while skipping token-revealing `--show-token`, bare `-t`, clustered shorthand forms such as `-at`, `-ta`, and `-ath`, and hostname forms such as `-h`; block browser-launch flags; block gh host-redirection selectors (`--hostname`, host-qualified `-R` / `--repo`, host-qualified repo/PR operands, and full URL `api` operands); reject read-looking `git` invocations with executable or file-writing options; skip `git log` / `git show` `--show-signature` plus `log` / `show` / `rev-list` `%G` formats; skip `git log` / `git show` remerge-diff options and pin `log.diffMerges=separate` so `-m` / `--diff-merges=on` cannot inherit a repo-local remerge default; reject every leading global config override; fail-closed on known exec-capable git environment seams (`GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, `GIT_SSH_COMMAND`, `GIT_SSH`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`, `GIT_CONFIG_GLOBAL`, and `GIT_CONFIG_SYSTEM`); run git read passthrough hermetically with user config neutralized (HOME/XDG_CONFIG_HOME redirected, `GIT_CONFIG_*=/dev/null`, `GIT_OPTIONAL_LOCKS=0`) plus `core.fsmonitor=false`, `core.askPass=`, `log.showSignature=false`, `--no-ext-diff --no-textconv`, and local external diff/textconv/fsmonitor/helper-path/signature verification disabled; and write skipped-command audit logs only after a regular-file/current-uid preflight plus a no-follow, nonblocking open with control-character escaping. `test/unit/babysitter/dry_run_env_test.rb` verifies those guards with recording fake binaries, including PATH overlay wrapper handoff, relative PATH real-binary canonicalization, non-absolute real-binary refusal, real-binary and skip-log override resistance, gh tempdir config isolation against command-local home/config env, gh host selector skips and host/config env scrubbing, fresh empty gh HOME/config roots, `GIT_EXEC_PATH` skips, `remote show` without `-n`, exact read-only `git branch` forms versus mixed branch mutations, `gh api` file/cache variants, symlinked skip-log refusal, FIFO skip-log refusal without blocking, escaped ASCII control characters, env seam skips including malformed `GIT_CONFIG_COUNT`, `GIT_ASKPASS` / `SSH_ASKPASS`, HOME/XDG config isolation, invalid-real-git diagnostics, subcommand `-p` passthrough, grep/ls-files read-option exceptions, textconv/filter/signature/remerge blocking, and pathspec separator handling. The 2026-06-19 post-fix audit found no artifact showing a full `hive babysit --once PROJECT --dry-run` live-agent run after these dry-run stub changes.
+Residual audits of commits `6a6cf990`, `2d15e9ee`, and `5e8723fa` carried this babysitter dry-run uncertainty forward after checking the residual diffs, source commit `f12c46c7`, and current source/tests; no additional in-tree live-agent smoke artifact was found.
+
+### Babysitter stale-runtime restart was live-smoked and exposed a restart argv bug.
+
+#### Source S28, lines 801–801: Open questions about the codebase
+
+25. **Babysitter stale-runtime restart was live-smoked and exposed a restart argv bug.** On 2026-06-07, a live detached babysitter started before the current checkout correctly printed the stale-runtime restart recommendation, but `hive babysit restart --detach` daemonized after running through the `restart` code path and left the long-lived process recorded as `ruby bin/hive babysit restart --detach`. A second restart then blocked while waiting on that same process. The fix re-execs detached restart as the canonical `hive babysit start --detach` command before daemonizing, resolves the stable installed wrapper through `Hive::InvokedBinary.path`, aborts restart if stop leaves a potentially live PID behind, keeps the 600-second stop drain for active PR repair agents, and removes stopped/stale PID files only when the current payload still matches the one being stopped; `test/unit/commands/babysit_test.rb` covers the detached re-exec, wrapper resolution failure, refused-stop abort, re-exec failure, post-grace exit race, and replacement-PID preservation contracts. The branch was live-smoked locally by replacing the stale process and verifying the long-lived argv became `ruby bin/hive babysit start --detach`.
+
+### Babysitter dirty-priority selection and pre-fix residue snapshots are test-pinned but not live-smoked.
+
+#### Source S28, lines 802–802: Open questions about the codebase
+
+26. **Babysitter dirty-priority selection and pre-fix residue snapshots are test-pinned but not live-smoked.** The dirty-priority change has `Hive::Gh.list_open_prs` request `mergeStateStatus`, sorts `DIRTY` / `BLOCKED` / `UNSTABLE` PRs ahead of `BEHIND` / `UNKNOWN` and neutral states before applying `babysitter.max_concurrent_prs`, and changes the 6-review pre-fix `CleanExit` path so `reason: :pre_fix_dirty_worktree` snapshots all residue even when it is outside `review.fix.auto_commit.scope_check`. `test/unit/babysitter/project_tick_test.rb`, `test/unit/gh_test.rb`, and `test/integration/run_review_test.rb` cover the selector and in/out-of-scope pre-fix residue commits. No in-tree artifact was found showing a live `hive babysit PROJECT` run recovering a newer `DIRTY` PR from a large open-PR backlog, nor a live Claude/Codex-backed 6-review run where an out-of-scope pre-fix residue snapshot is inspected/reverted by an operator.
+
+### Babysitter GH browser-flag parsing is unit-pinned but not live-agent-smoked.
+
+#### Source S29, lines 919–920: 2026-06-16/17 refresh uncertainty
+
+47. **Babysitter GH browser-flag parsing is unit-pinned but not live-agent-smoked.** Commit `1dab816a` changes `bin/hive-babysitter-stub-gh` so short `-w` is treated as a browser-launch flag only when the command-specific short-option scanner parses it as an option flag. Value-taking read options now consume attached or following values, allowing examples such as `gh pr diff 42 -eworkflow.yml`, `gh pr list -lwip`, `gh pr view 42 -qweb`, and `gh pr list --search -wip` to pass through. `test/unit/babysitter/dry_run_env_test.rb` pins those cases with a recording fake `gh`, but this refresh did not find an in-tree artifact proving a full live-agent `hive babysit --once PROJECT --dry-run` run after the GH stub parser change.

@@ -3,7 +3,7 @@ title: Secret detection and diagnostic redaction
 type: module
 source: lib/hive/secret_scanner.rb, lib/hive/secret_patterns.rb, lib/hive/betterleaks.rb
 created: 2026-04-26
-updated: 2026-09-06
+updated: 2026-11-02
 tags: [security, secrets, betterleaks, redact]
 ---
 
@@ -47,6 +47,8 @@ reading them still checks their contents with the current Betterleaks detector.
 
 ## Distribution and tests
 
+For the retained uncertainty and historical evidence, see [Betterleaks distribution and recovery verification](#betterleaks-distribution-and-recovery-verification).
+
 See [[dependencies]] for pinned bundled binaries and build-time verification.
 `test/unit/secret_scanner_test.rb` exercises the real Betterleaks binary,
 large inputs, binary payloads, source context, suppression resistance, and
@@ -56,3 +58,20 @@ failure handling. Publication/auto-commit/handoff tests cover their boundaries;
 ## Backlinks
 
 - [[stages/open-pr]] · [[stages/review]] · [[dependencies]]
+
+## Known gaps
+
+### Betterleaks distribution and recovery verification
+
+#### Source S10, lines 175–185: Betterleaks distribution and recovery verification
+
+Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.
+Real scanner regression tests run on Linux x64; execution on the other three
+targets and packaged installation remain release/CI verification obligations.
+Publication range and size fixes have candidate-code checks, but live task
+advancement must be verified after an authorized dogfood deployment. Scanning
+Git objects does not fetch LFS payloads or decrypt encrypted artifacts.
+Ordinary publication hashes stream, but outcome-evidence materialization and
+Patrol snapshots still buffer a complete diff. Betterleaks staged-blob checks
+start a process per current blob (and matching prior blobs only when needed);
+large multi-file commits need throughput measurement before adding batching.

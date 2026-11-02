@@ -3,7 +3,7 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-08-06
+updated: 2026-11-02
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
@@ -230,4 +230,4 @@ hand-edit `openclaw/skills/hive/`.
 ## Backlinks
 
 - [[commands/doctor]] · [[commands/init]] · [[cli]]
-- [[modules/agent_profile]] · [[testing]] · [[gaps]]
+- [[modules/agent_profile]] · [[testing]] · [activation proof](../modules/agent_profile.md#authenticated-four-agent-activation-remains-optional-and-unproven-for-the-current-candidate)

@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-08-21
+updated: 2026-11-02
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -144,6 +144,8 @@ restoration repairs custody but does not erase the tampering event.
 
 ## Threat contract
 
+For the retained uncertainty and historical evidence, see [Controller receipt retention remains unbounded (2026-08-21)](#controller-receipt-retention-remains-unbounded-2026-08-21).
+
 This boundary assumes Hive and the spawned agent run as the same OS user.
 Therefore it can detect selected before/after changes, reject required-output
 shape, and reconstruct selected captured files. It cannot:
@@ -220,3 +222,37 @@ retains ownership of exception and marker semantics.
 
 - [[modules/agent]] · [[stages/execute]] · [[stages/review]]
 - [[component-boundaries]] · [[decisions]] (ADR-013)
+
+## Known gaps
+
+### ArtifactFirewall same-UID containment limits
+
+#### Source S25, lines 641–654: Current release gap
+
+- `Hive::ArtifactFirewall` now proves before/after custody for declared anchors,
+  rejects non-regular or outside-root required outputs, and verifies
+  reconstructable restoration. Baseline identity comes from the same
+  descriptor as captured bytes, and restoration refuses a changed protected
+  parent. It still runs under the controller's OS user: it cannot prevent
+  concurrent same-UID writes, observe undeclared paths, or provide
+  process/mount/network isolation or an atomic multi-file rollback. Stronger
+  hostile-agent containment remains an OS-level (separate user or VM) or separate-identity
+  concern, not a future widening of the in-process report contract.
+  Patrol Fix validation now keeps Hive-launched commands in a disposable exact
+  checkout and detects authoritative-checkout drift afterward, but a separate
+  same-UID process can still race that check; preventing such writes remains
+  part of this stronger containment gap.
+
+### Controller receipt retention remains unbounded (2026-08-21)
+
+#### Source S63, lines 1496–1506: Controller receipt retention remains unbounded (2026-08-21)
+
+Artifact custody now uses one manifest with a 128-entry default and a hard
+4096-entry ceiling; execute and plan review may widen that manifest only to
+their exact current protected inventory. This deletes multi-manifest batching
+but makes the actual deferred wall explicit: context receipts, activity
+operations, and plan-review attempt records currently have no compaction or
+retention policy. A sufficiently long-lived task will eventually reach the
+hard custody ceiling and fail closed before provider launch. Solve this with a
+durable receipt retention/compaction design that preserves authority evidence,
+not by adding another custody topology or raising the hard ceiling again.

@@ -3,7 +3,7 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-02
 tags: [stage, brainstorm, qa]
 ---
 
@@ -73,3 +73,20 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 - [[stages/inbox]] · [[stages/plan]]
 - [[modules/agent]] · [[modules/markers]]
 - [[state-model]]
+
+## Known gaps
+
+### Typed budget and Brainstorm artifact repair need live dogfood (2026-07-25)
+
+#### Source S52, lines 1266–1277: Typed budget and Brainstorm artifact repair need live dogfood (2026-07-25)
+
+Focused source tests pin Claude's structured `error_max_budget_usd` result as a
+per-run `budget_exhausted` outcome, keep it separate from provider quota
+recovery, and prove that a changed valid Brainstorm artifact can outrank a
+trailing diagnostic. They also pin structural WAITING/COMPLETE validation,
+failed-spawn rejection of unchanged stale output, and one repair admission for
+a successful Brainstorm receipt whose artifact is absent. No installed-main
+dogfood artifact yet shows the affected Content writing task rerun with the
+fixed stage caps, nor a real detached Brainstorm attempt recovering a terminal
+receipt with missing output and then replaying the repaired artifact. Keep
+those live checks separate from this source-level contract.

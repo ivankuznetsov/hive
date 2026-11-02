@@ -3,7 +3,7 @@ title: Daily changes digest
 type: module
 source: lib/hive/daily_digest/, web/app/views/digests/
 created: 2026-08-30
-updated: 2026-09-16
+updated: 2026-11-02
 tags: [digest, prdigest, document, telegram]
 ---
 
@@ -97,3 +97,13 @@ an external-link icon, and shows the corresponding statistics under the heading,
 lines in red using the existing light/dark theme colors.
 The article uses the page width, compact vertical spacing, and body-sized theme
 headings. The stored Markdown remains unchanged for CLI and Telegram.
+
+## Known gaps
+
+### PRDigest document integration
+
+#### Source S81, lines 1755–1759: PRDigest document integration
+
+- PRDigest 0.4.0 and agent-cli-runtime 0.2.4 are published and clean-install
+  verified. Local Web and real test Telegram formatting/deduplication passed.
+  Installed Hive generation and presentation remain to be verified after cutover.

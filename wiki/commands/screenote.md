@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -114,7 +114,7 @@ Screenote MCP config, but no launch path calls it: the Claude-only
 took ownership of agent MCP (plan 2026-10-15-001, [[modules/mcp]]). Agents now
 receive only catalog servers granted with `mcp.use`, so `7-artifacts` does not
 inject Screenote today; wiring it through the catalog is an open item in
-[[gaps]]. When wired, the prompt is meant to supply the selected project id and
+[capture reliability](../stages/artifacts.md#automatic-outcome-capture-remains-unreliable-2026-09-06). When wired, the prompt is meant to supply the selected project id and
 instruct the agent to call `create_screenshot_upload`, PUT local PNG/JPEG bytes
 to the signed upload URL, and write the resulting `screenote_url` into
 `media/manifest.json`.
@@ -126,3 +126,11 @@ section only when `media/manifest.json` already holds `screenote_url` values.
 
 - [[cli]] · [[commands]]
 - [[modules/config]] · [[stages/artifacts]]
+
+## Known gaps
+
+### Screenote live capture test-token endpoint is blocked on Screenote-side availability.
+
+#### Source S28, lines 869–870: Open questions about the codebase
+
+49. **Screenote live capture test-token endpoint is blocked on Screenote-side availability.** The OAuth/MCP implementation has opt-in live discovery, dynamic-registration, and preseeded auth-code exchange coverage in `test/integration/screenote_oauth_live_test.rb`. The live `create_screenshot_upload` round-trip is written in `test/integration/screenote_capture_live_test.rb`, but it skips until the Screenote non-interactive test-token endpoint URL, secret, and project id are provided. As of 2026-06-22 the upload tool's request/response contract is covered in CI by `test_call_tool_create_screenshot_upload_round_trips_through_http_seam` (`test/unit/screenote/mcp_client_test.rb`) through the FakeHttp seam; the remaining gap is narrowed to proving the *signed upload* against a real Screenote bearer, which still requires the blocked live endpoint.

@@ -3,7 +3,7 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-02
 tags: [template, erb, prompt, llm-wiki]
 ---
 
@@ -213,3 +213,11 @@ defects; evidence-tooling limitations use its existing `blocked` verdict, which
 the artifacts stage completes best-effort without accepted evidence. Actual
 product requirements, source integrity, and implementation failures remain
 blocking.
+
+## Known gaps
+
+### `Stages::Base::TemplateBindings` reflection pattern
+
+#### Source S31, lines 948–948: Patterns detected in code but not yet documented
+
+1. **`Stages::Base::TemplateBindings` reflection pattern** — used as a generic kw-args → instance vars adapter. Worth a one-paragraph note in [[templates]] if the pattern appears elsewhere.

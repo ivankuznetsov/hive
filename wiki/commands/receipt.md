@@ -3,7 +3,7 @@ title: hive receipt
 type: command
 source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
@@ -13,6 +13,8 @@ resolving the task again. Receipt maintenance is explicit, generation-fenced,
 and preview-first. Only prune accepts its own idempotency key.
 
 ## Installation and enablement
+
+For the retained uncertainty and historical evidence, see [Command receipt activation boundaries (2026-09-27)](#command-receipt-activation-boundaries-2026-09-27).
 
 The additive receipt schema is not part of ordinary setup. A production build
 must name a published and retained compatibility package before this succeeds:
@@ -237,3 +239,51 @@ as an unbounded administrative backlog.
 - [[commands/setup]]
 - [[operating]]
 - [[state-model]]
+
+## Known gaps
+
+### Command-receipt external evidence gaps (2026-09-28)
+
+#### Source S06, lines 104–116: Command-receipt external evidence gaps (2026-09-28)
+
+Resolved for Tier A on 2026-09-28: the compatibility candidate was rebuilt
+from a clean archive of baseline `f3de2561` with the current patch
+(`82562752…`, whose 31-object inventory matches `CommandSchema::OBJECT_NAMES`
+including the installation-wide capacity aggregate). The rebuilt candidate is
+`ddc5ecca37a4fa67329ad022c546d03bee71bf6526f2180838ed32dc765971db`, and the
+isolated rollback/re-upgrade drill was repeated against a fresh database. The
+candidate read and wrote the extended base schema, the current runtime replayed
+its terminal receipt without re-executing, and an altered extension failed
+closed. The earlier `4ac48a4a…` candidate is superseded. Details are in
+`docs/implementation/command-receipt-compatibility-proof.md`. Publication
+remains a separate Tier B authorization boundary: no published coordinates
+exist, and the candidate is not a distribution.
+
+### Command-receipt C4 consumer mapping (2026-09-28)
+
+#### Source S06, lines 117–126: Command-receipt external evidence gaps (2026-09-28)
+
+The producer checkout still has no concrete hivedev C4 request/response
+mapping, so local verification covers only the bounded Hive adapters. The
+bounded-search record in `docs/command-receipts-c4-comparison.md` is attached
+to the hivedev C4 consumer task `c4-implement-durable-command-operations-260923-9817`
+(`.hive-state/stages/1-inbox/c4-implement-durable-command-operations-260923-9817/idea.md`)
+by hivedev state commit `f54b9b998b4d9b83799283ef175d54e0cee5b2b2`. That
+commit is on the local `hive/state` branch and has not been pushed to the
+hivedev remote. The Hive follow-up tasks `hive:43362`, `hive:43363`, and
+`hive:43364` link the record from their bodies (hive state commit `3cbb2e5e62`).
+
+### Command receipt activation boundaries (2026-09-27)
+
+#### Source S84, lines 1774–1785: Command receipt activation boundaries (2026-09-27)
+
+- The compatibility rollback package remains a production-activation
+  dependency; source support does not prove a published, retained package can
+  be fetched.
+- Receipt maintenance is CLI-only in this increment. There is no shipped web
+  route for prune, retirement, pin release, batch abandonment, or enrollment.
+- Project identity and receipt continuity cover one intact host database plus
+  its bound marker. Multi-host continuity and decommission witnesses remain a
+  follow-up.
+- Terminal prune reclaims reusable SQLite pages. It does not guarantee that the
+  database or WAL files shrink on disk.

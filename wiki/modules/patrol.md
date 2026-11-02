@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-27
+updated: 2026-11-02
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -149,6 +149,8 @@ A new daemon may reclaim a dead exact process; live or unverifiable ownership
 remains fenced.
 
 ## Patrol Fix and publication
+
+For the retained uncertainty and historical evidence, see [Unified Patrol Fix live execution](#unified-patrol-fix-live-execution).
 
 Patrol Fix owns the repair workflow:
 
@@ -333,3 +335,189 @@ the standard task projections.
 Patrol Fix PR bodies omit URL userinfo from copied review and finding evidence.
 Original task receipts remain unchanged. Betterleaks still checks the generated
 body and exact commit range before publication; other detected secrets block.
+
+## Known gaps
+
+### Unified Patrol Fix live execution
+
+#### Source S16, lines 273–325: Unified Patrol Fix live execution
+
+The current simplification keeps historical Architecture Patrol issue-action and
+policy fields readable for replay compatibility. The retired issue effect is
+still parked fail-closed; removing that persisted vocabulary is separate from
+the completed Patrol Fix migration-subsystem deletion.
+
+The Inbox/Fix/Validate/Review/Publish path has focused local proof for exact worktree and
+receipt custody, failed-validation continuation, independent decision parsing,
+generation-safe rework/reopen, parked outcomes, and exactly-once coding
+successors. Local bare remotes and injected GitHub inventories also prove
+expected-absence publication, lost-response reconciliation, exact hosted-PR
+adoption, strict publication receipts, cleanup diagnostics, and the PR-gated
+Done move. The workflow has not yet run a real configured provider or GitHub
+publication against a disposable project. End-to-end dogfood belongs to the
+plan's final lifecycle verification; no current evidence claims live PR
+production.
+
+The one-time importer has focused proof for active-finding selection,
+deterministic idempotency, dry-run behavior, and normal `TaskCapture` output.
+There is intentionally no migration preflight, cutover state, rollback, or
+runtime reconciliation path.
+U11 closes the four admission-runtime blockers without adding another
+coordinator: the daemon inventories only exact Patrol Fix task manifests,
+fails visibly on owned corruption while ignoring unrelated task bytes, binds
+the complete owned inventory count/digest/head, and supplies one deterministic
+top-64 context capped at 192 KiB. Exact source/alias/lineage overlap ranks
+before path and lexical relevance; every selected row carries bounded evidence,
+affected code, remediation, manifest digest, and a digest of those exact bytes.
+Each reserved decision attempt receives exactly one provider launch through
+the existing `ChildSupervisor`, with no candidate-page fan-out. An occurrence
+may retry later under bounded provider backoff. A durable AdmissionStore
+reservation fences late, expired, restarted, or never-launched children, and
+the parent alone retains materialization and source-acknowledgement authority.
+
+The remaining gap is live delivery evidence, not local runtime behavior. The
+new fake-provider lifecycle proves both source engines, a cross-source duplicate,
+rework, a separately parked escalation successor, one local publication, and
+restart replay. The frozen historical corpus exercises the four production LLM
+prompt/parser seams and the dogfood report schema can retain one exact source to
+PR trace, but no configured real provider, enabled-project discovery round,
+hosted GitHub PR, hosted CI, or natural finding was executed in this change.
+Keep release/dogfood incomplete until the opt-in historical corpus has actual
+provider/model receipts and one naturally discovered finding reaches `done`
+with an exact PR and zero duplicate replay.
+
+An August 26 dogfood run exercised the real Pi/Ox Alpha Fix launch and durable
+markerless recovery, but exposed that pre-fix first-generation worktrees had
+treated Inbox's local checkout `HEAD` as their creation base. On a divergent
+operator checkout this carried unrelated local commits into the resulting PR.
+New first generations now fail closed onto exact `origin/<default>` OIDs; the
+remaining live-delivery proof must come from a task admitted after that cutover
+and reach one focused hosted PR.
+
+### Patrol dispatch incident demand baseline (2026-08-26)
+
+#### Source S17, lines 328–347: Patrol dispatch incident demand baseline (2026-08-26)
+
+The sanitized 600-charge incident replay pins the Patrol/coding, outcome,
+generation-stage repeat, stage, and failure-class aggregates without retaining
+task identities, provider output, secret material, credentials, or host paths.
+It also characterizes the former undifferentiated daily pool: once Patrol had
+used all 600 charges, later-stage Patrol progress, first-attempt Patrol work,
+and non-Patrol work were all starved even though later-stage ordering remained
+stable. Source and focused tests now pace three matching receipt-bound typed
+Patrol failures with one durable probe across restart while leaving task
+capacity as the shared safety boundary. The remaining gap is installed-daemon load
+and UTC-rollover proof over a live representative backlog; the sanitized replay
+is deterministic local evidence, not that operational soak.
+
+The preceding seven complete UTC days cannot be reconstructed into a
+defensible non-Patrol demand series from the retained Attempts v4 records.
+Historical `1-inbox` attempts do not all carry an unambiguous durable workflow
+identity, so classifying them as Patrol or coding would invent evidence. No
+task-capacity partition is inferred from that missing history: Patrol discovery
+already has separate scan concurrency and per-engine daily allowances, while
+Attempts capacity remains a shared safety boundary.
+
+### Separate Patrol launch lanes need installed rollover proof (2026-08-21)
+
+#### Source S33, lines 955–963: Separate Patrol launch lanes need installed rollover proof (2026-08-21)
+
+Focused tests prove separate ordinary and Architecture per-project daily launch
+allowances, durable pre-spawn reservations, lane-local provider holds, and UTC
+rollover. The current source has not yet been installed and observed across a
+UTC rollover with both lanes active. Capture one live medium project that
+exhausts each four-launch lane independently, emits no fifth process in either
+lane, avoids hot retry, and resumes both lanes after rollover. Token totals are
+telemetry-only and do not authorize launches.
+
+### Patrol quota-progress fixes need post-release dogfood (2026-07-19)
+
+#### Source S45, lines 1115–1160: Patrol quota-progress fixes need post-release dogfood (2026-07-19)
+
+Historical note: the split ordinary/architecture launch accounting described
+below was superseded on 2026-08-20 by the shared mode-derived daily ceiling.
+The remaining current live-proof requirement is recorded in “Shared Patrol
+launch ceiling needs installed mixed-lane proof” above.
+
+A live medium ordinary-patrol run exposed that the configured 12-feature batch
+could consume its three-launch cycle envelope, report the remaining features as
+errors, and leave the cursor at zero. Live architecture jobs then exposed the
+same exhausted shared 8-launch UTC-day ceiling as one synthetic failure for
+every remaining feature and retried it every minute without starting another
+provider process. Post-release v0.6.2 ordinary patrol mapped 209 features,
+reviewed exactly the launch-aware three-feature batch without errors, advanced
+its clean prefix, and ranked one source-anchored systemd startup defect at alpha
+80. Architecture Patrol reached the isolated exact checkout and retained its
+raw response, proving the dirty-checkout and ephemeral-evidence fixes, but
+exposed a valid leading JSON fence followed by plain-text rationale that v0.6.2
+rejected. The v0.6.3 parser accepts that canonical document shape; exact-main
+dogfood then completed clean PR-scoped reviews and a full scan produced the
+meaningful `invert-usage-error-contract-ownership` thesis above the configured
+0.25 discovery floor. Automation correctly rejected it for unverified evidence
+and missing behavior validation. Cross-feature scope is no longer independently
+disqualifying: exact replays of the two bounded PR 785 documentation findings
+under the revised policy are admissible and auto-fix eligible, with built-in
+docs diff validation before normal PR review. Durable architecture review run
+directories still have no automatic retention policy, so long-running
+installations should monitor `.hive-state/refactor_patrol/runs/` growth.
+
+Exact-source dogfood on 2026-07-20 replayed merged PR 785 through 13
+architecture reviews while ordinary launch accounting remained at zero,
+crossing the ordinary eight-launch ceiling without consuming it. The accepted
+theses became review issues 811 and 812. A separate non-dry ordinary patrol run
+found a reachable bot logger crash, independently proved fail-before and
+pass-after, opened pull request 814, and entered 6-review. This closes the local
+delivery-path uncertainty, but the installed package is still v0.6.4 and has
+not exercised the proposed split accounting or default issue-filing behavior;
+v0.6.5 packages those changes. Installed v0.6.4 dogfood also exposed a
+separate ordinary-patrol wire-contract gap: reviewers returned meaningful
+source evidence as multiline excerpts or annotated paraphrases, while the
+validator requires every snippet to be an exact substring of one claimed
+source line and therefore rejected the complete finding. v0.6.5 aligns the
+reviewer prompt with that existing fail-closed validator. Retain this gap until
+the installed v0.6.5 package opens meaningful ordinary and Architecture Patrol
+work without dirty-checkout, quota-churn, response-envelope, or evidence-
+contract errors.
+
+### Patrol Fix has no interrupted-attempt recovery (2026-08-21)
+
+#### Source S64, lines 1508–1525: Patrol Fix has no interrupted-attempt recovery (2026-08-21)
+
+Ordinary patrol used to settle a process-interrupted local fix attempt in
+`Patrol::Fixer#recover_interrupted_attempt`: adopt the exact patch receipt, or
+prove the deterministic checkout disposable before recording
+`interrupted_fix_attempt`. Consolidating discovery and fixing removed both
+`Patrol::Fixer` and `RefactorPatrol::Fixer`, and the unified
+[[modules/patrol]] Fix workflow has no equivalent — a killed Patrol Fix child
+can leave a worktree and branch behind with no receipt, for either source.
+`Commands::Patrol` no longer calls `recover_pending_fix_attempts!` at all.
+
+This is a known regression against `main`, not a resolved gap. The replacement
+belongs in the Patrol Fix stage machinery (worktree generations plus the
+admission store already hold the durable identity the old proof reconstructed
+from Git), so port it there rather than reviving the deleted engines. Keep this
+gap open until Patrol Fix proves an interrupted local generation either
+adoptable or disposable before reuse, and preserves dirty, broken-registration,
+or uniquely committed residue as operator-owned.
+
+### Patrol background discovery cadence (2026-08-28)
+
+#### Source S69, lines 1595–1612: Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
+
+Patrol candidate enumeration is now decoupled from scheduler cadence through a
+one-slot background worker. The dispatcher can publish another authoritative
+task snapshot while a prior discovery pass is still running; it harvests the
+completed hints later and keeps reservation, capacity gates, and spawn on the
+main thread. Architecture discovery's durable maintenance stays under its
+existing store locks, with stale diagnostic writes rejected by an observation
+fence. Focused source tests prove non-overlap, repeated publication carrying a
+fresh task source, once-only stall telemetry, truthful non-drained shutdown,
+retry-deadline enforcement, and rejection of candidates made stale by newer
+failure backoff or registration/config changes. This has not yet been installed
+and observed through a discovery pass longer than the snapshot-validity window,
+so the live cadence claim remains a dogfood gap, not a source-code gap. The
+harvest-time reservation/ownership checks still run on the dispatcher thread;
+live timing should determine whether they need a separate bounded optimization.
+The PR sweep also identified competing process waits between discovery and the
+ancillary supervisor. Its focused regression uses real subprocesses and the
+Gh capture path; it does not replace the installed slow-discovery cadence proof.

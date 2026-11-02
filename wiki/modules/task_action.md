@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/task_workspace/builder.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-08-30
+updated: 2026-11-02
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
 ---
 
@@ -265,3 +265,36 @@ Most of the data IS in the `ACTIONS` hash, but `command` needs to compose multip
 - [[modules/plan_review]] — critique state and execution authority projected here
 - [[modules/task_workspace]] — read-only decision and sanitized action projection
 - [[decisions]] ADR-025 (required-and-nullable JSON envelopes) and ADR-027 (red-status diagnose-then-act)
+
+## Known gaps
+
+- [Shared recovery pipeline evidence](../state-model.md#recovery-pipeline-follow-ups-need-installed-main-replay-2026-07-26)
+
+### Operator cancellation awaits live validation (2026-09-09)
+
+#### Source S08, lines 144–150: Operator cancellation awaits live validation (2026-09-09)
+
+`archive --reason cancelled` is covered locally for cancellation without GitHub
+evidence, live-owner refusal, preserved worktrees, missing prerequisites,
+dependency rejection, and Web preview. Deploy a compatible runtime before
+creating cancellation receipts in live state; older readers reject the new
+reason. Task 43085 is the intended first live validation, not yet archived.
+
+### Append-only log.d fragment carries a stale `:marker` kind reference (U11).
+
+#### Source S28, lines 867–868: Open questions about the codebase
+
+49. **Append-only log.d fragment carries a stale `:marker` kind reference (U11).** `wiki/log.d/20260620T120000Z-task-action-review-fixes.md:7` says the `:none` inert fall-through gate "excludes `:agent`, `:marker`, and `nil`". That was accurate at its 2026-06-20 timestamp, but U11 retired the `:marker` kind: `Hive::Workflow::KNOWN_KINDS` is now `[nil, :agent, :inert, :execute, :review_council, :finalize]` (`refute_includes ..., :marker` pins the absence in `test/unit/workflow_test.rb`), and the live code comment in `lib/hive/task_action.rb` was updated to "coding runtime kinds". Per the repo's append-only `log.d` convention the fragment is NOT rewritten; this note exists so an `rg :marker` reader treats that line as historical, not current. The only authoritative kind list lives in `lib/hive/workflow.rb`. See [[modules/task_action]].
+
+### Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
+
+#### Source S72, lines 1644–1653: Generic rewind rearming lacks managed-workflow live proof (2026-08-29)
+
+Backward `hive approve --to` now rearms descriptor-owned state files across the
+destination-through-source interval and has focused coding-workflow integration
+coverage, including exact rollback and shared-file scoping. The algorithm is
+descriptor-driven and therefore also applies to project-authored and managed
+workflows, but no live managed-workflow task has yet been rewound through a
+deployed daemon. Keep this gap open until such a workflow proves that its
+destination reruns and later revisited stages do not consume prior terminal
+markers.

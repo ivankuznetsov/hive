@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb
 created: 2026-06-18
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -237,6 +237,8 @@ calls.
 
 ## Stacked branches
 
+For the retained uncertainty and historical evidence, see [Multi-dependency review verification (2026-10-15)](#multi-dependency-review-verification-2026-10-15).
+
 A valid same-project scalar continues to supply the prerequisite slug to
 `DependencySnapshot.stacked_base`. Execute resolves the base from the remote
 branch, then local branch, then default branch under the existing placeholder
@@ -309,3 +311,62 @@ array as a scalar to make the old reader proceed.
 - [[commands/run]] · [[commands/approve]] · [[commands/new]] · [[stages/plan]]
 - [[modules/worktree]] · [[stages/execute]] · [[stages/open-pr]]
 - [[modules/task_workspace]]
+
+## Known gaps
+
+### Cross-project dependency hosted dogfood
+
+#### Source S25, lines 618–624: Current release gap
+
+- Cross-project dependency admission is covered with local-path remotes and
+  anonymized multi-project integration fixtures, including stored/live remote
+  mismatch. It has not yet been dogfooded end-to-end against two separately
+  hosted repositories through daemon dispatch and merge/archive. The current
+  implementation intentionally performs no network identity lookup; it trusts
+  only normalized enrolled/live `origin` strings and fails closed on missing
+  or ambiguous evidence.
+
+### 2026-06-22 dependency-stacking placeholder branch investigation
+
+#### Source S28, lines 755–774: Open questions about the codebase
+
+Branch-creator inventory for the U1-U10 inversion dogfood found no separate
+in-`lib/` creator for normal task slug branches. The only normal slug branch
+creator is `Hive::Worktree#create!`'s `git worktree add -b <slug> <base>` path;
+`Hive::Babysitter::Worktree` creates only `hive-babysitter/pr-*` branches from
+PR refs, and `Hive::GitOps` branch operations in this area delete/drop branches
+rather than pre-create task slugs.
+
+The leading root cause is therefore a stale placeholder left by an earlier
+collapsed execute attempt: the first run resolved a dependency override to the
+default branch, created `<slug>` from that default, then halted with
+`EXECUTE_WAITING reason=no_worktree_changes` or otherwise removed the worktree
+while leaving `refs/heads/<slug>` behind. Later runs hit the existing-branch
+attach path and kept the placeholder on the default branch. The current fix is
+the `Hive::Worktree` hardening documented in [[modules/worktree]] and
+[[modules/task_dependencies]]: empty placeholders with a stacked override are
+re-pointed, local prerequisite branches are preferred over default fallback,
+and branches with real commits remain preserved. Remaining uncertainty: no
+checked-in live dogfood artifact yet proves the U1-U10 stacked sequence after
+this fix.
+
+### Numeric dependency lookup registration coverage (2026-09-14)
+
+#### Source S79, lines 1734–1740: Numeric dependency lookup registration coverage (2026-09-14)
+
+Registered IDs resolve through the runtime subject alias and exact stage-folder
+checks. Older or never-run tasks without that registration still use metadata
+discovery. This change does not claim every numeric dependency is scan-free.
+The targeted path verifies the selected folder ID and detects copies of its
+slug across stages; it is not an audit for hand-copied duplicate IDs under
+unrelated slugs. Full admission scans retain that broader ambiguity check.
+
+### Multi-dependency review verification (2026-10-15)
+
+#### Source S87, lines 1815–1821: Multi-dependency review verification (2026-10-15)
+
+- Focused tests cover cycle fan-in, declaration/gate/base-mode freshness,
+  schema-safe malformed metadata, batched status inputs, and consumer
+  projections. They do not measure a long-running installed daemon, TUI, or Web
+  process against a production-sized cyclic graph; hosted review and CI remain
+  separate verification boundaries.

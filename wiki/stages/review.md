@@ -3,13 +3,15 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,remote_ci,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
 **TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, Patrol Fix workflow routing can enter the same stage, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR. `Hive::Stages::Review.run!` proves local and hosted CI on entry, loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap), settles the exact final PR head, and only then finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
 
 ## Setup
+
+For the retained uncertainty and historical evidence, see [Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)](#triage-phase-55-min-failure-cause-unconfirmed-2026-06-17).
 
 - **State file**: `task.md` with frontmatter written by 4-execute, Patrol Fix routing, or ad-hoc PR review. The runner derives the current pass from `reviews/<reviewer-name>-<NN>.md` filenames.
 - **Worktree pointer**: `worktree.yml` carried from the owning workflow or written by `Hive::Commands::AdhocReview`; missing → exit 1 with "6-review entered without a worktree.yml".
@@ -291,3 +293,93 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 - [[modules/patrol]]
 - [[modules/markers]] · [[modules/agent]] · [[modules/config]]
 - [[state-model]] · [[decisions]] · [[architecture]]
+
+## Known gaps
+
+### No finalize-side backstop (2026-10-15)
+
+#### Source S03, lines 39–41: Review verify-pass follow-ups (2026-10-15)
+
+The final fix pass now gets a verify-only pass (see [[stages/review]]). Open
+items:
+
+#### Source S03, lines 50–52: Review verify-pass follow-ups (2026-10-15)
+
+- **No finalize-side backstop.** 8-finalize does not check that the review's
+  `REVIEW_COMPLETE` HEAD matches the branch it finalizes; the fix relies on the
+  review loop alone.
+
+### Operator edits on a `final_fix_unverified` STALE are not consumed (2026-10-15)
+
+#### Source S03, lines 53–57: Review verify-pass follow-ups (2026-10-15)
+
+- **Operator edits on a `final_fix_unverified` STALE are not consumed.** The TUI
+  still opens the verify pass's `escalations-NN.md`, but a retry re-runs the
+  reviewers instead of fixing from edited marks. To act on those findings the
+  operator commits fixes by hand (or raises `review.max_passes`) and retries.
+
+### Ad-hoc PR review is source/test-pinned but not live-smoked.
+
+#### Source S28, lines 873–874: Open questions about the codebase
+
+51. **Ad-hoc PR review is source/test-pinned but not live-smoked.** `hive review --pr PR` runs through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`. Focused unit/integration tests pin PR identifier parsing, project-scoped `gh pr view` lookup via `chdir:`, synthetic `6-review/adhoc-review-pr-N` task creation/reuse/collision behavior, PR-head materialization, head-SHA verification, cleanup after partial creation, reviewer selection, and default fix-off behavior (`review.adhoc.fix: false`). This refresh did not find an in-tree artifact showing a real registered project running `hive review --pr <github-pr>`, materializing the PR head from GitHub, completing review with real reviewer agents, and surfacing the ad-hoc task through `hive status`/TUI/bot. The 2026-06-30 cleanup audit for `make-the-hive-daemon-automatically-260629-223d` rechecked the branch commit, current source/tests, and configured main-wiki context and found no new live ad-hoc PR review evidence closing this gap.
+
+### Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.
+
+#### Source S29, lines 921–922: 2026-06-16/17 refresh uncertainty
+
+48. **Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.** Commit `ce3f7978` changes `templates/fix_prompt.md.erb` so a 6-review Phase 4 fix agent should grep for and fix every site with the same defect class named by an accepted finding, rather than patching only the cited line. The committed evidence is prompt prose plus the existing `test/integration/prompt_injection_test.rb` render coverage (nonce wrapping, trailers, answered-escalation context); no in-tree artifact yet proves a live review fix agent followed the new instruction by repairing multiple same-defect sites in one pass, named the extra sites, and avoided unrelated refactors.
+
+### Resolved
+
+#### On-disk pass guard vs. CI-repair chains (2026-10-15)
+
+##### Source S03, lines 42–49: Review verify-pass follow-ups (2026-10-15)
+
+- **Closed 2026-10-15: on-disk pass guard vs. CI-repair chains.**
+  `Review.max_review_pass` used to raise `ConfigError` once a top-level
+  `reviews/*-NN.md` exceeded `max_passes + 1`, so a retry of a pass that a CI
+  repair during the verify pass had admitted (`max_passes + 2`) landed
+  `REVIEW_ERROR reason=config_error`. The ceiling is now
+  `Review.admitted_pass_ceiling`: `max_passes + 1`, extended by one for each
+  consecutive `kind=ci_repaired` sentinel from the verify pass upward. A pass
+  with no admitting receipt still fails loudly.
+
+#### Claude/tmux review-fix Stop-hook fallback is integration-pinned but not live-replayed.
+
+##### Source S28, lines 794–794: Open questions about the codebase
+
+17a. ~~**Claude/tmux review-fix Stop-hook fallback is integration-pinned but not live-replayed.**~~ — closed 2026-10-14. The Claude tmux launch runtime was deleted (Claude launches only as headless `claude -p`; see ADR-053 in [[decisions]]); the Stop hook and the review-fix completion fallback were removed with it. Tasks already stuck on this marker are covered by the manual evidence check in `docs/recipes.md`, and the `claude_completion_fallback` event type stays readable in journals. Original record: Branch HEAD narrows the manual recovery note for `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` to require a live tmux session and code-change evidence: a new fix commit, dirty worktree pending Hive post-fix auto-commit, or whole-pass no-change where all findings were dispositioned `RESOLVED/NO-FIX:` with no unapplied `[x] AUTO-FIX:` line. Current source and `test/integration/run_review_test.rb` cover the same predicate through `handle_fix_completion_fallback`, including `claude_completion_fallback` audit emission for commit/no-change evidence and rejection when commit/no-change evidence or escalation clearance is missing; `test/unit/daemon/stale_agent_healer_test.rb` covers unbounded cooldown retries for the residual known stop-hook marker. This refresh did not find an in-tree artifact replaying a real stuck task through a live Claude/tmux review-fix session, nor one proving the documented recovery tasks advanced after applying the narrowed evidence check.
+
+#### Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
+
+##### Source S41, lines 1041–1069: Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
+
+**Closed 2026-10-14.** Every candidate cause below lives in the deleted Claude tmux runtime (`wait_for_expected_output`, `expected_output_session_alive?`, `tmux has-session`, pane reads); triage now launches Claude only as headless `claude -p` (ADR-053 in [[decisions]]). A new triage failure should be investigated from its `message=` attr and the headless log. Original record:
+
+Live task `xbookmark` #1333 (`we-need-to-add-an-260616-094b`) failed at the
+triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with a
+legacy generic triage failure reason. The real `error_message` was discarded by
+`mark_review_phase_failure` (now fixed — it surfaces a `message=` attr and
+triage retries; see [[stages/review]]), so the underlying trigger was never
+captured. Open questions:
+- What exactly made `wait_for_expected_output` exit before its 1800s deadline?
+  No 300s/5-min constant exists in `claude_launcher.rb`; the early-exit paths
+  are limit-reached, `tmux_session_terminated` (single-shot
+  `expected_output_session_alive?` — one `tmux has-session` `TmuxError` →
+  `false`, with no streak tolerance unlike the 3-streak pane-read path), or
+  3× consecutive unreadable-pane errors.
+- The box had ~130 agent procs and fully-exhausted swap (no OOM-kill in the
+  kernel log). Did swap thrash make a `tmux has-session` call transiently fail
+  and get misread as a dead session? If so, `expected_output_session_alive?`
+  should tolerate a transient `TmuxError` like the pane-read streak does.
+- Or did the interactive `claude` triage agent end its turn / exit before
+  writing `escalations-NN.md` (the log showed it spinning at "5m 0s" right as
+  it was about to write its output files)?
+Commit `e5c26edc` adds direct helper coverage for bounded `message=`
+truncation and capped retry backoff. Commit `c4045dfe` then clamps the retry
+loop against `review.max_wall_clock_sec` before another triage spawn and dedups
+the retry/backoff/truncation helpers, but it still does not provide a live
+post-fix failure sample. Next live triage failure should now carry the
+`message=` attr — use it to pick between these before hardening
+`expected_output_session_alive?`.

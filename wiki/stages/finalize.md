@@ -3,7 +3,7 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, lib/hive/task_closure.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-08-24
+updated: 2026-11-02
 tags: [stage, finalize, pr, github, clean-exit, closure]
 ---
 
@@ -103,3 +103,11 @@ not repeat accepted work.
 
 - [[stages/open-pr]] · [[stages/review]] · [[stages/done]]
 - [[state-model]] · [[commands/stage_action]]
+
+## Known gaps
+
+### Finalize unpushed-commit auto-retry is unit-pinned but not live-smoked.
+
+#### Source S28, lines 804–804: Open questions about the codebase
+
+28. **Finalize unpushed-commit auto-retry is unit-pinned but not live-smoked.** `Hive::Daemon::StaleAgentHealer` submits an `8-finalize` `ERROR reason=unpushed_commits` row after the universal cooldown when no task lock is live. `RecoveryCoordinator` then owns the identity-guarded transition and workflow-derived `hive finalize` retry, preserving normal clean-exit, auth, and push checks. `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb` covers live-lock refusal, marker identity, safety, and unbounded retry; `test/integration/run_finalize_test.rb` covers finalize writing the marker on persistent push failure. This refresh did not find an in-tree artifact showing a live daemon observing such a finalized red row, coordinating the retry, and eventually succeeding after the underlying push failure is repaired.

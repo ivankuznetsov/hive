@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-02
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -82,6 +82,8 @@ For stages 4 and later:
 `Task` carries identity (`@folder`, `@slug`, `@stage_name`) — it's a value object. All other path-like helpers are derived. `Markers`, `Lock`, `Config` etc. are stateless modules.
 
 ## Task metadata helpers
+
+For the retained uncertainty and historical evidence, see [Task observation boundary (2026-10-02)](#task-observation-boundary-2026-10-02).
 
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
@@ -162,3 +164,40 @@ For stages 4 and later:
 - [[modules/task_dependencies]] · [[modules/workflows]]
 - [[commands/run]] · [[commands/status]]
 - [[state-model]]
+
+## Known gaps
+
+### Task observation boundary (2026-10-02)
+
+#### Source S01, lines 11–25: Task observation boundary (2026-10-02)
+
+Update-only metadata writers, completion clocks, managed-workflow rollback,
+approve/decide rollback, and their live callers now retain and revalidate a
+process-local directory observation. Focused tests force deletion and copied
+same-path replacement before custody, after metadata read, and before
+persistence. Supported `hive drop` participates in the project-commit-lock then
+task-lease order, so observed run and plan-review claims now serialize with it
+without retaining the project lock for their long-running work. Cross-device
+cleanup retains the copied directory handle and preserves a destination whose
+identity changes before validation. This does not claim protection
+against an arbitrary same-user filesystem process that ignores Hive locks and
+mutates paths between individual filesystem syscalls; the observation is
+transient custody evidence, not a persistent generation authority or an OS
+filesystem transaction.
+
+### Task ids are not unique across state homes (2026-10-16)
+
+#### Source S89, lines 1836–1849: Task ids are not unique across state homes (2026-10-16)
+
+`Hive::TaskCounter` allocates from the runtime database of the current state
+home. A fresh `HIVE_HOME` (for example an agent copying the global config into
+`mktemp -d` to run `hv new` against a real project) infers its first id from
+its own empty `task_subjects` and writes `id: 1` into the shared project's
+`meta.yml`. That is how topgreendeals.co.uk task
+`preview-only-prepare-the-top-260901-b765` collided with the hive project's
+task 1 on 2026-09-01. The live installation now detects and parks such tasks
+as an operator repair, but nothing prevents a second state home from minting
+the ids, and there is no CLI command that re-keys a task (`hive migrate` no
+longer exists). Open question: whether `hive new` should refuse to write into
+a project registered in a different installation, or whether a supported
+re-key command should exist.

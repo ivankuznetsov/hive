@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-08-27
+updated: 2026-11-02
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -171,3 +171,7 @@ data trustworthy. Agent invocation guarantees belong to
 - [[component-boundaries]]
 - [[modules/gh]] · [[modules/worktree]] · [[modules/git_ops]]
 - [[commands/refactor-patrol]]
+
+## Related gap evidence
+
+- [Betterleaks distribution and publication recovery verification](secret_patterns.md#betterleaks-distribution-and-recovery-verification)

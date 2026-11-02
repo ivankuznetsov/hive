@@ -3,7 +3,7 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb, lib/hive/task_activity.rb, lib/hive/task_workspace/timeline.rb
 created: 2026-05-23
-updated: 2026-08-13
+updated: 2026-11-02
 tags: [module, events, observability, status, append-only]
 ---
 
@@ -101,6 +101,8 @@ from older Hive versions remain readable through a best-effort parser.
 
 ## Material activity and workspace timeline
 
+For the retained uncertainty and historical evidence, see [Task-journal growth and compaction](#task-journal-growth-and-compaction).
+
 `Hive::TaskActivity` is the sole append/idempotency facade for material task
 audit facts. It binds a closed activity kind to task, workflow, stage, durable
 attempt, task generation, stable operation ID, optional correlation ID,
@@ -185,3 +187,36 @@ Per-reviewer spawns inside Phase 2 emit their own `agent_start` / `agent_end` vi
 - [[stages/brainstorm]] · [[stages/plan]] · [[stages/review]]
 - [[commands/run]] · [[commands/status]]
 - [[modules/task_workspace]]
+
+## Known gaps
+
+### Task-journal growth and compaction
+
+#### Source S13, lines 220–232: Task-journal growth and compaction
+
+`task-journal.jsonl` is append-only and routine reads must validate and fold its
+complete history. The bounded process-local Reader cache avoids repeating that
+work while a journal and marker are unchanged, but the first read after each
+append remains O(history), and no compaction or retention protocol bounds
+long-lived journals. Routine cache entries now release raw records and replay
+working objects after retaining the projected data and record count. In
+particular, high-volume `activity_recorded` timeline events share the authority
+stream even when most do not affect the current condition projection. Moving
+timeline-only activity to a sibling stream or introducing a compaction protocol
+requires a separate design that preserves JSONL as the sole persistent history
+authority.
+
+### WorkLedger is an internal boundary, not a published format (2026-07-26)
+
+#### Source S51, lines 1253–1264: WorkLedger is an internal boundary, not a published format (2026-07-26)
+
+`Hive::WorkLedger` now has clean-load, structural descriptor, durable append,
+rollback, idempotency-conflict, replay, adapter-compatibility, historical
+fixture, and component-graph tests. This proves the internal mechanism seam; it
+does not establish external demand, a stable public journal/projection disk
+schema, cross-platform crash semantics beyond Hive's supported filesystem
+tests, or independent release/version ownership. The Hive task journal,
+projection snapshots, attempts, conditions, workflow overlays, and migrations
+remain Hive-owned compatibility contracts. Do not infer a gem or repository
+split from `boundary-ready`; future packaging still needs a real non-Hive
+consumer and explicit release direction.

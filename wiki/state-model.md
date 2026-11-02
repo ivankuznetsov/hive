@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-02
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -133,6 +133,8 @@ next status or supported dispatch boundary observes and holds invalid state.
 `workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. Daemon ticks and status projections never backfill ids, names, or completion metadata. Display names are repaired explicitly with `hive generate-name`; managed workflow install/update owns retained-task pin migration. Patrol review handoff attempts normal id allocation and writes its display name as part of capture.
 
 ## Evidence-bound task closure
+
+For the retained uncertainty and historical evidence, see [Recovery pipeline follow-ups need installed-main replay (2026-07-26)](#recovery-pipeline-follow-ups-need-installed-main-replay-2026-07-26).
 
 `Hive::TaskClosure` owns `<task>/closure.json`
 (`hive-task-closure.v1`) for the exceptional case where immutable remote
@@ -1424,3 +1426,64 @@ prepares that day; neither sent nor ambiguous outcomes auto-resend.
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[commands/digest]] · [[commands/refactor-patrol]]
+
+## Known gaps
+
+- [Ten-table runtime deployment proof](modules/attempts.md#ten-table-runtime-deployment-proof)
+
+### Merged-PR task closure is not yet live-smoked after the ledger removal.
+
+#### Source S28, lines 808–808: Open questions about the codebase
+
+33. **Merged-PR task closure is not yet live-smoked after the ledger removal.** `Hive::Daemon::PrMergeWatcher` rebuilds current PR-bearing coding candidates in stages 5–8, keeps only process-local poll cadence/fairness, rechecks GitHub facts, and repeats idempotent architecture intake before the same evidence-bound `TaskClosure` transition. Durable closure receipts, not a separate reconciliation ledger, support archive replay. `Stages::Finalize.pr_already_merged?` still short-circuits a normal finalize run. Installed-daemon evidence is still needed for a real out-of-band merge, restart, and receipt rendering on status/web/bot surfaces.
+
+#### Source S28, lines 907–908: Open questions about the codebase
+
+56. **Stateless merge-watcher rollout is not yet live-evidenced.** The former reconciliation ledger, durable cursor, and remote/intake checkpoints are removed. Candidate reconstruction and process-local oldest-polled selection now provide bounded fair polling; idempotent architecture intake and durable `TaskClosure` receipts own restart safety at the side-effect boundaries. A later authorized deployment must demonstrate restart rediscovery and show that one failing repository or deferred intake does not block a healthy merged task. No retained per-task watcher ledger is expected.
+
+### Universal durable-error recovery is source/test-pinned but not post-v4 live-smoked.
+
+#### Source S28, lines 871–872: Open questions about the codebase
+
+50. **Universal durable-error recovery is source/test-pinned but not post-v4 live-smoked.** `RecoveryCoordinator` is the sole destructive owner for bot, TUI, Rails, CLI/action, recorder, and healer recovery. `hive migrate` performs the one-off marker-ID upgrade; runtime has no v1 identity fallback. Attempt loss remains a separate ledger-owned successor lifecycle and no longer projects a compatibility error marker. Focused tests pin cooldown/safety, durable-history retry counts, canonical identity revalidation, request-lock serialization, restart replay across admitted/cleared/dispatched/terminal phases, bounded terminal retention, adapter authority guards, and one-scan web lifecycle rendering. Remaining uncertainty is operational: no checked-in dogfood artifact yet shows an installed daemon crash-restarting between clear and dispatch, advancing the same real Codex/Claude-limited task, and rendering the terminal receipt on every surface without marker surgery.
+
+### Evidence-bound task closure is source/focused-test pinned but not yet live-dogfooded.
+
+#### Source S28, lines 905–906: Open questions about the codebase
+
+55. **Evidence-bound task closure is source/focused-test pinned but not yet live-dogfooded.** `Hive::TaskClosure` now verifies merged PR/full commit evidence, default-branch reachability, registered repository identity, live attempts/locks, owned-worktree safety, two-step operator authorization, receipt quarantine, crash resume, status projection, and CLI/web/bot adapters. Focused tests use real local task/state/worktree transitions with an injected GitHub transport plus Rails authentication/CSRF coverage. The remaining uncertainty is the planned U9 dogfood against `fix-and-ship-github-merged-260719-0878`: its real Hive and PRDigest delivery PRs/OIDs must be reverified through the installed GitHub CLI, the exact receipt confirmed by an operator, and the archived closure observed on every live surface.
+
+### Recovery pipeline follow-ups need installed-main replay (2026-07-26)
+
+#### Source S55, lines 1305–1316: Recovery pipeline follow-ups need installed-main replay (2026-07-26)
+
+Focused tests pin three failures exposed by the current-main dogfood: an owned
+dirty execute worktree is retryable without weakening execute's clean committed
+completion boundary; `hive migrate` preflights and rebinds same-generation
+managed workflow configuration pins without partial rewrites; and merge
+reconciliation quietly skips registrations that have no GitHub identity while
+retaining strict identity-drift refusal. The remaining evidence is operational:
+merge and install the exact head, replay the stranded patrol execute task and
+the stale writing workflow pin, and observe at least one daemon tick with the
+local-only registrations present and no merge-reconciliation error. Keep this
+gap open until those three live checks are recorded.
+
+### Current-format-only conversion boundary (2026-09-09)
+
+#### Source S76, lines 1683–1691: Current-format-only conversion boundary (2026-09-09)
+
+Historical installation conversion is manual through
+`docs/guides/current-format-migration.md`. No live installation has been converted
+by this cleanup. Old attempts, usage and incompatible task evidence may remain in
+external backups; exact conversion coverage depends on the inventoried source.
+Markers still serve current stages outside execute; `legacy_baseline` remains a
+current ad-hoc task initialization event, and provider routing's `legacy` mode
+still denotes current default routing. Their names do not imply removable code.
+
+### Resolved
+
+#### Resolved 2026-07-25: the bespoke `3-plan` healer requeue was retired.
+
+##### Source S28, lines 852–852: Open questions about the codebase
+
+39. **Resolved 2026-07-25: the bespoke `3-plan` healer requeue was retired.** RecoveryCoordinator now derives the owning workflow argv for every stage and persists it before the sole guarded marker transition. `3-plan` therefore uses the same v4 recovery lifecycle as any other stage; there is no `heal_requeued`, clear-only branch, or alternate scheduler. The remaining installed/live proof is tracked once in gap 50.

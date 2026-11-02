@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-02
 tags: [command, bootstrap, git, prompts, preview, minimal, llm-wiki, provisioning]
 ---
 
@@ -211,3 +211,17 @@ or declined confirmation therefore leaves the directory unchanged.
 - [[cli]] · [[commands/run]] · [[commands/doctor]] · [[commands/setup-agents]]
 - [[modules/git_ops]] · [[modules/config]] · [[modules/agent_profile]] · [[modules/babysitter]]
 - [[state-model]] · [[decisions]] (ADR-023)
+
+## Known gaps
+
+### Has `hive init` been run against a real project yet?
+
+#### Source S28, lines 776–776: Open questions about the codebase
+
+2. **Has `hive init` been run against a real project yet?** Planned pilot, but the working tree shows no first commit on `~/Dev/hive` itself, so the pilot may not have started.
+
+### Does the pilot project's pre-commit hook chain (lefthook/overcommit/husky) misbehave on `.hive-state/` commits?
+
+#### Source S28, lines 778–778: Open questions about the codebase
+
+4. **Does the pilot project's pre-commit hook chain (lefthook/overcommit/husky) misbehave on `.hive-state/` commits?** The plan flags this as a known caveat to verify on first init; outcome unrecorded.

@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-09-26
+updated: 2026-11-02
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -356,3 +356,11 @@ JSON document and lets that serialization failure propagate.
 - [[modules/workflows]]
 - [[modules/workflow_package]]
 - [[commands/new]]
+
+## Known gaps
+
+### Direct Git workflow import update limitations
+
+#### Source S82, lines 1765–1766: Digest numerical scope
+
+- Direct Git workflow imports support initial authored installation. Automatic upstream update/merge and companion service installation are not implemented; those remain explicit owner operations.

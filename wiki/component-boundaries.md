@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-09-26
+updated: 2026-11-02
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
@@ -120,3 +120,33 @@ The contract validates:
 - [[architecture]]
 - [[modules/patrol]]
 - [[testing]]
+
+## Known gaps
+
+### Internal component boundary gap
+
+#### Source S26, lines 690–714: Internal component boundary gap
+
+- The internal graph retains fifteen catalog rows. Eleven are
+  `boundary-ready`; Provider Health, Provider Routing Policy, Provider Routing
+  Operations, and Attempts remain `candidate`. Patrol Effect Evidence and its
+  U3 migration exception were deleted. Attempts remains unready because Hive
+  has no demonstrated need for a supported reconciliation, supervision,
+  capacity, loss-processing, cancellation, export, or raw-store lifecycle API.
+- U1a1vt closes the inherited `U1A1V-R02-ARCH-002` combined metric proof at
+  498 lines / 34 callables / 55 decisions while keeping both files inside the
+  per-method R43 limits. The candidate must not be described as boundary-ready
+  before U1a1c establishes its first production consumer and removes the fence.
+  TextSafety accepts exact frozen plain Values shapes as an internal contract;
+  those checks are not provenance or origin authentication, and callers must
+  not turn them into an external trust claim.
+- No ready component has yet earned standalone packaging. There is no named
+  non-Hive adopter, independently installed component artifact, separate
+  compatibility promise, or explicit release decision. Those proofs belong to
+  `docs/plans/2026-07-25-002-feat-standalone-component-gems-plan.md`; internal
+  readiness must not be reported as RubyGems publication eligibility.
+- The catalog guard parses literal `require`, `require_relative`, and
+  `Constant.new` edges. Dynamic loading, aliases, reflection, factories, and
+  same-user monkeypatching remain outside that test-only architecture check.
+  A future package candidate still needs an independent package harness and
+  security claims grounded in its own runtime tests.

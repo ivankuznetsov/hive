@@ -3,7 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,runtime,synthetic_task,plan_context}.rb, lib/hive/agent_support/codex/reviewer.rb
 created: 2026-04-26
-updated: 2026-08-30
+updated: 2026-11-02
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 
@@ -59,6 +59,8 @@ Claude agent reviewers take the same `run!` / `spawn_agent` path as every other 
 All branch-based reviewer prompts scope their work with `git diff <default_branch>...HEAD`. The three-dot range compares `HEAD` with the merge-base, so a reviewer sees only changes introduced by the task branch; the former two-dot tip comparison could show inverse changes that had already landed on the default branch.
 
 ## `AgentSupport::Codex::Reviewer`
+
+For the retained uncertainty and historical evidence, see [codex-native review: prose-verdict clean-pass heuristic (2026-06-19)](#codex-native-review-prose-verdict-clean-pass-heuristic-2026-06-19).
 
 Native Codex review adapter (added 2026-06-10; `codex exec review` since 2026-10-16). The **patrol-default** reviewer: one cheap, tuned, read-only native Codex review pass instead of the multi-persona `ce-code-review` fan-out (6–18 subagents). `run!`:
 
@@ -133,3 +135,51 @@ The DEFAULTS `patrol.review.reviewers` is the single `codex-native-review` entry
 
 - [[stages/review]] · [[modules/agent_profile]] · [[modules/config]]
 - [[decisions]] (ADR-014 / ADR-015)
+
+## Known gaps
+
+- [Hive-owned native Codex reviewer follow-ups](mcp.md#native-codex-reviewer-parser-and-live-pass-evidence-2026-10-16)
+
+### Native Codex reviewer transcript trimming is unit-pinned, not live-flow-smoked.
+
+#### Source S29, lines 916–916: 2026-06-16/17 refresh uncertainty
+
+- **Native Codex reviewer transcript trimming is unit-pinned, not live-flow-smoked.** Commit `0d0cac16` trims `codex review` stdout so triage receives the findings block plus final Codex reply without the middle exec/thinking transcript. `test/unit/reviewers/codex_review_test.rb` covers the output shapes, but this refresh did not find a live `hive patrol` or 6-review daemon artifact proving a real large Codex transcript no longer bloats triage.
+
+### codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
+
+#### Source S42, lines 1071–1084: codex-native review: prose-verdict clean-pass heuristic (2026-06-19)
+
+`Hive::AgentSupport::Codex::Reviewer` accepts a prose (non-checkbox) verdict as a
+`:clean` pass only when `clean_verdict?` matches an affirmative no-findings
+phrase (`CLEAN_VERDICT`) and no `CONCERN_SIGNAL`. This closed the `all_failed`
+regression (genuine clean reviews failing) while preventing a prose-described
+finding or an exit-0 soft-error from being laundered into a clean pass. Residual
+risk: the patterns are heuristic. A finding phrased with no concern word AND a
+"no … issues" hedge could still slip to `:clean`, and an unusually-worded
+genuine clean verdict could fail to match and `:error`/retry (worst case
+`all_failed`). The robust long-term fix is to get `codex review` to reliably
+emit the strict `## High/Medium/Nit` + `No findings.` format so the prose path
+is never exercised; until then, watch `reviews/errors-NN.md` tails for
+clean-but-rejected verdicts and extend `CLEAN_VERDICT` as new phrasings appear.
+
+### Legacy root reviewers compatibility removal is not scheduled (2026-07-23)
+
+#### Source S49, lines 1212–1219: Legacy root reviewers compatibility removal is not scheduled (2026-07-23)
+
+The project-config loader temporarily promotes a root-level `reviewers` key to
+`review.reviewers` so an installed Hive update does not strand older projects;
+`hive migrate` persists the canonical form. The release that removes this
+read-through alias has not been selected. Remove it only after warned projects
+have had a migration window and release notes make the strict boundary
+explicit; no version or publication decision is implied by the source change.
+
+### Adversarial review model attribution (2026-09-11)
+
+#### Source S78, lines 1724–1729: Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+- 2026-09-11: Three blocked adversarial reviews recorded Haiku for an Opus
+  request. The mixed-model attribution defect is reproduced and fixed in code;
+  native task diagnostics expose no correlated raw stream for those attempts,
+  so their exact subagent provenance remains unverified. Existing records need
+  an explicit `request-review` after deploying the corrected runtime.

@@ -3,7 +3,7 @@ title: hive update
 type: command
 source: lib/hive/commands/update.rb, lib/hive/install_channel.rb, install.sh
 created: 2026-05-21
-updated: 2026-08-30
+updated: 2026-11-02
 tags: [command, install, update, migration]
 ---
 
@@ -50,3 +50,22 @@ Fresh installations use `hive setup`. Older state uses the
 The daemon nudge remains `hive update` for installed channels and absent for dev.
 Tests in `test/unit/commands/update_test.rb` cover updater ordering, dry runs,
 manager selection and validation failure reporting.
+
+## Known gaps
+
+### Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)
+
+#### Source S58, lines 1380–1393: Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)
+
+Focused source tests prove that brew, AUR, and bash update commands finish
+before the newly resolved Hive binary runs the confirmed, fleet-wide
+`hive migrate --all --yes` cutover. The immediately previous packaged release
+and each enumerated retired writer have a release-candidate test that requires
+real extracted target roots; it remains an honest CI-only skip when those roots
+are absent locally. That test reaches the old Update-to-candidate invocation,
+the candidate's interactive/non-interactive confirmation boundary, activation,
+and exact writer tombstones. No real package-manager installation was mutated
+during this implementation. Before calling every installed channel
+operationally proven, run one disposable installed upgrade for brew, AUR, and
+bash and retain the updater, activation-gate, cutover, and resume output. This
+gap does not weaken the focused command or crash-forward cutover contracts.

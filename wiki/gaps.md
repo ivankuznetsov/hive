@@ -3,9 +3,16 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Web sanitization dependency validation (2026-11-02)
+
+The web dependency patches pass the current advisory audit and Markdown helper
+tests on Linux. Native macOS validation remains pending: PR #1587's launchd
+job was cancelled before any steps ran. The lockfile retains both Darwin
+Nokogiri variants for the next CI run.
 
 ## Task observation boundary (2026-10-02)
 

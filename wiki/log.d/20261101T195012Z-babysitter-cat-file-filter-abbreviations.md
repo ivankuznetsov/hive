@@ -58,15 +58,6 @@
   Both snapshot diffs identify only the runner's concurrently written
   `tmp/test-parallel-*/worker-2.log`. This unchanged parallel-harness failure
   is outside the filter-policy fix; the standalone read-only checks pass.
-- Review scope correction: removed the unrelated Addressable/sqlite3 lockfile
-  patch from this PR's final diff and removed its second source fragment.
-  Commit `1b0e6a615f` retains the remediation for a separate change. The
-  original root lockfile failed the live advisory audit at database commit
-  `79c0e052ade15d29d3ecc1e8d4fa59c337a86383`; Addressable 2.9.0, root sqlite3
-  2.10.1, and web sqlite3 2.9.6 remain locked here. The CI audit fetches the live
-  database, so its
-  Addressable GHSA-4w5q-wg7v-w6gp / GHSA-539f-xcgw-2gjg and sqlite3
-  GHSA-4fqr-96q8-xrfx failures remain a separate dependency unblock.
 - Review proof corrections: both launchers now establish a recorded ordinary
   `cat-file` read before checking no handoff for denied tokens, with independent
   skip logs per launcher. Every allowed fixture case requires no skip record;
@@ -83,3 +74,14 @@
   Removed the disposable Git build directories and source archives after
   verification; retained characterization/test logs and the dirty isolated
   verification checkout for the documented broad-suite evidence.
+- Review scope correction (pass 2): the unrelated web flash repair, its
+  browser-test extension, and its owning Wiki updates are preserved separately
+  on local branch `fix/web-flash-acknowledgements` (commit `6446862a74`).
+  This branch retains only the planned babysitter policy, fixture, tests,
+  owning Wiki updates, and this one source fragment. Both lockfiles retain
+  the patched versions already present on `origin/main`.
+- Scope correction verification: the focused policy, dry-run environment,
+  and acceptance files passed via `bin/test` (88 tests, 1,973 assertions,
+  no failures/errors; one CI-only matrix skip). An explicit final-diff
+  allowlist check confirmed all ten planned paths and one log fragment,
+  both lockfiles match main, and `git diff --check` passed.

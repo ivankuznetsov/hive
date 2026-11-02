@@ -459,12 +459,8 @@ Honeycomb projections.
   Turbo's body replacement, and both late refresh streams and their old-URL
   replace visits remain suppressed until that URL is active. Declining a
   confirmation does not start submission admission.
-  This prevents a filesystem broadcast from aborting the mutation.
-  Flash notices and alerts share a stable `flash-messages` container.
-  Background morphs preserve it when the refresh GET has no flash, since Rails
-  consumed it on the mutation's redirect GET. Incoming messages replace that
-  container's contents, and ordinary navigation clears it, so a late broadcast
-  cannot erase the acknowledgement. The app-owned Action Cable
+  This prevents a
+  filesystem broadcast from aborting the mutation. The app-owned Action Cable
   source stays permanent across morphs and performs the version comparison
   only from its confirmed subscription callback; there is no reconnect DOM
   observer, timer, or fresh-navigation refresh. One internal owner contains the

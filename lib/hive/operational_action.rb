@@ -15,6 +15,7 @@ module Hive
     ACTION_ID = "workflow.advance".freeze
     RETRY_ACTION_ID = "workflow.retry".freeze
     CLOSURE_ACTION_ID = "workflow.close_with_evidence".freeze
+    REVIEW_GRANT_ACTION_ID = "workflow.grant_fix_passes".freeze
     EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
@@ -90,6 +91,17 @@ module Hive
         SAFE_TASK_ACTIONS.include?(row["action"]) &&
           row["blocked"] != true && row["held"].nil? &&
           row["marker"] != "manual_steering"
+      end
+
+      # Operator advertisement only; never admitted by the routine executor.
+      def review_grant_descriptor(project:, row:)
+        {
+          "action_id" => REVIEW_GRANT_ACTION_ID,
+          "target" => "#{project}:#{row.fetch('slug')}",
+          "risk_class" => "operator_attested",
+          "confirmation_required" => false,
+          "provenance" => { "source" => "hive-operational-status", "task_action" => row.fetch("action") }
+        }
       end
 
       def recoverable?(row)

@@ -16,6 +16,7 @@ require "hive/commands/new"
 require "hive/markers"
 require "hive/daemon/plan_approval"
 require "hive/recovery/api"
+require "hive/review_pass"
 require "hive/stages"
 require "hive/task"
 require "hive/usage_db"
@@ -2181,7 +2182,7 @@ module Hive
       end
 
       def review_escalations_file?(path)
-        File.basename(path.to_s).match?(/\Aescalations-\d{2}\.md\z/)
+        Hive::ReviewPass.prefix(path) == "escalations"
       end
 
       # pr-review-toolkit round-5 H3 + #13: tri-state replacement for

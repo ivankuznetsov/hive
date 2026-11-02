@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-08-21
+updated: 2026-11-02
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -115,6 +115,16 @@ Protected anchors are the exact paths for which the facade can prove
 before/after custody.
 
 ## Restoration
+
+`Hive::ArtifactFirewall::PathCustody` supports controller-owned receipt sets.
+The owner supplies explicit absolute paths, including absent fixed paths, and
+retains a pre-spawn receipt-name listing. After the spawn, it supplies paths
+proven absent by that listing to `restore_changes!`. The facade restores edits
+and deletions and removes unauthorized additions through the same no-follow
+engine. Overlapping absence claims and unsafe restoration fail closed.
+[[commands/review-grant]] uses this process-local custody boundary alongside
+its sorted listing digest; the snapshot never becomes a persisted budget
+ledger. The owner still validates receipt names, parents and listing bounds.
 
 `lib/hive/protected_files.rb` is the internal no-follow capture/restore engine
 behind the facade. `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` remains the

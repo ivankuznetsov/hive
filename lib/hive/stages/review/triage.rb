@@ -225,10 +225,10 @@ module Hive
           glob = File.join(
             ctx.task_folder,
             "reviews",
-            "*-#{format('%02d', ctx.pass)}.md"
+            "*.md"
           )
           Dir[glob]
-            .select { |f| reviewer_file?(File.basename(f)) }
+            .select { |f| Hive::ReviewPass.number(f) == ctx.pass && reviewer_file?(File.basename(f)) }
             .sort
         end
 
@@ -378,10 +378,10 @@ module Hive
         def build_prior_escalations_context(ctx, tag)
           files = Dir[File.join(ctx.task_folder, "reviews", "escalations-*.md")]
                   .select do |path|
-                    File.basename(path) =~ /\Aescalations-(\d{2})\.md\z/ &&
-                      Regexp.last_match(1).to_i <= ctx.pass
+                    Hive::ReviewPass.prefix(path) == "escalations" &&
+                      Hive::ReviewPass.number(path) <= ctx.pass
                   end
-                  .sort
+                  .sort_by { |path| Hive::ReviewPass.sort_key(path) }
           return "Escalation context: no earlier or current escalation files for this task." if files.empty?
 
           out = +"Escalation context:\n\n"

@@ -5,6 +5,7 @@ require "hive/artifact_firewall"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/review_pass"
 require "hive/claude_launcher"
 require "hive/stages"
 require "hive/stages/base"
@@ -599,7 +600,7 @@ module Hive
 
       def review_summary(task, cfg = nil)
         passes = Dir[File.join(task.reviews_dir, "*-*.md")].filter_map do |path|
-          File.basename(path).match(/-(\d{2})\.md\z/)&.[](1)&.to_i
+          Hive::ReviewPass.number(path)
         end
         max_pass = passes.max || 0
         bias = review_summary_triage_bias(task) || cfg&.dig("review", "triage", "bias") || "courageous"
@@ -607,7 +608,9 @@ module Hive
       end
 
       def review_summary_triage_bias(task)
-        triage_path = Dir[File.join(task.reviews_dir, "triage-*.md")].sort.last
+        triage_path = Dir[File.join(task.reviews_dir, "triage-*.md")]
+          .select { |path| Hive::ReviewPass.prefix(path) == "triage" }
+          .max_by { |path| Hive::ReviewPass.sort_key(path) }
         if triage_path
           File.read(triage_path) =~ /^bias:\s*(\S+)/i and return Regexp.last_match(1)
         end
@@ -615,7 +618,9 @@ module Hive
       end
 
       def open_escalations(task)
-        paths = Dir[File.join(task.reviews_dir, "escalations-*.md")].sort
+        paths = Dir[File.join(task.reviews_dir, "escalations-*.md")]
+          .select { |path| Hive::ReviewPass.prefix(path) == "escalations" }
+          .sort_by { |path| Hive::ReviewPass.sort_key(path) }
         unchecked = paths.flat_map do |path|
           File.readlines(path).grep(/^\s*-\s+\[\s*\]\s+/).map { |line| "#{File.basename(path)}: #{line.strip}" }
         rescue Errno::ENOENT
@@ -633,7 +638,7 @@ module Hive
       def build_reviews_summary(task)
         return "(no reviews/ directory found)" unless File.directory?(task.reviews_dir)
 
-        Dir[File.join(task.reviews_dir, "*.md")].sort.map do |f|
+        Dir[File.join(task.reviews_dir, "*.md")].sort_by { |path| Hive::ReviewPass.sort_key(path) }.map do |f|
           "### #{File.basename(f)}\n#{File.read(f)}"
         end.join("\n\n")
       end

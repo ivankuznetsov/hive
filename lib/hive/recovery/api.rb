@@ -16,6 +16,12 @@ module Hive
 
       RECOVERABLE_MARKERS = Hive::Recovery::RECOVERABLE_MARKERS
 
+      def grant_review!(task:, project:, passes:, reason:, evidence_token:, coordinator: nil)
+        coordinator ||= Hive::Daemon::RecoveryCoordinator.new
+        coordinator.grant_review!(task: task, project: project, passes: passes,
+          reason: reason, evidence_token: evidence_token)
+      end
+
       Observation = Data.define(
         :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
         :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,

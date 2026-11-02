@@ -43,7 +43,7 @@ module Hive
       :max_budget_usd, :model, :effort, :pin_model, :identity_arguments,
       :routing_arguments, :capabilities, :raw_cli_arguments,
       :trusted_cli_arguments, :executable, :command_prefix,
-      :include_output_format
+      :include_output_format, :denied_commands
     ) do
       def initialize(profile:, prompt:, permission_mode: nil,
                      permission_arguments: nil, add_dirs: [],
@@ -53,7 +53,8 @@ module Hive
                      identity_arguments: [], routing_arguments: nil,
                      capabilities: [], raw_cli_arguments: [],
                      trusted_cli_arguments: [], executable: nil,
-                     command_prefix: [], include_output_format: true)
+                     command_prefix: [], include_output_format: true,
+                     denied_commands: [])
         super(
           profile: profile,
           prompt: Immutable.string(prompt),
@@ -76,7 +77,8 @@ module Hive
           trusted_cli_arguments: Immutable.values(trusted_cli_arguments),
           executable: executable.nil? ? nil : Immutable.string(executable),
           command_prefix: Immutable.values(command_prefix),
-          include_output_format: include_output_format != false
+          include_output_format: include_output_format != false,
+          denied_commands: Immutable.values(denied_commands)
         )
       end
     end
@@ -134,6 +136,7 @@ module Hive
         require_capability!(profile, capability)
       end
       named_arguments = named_evidence.flat_map(&:arguments)
+      command_policy = command_denial_policy(profile, request)
 
       public_request = AgentCliRuntime::Request.new(
         profile: runtime,
@@ -144,7 +147,8 @@ module Hive
         require_add_dirs: request.require_add_dirs,
         allowed_tools: supported_tool_scope(profile, :allowed, request.allowed_tools),
         disallowed_tools:
-          supported_tool_scope(profile, :disallowed, request.disallowed_tools),
+          supported_tool_scope(profile, :disallowed,
+                               request.disallowed_tools + command_policy.fetch(:tools)),
         max_budget_usd:
           profile.respond_to?(:budget_flag) && profile.budget_flag ?
             request.max_budget_usd : nil,
@@ -152,7 +156,7 @@ module Hive
           identity.fetch(:arguments) + routing.fetch(:subcommand) +
           named_arguments,
         raw_cli_arguments: request.raw_cli_arguments,
-        trusted_cli_arguments: request.trusted_cli_arguments,
+        trusted_cli_arguments: request.trusted_cli_arguments + command_policy.fetch(:arguments),
         executable: request.executable,
         command_prefix: request.command_prefix,
         include_output_format: request.include_output_format
@@ -170,7 +174,7 @@ module Hive
         launcher_identity: invocation.launcher_identity,
         capability_evidence:
           invocation.capability_evidence + identity.fetch(:evidence) +
-          routing.fetch(:evidence) + named_evidence
+          routing.fetch(:evidence) + named_evidence + command_policy.fetch(:evidence)
       )
     rescue Error
       raise
@@ -427,6 +431,29 @@ module Hive
       flags.key?(scope) ? tools : nil
     end
     private_class_method :supported_tool_scope
+
+    def command_denial_policy(profile, request)
+      return { arguments: [], evidence: [], tools: [] } if request.denied_commands.empty?
+      unless request.denied_commands == [ "review-grant" ]
+        package_unsupported!(profile, :operator_command_denial,
+                             "required operator command policy is unsupported")
+      end
+
+      require "hive/agent_support/operator_authority"
+      Hive::AgentSupport::OperatorAuthority.launch_environment
+      # This required policy is enforced by the shared command boundary for
+      # every adapter, including Codex/Pi which have no native deny-list flag.
+      # Provider tool scopes remain optional; this policy is never dropped.
+      support = Hive::AgentSupport.for(profile)
+      arguments = support&.respond_to?(:operator_command_arguments) ?
+        support.operator_command_arguments : []
+      tools = support&.respond_to?(:operator_tool_denials) ? support.operator_tool_denials : []
+      {
+        arguments:, tools:,
+        evidence: [ supported_evidence(profile, :operator_command_denial, request.denied_commands) ]
+      }
+    end
+    private_class_method :command_denial_policy
 
     def supported_evidence(profile, capability, arguments = [])
       CapabilityEvidence.new(

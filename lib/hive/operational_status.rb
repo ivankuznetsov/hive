@@ -9,6 +9,8 @@ require "hive/task_projection"
 require "hive/terminal_outcome"
 require "hive/patrol_fix/publication_block_receipt"
 require "hive/dependencies"
+require "hive/review_budget"
+require "shellwords"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -410,6 +412,13 @@ module Hive
          action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
       end
+      review_grant, grant_diagnostic = review_grant_payload(project, row)
+      if review_grant && review_grant.fetch("state") == "eligible"
+        reasons.unshift(reason("review_grant_available", "An operator can grant 1–3 additional fix passes with hive review-grant.", "review_budget"))
+        state, owner = "waiting_on_you", "operator" unless running?(row)
+      elsif grant_diagnostic
+        reasons << reason("review_grant_unavailable", grant_diagnostic.fetch("remediation"), "review_budget")
+      end
       {
         "identity" => {
           "project" => project.fetch("name"),
@@ -437,6 +446,7 @@ module Hive
         ),
         "retry" => retry_payload(scheduler_disposition),
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
+        "review_grant" => review_grant,
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
         "dependency" => {
@@ -457,10 +467,54 @@ module Hive
           "marker_attrs" => row["attrs"] || {},
           "diagnostic" => row["diagnostic"],
           "condition_warning" => row["condition_warning"],
-          "held" => row["held"]
+          "held" => row["held"],
+          "review_grant_diagnostic" => grant_diagnostic
         },
         "action" => action
       }
+    end
+
+    def review_grant_payload(project, row)
+      folder = row.fetch("folder")
+      candidate = row["marker"] == "review_stale" && row.dig("attrs", "reason") == "final_fix_unverified"
+      retained = Dir[File.join(folder, "reviews", "review-{grant,completion}-*.json")].any?
+      if (task_history_unavailable?(row) || Hive::TaskProjection.history_invalid_row?(row)) &&
+         (row["stage"] == "6-review" || retained) # coding-scoped: fix-pass grants are specific to the coding review runner.
+        return [ nil, { "reason" => "invalid_task_history",
+          "remediation" => "Repair the task-journal.jsonl history before requesting review allowance, then refresh operational status." } ]
+      end
+      return [ nil, nil ] unless candidate || retained
+
+      task = Hive::Task.new(folder)
+      budget = Hive::ReviewBudget.new(task: task, project: project.fetch("name"))
+      snapshot = budget.observe
+      if %w[refused unavailable].include?(snapshot.state) || (snapshot.eligible? && running?(row))
+        return [ nil, { "reason" => snapshot.reason || "live_owner",
+          "remediation" => snapshot.remediation || "Wait for the current task owner and refresh operational status." } ]
+      end
+      payload = {
+        "schema" => "hive-review-grant-state", "schema_version" => 1,
+        "state" => snapshot.state, "decision_id" => snapshot.decision_id,
+        "granted" => snapshot.granted, "spent" => snapshot.spent,
+        "remaining" => snapshot.remaining, "incomplete_slot" => snapshot.slot,
+        "original_scope" => snapshot.original_scope,
+        "exhausted_pass" => snapshot.exhausted_pass,
+        "audit_path" => budget.audit_path,
+        "remediation" => snapshot.remediation || "Normal review admission and existing recovery holds apply."
+      }
+      if snapshot.eligible?
+        payload.merge!(
+          "evidence_token" => snapshot.evidence_token,
+          "available_passes" => { "minimum" => 1, "maximum" => 3 }, "reason_required" => true,
+          "command" => "hive review-grant #{Shellwords.escape(row.fetch('slug'))} --project #{Shellwords.escape(project.fetch('name'))} --passes N --reason TEXT --evidence-token #{snapshot.evidence_token}",
+          "action" => Hive::OperationalAction.review_grant_descriptor(project: project.fetch("name"), row: row)
+        )
+      elsif snapshot.state == "suspended"
+        payload["blocking_marker"] = snapshot.blocking_marker
+      end
+      [ payload, nil ]
+    rescue Hive::Error, SystemCallError, IOError => error
+      [ nil, { "reason" => "evidence_unavailable", "remediation" => "Inspect the task review evidence and refresh operational status (#{error.class.name.split('::').last})." } ]
     end
 
     def scheduler_disposition_for(project, row, scheduler)

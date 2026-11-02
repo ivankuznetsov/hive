@@ -13,6 +13,7 @@ module Hive
       "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
+      "hive-review-grant" => 1,
       "hive-init" => 3,
       "hive-init-preview" => 1,
       "hive-new" => 1,
@@ -326,6 +327,23 @@ module Hive
     # error envelope is produced. The status producer surface
     # is much narrower than `hive run`'s — only ConfigError / InternalError
     # and the generic fallback. Same self-derived ALL pattern.
+    module ReviewGrantErrorKind
+      USAGE = "usage".freeze
+      AMBIGUOUS_TARGET = "ambiguous_target".freeze
+      INVALID_TASK_PATH = "invalid_task_path".freeze
+      CONCURRENT_RUN = "concurrent_run".freeze
+      AGENT_DENIED = "agent_denied".freeze
+      SOURCE_UNVERIFIED = "source_unverified".freeze
+      EVIDENCE_UNAVAILABLE = "evidence_unavailable".freeze
+      STALE_EVIDENCE = "stale_evidence".freeze
+      DECISION_CONFLICT = "decision_conflict".freeze
+      UNSAFE_STATE = "unsafe_state".freeze
+      CONFIG = "config".freeze
+      INTERNAL = "internal".freeze
+      ERROR = "error".freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
     module StatusErrorKind
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze

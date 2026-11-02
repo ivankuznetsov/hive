@@ -17,6 +17,7 @@ require "hive/markers"
 require "hive/agent_limit"
 require "hive/model_unsupported"
 require "hive/review_error_reason"
+require "hive/review_budget"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
@@ -148,6 +149,20 @@ module Hive
         # exits (return, raise, or system_exit), so events.jsonl
         # readers always see balanced brackets.
         @open_phase_event = nil
+        @grant_budget = nil
+        @granted_fix_context = nil
+        @granted_fix_started = false
+
+        budget_snapshot = nil
+        candidate_budget = review_budget_for(task)
+        if candidate_budget
+          @grant_budget = candidate_budget
+          require "hive/daemon/recovery_coordinator"
+          budget_snapshot = Hive::Daemon::RecoveryCoordinator.new.reconcile_review_grant!(
+            task: task, project: task.project_name
+          )
+          @grant_budget.validate_resume!(snapshot: budget_snapshot)
+        end
 
         # Pre-flight terminal markers
         marker = Hive::Markers.current(task.state_file)
@@ -195,6 +210,29 @@ module Hive
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
 
+        # A sealed receipt spends the slot before guardrail admission. Recover
+        # that boundary before CI can mutate/publish HEAD or reviewers advance.
+        if budget_snapshot&.applicable?
+          budget_snapshot.completions.group_by { |entry| entry.fetch("pass") }.each_value do |entries|
+            completion = entries.last
+            next if granted_guardrail_disposed?(task.folder, completion)
+            next if resuming_from_waiting?(marker, completion.fetch("pass")) &&
+              marker.attrs["reason"] == "fix_guardrail"
+
+            unless git_head(worktree_path) == completion.fetch("head") && !worktree_dirty?(worktree_path)
+              raise Hive::ReviewBudget::Refused.new("evidence_changed",
+                "the granted fix awaiting guardrail admission has changed HEAD or dirty worktree edits")
+            end
+            @current_phase = :fix
+            completed_ctx = ctx.with(pass: completion.fetch("pass"))
+            terminal = check_fix_guardrail(task, cfg, completed_ctx,
+              base_sha: completion.fetch("input_head"), head_sha: completion.fetch("head"))
+            return terminal if terminal
+
+            write_fix_success(completed_ctx, kind: "fixed")
+          end
+        end
+
         # --- Phase 1: CI fix ---
         # Resume rule: if marker is :review_waiting, the CI was already
         # green when we got there (otherwise we'd be at :review_ci_stale).
@@ -225,6 +263,11 @@ module Hive
           entry_ci_repaired = git_head(worktree_path) != before_entry_ci_head
         end
 
+        if budget_snapshot&.remaining.to_i.positive?
+          budget_snapshot = @grant_budget.observe
+          @grant_budget.validate_resume!(snapshot: budget_snapshot)
+        end
+
         # HEAD proven by the entry gate. Normal REVIEW_WAITING resumes
         # deliberately skip that gate, so leave this nil and require an
         # exact-head gate at the all-clean boundary. Review-only ad-hoc tasks
@@ -236,13 +279,15 @@ module Hive
         end
 
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
-        on_disk_pass = max_review_pass(task.folder, cfg)
+        on_disk_pass = max_review_pass(task.folder, cfg, budget_snapshot: budget_snapshot)
         pass = next_pass_for(task, marker, cfg, max_pass: on_disk_pass)
         max_passes = cfg.dig("review", "max_passes") || 3
         # The configured cap bounds fix passes. `max_passes` below may widen
         # to admit review of unreviewed commits, but every pass beyond this
         # cap is verify-only and never spawns the fix agent.
         fix_pass_cap = max_passes
+        max_passes = [ max_passes, admitted_pass_ceiling(task.folder, fix_pass_cap,
+          budget_snapshot: budget_snapshot) ].max if budget_snapshot&.applicable?
         # A task can be intentionally rewound into review after exhausting its
         # configured pass cap. If the entry CI gate repairs that previously
         # reviewed head, admit exactly the next on-disk pass so the repair is
@@ -295,6 +340,12 @@ module Hive
         # applies to the FIRST loop iteration; subsequent passes are
         # fresh and clear fix_retry_pass at the loop tail.
         fix_retry_pass = pass_completion_status(task.folder, pass) == :fix_incomplete ? pass : nil
+        preserved_grant_pass = if budget_snapshot&.remaining.to_i.positive? &&
+            budget_snapshot.receipts.last &&
+            budget_snapshot.completions.none? { |entry| entry.fetch("decision_id") == budget_snapshot.decision_id }
+          budget_snapshot.receipts.last.fetch("evidence").fetch("pass")
+        end
+        pass = preserved_grant_pass if preserved_grant_pass
 
         loop do
           break if resume_browser
@@ -309,10 +360,16 @@ module Hive
           end
 
           ctx_pass = ctx.with(pass: pass)
+          reviewed_head = nil
           # A verify-only pass never resumes into Phase 4 on stale [x] marks
           # or answered escalations: a retry of it (including one after its
           # own REVIEW_STALE) re-runs the reviewers against the current HEAD.
-          verify_only = pass > fix_pass_cap
+          budget_snapshot = @grant_budget.observe if @grant_budget
+          @grant_budget.validate_resume!(snapshot: budget_snapshot) if budget_snapshot&.state == "refused"
+          grant_slot_available = budget_snapshot&.remaining.to_i.positive? &&
+            (budget_snapshot.runnable? || resuming_from_waiting?(marker, pass))
+          active_grant = budget_snapshot&.applicable? && !budget_snapshot.receipts.empty?
+          verify_only = active_grant ? !grant_slot_available : pass > fix_pass_cap
 
           # U5 — fix-guardrail approval-on-resume. When the user has
           # ticked [x] on every line of reviews/fix-guardrail-NN.md
@@ -389,7 +446,8 @@ module Hive
                          status: :review_error }
               end
 
-              write_fix_success(ctx_pass, kind: "approved")
+              granted_completion = budget_snapshot&.completions&.any? { |entry| entry.fetch("pass") == pass }
+              write_fix_success(ctx_pass, kind: granted_completion ? "fixed" : "approved")
               marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
               fix_retry_pass = nil
               # If we approved the very last pass-cap-N pass, advancing
@@ -398,7 +456,9 @@ module Hive
               # approval. Head to Phase 5 (browser test) instead, but
               # only once CI has settled on the exact approved HEAD: the
               # approved commits never passed the clean-boundary gate.
-              if pass >= max_passes
+              if granted_completion
+                max_passes = [ max_passes, pass + 1 ].max
+              elsif pass >= max_passes
                 gate = completion_ci_gate(
                   task, cfg, ctx_pass, ci_validated_head,
                   started_at: started_at, max_wall_clock_sec: max_wall_clock
@@ -443,7 +503,7 @@ module Hive
           # resume_no_findings instead of looping with an empty fix
           # prompt.
           skip_review_and_triage = !verify_only &&
-                                   (resuming_from_waiting?(marker, pass) || pass == fix_retry_pass)
+                                   (resuming_from_waiting?(marker, pass) || pass == fix_retry_pass || pass == preserved_grant_pass)
           if skip_review_and_triage &&
              Hive::Stages::Review::Triage.discover_reviewer_files(ctx_pass).empty?
             Hive::Markers.set(task.state_file, :review_error,
@@ -674,6 +734,20 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          fix_budget_snapshot = nil
+          if active_grant
+            fix_budget_snapshot = @grant_budget.observe
+            @grant_budget.validate_resume!(snapshot: fix_budget_snapshot, reviewed_head: reviewed_head)
+            # Existing REVIEW_WAITING admission owns this resume. Budget
+            # supplies only the slot once the normal user-answer gate ran.
+            if fix_budget_snapshot.state == "suspended" && resuming_from_waiting?(marker, pass)
+              fix_budget_snapshot = fix_budget_snapshot.with(state: "applied")
+            end
+            unless @grant_budget.next_slot(snapshot: fix_budget_snapshot)
+              raise Hive::ReviewBudget::Refused.new("budget_exhausted", "no granted fix slot remains; a fresh verification pass is required")
+            end
+            @granted_fix_context = { snapshot: fix_budget_snapshot, pass: pass, worktree_path: worktree_path }
+          end
           pre_effect_routing_validation = true
           fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           pre_effect_routing_validation = false
@@ -686,7 +760,11 @@ module Hive
           # fix agent runs; capturing HEAD afterwards would omit that whole
           # checkpoint from the guardrail diff and launder precisely the
           # changes the scope check rejected.
-          before_fix_head = git_head(worktree_path)
+          before_fix_head = if fix_budget_snapshot
+            @grant_budget.fix_input_head(snapshot: fix_budget_snapshot)
+          else
+            git_head(worktree_path)
+          end
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
@@ -709,6 +787,9 @@ module Hive
             mark_pre_fix_clean_exit_failure(task, pre_fix_status, pass)
             return { commit: "ensure_clean_on_exit_failed_pass_#{format('%02d', pass)}",
                      status: :review_error }
+          end
+          if fix_budget_snapshot
+            @grant_budget.validate_resume!(snapshot: @grant_budget.observe)
           end
 
           # Protect orchestrator-owned files PLUS the current pass's
@@ -740,12 +821,16 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
+          if fix_budget_snapshot
+            protected_set = (protected_set + fix_budget_snapshot.evidence.fetch("artifacts").keys.map { |name| "reviews/#{name}" }).uniq
+          end
           custody_manifest = Hive::ArtifactFirewall::Manifest.new(
             root: task.folder,
             protected_anchors: protected_set,
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
           agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+          @granted_fix_started = !fix_budget_snapshot.nil?
           fix_result = spawn_fix_agent(
             task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
             agent_custody: agent_custody
@@ -812,30 +897,15 @@ module Hive
                      status: :review_error }
           end
 
-          # Post-fix diff guardrail (U13 stub today).
-          guardrail = Hive::Stages::Review::FixGuardrail.run!(
-            cfg: cfg, ctx: ctx_pass,
-            base_sha: before_fix_head,
-            head_sha: after_fix_head
-          )
-          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
-          if guardrail.status == :tripped
-            write_fix_guardrail_findings(ctx_pass, guardrail.matches)
-            # Record the guarded HEAD SHA on the marker so the
-            # approval-on-resume path can verify the
-            # commits the user is approving still match the diff the
-            # guardrail flagged. Without this, a user (or an automated
-            # editor) who amends/squashes/rebases the worktree between
-            # the trip and the approval can launder a different diff
-            # past the guardrail using stale [x] ticks.
-            Hive::Markers.set(task.state_file, :review_waiting,
-                              reason: "fix_guardrail",
-                              matches: guardrail.matches.size,
-                              head: after_fix_head,
-                              pass: pass)
-            return { commit: "review_waiting_fix_guardrail_pass_#{format('%02d', pass)}",
-                     status: :review_waiting }
+          if fix_budget_snapshot
+            @grant_budget.complete_fix!(snapshot: fix_budget_snapshot, pass: pass, head: after_fix_head)
+            @granted_fix_context = nil
+            @granted_fix_started = false
           end
+
+          terminal = check_fix_guardrail(task, cfg, ctx_pass,
+            base_sha: before_fix_head, head_sha: after_fix_head)
+          return terminal if terminal
 
           # Phase 4 fix succeeded AND guardrail passed: pass N is
           # complete. Drop the sentinel so a subsequent re-entry (e.g.
@@ -855,6 +925,7 @@ module Hive
           # a clean Phase 4 and incremented, we're on a brand-new pass.
           marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
           fix_retry_pass = nil
+          preserved_grant_pass = nil
           pass += 1
         end
 
@@ -867,6 +938,7 @@ module Hive
         when :passed, :skipped, :warned
           Hive::Markers.set(task.state_file, :review_complete,
                             pass: pass, browser: browser_result.status)
+          @grant_budget&.record_expiry!(reason: "review_completed")
           { commit: "review_complete_browser_#{browser_result.status}_pass_#{format('%02d', pass)}",
             status: :review_complete }
         else
@@ -879,6 +951,14 @@ module Hive
         # path missing) are intentional terminations — let them through
         # so the existing test contract is preserved.
         raise
+      rescue Hive::ReviewBudget::Refused => e
+        if %w[agent_modified_budget unsafe_state].include?(e.reason) && @current_phase != :pre_flight
+          Hive::Markers.set(task.state_file, :review_error, phase: @current_phase,
+            reason: e.reason, message: truncate_marker_message(e.message))
+          raise
+        end
+        warn "hive: review grant refused: #{e.message}. #{e.remediation}"
+        { commit: nil, status: :review_error }
       rescue Hive::ConfigError => e
         # A Hive::ConfigError
         # (e.g. `max_review_pass NN=99 exceeds review.max_passes=4`) is
@@ -930,6 +1010,7 @@ module Hive
         # rescue, SystemExit) so the events.jsonl bracket structure
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
+        record_granted_fix_failure(task) if @granted_fix_started && @granted_fix_context
         close_phase_event!(task) if @open_phase_event
       end
 
@@ -1017,7 +1098,9 @@ module Hive
       end
 
       def mark_working(task, phase:, pass:)
-        Hive::Markers.set(task.state_file, :review_working, phase: phase, pass: pass)
+        attrs = { phase: phase, pass: pass }
+        attrs.merge!(granted_fix_resume_attrs) if phase == :fix && @granted_fix_context
+        Hive::Markers.set(task.state_file, :review_working, attrs)
         # Bracket the phase with agent_start/agent_end so the drill-down
         # view can show "review pass=2 — fix" and the per-reviewer
         # spawn brackets nest cleanly under it. Reviewer spawns
@@ -1239,7 +1322,7 @@ module Hive
           # Retry pass N when it's not yet complete (either triage
           # didn't write escalations-NN.md, or fix didn't finish before
           # the runner exited / was interrupted). pass_completion_status
-          # returns :complete, :triage_incomplete, or :fix_incomplete.
+          # also keeps a sealed fix awaiting guardrail admission on pass N.
           pass_completion_status(task.folder, max) == :complete ? max + 1 : max
         end
       end
@@ -1254,6 +1337,9 @@ module Hive
       #                         `fix-success-NN.md` sentinel exists AND
       #                         the operator has not edited escalations
       #                         since; the runner moved past pass N cleanly.
+      #   :guardrail_incomplete — a granted fix spent its slot, but its
+      #                         bound post-guardrail sentinel is absent.
+      #                         Recovery scans the sealed diff before CI.
       #   :triage_incomplete  — reviewer files for pass N exist but no
       #                         `escalations-NN.md`, or escalations exist
       #                         without a completed fix while
@@ -1276,14 +1362,22 @@ module Hive
       #                         and re-runs Phase 4 on the operator's
       #                         current [x] marks.
       #
+      # Granted completions use sealed answer proofs: newly answered work
+      # may make the pass fix-incomplete, but spends a fresh logical slot.
       # Pass < 1 or an empty reviews/ dir → :complete (nothing to retry).
       def pass_completion_status(task_folder, pass)
         return :complete if pass < 1
+        if (completion = granted_completion_for(task_folder, pass))
+          return :guardrail_incomplete unless granted_guardrail_disposed?(task_folder, completion)
+          return :fix_incomplete if pending_granted_escalation_answers(task_folder, completion)&.any?
+
+          return :complete
+        end
 
         pass_suffix = format("%02d", pass)
         reviews_dir = File.join(task_folder, "reviews")
-        reviewer_files = Dir[File.join(reviews_dir, "*-#{pass_suffix}.md")]
-                          .select { |path| reviewer_file?(File.basename(path)) }
+        reviewer_files = Dir[File.join(reviews_dir, "*.md")]
+                          .select { |path| Hive::ReviewPass.number(path) == pass && reviewer_file?(File.basename(path)) }
         return :complete if reviewer_files.empty?
 
         escalations_path = File.join(reviews_dir, "escalations-#{pass_suffix}.md")
@@ -1311,9 +1405,8 @@ module Hive
         # attempt and the stale errors-NN.md is cleared.
         return :triage_incomplete if File.exist?(errors_path)
 
-        next_pass_suffix = format("%02d", pass + 1)
-        next_pass_started = Dir[File.join(reviews_dir, "*-#{next_pass_suffix}.md")].any? do |path|
-          reviewer_file?(File.basename(path))
+        next_pass_started = Dir[File.join(reviews_dir, "*.md")].any? do |path|
+          Hive::ReviewPass.number(path) == pass + 1 && reviewer_file?(File.basename(path))
         end
         return :complete if next_pass_started
 
@@ -1329,11 +1422,14 @@ module Hive
       end
 
       def completed_pass_receipt?(task_folder, pass)
-        File.exist?(fix_success_path(task_folder, pass)) &&
+        (granted_completion_for(task_folder, pass) || File.exist?(fix_success_path(task_folder, pass))) &&
           pass_completion_status(task_folder, pass) == :complete
       end
 
       def fix_success_head(task_folder, pass)
+        completion = granted_completion_for(task_folder, pass)
+        return completion.fetch("head") if completion
+
         first_line = File.open(fix_success_path(task_folder, pass), &:gets).to_s
         first_line[/\bhead=([0-9a-f]{40,64})\b/, 1]
       rescue SystemCallError, IOError
@@ -1341,6 +1437,8 @@ module Hive
       end
 
       def fix_success_kind(task_folder, pass)
+        return "fixed" if granted_completion_for(task_folder, pass)
+
         first_line = File.open(fix_success_path(task_folder, pass), &:gets).to_s
         first_line[/\bkind=([a-z_]+)\b/, 1]
       rescue SystemCallError, IOError
@@ -1395,7 +1493,7 @@ module Hive
           marker.attrs["pass"].to_i == pass
       end
 
-      def max_review_pass(task_folder, cfg = nil)
+      def max_review_pass(task_folder, cfg = nil, budget_snapshot: nil)
         glob = File.join(task_folder, "reviews", "*-*.md")
         max = 0
         offending = nil
@@ -1403,8 +1501,7 @@ module Hive
           name = File.basename(path)
           next unless reviewer_file?(name)
 
-          if name =~ /-(\d{2})\.md\z/
-            n = Regexp.last_match(1).to_i
+          if (n = Hive::ReviewPass.number(name))
             if n > max
               max = n
               offending = path
@@ -1418,7 +1515,7 @@ module Hive
         # drive the loop past `review.max_passes` and overwrite real
         # findings.
         max_passes = cfg ? (cfg.dig("review", "max_passes") || 4) : nil
-        if max_passes && max > admitted_pass_ceiling(task_folder, max_passes)
+        if max_passes && max > admitted_pass_ceiling(task_folder, max_passes, budget_snapshot: budget_snapshot)
           raise Hive::ConfigError,
                 "review pass NN=#{max} exceeds review.max_passes=#{max_passes}; remove or rename #{offending}"
         end
@@ -1432,10 +1529,88 @@ module Hive
       # (`kind=ci_repaired` sentinel), which admits exactly one more reviewer
       # pass. Walk that chain of controller-written receipts so a retry can
       # resume a CI-admitted pass; the first pass without one bounds it.
-      def admitted_pass_ceiling(task_folder, max_passes)
+      def admitted_pass_ceiling(task_folder, max_passes, budget_snapshot: nil)
         ceiling = max_passes + 1
+        budget_snapshot ||= review_budget_snapshot_for(task_folder)
+        if budget_snapshot&.applicable? || budget_snapshot&.eligible?
+          budget_snapshot.receipts.each do |receipt|
+            ceiling = [ ceiling, receipt.fetch("evidence").fetch("pass") + receipt.fetch("amount") ].max
+          end
+          ceiling = [ ceiling, budget_snapshot.completions.map { |entry| entry.fetch("pass") + 1 }.max.to_i ].max
+        end
         ceiling += 1 while fix_success_kind(task_folder, ceiling) == "ci_repaired"
         ceiling
+      end
+
+      def review_budget_for(task)
+        budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+        budget.present? ? budget : nil
+      end
+
+      def review_budget_snapshot_for(task_folder)
+        return nil unless Dir[File.join(task_folder, "reviews", "review-grant-*.json")].any?
+
+        budget = if @grant_budget && @grant_budget.folder == File.expand_path(task_folder)
+          @grant_budget
+        else
+          require "hive/task"
+          review_budget_for(Hive::Task.new(task_folder))
+        end
+        snapshot = budget&.observe
+        if snapshot&.state == "refused"
+          raise Hive::ReviewBudget::Refused.new(snapshot.reason, snapshot.remediation)
+        end
+        snapshot
+      end
+
+      def granted_completion_for(task_folder, pass)
+        snapshot = review_budget_snapshot_for(task_folder)
+        return nil unless snapshot&.applicable? || snapshot&.eligible?
+
+        snapshot.completions.reverse.find { |entry| entry.fetch("pass") == pass }
+      end
+
+      def pending_granted_escalation_answers(task_folder, completion)
+        snapshot = review_budget_snapshot_for(task_folder)
+        return nil unless snapshot&.remaining.to_i.positive?
+
+        budget = if @grant_budget && @grant_budget.folder == File.expand_path(task_folder)
+          @grant_budget
+        else
+          Hive::ReviewBudget.new(task: Hive::Task.new(task_folder), project: snapshot.evidence.fetch("project"))
+        end
+        budget.new_escalation_answers(completion)
+      end
+
+      # The immutable completion records spending; only the post-guardrail
+      # sentinel records admission (including explicit approval) of that HEAD.
+      def granted_guardrail_disposed?(task_folder, completion)
+        line = File.open(fix_success_path(task_folder, completion.fetch("pass")), &:gets).to_s
+        if completion.key?("escalation_proof") && completion.fetch("slot") > 1
+          return false unless line[/\bgrant_decision=([0-9a-f]{64})\b/, 1] == completion.fetch("decision_id") &&
+            line[/\bgrant_slot=(\d+)\b/, 1].to_i == completion.fetch("slot")
+        end
+        line[/\bhead=([0-9a-f]{40,64})\b/, 1] == completion.fetch("head") &&
+          line[/\bkind=([a-z_]+)\b/, 1] == "fixed"
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def granted_fix_resume_attrs
+        context = @granted_fix_context
+        snapshot = context.fetch(:snapshot)
+        slot = @grant_budget.next_slot(snapshot: snapshot)
+        { grant_decision: slot.fetch("decision_id"), grant_slot: slot.fetch("slot"),
+          input_head: @grant_budget.fix_input_head(snapshot: snapshot),
+          input_artifacts_digest: Hive::ReviewBudget.digest(snapshot.evidence.fetch("artifacts")),
+          head: git_head(context.fetch(:worktree_path)), pass: context.fetch(:pass), phase: :fix }
+      end
+
+      def record_granted_fix_failure(task)
+        marker = Hive::Markers.current(task.state_file)
+        return unless marker.name == :review_error && marker.attrs["phase"] == "fix"
+
+        Hive::Markers.set(task.state_file, :review_error, marker.attrs.merge(granted_fix_resume_attrs.transform_keys(&:to_s)))
       end
 
       # Run every configured reviewer sequentially. Returns :all_failed
@@ -1745,7 +1920,7 @@ module Hive
             # marker and hard-fails the run. Only the typed config error
             # propagates; genuine per-reviewer infra failures (spawn errors,
             # adapter timeouts) still degrade to a recorded :error below.
-            raise if e.is_a?(Hive::ConfigError)
+            raise if e.is_a?(Hive::ConfigError) || e.is_a?(Hive::ReviewBudget::Refused)
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
@@ -1870,9 +2045,14 @@ module Hive
       end
 
       def collect_accepted_findings_with_count(ctx)
+        if (completion = granted_completion_for(ctx.task_folder, ctx.pass)) &&
+            (answers = pending_granted_escalation_answers(ctx.task_folder, completion))
+          return collect_answered_escalation_findings_with_count(ctx, only: answers)
+        end
+
         out = +""
         count = 0
-        Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")].sort.each do |path|
+        Hive::Stages::Review::Triage.discover_reviewer_files(ctx).each do |path|
           name = File.basename(path)
           next unless reviewer_file?(name)
 
@@ -1889,19 +2069,12 @@ module Hive
         AcceptedFindings.new(text: out, count: count + answered.count)
       end
 
-      def auto_fix_finding_line?(line)
-        return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
-
-        true
-      end
-
-      def collect_answered_escalation_findings_with_count(ctx)
+      def collect_answered_escalation_findings_with_count(ctx, only: nil)
         path = Hive::Stages::Review::Triage.escalations_path(ctx)
         questions = parse_escalation_questions(path)
-        return collect_legacy_checked_escalations_with_count(path) if questions.empty?
+        return collect_legacy_checked_escalations_with_count(path, only: only) if questions.empty?
 
-        answered = questions.select { |q| q[:answer].strip != "" }
+        answered = questions.each_with_index.filter_map { |q, index| q if q[:answer].strip != "" && (only.nil? || only.include?(index)) }
         return AcceptedFindings.new(text: "", count: 0) if answered.empty?
 
         name = File.basename(path)
@@ -1917,11 +2090,12 @@ module Hive
         AcceptedFindings.new(text: out, count: answered.size)
       end
 
-      def collect_legacy_checked_escalations_with_count(path)
+      def collect_legacy_checked_escalations_with_count(path, only: nil)
         return AcceptedFindings.new(text: "", count: 0) unless File.exist?(path)
 
         name = File.basename(path)
-        lines = File.readlines(path).select { |line| auto_fix_finding_line?(line) }
+        lines = File.readlines(path).grep(Hive::ReviewBudget::EscalationProof::CHECKBOX)
+          .each_with_index.filter_map { |line, index| line if auto_fix_finding_line?(line) && (only.nil? || only.include?(index)) }
         return AcceptedFindings.new(text: "", count: 0) if lines.empty?
 
         out = +"\n# Accepted legacy escalations from #{name}\n"
@@ -2078,10 +2252,9 @@ module Hive
       # list — rather than re-listing the prefixes here (the old inline
       # list had drifted stale).
       def reviewer_sources_for(ctx)
-        sources = Dir[File.join(ctx.task_folder, "reviews", "*-#{format('%02d', ctx.pass)}.md")]
-                  .map { |p| File.basename(p, ".md") }
-                  .select { |n| reviewer_file?("#{n}.md") }
-                  .map { |n| n.sub(/-\d{2}\z/, "") }
+        sources = Dir[File.join(ctx.task_folder, "reviews", "*.md")]
+                  .select { |p| Hive::ReviewPass.number(p) == ctx.pass && reviewer_file?(File.basename(p)) }
+                  .map { |p| Hive::ReviewPass.prefix(p) }
                   .uniq
                   .sort
 
@@ -2214,6 +2387,21 @@ module Hive
           #{ci_result.last_output}
           ```
         MD
+      end
+
+      def check_fix_guardrail(task, cfg, ctx, base_sha:, head_sha:)
+        guardrail = Hive::Stages::Review::FixGuardrail.run!(
+          cfg: cfg, ctx: ctx, base_sha: base_sha, head_sha: head_sha
+        )
+        emit_guardrail_waivers(task, ctx.pass, guardrail.waived_matches)
+        return nil unless guardrail.status == :tripped
+
+        write_fix_guardrail_findings(ctx, guardrail.matches)
+        Hive::Markers.set(task.state_file, :review_waiting,
+          reason: "fix_guardrail", matches: guardrail.matches.size,
+          head: head_sha, pass: ctx.pass)
+        { commit: "review_waiting_fix_guardrail_pass_#{format('%02d', ctx.pass)}",
+          status: :review_waiting }
       end
 
       def write_fix_guardrail_findings(ctx, matches)
@@ -2368,6 +2556,10 @@ module Hive
         FileUtils.mkdir_p(File.dirname(path))
         head = git_head(ctx.worktree_path)
         head_binding = head.to_s.match?(/\A[0-9a-f]{40,64}\z/) ? " head=#{head}" : ""
+        completion = granted_completion_for(ctx.task_folder, ctx.pass) if kind == "fixed"
+        if completion
+          head_binding += " grant_decision=#{completion.fetch('decision_id')} grant_slot=#{completion.fetch('slot')}"
+        end
         body = +"<!-- HIVE: fix-success sentinel for pass " \
                "#{format('%02d', ctx.pass)};#{head_binding} kind=#{kind} do not edit. " \
                "Removing this file makes the next markerless `hive run` " \

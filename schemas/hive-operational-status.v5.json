@@ -302,12 +302,405 @@
         "remediation": { "type": "string" }
       }
     },
+    "ReviewGrantCommon": {
+      "type": "object",
+      "required": [
+        "schema",
+        "schema_version",
+        "decision_id",
+        "granted",
+        "spent",
+        "remaining",
+        "incomplete_slot",
+        "original_scope",
+        "exhausted_pass",
+        "audit_path",
+        "remediation"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-review-grant-state"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "decision_id": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          ]
+        },
+        "granted": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "spent": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "incomplete_slot": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "decision_id",
+                "slot"
+              ],
+              "properties": {
+                "decision_id": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "slot": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          ]
+        },
+        "original_scope": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "history_digest",
+                "anchor_artifacts",
+                "first_pass"
+              ],
+              "properties": {
+                "history_digest": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "anchor_artifacts": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                },
+                "first_pass": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        "exhausted_pass": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "audit_path": {
+          "type": "string"
+        },
+        "remediation": {
+          "type": "string"
+        }
+      }
+    },
+    "ReviewGrant": {
+      "oneOf": [
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "evidence_token",
+                "available_passes",
+                "reason_required",
+                "command",
+                "action"
+              ],
+              "properties": {
+                "state": {
+                  "const": "eligible"
+                },
+                "evidence_token": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "available_passes": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "minimum",
+                    "maximum"
+                  ],
+                  "properties": {
+                    "minimum": {
+                      "const": 1
+                    },
+                    "maximum": {
+                      "const": 3
+                    }
+                  }
+                },
+                "reason_required": {
+                  "const": true
+                },
+                "command": {
+                  "type": "string"
+                },
+                "action": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "action_id",
+                    "target",
+                    "risk_class",
+                    "confirmation_required",
+                    "provenance"
+                  ],
+                  "properties": {
+                    "action_id": {
+                      "const": "workflow.grant_fix_passes"
+                    },
+                    "target": {
+                      "type": "string"
+                    },
+                    "risk_class": {
+                      "const": "operator_attested"
+                    },
+                    "confirmation_required": {
+                      "const": false
+                    },
+                    "provenance": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "source",
+                        "task_action"
+                      ],
+                      "properties": {
+                        "source": {
+                          "const": "hive-operational-status"
+                        },
+                        "task_action": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "pending"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "applied"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "fixing"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "verifying"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state",
+                "blocking_marker"
+              ],
+              "properties": {
+                "state": {
+                  "const": "suspended"
+                },
+                "blocking_marker": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name",
+                    "attrs",
+                    "raw"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "attrs": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      }
+                    },
+                    "raw": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "exhausted"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "completed"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        },
+        {
+          "allOf": [
+            {
+              "$ref": "#/$defs/ReviewGrantCommon"
+            },
+            {
+              "type": "object",
+              "required": [
+                "state"
+              ],
+              "properties": {
+                "state": {
+                  "const": "expired"
+                }
+              }
+            }
+          ],
+          "unevaluatedProperties": false
+        }
+      ]
+    },
     "Task": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "identity", "workflow", "position", "liveness", "state", "blocker_owner",
-        "reason", "reasons", "provider", "routing", "retry", "recovery", "closure", "plan_review",
+        "reason", "reasons", "provider", "routing", "retry", "recovery", "review_grant", "closure", "plan_review",
         "dependency", "freshness", "evidence", "action"
       ],
       "properties": {
@@ -397,6 +790,7 @@
             { "$ref": "#/$defs/Recovery" }
           ]
         },
+        "review_grant": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/ReviewGrant" }] },
         "closure": { "$ref": "#/$defs/Closure" },
         "plan_review": {
           "oneOf": [
@@ -442,6 +836,7 @@
             "marker_attrs": { "type": "object", "additionalProperties": true },
             "diagnostic": { "type": ["object", "null"], "additionalProperties": true },
             "condition_warning": { "type": ["string", "null"] },
+            "review_grant_diagnostic": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["reason", "remediation"], "properties": {"reason": {"type": "string"}, "remediation": {"type": "string"}}}]},
             "held": { "type": ["object", "null"], "additionalProperties": true }
           }
         },

@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -43,6 +43,24 @@ their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
 
 ## Usage and examples: act
+
+Operational task rows include the required nullable `review_grant` field in
+`hive-operational-status.v5`. For an evidenced
+`REVIEW_STALE reason=final_fix_unverified`, it advertises the dedicated
+[[commands/review-grant]] command with a grant evidence token, explicit
+`--passes N` and `--reason TEXT` placeholders. This operator decision remains
+visible when the daemon is enabled or ordinary recovery reports a missing
+observation. Scheduler freshness warnings remain independent.
+
+Applied, fixing, verifying and suspended variants show receipt-derived
+granted/spent/remaining counts, the original scope and any incomplete slot.
+Suspended allowance also names the blocking marker and existing recovery
+route; it supplies no permission to clear that park. Expired/completed
+summaries have zero usable allowance. Missing or changed evidence leaves
+`review_grant` null with a specific diagnostic and no usable token. Reads do
+not create budget files or reconstruct grants from historical audit. The
+`workflow.grant_fix_passes` advertisement is outside routine `hive act`'s
+executable actions. Closure remains a separate operator option.
 
 `hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
 routine action issued by operational status. For example, use

@@ -30,6 +30,11 @@ unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
 The first hosted Ubuntu credential proof failed before probe execution because
 the shared fixture requested eight CPUs on a four-CPU daemon. The real Docker
 matrix now requests one CPU; hosted confirmation of that correction is pending.
+Canonical follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies the same
+override in `tmp/bench-credential-canonical`. Both local proof gates passed
+under a four-CPU rejection shim with actual Bash 3.2.57/5.3.20 and real Docker,
+with zero skips (canonical 3 tests/40 assertions; Hive 3/55). That simulation
+does not establish a hosted CI result; upstream publication remains pending.
 
 ## Task observation boundary (2026-10-02)
 

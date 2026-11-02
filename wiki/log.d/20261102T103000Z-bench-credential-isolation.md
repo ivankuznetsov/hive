@@ -10,6 +10,9 @@ Canonical baseline: `432e730ea7812246496726fcc9153e98be58eb30`.
 Hive execution baseline: `966211001e76d53da50879a582668b5b2e381607`.
 Canonical local commits on `fix/profile-credential-isolation`:
 `dce0f155` (U1), `a09fd659` (U2), `7383c88b` (U3), `f157ef7` (U4).
+Review follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies Hive's
+one-CPU real-Docker proof override to canonical; the U3/U4 evidence below now
+includes the constrained-runner recheck.
 The independent canonical checkout is `tmp/bench-credential-canonical` inside
 this worktree because execution permits writes only here. The original dirty
 canonical checkout is untouched. These are local commits, not upstream PRs.
@@ -24,6 +27,7 @@ Hive implementation commits are `7169b37d19` (U1), `f1b1aabac7` (U2) and
 | Regression baseline | Before implementation, canonical decoy tests observed all ambient keys forwarded, undeclared/incomplete gen accepted, missing policy declarations and secret-bearing raw diagnostics. |
 | R5 actual Bash | Bash 3.2.57(2)-release built from GNU bash-3.2.57 sources locally; current GNU Bash 5.3.20(1)-release. Each executed the complete 15-test Ruby/shell matrix against each copy (Hive 602 assertions, canonical 590, per interpreter). Both wrapper syntax checks passed under both interpreters. |
 | Named gate/CI | `HB_TEST_BASH_32=... bundle exec rake test:bench_isolation_proof`: Hive 3 tests/55 assertions, canonical 3/40; zero failures/errors/skips. Both CI YAML files have ubuntu-24.04 and macos-15 lanes. Hosted macOS is unrun locally; its lane requires actual /bin/bash 3.2. |
+| Hosted CPU correction | At canonical `8d562e148902dfbfc9b32c4b333ce3d8593f31e3`, both real-Docker proofs request one CPU. A shim rejecting requests above four CPUs reproduced canonical's former exit 125, then both full gates passed with actual Bash 3.2.57/5.3.20 and real Docker: canonical 3 tests/40 assertions, Hive 3/55, zero failures/errors/skips. Each interpreter's nested matrix passed (canonical 15/590, Hive 15/602). Hosted confirmation remains pending. |
 | Default/coverage exclusion | Proof omitted from HIVE_DEFAULT_TEST_FILES, every coverage shard and bin/test --changed shared/direct selections. Selector/CI/runner checks: 48 tests/406 assertions pass. |
 | R6 source synchronization | `cmp` passes for the entire isolation.sh and isolation_exec.rb files, stronger than region-only comparison. Baseline files were also identical. The 37 pre-existing divergent harness files outside this boundary are retained; see gaps. |
 | Focused suites | Canonical executor/policy/shell: 43 tests/682 assertions pass. Hive integrated isolation/pipeline/install/workflow/selector/CI/runner run: 122 tests/1574 assertions pass; final strengthened shell assertions separately pass 10 tests/532 assertions. Expanded install regression passes 4 tests/59 assertions. |

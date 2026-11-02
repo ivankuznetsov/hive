@@ -759,7 +759,11 @@ module Hive
           # fix agent runs; capturing HEAD afterwards would omit that whole
           # checkpoint from the guardrail diff and launder precisely the
           # changes the scope check rejected.
-          before_fix_head = git_head(worktree_path)
+          before_fix_head = if fix_budget_snapshot
+            @grant_budget.fix_input_head(snapshot: fix_budget_snapshot)
+          else
+            git_head(worktree_path)
+          end
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
@@ -1574,15 +1578,8 @@ module Hive
         context = @granted_fix_context
         snapshot = context.fetch(:snapshot)
         slot = @grant_budget.next_slot(snapshot: snapshot)
-        proof = snapshot.evidence.fetch("resume_evidence")
-        input_head = if proof.is_a?(Hash) && proof["grant_decision"] == slot.fetch("decision_id") &&
-            proof["grant_slot"].to_s == slot.fetch("slot").to_s
-          proof.fetch("input_head")
-        else
-          snapshot.evidence.fetch("head")
-        end
         { grant_decision: slot.fetch("decision_id"), grant_slot: slot.fetch("slot"),
-          input_head: input_head,
+          input_head: @grant_budget.fix_input_head(snapshot: snapshot),
           input_artifacts_digest: Hive::ReviewBudget.digest(snapshot.evidence.fetch("artifacts")),
           head: git_head(context.fetch(:worktree_path)), pass: context.fetch(:pass), phase: :fix }
       end

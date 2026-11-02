@@ -163,6 +163,81 @@ class ReviewGrantRecoveryTest < Minitest::Test
     end
   end
 
+  def test_noop_retry_of_failed_guarded_commit_preserves_original_diff_and_completion_input
+    [ false, true ].each do |restart|
+      with_review_grant_task do |task, cfg|
+        budget = grant(task)
+        base = Hive::Stages::Review.git_head(task.worktree_path)
+        git_command = method(:run!)
+        fix = lambda do |*, agent_custody:, **|
+          agent_custody.call do
+            path = File.join(task.worktree_path, ".github", "workflows", "check.yml")
+            FileUtils.mkdir_p(File.dirname(path))
+            File.write(path, "name: Check\n")
+            git_command.call("git", "-C", task.worktree_path, "add", ".github/workflows/check.yml")
+            git_command.call("git", "-C", task.worktree_path, "commit", "--quiet", "-m", "Update workflow")
+            { status: :error, error_message: "provider error after commit" }
+          end
+        end
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, fix) do
+          capture_io do
+            Hive::Lock.with_task_lock(task.folder, create: false) do
+              assert_equal :review_error, Hive::Stages::Review.run!(task, cfg).fetch(:status)
+            end
+          end
+        end
+        partial_head = Hive::Stages::Review.git_head(task.worktree_path)
+        refute_equal base, partial_head
+        assert_empty budget.observe.completions
+        proof = Hive::Markers.current(task.state_file).attrs.slice("grant_decision", "grant_slot",
+          "input_head", "head", "input_artifacts_digest", "pass", "phase")
+        assert_equal base, proof.fetch("input_head")
+        # Retain the same proof that recovery journals before clearing the park.
+        event = Hive::TaskJournal::Envelope.authoritative({
+          event_type: "activity_recorded", task: { "id" => task.id, "slug" => task.slug },
+          workflow: "coding", stage: "6-review", attempt_id: "retry-1", task_generation: 0,
+          reason: "preserved granted fix recovery evidence",
+          provenance: { "source" => "recovery_service" },
+          payload: { "activity_kind" => "recovery_recorded", "operation_id" => "retry-1", "review_grant_resume" => proof }
+        })
+        File.open(File.join(task.folder, "task-journal.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
+        Hive::Markers.clear_current(task.state_file, expected_name: :review_error)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, agent_custody:, **) {
+          agent_custody.call { { status: :ok } }
+        }) do
+          capture_io do
+            Hive::Lock.with_task_lock(task.folder, create: false) do
+              if restart
+                with_replaced_singleton_method(Hive::Stages::Review, :check_fix_guardrail, ->(*, **) { raise SystemExit, "before guardrail" }) do
+                  assert_raises(SystemExit) { Hive::Stages::Review.run!(task, cfg) }
+                end
+              else
+                assert_equal :review_waiting, Hive::Stages::Review.run!(task, cfg).fetch(:status), File.read(task.state_file)
+              end
+            end
+          end
+        end
+        completion = budget.observe.completions.fetch(0)
+        assert_equal base, completion.fetch("input_head")
+        assert_equal partial_head, completion.fetch("head")
+        if restart
+          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(*, **) { flunk "spent slot must not launch another fix" }) do
+            capture_io do
+              Hive::Lock.with_task_lock(task.folder, create: false) do
+                assert_equal :review_waiting, Hive::Stages::Review.run!(task, cfg).fetch(:status)
+              end
+            end
+          end
+        end
+        assert_equal "fix_guardrail", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        assert_includes File.read(File.join(task.reviews_dir, "fix-guardrail-04.md")), ".github/workflows/check.yml"
+        refute Hive::Stages::Review.completed_pass_receipt?(task.folder, 4)
+        assert_equal [ 1, 0 ], [ budget.observe.spent, budget.observe.remaining ]
+      end
+    end
+  end
+
   def test_standalone_budget_reader_refuses_mutated_granted_evidence
     with_review_grant_task do |task, _cfg|
       grant(task)

@@ -424,6 +424,38 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_later_slot_retry_keeps_its_own_input_head_and_ignores_prior_slot_proof
+    with_fixture do |budget, task|
+      receipt = record(budget, passes: 2)
+      clear(task)
+      budget.complete_fix!(snapshot: budget.observe, pass: 4, head: "b" * 40)
+      reviews = File.join(task.folder, "reviews")
+      File.write(File.join(reviews, "fix-success-04.md"), "<!-- head=#{'b' * 40} kind=fixed -->\n")
+      File.write(File.join(reviews, "codex-05.md"), "- [x] Later accepted defect\n")
+      File.write(File.join(reviews, "escalations-05.md"), "# Escalations\n")
+      proof = { "phase" => "fix", "pass" => "4", "grant_decision" => receipt.fetch("decision_id"),
+        "grant_slot" => "1", "input_head" => HEAD, "head" => "b" * 40 }
+      later = Hive::ReviewBudget.new(task: task, project: "demo", head: "b" * 40, resume_evidence: proof)
+      input = later.observe
+      assert later.validate_resume!(snapshot: input)
+      assert_equal "b" * 40, later.fix_input_head(snapshot: input)
+
+      proof = proof.merge("pass" => "5", "grant_slot" => "2", "input_head" => "b" * 40,
+        "head" => "c" * 40, "input_artifacts_digest" => Hive::ReviewBudget.digest(input.evidence.fetch("artifacts")))
+      retry_budget = Hive::ReviewBudget.new(task: task, project: "demo", head: "c" * 40, resume_evidence: proof)
+      retry_input = retry_budget.observe
+      assert retry_budget.validate_resume!(snapshot: retry_input)
+      assert_equal "b" * 40, retry_budget.fix_input_head(snapshot: retry_input)
+      invalid = Hive::ReviewBudget.new(task: task, project: "demo", head: "c" * 40,
+        resume_evidence: proof.merge("input_head" => nil))
+      assert_raises(Hive::ReviewBudget::Refused) { invalid.fix_input_head(snapshot: invalid.observe) }
+      completion = retry_budget.complete_fix!(snapshot: retry_input, pass: 5, head: "c" * 40)
+      assert_equal "b" * 40, completion.fetch("input_head")
+      assert_equal 2, completion.fetch("slot")
+      assert_equal [ 2, 0 ], [ retry_budget.observe.spent, retry_budget.observe.remaining ]
+    end
+  end
+
   def test_resume_validation_preserves_suspension_and_refuses_later_unbound_findings
     with_fixture do |budget, task|
       record(budget, passes: 2)

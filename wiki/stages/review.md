@@ -66,6 +66,12 @@ granted fix still spends its slot and owes verification. The final fix always
 receives another review; new findings then create a fresh eligible exhaustion. No global cap or configuration is
 changed, and `hive act` cannot grant allowance.
 
+If a granted fix commits and then reports a provider error, recovery retains
+the original slot input HEAD. A successful retry uses that validated input
+for both its immediate guardrail diff and its sealed completion receipt, even
+when the retry makes no commits. Further failures retain the same input;
+commits from failed attempts therefore still require guardrail approval.
+
 Unused slots survive ordinary commits, restarts and non-final parks inside
 the original review scope. Existing recovery rules decide whether a suspended
 review may resume. Changed HEAD/findings/scope evidence refuses without

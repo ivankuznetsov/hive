@@ -19,7 +19,10 @@ covered by deterministic adapter/launch tests; no live-provider run was part
 of the local acceptance evidence. Guardrail restart regressions simulate
 process loss after sealing a granted fix, after writing its trip report, and
 before writing the post-guardrail sentinel; physical power-loss durability
-was not exercised.
+was not exercised. Provider failure after a guarded commit followed by a
+successful no-op retry is covered with deterministic failure injection,
+including a restart before the retry's guardrail scan; no live-provider
+failure was induced.
 
 ## Task observation boundary (2026-10-02)
 

@@ -258,6 +258,7 @@ module Hive
       slot = completed.length + 1
       if proof.is_a?(Hash) && proof["grant_decision"] == latest.fetch("decision_id") &&
           proof["grant_slot"].to_s == slot.to_s && proof["pass"].to_s == snapshot.evidence.fetch("pass").to_s
+        valid_oid!(proof["input_head"], "granted fix input HEAD")
         unless proof["phase"] == "fix" && proof["head"] == snapshot.evidence.fetch("head") &&
             proof["input_artifacts_digest"] == self.class.digest(snapshot.evidence.fetch("artifacts"))
           raise Refused.new("evidence_changed", "the incomplete granted fix HEAD or accepted findings changed")
@@ -276,6 +277,22 @@ module Hive
         end
       end
       true
+    end
+
+    # Failed attempts may have committed before parking. Keep the slot's
+    # original input across retries so every partial commit is guardrailed.
+    def fix_input_head(snapshot:)
+      logical = next_slot(snapshot: snapshot)
+      raise Refused.new("budget_exhausted", "no granted fix slot is available") unless logical
+
+      proof = snapshot.evidence.fetch("resume_evidence")
+      if proof.is_a?(Hash) && proof["grant_decision"] == logical.fetch("decision_id") &&
+          proof["grant_slot"].to_s == logical.fetch("slot").to_s
+        validate_resume!(snapshot: snapshot)
+        valid_oid!(proof["input_head"], "granted fix input HEAD")
+      else
+        snapshot.evidence.fetch("head")
+      end
     end
 
     # `snapshot` is captured immediately before Phase 4. The caller retains it
@@ -312,7 +329,7 @@ module Hive
         "task_generation" => snapshot.evidence.fetch("task_generation"),
         "scope" => snapshot.original_scope, "decision_id" => logical.fetch("decision_id"),
         "slot" => logical.fetch("slot"), "kind" => "fixed", "pass" => positive_integer!(pass, "pass"),
-        "head" => valid_oid!(head, "completed fix HEAD"), "input_head" => snapshot.evidence.fetch("head"),
+        "head" => valid_oid!(head, "completed fix HEAD"), "input_head" => fix_input_head(snapshot: snapshot),
         "input_artifacts" => snapshot.evidence.fetch("artifacts"),
         "previous_receipt_digest" => chain_digest(current.receipts, current.completions),
         "recorded_at" => @clock.call.utc.iso8601(6)

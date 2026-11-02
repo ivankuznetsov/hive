@@ -3,6 +3,8 @@ require "stringio"
 require "fileutils"
 require "json"
 require "digest"
+require "open3"
+require "rbconfig"
 require "hive/commands/doctor"
 require "hive/agent_support/pi"
 require "hive/agent_skills/inspector"
@@ -442,169 +444,286 @@ class HiveCommandsDoctorTest < Minitest::Test
     assert_empty errors
   end
 
-  def test_llm_wiki_qmd_uses_hive_managed_binary_when_not_on_path
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      with_tmp_dir do |project|
-        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
-        with_tmp_dir do |data_home|
-          qmd = File.join(data_home, "hive", "qmd", "bin", "qmd")
-          write_file(qmd, <<~SH)
-            #!/bin/sh
-            echo "qmd 2.1.0"
-          SH
-          File.chmod(0o755, qmd)
+  def qmd_executable(path, body = 'printf "qmd 2.1.0\\n"')
+    write_file(path, "#!/bin/sh\n#{body}\n")
+    File.chmod(0o755, path)
+    path
+  end
 
-          out = StringIO.new
-          cfg = base_config(
-            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
-            "plan" => { "agent" => "claude", "skill" => "/x" }
-          )
+  def managed_qmd_path(data_home)
+    File.join(data_home, "hive", "qmd", "bin", "qmd")
+  end
 
-          with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
-            doctor = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out)
-            exit_code = doctor.call
+  def find_qmd(environment)
+    inspector = Object.new
+    inspector.define_singleton_method(:inspect) { [] }
+    Hive::Commands::Doctor.new(
+      config: base_config, project_root: nil, inspector: inspector,
+      environment: environment, mcp_discover: nil
+    ).send(:find_qmd)
+  end
 
-            assert_equal 0, exit_code
-            assert_match(%r{wiki/qmd.*✓ present}, out.string)
-            qmd_row = doctor.rows.find { |row| row[:label] == "wiki/qmd" }
-            assert_match(/qmd 2\.1\.0/, qmd_row.fetch(:message))
-          end
+  # Only this Ruby child inherits the test/coverage runtime. Doctor's QMD probe
+  # gets the supplied environment, while host-driven checks see scratch state.
+  def doctor_in_child(project_root: nil, environment: {}, host_environment: {}, json: false)
+    parent_environment = ENV.to_h
+    with_tmp_dir do |home|
+      host = {
+        "HOME" => home, "HIVE_HOME" => home,
+        "HIVE_QMD_BIN" => nil, "PATH" => "", "XDG_DATA_HOME" => nil
+      }.merge(host_environment)
+      script = <<~'RUBY'
+        require "json"
+        require "stringio"
+        require "hive/commands/doctor"
+        input = JSON.parse(STDIN.read)
+        inspector = Object.new
+        inspector.define_singleton_method(:inspect) { [] }
+        output = StringIO.new
+        doctor = Hive::Commands::Doctor.new(
+          config: input.fetch("config"), project_root: input["project_root"],
+          environment: input.fetch("environment"), inspector: inspector,
+          mcp_discover: nil, json: input.fetch("json"), output: output
+        )
+        before = ENV.to_h
+        exit_code = doctor.call
+        puts JSON.generate(
+          exit_code: exit_code, rows: doctor.rows, output: output.string,
+          environment_unchanged: before == ENV.to_h
+        )
+      RUBY
+      out, err, status = Open3.capture3(
+        host, RbConfig.ruby, "-I", File.expand_path("../../../lib", __dir__), "-e", script,
+        stdin_data: JSON.generate(config: base_config, project_root: project_root,
+                                  environment: environment, json: json)
+      )
+      assert status.success?, "Doctor child failed: #{err}\n#{out}"
+      result = JSON.parse(out)
+      assert result.fetch("environment_unchanged"), "Doctor changed its process environment"
+      assert_equal parent_environment, ENV.to_h
+      result
+    end
+  end
+
+  def assert_qmd_present(result, qmd, version = "qmd 2.1.0")
+    assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+    row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
+    assert_equal "dependency", row.fetch("kind")
+    assert_equal "present", row.fetch("status")
+    assert_equal "#{qmd} #{version}", row.fetch("message")
+    assert_match(%r{wiki/qmd.*✓ present}, result.fetch("output"))
+  end
+
+  def test_qmd_discovery_precedence_and_override_fallthrough
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      data_home = File.join(root, "data")
+      prefix = File.join(root, "prefix")
+      home_qmd = qmd_executable(managed_qmd_path(File.join(home, ".local/share")))
+      data_qmd = qmd_executable(managed_qmd_path(data_home))
+      sidecar_qmd = qmd_executable(managed_qmd_path(prefix))
+      write_file(File.join(data_home, "hive/install-prefix"), "  #{prefix}  \nignored\n")
+      path_qmd = qmd_executable(File.join(root, "bin/qmd"))
+      override = qmd_executable(File.join(root, "override"))
+      environment = {
+        "HIVE_QMD_BIN" => override, "PATH" => File.dirname(path_qmd),
+        "HOME" => home, "XDG_DATA_HOME" => data_home
+      }
+
+      assert_equal override, find_qmd(environment)
+      [ nil, "", File.join(root, "absent") ].each do |value|
+        assert_equal path_qmd, find_qmd(environment.merge("HIVE_QMD_BIN" => value))
+      end
+      File.chmod(0o644, override)
+      assert_equal path_qmd, find_qmd(environment)
+      environment.delete("HIVE_QMD_BIN")
+      assert_equal path_qmd, find_qmd(environment)
+      [ nil, "" ].each do |value|
+        assert_equal data_qmd, find_qmd(environment.merge("PATH" => value))
+      end
+      environment.delete("PATH")
+      File.unlink(data_qmd)
+      assert_equal home_qmd, find_qmd(environment), "HOME fallback precedes the sidecar"
+      File.unlink(home_qmd)
+      assert_equal sidecar_qmd, find_qmd(environment)
+    end
+  end
+
+  def test_qmd_discovery_uses_only_nonempty_supplied_roots
+    with_tmp_dir do |root|
+      home = File.join(root, "home")
+      data_home = File.join(root, "data")
+      home_qmd = qmd_executable(managed_qmd_path(File.join(home, ".local/share")))
+      data_qmd = qmd_executable(managed_qmd_path(data_home))
+      [ {}, { "XDG_DATA_HOME" => "" } ].each do |values|
+        assert_equal home_qmd, find_qmd(values.merge("HOME" => home))
+      end
+      [ {}, { "HOME" => "" } ].each do |values|
+        environment = values.merge("XDG_DATA_HOME" => data_home)
+        assert_equal data_qmd, find_qmd(environment)
+      end
+      File.unlink(data_qmd)
+      prefix = File.join(root, "prefix")
+      sidecar_qmd = qmd_executable(managed_qmd_path(prefix))
+      write_file(File.join(data_home, "hive/install-prefix"), "#{prefix}\n")
+      File.unlink(home_qmd)
+      write_file(File.join(home, ".local/share/hive/install-prefix"), "#{prefix}\n")
+      [ {}, { "XDG_DATA_HOME" => "" } ].each do |values|
+        assert_equal sidecar_qmd, find_qmd(values.merge("HOME" => home))
+      end
+      [ {}, { "HOME" => "" } ].each do |values|
+        assert_equal sidecar_qmd, find_qmd(values.merge("XDG_DATA_HOME" => data_home))
+      end
+      # A missing root must not accidentally form a relative managed candidate.
+      qmd_executable(managed_qmd_path(File.join(root, ".local/share")))
+      qmd_executable(managed_qmd_path(root))
+      Dir.chdir(root) do
+        [ {}, { "HOME" => "" }, { "XDG_DATA_HOME" => "" },
+          { "HOME" => "", "XDG_DATA_HOME" => "" } ].each do |environment|
+          assert_nil find_qmd(environment)
         end
       end
     end
   end
 
-  def test_llm_wiki_qmd_warning_when_binary_fails_to_start
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      with_tmp_dir do |project|
-        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
-        with_tmp_dir do |bin_dir|
-          qmd = File.join(bin_dir, "qmd")
-          write_file(qmd, <<~SH)
-            #!/usr/bin/env bash
-            echo "NODE_MODULE_VERSION mismatch" >&2
-            exit 1
-          SH
-          File.chmod(0o755, qmd)
-
-          out = StringIO.new
-          cfg = base_config(
-            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
-            "plan" => { "agent" => "claude", "skill" => "/x" }
-          )
-
-          with_env("HIVE_QMD_BIN" => qmd) do
-            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
-
-            assert_equal 0, exit_code
-            assert_match(%r{wiki/qmd.*! warning}, out.string)
-            assert_match(/NODE_MODULE_VERSION mismatch/, out.string)
-            assert_match(/npm rebuild better-sqlite3/, out.string)
-          end
-        end
+  def test_qmd_discovery_preserves_sidecar_first_line_and_candidate_eligibility
+    with_tmp_dir do |root|
+      data_home = File.join(root, "data")
+      prefix = File.join(root, "prefix")
+      qmd = qmd_executable(managed_qmd_path(prefix))
+      sidecar = File.join(data_home, "hive/install-prefix")
+      environment = { "XDG_DATA_HOME" => data_home }
+      assert_nil find_qmd(environment)
+      [ "", "\n#{prefix}\n", "  \n#{prefix}\n" ].each do |contents|
+        write_file(sidecar, contents)
+        assert_nil find_qmd(environment)
       end
+      write_file(sidecar, "  #{prefix} \nignored\n")
+      assert_equal qmd, find_qmd(environment)
+      File.chmod(0o644, qmd)
+      assert_nil find_qmd(environment)
+      File.unlink(qmd)
+      FileUtils.mkdir_p(qmd)
+      assert_nil find_qmd(environment), "sidecar candidates must be regular files"
+      data_qmd = qmd_executable(managed_qmd_path(data_home))
+      File.chmod(0o644, data_qmd)
+      assert_nil find_qmd(environment)
+      File.unlink(data_qmd)
+      FileUtils.mkdir_p(data_qmd)
+      assert_nil find_qmd(environment), "managed candidates must be regular files"
+      home = File.join(root, "home")
+      home_qmd = qmd_executable(managed_qmd_path(File.join(home, ".local/share")))
+      File.chmod(0o644, home_qmd)
+      assert_nil find_qmd(environment.merge("HOME" => home))
+      File.unlink(home_qmd)
+      FileUtils.mkdir_p(home_qmd)
+      assert_nil find_qmd(environment.merge("HOME" => home))
+    end
+  end
+
+  def test_llm_wiki_qmd_uses_hive_managed_binary_when_not_on_path
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      data_home = File.join(root, "data")
+      qmd = qmd_executable(managed_qmd_path(data_home))
+      result = doctor_in_child(project_root: root, environment: { "XDG_DATA_HOME" => data_home })
+      assert_qmd_present(result, qmd)
     end
   end
 
   def test_llm_wiki_qmd_uses_install_prefix_sidecar_binary
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      with_tmp_dir do |project|
-        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
-        with_tmp_dir do |data_home|
-          with_tmp_dir do |prefix|
-            # No qmd at the default <data_home>/hive/qmd/bin/qmd candidate;
-            # the install-prefix sidecar points at a separate prefix dir.
-            write_file(File.join(data_home, "hive", "install-prefix"), "#{prefix}\n")
-            qmd = File.join(prefix, "hive", "qmd", "bin", "qmd")
-            write_file(qmd, <<~SH)
-              #!/bin/sh
-              echo "qmd 2.2.0"
-            SH
-            File.chmod(0o755, qmd)
-
-            out = StringIO.new
-            cfg = base_config(
-              "brainstorm" => { "agent" => "claude", "skill" => "/x" },
-              "plan" => { "agent" => "claude", "skill" => "/x" }
-            )
-
-            with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
-              doctor = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out)
-              exit_code = doctor.call
-
-              assert_equal 0, exit_code
-              assert_match(%r{wiki/qmd.*✓ present}, out.string)
-              qmd_row = doctor.rows.find { |row| row[:label] == "wiki/qmd" }
-              assert_match(/qmd 2\.2\.0/, qmd_row.fetch(:message),
-                "doctor must resolve qmd via the install-prefix sidecar")
-            end
-          end
-        end
-      end
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      data_home = File.join(root, "data")
+      prefix = File.join(root, "prefix")
+      qmd = qmd_executable(managed_qmd_path(prefix))
+      write_file(File.join(data_home, "hive/install-prefix"), "#{prefix}\n")
+      result = doctor_in_child(project_root: root, environment: { "XDG_DATA_HOME" => data_home })
+      assert_qmd_present(result, qmd)
     end
   end
 
-  def test_llm_wiki_qmd_warning_when_not_found
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      with_tmp_dir do |project|
-        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
-        with_tmp_dir do |data_home|
-          # Empty data_home: no qmd at the default candidate and no
-          # install-prefix sidecar file.
-          out = StringIO.new
-          cfg = base_config(
-            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
-            "plan" => { "agent" => "claude", "skill" => "/x" }
-          )
-
-          with_env("XDG_DATA_HOME" => data_home, "PATH" => "", "HIVE_QMD_BIN" => nil) do
-            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
-
-            assert_equal 0, exit_code
-            assert_match(%r{wiki/qmd.*! warning}, out.string)
-            assert_match(/qmd is not installed or not discoverable/, out.string)
-          end
+  def test_llm_wiki_qmd_does_not_discover_host_candidates
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      home = File.join(root, "host-home")
+      data_home = File.join(root, "host-data")
+      override = qmd_executable(File.join(root, "override"))
+      path_qmd = qmd_executable(File.join(root, "bin/qmd"))
+      qmd_executable(managed_qmd_path(File.join(home, ".local/share")))
+      qmd_executable(managed_qmd_path(data_home))
+      prefix = File.join(root, "host-prefix")
+      qmd_executable(managed_qmd_path(prefix))
+      write_file(File.join(data_home, "hive/install-prefix"), "#{prefix}\n")
+      hosts = [
+        { "HIVE_QMD_BIN" => override }, { "PATH" => File.dirname(path_qmd) },
+        { "HOME" => home }, { "XDG_DATA_HOME" => data_home }
+      ]
+      hosts.each do |host|
+        [ {}, { "HOME" => "", "XDG_DATA_HOME" => "", "PATH" => "", "HIVE_QMD_BIN" => "" } ].each do |environment|
+          result = doctor_in_child(project_root: root, environment: environment, host_environment: host)
+          assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+          row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
+          assert_equal "warning", row.fetch("status")
+          assert_includes row.fetch("message"), "qmd is not installed or not discoverable"
         end
       end
+      File.unlink(managed_qmd_path(data_home))
+      result = doctor_in_child(project_root: root, environment: { "PATH" => "" },
+                               host_environment: { "XDG_DATA_HOME" => data_home })
+      assert_includes result.fetch("output"), "qmd is not installed or not discoverable"
+    end
+  end
+
+  def test_llm_wiki_qmd_directory_override_warns_instead_of_falling_through
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      override = File.join(root, "override")
+      FileUtils.mkdir_p(override)
+      qmd = qmd_executable(File.join(root, "bin/qmd"))
+      environment = { "HIVE_QMD_BIN" => override, "PATH" => File.dirname(qmd) }
+      assert_equal override, find_qmd(environment)
+      result = doctor_in_child(project_root: root, environment: environment)
+      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+      row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
+      assert_equal "warning", row.fetch("status")
+      assert_includes row.fetch("message"), "qmd at #{override} timed out or could not be executed"
+    end
+  end
+
+  def test_llm_wiki_qmd_is_not_probed_without_wiki_configuration
+    with_tmp_dir do |root|
+      marker = File.join(root, "probe-ran")
+      qmd = qmd_executable(File.join(root, "qmd"), 'printf ran > "' + marker + '"')
+      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd })
+      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+      refute result.fetch("rows").any? { |row| row["label"] == "wiki/qmd" }
+      refute File.exist?(marker)
+    end
+  end
+
+  def test_llm_wiki_qmd_warning_when_binary_fails_to_start
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = qmd_executable(File.join(root, "qmd"), 'echo "NODE_MODULE_VERSION mismatch" >&2; exit 1')
+      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd })
+      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+      assert_match(%r{wiki/qmd.*! warning}, result.fetch("output"))
+      assert_includes result.fetch("output"), "NODE_MODULE_VERSION mismatch"
+      assert_includes result.fetch("output"), "npm rebuild better-sqlite3"
     end
   end
 
   def test_llm_wiki_qmd_warning_when_binary_cannot_be_executed
-    with_fake_home do |home|
-      install_brainstorm_and_plan_skills(home)
-      with_tmp_dir do |project|
-        FileUtils.mkdir_p(File.join(project, ".llm-wiki"))
-        with_tmp_dir do |bin_dir|
-          # Executable file whose shebang names a missing interpreter, so
-          # Open3.capture3 raises Errno::ENOENT — FIX 1 must rescue it.
-          qmd = File.join(bin_dir, "qmd")
-          write_file(qmd, <<~SH)
-            #!/nonexistent/xyz
-            echo unreachable
-          SH
-          File.chmod(0o755, qmd)
-
-          out = StringIO.new
-          cfg = base_config(
-            "brainstorm" => { "agent" => "claude", "skill" => "/x" },
-            "plan" => { "agent" => "claude", "skill" => "/x" }
-          )
-
-          with_env("HIVE_QMD_BIN" => qmd) do
-            # No assert_nothing_raised: if FIX 1's rescue is absent the
-            # call raises Errno::ENOENT and this test errors out.
-            exit_code = Hive::Commands::Doctor.new(config: cfg, project_root: project, output: out).call
-
-            assert_equal 0, exit_code
-            assert_match(%r{wiki/qmd.*! warning}, out.string)
-            assert_match(/timed out or could not be executed/, out.string)
-          end
-        end
-      end
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      qmd = File.join(root, "qmd")
+      write_file(qmd, "#!/nonexistent/xyz\n")
+      File.chmod(0o755, qmd)
+      result = doctor_in_child(project_root: root, environment: { "HIVE_QMD_BIN" => qmd })
+      assert_equal 0, result.fetch("exit_code"), result.fetch("output")
+      assert_match(%r{wiki/qmd.*! warning}, result.fetch("output"))
+      assert_includes result.fetch("output"), "timed out or could not be executed"
     end
   end
 
@@ -922,10 +1041,10 @@ class HiveCommandsDoctorTest < Minitest::Test
       executable = File.join(dir, "qmd")
       File.write(executable, "#!/bin/sh\n")
       FileUtils.chmod(0o755, executable)
-      doctor = Hive::Commands::Doctor.new(config: base_config, project_root: dir, output: StringIO.new)
-      with_env("PATH" => dir) do
-        assert_equal executable, doctor.send(:which, "qmd")
-      end
+      doctor = Hive::Commands::Doctor.new(
+        config: base_config, project_root: dir, output: StringIO.new, environment: { "PATH" => dir }
+      )
+      assert_equal executable, doctor.send(:which, "qmd")
 
       state = File.join(dir, ".hive-state")
       FileUtils.mkdir_p(state)

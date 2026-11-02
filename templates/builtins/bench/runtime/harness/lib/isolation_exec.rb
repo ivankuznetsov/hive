@@ -116,11 +116,11 @@ module HiveBench
     # Fail closed on an explicit isolation refusal (70) or a container that never
     # started (125-127). Other non-zero exits mean the agent ran and failed, or
     # the gate's tests failed — those are scored normally, not raised.
-    def fail_closed!(status, diagnostics, phase:)
+    def fail_closed!(status, _diagnostics, phase:)
       code = status.exitstatus
       return unless code == FAIL_ISOLATION || CONTAINER_START_FAILURES.include?(code)
 
-      raise IsolationError, "runner could not establish isolation (#{phase}, exit #{code}): #{diagnostics.to_s.strip[0, 300]}"
+      raise IsolationError, "runner could not establish isolation (#{phase}, exit #{code})"
     end
 
     API_KEYS = { "openrouter" => "OPENROUTER_API_KEY", "anthropic" => "ANTHROPIC_API_KEY",

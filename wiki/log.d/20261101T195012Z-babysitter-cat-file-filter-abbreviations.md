@@ -10,8 +10,8 @@
   Interception preserves synthetic success, empty stdout, skip diagnostics,
   audit behavior, and no real-Git handoff. Public/serialized contracts and
   hardened passthrough argv are unchanged.
-- Only exact `--ext-diff` is denied in that family. Its rejected prefixes reach
-  Git on allowlisted `log`/`show` reads; no rejected-prefix guard was added.
+- For external-diff options, only exact `--ext-diff` is denied. Its rejected
+  prefixes reach Git on allowlisted `log`/`show` reads.
   The command Wiki's read-only allowlist no longer includes working-tree `diff`.
 - `test/fixtures/babysitter/git_option_spellings.v1.json` records 36 exact forms
   separately for locally reproduced Git 2.45.4, 2.55.0, and 2.56.0, with exit
@@ -33,55 +33,35 @@
   exact 100% line coverage for the changed Git policy from ordinary tests.
 - Broad checkpoint: `bin/test --all` ran 931 files. The 458-file root worker
   passed (8,042 tests), as did all 14 component files (139 tests). The other
-  root worker ran 7,738 tests and reported two repository-state failures.
+  root worker ran 7,738 tests and reported failures in
   `ReleaseCandidateCliTest#test_no_verb_defaults_to_read_only_plan_with_committed_input_blocks`
-  had captured U1's HEAD before the U2 commit occurred during the run; its
-  candidate-SHA assertion therefore saw a different revision. Both complete
-  affected files passed in a stable isolated checkout of current code and of
-  unmodified base `236b127953504c9aa521d6b0f5258a181f6504f0` (9 tests and 134
-  assertions each), using:
+  and `WikiCommandIndexIntegrationTest#test_public_help_metadata_and_navigation_are_one_read_only_contract`.
+  The two complete affected files passed when run together without the parallel
+  harness (9 tests, 134 assertions):
 
   ```sh
   bundle exec ruby -Itest -Ilib -e 'ARGV.each { |path| require File.expand_path(path) }' test/integration/release_candidate_cli_test.rb test/integration/wiki_command_index_test.rb
   ```
 
-  The remaining parallel-run baseline is
-  `WikiCommandIndexIntegrationTest#test_public_help_metadata_and_navigation_are_one_read_only_contract`
-  at `test/integration/wiki_command_index_test.rb:52`, with the matching error
-  `public help or the command-index guard modified the repository`. The same
-  command reproduces it on base and current code in isolated checkouts:
+  The wiki command-index failure was reproduced on base
+  `236b127953504c9aa521d6b0f5258a181f6504f0` and on this change with:
 
   ```sh
   bundle exec ruby script/test_parallel.rb test/integration/wiki_command_index_test.rb test/unit/babysitter/dry_run_env_test.rb
   ```
 
-  Both snapshot diffs identify only the runner's concurrently written
-  `tmp/test-parallel-*/worker-2.log`. This unchanged parallel-harness failure
-  is outside the filter-policy fix; the standalone read-only checks pass.
-- Review proof corrections: both launchers now establish a recorded ordinary
-  `cat-file` read before checking no handoff for denied tokens, with independent
-  skip logs per launcher. Every allowed fixture case requires no skip record;
-  glued object-filter output checks use the fixture's recorded exit status.
-  Independent leading-global classification and literal hardened argv checks
-  cover `log`, `show`, and glued `cat-file` object filtering. Acceptance audit
-  assertions now explain failures, and the policy comment names the dependence
-  of excluded `--f` / `--filters=<value>` forms on Git's current parsing.
-- Review verification: `bin/test` with the policy, dry-run environment, and
-  acceptance files passed (88 tests, 1,973 assertions, no failures/errors; the
-  CI-only security matrix remains skipped in this ordinary run). The three
-  compatibility/helper tests passed again on Git 2.45.4 (568 assertions) and
-  2.55.0 (572 assertions), without skips. RuboCop passed all four Ruby files.
-  Removed the disposable Git build directories and source archives after
-  verification; retained characterization/test logs and the dirty isolated
-  verification checkout for the documented broad-suite evidence.
-- Review scope correction (pass 2): the unrelated web flash repair, its
-  browser-test extension, and its owning Wiki updates are preserved separately
-  on local branch `fix/web-flash-acknowledgements` (commit `6446862a74`).
-  This branch retains only the planned babysitter policy, fixture, tests,
-  owning Wiki updates, and this one source fragment. Both lockfiles retain
-  the patched versions already present on `origin/main`.
-- Scope correction verification: the focused policy, dry-run environment,
-  and acceptance files passed via `bin/test` (88 tests, 1,973 assertions,
-  no failures/errors; one CI-only matrix skip). An explicit final-diff
-  allowlist check confirmed all ten planned paths and one log fragment,
-  both lockfiles match main, and `git diff --check` passed.
+  Its repository snapshot diff contained only the parallel runner's
+  `tmp/test-parallel-*/worker-2.log`.
+- Both launchers establish a recorded ordinary `cat-file` read before checking
+  no handoff for denied tokens, with independent skip logs per launcher.
+  Every allowed fixture case requires no skip record; glued object-filter
+  output checks use the fixture's recorded exit status. Independent
+  leading-global classification and literal hardened argv checks cover `log`,
+  `show`, and glued `cat-file` object filtering. Acceptance audit assertions
+  explain failures, and the policy comment names the parsing dependencies of
+  excluded forms.
+- Focused verification via `bin/test` passed for the policy, dry-run environment,
+  and acceptance files (88 tests, 1,973 assertions, no failures/errors; one
+  CI-only matrix skip). The three compatibility/helper tests passed on Git
+  2.45.4 (568 assertions) and 2.55.0 (572 assertions), without skips. RuboCop
+  passed all four changed Ruby files, and `git diff --check` passed.

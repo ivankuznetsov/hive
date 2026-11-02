@@ -7,13 +7,12 @@ require "timeout"
 require "hive/babysitter/dry_run_env"
 require "hive/babysitter/git_policy"
 require_relative "../../../bin/hive-babysitter-skip-log"
+require_relative "../../support/babysitter_git_options"
 
 class BabysitterDryRunEnvTest < Minitest::Test
   include HiveTestHelper
 
-  GIT_OPTION_SPELLINGS = JSON.parse(File.read(
-    File.expand_path("../../fixtures/babysitter/git_option_spellings.v1.json", __dir__)
-  )).freeze
+  GIT_OPTION_SPELLINGS = BabysitterGitOptions::SPELLINGS
 
   def test_git_option_fixture_requires_an_exact_recorded_version_and_case
     %w[2.45.4 2.55.0].each do |version|
@@ -61,6 +60,37 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_rev_list_separate_word_filter_passes_through_stub_and_overlay
+    with_git_option_repo do |dir, binary, _version, marker|
+      args = %w[rev-list --objects --filter blob:none HEAD]
+      expected_out, expected_err, expected_status = raw_option_git(binary, dir, *args)
+
+      recording_git, real_log = recording_git_delegate(dir, binary)
+      skip_log = File.join(dir, "skipped.log")
+      env = git_option_environment.merge(
+        "HIVE_BABYSITTER_REAL_GIT" => recording_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log
+      )
+      overlay = Hive::Babysitter::DryRunEnv.prepare_overlay(
+        dir, real_git: recording_git, real_gh: "/unused/gh", skip_log: skip_log
+      )
+      [ stub_path("git"), File.join(overlay, "git") ].each do |launcher|
+        FileUtils.rm_f(real_log)
+        FileUtils.rm_f(skip_log)
+        out, err, status = Open3.capture3(env, launcher, *args, chdir: dir, unsetenv_others: true)
+        assert_equal expected_status.exitstatus, status.exitstatus, "#{launcher}: #{err}"
+        assert_equal expected_out, out, launcher
+        assert_equal expected_err, err, launcher
+        refute_includes err, "[dry-run]", launcher
+        refute_path_exists skip_log, launcher
+        refute_path_exists marker, launcher
+        assert_path_exists real_log, launcher
+        calls = File.readlines(real_log).map { |line| JSON.parse(line) }
+        assert_equal [ Hive::Babysitter::GitPolicy.hardened_passthrough_argv(args, args) ], calls, launcher
+      end
+    end
+  end
+
   def test_cat_file_filter_tokens_stop_before_real_git_through_stub_and_overlay
     with_git_option_repo do |dir, binary, version, marker|
       # Only exact --filters establishes that this repository can execute smudge.
@@ -83,12 +113,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
         FileUtils.rm_f(skip_log)
         out, err, status = Open3.capture3(env, launcher, "cat-file", "-p", "HEAD:README.md",
                                         chdir: dir, unsetenv_others: true)
-        assert status.success?, err
-        assert_equal "test\n", out
+        assert status.success?, "#{launcher}: #{err}"
+        assert_equal "test\n", out, launcher
         assert_path_exists real_log, "#{launcher} must record an allowed read before the deny checks"
         calls = File.readlines(real_log).map { |line| JSON.parse(line) }
-        assert_equal %w[cat-file -p HEAD:README.md], calls.fetch(0).last(3)
-        refute_path_exists marker
+        assert_equal %w[cat-file -p HEAD:README.md], calls.fetch(0).last(3), launcher
+        refute_path_exists marker, launcher
         refute_path_exists skip_log, "#{launcher} must not audit an allowed read as skipped"
         FileUtils.rm_f(real_log)
 
@@ -96,13 +126,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
           next unless entry.fetch("hive_policy") == "deny"
 
           args = entry.fetch("argv")
+          label = "#{entry.fetch('id')} via #{launcher}"
           out, err, status = Open3.capture3(env, launcher, *args, chdir: dir, unsetenv_others: true)
-          assert status.success?, err
-          assert_empty out
-          assert_includes err, "[dry-run] git #{args.join(' ')} skipped"
-          assert_includes File.read(skip_log), "git #{args.join(' ')} skipped"
-          refute_path_exists marker
-          refute_path_exists real_log, "denied command reached real Git: #{args.inspect}"
+          assert status.success?, "#{label}: #{err}"
+          assert_empty out, label
+          assert_includes err, "[dry-run] git #{args.join(' ')} skipped", label
+          assert_path_exists skip_log, label
+          assert_includes File.read(skip_log), "git #{args.join(' ')} skipped", label
+          refute_path_exists marker, label
+          refute_path_exists real_log, "#{label}: denied command reached real Git: #{args.inspect}"
         end
       end
 
@@ -2339,20 +2371,16 @@ class BabysitterDryRunEnvTest < Minitest::Test
     assert status.success?, err
     version = version.strip
     recorded_git_option_outcome(version, "cat-filters")
-    with_tmp_dir do |dir|
-      setup = lambda do |*args|
-        _out, error, result = raw_option_git(binary, dir, *args)
-        assert result.success?, "#{binary} (#{version}): #{error}"
-      end
-      setup.call("init", "--template=", "-q", "-b", "master")
-      {
-        "user.name" => "Test", "user.email" => "test@example.com", "commit.gpgsign" => "false",
-        "gc.auto" => "0", "maintenance.auto" => "false"
-      }.each { |key, value| setup.call("config", key, value) }
+    git_runner = lambda do |_command, *args|
+      _out, error, result = Open3.capture3(git_option_environment, binary, *args, unsetenv_others: true)
+      assert result.success?, "#{binary} (#{version}): #{error}"
+    end
+    with_tmp_git_repo(git_runner: git_runner, init_options: [ "--template=" ]) do |dir|
+      setup = ->(*args) { git_runner.call(binary, "-C", dir, *args) }
       File.write(File.join(dir, "README.md"), "old\n")
       File.write(File.join(dir, ".gitattributes"), "README.md filter=hivepwn\n")
       setup.call("add", "README.md", ".gitattributes")
-      setup.call("commit", "-qm", "initial")
+      setup.call("commit", "-qm", "filter attributes")
       File.write(File.join(dir, "README.md"), "test\n")
       setup.call("add", "README.md")
       setup.call("commit", "-qm", "update")
@@ -2378,7 +2406,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     File.write(path, <<~RUBY)
       #!#{RbConfig.ruby}
       require "json"
-      unless ARGV == ["--no-lazy-fetch", "--version"]
+      unless ARGV == #{BabysitterGitOptions::CAPABILITY_PROBE_ARGV.inspect}
         File.open(#{log_path.dump}, "a") { |file| file.puts(JSON.generate(ARGV)) }
       end
       exec #{binary.dump}, *ARGV
@@ -2494,7 +2522,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
       #!#{RbConfig.ruby}
-      exit 0 if ARGV == ["--no-lazy-fetch", "--version"]
+      exit 0 if ARGV == #{BabysitterGitOptions::CAPABILITY_PROBE_ARGV.inspect}
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
@@ -2576,7 +2604,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
       #!#{RbConfig.ruby}
-      exit 0 if ARGV == ["--no-lazy-fetch", "--version"]
+      exit 0 if ARGV == #{BabysitterGitOptions::CAPABILITY_PROBE_ARGV.inspect}
       keys = #{keys.inspect}
       File.open(#{File.join(dir, "env.log").dump}, "a") do |file|
         keys.each do |key|

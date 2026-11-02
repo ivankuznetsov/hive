@@ -874,7 +874,14 @@ legitimate separate-word object-filter reads. Glued `--filter=blob:none` retains
 its per-version Git outcome and output checks. Unrecorded versions or missing
 cases fail with a characterization diagnostic; this is an evidence boundary
 in tests, never a production Git-version gate. Repeated overlay invocations
-produce one complete audit record each.
+produce one complete audit record each. A separate real-Git comparison checks
+that `rev-list --filter blob:none` reaches Git through both the direct stub and
+generated overlay, preserves raw stdout, stderr and exit status (including
+Git's own rejection of the separate-word form), and writes no skip record.
+Both babysitter test files load the spelling fixture through the shared
+`test/support/babysitter_git_options.rb`; its probe argv is also shared by the
+recording binaries. The repository helper accepts a Git runner and init options
+so compatibility setup can keep its selected binary and isolated environment.
 
 Each launcher first records a successful ordinary `cat-file` read to control
 the real-binary log, and clears its skip log before the denied-token loop.

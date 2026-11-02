@@ -2133,9 +2133,9 @@ claimed for this host.
 
 The fixed six-token `cat-file` boundary (`--filters`, `--fi`, `--fil`, `--filt`,
 `--filte`, `--filter`) intentionally over-blocks some errors and reads with
-synthetic success and empty stdout, independently of Git version. Only exact
-`--ext-diff` is denied in that family; its recorded rejected prefixes remain
-Git's responsibility on otherwise allowlisted reads.
+synthetic success and empty stdout, independently of Git version. For
+external-diff options, only exact `--ext-diff` is denied; its recorded rejected
+prefixes remain Git's responsibility on otherwise allowlisted reads.
 
 Only the exact versions and cases recorded in
 `test/fixtures/babysitter/git_option_spellings.v1.json` are proven: Git 2.45.4,
@@ -2144,7 +2144,10 @@ The latest successful security-matrix CI run reports `/usr/bin/git` 2.56.0;
 that version identity is recorded separately from locally reproduced parsing.
 Unrecorded versions/cases fail the compatibility test with a characterization
 request, while production continues to deny the same six bare tokens.
-Fixture coverage cannot prove every future Git parsing behavior.
+Fixture coverage cannot prove every future Git parsing behavior. In particular,
+allowed glued `cat-file --filter=<spec>` is parsed as `--filters` on Git
+2.45.4 and rejected because that option takes no value. Its safety on that
+version depends on the valueless option continuing to reject attached values.
 
 A broader multi-version compatibility matrix and an audit of other
 abbreviation-dependent option execution seams remain deferred. Git launchers

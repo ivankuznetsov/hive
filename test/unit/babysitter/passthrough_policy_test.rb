@@ -1,13 +1,11 @@
 require "test_helper"
-require "json"
+require_relative "../../support/babysitter_git_options"
 require "hive/babysitter/git_policy"
 require "hive/babysitter/gh_policy"
 require "hive/babysitter/passthrough_runner"
 
 class BabysitterPassthroughPolicyTest < Minitest::Test
-  GIT_OPTION_SPELLINGS = JSON.parse(File.read(
-    File.expand_path("../../fixtures/babysitter/git_option_spellings.v1.json", __dir__)
-  )).freeze
+  GIT_OPTION_SPELLINGS = BabysitterGitOptions::SPELLINGS
 
   def test_git_policy_matches_the_version_independent_option_contract
     assert_equal 1, GIT_OPTION_SPELLINGS.fetch("schema_version")

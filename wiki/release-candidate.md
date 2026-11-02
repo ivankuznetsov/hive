@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -349,3 +349,70 @@ The release E2E job prepares the checksum-pinned Betterleaks bundle before
 running publication scenarios, matching ordinary CI. It retains complete
 scenario reports on success or failure for 14 days; a summary count alone
 cannot identify a failed scenario.
+
+## Known gaps
+
+### Release-candidate protected-main dogfood evidence
+
+#### Source S25, lines 572–595: Current release gap
+
+- Release-candidate protected-main dogfood run `31014105054` at exact
+  candidate/workflow SHA `f113b6a238c0922e60ceafb091a9b215ce7c451e`
+  retained exact terminal evidence, but only seven of fourteen required gates
+  passed. The expected `candidate_not_newer` result is joined by harness
+  findings: catalog tests lacked historical tags in a shallow checkout,
+  managed-Web verification used split arguments unsupported by its equals-only
+  verifier, Linux upgrade installation consumed producer-host closure roots
+  inside the `/cache` container namespace, and the macOS upgrade lane exited
+  without a typed diagnostic. Ordinary CI, artifact/package checks, all
+  native installs, baseline freshness, and release E2E passed. Named retry run
+  `31015265841` selected only `Candidate version newer`, reused the original
+  candidate artifact, and composed every unselected effective row from the
+  source run, closing the hosted retry-path gap while correctly remaining
+  `qa_blocked`. The U8 coordinator extraction is
+  deliberately move-only: current local attempts checkpoint captured INT/TERM,
+  not an uncatchable hard crash between a gate result and evidence publication.
+  Adding a durable in-progress journal remains a separately admitted behavior
+  change rather than hidden refactor scope.
+  The local gate repair now covers the three confirmed harness defects and adds
+  same-profile macOS shell/Ruby probes plus phase checkpoints without widening
+  the sandbox policy. The exact macOS denial remains unknown until a fresh
+  hosted run reports the first failing checkpoint; no local test can promote
+  this candidate to trusted release evidence.
+
+### Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)
+
+#### Source S57, lines 1345–1378: Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)
+
+The reviewed catalog and installed-target layer now feed blocking
+latest-stable and historical upgrade gates. Fixed runner contracts pin the
+v0.4.1 producer, exact legacy bench descriptor/instructions, required v0.4.2
+collision observer, candidate migration, named semantic snapshots,
+idempotency, process/service teardown, and cloned-prefix Linux/macOS update
+oracles. Focused tests use an injected fixed executor with synthetic installed
+binaries and never count them as real producer evidence. The default local CLI
+keeps those gates unavailable as
+`compliant_local_upgrade_executor_unavailable`; it does not start a production
+historical container lane.
+
+The real authenticated v0.6.9 and v0.4.1/v0.4.2 packages have not yet run in a
+disposable OS sandbox on their required platform cells. The U5 hosted workflow
+now encodes staging, containment, freshness, ordinary-CI, closed aggregate, and
+checkout-free Check Run publication contracts, but it was not dispatched.
+Targeted retry preflight validates the exact source evidence and Check digest,
+resolves named/failed/missing gate display names, conditions every matrix
+operation on that closed selection, and composes immutable trusted-control
+receipts with provenance-preserving predecessor rows. Failed attempts retain
+`qa_blocked` evidence and a digest-bound failed Check. This closes the prior
+targeted-retry plumbing gap, but does not constitute hosted execution evidence.
+Do not treat U3 cache/target proof, U4 fixture proof, or U5 workflow contract
+tests as evidence that a historical upgrade or hosted candidate run completed.
+
+The reviewed offline-closure inventories are now checked in with exact
+filenames, sizes, and SHA-256 digests, and `plan` returns the explicit cache
+materializer argv when they are absent. That closes the manifest-definition
+gap, not the execution gap: no real hosted candidate, native-platform matrix,
+or historical package lane ran during this implementation. The current source
+version and latest-stable row are both 0.6.9, so `candidate_not_newer` must keep
+the candidate blocked. No version choice, tag, publication, deployment, or
+release was authorized.

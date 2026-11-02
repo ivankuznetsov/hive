@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/runtime_control_plane/task_lease_repository.rb, lib/hive/runtime_control_plane/process_guard.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-02
 tags: [lock, concurrency, sqlite, sequel, lease, fencing, flock, commit-lock, fork]
 ---
 
@@ -212,3 +212,19 @@ coordination, not task ownership authority.
 - [[modules/task]] · [[modules/agent]] · [[modules/git_ops]]
 - [[commands/run]] · [[commands/new]] · [[commands/drop]] · [[commands/markers]]
 - [[commands/status]] · [[state-model]]
+
+## Known gaps
+
+### Drop's descendant cleanup still has a snapshot/concurrent-fork race.
+
+#### Source S28, lines 903–904: Open questions about the codebase
+
+54. **Drop's descendant cleanup still has a snapshot/concurrent-fork race.** `Hive::ProcessKill` can terminate the agent and every descendant whose parent, process group, and start-time identity agree across two successful process-tree snapshots, and it reports `process_tree_unavailable` when discovery cannot support that claim. The second snapshot closes the PID-reuse window between ancestry and identity reads, but a child created after confirmation can still escape before the captured processes are stopped. Fully closing this race requires durable OS-level containment such as a cgroup (or an equivalent cross-platform process-lifetime boundary); repeated best-effort snapshots can narrow but cannot remove the race.
+
+### Resolved
+
+#### macOS PID-reuse fallback
+
+##### Source S28, lines 779–779: Open questions about the codebase
+
+5. ~~**macOS PID-reuse fallback**~~ — closed 2026-04-25. `Lock#process_start_time` now tries `/proc/<pid>/stat` first, falls back to `ps -o lstart= -p <pid>` on macOS / BSD / containers without `/proc`. Returns nil only when neither source works.

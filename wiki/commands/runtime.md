@@ -2,7 +2,7 @@
 title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/worktree.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [command, sqlite, status, read-only, audit]
 ---
 
@@ -109,3 +109,30 @@ current databases do not require another conversion.
 Tests: `test/unit/runtime_control_plane/installation_test.rb`,
 `activation_gate_test.rb`, `database_test.rb`, `test/unit/commands/runtime_test.rb`,
 and the real-mount `test/integration/status_read_only_test.rb` gate.
+
+## Known gaps
+
+### Dogfood runtime identity awaits installed replacement proof (2026-08-25)
+
+#### Source S68, lines 1566–1576: Dogfood runtime identity awaits installed replacement proof (2026-08-25)
+
+Source contracts now expose the active runtime channel, exact build SHA, and
+deployment ID through version, operational, daemon, and web status. The
+canonical Hive skill tells plugins to use the normal `hive` command and not
+bypass dogfood for another binary, registry, daemon, or web service. The
+machine-local dogfood launcher and service overrides are deployment-owned and
+not stored in this repository, so this remains unproven as an end-to-end
+installed flow until a later authorized dogfood cutover supplies all three
+`HIVE_RUNTIME_*` values, restarts the single existing daemon/web units, and an
+unchanged installed plugin observes the matching status identity.
+
+### Read-only `runtime projects` worktree roots (2026-10-30)
+
+#### Source S86, lines 1807–1813: Read-only `worktree status` and `runtime projects` worktree roots (2026-10-30)
+
+- `hive runtime projects` reports a relative `worktree_root` override
+  expanded against the caller's current directory because that is what
+  `Hive::Worktree.canonical_root` does everywhere; whether Hive should
+  instead resolve relative overrides against the project root is undecided.
+- `worktree_root` is read from raw project config without full validation, so
+  a project whose config Hive would otherwise reject still reports a root.

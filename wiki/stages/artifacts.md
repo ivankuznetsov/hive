@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-09-06
+updated: 2026-11-02
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -383,3 +383,111 @@ and reviewer capability. Legacy media follows in a visibly labelled
 - [[stages/review]] · [[stages/finalize]]
 - [[state-model]] · [[commands/evidence]] · [[commands/web]]
 - [[modules/config]] · [[modules/workflows]]
+
+## Known gaps
+
+### Automatic outcome capture remains unreliable (2026-09-06)
+
+#### Source S09, lines 152–172: Automatic outcome capture remains unreliable (2026-09-06)
+
+Execution safeguards (2026-09-14) also tell planning, implementation, and review
+agents not to turn collection limitations into implementation blockers. These
+instructions guide semantic judgments; they do not prove that every provider
+will distinguish missing evidence from a real defect. Capture-tool improvements
+remain deferred. Concrete prerequisite inspection is likewise planner guidance,
+not an inferred dependency graph or a guarantee that an older execution checkout
+matches every semantic assumption in a plan. External history rewrites still
+require manual baseline reconciliation when the new entry check rejects them.
+Task-scoped planners may lack source access: they record unverified prerequisites
+for inspection by the executor in its real checkout, without expanding planner
+permissions or treating unavailable inspection as proof of a missing dependency.
+
+Dogfood producers can still fail to obtain controller screenshot receipts or
+start the target application. The artifact stage now treats these as best-effort
+warnings, not task-completion blockers, without labelling missing or rejected
+proof accepted. Rebuilding capture and the Screenote integration is deferred;
+this change makes workflow progress independent of that larger project, not
+the evidence pipeline reliable. Real implementation rework and source-integrity
+failures retain their blocking behavior.
+
+### Portable project-owned artifact-provider custody
+
+#### Source S25, lines 596–602: Current release gap
+
+- Project-owned artifact providers currently require Linux
+  `PR_SET_CHILD_SUBREAPER` plus `/proc` ancestry so detached descendants remain
+  in exact custody through output drain and teardown. Provider capture fails
+  closed on macOS/BSD rather than weakening that guarantee. A portable custody
+  primitive and a live conventional-project browser provider remain follow-up
+  work; the built-in web recorder is unaffected.
+
+### Outcome evidence needs one fully accepted live package (2026-08-14)
+
+#### Source S62, lines 1435–1494: Outcome evidence needs one fully accepted live package (2026-08-14)
+
+A read-only retrospective ran the completed conditional-plan-critique task at
+source `48223ab9c2fab1b9c8716d759da6eea968d3fb7e` over its reconstructed exact
+159-path implementation range. Inference produced four outcome claims with the
+appropriate video, screenshot, and terminal proof kinds, plus two supporting
+documentation/test exclusions. Three fresh reviewer passes accepted both
+exclusions but rejected every behavior claim: the producer repeatedly supplied
+fixture-like summaries, selected test output, terminal-styled composites, or
+curated commandless output instead of real product surfaces and transitions.
+The controller exhausted its two recaptures and published a semantic blocked
+package rather than accepting the historical synthetic Hivebox screenshot and
+two-second board-to-task video.
+
+This proves the fail-closed reviewer and bounded-recapture path against the
+historical bad-evidence class.
+
+Latest refresh (2026-08-14): Hive now ships one preflighted capture toolkit:
+pinned native agent-browser plus managed Chrome for Web, a native Ruby PTY
+recorder for terminal/TUI, and ffmpeg/ffprobe/Tesseract admission. Mechanical
+source identity, sizes, hashes, and reviewer hash inventory moved into the
+controller, and missing claim proof can be retained as `revise` instead of
+collapsing into an undurable StoreError. Focused tests, a native terminal CLI
+smoke, and a real 0.34.0 agent-browser bootstrap/managed-Chrome launch produced
+and decoded a PNG/WebM locally. A second exact-range retrospective then inferred
+three grouped claims. Its actual Hive Web coverage-blocked task screenshot was
+independently accepted: it showed review identity, failed/unsupported coverage,
+reviewer routes, audit receipts, state-valid waiver/downgrade controls, and no
+execution action. Both terminal claims remained `revise` because their casts
+summarized probes rather than driving critique, planner revision, verification,
+real cross-surface actions, and stale-token denial. After three attempts Hive
+published `blocked` with those exact reasons; it did not discard the accepted
+Web proof or overstate package completion. The run also exposed and fixed
+keep-alive Host rewriting and raw browser-daemon output custody. (The prewarmed
+Hivebox image named here as a CI merge gate was later removed by ADR-055.) Keep this gap open until a current task publishes a fully accepted
+package from genuine Web/CLI/TUI or document behavior without weakening the
+reviewer contract.
+
+The 2026-08-14 review hardening replaced the producer-visible gateway socket
+with a bounded controller mailbox, enabled Codex's managed limited network proxy
+with local binding but no domains, moved browser state outside the producer
+write root, and requires controller receipts for screenshot/video/terminal
+representations. Media sizes are checked before hashing/copying, and Hive web
+package listing now validates immutable metadata without rerunning OCR/ffmpeg
+for every retained file; selected downloads still recheck exact size/digest.
+Focused tests pin these boundaries, but a fully accepted live provider package
+through the new mailbox/network configuration remains part of this open gap.
+
+A frozen four-task retrospective over 350 exact changed paths sharpened this
+gap. Legacy marked all four tasks complete even though manual policy review
+found zero complete evidence packages; the new controller blocked all four,
+preventing every false completion. It accepted 2 of 9 final claims and all 9
+supporting exclusions, but accepted zero complete packages. Managed Web,
+terminal, and document capture all operated; the runs instead exposed omitted
+promised outcomes, claims too broad for one artifact, unreachable historical
+Web fixtures, and a producer substituting a custom script for the shipped CLI.
+One visual-custody contract defect was fixed, and a post-fix CLI inference rerun
+restored the omitted compatibility outcome and split one broad claim into three.
+Keep the gap open until at least one exact-range Web package and one CLI/TUI
+package are fully accepted without weakening the 4/4 false-completion result.
+
+### Linux ARM64 browser capture strategy (0.7.3)
+
+#### Source S80, lines 1747–1749: 0.7.3 distribution follow-up
+
+- Built-in browser capture on Linux ARM64 needs an explicit supported browser
+  strategy; Chrome for Testing has no ARM64 Linux payload. (The discontinued
+  Hivebox image skipped prewarming there; native ARM64 hosts share the gap.)

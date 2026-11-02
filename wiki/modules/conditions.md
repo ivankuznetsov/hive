@@ -3,7 +3,7 @@ title: Generation-scoped task conditions
 type: module
 source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/task_projection/reader.rb
 created: 2026-07-17
-updated: 2026-09-01
+updated: 2026-11-02
 tags: [conditions, projection, journal, execute, migration, bounded-storage]
 ---
 
@@ -100,6 +100,8 @@ while the authoritative journal retains the full audit.
 
 ## Authority migration
 
+For the retained uncertainty and historical evidence, see [Execute condition shadow rollout lacks live parity volume (2026-07-17)](#execute-condition-shadow-rollout-lacks-live-parity-volume-2026-07-17).
+
 Project config accepts `markers`, `shadow`, or `conditions`; only a
 `4-execute` override can select condition authority in increment 1. A legacy
 task remains marker-authoritative until a real supervised attempt exists.
@@ -131,3 +133,32 @@ serialization compatible with the existing valid-text fingerprints.
 Marker parsing also returns UTF-8-tagged attribute and raw-marker strings after
 the bounded binary scan, preserving invalid bytes without replacement. This
 protects other JSON and generation consumers that use markers directly.
+
+## Known gaps
+
+### Execute condition shadow rollout lacks live parity volume (2026-07-17)
+
+#### Source S43, lines 1086–1109: Execute condition shadow rollout lacks live parity volume (2026-07-17)
+
+Generation-scoped execute conditions, deterministic replay, marker/shadow/
+conditions modes, and the sanitized task-1849 golden fixture are covered in
+source and tests. Authenticated replay, future-schema rejection, short-write
+completion, partial-append rollback, journal/telemetry separation, and cached
+snapshot attempt revalidation are fault-injection/unit pinned, but have not
+been exercised against a live task
+journal under real disk pressure. No production project has yet supplied the promotion bar of
+at least 100 categorized live transitions across commit success, research
+success, no-change, agent-loss, and operator-repair with zero unexplained
+mismatches and an empty allow-list. Projects must remain on marker or shadow
+authority until operators collect that evidence; Hive never auto-promotes.
+The daemon's terminal/lost `AttemptObserver` path is likewise unit-pinned but
+has not been live-smoked with a real detached execute worker failing after its
+last boundary observation and then surfacing the updated gate through status.
+Missing/empty post-handoff journals, failed-first-append retry fsync, causal
+predecessor ordering under clock regression, terminal-state snapshot
+invalidation, structured condition recovery actions, and durable forced-
+override visibility are also unit/fault-injection pinned only. The rollout
+still has no project-scoped promotion/rollback CLI or public snapshot-rebuild
+command; those are operator-ergonomics follow-ups rather than authority gaps,
+because marker mode remains default, status replays snapshots read-only, and
+promotion is deliberately explicit/manual.

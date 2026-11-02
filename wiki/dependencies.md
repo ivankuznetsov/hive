@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -298,3 +298,13 @@ an ambiguous command-not-found failure.
 Retired. The release and recovery workflows no longer build container images
 (ADR-055), so `docker/setup-buildx-action`, `docker/login-action`, and
 `docker/build-push-action` are no longer pinned anywhere in `.github/`.
+
+## Known gaps
+
+### Resolved
+
+#### Root `Gemfile.lock` still lists `rack-test` after the manifest removal.
+
+##### Source S28, lines 853–853: Open questions about the codebase
+
+40. ~~**Root `Gemfile.lock` still lists `rack-test` after the manifest removal.**~~ — closed 2026-06-12. Commit `2e307a19` relocked the root bundle after commit `b0a31edf` removed `gem "rack-test", "~> 2.2"` from the root `Gemfile`. Current root `Gemfile.lock` no longer resolves `rack-test` and no longer lists it under top-level `DEPENDENCIES`; the separate web bundle still resolves `rack-test` transitively through Rails/Capybara for upload integration tests.

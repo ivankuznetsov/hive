@@ -3,7 +3,7 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-08-12
+updated: 2026-11-02
 tags: [config, models, routing, validation]
 ---
 
@@ -114,3 +114,14 @@ After execution, a separate journal observation may add requested and actual
 backend/model values, route-resolution status, outcome kind, and usage. It
 never overwrites the generation-scoped requested identity, and it never copies
 the requested alias into actual identity without sanitized-export evidence.
+
+## Known gaps
+
+### Packaged mixed model-profile evidence
+
+#### Source S25, lines 684–688: Current release gap
+
+- The packaged mixed Sol/Terra/Grok and Opus/Fable profiles, provider-neutral
+  model routes, explicit reviewer identities, and combined Sol-runner selection
+  are locally test-pinned; the Opus/Fable profiles now have one paid end-to-end
+  cell each, while the remaining profiles retain their existing evidence gaps.

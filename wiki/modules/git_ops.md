@@ -3,7 +3,7 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-08-26
+updated: 2026-11-02
 tags: [git, init, commit]
 ---
 
@@ -87,6 +87,8 @@ Both the staged-emptiness check (`git diff --cached --quiet -- <paths>`) and the
 
 ## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false, after_stage: nil)`
 
+For the retained uncertainty and historical evidence, see [Conservative Git index-lock recovery (2026-09-07)](#conservative-git-index-lock-recovery-2026-09-07).
+
 Records a hive-state audit commit. `GitOps` acquires the project commit lock at
 this shared mutation seam, so every caller is serialized, including
 `Hive::DisplayName::Generator` and Patrol Fix transition commits. Existing
@@ -109,7 +111,7 @@ The central lock covers runtime commits after the hive-state worktree exists.
 `hive_state_init` remains a separate lifecycle boundary: it must create the
 orphan worktree before a worktree-local `.commit-lock` can be opened, so
 simultaneous first initialization is not solved by `hive_commit` serialization.
-See [[gaps]].
+See [first initialization](#hive-state-runtime-commit-serialization-is-process-tested-but-first-time-bootstrap-and-the-original-live-workload-remain-separate-gaps).
 
 ## Worktree Inspection Helpers
 
@@ -133,3 +135,33 @@ See [[gaps]].
 - [[commands/init]] · [[commands/run]] · [[commands/new]]
 - [[modules/worktree]]
 - [[state-model]]
+
+## Known gaps
+
+### Is `hive/state` reachable after `git gc`?
+
+#### Source S28, lines 777–777: Open questions about the codebase
+
+3. **Is `hive/state` reachable after `git gc`?** The plan recommends `git config --add gc.reflogExpire never refs/heads/hive/state`. This is documented in [[decisions]] ADR-003 but not enforced in `Init#call`.
+
+### Local git index health affected the 2026-06-01 wiki refresh.
+
+#### Source S28, lines 786–786: Open questions about the codebase
+
+12. **Local git index health affected the 2026-06-01 wiki refresh.** `git status --short` failed with `fatal: unable to read 7afa1ea39e410defd0219acecd295e3108f5f93a`; `git ls-files -s` mapped that blob to `plugins/zoom/CONTRIBUTING.md`. The index also staged deletions for several wiki pages while the files still existed in the working tree. This refresh verified the committed docs change via `git show HEAD` and direct source reads, but a normal clean-tree check remains unresolved in this checkout.
+
+### Hive-state runtime commit serialization is process-tested, but first-time bootstrap and the original live workload remain separate gaps.
+
+#### Source S28, lines 866–866: Open questions about the codebase
+
+46. **Hive-state runtime commit serialization is process-tested, but first-time bootstrap and the original live workload remain separate gaps.** `Hive::GitOps#hive_commit` now owns the project commit lock for every scoped staging/callback/diff/commit sequence, including display-name and Patrol Fix transition callers. The lock is same-thread reentrant for transactional callers that already hold it, rejects fork-inherited ownership by PID, and is process-tested for contention and `SIGKILL` release. A direct eight-process GitOps regression also pins one successful commit per child. `GitOps#hive_state_init` still creates the orphan worktree and bootstrap commit before a worktree-local `.commit-lock` can safely exist; simultaneous first initialization therefore needs a separate project-level lifecycle lock. The historical fragment for commit `bdd9a9fa` records the original 3-of-8 `hive new` failure, but this refresh still has no external Rails/system-worker artifact reproducing that exact Hive web workload after centralization.
+
+### Conservative Git index-lock recovery (2026-09-07)
+
+#### Source S75, lines 1675–1681: Conservative Git index-lock recovery (2026-09-07)
+
+Automatic recovery requires successful process and open-file probes (`ps` and
+`fuser`). Missing tools, inaccessible process state, any Git process, and
+nonempty locks deliberately leave recovery to a later retry or operator.
+This is not general recovery of interrupted Git operations; preserved lock
+files may still require inspection on platforms without these probes.

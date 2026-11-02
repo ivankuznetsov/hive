@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-02
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -126,6 +126,8 @@ or SQL-versus-record synchronization protocol remains. Receipt digests still
 bind publication evidence; they are not a second live-state authority.
 
 ## Admission and capacity
+
+For the retained uncertainty and historical evidence, see [Ten-table runtime deployment proof](#ten-table-runtime-deployment-proof).
 
 Admission runs in one immediate SQLite transaction. It checks active
 `launching` and `running` attempts, applies the configured global/project/daily
@@ -259,3 +261,100 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+## Known gaps
+
+### Ten-table runtime deployment proof
+
+#### Source S12, lines 199–218: Ten-table runtime deployment proof
+
+The ten-table runtime and SQL-authoritative attempt records have local regression
+coverage, but have not been cut over or exercised in dogfood. The unreleased
+bootstrap schema is deliberately rewritten in place; an existing database is
+rejected by the schema fingerprint rather than silently upgraded. Deployment
+needs a separately implemented and verified cutover that preserves token usage,
+task Markdown, and journal history while rebuilding disposable runtime state.
+The current `hive migrate --all` does not convert an existing active SQLite
+installation to this schema. Neither that command nor a code-only daemon restart
+is an upgrade procedure for this change.
+
+The broad local test command on 2026-09-04 stopped at the separate Agent CLI
+Runtime OpenCode offline smoke because its default route was absent from the
+installed model inventory. Hive's separate main run completed 13,921 tests with
+one missing-identity usage fixture error and no assertion failures. The fixture
+was corrected to use a registered task ID in the dispatcher's string form;
+its 12-test integration file then passed. The final runtime-focused run passed
+450 tests. The full main suite was not repeated after that fixture-only fix;
+no coverage-gate or live-provider result is claimed.
+
+### Durable task attempts platform and restart evidence
+
+#### Source S25, lines 625–629: Current release gap
+
+- Durable task attempts are race/unit/integration-pinned and the local Linux
+  1849 subprocess replay proves caller-loss survival without a daemon. There
+  is not yet a checked-in macOS/BSD detachment run or a paid-provider,
+  multi-hour daemon-restart artifact; unsupported platforms reject before
+  acceptance rather than weakening ownership guarantees.
+
+### Durable attempt capabilities and same-UID trust
+
+#### Source S25, lines 630–640: Current release gap
+
+- Durable attempt capabilities prevent ordinary worker-environment inheritance,
+  a dedicated attempt-context store override, public context construction,
+  cross-task argv reuse, and PID/session/group substitution. The process-level
+  `HIVE_HOME`, `XDG_STATE_HOME`, and `HOME` inputs still select Hive's global
+  state root and are part of the trusted launch configuration. These guards do
+  not provide privilege separation from hostile same-UID Ruby code with
+  arbitrary environment, store, or process-internal access. Closing that
+  stronger boundary requires a broker under a separate OS identity (or
+  equivalent protected signing/storage authority), not another in-process
+  Ruby guard.
+
+### Durable capacity deferrals do not expose their limiting scope (2026-08-29)
+
+#### Source S73, lines 1655–1664: Durable capacity deferrals do not expose their limiting scope (2026-08-29)
+
+`Hive::Attempts::Dispatcher` currently returns the generic reason `capacity`
+when any global, per-project, or daily attempt limit closes between the
+daemon's controller precheck and durable admission. The daemon therefore
+conservatively treats that result as a global priority fence through the next
+authoritative full scan, including intervening changed-task ticks. This
+prevents lower-priority leapfrogging, but a rare project-only race can leave an
+unrelated slot unused for the full-scan interval plus scan time. Keep this gap
+open until durable admission emits a typed capacity scope that the row
+scheduler can preserve directly.
+
+### Attempt request-provenance upgrade awaits deployment (2026-09-06)
+
+#### Source S74, lines 1666–1673: Attempt request-provenance upgrade awaits deployment (2026-09-06)
+
+The exact-schema upgrade removing the dispatch-request foreign key is tested
+against a reconstructed copy of the preceding schema, including row preservation
+and transaction rollback. It has not been applied to dogfood. Stop all writers
+and take an external SQLite backup before the explicit upgrade described in
+[[modules/attempts]]. Request IDs already cleared by the old foreign key are not
+recovered by this change; retained IDs and future attempts are preserved.
+
+### Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+#### Source S78, lines 1706–1723: Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+The execution host uses unified cgroup v2, and a real transient
+`systemd-run --user --scope --property=Delegate=yes` scope reports delegation.
+That is not a containment proof. Both the attempt scope and its `app.slice`
+parent are owned by the same unprivileged user; the parent's directory and
+`cgroup.procs` are writable. A real workload moved its own PID from the
+delegated attempt scope into a sibling cgroup and `/proc/self/cgroup` confirmed
+the escape. The capability adapter therefore reports
+`parent_cgroup_writable`, and the arbitrary-descendant U2b/U6b success path is
+not qualified here. Increment 1 remains the delivered fail-closed behavior;
+this host must not advertise Linux backup readiness for active attempt roots.
+
+Qualifying increment 2 still needs an installation custody parent that the
+workload identity cannot write or create siblings beneath, plus real-process
+proof across fork, reparenting, `setsid`, controller restart, attempted escape,
+permission loss, and legacy work outside custody. A transient user scope alone
+continues to provide OOM isolation, not the required adversarial ownership
+boundary.

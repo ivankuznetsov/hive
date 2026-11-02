@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-09-02
+updated: 2026-11-02
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -102,3 +102,22 @@ replaced with prose or a fallback JSON document; it propagates.
 
 - [[cli]] · [[commands]] · [[commands/status]] · [[commands/web]]
 - [[modules/task_workspace]] · [[modules/workflows]] · [[token-usage]]
+
+## Known gaps
+
+### Operator-first task view Screenote evidence (2026-08-16)
+
+#### Source S23, lines 537–550: Operator-first task view Screenote evidence (2026-08-16)
+
+Local Chromium checks cover the architecture, Hive/OpenCode, and
+TopGreenDeals task surfaces at desktop and mobile sizes. They prove that the
+primary result and usage summary remain visible, exact correlated logs appear
+only for the task that needs diagnosis, raw attempts/provenance/timeline and
+raw lifecycle noise stay out of the normal view, and the pages do not overflow
+horizontally.
+
+Publishing those six captures to Screenote remains unverified on this host:
+`~/.config/hive/screenote.json` is absent and no Screenote connector is
+available to the agent. Retain this gap until a configured Screenote client
+reruns and uploads the six captures, then returns durable review URLs. This
+publication gap does not weaken the local browser acceptance evidence.

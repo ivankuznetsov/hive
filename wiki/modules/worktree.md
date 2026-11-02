@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -36,6 +36,8 @@ Hive::Worktree.materialize_pr(repo_root:, pr_number:, path:, branch:) → {path:
 ```
 
 ## `worktree_root` resolution
+
+For the retained uncertainty and historical evidence, see [Read-only `worktree status` mount proof (2026-10-30)](#read-only-worktree-status-mount-proof-2026-10-30).
 
 If passed explicitly, that's used. Otherwise:
 
@@ -373,3 +375,15 @@ All machine-readable status and repair results use `hive-worktree.v1`, with
 - [[modules/git_ops]]
 - [[stages/execute]] · [[stages/open-pr]] · [[stages/finalize]] · [[stages/done]]
 - [[state-model]]
+
+## Known gaps
+
+### Read-only `worktree status` mount proof (2026-10-30)
+
+#### Source S86, lines 1802–1806: Read-only `worktree status` and `runtime projects` worktree roots (2026-10-30)
+
+- The real-mount Docker gate (`test/integration/status_read_only_test.rb`)
+  still covers only `runtime status` and `status --operational`. `worktree
+  status` under inspection is covered by a unit test with a stubbed mount
+  confirmation and a manual user-namespace read-only bind-mount run, not by
+  the Docker gate.

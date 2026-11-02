@@ -27,6 +27,27 @@ Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
 `.llm-wiki/post-commit-refresh.sh`. Codex is the configured headless wiki agent.
 <!-- END LLM WIKI -->
 
+## Project-owned gap authoring
+
+Authoritative gap text lives under `## Known gaps` on the owning domain page.
+Read `wiki/gaps.md` first, find the owner, and update its narrative and the root
+index in the same edit. Link other affected domains to that owner. Resolve an
+item by retaining its verbatim evidence history under `### Resolved` and
+removing its root entry when no open qualification remains.
+
+The managed line “Known gaps: `wiki/gaps.md`” names the hand-maintained,
+unresolved-only index. Recording uncertainty there means maintaining the index
+alongside authoritative domain text; the index is not generated.
+
+Entry grammar: `- [Title](relative/page.md#anchor)`
+
+Example: `- [Task-journal growth and compaction](modules/events.md#task-journal-growth-and-compaction)`
+
+Only entries in that form, plus blank separators, may appear under
+`## Unresolved gaps`: no prose, summaries, or nested lists. Use one entry per
+open logical gap in alphabetical display-title order, with destination
+path/anchor as the tie-breaker. Link directly to a unique owner heading.
+
 ## Documented Solutions
 
 `docs/solutions/` contains documented solutions to past problems (bugs, architecture patterns, workflow issues, and conventions), organized by category with YAML frontmatter such as `module`, `tags`, and `problem_type`. Relevant when implementing or debugging in documented areas.

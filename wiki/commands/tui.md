@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-08-28
+updated: 2026-11-02
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, retention, pr]
 ---
 
@@ -326,3 +326,11 @@ The new-idea resolution result carries only state, exact name, and diagnostic
 detail. Numeric entry accepts only scope; name revalidation is a separate
 method. A cleared picker highlight shows the first six choices without selecting
 one until the operator explicitly moves and confirms.
+
+## Known gaps
+
+### TUI scrollable help overlay is unit-pinned but not live-terminal-smoked.
+
+#### Source S28, lines 807–807: Open questions about the codebase
+
+32. **TUI scrollable help overlay is unit-pinned but not live-terminal-smoked.** Commits `4d31fc65`, `f760bfa0`, and `0f70918a` added the bounded/wrapped help view, scroll keys, offset clamping, resize reclamping, Bubbletea mouse-cell reporting, and mouse-wheel translation. `test/unit/tui/views/help_overlay_test.rb`, `test/unit/tui/key_map_test.rb`, `test/unit/tui/update_test.rb`, and `test/unit/tui/bubble_model_test.rb` cover the renderer, key mapping, state transitions, and mouse-message adapter. This refresh did not find an in-tree PTY or Charm smoke artifact proving the full operator path in a real terminal: launch `hive tui`, press `?`, scroll with keys and mouse wheel, resize while scrolled, close with `q` / `Esc` / `?`, and verify the tiny-terminal fallback.

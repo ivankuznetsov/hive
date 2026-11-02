@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-02
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -1474,7 +1474,7 @@ provider replays and timing remain separate verification gates.
 - [[modules/agent]]
 - [[modules/task_workspace]]
 - [[e2e]]
-- [[gaps]]
+- [Known gaps](#known-gaps)
 
 The command-owner guard checks each named cell in shared command-contract tables.
 Regression probes delete one cell at a time and reject command-specific contract
@@ -1485,3 +1485,115 @@ Active-row reuse regressions in `commands/status_test.rb`,
 classification per candidate, prepared-folder admission, project-local fallback,
 captured invalid-row membership, and matching TUI admission context. Status
 tests also preserve retention-boundary and internal archive-index contracts.
+
+## Known gaps
+
+### Test performance measurement limits
+
+#### Source S11, lines 187–197: Test performance measurement limits
+
+The checked-in shard timings come from three completed nightly seeds on
+`cce8c398b`, run `33848365560`; that sweep reported missing-history failures and
+one provider-exit race, so the snapshot is a scheduling estimate, not a clean
+performance acceptance result. Both issues are addressed by the test-flow
+change; a future hosted run must establish the new CI wall clock. Timing-guided
+selection is not used to skip tests. The local task-capture profile took 16.7s
+versus a nightly 178s mean, so no timeout reductions were made from that mismatch.
+Focused source-to-test mapping cannot establish every transitive consumer;
+shared infrastructure falls back broadly and the full coverage gate remains.
+
+### CI velocity measurement gaps (2026-08-22)
+
+#### Source S21, lines 496–509: CI velocity measurement gaps (2026-08-22)
+
+PR #1167 now keeps required CI on the hosted-proven six-way byte partition and
+adds a complete-set nightly seed-sweep producer. Focused tests prove the sweep
+starts, admits exactly seeds 101/202/303 with one shared suite manifest, a
+completed suite load, and one positive test count, rejects partial or
+incompatible inputs before deriving artifacts, and preserves a
+complete failing analysis before its final red verdict. The scheduled workflow
+does not exist on the default branch yet, so there is no hosted three-seed
+artifact to justify runtime-based repartitioning or an evidence-backed retry
+entry. Those consumers remain deliberately absent until a later reviewed PR
+can cite the real artifact. The new absolute TUI latency job is likewise
+source- and local-run-pinned but has no stable hosted baseline yet; its signal
+is advisory while the deterministic scale gate remains required.
+
+### Golden-path CI flake fixes are source-pinned but not post-fix CI-verified in-tree.
+
+#### Source S28, lines 863–863: Open questions about the codebase
+
+45. **Golden-path CI flake fixes are source-pinned but not post-fix CI-verified in-tree.** Commit `798beb74` changes `web/test/e2e/golden_path_e2e.rb` so the browser test reads the newly created task slug from one current-DOM JavaScript query instead of retaining a `.task-row` Capybara element across daemon-driven Turbo replacements. Follow-up changes wait for the daemon's `needs_input` classification and a distinct `brainstorm.md` mtime tick before submitting the answer, and fix `hive status --json` to emit subsecond `mtime` / `folder_mtime` values so daemon edit-resume baselines are compared against the same precision they store. Commit `d76b3f60` then fixes the adjacent PR #480 failure by capturing the slug while the status grid is still visible and carrying that value into `wait_for_answer_window!`, rather than calling a nonexistent `task_slug` helper after task-page navigation. This refresh inspected the committed diff, row markup, golden-path E2E source, prior wiki fragments, and testing docs; the checked-in fragment records local Rails web/e2e/rubocop verification, but this refresh did not find an in-tree artifact showing the PR #480 `hivebox web (Rails tests + system)` job passing after the `NameError` fix.
+
+### PR #512 coverage-gate repair is focused-test pinned but not hosted-CI verified in-tree.
+
+#### Source S29, lines 923–923: 2026-06-16/17 refresh uncertainty
+
+49. **PR #512 coverage-gate repair is focused-test pinned but not hosted-CI verified in-tree.** Commit `03ba06b9` added regressions for the two lines that made the Ruby CI coverage gate red: `test_wall_clock_returned_from_triage_retry_yields_review_stale` proves `run_triage_with_retries` returning `:wall_clock_exceeded` becomes `REVIEW_STALE reason=wall_clock`, and `test_dry_run_digest_complete_raise_is_isolated_as_a_fatal_event` proves dry-run digest pseudo-child completion write failures log `:fatal` instead of crashing the dispatcher tick. The committed fragment records the failed job's uncovered-line evidence and [[testing]] now names both contracts, but this refresh did not find an in-tree artifact showing the hosted Ruby CI / `bundle exec rake coverage` job passing after `03ba06b9`.
+
+### Ubuntu 26.04 CI compatibility (2026-10-26)
+
+#### Source S90, lines 1851–1858: Ubuntu 26.04 CI compatibility (2026-10-26)
+
+CI is pinned back to Ubuntu 24.04 after the `ubuntu-latest` transition exposed
+Playwright 1.60.0's unsupported-platform error and two artifact-sandbox test
+failures. The Playwright cause is confirmed; the sandbox failures passed on the
+local host but have not been reproduced on Ubuntu 26.04, so their precise
+platform incompatibility remains unconfirmed. A future runner/Playwright
+upgrade should validate both paths before the pin is removed.
+
+### Resolved
+
+#### Parallel Hive web CI exact-head evidence (2026-08-14)
+
+##### Source S19, lines 446–455: Parallel Hive web CI exact-head evidence (2026-08-14)
+
+The serial Hive web job took 441 seconds in exact-head run `31818138021`, led
+by the 184-second Playwright system-test step and the 149-second Rails
+integration step. CI now schedules integration/lint, system, and golden-path
+cells independently behind the existing aggregate check name. Exact-head run
+`31819264376` passed all three cells and the aggregate. From the first web-cell
+start through aggregate completion the path took 246 seconds, down from the
+441-second serial job; the system, integration/lint, and golden-path cells took
+220, 115, and 111 seconds. This closes the hosted-concurrency uncertainty.
+
+#### Sharded CI coverage exact-head evidence (2026-08-14)
+
+##### Source S20, lines 457–494: Sharded CI coverage exact-head evidence (2026-08-14)
+
+The four-way coverage collector and downstream exact merge are locally pinned
+at the harness level: all four disjoint file partitions ran, and their 1,546
+raw process results merged to 84,609/84,609 covered executable lines with no
+unloaded files or result errors. Three collectors were green. The fourth
+completed in 560 seconds but one 0.5-second subprocess-start assertion lost a
+race while another repository-wide test process saturated the host; that test
+passed immediately in an isolated coverage reproduction. The source-byte
+heuristic is intentionally only an initial partition, and local green shard
+wall times ranged from 187 to 486 seconds. Exact-head GitHub Actions run
+`31818138021` then proved artifact upload/download, the exact
+100% merge, and the unchanged protected aggregate. The workflow completed in
+484 seconds versus the 1,592-second four-run `main` median; hosted shard jobs
+took 300, 284, 430, and 388 seconds, and the merge gate took 44 seconds. This
+closes the missing hosted-proof gap, while confirming that source bytes are
+only an approximate runtime weight: the 146-second fastest-to-slowest spread
+identified the third partition as the long pole. A second hosted run measured
+that same collector at 440 seconds while the others took 244--294 seconds. CI
+therefore split that measured hot partition into two source-byte-balanced
+halves. Five-way exact-head run `31821818842` passed at 469 seconds overall;
+the two halves took 219 and 280 collector seconds. The unchanged fourth
+original partition then became the 370-second long pole, consistent with its
+368- and 294-second samples in the prior runs. Six-way exact-head run
+`31823734367` passed all 23 jobs at 394 seconds overall. The new pair took 154
+collector seconds each (172- and 176-second jobs), reducing the prior
+long-pole step by 58.4% while exact 100% coverage and the protected aggregate
+remained green. This closes the final hosted-timing gap for the six-way design.
+
+Post-review accounting found that flattened artifact download consumed four
+fewer process results than the collectors produced in both sampled six-way
+runs. The branch now preserves one directory per artifact and requires a
+revision/run/Ruby/shard/test-file/result-list manifest before merging. Focused
+tests prove same-basename preservation and rejection of missing, duplicate,
+foreign, empty, corrupt, error-marked, and unlisted inputs. Rebased exact-head
+run `31861365214` consumed all 1,727 process results across six shards, retained
+100% line coverage, and passed all 23 gates. This closes the artifact-transport
+and source-catalog ownership proof gap.

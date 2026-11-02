@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/billing_evidence.rb, lib/hive/model_pricing.rb, lib/hive/task_workspace/resources.rb, lib/hive/task_workspace/usage.rb, config/model-pricing.v1.yml, lib/hive/patrol/launch_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-08-30
+updated: 2026-11-02
 tags: [observability, usage, pricing, billing, tui, sqlite, agent]
 ---
 
@@ -242,4 +242,12 @@ See [[commands/tui]] for the broader TUI mode and keybinding contract.
 - [[modules/agent_profile]]
 - [[modules/task_workspace]]
 - [[stages/index]]
-- [[gaps]]
+- [stream refinement](#codex-and-pi-token-usage-payloads-need-real-stream-refinement)
+
+## Known gaps
+
+### Codex and Pi token usage payloads need real-stream refinement.
+
+#### Source S28, lines 783–783: Open questions about the codebase
+
+9. **Codex and Pi token usage payloads need real-stream refinement.** [[token-usage]] ships zero-fill extractors for missing or unrecognized usage payloads so hive-driven spawns still record rows, but the exact non-zero JSON shapes should be updated after one captured Codex and one captured Pi spawn.

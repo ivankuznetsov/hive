@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-09-06
+updated: 2026-11-02
 tags: [stage, pr, github]
 ---
 
@@ -100,3 +100,33 @@ Revalidation still checks the exact candidate and change range before effects.
 ## Backlinks
 
 - [[stages/execute]] · [[stages/review]] · [[state-model]] · [[modules/patrol]]
+
+## Known gaps
+
+### Managed draft-PR handoff needs hosted crash-recovery smoke (2026-07-21)
+
+#### Source S47, lines 1179–1190: Managed draft-PR handoff needs hosted crash-recovery smoke (2026-07-21)
+
+The terminal worktree-agent and draft-PR handoff are locally pinned with real
+Git worktrees plus injected remote/GitHub seams. Tests cover hardened
+post-agent Git, exact-OID push intent, PR create intent, ambiguous-result
+reconciliation, byte-exact report resume, terminal artifact repair, no-fix
+cleanup retry, and quarantine redaction retry. No checked-in artifact yet runs
+the complete path against a disposable GitHub repository: ordinary exact-OID
+push, draft PR creation/reconciliation, and process death after each mutation
+intent followed by a separate-process resume. Keep this as an operational
+verification gap; the controller remains fail-closed when a result is not
+uniquely observable.
+
+### Open PR custody documentation lost detail in the publication merge (2026-08-21)
+
+#### Source S65, lines 1527–1536: Open PR custody documentation lost detail in the publication merge (2026-08-21)
+
+`wiki/stages/open-pr.md` was rewritten around the shared
+`Hive::GithubPublication` engine while `main` independently documented the
+open-pr agent custody window and the pre-push secret-scan ordering. The merge
+kept the consolidated engine description, so the custody anchor set, the
+`open_pr_tampered` restore contract, and the ownership-lock interaction with a
+late terminal execute observation are no longer described on the page even
+though the behaviour still exists in `lib/hive/stages/open_pr.rb`. Re-document
+those steps against the consolidated engine.

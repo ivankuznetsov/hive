@@ -6,7 +6,7 @@ This project has an LLM-maintained knowledge base in `wiki/`.
 - `wiki/index.md` — catalog of all pages
 - `wiki/log.md` — compiled append-only changelog
 - `wiki/log.d/` — per-change changelog fragments
-- `wiki/gaps.md` — known gaps and open questions
+- `wiki/gaps.md` — hand-maintained unresolved gap index; see Project-owned gap authoring below
 - `raw/notes/` — manually added reference material
 
 **Always check wiki/ before answering questions about this project's architecture, patterns, or decisions.**
@@ -16,7 +16,9 @@ When you learn something new about the project or make a decision:
 2. Update wiki/index.md if a new page was created
 3. Add a wiki/log.d/<timestamp>-<slug>.md fragment; do not edit compiled wiki/log.md directly in feature PRs
 
-Never hallucinate. Ground everything in code or existing wiki pages. If unsure, note it in wiki/gaps.md.
+Never hallucinate. Ground everything in code or existing wiki pages. If unsure,
+follow Project-owned gap authoring below, updating the domain narrative and
+wiki/gaps.md together.
 
 Use [[page-name]] backlinks between wiki pages.
 
@@ -68,3 +70,24 @@ When code behavior, architecture, commands, or dependencies change:
 Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
 `.llm-wiki/post-commit-refresh.sh`. Codex is the configured headless wiki agent.
 <!-- END LLM WIKI -->
+
+## Project-owned gap authoring
+
+Authoritative gap text lives under `## Known gaps` on the owning domain page.
+Read `wiki/gaps.md` first, find the owner, and update its narrative and the root
+index in the same edit. Link other affected domains to that owner. Resolve an
+item by retaining its verbatim evidence history under `### Resolved` and
+removing its root entry when no open qualification remains.
+
+The managed line “Known gaps: `wiki/gaps.md`” names the hand-maintained,
+unresolved-only index. Recording uncertainty there means maintaining the index
+alongside authoritative domain text; the index is not generated.
+
+Entry grammar: `- [Title](relative/page.md#anchor)`
+
+Example: `- [Task-journal growth and compaction](modules/events.md#task-journal-growth-and-compaction)`
+
+Only entries in that form, plus blank separators, may appear under
+`## Unresolved gaps`: no prose, summaries, or nested lists. Use one entry per
+open logical gap in alphabetical display-title order, with destination
+path/anchor as the tie-breaker. Link directly to a unique owner heading.

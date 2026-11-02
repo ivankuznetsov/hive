@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -843,3 +843,95 @@ because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
 
 Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.
+
+## Known gaps
+
+### Archive listing is unit-pinned but not live-smoked.
+
+#### Source S28, lines 799–799: Open questions about the codebase
+
+23. **Archive listing is unit-pinned but not live-smoked.** Commits `01e86e1a` through `93fb45fb` add `Hive::ArchiveFilter`, required `tasks[].folder_mtime`, daily text/TUI hiding for old `9-done` rows, an unfiltered TUI Archive pane, and no-target `hive archive` listing/JSON filtering through `Hive::Commands::Status`; the archive-filter cleanup removes the dead `marker_name` input from `ArchiveFilter.hide?`, making the marker-agnostic age policy explicit. Focused unit/integration tests cover the policy, status text/JSON boundaries, TUI projection/cursor behavior, CLI routing, and empty archive message, including marker-independent hiding and fail-open behavior when no timestamp is available. This refresh did not find an in-tree live artifact from a real registered project showing the full operator workflow (`hive status`, `hive tui` -> `z`, `hive archive --json`) after aged done folders exist.
+
+### Status stage-move race handling is unit-pinned but not live-smoked.
+
+#### Source S28, lines 859–859: Open questions about the codebase
+
+45. **Status stage-move race handling is unit-pinned but not live-smoked.** Commits `586b9d31`, `a274bf42`, and `52585bc7` make `Hive::Commands::Status#collect_rows` tolerate task folders that vanish mid-scan and then drop duplicate-slug rows only when one duplicate folder no longer exists, preventing transient old-stage/new-stage duplicates in `hive status --json` and the TUI during ordinary forward workflow moves. Follow-up commits `0976c9ee`, `02ebf151`, `85e76754`, `c6543d8f`, `b018341b`, and `f6f03c59` narrow the `InvalidTaskPath` skip back to `Hive::Task.new`, document the folder-level `ENOENT` re-raise premise, and add focused tests for non-finalize forward moves, surviving-folder state-file `ENOENT`, the vanish test double's `to_path` timing, and three-member duplicate groups. This refresh still found no live TUI/daemon artifact showing a real task stage transition while the dashboard polls at 1 Hz; backward moves to an already-scanned stage are source-documented as a one-poll disappearance rather than live-smoked.
+
+### Status/TUI/Telegram PR URL surfacing is unit-pinned but not live-smoked.
+
+#### Source S29, lines 924–925: 2026-06-16/17 refresh uncertainty
+
+49. **Status/TUI/Telegram PR URL surfacing is unit-pinned but not live-smoked.** Commits `42fd5e2b`, `5e4e1ffa`, `408192cb`, `50552435`, and `06e37a80` add `tasks[].pr_url` to the current `hive-status` task payload, preserve it through `Hive::Bot::StatusWatcher` and `Hive::Tui::Snapshot::Row`, add `Hive::Pr.number`, render fixed PR columns in text status/archive output and the TUI, render Telegram `/status`/`/queue` PR links with HTML escaping, and append a PR link to the existing `ready_for_review` push without changing its fingerprint. Focused tests cover status extraction from `pr.md`, nil behavior before `5-open-pr` / missing / malformed sidecars, quiet mid-scan `pr.md` `ENOENT` degradation, schema required-key drift, bot row parsing, snapshot preservation, PR-number formatting, invalid URI rejection for link safety, text/archive status rendering, TUI column layout, OSC 8 hyperlink sanitization, Telegram HTML PR-link escaping, queue parse-mode forwarding, ready-for-review push enrichment, and fingerprint stability. This refresh did not find an in-tree artifact showing a real task with an opened PR feeding live `hive status` text output, a live `hive tui` TTY frame whose PR number is clickable in the operator's terminal, or a real Telegram dev chat receiving `/status` plus the open-PR push with clickable links.
+
+### Compact running status is not yet installed-plugin-smoked (2026-08-24)
+
+#### Source S67, lines 1550–1564: Compact running status is not yet installed-plugin-smoked (2026-08-24)
+
+`hive status --json` has focused source coverage and has been run from
+the source checkout against the live Hive registry. That proves the compact
+producer over current task data, but not the final installed dogfood binary plus
+authenticated Omarchy plugin invocation. Keep this gap open until the feature
+PR is deployed and the plugin's unchanged bare status command consumes
+`hive-running-status.v2` below its 1 MiB capture limit.
+
+The public fleet-wide v7 status mode is removed, but daemon, bot, TUI, and web
+still share parts of its in-process producer. Daemon and bot temporarily reach
+it through a hidden internal transport. Separate consumer-specific projection
+PRs must remove those fields and then delete the v7 schema/producer entirely;
+this PR deliberately does not combine those independent scheduler and UI
+optimizations.
+
+### Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
+
+#### Source S69, lines 1579–1594: Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
+
+As repaired during the 2026-09-09 PR sweep, in-process daemon, operational
+status, TUI, Web, and watch use the active projection; TUI/Web archive history
+is loaded on demand. The bot's internal CLI graph retains ordinary rows while
+its terminal notification recovery policy is unresolved. Focused source tests
+cover exact dependency loading and archive separation. Earlier live-registry
+measurements below predate these repairs and have not been repeated.
+This has not yet been installed or dogfooded through the managed daemon, Web,
+bot, and TUI runtimes, so do not treat source-checkout evidence as rollout
+proof.
+
+The active projection is smaller, but it is not small: the sampled registry
+still contained 249 active rows, including 152 active Patrol Fix rows. The rich
+v7 producer emitted 1,578,516 JSON bytes and took 9.56 seconds; its admission
+pre-scan alone took 2.16 seconds before the 6.30-second rich row projection.
+Removing terminal transport therefore prevents unbounded archive growth but
+does not solve active-controller scale or the duplicate active metadata reads.
+
+### Active-only bot auto_residue delivery (2026-08-28)
+
+#### Source S69, lines 1613–1617: Active-only status projections and Patrol cadence still need installed dogfood (2026-08-28)
+
+Finally, bot delivery of `auto_residue` on a row that becomes archived between
+polls has not been proven under the active-only transport. If that terminal
+transition carries a notification that was not visible before the move, the
+bot needs an exact event/receipt source instead of periodic archive scanning.
+
+### Active-row reuse fleet timing (PR #1331)
+
+#### Source S79, lines 1741–1744: Numeric dependency lookup registration coverage (2026-09-14)
+
+- PR #1331 integrated active-row reuse has a fresh classification-count regression
+  (two calls on the repaired parent, one after reuse), but no fresh fleet-scale
+  wall-clock measurement. Earlier percentage improvements are historical.
+
+### Read-only operational inspection boundaries (2026-10-14)
+
+#### Source S85, lines 1787–1799: Read-only operational inspection boundaries (2026-10-14)
+
+- Immutable inspection assumes stable database bytes: no concurrent writer may
+  modify the same database through another read-write mount while the audit is
+  running. A torn read can surface as SQLite corruption and retain the existing
+  backup guidance even when the durable database is healthy. The one-shot
+  fallback does not coordinate writers it cannot see across mounts.
+- Paired WAL/SHM inspection depends on the host SQLite and kernel being able to
+  open or recover the WAL index without writing to the mounted state. The Docker
+  gate accepts only a recovery-specific typed SQLite failure for that excluded
+  host capability; it does not treat unrelated command or storage failures as a
+  valid degraded outcome. This documents the exclusion and does not claim that
+  a degraded run was observed.

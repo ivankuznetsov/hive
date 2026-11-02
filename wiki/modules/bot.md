@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-08-29
+updated: 2026-11-02
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -290,3 +290,29 @@ a full bot restart.
 - [[commands/status]] · [[modules/task_action]]
 - [[modules/daemon]]
 - [[decisions]] (ADR-026)
+
+## Known gaps
+
+### Bot suppress-while-answering behavior is unit-pinned but not live-smoked.
+
+#### Source S28, lines 792–792: Open questions about the codebase
+
+16. **Bot suppress-while-answering behavior is unit-pinned but not live-smoked.** Commits `0d9bf875` (merged PR #281) and the PR #281 review follow-up add `ConversationStore#active_for_slug?`, inject the store into `NotificationDispatcher`, wire the same store through `Supervisor` startup and SIGHUP reload, mutex-guard the store for Telegram/status-poll thread sharing, scope suppression by project+slug where possible, and log `notification_skipped_active_conversation`. `test/unit/bot/conversation_store_test.rb` and `test/unit/bot/notification_dispatcher_test.rb` cover TTL expiry, same-slug suppression, different-slug/project non-suppression, nil-project fallback, recovery/error non-suppression, no stale dedup entry, re-alert after conversation end, and concurrent access. No artifact was found showing a live Telegram bot plus daemon WAITING-flap reproduction after the change.
+
+### Telegram idea attachments and voice notes need live Bot API/download smoke evidence.
+
+#### Source S28, lines 795–795: Open questions about the codebase
+
+18. **Telegram idea attachments and voice notes need live Bot API/download smoke evidence.** The 2026-06-03 wiki refresh verified commit `af183c0b` against router/handler source and the local unit/integration tests that cover media classification, project-pick collection, and `commit_idea` routing. The 2026-06-05 voice refresh verified commits `e96e024b`, `1e61c1ff`, `9a79198a`, `a740bab7`, and `21813bb2` against Telegram voice metadata parsing, `Hive::Bot::Transcriber`, transcription config validation, transcript draft phases, router/handler confirm/edit/discard routing, and focused unit tests. The checked-in `test/fixtures/voice/voice-idea.oga` fixture now lets the secret-gated voice E2E run when credentials are present, and `TG_IDEA_MODE=voice test/e2e/tg/run_idea_e2e.sh` seeds both a new audio idea and an audio `/answer` path. There is still no in-tree artifact proving a real Telegram `getFile` + download + `Hive::Commands::New#call!` capture or audio answer write has been smoke-tested against the live Bot API, nor an artifact proving live OpenAI audio transcription with `HIVE_WHISPER_API_KEY`.
+
+### Bot Codex draft-assist retirement is source/unit-pinned but not live-smoked.
+
+#### Source S28, lines 806–806: Open questions about the codebase
+
+30. **Bot Codex draft-assist retirement is source/unit-pinned but not live-smoked.** Commit `723906be` deletes `Hive::Bot::CodexConversation` and `templates/bot_brainstorm_codex_prompt.md.erb`, removes the `codex_write:` / `codex_edit:` / `codex_cancel:` callback parser branches, removes `start_codex` / `confirm_codex_draft` router actions, drops `bot.codex_budget_usd` / `bot.codex_timeout_sec`, and bumps bot structured logs to `hive-bot-log.v2` without the three `codex_*` events. Commit `c680ac29` then removes the leftover `ConversationStore` draft/confirm fields (`history`, `draft`, `awaiting_confirm`), deletes `pending_confirm_count`, and drops the unreachable `/done` pending-draft guard. Focused source-tree tests cover deterministic `:path_a` answer writes, legacy `path_a_yes` / `path_a_type` retirement replies, retired `codex_*` callback-data classification as `:unknown`, config-key removal, schema v2 validation, the smaller conversation-state shape, and `/done` dispatching directly from the active conversation. This refresh did not find an in-tree live Telegram artifact showing old Path-A buttons in a real chat steering to the deterministic answer flow, retired `codex_*` buttons degrading through the unknown-callback path, a live `:path_a` conversation writing an answer and sending the next question, or an installed log consumer accepting `hive-bot-log.v2`.
+
+### Telegram `/start` welcome is source/unit/E2E-harness-pinned but not live Bot API-smoked.
+
+#### Source S28, lines 854–854: Open questions about the codebase
+
+41. **Telegram `/start` welcome is source/unit/E2E-harness-pinned but not live Bot API-smoked.** Commit `4353734f` adds the `:slash_start` router intent and `SlashHandlers#start` welcome reply so Telegram's automatic first-contact command gets concrete `/status`, `/idea`, and `/help` next steps. `test/unit/bot/router_test.rb` and `test/unit/bot/slash_handlers_test.rb` cover classification and copy. The secret-gated Telegram E2E driver now imports `_drive.drive_start` and calls it before the text-mode `/idea` flow, so credentials-present runs exercise the live Bot API `/start` path. This refresh did not find an in-tree run artifact showing a freshly connected real chat sending `/start` to a running bot and receiving the welcome.

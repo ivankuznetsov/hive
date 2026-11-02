@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-10-16
+updated: 2026-11-02
 tags: [decisions, adr, plan-review, daily-digest]
 ---
 
@@ -1000,7 +1000,7 @@ The following stay because they serve native Hive: GitHub device-flow sign-in an
 **Status:** Active (amends ADR-051; 2026-10-15)
 **Context:** Every agent Hive launched inherited the operator's personal and project MCP servers. Background Codex runs (babysitter, patrol) loaded all of `~/.codex/config.toml` and logged OAuth `AuthRequired` errors for servers they never needed. `-c mcp_servers={}` could not help because Codex deep-merges overrides. ADR-051 had accepted that native MCPs "can affect a Hive run".
 **Decision:** Hive config is the source of truth for launched-agent MCP. Servers live in one global catalog (`mcp.servers`), filled by an explicit `hive mcp import`; projects and stages grant names with `mcp.use`, and background roles never inherit the project grant. Claude always runs with `--strict-mcp-config` and a per-launch file; Codex always runs with `--ignore-user-config` and `-c` entries, and Hive carries over the personal Codex settings it needs (model, effort, service tier, personality, providers, profiles, base URL, OAuth store, enabled managed plugins); OpenCode disables every discovered server in its config overlay; Pi runs with `--no-mcp` (Hive's Pi floor is 1.0.4); Grok is reported as unisolated by `hive doctor`. Secrets are referenced by env-var name only. OAuth logins are per agent and recorded by presence; `hive mcp login` signs an agent in against the exact entry Hive renders. Discovery failures warn and launch. `mcp.inherit_user: true` restores the old behaviour.
-**Consequences:** Native MCPs no longer affect a Hive run unless granted (the ADR-051 sentence no longer holds for MCP). Codex launches lose any `config.toml` setting outside the carried-over list, and project `.codex/config.toml` layers. The native `codex review` reviewer stays unisolated until `codex exec review` output is verified (closed 2026-10-16: it now runs `codex exec review` with the same launch; see [[modules/reviewers]]). See [[modules/mcp]], [[commands/mcp]] and [[gaps]].
+**Consequences:** Native MCPs no longer affect a Hive run unless granted (the ADR-051 sentence no longer holds for MCP). Codex launches lose any `config.toml` setting outside the carried-over list, and project `.codex/config.toml` layers. The native `codex review` reviewer stays unisolated until `codex exec review` output is verified (closed 2026-10-16: it now runs `codex exec review` with the same launch; see [[modules/reviewers]]). See [[modules/mcp]], [[commands/mcp]] and [MCP follow-ups](modules/mcp.md#pi-floor-lives-only-on-the-hive-side-2026-10-15).
 
 ## Source
 

@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/commands/digest*.rb, lib/hive/daily_digest/, schemas/hive-digest*.json
 created: 2026-08-30
-updated: 2026-09-10
+updated: 2026-11-02
 tags: [command, digest, activity, history, json, telegram, retention]
 ---
 
@@ -46,3 +46,12 @@ A missing document does not claim that historical source evidence is unavailable
 Generation and delivery are independently configured under `daily_digest`;
 see [[modules/config]]. Neither this command nor this feature authorizes releases
 or changes to external publication destinations.
+
+## Known gaps
+
+### Digest numerical scope
+
+#### Source S82, lines 1762–1764: Digest numerical scope
+
+- Digest commit and LOC totals describe the PRs merged that day. Direct commits
+  outside merged PRs are not counted. The Web label makes that scope explicit.

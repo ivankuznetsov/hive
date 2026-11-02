@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -551,6 +551,8 @@ applies, the generic force-approve control is hidden.
 
 ## Tests and proof
 
+For the retained uncertainty and historical evidence, see [Plan-review native route still needs an authorized live capture (2026-08-12)](#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12).
+
 - `test/unit/plan_review/` covers policy, identity, immutable storage, parser,
   adapter, routing, coverage, decisions, orchestration, and transition safety.
 - `test/integration/plan_review_action_test.rb` and
@@ -568,7 +570,7 @@ applies, the generic force-approve control is hidden.
 - [[stages/plan]] · [[stages/execute]]
 - [[modules/config]] · [[modules/daemon]] · [[modules/model_routing]] · [[modules/task_action]]
 - [[commands/status]] · [[commands/daemon]] · [[commands/web]] · [[cli]]
-- [[decisions]] · [[testing]] · [[gaps]]
+- [[decisions]] · [[testing]] · [native route proof](#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12)
 
 ### Conflicting automatic dispositions
 
@@ -588,3 +590,27 @@ routine work: accepted residuals at that boundary terminate with
 ### Repair label
 
 Blocked reviewer capability and execution failures share the label `Plan review needs repair`. The label does not assert that configuration is missing: disposable-worktree creation can fail even when the reviewer capability is present. The structured review blocker and route diagnostic retain the specific cause; the action key, retry policy, and execution gate are unchanged.
+
+## Known gaps
+
+### Plan-review native route still needs an authorized live capture (2026-08-12)
+
+#### Source S61, lines 1421–1433: Plan-review native route still needs an authorized live capture (2026-08-12)
+
+Deterministic policy, adapter, lineage, decision, transition-bypass, status/TUI,
+and Rails Web tests pin the conditional plan-review contract, including
+requested native Grok Build / `grok-4.6`, its `grok-4.6-build` served identity,
+and different-family independence.
+`test/smoke/plan_review_smoke_test.rb` now provides the credential-preserving
+real route proof, but it deliberately requires `HIVE_LIVE_PLAN_REVIEW=1` and is
+excluded from normal CI. Until an operator runs that opt-in smoke on the exact
+candidate and retains its sanitized receipt, native route/model/effort and
+real-provider JSON-file behavior remain source/offline-test evidence rather
+than an authenticated live claim. The default runtime still fails mandatory
+coverage closed when that capability is unavailable.
+
+### Decision-triage installed-task recovery (2026-09-13)
+
+#### Source S78, lines 1730–1731: Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
+
+- 2026-09-13: Decision-triage fixtures cover duplicate correction consolidation, retained choices, and legacy recovery. Real-provider replays of three existing reviews are in progress; live installed-task recovery is not yet verified for this change.

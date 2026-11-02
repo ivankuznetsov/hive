@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-10-02
+updated: 2026-11-02
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -54,7 +54,7 @@ Daemon and bot startup never run storage migrations. `hive migrate` and
 `hive migrate --all` cover their explicit legacy-layout conversions, not an
 upgrade of an existing active SQLite database to this rewritten bootstrap
 schema. That deployment needs a separately implemented and verified
-token-preserving cutover while writers are stopped; see [[gaps]]. Startup opens
+token-preserving cutover while writers are stopped; see [ten-table deployment](attempts.md#ten-table-runtime-deployment-proof). Startup opens
 only the current layout and rejects an incompatible schema fingerprint.
 
 ## One-shot ownership and bounded lifecycle
@@ -1554,3 +1554,58 @@ owns the durable `ScheduledSliceProducer` claim and only advances the cursor
 after successful review and finding admission.
 
 Manual Architecture discovery claims also honor the durable retry deadline. A retry during backoff cannot start review work; after the deadline, an interrupted review resumes from its completed feature checkpoints. Claim rejection reports that the job may be claimed or waiting for retry backoff.
+
+## Known gaps
+
+- [Ten-table runtime deployment proof](attempts.md#ten-table-runtime-deployment-proof)
+
+- [Linux attempt custody qualification](attempts.md#increment-2-linux-custody-is-not-qualified-on-the-execution-host-2026-09-25)
+
+### `live_task_lock` daemon behavior is unit-pinned but not live-smoked.
+
+#### Source S28, lines 784–784: Open questions about the codebase
+
+10. **`live_task_lock` daemon behavior is unit-pinned but not live-smoked.** PR #151 adds StatusConsumer parsing, stale-healer skips, and dispatcher capacity accounting for rows whose only liveness signal is a verified task `.lock`. Unit tests cover the contracts; no live daemon restart/rebase smoke artifact was found in-tree.
+
+### PR #244 final verification remains before merge.
+
+#### Source S28, lines 787–787: Open questions about the codebase
+
+13. **PR #244 final verification remains before merge.** The 2026-06-03 repair adds focused coverage for queue claim sidecars, recovery-sequence continuations, and the unbounded timeout default, but the branch still needs its final focused test/rubocop pass, `/ce-code-review`, and hosted CI before merge.
+
+### Daemon/TUI latency reductions are unit-pinned but not live-smoked.
+
+#### Source S28, lines 798–798: Open questions about the codebase
+
+21. **Daemon/TUI latency reductions are unit-pinned but not live-smoked.** Commits `0f4d9373`, `c1a63370`, and `7375c51d` remove the daemon SUCCESS cooldown, add the `daemon.fast_poll_sec` cheap child-reap/state-file mtime probe, and make `Hive::Tui::StateSource` skip `Status#json_payload` reparses when its watched mtime fingerprint is unchanged. Unit tests cover the controller, dispatcher, config bounds, and TUI state source. This refresh did not find an in-tree artifact showing a live daemon plus `hive tui` run where a completed child advances to the next stage within the intended ~1s window and the TUI avoids unchanged-status reparse work under real project load.
+
+### Leaked sandbox daemons from tests/recorders (2026-06-12)
+
+#### Source S39, lines 1020–1033: Leaked sandbox daemons from tests/recorders (2026-06-12)
+
+Six `hive daemon start` processes (cwd: pr300-review worktree, throwaway
+HIVE_HOMEs) were found running on the dev machine, leaked across the day's
+web-suite/E2E/recorder runs. At least one was DETACHED (argv without
+--foreground) while bound to a recorder sandbox's HIVE_HOME, fighting the
+recorder's own foreground daemon over the pidfile. Open questions:
+- What spawns a detached daemon with an inherited sandbox HIVE_HOME?
+  (Only Hive::Web::Supervisor uses `hive daemon start` without
+  --foreground in-tree.)
+- Should `hive daemon start` refuse to detach when HIVE_HOME looks like a
+  test sandbox, or should test helpers register an at_exit reaper?
+- A daemon whose pidfile is stolen exits silently — no dispatcher_stopping
+  event. It should log what it observed before exiting.
+
+### Increment-1 quiescence cannot create its own idle window (2026-09-25)
+
+#### Source S77, lines 1693–1703: Increment-1 quiescence cannot create its own idle window (2026-09-25)
+
+The first daemon-quiescence increment can safely acknowledge only an already-
+idle registry. Its audited launch table has no surface classified as unable to
+spawn unregistered descendants, and any agent attempt root remains
+`ownership_unverifiable` without the later delegated-cgroup custody proof.
+Operators must stop direct submissions and managed ingress with existing
+service controls, let attempts finish, and retry. A pre-drain refusal leaves
+admission open, so another submission can race that preparation. Do not close
+this gap by weakening the ownership predicate; it needs either a first-class
+idle-window coordinator or the separately verified custody increment.

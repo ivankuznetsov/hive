@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-25
+updated: 2026-11-02
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -382,6 +382,8 @@ home and matches the isolated child-environment contract used for real CLIs.
 
 ## Explicit provider-account execution and evidence
 
+For the retained uncertainty and historical evidence, see [Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)](#pigrok-concrete-default-config-discovery-needs-live-drift-monitoring-2026-07-17).
+
 An admitted explicit route overrides mutable role/profile/model configuration
 at the final `Stages::Base.spawn_agent` seam. Every provider-backed invocation
 inside that durable attempt uses the persisted adapter, model, effort, and
@@ -456,3 +458,23 @@ the attempt evidence channel.
 - [[modules/agent]] · [[modules/config]]
 - [[stages/review]] · [[architecture]] · [[commands/doctor]] · [[commands/setup-agents]]
 - [[decisions]] (ADR-017 / ADR-018 / ADR-019)
+
+## Known gaps
+
+### Authenticated four-agent activation remains optional and unproven for the current candidate.
+
+#### Source S30, lines 943–943: Release install follow-ups
+
+3. **Authenticated four-agent activation remains optional and unproven for the current candidate.** Offline release tests prove the canonical Hive operating policy, deterministic OpenClaw/Claude/Codex/Pi projections, exact manifest/archive digests, byte-for-byte projection identity, private exact-gem installation, and managed-web setup. `.github/workflows/live-agent-skills.yml` can still run all four authenticated native jobs and create an attested candidate-bound Check Run, but no provider credentials are configured and `release.yml` intentionally does not require it. Therefore local/hosted release gates prove packaging and invocation contracts, not real model discovery or behavior against provider services.
+
+### Published OpenClaw v0.1.3 is verified, but the new canonical projection is not yet published or live-proven.
+
+#### Source S30, lines 944–945: Release install follow-ups
+
+4. **Published OpenClaw v0.1.3 is verified, but the new canonical projection is not yet published or live-proven.** The current public `@ivankuznetsov/hive-cli` v0.1.3 payload completed ClawHub static, Skillspector, ClawScan, moderation, exact-version inspection, and clean-install byte comparison; its immutable version ID is `k9755za2qn954070sytzmw4e958awza0`, fingerprint `c172cc4a4b71ec712512c3ae64ba0c92f36d1432e29096df7b08ddb37b8357f0`, and published `SKILL.md` SHA-256 `f7a0981a6058a7b5e7fa0a385589edb558905cca295fa041c673d46a40395202`. This branch replaces the checked-in source with the generated projection from `skills/hive/`; that new payload has not been published, scanned, or invoked through a real installed OpenClaw. `hive doctor` treats the older ClawHub payload as stale when canonical provenance is absent. A future separately authorized skill publication must choose a new immutable skill version. Shortcut listings remain intentionally absent.
+
+### Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)
+
+#### Source S44, lines 1111–1113: Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)
+
+Implementation ownership resolves pi from project/home `settings.json` and Grok from project/home `settings.json` or top-level `config.toml`, extracting only provider/model identifiers. Deterministic tests cover those current shapes and ensure PR opening remains unpinned, but neither CLI publishes a Hive-stable config schema. A future upstream path/key change will intentionally fail before execute capture rather than serialize `default` or route to another provider. The next verified CLI upgrade should re-check these read-only paths and update the headless matrix plus fixtures if native configuration moved.

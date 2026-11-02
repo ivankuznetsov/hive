@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-09-25
+updated: 2026-11-02
 tags: [command, patrol, review, findings]
 ---
 
@@ -129,3 +129,7 @@ not replaced with prose or a fallback JSON document; it propagates.
 ## Backlinks
 
 - [[modules/patrol]] · [[modules/daemon]] · [[state-model]]
+
+## Related gap evidence
+
+- [Unified Patrol Fix live execution](../modules/patrol.md#unified-patrol-fix-live-execution)

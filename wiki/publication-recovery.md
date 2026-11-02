@@ -55,3 +55,7 @@ Never use a blanket rule or directory exception for a fixture finding.
 Operational status preserves a receipt-bound controller failure and its owner
 ahead of the generic no-progress scheduler brake. A controller's lack of a text
 marker is not evidence that its agent failed to produce one.
+
+## Related gap evidence
+
+- [Publication scanner evidence and limits](modules/secret_patterns.md#betterleaks-distribution-and-recovery-verification)

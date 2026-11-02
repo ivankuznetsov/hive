@@ -15,7 +15,8 @@ HIVE_CI_GATE_TESTS = {
   "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
   "test:status_read_only" => "test/integration/status_read_only_test.rb",
   "test:babysitter_dry_run_security_matrix" =>
-    "test/unit/babysitter/dry_run_security_matrix_test.rb"
+    "test/unit/babysitter/dry_run_security_matrix_test.rb",
+  "test:bench_isolation_proof" => "test/unit/bench_harness/isolation_proof_test.rb"
 }.freeze
 HIVE_CI_GATE_TEST_OPTIONS = {
   "test:babysitter_dry_run_security_matrix" =>

@@ -32,9 +32,9 @@ class BenchIsolationPolicyTest < Minitest::Test
   end
 
   def test_unknown_policy_refuses_before_spawning_and_cleans_the_prompt
-    candidates = [profile("unknown"), profile("pi", "unknown/model"), profile("pi", "openrouter/"),
+    candidates = [ profile("unknown"), profile("pi", "unknown/model"), profile("pi", "openrouter/"),
                   profile("pi", "minimax-3"), profile("pi", "qwen-2.6-coder"),
-                  profile("claude"), profile("codex", auth: "")]
+                  profile("claude"), profile("codex", auth: "") ]
     candidates.each do |candidate|
       error = assert_raises(IE::IsolationError) do
         IE.gen_exec(script: @spawn_script).call(profile: candidate, prompt: "x", cwd: @work)
@@ -72,12 +72,12 @@ class BenchIsolationPolicyTest < Minitest::Test
     BASH
     with_isolation_env("HB_API_KEYS" => "poison", "HB_CLAUDE_AUTH" => @claude_auth, "HB_CODEX_AUTH" => @codex_auth) do
       before = ENV.to_h
-      [profile, profile("claude", auth: @claude_auth), profile("codex", auth: @codex_auth)].each do |candidate|
+      [ profile, profile("claude", auth: @claude_auth), profile("codex", auth: @codex_auth) ].each do |candidate|
         capture_io { IE.gen_exec(script: script).call(profile: candidate, prompt: "x", cwd: @work) }
         expected = IE.gen_env(candidate)
 
-        assert_equal [expected.fetch("HB_API_KEYS"), expected["HB_CLAUDE_AUTH"] || "unset",
-                      expected["HB_CODEX_AUTH"] || "unset"], File.readlines(@docker_log, chomp: true)
+        assert_equal [ expected.fetch("HB_API_KEYS"), expected["HB_CLAUDE_AUTH"] || "unset",
+                      expected["HB_CODEX_AUTH"] || "unset" ], File.readlines(@docker_log, chomp: true)
         assert_equal before, ENV.to_h
       end
     end

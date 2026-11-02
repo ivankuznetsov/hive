@@ -23,7 +23,7 @@ module BenchIsolationFixture
     @isolation_dir = Dir.mktmpdir("bench-isolation")
     @work = File.join(@isolation_dir, "work with spaces")
     @bin = File.join(@isolation_dir, "bin")
-    FileUtils.mkdir_p([@work, @bin])
+    FileUtils.mkdir_p([ @work, @bin ])
     @claude_auth = File.join(@isolation_dir, "claude auth.json")
     @codex_auth = File.join(@isolation_dir, "codex auth.json")
     File.write(@claude_auth, "decoy-claude-oauth")
@@ -52,11 +52,11 @@ module BenchIsolationFixture
 
   def profile(harness = "pi", model = "openrouter/vendor/model:high", auth: nil)
     HiveBench::Profile.new(id: "test", harness: harness, model: model, bin: harness,
-                           auth_path: auth, headless_argv: ->(prompt:) { [harness, prompt] })
+                           auth_path: auth, headless_argv: ->(prompt:) { [ harness, prompt ] })
   end
 
   def fixture_env
-    KEYS.to_h { |key| [key, "decoy-#{key}"] }.merge(
+    KEYS.to_h { |key| [ key, "decoy-#{key}" ] }.merge(
       "PATH" => "#{@bin}:#{ENV.fetch("PATH")}", "HB_TEST_DOCKER_LOG" => @docker_log,
       "HB_API_KEYS" => nil, "HB_CLAUDE_AUTH" => nil, "HB_CODEX_AUTH" => nil,
       "HB_TEST_DOCKER_ERROR" => nil, "HB_TEST_DOCKER_EXIT" => nil,
@@ -67,14 +67,14 @@ module BenchIsolationFixture
 
   def with_isolation_env(overrides = {})
     values = fixture_env.merge(overrides)
-    previous = values.to_h { |key, _| [key, ENV.fetch(key, nil)] }
+    previous = values.to_h { |key, _| [ key, ENV.fetch(key, nil) ] }
     values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
     yield
   ensure
     previous.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
   end
 
-  def shell_run(overrides = {}, mode: "gen", bash: "bash", command: ["sh", "-c", "printf '%s' 'a b; $x'"])
+  def shell_run(overrides = {}, mode: "gen", bash: "bash", command: [ "sh", "-c", "printf '%s' 'a b; $x'" ])
     FileUtils.rm_f(@docker_log)
     Open3.capture3(fixture_env.merge(overrides), bash, HiveBench::IsolationExec::SCRIPT, mode, @work, *command)
   end
@@ -93,7 +93,7 @@ module BenchIsolationFixture
   end
 
   def assert_no_secrets(text)
-    (KEYS.map { |key| "decoy-#{key}" } + [@claude_auth, @codex_auth]).each do |secret|
+    (KEYS.map { |key| "decoy-#{key}" } + [ @claude_auth, @codex_auth ]).each do |secret|
       refute_includes text, secret
     end
   end

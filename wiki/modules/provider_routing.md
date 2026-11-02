@@ -121,14 +121,6 @@ prompt-derived output, or tool output into shared circuit evidence. Expand the
 allowlist only after a reviewed, sanitized real subscription capture proves a
 stable class and scope.
 
-### Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.
-
-#### Source S28, lines 800–800: Open questions about the codebase
-
-24. **Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.** `Hive::AgentLimit` and the headless and review writers classify quota/rate/usage-credit walls as `limits_reached` while filtering healthy UI-limit text. Provider reset dates remain visible estimates, but the daemon schedules readiness solely from the latest quota marker mtime, submits after the default one-hour interval even when the provider advertises a later date, and never exhausts a recovery budget. `test/unit/agent_limit_test.rb`, `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb`, and `test/integration/daemon_auto_retry_test.rb` pin the display/scheduling split, shared cooldown, durable-history retry count, and repeated unbounded retries. No in-tree live artifact yet shows an installed daemon observing a real July-25-style hold, retrying after a user resets usage/switches account/tops up credits, and advancing the task while status/TUI retains the provider estimate. A large cohort limited at the same time can also become eligible in the same daemon tick; normal concurrency caps still bound dispatch, but that synchronized recovery shape has not been live load-smoked. 6-review reuses succeeded reviewer outputs only across a *triage*-limited retry ([[stages/review]] `ReviewerReuse`); a pass parked by a limited CI fixer at the clean boundary, or a `reviewer_partial_failure` whose only failed reviewer was quota-limited (a non-limit reason, so it is paced by the generic retry backoff, not the hourly limit cooldown), still re-runs every reviewer on retry. Reuse is not yet live-smoked against a real limited triage.
-
-### Provider transport coverage remains intentionally partial (2026-08-11)
-
 #### Source S59, lines 1395–1404: Provider transport coverage remains intentionally partial (2026-08-11)
 
 The explicit provider-health implementation now enables only the real Claude
@@ -139,3 +131,9 @@ class, retain a sanitized real subscription capture from that adapter's
 structured transport or separately authenticated provider-diagnostic channel,
 confirm stable account/model scope, and update the inventory. Until then,
 unmatched provider output remains attempt-local and cannot open shared health.
+
+### Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.
+
+#### Source S28, lines 800–800: Open questions about the codebase
+
+24. **Provider-limit recovery is unit/integration-pinned but not post-fix live-smoked.** `Hive::AgentLimit` and the headless and review writers classify quota/rate/usage-credit walls as `limits_reached` while filtering healthy UI-limit text. Provider reset dates remain visible estimates, but the daemon schedules readiness solely from the latest quota marker mtime, submits after the default one-hour interval even when the provider advertises a later date, and never exhausts a recovery budget. `test/unit/agent_limit_test.rb`, `test/unit/daemon/{stale_agent_healer,recovery_coordinator}_test.rb`, and `test/integration/daemon_auto_retry_test.rb` pin the display/scheduling split, shared cooldown, durable-history retry count, and repeated unbounded retries. No in-tree live artifact yet shows an installed daemon observing a real July-25-style hold, retrying after a user resets usage/switches account/tops up credits, and advancing the task while status/TUI retains the provider estimate. A large cohort limited at the same time can also become eligible in the same daemon tick; normal concurrency caps still bound dispatch, but that synchronized recovery shape has not been live load-smoked. 6-review reuses succeeded reviewer outputs only across a *triage*-limited retry ([[stages/review]] `ReviewerReuse`); a pass parked by a limited CI fixer at the clean boundary, or a `reviewer_partial_failure` whose only failed reviewer was quota-limited (a non-limit reason, so it is paced by the generic retry backoff, not the hourly limit cooldown), still re-runs every reviewer on retry. Reuse is not yet live-smoked against a real limited triage.

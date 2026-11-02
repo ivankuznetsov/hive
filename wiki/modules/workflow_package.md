@@ -379,8 +379,6 @@ Closing those stronger guarantees would require a separate OS identity or
 equivalent protected broker, not a compatibility reader or another in-process
 Ruby fence.
 
-### Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
-
 #### Source S60, lines 1406–1419: Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)
 
 U1a2 makes the incumbent attestor and verifier require, retain, and

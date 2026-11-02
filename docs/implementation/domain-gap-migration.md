@@ -264,7 +264,7 @@ The line span identifies the exact source bytes including its final newline; bla
 | S29-B02 | 915–915 | G112 | [Hive web Agents-page login fixes are source/Rails-integration-pinned, not live-provider-smoked.](../../wiki/commands/web.md#hive-web-agents-page-login-fixes-are-sourcerails-integration-pinned-not-live-provider-smoked) | open | verbatim body; `2ef8f424f8a4f87387095dbb0001a62309b227912ef1383c39d5370fc2fa189d` | — | `moved:wiki/commands/web.md#hive-web-agents-page-login-fixes-are-sourcerails-integration-pinned-not-live-provider-smoked` |
 | S29-B03 | 916–916 | G113 | [Native Codex reviewer transcript trimming is unit-pinned, not live-flow-smoked.](../../wiki/modules/reviewers.md#native-codex-reviewer-transcript-trimming-is-unit-pinned-not-live-flow-smoked) | open | verbatim body; `9c393a1e12fe8a124d3c7f9ef8db48d1d2e5a55264594c59437e05a2df284782` | — | `moved:wiki/modules/reviewers.md#native-codex-reviewer-transcript-trimming-is-unit-pinned-not-live-flow-smoked` |
 | S29-B04 | 917–917 | G114 | [Tmux large-prompt settle is unit-pinned, not live-Claude-smoked.](../../wiki/modules/agent_cli_runtime.md#tmux-large-prompt-settle-is-unit-pinned-not-live-claude-smoked) | resolved | verbatim body; `c966742566e321e76dff065f402b3adc7fc342d5adf61b53dd8fa4e04f294204` | — | `resolved` |
-| S29-B05 | 919–919 | G115 | [Babysitter GH browser-flag parsing is unit-pinned but not live-agent-smoked.](../../wiki/modules/babysitter.md#babysitter-gh-browser-flag-parsing-is-unit-pinned-but-not-live-agent-smoked) | open | verbatim body; `1074e4ce7c70db513ebf43efdf52141c4fd77fa99e5201c5d2f279d7aa491d8c` | — | `moved:wiki/modules/babysitter.md#babysitter-gh-browser-flag-parsing-is-unit-pinned-but-not-live-agent-smoked` |
+| S29-B05 | 919–919 | G056 | [Babysitter dry-run default-deny stubs are unit-pinned but not live-agent-smoked.](../../wiki/modules/babysitter.md#babysitter-dry-run-default-deny-stubs-are-unit-pinned-but-not-live-agent-smoked) | open | verbatim body; `1074e4ce7c70db513ebf43efdf52141c4fd77fa99e5201c5d2f279d7aa491d8c` | — | `moved:wiki/modules/babysitter.md#babysitter-dry-run-default-deny-stubs-are-unit-pinned-but-not-live-agent-smoked` |
 | S29-B06 | 921–921 | G116 | [Fix-prompt whole-defect-class behavior is prose/test-render pinned but not live-smoked.](../../wiki/stages/review.md#fix-prompt-whole-defect-class-behavior-is-prosetest-render-pinned-but-not-live-smoked) | open | verbatim body; `a04950d07e2d4fc10a0400ce497e8dd526a3f55e00dc9f004601c74470434773` | I14 | `moved:wiki/stages/review.md#fix-prompt-whole-defect-class-behavior-is-prosetest-render-pinned-but-not-live-smoked` |
 | S29-B07 | 923–923 | G117 | [PR #512 coverage-gate repair is focused-test pinned but not hosted-CI verified in-tree.](../../wiki/testing.md#pr-512-coverage-gate-repair-is-focused-test-pinned-but-not-hosted-ci-verified-in-tree) | open | verbatim body; `327259483e5a2e0f4ba757927aa8e0c042dd1f61df0ca3abc524c7399b2b7e1b` | I16 | `moved:wiki/testing.md#pr-512-coverage-gate-repair-is-focused-test-pinned-but-not-hosted-ci-verified-in-tree` |
 | S29-B08 | 924–924 | G118 | [Status/TUI/Telegram PR URL surfacing is unit-pinned but not live-smoked.](../../wiki/commands/status.md#statustuitelegram-pr-url-surfacing-is-unit-pinned-but-not-live-smoked) | open | verbatim body; `8a56db3099ddc0146354a32ab9fe7972f8862c1136c472460fb05491f9a4416d` | — | `moved:wiki/commands/status.md#statustuitelegram-pr-url-surfacing-is-unit-pinned-but-not-live-smoked` |
@@ -325,8 +325,8 @@ The line span identifies the exact source bytes including its final newline; bla
 | S57-B02 | 1357–1368 | G152 | [Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)](../../wiki/release-candidate.md#pre-release-upgrade-survivor-contracts-are-implemented-but-real-lanes-are-not-yet-run-2026-07-27) | open | verbatim body; `b4045b65bd128871791ab0d65344cf0e26a869c71315fdfeed5a8b48d6407917` | — | `moved:wiki/release-candidate.md#pre-release-upgrade-survivor-contracts-are-implemented-but-real-lanes-are-not-yet-run-2026-07-27` |
 | S57-B03 | 1370–1377 | G152 | [Pre-release upgrade-survivor contracts are implemented but real lanes are not yet run (2026-07-27)](../../wiki/release-candidate.md#pre-release-upgrade-survivor-contracts-are-implemented-but-real-lanes-are-not-yet-run-2026-07-27) | open | verbatim body; `efbcd83a866ae2affa05a97c6142569b30d0fad3cfd7a76926f64c4b8d82ea58` | — | `moved:wiki/release-candidate.md#pre-release-upgrade-survivor-contracts-are-implemented-but-real-lanes-are-not-yet-run-2026-07-27` |
 | S58-B01 | 1381–1392 | G153 | [Confirmed fleet cutover needs installed-channel smoke (updated 2026-08-30)](../../wiki/commands/update.md#confirmed-fleet-cutover-needs-installed-channel-smoke-updated-2026-08-30) | open | verbatim body; `2dd9d90bb5e6a02c117dd9f2113531cf2784730c0d2d37005d25c3e2e24da778` | I01 | `moved:wiki/commands/update.md#confirmed-fleet-cutover-needs-installed-channel-smoke-updated-2026-08-30` |
-| S59-B01 | 1396–1403 | G154 | [Provider transport coverage remains intentionally partial (2026-08-11)](../../wiki/modules/provider_routing.md#provider-transport-coverage-remains-intentionally-partial-2026-08-11) | open | verbatim body; `89a394cde49e85aa23422f053a1cf8b0935ea0b13c7e6db2d52c3662d825267c` | — | `moved:wiki/modules/provider_routing.md#provider-transport-coverage-remains-intentionally-partial-2026-08-11` |
-| S60-B01 | 1407–1418 | G155 | [Live Workflow Creator still needs authorized exact-head evidence (2026-08-04)](../../wiki/modules/workflow_package.md#live-workflow-creator-still-needs-authorized-exact-head-evidence-2026-08-04) | open | verbatim body; `2b29c987471ad1f39d425f2cf7eef19db0673c0b2f89d4a6f6e35b0bc6ae6530` | — | `moved:wiki/modules/workflow_package.md#live-workflow-creator-still-needs-authorized-exact-head-evidence-2026-08-04` |
+| S59-B01 | 1396–1403 | G040 | [Provider-routing trusted captures (updated 2026-08-11)](../../wiki/modules/provider_routing.md#provider-routing-trusted-captures-updated-2026-08-11) | open | verbatim body; `89a394cde49e85aa23422f053a1cf8b0935ea0b13c7e6db2d52c3662d825267c` | — | `moved:wiki/modules/provider_routing.md#provider-routing-trusted-captures-updated-2026-08-11` |
+| S60-B01 | 1407–1418 | G145 | [Workflow-creator protected OpenClaw proof awaits a credentialed run (2026-07-24)](../../wiki/modules/workflow_package.md#workflow-creator-protected-openclaw-proof-awaits-a-credentialed-run-2026-07-24) | open | verbatim body; `2b29c987471ad1f39d425f2cf7eef19db0673c0b2f89d4a6f6e35b0bc6ae6530` | — | `moved:wiki/modules/workflow_package.md#workflow-creator-protected-openclaw-proof-awaits-a-credentialed-run-2026-07-24` |
 | S61-B01 | 1422–1432 | G156 | [Plan-review native route still needs an authorized live capture (2026-08-12)](../../wiki/modules/plan_review.md#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12) | open | verbatim body; `65d33c29bfe29df36c3f858e7db5e41ef607154b7293a05392087c4ccebd53b8` | I14 | `moved:wiki/modules/plan_review.md#plan-review-native-route-still-needs-an-authorized-live-capture-2026-08-12` |
 | S62-B01 | 1436–1446 | G157 | [Outcome evidence needs one fully accepted live package (2026-08-14)](../../wiki/stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14) | open | verbatim body; `0eddca55e797ec1c8f9789e655c91e828a7b78dc9b48cda6cea98719980d1d3b` | I05,I08 | `moved:wiki/stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14` |
 | S62-B02 | 1448–1449 | G157 | [Outcome evidence needs one fully accepted live package (2026-08-14)](../../wiki/stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14) | open | verbatim body; `329caff659881e76d4cc374a051be0c0b6a0b2cca1a3006769fecc288f80bb98` | I05,I08 | `moved:wiki/stages/artifacts.md#outcome-evidence-needs-one-fully-accepted-live-package-2026-08-14` |
@@ -538,3 +538,96 @@ The three policy bodies were compared and are identical. All publish literal ent
 | templates/llm-wiki/post-commit-refresh.sh | 42,551 | equal; `1bf3ed74bd0ed736f84d6c2f9468a23a7873766f91c8d997b3de386f252e57f5` |
 
 U3 verification: `bundle check` remains satisfied; `bin/test --changed --list` reported 71 documentation paths and no runnable tests. The same explicit five-file checkpoint as U2 passed again (64 runs, 645 assertions, zero failures/errors/skips). No behavior-bearing code changed; this dry read-through, policy equality and protected-input byte comparison provide the author-flow evidence. Catalog count is still 119/119; U3 updates frontmatter `updated:` and visible `Updated:` together to 2026-11-02. The earlier totals row describes the U2 snapshot before that header update. The normal log fragment is added without compiling or editing `wiki/log.md`.
+
+### U4 final migration reconciliation and offline validation
+
+The final constituent table above supersedes the initial U2 grouping counts.
+Reconciliation found three repeated logical gaps within existing owners:
+S59 provider transport evidence joins S24 trusted captures; S60 Workflow
+Creator evidence joins S50 protected OpenClaw proof; and the S29 babysitter
+browser-flag occurrence joins S27/S28 dry-run proof. Their earliest logical
+IDs stay stable. Each occurrence retains its complete body and source caption;
+only the redundant item headings and root entries were removed. The final
+totals are 191 source logical groups (164 open, 22 resolved, five supporting)
+and two residual open navigation items, giving **166 unresolved root entries**.
+No owner changed during this reconciliation.
+
+All 262 source body blocks and every complete source occurrence were compared
+again with execution-baseline text at their recorded owner headings, including
+each separate copy of identical evidence. All body hashes match. Every
+nonblank non-heading source line is covered once, all 91 source sections are
+reconciled, and no block row remains pending. Source body bytes total 176,242;
+the per-destination table remains unchanged by regrouping within the same
+pages. The fallback remains absent (zero items, zero bytes), strictly smaller
+than the largest destination, `wiki/commands/web.md` at 17,818 migrated bytes.
+The 100 source wiki links retain their exact bytes and multiplicity. All
+indexed item anchors are unique across their complete owner pages, including
+resolved history. The three removed duplicate headings have no remaining
+current inbound links. The reviewed inbound-reference table and additive
+overlap follow-ups above remain complete.
+
+The new `test/unit/wiki_gaps_index_test.rb` is local Minitest code with no
+production service, new dependency, generator, global crawl, reverse
+completeness check, ownership inference or status inference. It checks every
+root entry, fails malformed lines, resolves relative pages from the index
+file, and requires a real unique base heading anchor. Fixtures demonstrate
+missing pages, absent/empty/wrong fragments, nested relative paths, markup,
+punctuation, duplicate suffix allocation and collisions, duplicate headings
+across resolved history, and fenced/YAML examples. The real-index case also
+changes working directory to prove repository-path independence. Negative
+fixtures assert concrete diagnostics without changing real wiki files.
+
+The normative target is GitHub's rendered Markdown; its [section-link
+documentation](https://docs.github.com/en/get-started/writing-on-github/getting-started-with-writing-and-formatting-on-github/basic-writing-and-formatting-syntax#section-links)
+was consulted. Destination heading forms were inspected locally. The bounded
+implementation covers the ATX headings, inline code/emphasis/links, YAML and
+backtick/tilde fences used here. Literal expectations independently pin
+`event-types-hiveeventsevent_types`,
+`deprecated-native-web-hivebox_-aliases-2026-10-15`, and
+`2026-06-1617-refresh-uncertainty`; expected anchors do not come from the helper
+under test. The web tool could not fetch this repository's rendered Events
+page (cache miss), so no live rendered-page inspection is claimed. This does
+not replace the pinned anchor expectations with a different renderer.
+
+`bundle check` succeeded. After temporary migration helpers were removed,
+`bin/test --changed --list` reported 71 changed paths and selected only
+`test/unit/wiki_gaps_index_test.rb`. The new test alone passed on its first
+execution (10 runs, 44 assertions); this is a test-only validation addition,
+not a runtime behavior change, so no production red/green cycle applies.
+Its temporary failure fixtures establish the requested rejection behavior.
+
+The required focused command was run before and after the final grouping
+correction:
+
+```sh
+bin/test test/unit/wiki_gaps_index_test.rb test/unit/wiki_architecture_single_ownership_test.rb test/unit/wiki_workflow_package_ownership_test.rb test/unit/wiki_command_index_test.rb test/unit/native_web_positioning_test.rb test/integration/wiki_command_index_test.rb
+```
+
+Both runs passed: **74 runs, 689 assertions, zero failures, errors or skips**.
+All six files were loaded by the explicit runner; results by file in that run:
+
+| Test file | Result |
+| --- | --- |
+| `test/unit/wiki_gaps_index_test.rb` | passed |
+| `test/unit/wiki_architecture_single_ownership_test.rb` | passed |
+| `test/unit/wiki_workflow_package_ownership_test.rb` | passed |
+| `test/unit/wiki_command_index_test.rb` | passed |
+| `test/unit/native_web_positioning_test.rb` | passed |
+| `test/integration/wiki_command_index_test.rb` | passed |
+
+`bundle exec rubocop test/unit/wiki_gaps_index_test.rb --format simple --cache false`
+passed (one file, no offenses). `git diff --check` passed. Final comparison
+reconfirmed both managed blocks, both refresh scripts and compiled
+`wiki/log.md` are byte-identical to the execution baseline. All three author
+policies are identical. The catalog has 119 rows and Page count 119; both
+updated-date fields are 2026-11-02. The U3 refresh/new/change/resolve and
+cross-domain walkthroughs and protected-input hashes are present above.
+
+The automated test establishes syntax and link existence only. Manual
+migration reconciliation establishes completeness, status treatment and body
+preservation. No runtime defect was repaired or historical claim reassessed.
+No live refresh, provider call, deployment, publication, screenshot collection,
+full runtime suite, coverage campaign or browser suite was required or run.
+Stage 4 performs implementation and local verification; the autonomous review
+pass remains with the caller. Temporary migration tooling is removed; this
+receipt is bounded historical evidence rather than a maintained second index.

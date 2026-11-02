@@ -14,6 +14,27 @@ module Hive
 
     module_function
 
+    # Edit only an assertion that already exists; the plan body is opaque.
+    def edit_dependency(bytes, value)
+      absent_assertion = { "present" => false, "value" => nil }
+      return [absent_assertion, bytes] if bytes.nil?
+
+      source = bytes.dup.force_encoding(Encoding::UTF_8)
+      lines = source.lines
+      return [absent_assertion, bytes] unless lines.first&.start_with?("---")
+      raise ArgumentError, "malformed plan frontmatter" unless lines.first.match?(/\A---[ \t]*\r?\n\z/)
+
+      closing = (1...lines.length).find { |index| lines[index].match?(/\A---[ \t]*(?:\r?\n|\z)/) }
+      raise ArgumentError, "unterminated plan frontmatter" unless closing
+
+      yaml = lines[1...closing].join
+      raise ArgumentError, "oversized plan frontmatter" if yaml.bytesize > MAX_FRONTMATTER_BYTES
+
+      document = Hive::DependencyEdit::Document.new(yaml)
+      edited = document.present ? document.edit(value) : yaml
+      [document.assertion, lines.first + edited + lines[closing..].join]
+    end
+
     def read(path)
       frontmatter = read_frontmatter(path)
       return absent if frontmatter == :absent

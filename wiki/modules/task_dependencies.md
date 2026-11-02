@@ -271,6 +271,12 @@ bounded relationship set. See [[modules/task_workspace]].
 
 ## Recovery
 
+Dependency edit preparation uses `DependencyEdit::Document` to validate safe YAML
+and reject duplicate mapping keys and anchors before changing files. It edits
+only source spans belonging to the dependency entry. Existing-task admission
+overlays retain the task's numeric identity, workflow and proposed destination
+stage, replacing its disk snapshot while checking the complete reachable graph.
+
 Inspect `hive status --operational --json` or the TUI's admission text, then repair the named
 `meta.yml`, `plan.md`, project enrollment, remote, workflow, or gate. Do not
 delete dependency metadata merely to clear the row unless removing the edge is

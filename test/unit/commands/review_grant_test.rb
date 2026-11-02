@@ -15,14 +15,14 @@ class ReviewGrantCommandTest < Minitest::Test
       assert_equal "eligible", snapshot.state, snapshot.remediation
       token = snapshot.evidence_token
       output, = capture_io do
-        Hive::CLI.start(["review-grant", task.folder, "--project", task.project_name,
-          "--passes", "2", "--reason", "Finish verified accepted fixes", "--evidence-token", token, "--json"])
+        Hive::CLI.start([ "review-grant", task.folder, "--project", task.project_name,
+          "--passes", "2", "--reason", "Finish verified accepted fixes", "--evidence-token", token, "--json" ])
       end
       applied = JSON.parse(output)
       assert_equal "applied", applied.fetch("state")
       assert_equal :none, Hive::Markers.current(task.state_file).name
       assert_equal 2, budget.observe.remaining
-      before = Dir[File.join(task.folder, "reviews", "review-grant-*")].to_h { |path| [path, File.binread(path)] }
+      before = Dir[File.join(task.folder, "reviews", "review-grant-*")].to_h { |path| [ path, File.binread(path) ] }
       output, = capture_io do
         Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
           passes: "2", reason: "Finish verified accepted fixes  ", evidence_token: token, json: true).call
@@ -32,7 +32,7 @@ class ReviewGrantCommandTest < Minitest::Test
       assert_equal applied.fetch("decision_id"), replay.fetch("decision_id")
       assert_equal applied.fetch("decided_at"), replay.fetch("decided_at")
       assert_equal 2, budget.observe.remaining
-      assert_equal before, before.keys.to_h { |path| [path, File.binread(path)] }
+      assert_equal before, before.keys.to_h { |path| [ path, File.binread(path) ] }
       assert_equal 1, File.readlines(budget.audit_path).size
       schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-review-grant"))))
       assert schema.valid?(applied), schema.validate(applied).to_a.inspect
@@ -53,7 +53,7 @@ class ReviewGrantCommandTest < Minitest::Test
       token = budget.observe.evidence_token
       File.open(File.join(task.folder, "reviews", "codex-04.md"), "a") { |file| file.puts "Edited after observation" }
       before = File.binread(task.state_file)
-      [token, "b" * 64].each do |stale|
+      [ token, "b" * 64 ].each do |stale|
         assert_raises(Hive::ReviewBudget::Refused) do
           capture_io do
             Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
@@ -145,7 +145,7 @@ class ReviewGrantCommandTest < Minitest::Test
     calls = 0
     coordinator = Object.new
     coordinator.define_singleton_method(:grant_review!) { |**| calls += 1 }
-    invalid = [nil, "", "0", "-1", "4", "1.0", "1a", " 1", "1 ", 1.5]
+    invalid = [ nil, "", "0", "-1", "4", "1.0", "1a", " 1", "1 ", 1.5 ]
     invalid.each do |passes|
       error = assert_raises(Hive::UsageError) do
         capture_io do
@@ -156,7 +156,7 @@ class ReviewGrantCommandTest < Minitest::Test
       end
       assert_match(/passes/, error.message)
     end
-    [nil, "", " \t ", "line\nbreak", "escape\e", "x" * 1025, "\xff".b].each do |reason|
+    [ nil, "", " \t ", "line\nbreak", "escape\e", "x" * 1025, "\xff".b ].each do |reason|
       assert_raises(Hive::UsageError) do
         capture_io do
           Hive::Commands::ReviewGrant.new("target", project: "demo", passes: "2",
@@ -168,7 +168,7 @@ class ReviewGrantCommandTest < Minitest::Test
   end
 
   def test_missing_project_or_evidence_is_a_usage_error
-    [[nil, "a" * 64], ["demo", nil], ["demo", ""], ["demo", "not-a-token"]].each do |project, token|
+    [ [ nil, "a" * 64 ], [ "demo", nil ], [ "demo", "" ], [ "demo", "not-a-token" ] ].each do |project, token|
       assert_raises(Hive::UsageError) do
         capture_io do
           Hive::Commands::ReviewGrant.new("target", project: project, passes: "1",
@@ -188,5 +188,97 @@ class ReviewGrantCommandTest < Minitest::Test
     error = Hive::Schemas::ErrorEnvelope.build(schema: "hive-review-grant",
       error: Hive::UsageError.new("missing decision"), error_kind: "usage")
     assert JSONSchemer.schema(doc).valid?(error)
+  end
+
+  def test_refusal_envelopes_preserve_machine_reason_and_operator_remediation
+    with_review_grant_task do |task, _cfg|
+      failures = {
+        "decision_conflict" => "decision_conflict", "unsafe_state" => "unsafe_state",
+        "invalid_passes" => "usage", "invalid_reason" => "usage",
+        "head_changed" => "stale_evidence", "evidence_changed" => "stale_evidence",
+        "stale_evidence" => "stale_evidence", "invalid_task_history" => "evidence_unavailable"
+      }
+      failures.each do |reason, kind|
+        error = Hive::ReviewBudget::Refused.new(reason, "Grant refused: #{reason}",
+          remediation: "Refresh this task's operational observation.")
+        payload = command_failure(task, error)
+        assert_equal kind, payload.fetch("error_kind")
+        assert_equal reason, payload.fetch("refusal_reason")
+        assert_equal error.remediation, payload.fetch("remediation")
+      end
+    end
+  end
+
+  def test_command_boundary_errors_keep_exit_codes_and_schema_valid_envelopes
+    with_review_grant_task do |task, _cfg|
+      failures = [
+        [ Hive::UsageError.new("Required option absent"), "usage" ],
+        [ Hive::AmbiguousSlug.new("Two matching tasks", slug: "grant", candidates: [ "grant-a", "grant-b" ]), "ambiguous_target" ],
+        [ Hive::InvalidTaskPath.new("Task moved"), "invalid_task_path" ],
+        [ Hive::ConcurrentRunError.new("Live task owner", holder: { "pid" => Process.pid }, lock_path: "task-lease"), "concurrent_run" ],
+        [ Hive::ConfigError.new("Invalid project configuration"), "config" ],
+        [ Hive::InternalError.new("Receipt I/O failed"), "internal" ],
+        [ Hive::Error.new("Unclassified operator failure"), "error" ],
+        [ Hive::AgentSupport::OperatorAuthority::Denied.new, "agent_denied" ],
+        [ Hive::AgentSupport::OperatorAuthority::AuthorityUnavailable.new, "source_unverified" ]
+      ]
+      failures.each do |error, kind|
+        payload = command_failure(task, error)
+        assert_equal kind, payload.fetch("error_kind")
+        assert_equal error.exit_code, payload.fetch("exit_code")
+        assert_equal kind, payload.fetch("refusal_reason")
+      end
+    end
+  end
+
+  def test_text_success_reports_decision_without_rendering_audit_reason
+    with_review_grant_task do |task, _cfg|
+      token = Hive::ReviewBudget.new(task: task, project: task.project_name).observe.evidence_token
+      payload = nil
+      output, = capture_io do
+        payload = Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
+          passes: "1", reason: "Keep reason in audit", evidence_token: token).call
+      end
+      assert_match(/#{Regexp.escape(task.slug)}: review grant #{payload.fetch('decision_id')} applied;/, output)
+      assert_includes output, "Verification and existing recovery holds still apply."
+      refute_includes output, "Keep reason in audit"
+    end
+  end
+
+  def test_unserializable_failure_is_raised_without_emitting_a_partial_envelope
+    with_review_grant_task do |task, _cfg|
+      error = Hive::ConcurrentRunError.new("Live owner", holder: { "bad" => "\xff".b })
+      coordinator = Object.new
+      coordinator.define_singleton_method(:grant_review!) { |**| raise error }
+      output, = capture_io do
+        assert_raises(JSON::GeneratorError) do
+          Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
+            passes: 1, reason: "Finish accepted fixes", evidence_token: "a" * 64,
+            coordinator: coordinator, json: true).call
+        end
+      end
+      assert_empty output
+    end
+  end
+
+  private
+
+  def command_failure(task, error)
+    coordinator = Object.new
+    coordinator.define_singleton_method(:grant_review!) { |**| raise error }
+    output, = capture_io do
+      raised = assert_raises(error.class) do
+        Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
+          passes: 1, reason: "Finish accepted fixes", evidence_token: "a" * 64,
+          coordinator: coordinator, json: true).call
+      end
+      assert_same error, raised
+    end
+    payload = JSON.parse(output)
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-review-grant"))))
+    assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+    refute payload.fetch("ok")
+    assert_equal error.class.name.split("::").last, payload.fetch("error_class")
+    payload
   end
 end

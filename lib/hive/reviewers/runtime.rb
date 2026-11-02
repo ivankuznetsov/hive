@@ -9,7 +9,12 @@ module Hive::Reviewers::Runtime
 
   module_function
 
-  def capture(environment:, argv:, chdir:, timeout_sec:, timeout_message:)
+  def capture(environment:, argv:, chdir:, timeout_sec:, timeout_message:, task_folder: nil)
+    if task_folder
+      require "hive/review_budget"
+      review_budget = Hive::ReviewBudget.new(task: Struct.new(:folder).new(task_folder), project: "")
+      budget_custody = review_budget.capture_custody
+    end
     pipe_r, pipe_w = IO.pipe
     # stdin is /dev/null: `codex exec` otherwise waits on an inherited
     # stdin for "additional input" before it starts the review.
@@ -41,6 +46,8 @@ module Hive::Reviewers::Runtime
     output = output.dup.force_encoding(Encoding::UTF_8)
     output.scrub!("?")
     Result.new(output, status.exitstatus, nil)
+  ensure
+    review_budget.verify_custody!(budget_custody) if budget_custody
   end
 
   def write(path, content) = File.write(path, content)

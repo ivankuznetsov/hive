@@ -309,6 +309,33 @@ module Hive
       private_class_method :immutable_value
     end
 
+    # Explicit paths plus paths proven absent by the caller's pre-spawn
+    # listing. Receipt owners keep name validation and listing digests; the
+    # firewall retains custody of the no-follow capture/restoration engine.
+    class PathCustody
+      def initialize(paths)
+        @paths = paths.dup.freeze
+        @before = Hive::ProtectedFiles.observe_paths(@paths)
+        @captured = Hive::ProtectedFiles.capture_paths(@paths)
+      end
+
+      def restore_changes!(absent_paths: {})
+        unless (@paths.keys & absent_paths.keys).empty?
+          raise InvalidManifest, "absent path labels overlap captured paths"
+        end
+        paths = @paths.merge(absent_paths)
+        captured = @captured.merge(absent_paths.to_h do |label, _path|
+          [ label, { kind: :missing, fingerprint: nil, identity: { kind: :missing }.freeze } ]
+        end)
+        changed = Hive::ProtectedFiles.diff(@before, Hive::ProtectedFiles.observe_paths(@paths))
+        changed.concat(absent_paths.keys)
+        Hive::ProtectedFiles.restore_paths(paths, captured, changed) unless changed.empty?
+        changed.freeze
+      rescue Hive::ProtectedFiles::RestoreError, SystemCallError => error
+        raise CaptureError, "protected path restoration failed (#{error.class})"
+      end
+    end
+
     # A single-use boundary that keeps controller bookkeeping outside the
     # protected-file snapshot while still enclosing the untrusted agent call.
     # Stages pass this callable through Base's spawn helpers and inspect the

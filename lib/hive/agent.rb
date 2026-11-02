@@ -283,6 +283,13 @@ module Hive
     end
 
     def spawn_and_wait
+      if review_budget_task?
+        require "hive/review_budget"
+        review_budget = Hive::ReviewBudget.new(
+          task: @task, project: @task.respond_to?(:project_name) ? @task.project_name : ""
+        )
+        budget_custody = review_budget.capture_custody
+      end
       pid = nil
       child_start_time = nil
       child_finished = false
@@ -589,10 +596,14 @@ module Hive
           stdin_file.unlink
         end
       ensure
-        if child_finished && pid
-          Hive::Lock.clear_task_lock_child(
-            @task.folder, pid: pid, process_start_time: child_start_time
-          )
+        begin
+          if child_finished && pid
+            Hive::Lock.clear_task_lock_child(
+              @task.folder, pid: pid, process_start_time: child_start_time
+            )
+          end
+        ensure
+          review_budget.verify_custody!(budget_custody) if budget_custody
         end
       end
     end
@@ -910,10 +921,16 @@ module Hive
           trusted_cli_arguments: @runtime_cli_flags + mcp_arguments,
           executable: @runtime_policy&.executable,
           command_prefix: @runtime_policy&.command_prefix,
-          denied_commands: %w[review 6-review].include?(@task.stage_name) ? [ "review-grant" ] : []
+          denied_commands: review_budget_task? ? [ "review-grant" ] : []
         )
       ))
     end
+
+    def review_budget_task?
+      @task.respond_to?(:stage_name) &&
+        %w[review 6-review].include?(@task.stage_name.to_s) # coding-scoped: fix-pass grants belong to coding review.
+    end
+    private :review_budget_task?
 
     def kill_group(pgid)
       Process.kill("TERM", -pgid)

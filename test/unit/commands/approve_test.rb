@@ -1,14 +1,87 @@
 require "test_helper"
 require "hive/commands/approve"
+require "hive/commands/digest"
 require "fileutils"
+require "hive/commands/review_grant"
+require_relative "../../support/review_grant_fixture"
 
 class HiveCommandsApproveTest < Minitest::Test
   include HiveTestHelper
+  include ReviewGrantFixture
+
+  def test_backward_review_reset_archives_grants_and_passes_while_retaining_audit
+    with_review_grant_task do |current, _cfg|
+      budget = Hive::ReviewBudget.new(task: current, project: current.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(current.folder, project: current.project_name,
+          passes: 2, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      pass_names = Dir.children(current.reviews_dir).sort
+      cmd = Hive::Commands::Approve.new(current.folder, to: "5-open-pr")
+      cmd.define_singleton_method(:record_hive_commit) { |*| nil }
+
+      moved, = cmd.send(:perform_move_and_commit, current, "5-open-pr")
+
+      assert_empty Dir[File.join(moved, "reviews", "review-grant-*.json")]
+      assert_empty Dir[File.join(moved, "reviews", "*-*.md")]
+      archive = Dir[File.join(moved, "reviews", "archive", "review-reset-*")].fetch(0)
+      assert_equal pass_names, Dir.children(archive).sort
+      audit = File.join(moved, "review-budget", "audit.jsonl")
+      assert_equal %w[grant expiry], File.readlines(audit).map { |line| JSON.parse(line).fetch("event") }
+    end
+  end
+
+  def test_failed_backward_review_reset_restores_receipts_and_passes_without_truncating_audit
+    with_review_grant_task do |current, _cfg|
+      budget = Hive::ReviewBudget.new(task: current, project: current.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(current.folder, project: current.project_name,
+          passes: 1, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      before = Dir[File.join(current.reviews_dir, "*")].to_h { |path| [ File.basename(path), File.binread(path) ] }
+      cmd = Hive::Commands::Approve.new(current.folder, to: "5-open-pr")
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "commit failed" }
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) { cmd.send(:perform_move_and_commit, current, "5-open-pr") }
+      end
+
+      assert File.directory?(current.folder)
+      assert_equal before, before.keys.to_h { |name| [ name, File.binread(File.join(current.reviews_dir, name)) ] }
+      assert_equal "applied", budget.observe.state
+      assert_equal %w[grant expiry], File.readlines(budget.audit_path).map { |line| JSON.parse(line).fetch("event") }
+    end
+  end
 
   FakeTask = Struct.new(
     :slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow,
     :state_file
   )
+
+  def test_review_reset_rollback_refuses_changed_archived_bytes
+    with_review_grant_task do |current, _cfg|
+      budget = Hive::ReviewBudget.new(task: current, project: current.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(current.folder, project: current.project_name,
+          passes: 1, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      observation = Hive::DependencySnapshot.observe_for_admission!(current, missing_message: "test task missing")
+      snapshot = {}
+      cmd = Hive::Commands::Approve.new(current.folder, to: "5-open-pr")
+      cmd.send(:archive_review_budget_for_reset!, current, "5-open-pr", snapshot: snapshot)
+      name = snapshot.fetch(:moved).last
+      File.write(File.join(current.folder, snapshot.fetch(:archive), name), "tampered archive\n")
+      _out, err = capture_io do
+        result = cmd.send(:restore_review_budget_reset!, current, nil, snapshot, observation: observation)
+        assert_includes result, "review budget reset"
+      end
+      assert_includes err, "rollback skipped"
+      refute File.exist?(File.join(current.reviews_dir, name))
+    ensure
+      observation&.close
+    end
+  end
 
   def command(**kwargs)
     Hive::Commands::Approve.new("slug", **kwargs)

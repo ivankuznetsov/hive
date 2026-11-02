@@ -4,6 +4,52 @@ require "hive/artifact_firewall"
 class ArtifactFirewallTest < Minitest::Test
   include HiveTestHelper
 
+  def test_explicit_path_custody_restores_bytes_and_listing_proven_additions
+    with_tmp_dir do |dir|
+      original = File.join(dir, "receipt.json")
+      audit = File.join(dir, "audit.jsonl")
+      added = File.join(dir, "added-receipt.json")
+      File.write(original, "trusted\n")
+      custody = Hive::ArtifactFirewall::PathCustody.new("receipt" => original, "audit" => audit)
+      assert_empty custody.restore_changes!
+      File.write(original, "edited\n")
+      File.write(audit, "unauthorized\n")
+      File.write(added, "unauthorized\n")
+      changed = custody.restore_changes!(absent_paths: { "added" => added })
+      assert_equal %w[added audit receipt], changed.sort
+      assert changed.frozen?
+      assert_equal "trusted\n", File.read(original)
+      refute File.exist?(audit)
+      refute File.exist?(added)
+    end
+  end
+
+  def test_explicit_path_custody_rejects_conflicting_absence_proof
+    with_tmp_dir do |dir|
+      path = File.join(dir, "receipt.json")
+      File.write(path, "trusted\n")
+      custody = Hive::ArtifactFirewall::PathCustody.new("receipt" => path)
+      assert_raises(Hive::ArtifactFirewall::InvalidManifest) do
+        custody.restore_changes!(absent_paths: { "receipt" => path })
+      end
+      assert_equal "trusted\n", File.read(path)
+    end
+  end
+
+  def test_explicit_path_custody_surfaces_unsafe_restoration
+    with_tmp_dir do |dir|
+      path = File.join(dir, "receipt.json")
+      File.write(path, "trusted\n")
+      custody = Hive::ArtifactFirewall::PathCustody.new("receipt" => path)
+      File.write(path, "edited\n")
+      with_replaced_singleton_method(Hive::ProtectedFiles, :restore_paths,
+        ->(*) { raise Hive::ProtectedFiles::RestoreError, "unsafe parent" }) do
+        error = assert_raises(Hive::ArtifactFirewall::CaptureError) { custody.restore_changes! }
+        assert_match(/restoration failed/, error.message)
+      end
+    end
+  end
+
   def test_protected_anchor_reports_added_changed_deleted_and_unchanged
     with_tmp_dir do |dir|
       File.write(File.join(dir, "changed"), "before\n")

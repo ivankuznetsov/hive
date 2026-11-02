@@ -94,7 +94,7 @@ module Hive
             trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd ],
             executable:,
             command_prefix: @runtime_policy&.command_prefix || [],
-            denied_commands: %w[review 6-review].include?(@task.stage_name) ? [ "review-grant" ] : []
+            denied_commands: review_budget_task? ? [ "review-grant" ] : []
           ))
           NativeLaunch.new(
             invocation:,

@@ -54,15 +54,20 @@ class ReviewBudgetTest < Minitest::Test
 
   def test_inputs_are_strict_bounded_canonical_and_secret_scanned
     with_replaced_singleton_method(Hive::SecretScanner, :match?, ->(*) { false }) do
-      [nil, 0, -1, 4, "", " 1", "1 ", "1.0", "1abc", 1.5].each do |value|
+      [ nil, 0, -1, 4, "", " 1", "1 ", "1.0", "1abc", 1.5 ].each do |value|
         error = assert_raises(Hive::ReviewBudget::Refused) { Hive::ReviewBudget.normalize_decision(passes: value, reason: "fix required") }
         assert_equal "invalid_passes", error.reason
       end
-      [nil, "", "  ", "x" * 1025, "bad\nreason", "bad\e", "\xFF".b, "bad\u200B"].each do |value|
+      [ nil, "", "  ", "x" * 1025, "bad\nreason", "bad\e", "\xFF".b, "bad\u200B" ].each do |value|
         error = assert_raises(Hive::ReviewBudget::Refused) { Hive::ReviewBudget.normalize_decision(passes: 1, reason: value) }
         assert_equal "invalid_reason", error.error_kind
       end
       assert_equal({ passes: 3, reason: "café" }, Hive::ReviewBudget.normalize_decision(passes: "3", reason: " cafe\u0301 ".b))
+      assert_equal({ passes: 1, reason: "operator reason" }, Hive::ReviewBudget.normalize_decision(
+        passes: 1, reason: "operator reason".dup.force_encoding(Encoding::US_ASCII)))
+      assert_raises(Hive::ReviewBudget::Refused) do
+        Hive::ReviewBudget.normalize_decision(passes: 1, reason: "\u0344" * 512)
+      end
     end
     with_replaced_singleton_method(Hive::SecretScanner, :match?, ->(*) { true }) do
       assert_raises(Hive::ReviewBudget::Refused) { Hive::ReviewBudget.normalize_decision(passes: 1, reason: "secret") }
@@ -111,7 +116,7 @@ class ReviewBudgetTest < Minitest::Test
       assert_equal before, tree_bytes(task.folder)
       receipt = record(budget)
       before = tree_bytes(task.folder)
-      [[2, "needs further fixes"], [1, "different reason"]].each do |passes, reason|
+      [ [ 2, "needs further fixes" ], [ 1, "different reason" ] ].each do |passes, reason|
         error = assert_raises(Hive::ReviewBudget::Refused) { budget.replay(evidence_token: receipt.fetch("observation_digest"), passes: passes, reason: reason) }
         assert_equal "decision_conflict", error.reason
       end
@@ -188,7 +193,7 @@ class ReviewBudgetTest < Minitest::Test
     with_fixture do |budget, task|
       receipt = record(budget, passes: 2)
       clear(task)
-      [:review_error, :review_ci_stale, :review_stale, :error, :review_waiting].each do |marker|
+      [ :review_error, :review_ci_stale, :review_stale, :error, :review_waiting ].each do |marker|
         Hive::Markers.set(task.state_file, marker, phase: "fix", reason: "provider_hold", pass: 4)
         snapshot = budget.observe
         assert_equal "suspended", snapshot.state
@@ -256,6 +261,17 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_distinct_expiry_intents_append_without_conflict_and_each_replays_idempotently
+    with_fixture do |budget, _task|
+      record(budget)
+      2.times { budget.record_expiry!(reason: "review_reset") }
+      2.times { budget.record_expiry!(reason: "review_completed") }
+      entries = File.readlines(budget.audit_path).map { |line| JSON.parse(line) }
+      assert_equal %w[grant expiry expiry], entries.map { |entry| entry.fetch("event") }
+      assert_equal %w[review_reset review_completed], entries.drop(1).map { |entry| entry.fetch("expiry_reason") }
+    end
+  end
+
   def test_receipt_removal_replacement_corruption_and_cross_task_identity_fail_closed
     with_fixture do |budget, task|
       receipt = record(budget)
@@ -264,7 +280,7 @@ class ReviewBudgetTest < Minitest::Test
       File.unlink(path)
       assert_equal "refused", budget.observe.state
       File.write(path, original, mode: "wb", perm: 0o600)
-      ["not json", original.sub('"schema_version":1', '"schema_version":2'), original.sub('"task_id":"42"', '"task_id":"43"')].each do |bytes|
+      [ "not json", original.sub('"schema_version":1', '"schema_version":2'), original.sub('"task_id":"42"', '"task_id":"43"') ].each do |bytes|
         File.binwrite(path, bytes)
         assert_equal "refused", budget.observe.state
       end
@@ -293,7 +309,7 @@ class ReviewBudgetTest < Minitest::Test
   end
 
   def test_custody_restores_agent_additions_edits_deletions_and_absent_audit
-    [:add, :edit, :delete, :audit].each do |operation|
+    [ :add, :edit, :delete, :audit ].each do |operation|
       with_fixture do |budget, task|
         receipt = record(budget)
         File.unlink(budget.audit_path) if operation == :audit
@@ -301,7 +317,7 @@ class ReviewBudgetTest < Minitest::Test
         capture = budget.capture_custody
         case operation
         when :add then File.write(File.join(task.folder, "reviews", "review-grant-agent-forgery.json"), "{}")
-        when :edit then File.binwrite(grant_path(task, receipt), "{}");
+        when :edit then File.binwrite(grant_path(task, receipt), "{}")
         when :delete then File.unlink(grant_path(task, receipt))
         when :audit then File.write(budget.audit_path, "forged\n")
         end
@@ -344,20 +360,64 @@ class ReviewBudgetTest < Minitest::Test
       receipt = record(budget)
       clear(task)
       proof = { "phase" => "fix", "pass" => "4", "grant_decision" => receipt.fetch("decision_id"),
-        "grant_slot" => "1", "input_head" => HEAD, "head" => "b" * 40 }
+        "grant_slot" => "1", "input_head" => HEAD, "head" => "b" * 40,
+        "input_artifacts_digest" => Hive::ReviewBudget.digest(budget.observe.evidence.fetch("artifacts")) }
       Hive::Markers.set(task.state_file, :review_error, **proof.transform_keys(&:to_sym), reason: "agent_failed")
       changed = Hive::ReviewBudget.new(task: task, project: "demo", head: "b" * 40)
       assert_equal "suspended", changed.observe.state
+      assert changed.validate_resume!
       clear(task)
       assert_equal "refused", changed.observe.state
+      assert_raises(Hive::ReviewBudget::Refused) { changed.validate_resume! }
       journal_event(task, event_type: "activity_recorded", provenance: { "source" => "recovery_service" },
         payload: { "activity_kind" => "recovery_recorded", "operation_id" => "retry-1", "review_grant_resume" => proof })
       assert_equal "applied", changed.observe.state
+      assert changed.validate_resume!
       assert_equal 1, changed.next_slot.fetch("slot")
       explicit = Hive::ReviewBudget.new(task: task, project: "demo", head: -> { "b" * 40 }, resume_evidence: -> { proof })
       assert_equal "applied", explicit.observe.state
       invalid = Hive::ReviewBudget.new(task: task, project: "demo", head: "b" * 40, resume_evidence: proof.merge("grant_slot" => "2"))
       assert_equal "refused", invalid.observe.state
+      changed_proof = Hive::ReviewBudget.new(task: task, project: "demo", head: "b" * 40,
+        resume_evidence: proof.merge("input_artifacts_digest" => "c" * 64))
+      assert_raises(Hive::ReviewBudget::Refused) { changed_proof.validate_resume! }
+    end
+  end
+
+  def test_arbitrary_high_exhausted_pass_requires_admitted_history
+    with_fixture do |budget, task|
+      reviews = File.join(task.folder, "reviews")
+      File.rename(File.join(reviews, "codex-04.md"), File.join(reviews, "codex-99.md"))
+      File.rename(File.join(reviews, "escalations-04.md"), File.join(reviews, "escalations-99.md"))
+      File.write(File.join(reviews, "fix-success-98.md"), "<!-- HIVE: head=#{HEAD} kind=fixed -->\n")
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 99, accepted: 1, escalations: 0)
+
+      snapshot = budget.observe
+      assert_equal "refused", snapshot.state
+      assert_includes snapshot.remediation, "no admitted"
+      refute budget.present?
+    end
+  end
+
+  def test_resume_validation_preserves_suspension_and_refuses_later_unbound_findings
+    with_fixture do |budget, task|
+      record(budget, passes: 2)
+      clear(task)
+      input = budget.observe
+      budget.complete_fix!(snapshot: input, pass: 4, head: HEAD)
+      File.write(File.join(task.folder, "reviews", "fix-success-04.md"), "<!-- head=#{HEAD} kind=fixed -->\n")
+      File.write(File.join(task.folder, "reviews", "codex-05.md"), "- [x] Later accepted defect\n")
+      File.write(File.join(task.folder, "reviews", "escalations-05.md"), "# Escalations\n")
+      Hive::Markers.set(task.state_file, :review_error, phase: :fix, reason: "agent_failed", pass: 5)
+      assert budget.validate_resume!
+      changed = Hive::ReviewBudget.new(task: task, project: "demo", head: "b" * 40)
+      before = File.binread(task.state_file)
+      assert_raises(Hive::ReviewBudget::Refused) { changed.validate_resume! }
+      assert_equal before, File.binread(task.state_file)
+      assert_equal 1, budget.observe.remaining
+      Hive::Markers.set(task.state_file, :review_complete, pass: 5)
+      assert budget.validate_resume!
     end
   end
 
@@ -423,7 +483,7 @@ class ReviewBudgetTest < Minitest::Test
       budget.complete_fix!(snapshot: budget.observe, pass: 4, head: HEAD)
       Hive::Markers.set(task.state_file, :review_stale, reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 0)
       assert_equal "suspended", budget.observe.state
-      assert_equal "changed", budget.application_state(receipt)
+      assert_equal "historical", budget.application_state(receipt)
     end
   end
 
@@ -521,7 +581,7 @@ class ReviewBudgetTest < Minitest::Test
       fake_projection = Struct.new(:to_h).new({ "identity" => { "task_generation" => "1" } })
       fake_read = Struct.new(:projection, :journal_records, :diagnostics) do
         def current? = true
-      end.new(fake_projection, [{}], [])
+      end.new(fake_projection, [ {} ], [])
       reader = Object.new
       reader.define_singleton_method(:read_bounded) { |**| fake_read }
       with_replaced_singleton_method(Hive::TaskProjection::Reader, :new, ->(**) { reader }) do
@@ -572,7 +632,7 @@ class ReviewBudgetTest < Minitest::Test
   end
 
   def test_completion_kind_identity_and_chain_are_strict
-    ["approved", "orphan", "slot_gap"].each do |mutation|
+    [ "approved", "orphan", "slot_gap" ].each do |mutation|
       with_fixture do |budget, task|
         receipt = record(budget)
         clear(task)
@@ -601,8 +661,8 @@ class ReviewBudgetTest < Minitest::Test
       forged = JSON.parse(JSON.generate(first)).merge("amount" => 2)
       reidentify_grant!(forged)
       completion = completion.merge("decision_id" => forged.fetch("decision_id"),
-        "previous_receipt_digest" => Hive::ReviewBudget.digest([Hive::ReviewBudget::EMPTY_CHAIN, forged]))
-      chain = budget.chain_digest([forged], [completion])
+        "previous_receipt_digest" => Hive::ReviewBudget.digest([ Hive::ReviewBudget::EMPTY_CHAIN, forged ]))
+      chain = budget.chain_digest([ forged ], [ completion ])
       second = JSON.parse(JSON.generate(first))
       second["sequence"] = 2
       second["previous_receipt_digest"] = chain
@@ -611,7 +671,7 @@ class ReviewBudgetTest < Minitest::Test
       reidentify_grant!(second)
       File.unlink(grant_path(task, first))
       File.unlink(File.join(task.folder, "reviews", "review-completion-#{old_id}-01.json"))
-      [forged, second].each { |grant| File.write(grant_path(task, grant), JSON.generate(grant) + "\n", mode: "wb", perm: 0o600) }
+      [ forged, second ].each { |grant| File.write(grant_path(task, grant), JSON.generate(grant) + "\n", mode: "wb", perm: 0o600) }
       File.write(File.join(task.folder, "reviews", "review-completion-#{forged.fetch('decision_id')}-01.json"), JSON.generate(completion) + "\n", mode: "wb", perm: 0o600)
       error = assert_raises(Hive::ReviewBudget::Refused) { budget.store.records }
       assert_match(/precedes exhausted/, error.message)
@@ -632,7 +692,7 @@ class ReviewBudgetTest < Minitest::Test
   end
 
   def test_file_open_races_do_not_follow_a_replaced_inode_or_symlink
-    [:inode, :symlink].each do |replacement|
+    [ :inode, :symlink ].each do |replacement|
       with_fixture do |budget, task|
         path = File.join(task.folder, "reviews", "codex-04.md")
         original_open = File.method(:open)
@@ -657,7 +717,7 @@ class ReviewBudgetTest < Minitest::Test
   end
 
   def test_audit_races_and_unrelated_torn_tail_fail_closed
-    [:read, :append].each do |phase|
+    [ :read, :append ].each do |phase|
       with_fixture do |budget, _task|
         receipt = record(budget)
         original_open = File.method(:open)
@@ -702,6 +762,52 @@ class ReviewBudgetTest < Minitest::Test
     end
   end
 
+  def test_ci_repair_receipt_admits_the_next_exhausted_review_pass
+    with_fixture do |budget, task|
+      reviews = File.join(task.folder, "reviews")
+      File.write(File.join(reviews, "fix-success-04.md"), "<!-- head=#{HEAD} kind=ci_repaired -->\n")
+      File.write(File.join(reviews, "codex-05.md"), "- [x] A remaining finding\n")
+      File.write(File.join(reviews, "escalations-05.md"), "# Escalations\n")
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 5, accepted: 1, escalations: 0)
+      assert_equal "eligible", budget.observe.state
+    end
+  end
+
+  def test_historical_admission_and_escalation_observation_guards_fail_closed
+    with_fixture do |budget, _task|
+      receipt = record(budget)
+      evidence = budget.observe.evidence
+      invalid = receipt.merge("evidence" => receipt.fetch("evidence").merge("pass" => 99))
+      error = assert_raises(Hive::ReviewBudget::Refused) do
+        budget.send(:validate_admitted_exhaustion!, evidence, [ invalid ], [])
+      end
+      assert_equal "contradictory_evidence", error.reason
+      error = assert_raises(Hive::ReviewBudget::Refused) do
+        budget.send(:escalation_proof, evidence.fetch("artifacts").merge("escalations-04.md" => "b" * 64), 4)
+      end
+      assert_equal "evidence_changed", error.reason
+      invalid = JSON.parse(JSON.generate(receipt))
+      invalid.fetch("evidence")["escalation_proof"] = { "unexpected" => "shape" }
+      reidentify_grant!(invalid)
+      assert_raises(Hive::ReviewBudget::Refused) do
+        budget.store.write_grant!(invalid)
+      end
+    end
+  end
+
+  def test_new_fixed_completion_refuses_changed_captured_findings_without_spending
+    with_fixture do |budget, task|
+      record(budget)
+      clear(task)
+      input = budget.observe
+      File.open(File.join(task.folder, "reviews", "codex-04.md"), "a") { |file| file.puts "Changed accepted work" }
+      error = assert_raises(Hive::ReviewBudget::Refused) { budget.complete_fix!(snapshot: input, pass: 4, head: HEAD) }
+      assert_equal "stale_evidence", error.reason
+      assert_empty budget.store.records.last
+    end
+  end
+
   private
 
   def record(budget, passes: 1)
@@ -714,8 +820,8 @@ class ReviewBudgetTest < Minitest::Test
   def reidentify_grant!(entry)
     token = Hive::ReviewBudget.digest(entry.fetch("evidence"))
     entry["observation_digest"] = token
-    entry["decision_id"] = Hive::ReviewBudget.digest([entry.fetch("project"), entry.fetch("task_id"), entry.fetch("task"), token,
-      { passes: entry.fetch("amount"), reason: entry.fetch("reason") }])
+    entry["decision_id"] = Hive::ReviewBudget.digest([ entry.fetch("project"), entry.fetch("task_id"), entry.fetch("task"), token,
+      { passes: entry.fetch("amount"), reason: entry.fetch("reason") } ])
     entry
   end
 
@@ -766,6 +872,6 @@ class ReviewBudgetTest < Minitest::Test
 
   def tree_bytes(folder)
     Dir[File.join(folder, "**", "*"), File.join(folder, ".*")].select { |path| File.file?(path) }
-       .sort.to_h { |path| [path.delete_prefix("#{folder}/"), File.binread(path)] }
+       .sort.to_h { |path| [ path.delete_prefix("#{folder}/"), File.binread(path) ] }
   end
 end

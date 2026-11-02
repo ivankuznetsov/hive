@@ -19,6 +19,7 @@ require "hive/runtime_identity"
 require "hive/task"
 require "hive/task_projection"
 require "hive/task_resolver"
+require "hive/task_activity"
 require "hive/review_budget"
 require "hive/agent_support/operator_authority"
 
@@ -215,7 +216,7 @@ module Hive
             end
             row = SafetyObservation.new(marker: "review_stale",
               marker_attrs: observation.evidence.fetch("marker").fetch("attrs"),
-              state_file: locked_task.state_file, stage: "6-review", folder: locked_task.folder)
+              state_file: locked_task.state_file, stage: "6-review", folder: locked_task.folder) # coding-scoped: grants target the coding review runner.
             safe, detail = @safety.call(row)
             raise Hive::ReviewBudget::Refused.new("unsafe_state", detail.to_s) unless safe == true
 
@@ -237,8 +238,14 @@ module Hive
         receipt = budget.store.grants.last
         return nil unless receipt
 
-        apply_review_grant!(task, budget, receipt)
-        budget.observe
+        preserve_review_grant_attempt_resume!(task, project, receipt)
+        budget.reconcile_audit!(receipt)
+        snapshot = budget.observe
+        if snapshot.state == "pending"
+          apply_review_grant!(task, budget, receipt)
+          snapshot = budget.observe
+        end
+        snapshot
       end
 
       # Requests carry their own charge; a request without one is its first.
@@ -966,6 +973,12 @@ module Hive
                 owner: "operator"
               ) unless generation_matches?(predicted, recovery)
 
+              begin
+                preserve_review_grant_resume!(locked_task, marker, current_request)
+              rescue Hive::ReviewBudget::Refused => error
+                return block_request(current_request, "review_grant_evidence_changed",
+                  owner: "operator", remediation: "#{error.message}. #{error.remediation}")
+              end
               cleared = clear_recoverable_marker(
                 locked_task.state_file,
                 expected_name: current_request.expected_marker_name,
@@ -1201,6 +1214,59 @@ module Hive
       end
 
       private
+
+      # A legacy direct run may have no prior durable attempt to receive a
+      # recovery activity. The newly authenticated worker can retain the exact
+      # coordinator request it was launched from before reading its budget.
+      def preserve_review_grant_attempt_resume!(task, project, receipt)
+        context = Hive::Attempts::Context.current
+        return unless context && context.project.to_s == project.to_s && context.task_slug == task.slug
+
+        attempt = attempts_store.fetch(context.attempt_id)
+        request = attempt && request_queue.fetch(attempt["request_id"])
+        return unless request && request.task_id.to_s == task.id.to_s && request.expected_stage == "6-review" # coding-scoped: partial granted fixes retain coding-review scope.
+        attrs = request.recovery&.fetch("expected_marker_attrs", nil)
+        return unless attrs.is_a?(Hash) && attrs["grant_decision"] == receipt.fetch("decision_id")
+
+        proof = Hive::Recovery.canonical_marker_attrs(attrs).slice("grant_decision", "grant_slot",
+          "input_head", "head", "input_artifacts_digest", "pass", "phase")
+        observed = Hive::ReviewBudget.new(task: task, project: project, resume_evidence: proof)
+        snapshot = observed.observe
+        return unless snapshot.applicable?
+        observed.validate_resume!(snapshot: snapshot)
+        history = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task).read_bounded
+        if history.current? && history.journal_records.any? { |record|
+          record["task_generation"] == context.task_generation &&
+            record.dig("payload", "activity_kind") == "recovery_recorded" &&
+            record.dig("payload", "review_grant_resume") == proof
+        }
+          return
+        end
+        activity = Hive::TaskActivity.for_context(task, context: context, attempt_store: attempts_store)
+        raise Hive::ReviewBudget::Refused.new("invalid_task_history", "managed recovery has no authoritative activity binding") unless activity
+
+        activity.record(kind: "recovery_recorded", operation_id: "review-grant-resume:#{request.request_id}",
+          reason: "preserved granted fix recovery evidence", source: "recovery_service",
+          payload: { "review_grant_resume" => proof })
+      end
+
+      def preserve_review_grant_resume!(task, marker, request)
+        budget = Hive::ReviewBudget.new(task: task, project: request.project)
+        return unless budget.present?
+
+        budget.validate_resume!
+        attrs = Hive::Recovery.canonical_marker_attrs(marker.attrs)
+        return if attrs["grant_decision"].to_s.empty?
+
+        activity = Hive::TaskActivity.for_task(task)
+        return unless activity
+
+        activity.record(kind: "recovery_recorded",
+          operation_id: "review-grant-resume:#{request.request_id}",
+          reason: "preserved granted fix recovery evidence", source: "recovery_service",
+          payload: { "review_grant_resume" => attrs.slice("grant_decision", "grant_slot",
+            "input_head", "head", "input_artifacts_digest", "pass", "phase") })
+      end
 
       def apply_review_grant!(task, budget, receipt)
         budget.reconcile_audit!(receipt)

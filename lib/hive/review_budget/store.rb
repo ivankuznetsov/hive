@@ -47,7 +47,7 @@ module Hive
         grants = documents.select { |entry| entry["schema"] == GRANT_SCHEMA }.sort_by { |entry| entry.fetch("sequence") }
         completions = documents.select { |entry| entry["schema"] == COMPLETION_SCHEMA }
         validate_chain!(grants, completions)
-        [grants, completions.sort_by { |entry| [grants.index { |grant| grant.fetch("decision_id") == entry.fetch("decision_id") }, entry.fetch("slot")] }]
+        [ grants, completions.sort_by { |entry| [ grants.index { |grant| grant.fetch("decision_id") == entry.fetch("decision_id") }, entry.fetch("slot") ] } ]
       end
 
       def grants = records.first
@@ -143,7 +143,7 @@ module Hive
         if torn && !line.start_with?(torn)
           raise Refused.new("unsafe_state", "review-budget audit has an unrelated torn final entry")
         end
-        existing = entries.find { |item| item.fetch("decision_id") == receipt.fetch("decision_id") && item.fetch("event") == entry.fetch("event") && item["completion_slot"] == entry["completion_slot"] }
+        existing = entries.find { |item| item.fetch("decision_id") == receipt.fetch("decision_id") && item.fetch("event") == entry.fetch("event") && item["completion_slot"] == entry["completion_slot"] && item["expiry_reason"] == entry["expiry_reason"] }
         if existing && existing != entry
           raise Refused.new("decision_conflict", "review-budget audit conflicts with its immutable grant")
         end
@@ -201,7 +201,7 @@ module Hive
         end
         if torn
           candidates = grants.flat_map do |grant|
-            [audit_entry(grant)] + completions.select { |completion| completion.fetch("decision_id") == grant.fetch("decision_id") }.map do |completion|
+            [ audit_entry(grant) ] + completions.select { |completion| completion.fetch("decision_id") == grant.fetch("decision_id") }.map do |completion|
               audit_entry(grant).merge("event" => "fixed", "completion_slot" => completion.fetch("slot"), "completion_digest" => ReviewBudget.digest(completion))
             end
           end
@@ -255,13 +255,16 @@ module Hive
         token = @budget.valid_digest!(document.fetch("observation_digest"), "grant observation")
         evidence = document.fetch("evidence")
         unless name == "review-grant-#{token}.json" && evidence.is_a?(Hash) &&
-            evidence.keys.sort == %w[artifacts head marker ownership pass project receipt_chain_digest resume_evidence scope task task_generation task_id worktree] &&
+            evidence.keys.sort == %w[artifacts escalation_proof head marker ownership pass project receipt_chain_digest resume_evidence scope task task_generation task_id worktree] &&
             ReviewBudget.digest(evidence) == token && evidence.fetch("scope") == document.fetch("scope") &&
             evidence.fetch("task_generation") == document.fetch("task_generation") &&
             evidence.values_at("project", "task", "task_id") == document.values_at("project", "task", "task_id")
           raise Refused.new("unsafe_state", "review-budget observation binding is invalid")
         end
         validate_artifacts!(evidence.fetch("artifacts"))
+        unless ReviewBudget::EscalationProof.valid?(evidence.fetch("escalation_proof"))
+          raise Refused.new("unsafe_state", "review-budget escalation proof is invalid")
+        end
         @budget.valid_oid!(evidence.fetch("head"), "reviewed HEAD")
         @budget.valid_digest!(evidence.fetch("receipt_chain_digest"), "observation receipt chain")
         @budget.positive_integer!(evidence.fetch("pass"), "exhausted pass")
@@ -271,8 +274,8 @@ module Hive
             Hive::Markers.current_from_content(marker.fetch("raw")).attrs == marker.fetch("attrs")
           raise Refused.new("unsafe_state", "review-budget bound marker is invalid")
         end
-        expected_id = ReviewBudget.digest([document.fetch("project"), document.fetch("task_id"), document.fetch("task"), token,
-          { passes: document.fetch("amount"), reason: document.fetch("reason") }])
+        expected_id = ReviewBudget.digest([ document.fetch("project"), document.fetch("task_id"), document.fetch("task"), token,
+          { passes: document.fetch("amount"), reason: document.fetch("reason") } ])
         raise Refused.new("unsafe_state", "review-budget decision identity is invalid") unless expected_id == document.fetch("decision_id")
       end
 
@@ -303,7 +306,7 @@ module Hive
           unless grant.fetch("sequence") == index + 1 && grant.fetch("previous_receipt_digest") == previous && grant.fetch("evidence").fetch("receipt_chain_digest") == previous
             raise Refused.new("unsafe_state", "review-budget receipt chain is missing, replaced or out of order")
           end
-          previous = ReviewBudget.digest([previous, grant])
+          previous = ReviewBudget.digest([ previous, grant ])
           fixed = completions.select { |entry| entry.fetch("decision_id") == grant.fetch("decision_id") }.sort_by { |entry| entry.fetch("slot") }
           fixed.each_with_index do |completion, slot_index|
             unless completion.fetch("slot") == slot_index + 1 && completion.fetch("slot") <= grant.fetch("amount") &&
@@ -311,7 +314,7 @@ module Hive
                 completion.fetch("task_generation") == grant.fetch("task_generation")
               raise Refused.new("unsafe_state", "review-budget fix completion chain is invalid")
             end
-            previous = ReviewBudget.digest([previous, completion])
+            previous = ReviewBudget.digest([ previous, completion ])
           end
           if index < grants.length - 1 && fixed.length != grant.fetch("amount")
             raise Refused.new("unsafe_state", "a later review grant precedes exhausted fixed slots")
@@ -366,7 +369,7 @@ module Hive
 
       def audit_tail
         path = @budget.audit_path
-        return [[], nil, 0] unless directory!(File.dirname(path), missing: true, private: true)
+        return [ [], nil, 0 ] unless directory!(File.dirname(path), missing: true, private: true)
         stat = File.lstat(path)
         unless stat.file? && !stat.symlink? && (stat.mode & 0o077).zero?
           raise Refused.new("unsafe_state", "review-budget audit must be a private regular file")
@@ -375,7 +378,7 @@ module Hive
           unless file.stat.ino == stat.ino && file.stat.dev == stat.dev
             raise Refused.new("unsafe_state", "review-budget audit changed while opening")
           end
-          file.seek([stat.size - MAX_AUDIT_TAIL, 0].max)
+          file.seek([ stat.size - MAX_AUDIT_TAIL, 0 ].max)
           file.read(MAX_AUDIT_TAIL + 1)
         end
         bytes = bytes.split("\n", 2).last.to_s if stat.size > MAX_AUDIT_TAIL
@@ -385,7 +388,7 @@ module Hive
         entries = lines.map do |line|
           value = parse(line)
           extra = case value.is_a?(Hash) && value["event"]
-          when "expiry" then ["expiry_reason"]
+          when "expiry" then [ "expiry_reason" ]
           when "fixed" then %w[completion_digest completion_slot]
           else []
           end
@@ -397,9 +400,9 @@ module Hive
           end
           value
         end
-        [entries, torn, stat.size]
+        [ entries, torn, stat.size ]
       rescue Errno::ENOENT
-        [[], nil, 0]
+        [ [], nil, 0 ]
       end
     end
   end

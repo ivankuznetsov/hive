@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/errors"
+require "hive/config"
 require "hive/markers"
 require "hive/recovery"
 require "hive/secret_scanner"
@@ -68,19 +69,18 @@ module Hive
       unless reason.is_a?(String)
         raise Refused.new("invalid_reason", "--reason is required")
       end
-      text = reason.dup
-      text.force_encoding(Encoding::UTF_8) if text.encoding == Encoding::BINARY
-      unless text.encoding == Encoding::UTF_8 && text.valid_encoding?
+      text = reason.dup.force_encoding(Encoding::UTF_8)
+      unless text.valid_encoding?
         raise Refused.new("invalid_reason", "--reason must be valid UTF-8")
       end
-      text = text.strip
+      text = Hive::Recovery.canonical_wire_value(text.strip)
       if text.empty? || text.bytesize > 1024 || text.match?(/[\p{Cc}\p{Cf}]/)
         raise Refused.new("invalid_reason", "--reason must contain 1–1024 bytes without control characters")
       end
       if Hive::SecretScanner.match?(text, path: "review-grant-reason")
         raise Refused.new("invalid_reason", "--reason contains secret-shaped text; provide a non-sensitive explanation")
       end
-      { passes: amount, reason: Hive::Recovery.canonical_wire_value(text) }
+      { passes: amount, reason: text }
     rescue Hive::SecretScanner::Unavailable
       raise Refused.new("secret_scan_unavailable", "reason validation is unavailable; repair the secret scanner and retry")
     end
@@ -198,7 +198,7 @@ module Hive
         "previous_receipt_digest" => chain_digest(current.receipts, current.completions),
         "amount" => decision.fetch(:passes), "reason" => decision.fetch(:reason),
         "caller" => caller, "source" => source,
-        "decision_id" => self.class.digest([project, task.id.to_s, task.slug.to_s, current.evidence_token, decision]),
+        "decision_id" => self.class.digest([ project, task.id.to_s, task.slug.to_s, current.evidence_token, decision ]),
         "recorded_at" => @clock.call.utc.iso8601(6)
       }
       receipt = store.write_grant!(document)
@@ -227,6 +227,9 @@ module Hive
         current.evidence.fetch("marker") == receipt.fetch("evidence").fetch("marker") ? "pending" : "changed"
       elsif %w[applied fixing verifying].include?(current.state)
         "applied"
+      elsif %w[eligible suspended exhausted].include?(current.state) &&
+          current.completions.any? { |entry| entry.fetch("decision_id") == receipt.fetch("decision_id") }
+        "historical"
       else
         "changed"
       end
@@ -239,6 +242,40 @@ module Hive
       completed = snapshot.completions.count { |entry| entry.fetch("decision_id") == latest.fetch("decision_id") }
       { "decision_id" => latest.fetch("decision_id"), "slot" => completed + 1,
         "grant_sequence" => latest.fetch("sequence"), "observation_digest" => latest.fetch("observation_digest") }
+    end
+
+    # Recovery may clear a park only after the preserved work still binds the
+    # original slot. This supplies evidence validation, never retry authority.
+    def validate_resume!(snapshot: observe, reviewed_head: nil)
+      if snapshot.state == "refused"
+        raise Refused.new(snapshot.reason, snapshot.remediation)
+      end
+      return true unless snapshot.applicable? && snapshot.remaining.positive?
+
+      latest = snapshot.receipts.last
+      completed = snapshot.completions.select { |entry| entry.fetch("decision_id") == latest.fetch("decision_id") }
+      proof = snapshot.evidence.fetch("resume_evidence")
+      slot = completed.length + 1
+      if proof.is_a?(Hash) && proof["grant_decision"] == latest.fetch("decision_id") &&
+          proof["grant_slot"].to_s == slot.to_s && proof["pass"].to_s == snapshot.evidence.fetch("pass").to_s
+        unless proof["phase"] == "fix" && proof["head"] == snapshot.evidence.fetch("head") &&
+            proof["input_artifacts_digest"] == self.class.digest(snapshot.evidence.fetch("artifacts"))
+          raise Refused.new("evidence_changed", "the incomplete granted fix HEAD or accepted findings changed")
+        end
+      elsif completed.empty?
+        check_observation_binding!(latest, snapshot.evidence, marker: false)
+      else
+        pass = snapshot.evidence.fetch("pass")
+        pending_findings = snapshot.evidence.fetch("artifacts").keys.any? do |name|
+          Hive::ReviewPass.number(name) == pass && Hive::Stages::Review.reviewer_file?(name)
+        end
+        if pending_findings && pass > completed.last.fetch("pass") &&
+            snapshot.evidence.fetch("head") != completed.last.fetch("head") &&
+            snapshot.evidence.fetch("head") != reviewed_head
+          raise Refused.new("evidence_changed", "the granted retry findings have no matching reviewed HEAD")
+        end
+      end
+      true
     end
 
     # `snapshot` is captured immediately before Phase 4. The caller retains it
@@ -262,6 +299,9 @@ module Hive
         store.append_audit!(receipts.last, completion: existing)
         return existing
       end
+      unless evidence.fetch("artifacts") == snapshot.evidence.fetch("artifacts")
+        raise Refused.new("stale_evidence", "accepted review artifacts changed before granted fix completion")
+      end
       current = self.snapshot("applied", evidence, receipts, completions)
       unless next_slot(snapshot: current) == logical
         raise Refused.new("completion_conflict", "granted fix logical slot changed")
@@ -283,12 +323,12 @@ module Hive
     end
 
     def chain_digest(grants, completions)
-      chain_records(grants, completions).reduce(EMPTY_CHAIN) { |digest, entry| self.class.digest([digest, entry]) }
+      chain_records(grants, completions).reduce(EMPTY_CHAIN) { |digest, entry| self.class.digest([ digest, entry ]) }
     end
 
     def chain_records(grants, completions)
       grants.flat_map do |grant|
-        [grant] + completions.select { |entry| entry.fetch("decision_id") == grant.fetch("decision_id") }.sort_by { |entry| entry.fetch("slot") }
+        [ grant ] + completions.select { |entry| entry.fetch("decision_id") == grant.fetch("decision_id") }.sort_by { |entry| entry.fetch("slot") }
       end
     end
 
@@ -361,13 +401,14 @@ module Hive
       worktree = worktree_evidence
       evidence = identity.merge("task_generation" => epoch, "marker" => marker_hash(marker),
         "head" => reviewed_head(worktree), "worktree" => worktree, "artifacts" => artifacts, "scope" => scope, "pass" => pass,
+        "escalation_proof" => escalation_proof(artifacts, pass),
         "ownership" => history.projection.to_h.fetch("identity"),
         "resume_evidence" => resume_evidence(marker, history.journal_records),
         "receipt_chain_digest" => chain_digest(grants, completions))
-      unless read_marker.raw == marker.raw && artifact_digests == artifacts && store.records == [grants, completions] && worktree_evidence == worktree && reviewed_head(worktree) == evidence.fetch("head")
+      unless read_marker.raw == marker.raw && artifact_digests == artifacts && store.records == [ grants, completions ] && worktree_evidence == worktree && reviewed_head(worktree) == evidence.fetch("head")
         raise Refused.new("evidence_changed", "review evidence changed during observation; refresh operational status")
       end
-      [self.class.canonical(evidence), grants, completions]
+      [ self.class.canonical(evidence), grants, completions ]
     end
 
     def read_marker
@@ -384,7 +425,7 @@ module Hive
         bytes = store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES)
         total += bytes.bytesize
         raise Refused.new("evidence_limit", "current review artifacts exceed the bounded read limit") if total > MAX_TOTAL_BYTES
-        [name, Digest::SHA256.hexdigest(bytes)]
+        [ name, Digest::SHA256.hexdigest(bytes) ]
       end
     end
 
@@ -434,7 +475,7 @@ module Hive
     def resume_evidence(marker, records)
       supplied = @resume_evidence.respond_to?(:call) ? @resume_evidence.call : @resume_evidence
       return self.class.canonical(supplied) if supplied
-      return self.class.canonical(marker.attrs) if marker.name == :review_error && marker.attrs["phase"] == "fix" && marker.attrs["grant_decision"]
+      return self.class.canonical(marker.attrs) if %i[review_error review_working].include?(marker.name) && marker.attrs["phase"] == "fix" && marker.attrs["grant_decision"]
       record = records.reverse.find do |entry|
         entry["event_type"] == "activity_recorded" && entry.dig("payload", "activity_kind") == "recovery_recorded" && entry.dig("payload", "review_grant_resume").is_a?(Hash)
       end
@@ -442,7 +483,7 @@ module Hive
     end
 
     def review_stage? = review_stage_string?(task.stage_name.to_s)
-    def review_stage_string?(value) = %w[review 6-review].include?(value)
+    def review_stage_string?(value) = %w[review 6-review].include?(value) # coding-scoped: grants extend the coding review loop only.
     def marker_hash(marker) = self.class.canonical("name" => marker.name.to_s, "attrs" => marker.attrs, "raw" => marker.raw)
     def eligible_marker?(marker) = marker.fetch("name") == "review_stale" && marker.fetch("attrs")["reason"] == "final_fix_unverified"
     def blocking_marker?(marker) = !%w[none review_working].include?(marker.fetch("name"))
@@ -450,6 +491,7 @@ module Hive
     def validate_exhaustion!(evidence, records, completions)
       pass = positive_integer!(evidence.fetch("pass"), "exhausted pass")
       raise Refused.new("missing_evidence", "exhausted review requires a preceding fixed HEAD receipt") if pass <= 1
+      validate_admitted_exhaustion!(evidence, records, completions)
       artifacts = evidence.fetch("artifacts")
       reviewer_files = artifacts.keys.select do |name|
         PASS_FILE.match(name)[1].to_i == pass && Hive::Stages::Review.reviewer_file?(name)
@@ -500,12 +542,42 @@ module Hive
       end
     end
 
+    def validate_admitted_exhaustion!(evidence, records, completions)
+      configured = task.respond_to?(:project_root) && task.project_root && Hive::Config.load(task.project_root).dig("review", "max_passes")
+      ceiling = (configured || 3) + 1
+      records.each do |receipt|
+        ceiling = widen_ci_ceiling(ceiling, evidence.fetch("artifacts"))
+        if receipt.fetch("evidence").fetch("pass") > ceiling
+          raise Refused.new("contradictory_evidence", "grant observation pass has no admitted review history")
+        end
+        ceiling = [ ceiling, receipt.fetch("evidence").fetch("pass") + receipt.fetch("amount") ].max
+        fixed = completions.select { |entry| entry.fetch("decision_id") == receipt.fetch("decision_id") }
+        ceiling = [ ceiling, fixed.map { |entry| entry.fetch("pass") + 1 }.max.to_i ].max
+      end
+      ceiling = widen_ci_ceiling(ceiling, evidence.fetch("artifacts"))
+      if evidence.fetch("pass") > ceiling
+        raise Refused.new("contradictory_evidence", "exhausted review pass has no admitted fix, grant or CI-repair history")
+      end
+    end
+
+    def widen_ci_ceiling(ceiling, artifacts)
+      loop do
+        name = "fix-success-#{format('%02d', ceiling)}.md"
+        break unless artifacts.key?(name)
+        line = store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES).lines.first.to_s
+        break unless line.match?(/\bkind=ci_repaired\b/)
+        ceiling += 1
+      end
+      ceiling
+    end
+
     def check_bound_artifacts!(records, completions, evidence)
       records.each do |receipt|
         # Evidence at exhausted passes is retained: it is the accepted work
         # the operator authorized, so edits cannot silently rebind a grant.
         receipt.fetch("evidence").fetch("artifacts").each do |name, digest|
           next if name.start_with?("escalations-") && completions.any? { |entry| entry.fetch("decision_id") == receipt.fetch("decision_id") }
+          next if permitted_escalation_answers?(receipt, evidence, name)
           unless evidence.fetch("artifacts")[name] == digest
             raise Refused.new("evidence_changed", "granted review artifact changed or disappeared: reviews/#{name}")
           end
@@ -518,7 +590,10 @@ module Hive
       fields = %w[head artifacts scope task_generation worktree]
       fields << "marker" if marker
       matches = fields.all? do |key|
-        before.fetch(key) == evidence.fetch(key) || (key == "head" && !marker && partial_fix_head_bound?(receipt, evidence))
+        before.fetch(key) == evidence.fetch(key) ||
+          (key == "head" && !marker && partial_fix_head_bound?(receipt, evidence)) ||
+          (key == "artifacts" && before.fetch("artifacts").keys == evidence.fetch("artifacts").keys &&
+            before.fetch("artifacts").all? { |name, digest| evidence.fetch("artifacts")[name] == digest || permitted_escalation_answers?(receipt, evidence, name) })
       end
       unless matches
         raise Refused.new("evidence_changed", "preserved accepted findings or HEAD changed before the granted fix")
@@ -532,8 +607,36 @@ module Hive
         proof["input_head"] == receipt.fetch("evidence").fetch("head") && proof["head"] == evidence.fetch("head") &&
         proof["pass"].to_s == receipt.fetch("evidence").fetch("pass").to_s && proof["phase"] == "fix"
     end
+
+    def escalation_proof(artifacts, pass)
+      name = "escalations-#{format('%02d', pass)}.md"
+      return nil unless artifacts.key?(name)
+
+      bytes = store.read_regular(File.join(reviews, name), max_bytes: MAX_ARTIFACT_BYTES)
+      unless Digest::SHA256.hexdigest(bytes) == artifacts.fetch(name)
+        raise Refused.new("evidence_changed", "escalation evidence changed during observation")
+      end
+      EscalationProof.capture(name, bytes)
+    end
+
+    def permitted_escalation_answers?(receipt, evidence, name)
+      original = receipt.fetch("evidence").fetch("escalation_proof")
+      return false unless original && original.fetch("name") == name
+
+      marker = evidence.fetch("marker")
+      attrs = marker.fetch("attrs")
+      proof = evidence.fetch("resume_evidence")
+      waiting = marker.fetch("name") == "review_waiting" && attrs["pass"].to_s == receipt.fetch("evidence").fetch("pass").to_s
+      fixing = proof.is_a?(Hash) && proof["phase"] == "fix" &&
+        proof["grant_decision"] == receipt.fetch("decision_id") && proof["pass"].to_s == receipt.fetch("evidence").fetch("pass").to_s
+      return false unless waiting || fixing
+
+      current = escalation_proof(evidence.fetch("artifacts"), receipt.fetch("evidence").fetch("pass"))
+      current && EscalationProof.fills_only?(original, current)
+    end
   end
 end
 
+require "hive/review_budget/escalation_proof"
 require "hive/review_budget/store"
 require "hive/review_budget/custody"

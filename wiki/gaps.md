@@ -27,6 +27,10 @@ proof does not claim a macOS result. `minimax-3` and `qwen-2.6-coder` remain
 unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
 `failed` and exit 2 until their routes are verified and configured.
 
+The first hosted Ubuntu credential proof failed before probe execution because
+the shared fixture requested eight CPUs on a four-CPU daemon. The real Docker
+matrix now requests one CPU; hosted confirmation of that correction is pending.
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

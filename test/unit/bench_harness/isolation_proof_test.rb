@@ -65,7 +65,8 @@ class BenchIsolationProofTest < Minitest::Test
                         "HB_CODEX_AUTH" => @codex_auth }, [ "HOME /tmp" ] ]
 
     cases.each do |mode, declaration, expected|
-      env = fixture_env.merge("PATH" => ENV.fetch("PATH"), "HB_RUNNER_IMAGE" => PROBE_IMAGE).merge(declaration)
+      env = fixture_env.merge("PATH" => ENV.fetch("PATH"), "HB_RUNNER_IMAGE" => PROBE_IMAGE,
+                              "HB_CPUS" => "1").merge(declaration)
       out, err, status = Open3.capture3(env, "bash", HiveBench::IsolationExec::SCRIPT, mode, @work, "sh", "-c", PROBE)
 
       assert_predicate status, :success?, "real Docker #{mode} credential probe failed (exit #{status.exitstatus}): #{err}"

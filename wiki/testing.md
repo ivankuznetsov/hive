@@ -1504,7 +1504,9 @@ CI job has `ubuntu-24.04`/`macos-15` lanes; macOS requires `/bin/bash` 3.2 and
 records `bash --version`. Linux without an override records its local 3.2 skip.
 The real Docker decoy matrix checks the three API routes, both OAuth variants
 and gate with digest-pinned stock Alpine 3.22.2, using multi-argument
-`sh -c` probes. Daemon unavailability is distinct from image setup failure,
+`sh -c` probes. The real Docker matrix requests one CPU so it can run on
+hosted runners with fewer CPUs than the eight-CPU fake-Docker fixture.
+Daemon unavailability is distinct from image setup failure,
 which fails the proof. The owning `harness/CREDENTIAL_ISOLATION.md` documents
 the exact image digest and protocol. Canonical hive-bench keeps corresponding
 tests under `test/` and owns runtime Ruby style. Only the two isolation files

@@ -515,3 +515,26 @@ Pre-existing text on all 57 narrative owners and the navigation-only consumers w
 Acceptance navigation: the root Task-journal growth and compaction entry reaches `modules/events.md#task-journal-growth-and-compaction` and its original append-only/O(history) narrative. The Unified Patrol Fix live execution entry reaches `modules/patrol.md#unified-patrol-fix-live-execution` and its original provider/GitHub evidence boundary. GitOps' first-initialization pointer reaches its exact relocated evidence; daemon's cutover pointer reaches Attempts' ten-table deployment proof. Closed triage, bootstrap, CI proof, removed Hivebox and benchmark parity history have no unresolved root entries. MCP and marker residual caveats remain discoverable through open-to-history links.
 
 `bin/test --changed --list` initially exposed broad fallback caused by two temporary migration helpers at repository root. After moving/removing those helpers, it reported 67 documentation paths and no runnable tests. The fallback suites were not run. The explicit five-file migration checkpoint passed: `bin/test test/unit/wiki_architecture_single_ownership_test.rb test/unit/wiki_workflow_package_ownership_test.rb test/unit/wiki_command_index_test.rb test/unit/native_web_positioning_test.rb test/integration/wiki_command_index_test.rb` — 64 runs, 645 assertions, zero failures/errors/skips. These are unchanged content/ownership tests; no runtime behavior changed in U2. The new focused index test is U4 work.
+
+### U3 author workflow and exact refresh-input walkthrough
+
+Read the exact heredoc input chain in both refresh scripts: `.llm-wiki/config.json`, `AGENTS.md`, `CLAUDE.md`, `wiki/index.md`, `wiki/gaps.md`, then recent `wiki/log.md`. The managed prompt still restricts writes to wiki, requests affected pages and one log fragment, updates the catalog only when coverage changes, and says to record uncertainty in the root. It does not require central narrative storage. The identical project-owned policies outside both managed blocks and in the root header define that last instruction as updating an unresolved-only index alongside the owning domain text. The catalog header points to the same workflow. The unchanged recent log is historical context, not a second current author policy.
+
+Dry walkthrough outcomes (no provider or live refresh launched):
+
+- **New uncertainty:** consult the index and domain page, add an owner heading with evidence, then one alphabetical title-only root link and cross-domain links in the same edit. Existing domain pages suffice for this migration.
+- **Changed uncertainty:** follow the root link, read/update the owner narrative and keep its single index entry current in the same edit; changed titles/anchors require corresponding link edits.
+- **Resolved uncertainty:** retain evidence verbatim beneath `### Resolved`, add the explicit resolution separately and remove the root entry in the same edit. A remaining qualification gets an open heading linked to history, as demonstrated by the MCP/marker migration examples.
+- **Cross-domain discovery:** link to the already-owned heading; do not copy another narrative or add a second logical root entry. Repeated dated evidence remains with that owner.
+- **Refresh writer:** the exact input chain supplies the project-owned policy before any wiki write and the root repeats it. Reading the Events entry reaches its authoritative compaction text; updating that text and the title-only index together satisfies the unchanged prompt. No read instructs recreation of central gap narratives.
+
+The three policy bodies were compared and are identical. All publish literal entry grammar `- [Title](relative/page.md#anchor)`, the exact Task-journal example, and the rule that only those entries and blank separators appear under `## Unresolved gaps`, without prose, summaries or nested lists. The root is hand-maintained. A non-conforming automated index edit fails the offline test by design; link validation does not infer status or completeness.
+
+| Protected input | Baseline/current bytes | Equality / SHA-256 |
+| --- | ---: | --- |
+| AGENTS.md managed block | 1,186 | equal; `31e116ce28c7d08a7341068adba47a0c0bf3460a0eeaa18f4351a09382a2a830` |
+| CLAUDE.md managed block | 1,186 | equal; `31e116ce28c7d08a7341068adba47a0c0bf3460a0eeaa18f4351a09382a2a830` |
+| .llm-wiki/post-commit-refresh.sh | 42,551 | equal; `1bf3ed74bd0ed736f84d6c2f9468a23a7873766f91c8d997b3de386f252e57f5` |
+| templates/llm-wiki/post-commit-refresh.sh | 42,551 | equal; `1bf3ed74bd0ed736f84d6c2f9468a23a7873766f91c8d997b3de386f252e57f5` |
+
+U3 verification: `bundle check` remains satisfied; `bin/test --changed --list` reported 71 documentation paths and no runnable tests. The same explicit five-file checkpoint as U2 passed again (64 runs, 645 assertions, zero failures/errors/skips). No behavior-bearing code changed; this dry read-through, policy equality and protected-input byte comparison provide the author-flow evidence. Catalog count is still 119/119; U3 updates frontmatter `updated:` and visible `Updated:` together to 2026-11-02. The earlier totals row describes the U2 snapshot before that header update. The normal log fragment is added without compiling or editing `wiki/log.md`.

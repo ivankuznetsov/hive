@@ -78,6 +78,41 @@ when the actual source and wiki page edits were independent. Fragments
 turn that hot append point into many independent files; the generated
 aggregate can be refreshed after rebasing or after merge.
 
+## Gap authoring workflow
+
+Start with [[gaps]], the hand-maintained unresolved-only index, and follow its
+link to the owning page's `## Known gaps`. The managed refresh instruction to
+record uncertainty in `wiki/gaps.md` is satisfied by changing the index in the
+same edit as authoritative domain text. The root is not generated; the managed
+scripts and instruction blocks keep their existing bytes.
+
+- **New uncertainty:** search the index and relevant domain pages for an
+  existing logical gap. Prefer that owner. Otherwise add a distinct heading
+  under `## Known gaps` on the relevant existing page, retain evidence, dates
+  and caveats there, and add one alphabetical title-only root link. Add links
+  from other affected domains to that exact heading.
+- **Changed uncertainty:** read the owner's history and update its narrative
+  with the evidence and qualifications. Maintain its root link in the same
+  edit, including title or anchor changes; keep one entry per logical gap.
+- **Resolved uncertainty:** retain the verbatim evidence history under the
+  owner's `### Resolved`, record the explicit resolution separately, and
+  remove its root entry in the same edit. If a qualification remains open,
+  keep a distinct open heading linked to the history and index that heading.
+- **Cross-domain discovery:** link the relevant pages to the existing owner
+  rather than copying the narrative. A second source occurrence can remain
+  with its original date and wording under that owner without a second root
+  entry.
+
+Under `## Unresolved gaps`, use only `- [Title](relative/page.md#anchor)` entries
+and blank separators, with no prose, summaries, or nested lists. For example:
+`- [Task-journal growth and compaction](modules/events.md#task-journal-growth-and-compaction)`.
+Paths are relative to `wiki/gaps.md`, and anchors must name unique headings
+across the whole destination page, including resolved history. Keep display
+titles alphabetical, using path/anchor to break ties. The focused offline
+index test checks entry syntax and destination headings; author review still
+owns completeness, status, and evidence preservation. A non-conforming
+automated index edit intentionally fails that test.
+
 ## Known gaps
 
 - [2026-06-16/17 refresh uncertainty domain items](web.md#hive-web-agents-page-login-fixes-are-sourcerails-integration-pinned-not-live-provider-smoked)

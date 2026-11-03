@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/task_capabilities/verification"
 require "hive/task_capabilities/resolver"
+require "hive/task_capabilities/gate"
 require "hive/attempts/dispatcher"
 require_relative "../../support/task_capabilities_fixture"
 
@@ -8,6 +9,115 @@ class TaskCapabilitiesVerificationTest < Minitest::Test
   include HiveTestHelper
 
   include TaskCapabilitiesFixture
+
+  def test_controlled_checks_use_the_same_actual_environment_across_creator_daemon_and_viewer
+    command = Shellwords.join([ RbConfig.ruby, "-rjson", "-e", "puts JSON.generate(ENV.to_h)" ])
+    with_env("RAILS_ENV" => "creator", "NODE_ENV" => "creator", "BUNDLE_GEMFILE" => "/creator/Gemfile", "BUNDLE_PATH" => "/creator/bundle") do
+      with_verification(command: command) do |verification, plan, _store, _code, _cfg, _task, context|
+        runner = plan.data.fetch("bindings").first.fetch("checks").first.fetch("runner")
+        assert_equal "controlled", runner.fetch("environment_mode")
+        refute runner.key?("environment")
+        creator = Hive::TaskCapabilities::Verification.environment(plan: plan)
+        with_env("RAILS_ENV" => "daemon", "NODE_ENV" => "daemon", "BUNDLE_GEMFILE" => "/daemon/Gemfile", "BUNDLE_PATH" => "/daemon/bundle", "TASK_UNAPPROVED_SECRET" => "must not inherit") do
+          result = verification.run!
+          assert_equal "passed", result.fetch("state"), result.inspect
+          child = JSON.parse(result.dig("checks", 0, "result", "evidence", 0, "output"))
+          %w[RAILS_ENV NODE_ENV BUNDLE_GEMFILE BUNDLE_PATH TASK_UNAPPROVED_SECRET].each { |key| refute child.key?(key), key }
+          assert_equal "UTC", child.fetch("TZ")
+          assert_equal context.attempt_id, child.fetch(Hive::Attempts::Context::OPERATOR_DENIAL_ENV)
+          assert_equal Hive::Paths.state_home, child["HIVE_HOME"] || File.join(child.fetch("XDG_STATE_HOME"), "hive")
+          assert_equal creator, Hive::TaskCapabilities::Verification.environment(plan: plan)
+          with_env("RAILS_ENV" => "viewer", "NODE_ENV" => "viewer", "BUNDLE_GEMFILE" => "/viewer/Gemfile") do
+            assert_equal creator, Hive::TaskCapabilities::Verification.environment(plan: plan)
+            assert_equal result, verification.run!
+          end
+        end
+      end
+    end
+  end
+
+  def test_controlled_child_retains_resolvable_attempt_denial_without_operator_authority
+    script = "abort %q{unresolved attempt} unless Hive::Attempts::Repository.open_default(create_directories: false).fetch(ENV.fetch(Hive::Attempts::Context::OPERATOR_DENIAL_ENV)); begin; Hive::TaskCapabilities::Admission.authorize_operator!; abort %q{unexpected authority}; rescue Hive::TaskCapabilities::Admission::Error => error; puts error.reason; end"
+    command = Shellwords.join([ RbConfig.ruby, "-I", $LOAD_PATH.join(File::PATH_SEPARATOR), "-rhive", "-rhive/task_capabilities/admission", "-e", script ])
+    with_verification(command: command) do |verification, _plan, _store, _code, _cfg, _task, _context, attempts|
+      with_env("HIVE_HOME" => File.dirname(attempts.database.path)) do
+        result = verification.run!
+        assert_equal "passed", result.fetch("state"), result.dig("checks", 0, "result", "evidence", 0, "output")
+        assert_equal "task_capability_operator_required\n", result.dig("checks", 0, "result", "evidence", 0, "output")
+      end
+    end
+  end
+
+  def test_changed_actual_executable_stales_evidence_and_can_be_rerun_without_repinning
+    configure = lambda do |cfg, dir|
+      path = File.join(dir, "behavior-check")
+      File.write(path, "#!#{RbConfig.ruby}\nputs :first\n")
+      File.chmod(0o755, path)
+      cfg["review"]["ci"]["command"] = Shellwords.escape(path)
+    end
+    with_verification(configure: configure) do |verification, plan, store, code, cfg, task|
+      first = verification.run!
+      assert_equal "passed", first.fetch("state")
+      path = Shellwords.split(cfg.dig("review", "ci", "command")).first
+      File.write(path, "#!#{RbConfig.ruby}\nputs :second\n")
+      sha = `git -C #{code} rev-parse HEAD`.strip
+      assert_equal "stale", Hive::TaskCapabilities::ResultStore.new(task.folder).aggregate(plan: plan,
+        sha: sha, environment: Hive::TaskCapabilities::Verification.environment(plan: plan)).fetch("state")
+      second = verification.run!
+      assert_equal "passed", second.fetch("state"), second.inspect
+      refute_equal first.dig("checks", 0, "result_digest"), second.dig("checks", 0, "result_digest")
+      assert_equal "second\n", second.dig("checks", 0, "result", "evidence", 0, "output")
+      assert_equal plan.digest, store.current.digest
+      File.write(path, "#!#{RbConfig.ruby}\nFile.write(__FILE__, File.read(__FILE__) + %q{# changed})\nputs :green\n")
+      assert_equal "stale", verification.run!.fetch("state")
+    end
+  end
+
+  def test_historical_runner_environment_remains_strict_and_mixed_modes_fail_closed
+    with_verification do |_verification, plan, store, code, cfg, task, context|
+      data = Marshal.load(Marshal.dump(plan.to_h)).merge("version" => 2)
+      data.fetch("bindings").each { |binding| binding.fetch("checks").each { |check| check.fetch("runner").delete("environment_mode") } }
+      environment = Hive::TaskCapabilities::Verification.environment(plan: Hive::TaskCapabilities::Plan.new(data))
+      data.fetch("bindings").each { |binding| binding.fetch("checks").each { |check| check.fetch("runner")["environment"] = environment } }
+      legacy = Hive::TaskCapabilities::Plan.new(data)
+      store.activate(legacy, expected_version: 1)
+      verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg, worktree_path: code, context: context)
+      assert_nil Hive::TaskCapabilities::Verification.execution_environment(plan: legacy)
+      run = Hive::Stages::Review::CiFix.run_ci_once(cfg.dig("review", "ci", "command"), code, 262_144, 5)
+      observations = Hive::TaskCapabilities::Verification.ci_observations(plan: legacy, cfg: cfg, context: context,
+        sha: `git -C #{code} rev-parse HEAD`.strip, environment: environment, output: run.combined)
+      assert_equal 1, observations.size
+      assert_equal "passed", verification.run!(existing_results: observations).fetch("state")
+      gate = Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg, worktree_path: code)
+      assert_equal "passed", gate.read_state.fetch("state")
+      with_env("NODE_ENV" => "different historical environment") do
+        assert_equal "passed", gate.read_state.fetch("state")
+        refute gate.evaluate.fetch("allowed")
+        assert_equal "blocked", verification.run!.fetch("state")
+      end
+      changed = Marshal.load(Marshal.dump(data))
+      controlled = Marshal.load(Marshal.dump(changed.fetch("bindings").first.fetch("checks").first))
+      controlled["runner"]["environment_mode"] = "controlled"
+      changed.fetch("bindings").first.fetch("checks") << controlled.merge("id" => "controlled")
+      assert_raises(Hive::TaskCapabilities::Result::Invalid) { Hive::TaskCapabilities::Verification.environment(plan: Hive::TaskCapabilities::Plan.new(changed)) }
+    end
+  end
+
+  def test_controlled_transport_uses_exact_xdg_state_locations_and_does_not_change_the_fingerprint
+    with_tmp_dir do |dir|
+      locations = %w[CONFIG DATA STATE CACHE].to_h { |name| [ "XDG_#{name}_HOME", File.join(dir, name.downcase) ] }
+      with_env(locations.merge("HIVE_HOME" => nil, "HIVE_CAPABILITY_PARENT_ATTEMPT_ID" => "inherited-parent")) do
+        environment = Hive::TaskCapabilities::Verification.execution_environment(context: nil)
+        locations.each { |key, value| assert_equal value, environment.fetch(key) }
+        refute environment.key?("HIVE_HOME")
+        assert_equal "inherited-parent", environment.fetch(Hive::Attempts::Context::OPERATOR_DENIAL_ENV)
+        fingerprint = Hive::TaskCapabilities::Verification.environment
+        with_env("HIVE_CAPABILITY_PARENT_ATTEMPT_ID" => "another-parent") do
+          assert_equal fingerprint, Hive::TaskCapabilities::Verification.environment
+        end
+      end
+    end
+  end
 
   def test_backend_behavior_runs_without_browser_and_accepts_bound_immutable_evidence
     with_verification do |verification, plan, store, code, _cfg, _task, context|
@@ -87,7 +197,7 @@ class TaskCapabilitiesVerificationTest < Minitest::Test
       refute_equal first, verification.run!.dig("checks", 0, "result_digest")
       prior = ENV["NODE_ENV"]
       ENV["NODE_ENV"] = "changed-test-environment"
-      assert_equal "blocked", verification.run!.fetch("state")
+      assert_equal "passed", verification.run!.fetch("state")
       no_parent = Hive::TaskCapabilities::Verification.new(task: task, cfg: {}, worktree_path: code, context: nil)
       error = assert_raises(Hive::TaskCapabilities::Admission::Error) { no_parent.run! }
       assert_includes error.message, "--durable"
@@ -178,20 +288,23 @@ class TaskCapabilitiesVerificationTest < Minitest::Test
   def test_existing_controller_ci_uses_the_same_contract_and_rejects_the_wrong_sha
     with_verification(command: "ruby -rsecurerandom -e 'puts SecureRandom.hex(8)'") do |verification, plan, _store, code, cfg, _task, context|
       environment = Hive::TaskCapabilities::Verification.environment(plan: plan)
-      run = Hive::Stages::Review::CiFix.run_ci_once(cfg.dig("review", "ci", "command"), code, 262_144, 5)
+      execution_environment = Hive::TaskCapabilities::Verification.execution_environment(plan: plan, context: context)
+      run = Hive::Stages::Review::CiFix.run_ci_once(cfg.dig("review", "ci", "command"), code, 262_144, 5, environment: execution_environment)
       sha = `git -C #{code} rev-parse HEAD`.strip
-      observations = Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: sha, environment: environment, output: run.combined)
+      assert_empty Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: sha, environment: environment, output: run.combined)
+      observations = Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: sha, environment: environment, output: run.combined, execution_environment: execution_environment)
       assert_equal 1, observations.size
       result = verification.run!(existing_results: observations)
       assert_equal "passed", result.fetch("state")
       assert_equal run.combined, result.dig("checks", 0, "result", "evidence", 0, "output")
       cfg["timeout_sec"]["review_ci"] += 1
-      assert_empty Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: sha, environment: environment, output: "untrusted")
+      assert_empty Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: sha, environment: environment, output: "untrusted", execution_environment: execution_environment)
       assert_empty Hive::TaskCapabilities::Verification.ci_observations(plan: nil, cfg: cfg, context: context, sha: sha, environment: environment, output: "untrusted")
     end
     with_verification do |verification, plan, _store, _code, cfg, _task, context|
       observations = Hive::TaskCapabilities::Verification.ci_observations(plan: plan, cfg: cfg, context: context, sha: "f" * 40,
-        environment: Hive::TaskCapabilities::Verification.environment(plan: plan), output: "green on the wrong commit")
+        environment: Hive::TaskCapabilities::Verification.environment(plan: plan), output: "green on the wrong commit",
+        execution_environment: Hive::TaskCapabilities::Verification.execution_environment(plan: plan, context: context))
       result = verification.run!(existing_results: observations)
       assert_equal "blocked", result.fetch("state")
       assert_includes result.dig("checks", 0, "result", "reason"), "another revision"

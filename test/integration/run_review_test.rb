@@ -217,10 +217,10 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir)
         cfg = Hive::Config.load(dir)
         counter = File.join(dir, "ci-runs")
-        cfg["review"]["ci"]["command"] = "ruby -e 'File.open(ARGV.fetch(0), %q{a}) { |f| f.puts :ran }; puts %q{ci behavior checked}' #{Shellwords.escape(counter)}"
+        cfg["review"]["ci"]["command"] = "ruby -e 'abort if ENV.key?(%q{RAILS_ENV}) || ENV.key?(%q{BUNDLE_GEMFILE}); abort unless ENV.fetch(%q{TZ}) == %q{UTC}; File.open(ARGV.fetch(0), %q{a}) { |f| f.puts :ran }; puts %q{ci behavior checked}' #{Shellwords.escape(counter)}"
         task = adopt_verification(folder, cfg)
         with_capability_parent(task) do
-          result = Hive::Stages::Review.run!(task, cfg)
+          result = with_env("RAILS_ENV" => "controller-viewer", "BUNDLE_GEMFILE" => "/controller/Gemfile") { Hive::Stages::Review.run!(task, cfg) }
           assert_equal :review_complete, result.fetch(:status)
           assert_equal "passed", result.dig(:capability_verification, "state")
           assert_equal [ "ran\n" ], File.readlines(counter)

@@ -2175,12 +2175,15 @@ module Hive
       # whenever the task owns a GitHub PR.
       def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:)
         before_head = git_head(ctx.worktree_path)
+        capability_plan = Hive::TaskCapabilities::Store.new(task.folder).current
+        execution_environment = Hive::TaskCapabilities::Verification.execution_environment(plan: capability_plan) if capability_plan
+        local_options = execution_environment ? { execution_environment: execution_environment } : {}
         gates = [
           [ "local", lambda {
             Hive::Stages::Review::CiFix.run!(
               cfg: cfg, ctx: ctx,
               started_at: started_at,
-              max_wall_clock_sec: max_wall_clock_sec
+              max_wall_clock_sec: max_wall_clock_sec, **local_options
             )
           } ],
           [ "github", lambda {
@@ -2205,7 +2208,7 @@ module Hive
               @capability_ci_observations ||= {}
               @capability_ci_observations.merge!(Hive::TaskCapabilities::Verification.ci_observations(plan: capability_plan,
                 cfg: cfg, context: Hive::Attempts::Context.current, sha: before_head, environment: observed_environment,
-                output: result.last_output))
+                output: result.last_output, execution_environment: execution_environment))
             end
           end
           if wall_clock_exceeded?(started_at, max_wall_clock_sec)

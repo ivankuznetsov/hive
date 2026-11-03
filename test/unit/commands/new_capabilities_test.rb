@@ -57,6 +57,10 @@ class NewCapabilitiesTest < Minitest::Test
       assert JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new")))).valid?(payload)
       after = Dir.glob(File.join(root, ".hive-state/**/*"), File::FNM_DOTMATCH).select { |path| File.file?(path) }.to_h { |path| [ path, File.binread(path) ] }
       assert_equal before, after
+      silent = nil
+      quiet_output, = capture_io { silent = command(project).preview! }
+      assert_empty quiet_output
+      assert_equal payload, silent
     end
   end
 

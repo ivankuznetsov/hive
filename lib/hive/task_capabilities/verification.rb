@@ -4,6 +4,7 @@ require "hive/stages/review/ci_fix"
 require "hive/stages/review/browser_test"
 require "hive/agent_git_gate"
 require "hive/invoked_binary"
+require "hive/paths"
 
 module Hive
   module TaskCapabilities
@@ -13,16 +14,48 @@ module Hive
       ENVIRONMENT_KEYS = %w[PATH LANG LC_ALL TZ BUNDLE_GEMFILE BUNDLE_PATH NODE_ENV RAILS_ENV].freeze
       PROPOSAL_KEYS = (Result::IDENTITY_KEYS + %w[state applicability evidence findings reason]).freeze
 
+      def self.controlled_environment?(plan)
+        return true unless plan
+        runners = plan.data.fetch("bindings").flat_map { |binding| binding.fetch("checks", []).map { |check| check.fetch("runner", {}) } }
+        modes = runners.map { |runner| runner["environment_mode"] == "controlled" }.uniq
+        raise Result::Invalid, "mixed verification environments require a consistent execution plan" if modes.size > 1
+        modes != [ false ]
+      end
+
+      # The check and its gate use the same environment, independent of whether
+      # Rails, the CLI or the daemon invoked the controller. Attempt transport
+      # only denies operator mutations; it never grants authority.
+      def self.execution_environment(plan: nil, context: Hive::Attempts::Context.current)
+        return nil unless controlled_environment?(plan)
+        variables = { "PATH" => [ File.dirname(RbConfig.ruby), Gem.default_bindir, "/usr/local/bin", "/usr/bin", "/bin" ].uniq.join(File::PATH_SEPARATOR),
+          "HOME" => Hive::Paths.home, "LANG" => "C.UTF-8", "LC_ALL" => "C.UTF-8", "TZ" => "UTC" }
+        if Hive::Paths.hive_home_collapsed?
+          variables["HIVE_HOME"] = Hive::Paths.state_home
+        else
+          { "XDG_CONFIG_HOME" => Hive::Paths.config_home, "XDG_DATA_HOME" => Hive::Paths.data_home,
+            "XDG_STATE_HOME" => Hive::Paths.state_home, "XDG_CACHE_HOME" => Hive::Paths.cache_home }.each do |key, path|
+            variables[key] = File.dirname(path)
+          end
+        end
+        reference = context&.attempt_id || ENV[Hive::Attempts::Context::OPERATOR_DENIAL_ENV]
+        variables[Hive::Attempts::Context::OPERATOR_DENIAL_ENV] = reference unless reference.to_s.empty?
+        variables
+      end
+
       def self.environment(plan: nil, commands: [])
+        variables = execution_environment(plan: plan, context: nil)
+        variables&.delete(Hive::Attempts::Context::OPERATOR_DENIAL_ENV)
+        variables ||= ENVIRONMENT_KEYS.to_h { |key| [ key, ENV[key] ] }
         commands = plan.data.fetch("bindings").flat_map { |binding| binding.fetch("checks", []).filter_map { |check| check["command"] } } if plan
         executables = commands.filter_map { |command| Shellwords.split(command).first }.uniq.sort.reject { |program| program.include?("/") && !File.absolute_path?(program) }.to_h do |program|
-          path = Hive::InvokedBinary.which(program)
+          path = File.absolute_path?(program) ? program : Hive::InvokedBinary.which(program, env: variables)
+          path = nil unless path && File.file?(path) && File.executable?(path)
           [ program, path && { "path" => File.realpath(path), "sha256" => ::Digest::SHA256.file(path).hexdigest } ]
         end
         { "platform" => RUBY_PLATFORM, "ruby" => RUBY_VERSION, "engine" => RUBY_ENGINE,
           "runtime_digest" => ::Digest::SHA256.file(RbConfig.ruby).hexdigest,
           "executables" => executables,
-          "variables" => ENVIRONMENT_KEYS.to_h { |key| [ key, Result.digest(ENV[key]) ] } }
+          "variables" => variables.to_h { |key, value| [ key, Result.digest(value) ] } }
       end
 
       def self.check_identity(plan:, binding:, check:, context:, sha:, environment:)
@@ -36,8 +69,9 @@ module Hive
 
       # Existing CI is usable only when the controller observed its clean
       # before/after revision and its full runner configuration matches.
-      def self.ci_observations(plan:, cfg:, context:, sha:, environment:, output:)
+      def self.ci_observations(plan:, cfg:, context:, sha:, environment:, output:, execution_environment: nil)
         return {} unless plan && context
+        return {} if controlled_environment?(plan) && execution_environment != self.execution_environment(plan: plan, context: context)
         plan.data.fetch("bindings").each_with_object({}) do |binding, results|
           binding.fetch("checks", []).each do |check|
             runner = check["runner"]
@@ -45,7 +79,7 @@ module Hive
               check["command"] == cfg.dig("review", "ci", "command") &&
               runner["timeout_sec"] == (cfg.dig("timeout_sec", "review_ci") || 600) &&
               runner["idle_timeout_sec"] == cfg.dig("timeout_sec", "review_ci_idle") &&
-              runner["max_output_bytes"] == (cfg.dig("review", "ci", "max_log_bytes") || 262_144) && runner["environment"] == environment
+              runner["max_output_bytes"] == (cfg.dig("review", "ci", "max_log_bytes") || 262_144) && (runner["environment_mode"] == "controlled" || runner["environment"] == environment)
             identity = check_identity(plan: plan, binding: binding, check: check, context: context, sha: sha, environment: environment)
             results[[ binding.fetch("id"), check.fetch("id") ]] = Result.command(identity, exit_status: 0, output: output.to_s)
           end
@@ -55,7 +89,7 @@ module Hive
       # Capture runner configuration once. Retry never consults live CI/browser
       # settings to broaden or replace a planned check.
       def self.pin_runner(check, binding:, cfg:, project_root:)
-        runner = { "environment" => environment, "command" => check["command"], "provider" => check["provider"],
+        runner = { "environment_mode" => "controlled", "command" => check["command"], "provider" => check["provider"],
           "configuration" => binding.slice("actor", "actor_route", "actor_fingerprint", "permissions", "targets", "budget_usd", "timeout_sec", "approval_reference"),
           "timeout_sec" => binding["timeout_sec"] || cfg.dig("timeout_sec", "review_ci") || 600,
           "idle_timeout_sec" => cfg.dig("timeout_sec", "review_ci_idle"),
@@ -128,7 +162,7 @@ module Hive
             runner = check["runner"] || {}
             reason = if dirty
               "verification requires a clean implementation worktree; commit or restore changes before retrying"
-            elsif runner["environment"] != environment
+            elsif runner["environment_mode"] != "controlled" && runner["environment"] != environment
               "verification environment changed; restore the pinned environment or accept a revised execution plan"
             elsif check.fetch("depends_on", []).any? { |id| !%w[passed not-applicable].include?(completed[id]) }
               "verification prerequisites have not passed"
@@ -192,7 +226,7 @@ module Hive
           else record(identity, "blocked", reason: check.dig("runner", "reason") || "selected verification runner unavailable; configure a concrete verification plan")
           end
         end
-        unless git!(:head_oid).strip == before && git!(:status).empty? && self.class.environment(plan: @plan) == check.dig("runner", "environment")
+        unless git!(:head_oid).strip == before && git!(:status).empty? && Result.digest(self.class.environment(plan: @plan)) == identity.fetch("environment_digest")
           return record(identity, "stale", reason: "implementation revision, worktree bytes or environment changed during verification")
         end
         result
@@ -205,7 +239,8 @@ module Hive
         timeout = [ runner.fetch("timeout_sec"), @session.remaining_timeout ].compact.min
         return record(identity, "blocked", reason: "parent verification deadline exhausted or cancelled") if @session.cancelled? || !timeout.positive?
         run = Hive::Stages::Review::CiFix.run_ci_once(check.fetch("command"), @worktree,
-          runner.fetch("max_output_bytes"), timeout, idle_timeout_sec: runner["idle_timeout_sec"], cancelled: @session.method(:cancelled?))
+          runner.fetch("max_output_bytes"), timeout, idle_timeout_sec: runner["idle_timeout_sec"], cancelled: @session.method(:cancelled?),
+          environment: self.class.execution_environment(plan: @plan, context: @context))
         return record(identity, "blocked", reason: run.reason) if run.is_a?(Hive::Stages::Review::CiFix::CommandError)
         return record(identity, "blocked", reason: "parent verification was cancelled") if @session.cancelled?
         return record(identity, "blocked", reason: "verification command exited without an exit status") unless run.exit_code.is_a?(Integer)

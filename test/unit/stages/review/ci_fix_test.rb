@@ -12,6 +12,23 @@ class CiFixTest < Minitest::Test
 
   FAKE_BIN = File.expand_path("../../../fixtures/fake-claude", __dir__)
 
+  def test_ci_applies_explicit_environment_and_preserves_legacy_inheritance
+    with_tmp_dir do |dir|
+      command = [ RbConfig.ruby, "-e", "puts ENV.fetch(%q{BEHAVIOR_SETTING}); puts ENV.key?(%q{UNAPPROVED_SETTING})" ]
+      with_env("BEHAVIOR_SETTING" => "inherited", "UNAPPROVED_SETTING" => "present") do
+        legacy = Hive::Stages::Review::CiFix.run_ci_once(command, dir, 1024, 5)
+        assert_equal "inherited\ntrue\n", legacy.combined
+        controlled = Hive::Stages::Review::CiFix.run_ci_once(command, dir, 1024, 5, environment: { "BEHAVIOR_SETTING" => "controlled" })
+        assert_equal 0, controlled.exit_code
+        assert_equal "controlled\nfalse\n", controlled.combined
+        cfg = cfg_with(Shellwords.join(command))
+        result = Hive::Stages::Review::CiFix.run!(cfg: cfg, ctx: make_ctx(dir, dir), execution_environment: { "BEHAVIOR_SETTING" => "loop" })
+        assert_equal :green, result.status
+        assert_equal "loop\nfalse\n", result.last_output
+      end
+    end
+  end
+
   def setup
     @prev_bin = ENV["HIVE_CLAUDE_BIN"]
     ENV["HIVE_CLAUDE_BIN"] = FAKE_BIN

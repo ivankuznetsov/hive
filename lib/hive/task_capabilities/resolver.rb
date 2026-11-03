@@ -62,14 +62,10 @@ module Hive
         selected = choices.select { |_id, choice| choice.fetch("effective") == "on" }.keys
         ordered = composition(selected, blockers)
         bindings = ordered.map { |definition, stage| binding(definition, stage, references, blockers, automatic: inputs.fetch(definition.id) == "automatic") }
-        environment = Verification.environment(commands: bindings.flat_map { |entry| entry.fetch("checks").filter_map { |check| check["command"] } })
-        bindings.each { |entry| entry.fetch("checks").each { |check| check.fetch("runner")["environment"] = environment } }
         waivers = []
         if inputs["qa"] == "off"
           waived_binding = binding(catalog.fetch("qa"), "review", {}, [], automatic: false)
           checks = waived_binding.fetch("checks")
-          waived_environment = Verification.environment(commands: checks.filter_map { |check| check["command"] })
-          checks.each { |check| check.fetch("runner")["environment"] = waived_environment }
           ids = checks.map { |check| check.fetch("id") }
           unless qa_waiver_checks == [ "all" ] || (ids - qa_waiver_checks).empty? && (qa_waiver_checks - ids).empty? && !ids.empty?
             invalid!("QA Off must acknowledge all planned affected checks (#{ids.join(', ')}), or use all")
@@ -255,8 +251,6 @@ module Hive
           definition.stages.map do |stage|
             blockers = []
             snapshot = binding(definition, stage, references.slice(definition.id), blockers, automatic: true)
-            environment = Verification.environment(commands: snapshot.fetch("checks").filter_map { |check| check["command"] })
-            snapshot.fetch("checks").each { |check| check.fetch("runner")["environment"] = environment }
             snapshot.merge("available" => blockers.empty?, "blockers" => blockers)
           end
         end

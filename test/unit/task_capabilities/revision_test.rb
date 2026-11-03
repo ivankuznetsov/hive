@@ -55,6 +55,9 @@ class TaskCapabilitiesRevisionTest < Minitest::Test
       proposal = service.propose(verification_plans: { "qa" => [ { "id" => "behavior", "kind" => "behavior", "claim" => "observe behavior", "command" => "ruby -e 'puts 7'" } ] }, **expectation(service))
       service.accept(proposal_digest: proposal.fetch("proposal_digest"), **expectation(service))
       assert_equal "ruby -e 'puts 7'", store.current.data.fetch("bindings").first.fetch("checks").first.fetch("command")
+      runner = store.current.data.fetch("bindings").first.fetch("checks").first.fetch("runner")
+      assert_equal "controlled", runner.fetch("environment_mode")
+      refute runner.key?("environment")
       assert_empty store.current.data.fetch("blockers")
     end
   end

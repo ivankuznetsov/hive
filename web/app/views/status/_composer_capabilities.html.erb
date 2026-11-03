@@ -1,0 +1,60 @@
+<% preview = local_assigns[:preview] %>
+<% selected = local_assigns.fetch(:selections, {}) %>
+<% error = local_assigns[:error] %>
+<div id="composer-capabilities" data-composer-target="capabilities">
+  <% unless preview %><p role="status" aria-live="polite" data-blocked="true">Choose a project to preview task capabilities.</p><% end %>
+  <% if preview && preview["capabilities_enabled"] %>
+    <% choices = preview.fetch("capabilities").fetch("choices") %>
+    <% recovery = preview.fetch("capability_recovery", []) %>
+    <% blocked = error || recovery.any? %>
+    <details class="composer-capabilities" <%= "open" if blocked %>>
+      <summary>Task capabilities</summary>
+      <% choices.each do |id, choice| %>
+        <% input = selected.fetch(id, choice.fetch("input")) %>
+        <% field_errors = recovery.select { |item| item["capability_id"] == id } %>
+        <fieldset aria-describedby="capability-<%= id %>-description">
+          <legend><%= id.upcase %></legend>
+          <% %w[automatic on off].each do |value| %>
+            <label for="capability-<%= id %>-<%= value %>">
+              <input type="radio" id="capability-<%= id %>-<%= value %>" name="capabilities[<%= id %>]"
+                     value="<%= value %>" <%= "checked" if input == value %>
+                     aria-describedby="capability-<%= id %>-description"
+                     data-action="change->composer#capabilityChanged">
+              <%= value.capitalize %>
+            </label>
+          <% end %>
+          <% if id == "qa" && input == "off" %>
+            <label for="qa-waiver-reason">QA waiver reason</label>
+            <input id="qa-waiver-reason" name="qa_waiver_reason" value="<%= local_assigns[:waiver_reason] %>" required
+                   aria-describedby="capability-qa-description" data-action="input->composer#capabilityChanged">
+            <label><input type="checkbox" name="qa_waiver_checks[]" value="all" required
+              <%= "checked" if Array(local_assigns[:waiver_checks]).include?("all") %>
+              aria-describedby="capability-qa-description" data-action="change->composer#capabilityChanged">All planned affected QA checks</label>
+          <% end %>
+          <% if id == "security" && input == "on" %>
+            <label for="security-approval">Exact security approval</label>
+            <select id="security-approval" name="capability_approvals[security]" aria-describedby="capability-security-description"
+                    data-action="change->composer#capabilityChanged">
+              <option value="">Select an approval</option>
+              <% preview.dig("capabilities", "policy", "approvals").to_h.each do |reference, envelope| %>
+                <% next unless envelope["capability"] == "security" %>
+                <option value="<%= reference %>" <%= "selected" if local_assigns.fetch(:approvals, {})[id] == reference %>><%= reference %></option>
+              <% end %>
+            </select>
+          <% end %>
+          <div id="capability-<%= id %>-description">
+            <p><%= error ? "Selections need correction" : "Effective: #{choice.fetch('effective')}" %> · <%= choice.fetch("source") %> · <%= choice.fetch("reason") %></p>
+            <% field_errors.each do |item| %><p><%= item.fetch("message") %></p><% end %>
+            <% if error %><p><%= error.message %></p><% end %>
+          </div>
+        </fieldset>
+      <% end %>
+      <div role="status" aria-live="polite" aria-atomic="true" data-blocked="<%= !!blocked %>">
+        <% if error %><p><%= "Selections changed. " if error.respond_to?(:reason) && error.reason == "task_capability_stale_preview" %><%= error.message %></p><% end %>
+        <% recovery.each do |item| %><p><%= item.fetch("message") %></p><% end %>
+        <% unless blocked %><p>Selections ready.</p><% end %>
+      </div>
+      <input type="hidden" name="capability_preview" value="<%= preview.dig('capabilities', 'preview_digest') %>">
+    </details>
+  <% end %>
+</div>

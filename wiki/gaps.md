@@ -1898,12 +1898,10 @@ declared environment selectors; project-specific dependency integrity remains
 part of the configured check contract. Adoption remains disabled until separate
 publication gates and operator controls are complete.
 
-- Adopted capability capture currently pins runner environment from the creating
-  process. Shared read state now uses that persisted execution environment,
-  while controller enforcement verifies its actual environment. Prove or
-  reconcile web-created versus daemon-run environment parity (Rails/Node/bundle
-  variables and runtime paths) before enabling adoption; reader-process ENV must
-  never become execution evidence.
+- Closed: new command checks use a fixed verification environment across Rails,
+  daemon and CLI callers. A real Rails capture, durable check and advancement
+  fixture proves environment parity; changed executables still stale evidence.
+  Project dependency integrity remains part of the declared check contract.
 
 ## Execution-plan revision rollout proof (2026-11-03)
 
@@ -1913,9 +1911,10 @@ security risk acceptance, immutable history and safe-boundary concurrency. Its l
 real Git repositories and deterministic provider fixtures. No live provider
 session or authenticated browser interaction is claimed by these checks.
 
-The per-task Web controls still need to consume this shared service and its
-explicit unavailable mutation token for retained tasks without worktrees.
-Adoption remains disabled pending that cross-surface work. Old captured plans
+Per-task Web controls now consume this shared service, including unavailable
+mutation reasons, stale-version rejection and attempt-context refusal. Rails
+integration and Chromium composer fixtures cover the shared recovery path.
+Old captured plans
 without verifier revision authority or unselected execution templates fail
 closed; current project configuration cannot supply missing historical
 permission or policy authority.

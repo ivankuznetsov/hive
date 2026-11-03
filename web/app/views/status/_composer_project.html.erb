@@ -2,4 +2,4 @@
 <% selection = local_assigns[:selected_project].presence || (names.first if names.size == 1) %>
 <% placeholder = selection ? "".html_safe : tag.option("Project…", value: "", selected: true, disabled: true, hidden: true) %>
 <%= select_tag "project", placeholder + options_for_select(names, selection),
-      id: "composer-project", required: true, aria: { label: "Project" } %>
+      id: "composer-project", required: true, aria: { label: "Project" }, data: { action: "change->composer#projectChanged" } %>

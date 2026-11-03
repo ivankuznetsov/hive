@@ -483,7 +483,7 @@ module Hive
             invalid!("declared command exceeds the captured stage permission envelope") unless permitted && command
             runner["type"] = "command"
           end
-          runner.merge!("command" => check["command"], "provider" => check["provider"], "environment" => Verification.environment(commands: normalized.filter_map { |entry| entry["command"] }))
+          runner.merge!("command" => check["command"], "provider" => check["provider"])
           check.merge("runner" => runner)
         end
         invalid!("QA requires at least one behavior check") if id == "qa" && binding.fetch("checks").none? { |check| check["kind"] == "behavior" }

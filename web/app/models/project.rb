@@ -95,11 +95,15 @@ class Project
     provisioning_error.string.strip.presence
   end
 
-  def add_idea!(text, attachments: [])
+  def capability_preview(text = "", **inputs)
+    Hive::Commands::New.new(name, text, preview: true, **inputs).preview!
+  end
+
+  def add_idea!(text, attachments: [], **capability_inputs)
     text = text.to_s.strip
     raise Hive::Error, "idea text is empty" if text.empty?
 
-    Hive::Commands::New.new(name, text, attachments:).call!
+    Hive::Commands::New.new(name, text, attachments:, **capability_inputs).call!
   rescue SystemCallError, IOError => e
     # Commands::New#call! deliberately leaves I/O errors raising for
     # in-process adapters to present in their native UI. Normalize them here

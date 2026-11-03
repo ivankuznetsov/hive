@@ -27,6 +27,7 @@ require "hive/daily_digest/task_creation_receipt"
 require "hive/runtime_control_plane/command_registration"
 require "hive/command_operation"
 require "hive/command_error_kind"
+require "hive/task_capabilities/blocker_formatter"
 require "hive/runtime_control_plane/command_registration"
 
 module Hive
@@ -240,6 +241,13 @@ module Hive
           "name" => File.basename(destination.to_s),
           "sha256" => File.file?(path.to_s) ? ::Digest::SHA256.file(path.to_s).hexdigest : nil
         }
+      end
+
+      # In-process adapters share exactly the CLI preview without stdout or writes.
+      def preview!
+        @preview = true
+        @quiet_preview = true
+        call!
       end
 
       def call!
@@ -532,6 +540,10 @@ module Hive
           payload["capabilities"] = plan.data.slice("inputs", "choices", "bindings", "waivers", "recommendations", "blockers")
           payload["execution_plan_digest"] = plan.digest
           payload["execution_plan_version"] = plan.version
+          require "hive/task_capabilities/revision"
+          expected = Hive::TaskCapabilities::Revision.new(task: task).show["expected"]
+          formatter = Hive::TaskCapabilities::BlockerFormatter.new(target: task.slug, project: @project_name, expected: expected)
+          payload["capability_recovery"] = plan.data.fetch("blockers").map { |blocker| formatter.call(blocker) }
           notice_path = File.join(task.hive_state_path, "task-capabilities-adoption.json")
           if created && File.file?(notice_path) && JSON.parse(File.read(notice_path))["task"] == plan.data.fetch("task")
             payload["capability_adoption_notice"] = Hive::TaskCapabilities::Resolver::NOTICE
@@ -555,7 +567,11 @@ module Hive
         end
         unless @json
           puts payload["capability_adoption_notice"] if payload["capability_adoption_notice"]
-          payload.dig("capabilities", "blockers")&.each { |blocker| puts "blocked: #{blocker.fetch('message')}" }
+          Array(payload["capability_recovery"]).each do |blocker|
+            puts "blocked: #{blocker.fetch('message')}"
+            puts "next: #{blocker['command']}" if blocker["command"]
+            puts "or: #{blocker['alternative_command']}" if blocker["alternative_command"]
+          end
         end
         payload
       end
@@ -575,7 +591,11 @@ module Hive
         payload = { "schema" => SCHEMA, "schema_version" => 1, "ok" => true, "preview" => true,
           "workflow" => workflow_info.fetch(:descriptor).id.to_s, "capabilities_enabled" => adopted,
           "capabilities" => preview }
-        if @json
+        formatter = Hive::TaskCapabilities::BlockerFormatter.new(project: @project_name)
+        payload["capability_recovery"] = preview.fetch("blockers").map { |blocker| formatter.call(blocker) } if adopted
+        if @quiet_preview
+          return payload
+        elsif @json
           puts JSON.generate(payload)
         else
           puts JSON.pretty_generate(payload)

@@ -27,6 +27,7 @@ Rails.application.routes.draw do
   resource :daemon_repair, only: :create, path: "daemon/repair"
 
   post "ideas" => "ideas#create", as: :ideas
+  get "capabilities" => "capabilities#show", as: :capabilities
 
   get "honeycombs" => "workflows#index", as: :honeycombs
 
@@ -57,6 +58,8 @@ Rails.application.routes.draw do
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
     get  "workspace" => "tasks/workspaces#show", as: :task_workspace
+    post "capabilities/:operation" => "tasks/capabilities#create", as: :task_capability,
+         constraints: { operation: /propose|accept|reject|waive|risk-accept/ }
     get  "diff" => "tasks/diffs#show", as: :task_diff
     get  "publication" => "tasks/publications#show", as: :task_publication
     post "publication" => "tasks/publications#create"

@@ -44,6 +44,8 @@ export default class extends Controller {
 function selectComposerProject(selected) {
   const select = document.querySelector("#composer select[name='project']")
   if (Array.from(select?.options || []).some((option) => option.value === selected)) {
+    const changed = select.value !== selected
     select.value = selected
+    if (changed) select.dispatchEvent(new Event("change", { bubbles: true }))
   }
 }

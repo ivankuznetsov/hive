@@ -1,6 +1,7 @@
 require "hive/web/request_limits"
 
 class IdeasController < ApplicationController
+  include CapabilityInputs
   MAX_IMAGES = Hive::Web::RequestLimits::IDEA_IMAGE_COUNT
   MAX_IMAGE_BYTES = Hive::Web::RequestLimits::IDEA_IMAGE_BYTES
 
@@ -10,8 +11,13 @@ class IdeasController < ApplicationController
   # task's assets/ dir (the TUI's exact contract).
   def create
     project = find_project!(params.require(:project))
-    project.add_idea!(params.require(:text), attachments: staged_attachments)
-    redirect_back_or_to root_path, allow_other_host: false, notice: "Idea added to #{project.name}"
+    result = project.add_idea!(params.require(:text), attachments: staged_attachments,
+      capability_preview: params[:capability_preview].presence, **capability_inputs)
+    notice = [ "Idea added to #{project.name}", result["capability_adoption_notice"] ].compact.join(". ")
+    redirect_back_or_to root_path, allow_other_host: false, notice: notice
+  rescue Hive::TaskCapabilities::Admission::Error => error
+    raise unless project
+    render_capability_rejection(project, error)
   end
 
   private

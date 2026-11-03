@@ -15,6 +15,7 @@ require "hive/task_workspace/resources"
 require "hive/task_workspace/semantic_snapshot"
 require "hive/task_workspace/timeline"
 require "hive/task_workspace/usage"
+require "hive/task_capabilities/projection"
 
 module Hive
   module TaskWorkspace
@@ -91,7 +92,9 @@ module Hive
           applicability: applicability,
           usage: usage,
           evidence: semantic_evidence(applicability),
-          diagnostic: semantic_diagnostic(projection)
+          diagnostic: semantic_diagnostic(projection),
+          capabilities: Hive::TaskCapabilities::Projection.new(task: @native_task,
+            cfg: nil, project: @project).call
         )
       end
 

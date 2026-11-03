@@ -281,12 +281,12 @@ class TaskCapabilitiesGateTest < Minitest::Test
   def test_read_model_does_not_use_viewer_environment_as_execution_authority
     with_verification do |verification, _plan, _store, code, cfg, task|
       verification.run!
-      with_env("RAILS_ENV" => "viewer-only") do
+      with_env("RAILS_ENV" => "viewer-only", "NODE_ENV" => "viewer", "BUNDLE_GEMFILE" => "/viewer/Gemfile", "BUNDLE_PATH" => "/viewer/bundle", "PATH" => "/usr/bin:/bin") do
         reader = gate(task, cfg, code).read_state
         assert_equal "passed", reader.fetch("state")
         assert_equal "read-model", reader.fetch("authority")
-        refute gate(task, cfg, code).evaluate.fetch("allowed")
-        assert_raises(Hive::TaskCapabilities::Gate::Blocked) { gate(task, cfg, code).enforce! }
+        assert gate(task, cfg, code).evaluate.fetch("allowed")
+        assert_equal "passed", gate(task, cfg, code).enforce!.fetch("state")
       end
     end
   end

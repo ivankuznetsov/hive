@@ -1,0 +1,3 @@
+<%= hidden_field_tag :identity, JSON.generate(expected.fetch("expected_identity")) %>
+<%= hidden_field_tag :plan_version, expected.fetch("expected_version") %>
+<%= hidden_field_tag :sha, expected.fetch("expected_sha") %>

@@ -142,6 +142,22 @@ module Hive
       def render(document)
         puts document.dig("headline", "label")
         puts "Action: #{document.dig('action', 'label') || 'None'}"
+        if (capabilities = document["capabilities"])
+          puts "Capability gate: #{capabilities.dig('gate', 'label')}"
+          puts capabilities.dig("gate", "reason") if capabilities.dig("gate", "reason")
+          Array(capabilities["blockers"]).each do |blocker|
+            puts blocker.fetch("message")
+            puts "next: #{blocker['command']}" if blocker["command"]
+            puts "or: #{blocker['alternative_command']}" if blocker["alternative_command"]
+          end
+          capabilities.fetch("gate").fetch("checks").each { |check| puts "#{check.fetch('capability_id')}/#{check.fetch('check_id')}: #{check.fetch('label')}#{check['reason'] ? ": #{check['reason']}" : ''}" }
+          capabilities.fetch("gate").fetch("terminal_dispositions").each { |item| puts "#{item['label']} · #{item['reference']}" }
+          puts "Execution plan v#{capabilities.fetch('execution_plan_version')} · #{capabilities.fetch('execution_plan_digest')}"
+          capabilities.fetch("choices").each { |id, choice| puts "#{id}: #{choice.fetch('input')} → #{choice.fetch('effective')} (#{choice.fetch('source')}: #{choice.fetch('reason')})" }
+          capabilities.fetch("bindings").each { |binding| puts "#{binding.fetch('stage')}: #{binding.fetch('id')} · #{JSON.generate(binding)}" }
+          puts "Plan history: #{JSON.generate(capabilities.fetch('history'))}"
+          puts "Waivers: #{JSON.generate(capabilities.fetch('waivers'))}" unless capabilities.fetch("waivers").empty?
+        end
         primary = document.dig("result", "primary", "reference")
         puts "Primary result: #{primary || 'Not available'}"
         puts "Usage: #{document.dig('usage', 'coverage')}"

@@ -38,8 +38,9 @@ module Hive
         digest
       end
 
-      # Viewers read the pinned execution environment, never their Rails/CLI
-      # process environment. enforce! always performs a fresh live evaluation.
+      # Controlled checks have the same environment in Rails, CLI and daemon
+      # processes. Historical runners retain their pinned read projection;
+      # enforce! always performs a fresh evaluation of executable identity.
       def read_state
         evaluate(reader: true).merge("authority" => "read-model")
       end
@@ -57,7 +58,11 @@ module Hive
         terminal_dispositions = results.terminal_history.map(&:last)
         @worktree ||= @task.worktree_path
         sha = git!(:head_oid).strip
-        environment = reader ? plan.data.fetch("bindings").flat_map { |binding| binding.fetch("checks", []) }.first&.dig("runner", "environment") || {} : Verification.environment(plan: plan)
+        environment = if reader && !Verification.controlled_environment?(plan)
+          plan.data.fetch("bindings").flat_map { |binding| binding.fetch("checks", []) }.first&.dig("runner", "environment") || {}
+        else
+          Verification.environment(plan: plan)
+        end
         delta = Result.task_delta(@worktree, sha: sha, target_branch: target_branch)
         value = results.aggregate(plan: plan, sha: sha, environment: environment, task_delta: delta)
         @equivalences = []
@@ -195,7 +200,7 @@ module Hive
         raise Result::Invalid, "selected verifier has no supported review attachment" unless binding["stage"] == "review" && binding["kind"] == "verification"
         binding.fetch("checks").each do |check|
           runner = check.fetch("runner")
-          raise Result::Invalid, "selected check environment changed" unless runner["environment"] == environment
+          raise Result::Invalid, "selected check environment changed" unless runner["environment_mode"] == "controlled" || runner["environment"] == environment
           raise Result::Invalid, "selected check runner unavailable" unless %w[command actor].include?(runner["type"])
           actor_binding = runner["actor_binding"] || (binding if binding["actor"])
           ActorRunner.available!(task: @task, cfg: @cfg, binding: actor_binding) if actor_binding

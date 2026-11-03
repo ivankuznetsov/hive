@@ -1,0 +1,122 @@
+<section id="task-capabilities" class="task-capabilities" aria-labelledby="capability-gate-title" <%= 'aria-describedby=capability-correction-error' if local_assigns[:error] %>>
+  <h2 id="capability-gate-title">Capability gate · <%= capabilities.dig("gate", "label") %></h2>
+  <% if local_assigns[:error] %><p id="capability-correction-error" role="alert"><%= error.message %></p><% end %>
+  <% if capabilities.dig("gate", "reason") %><p><%= capabilities.dig("gate", "reason") %></p><% end %>
+  <% capabilities.dig("gate", "terminal_dispositions").each do |item| %>
+    <p><strong><%= item.fetch("label") %></strong> · <%= link_to "Closure receipt #{item.fetch('reference')}", "#capability-closure-receipt" %></p>
+  <% end %>
+  <% capabilities.fetch("blockers").each do |blocker| %>
+    <p><%= blocker.fetch("message") %></p>
+    <% if blocker["command"] %><p>Next: <code><%= blocker["command"] %></code></p><% end %>
+    <% if blocker["alternative_command"] %><p>Or: <code><%= blocker["alternative_command"] %></code></p><% end %>
+  <% end %>
+  <% capabilities.dig("gate", "checks").reject { |check| %w[passed not-applicable].include?(check["state"]) }.each do |check| %>
+    <p><strong><%= check.fetch("capability_id") %>/<%= check.fetch("check_id") %> · <%= check.fetch("label") %></strong>
+      <%= check["reason"] %>
+      <% if %w[pending failed stale blocked].include?(check["state"]) %> · Rerun the affected review check.<% end %>
+      <% if check["state"] == "running" %> · View attempt progress below.<% end %>
+    </p>
+  <% end %>
+  <% capabilities.fetch("waivers").each do |waiver| %>
+    <p><strong>Waived by operator · <%= waiver.fetch("capability_id") %></strong> · <%= waiver.fetch("reason") %> · Affected checks: <%= waiver.fetch("checks").join(", ").presence || "all planned checks" %></p>
+  <% end %>
+
+  <% expected = capabilities["expected"] %>
+  <% capabilities.fetch("proposals").select { |proposal| proposal["status"] == "proposed" }.each do |proposal| %>
+    <section aria-label="Pending capability changes">
+      <h3>Pending capability changes</h3>
+      <p>Authority reason: <%= proposal["reason"].presence || "No reason supplied" %></p>
+      <% Array(proposal["selections"]).each do |selection| %>
+        <% id, value = selection.split("=", 2) %>
+        <p><%= id %>: <%= capabilities.dig("choices", id, "input") %> → <%= value %></p>
+      <% end %>
+      <% proposal.fetch("approval_previews").each do |approval| %>
+        <p>Exact approval <%= approval.fetch("reference") %> · <%= approval.fetch("digest") %></p>
+        <pre><%= JSON.pretty_generate(approval.fetch("envelope")) %></pre>
+      <% end %>
+      <% disabled_reason = proposal["disabled_reason"] %>
+      <% if disabled_reason %><p id="proposal-<%= proposal.fetch('proposal_digest') %>-reason"><%= disabled_reason %></p><% end %>
+      <% %w[accept reject].each do |operation| %>
+        <%= form_with url: task_capability_path(@project.name, @task.slug, operation: operation) do %>
+          <%= render "tasks/capability_fences", expected: expected if expected %>
+          <%= hidden_field_tag :proposal, proposal.fetch("proposal_digest") %>
+          <%= hidden_field_tag :reason, "Operator rejected the proposed capability changes" if operation == "reject" %>
+          <%= submit_tag "#{operation.capitalize} capability changes", disabled: disabled_reason.present? || !expected,
+                aria: { disabled: (disabled_reason.present? || !expected).to_s, describedby: ("proposal-#{proposal.fetch('proposal_digest')}-reason" if disabled_reason) } %>
+        <% end %>
+      <% end %>
+    </section>
+  <% end %>
+
+  <details class="task-secondary" data-workspace-disclosure-key="capability-evidence">
+    <summary>Execution plan v<%= capabilities.fetch("execution_plan_version") %> and check evidence</summary>
+    <p>Plan digest: <code><%= capabilities.fetch("execution_plan_digest") %></code></p>
+    <p>Configuration: <code><%= capabilities.fetch("configuration_digest") %></code> · Catalog: <code><%= capabilities.fetch("catalog_digest") %></code></p>
+    <% capabilities.fetch("choices").each do |id, choice| %>
+      <p><strong><%= id %></strong> · <%= choice.fetch("input") %> → <%= choice.fetch("effective") %> · <%= choice.fetch("source") %> · <%= choice.fetch("reason") %></p>
+    <% end %>
+    <% capabilities.fetch("bindings").each do |binding| %>
+      <p><strong><%= binding.fetch("stage") %> · <%= binding.fetch("id") %></strong> · <%= binding["skill"] %> · <%= binding["skill_digest"] %></p>
+      <pre><%= JSON.pretty_generate(binding.except("checks")) %></pre>
+    <% end %>
+    <% if capabilities.fetch("required_stages").any? %><p>Selected guidance awaits delivery in: <%= capabilities.fetch("required_stages").join(", ") %>. Return to these stages and rerun them.</p><% end %>
+    <% capabilities.dig("gate", "checks").each do |check| %>
+      <article aria-label="<%= check.fetch('capability_id') %> <%= check.fetch('check_id') %> evidence">
+        <h3><%= check.fetch("capability_id") %>/<%= check.fetch("check_id") %> · <%= check.fetch("label") %></h3>
+        <p><%= check["claim"] %> · <%= check["reason"] %></p>
+        <p>Result: <code><%= check["result_digest"] %></code> · Evaluated revision: <code><%= check["evaluated_sha"] %></code></p>
+        <pre><%= JSON.pretty_generate(check.slice("evidence", "applicability", "findings", "disposition", "dispositions")) %></pre>
+        <% if check["state"] == "failed" && check["capability_id"] == "security" && expected %>
+          <%= form_with url: task_capability_path(@project.name, @task.slug, operation: "risk-accept") do %>
+            <%= render "tasks/capability_fences", expected: expected %>
+            <%= hidden_field_tag :result, check.fetch("result_digest") %>
+            <% check.fetch("findings").each do |finding| %>
+              <label><%= check_box_tag "findings[]", finding.fetch("id") %><%= finding.fetch("id") %> · <%= finding["message"] %></label>
+            <% end %>
+            <%= label_tag "risk-reason-#{check.fetch('check_id')}", "Finding risk acceptance reason" %>
+            <%= text_field_tag :reason, nil, id: "risk-reason-#{check.fetch('check_id')}", required: true %>
+            <%= submit_tag "Accept selected finding risk", disabled: capabilities["mutation_unavailable"].present?, aria: { disabled: capabilities["mutation_unavailable"].present?.to_s } %>
+          <% end %>
+        <% end %>
+      </article>
+    <% end %>
+    <p>Plan history: <%= capabilities.fetch("history").map { |entry| "v#{entry.fetch('version')} #{entry.fetch('digest')}" }.join(" · ") %></p>
+    <div id="capability-closure-receipt"><% capabilities.dig("gate", "terminal_dispositions").each do |item| %><p><%= item.fetch("label") %> · <code><%= item.fetch("reference") %></code></p><% end %></div>
+  </details>
+
+  <% if expected %>
+    <details class="task-secondary" data-workspace-disclosure-key="capability-correction">
+      <summary>Correct capability selections or verification</summary>
+      <% if capabilities["mutation_unavailable"] %><p><%= capabilities["mutation_unavailable"] %></p><% end %>
+      <%= form_with url: task_capability_path(@project.name, @task.slug, operation: "propose") do %>
+        <%= render "tasks/capability_fences", expected: expected %>
+        <% capabilities.fetch("choices").each do |id, choice| %>
+          <fieldset><legend><%= id.upcase %></legend>
+            <% %w[automatic on off].each do |value| %>
+              <label><%= radio_button_tag "capabilities[#{id}]", value, choice["input"] == value %><%= value.capitalize %></label>
+            <% end %>
+          </fieldset>
+        <% end %>
+        <%= label_tag :verification_plan, "Verification check declarations (JSON map by capability)" %>
+        <%= text_area_tag :verification_plan %>
+        <%= label_tag :task_security_approval, "Task approval reference for the exact captured security envelope" %>
+        <%= text_field_tag "task_approvals[security]", nil, id: :task_security_approval %>
+        <%= label_tag :project_security_approval, "Captured project security approval reference" %>
+        <%= text_field_tag "capability_approvals[security]", nil, id: :project_security_approval %>
+        <%= label_tag :capability_correction_reason, "Authority reason" %>
+        <%= text_field_tag :reason, nil, id: :capability_correction_reason, required: true %>
+        <label><%= check_box_tag "checks[]", "all" %>All affected QA checks if proposing QA Off</label>
+        <%= submit_tag "Propose capability changes", disabled: capabilities["mutation_unavailable"].present?, aria: { disabled: capabilities["mutation_unavailable"].present?.to_s } %>
+      <% end %>
+      <% unless capabilities.dig("choices", "qa", "effective") == "off" %>
+        <%= form_with url: task_capability_path(@project.name, @task.slug, operation: "waive") do %>
+          <%= render "tasks/capability_fences", expected: expected %>
+          <%= label_tag :qa_correction_reason, "Per-task QA waiver reason" %>
+          <%= text_field_tag :reason, nil, id: :qa_correction_reason, required: true %>
+          <label><%= check_box_tag "checks[]", "all", false, required: true %>All affected QA checks</label>
+          <%= submit_tag "Waive QA for this task", disabled: capabilities["mutation_unavailable"].present?, aria: { disabled: capabilities["mutation_unavailable"].present?.to_s } %>
+        <% end %>
+      <% end %>
+    </details>
+  <% end %>
+</section>

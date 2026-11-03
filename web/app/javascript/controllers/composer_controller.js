@@ -8,8 +8,9 @@ const MAX_BATCH_INSPECTIONS = 16
 // Commands::New persists into the task's assets/ dir. The counter never
 // decrements on removal so a remove-then-paste cycle can't reuse a label.
 export default class extends Controller {
-  static targets = ["text", "files", "picker", "chips", "feedback"]
+  static targets = ["text", "files", "picker", "chips", "feedback", "capabilities"]
   static values = {
+    capabilitiesUrl: String,
     maxFiles: { type: Number, default: 8 },
     maxFileBytes: { type: Number, default: 10 * 1024 * 1024 }
   }
@@ -29,9 +30,14 @@ export default class extends Controller {
       this.attachments.set(label, file)
       this.counter = Math.max(this.counter, Number(label.slice("image".length)))
     })
+    this.capabilityDraft = this.capabilityDraft || new Map()
+    this.syncCapabilitySubmit()
+    this.refreshCapabilities()
   }
 
   disconnect() {
+    clearTimeout(this.capabilityTimer)
+    this.capabilityRequest?.abort()
     // Turbo temporarily disconnects data-turbo-permanent nodes while moving
     // them into the new document. Give that move a short cancellable window;
     // a genuinely abandoned composer then releases its browser-owned FileList.
@@ -108,6 +114,7 @@ export default class extends Controller {
       .replace(new RegExp(`\\s?\\[${label}\\]`, "g"), "")
     this.syncInput()
     this.clearFeedback()
+    this.capabilityChanged()
   }
 
   // Preserve the browser-owned project selection when the broadcaster updates
@@ -115,6 +122,16 @@ export default class extends Controller {
   // status-refresh controller because task-action forms need the same guard.
   beforeStreamRender(event) {
     const stream = event.detail?.newStream || event.target
+    if (stream?.getAttribute("target") === "composer-capabilities") {
+      this.rememberCapabilities()
+      const render = event.detail.render
+      event.detail.render = async (newStream) => {
+        await render(newStream)
+        this.restoreCapabilities()
+        this.syncCapabilitySubmit()
+      }
+      return
+    }
     // The server owns the live project order, but the selected project is
     // unfinished form state owned by this browser. Preserve that choice when
     // Turbo morphs the select, provided the project still exists.
@@ -131,7 +148,89 @@ export default class extends Controller {
       const projectStillExists = Array.from(select?.options || [])
         .some((option) => option.value === selectedProject)
       if (projectStillExists) select.value = selectedProject
+      if (!projectStillExists) this.projectChanged()
     }
+  }
+
+  projectChanged() {
+    this.rememberCapabilities()
+    this.refreshCapabilities()
+  }
+
+  capabilityChanged() {
+    this.rememberCapabilities()
+    if (this.hasCapabilitiesTarget) this.capabilitiesTarget.setAttribute("aria-busy", "true")
+    clearTimeout(this.capabilityTimer)
+    this.capabilityRequest?.abort()
+    this.capabilityTimer = setTimeout(() => this.refreshCapabilities(), 180)
+    this.element.querySelector('[type="submit"]').disabled = true
+  }
+
+  rememberCapabilities() {
+    if (!this.hasCapabilitiesTarget) return
+    this.capabilityOpen = this.capabilitiesTarget.querySelector("details")?.open
+    const active = document.activeElement
+    this.capabilityFocus = active && this.capabilitiesTarget.contains(active)
+      ? { id: active.id, start: active.selectionStart, end: active.selectionEnd } : null
+    const inputs = this.capabilitiesTarget.querySelectorAll("input[name], select[name]")
+    const names = new Set(Array.from(inputs).map((input) => input.name))
+    names.delete("capability_preview")
+    names.forEach((name) => this.capabilityDraft.set(name, []))
+    inputs.forEach((input) => {
+      if (input.name === "capability_preview" || ((input.type === "radio" || input.type === "checkbox") && !input.checked)) return
+      this.capabilityDraft.get(input.name)?.push(input.value)
+    })
+  }
+
+  restoreCapabilities() {
+    const disclosure = this.capabilitiesTarget.querySelector("details")
+    if (disclosure && this.capabilityOpen !== undefined) disclosure.open = this.capabilityOpen
+    this.capabilitiesTarget.querySelectorAll("input[name], select[name]").forEach((input) => {
+      const values = this.capabilityDraft.get(input.name)
+      if (!values) return
+      if (input.type === "radio" || input.type === "checkbox") input.checked = values.includes(input.value)
+      else input.value = values[0] || ""
+    })
+    if (this.capabilityFocus?.id) {
+      const input = this.capabilitiesTarget.querySelector(`#${CSS.escape(this.capabilityFocus.id)}`)
+      input?.focus({ preventScroll: true })
+      if (input && Number.isInteger(this.capabilityFocus.start)) input.setSelectionRange(this.capabilityFocus.start, this.capabilityFocus.end)
+    }
+  }
+
+  async refreshCapabilities() {
+    if (!this.hasCapabilitiesUrlValue || !this.hasCapabilitiesTarget) return
+    const project = this.element.querySelector("#composer-project")?.value
+    if (!project) return
+    this.capabilitiesTarget.setAttribute("aria-busy", "true")
+    this.element.querySelector('[type="submit"]').disabled = true
+    this.capabilityRequest?.abort()
+    const request = new AbortController()
+    this.capabilityRequest = request
+    const query = new URLSearchParams({ project, text: this.textTarget.value })
+    this.capabilityDraft.forEach((values, name) => values.forEach((value) => query.append(name, value)))
+    try {
+      const response = await fetch(`${this.capabilitiesUrlValue}?${query}`, {
+        signal: request.signal, headers: { Accept: "text/html" }
+      })
+      if (!response.ok) throw new Error("Capability preview unavailable. Refresh the project selection.")
+      const markup = await response.text()
+      if (request.signal.aborted) return
+      const template = document.createElement("template")
+      template.innerHTML = markup
+      this.capabilitiesTarget.replaceWith(template.content)
+      this.restoreCapabilities()
+      this.syncCapabilitySubmit()
+    } catch (error) {
+      if (error.name === "AbortError") return
+      this.feedbackTarget.textContent = error.message
+      this.element.querySelector('[type="submit"]').disabled = true
+    }
+  }
+
+  syncCapabilitySubmit() {
+    if (this.hasCapabilitiesTarget) this.capabilitiesTarget.setAttribute("aria-busy", "false")
+    this.element.querySelector('[type="submit"]').disabled = !!this.element.querySelector('#composer-capabilities [data-blocked="true"]')
   }
 
   // Turbo keeps this form alive across the successful redirect so live grid
@@ -152,6 +251,8 @@ export default class extends Controller {
     this.filesTarget.value = ""
     this.counter = 0
     this.clearFeedback()
+    this.capabilityDraft.clear()
+    this.refreshCapabilities()
   }
 
   insertPlaceholder(placeholder) {
@@ -164,6 +265,7 @@ export default class extends Controller {
     const caret = start + pad.length + placeholder.length
     input.setSelectionRange(caret, caret)
     input.focus()
+    this.capabilityChanged()
   }
 
   renderChip(label) {

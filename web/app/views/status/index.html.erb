@@ -31,14 +31,16 @@
 <%# data-turbo-permanent: a morph must never touch the composer — it holds
     typed-but-unsent idea text and staged image attachments (Stimulus state
     the server can't re-render). %>
+<% composer_project = @selected_project || (@projects.first if @projects.size == 1) %>
 <%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
               data: { controller: "composer", turbo_permanent: true,
                       composer_max_files_value: IdeasController::MAX_IMAGES,
                       composer_max_file_bytes_value: IdeasController::MAX_IMAGE_BYTES,
+                      composer_capabilities_url_value: capabilities_path,
                       action: "turbo:before-stream-render@document->composer#beforeStreamRender turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
-          required: true, data: { composer_target: "text", action: "paste->composer#paste" },
+          required: true, data: { composer_target: "text", action: "paste->composer#paste input->composer#capabilityChanged" },
           aria: { label: "New idea" } %>
     <div class="attachment-chips" data-composer-target="chips"></div>
     <p class="composer-feedback" data-composer-target="feedback"
@@ -66,8 +68,9 @@
       <%= f.file_field :images, multiple: true, hidden: true, name: "images[]",
             data: { composer_target: "files" } %>
       <span class="spacer"></span>
-      <%= f.submit "Add idea", data: { turbo_submits_with: "Adding…" } %>
+      <%= f.submit "Add idea", disabled: true, data: { turbo_submits_with: "Adding…" } %>
     </div>
+    <%= render "status/composer_capabilities", preview: nil %>
   </div>
 <% end %>
 

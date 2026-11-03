@@ -21,9 +21,78 @@
     "applicability": { "$ref": "#/$defs/Applicability" },
     "usage": { "$ref": "#/$defs/Usage" },
     "evidence": { "$ref": "#/$defs/EvidenceMap" },
-    "diagnostic": { "$ref": "#/$defs/Diagnostic" }
+    "diagnostic": { "$ref": "#/$defs/Diagnostic" },
+    "capabilities": { "$ref": "#/$defs/TaskCapabilities" }
   },
   "$defs": {
+    "TaskCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_plan_version",
+        "execution_plan_digest",
+        "configuration_digest",
+        "catalog_digest",
+        "choices",
+        "bindings",
+        "waivers",
+        "blockers",
+        "history",
+        "required_stages",
+        "expected",
+        "mutation_unavailable",
+        "proposals",
+        "gate",
+        "refresh_digest"
+      ],
+      "properties": {
+        "execution_plan_version": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "execution_plan_digest": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "choices": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "bindings": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "waivers": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "blockers": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "history": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "required_stages": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "expected": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "mutation_unavailable": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "proposals": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "gate": {
+          "$ref": "#/$defs/SafeValue"
+        },
+        "refresh_digest": {
+          "$ref": "#/$defs/SafeValue"
+        }
+      }
+    },
     "SafeString": {
       "type": "string",
       "maxLength": 524288,

@@ -47,7 +47,7 @@ module Hive
         module_function
 
         def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 command: nil, command_runner: nil)
+                 command: nil, command_runner: nil, execution_environment: nil)
           command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
@@ -98,7 +98,7 @@ module Hive
             else
               run_ci_once(
                 command, ctx.worktree_path, max_bytes, timeout_sec,
-                idle_timeout_sec: idle_timeout_sec
+                idle_timeout_sec: idle_timeout_sec, environment: execution_environment
               )
             end
             return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
@@ -233,7 +233,7 @@ module Hive
         # idle_timeout_sec is positive, a child that produces no output for
         # that long is killed the same way — the wall clock stays the
         # runaway backstop while the idle deadline fails wedges fast.
-        def run_ci_once(command, cwd, max_bytes, timeout_sec, idle_timeout_sec: nil, cancelled: nil)
+        def run_ci_once(command, cwd, max_bytes, timeout_sec, idle_timeout_sec: nil, cancelled: nil, environment: nil)
           # Always exec directly — no `sh -c` indirection. A String
           # command is shellword-split (so `bin/ci --flag` works as
           # YAML); an Array is exec'd as-is (so paths with spaces or
@@ -246,7 +246,9 @@ module Hive
 
           begin
             pipe_r, pipe_w = IO.pipe
-            pid = Process.spawn(*cmd, chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w)
+            spawn_options = { chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w }
+            spawn_options[:unsetenv_others] = true if environment
+            pid = Process.spawn(*[ environment, *cmd ].compact, **spawn_options)
             pipe_w.close
           rescue Errno::ENOENT, Errno::EACCES => e
             pipe_r&.close unless pipe_r&.closed?

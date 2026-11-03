@@ -307,7 +307,7 @@ without one, parent money is explicitly uncapped and each actor still requires
 an enforceable child cap. Checks never create their own Attempts or usage rows.
 Adopted direct review requires `hive run ... --durable` before any check effects.
 
-Capture pins each check's command/provider, timeouts, output bound, environment,
+Capture pins each check's command/provider, timeouts, output bound, environment mode,
 and relevant actor route/profile/model, permissions, targets and resource caps.
 Browser checks pin their own concrete actor and installed browser skill; an
 enabled browser setting alone does not establish a usable route. Retry uses the
@@ -316,10 +316,15 @@ live configuration. Custom legacy browser output templates require an explicit
 verification check rather than inferred requirements. Executable references reject secret-shaped arguments before
 redaction; operator reasons and captured output are redacted before persistence.
 
-`Verification.environment(plan: plan)` returns the controller environment
+`Verification.environment(plan: plan)` returns the verification environment
 identity: Ruby engine/version/platform and executable digest, resolved PATH
 executables used directly by planned commands, and digests of PATH, locale,
-timezone, Bundler paths and application environment selectors. Relative source
+timezone and Hive state locations. New command checks run with a fixed system
+PATH, UTC and UTF-8 locale, with inherited Rails, Node and Bundler variables
+removed. They retain only the denial-only parent attempt reference for nested
+operator guards. CLI, Rails and daemon callers therefore evaluate the same
+environment. Older accepted plans retain their original strict environment
+contract. Relative source
 commands are bound by the evaluated commit. Project checks remain responsible
 for their own dependencies and meaningful assertions. The controller proves a
 clean Git worktree and unchanged revision/environment before and after checks;
@@ -442,14 +447,40 @@ enforced. Missing worktrees never hide the retained terminal annotation.
 digests and plan/SHA identity; projection selects only the current task and
 commit generation. `capability_terminal` activities retain terminal custody.
 Full command output and evidence remain task detail data, outside fleet facts.
-Adoption remains disabled until operator recovery controls are complete.
+Operator recovery uses the shared execution-plan revision service.
 
-`Gate#read_state` is explicitly a read model: it uses the plan's pinned execution
-environment, so a Rails viewer cannot reinterpret results using its own
-`RAILS_ENV`, `NODE_ENV` or bundle paths. `Gate#evaluate` and `#enforce!` use the
-actual controller environment; the latter never accepts a viewer environment as
-authority. Capture-time web versus daemon environment parity still needs its
-cross-surface proof before adoption is enabled (see [[gaps]]).
+`Gate#read_state` is explicitly a read model. Controlled checks use the same
+verification environment across CLI, Rails and daemon processes; executable
+identity changes still stale their evidence. Historical plans use their pinned
+read environment and require their strict original environment for execution.
+Only `Gate#enforce!` authorizes advancement. A Rails integration fixture creates
+a real task, runs a durable check and approves it under different creator,
+executor and reader environments.
+
+## Task workspace and web controls
+
+`Projection` reads accepted plan versions, results and proposals for both
+`hive task` and Rails task detail. It retains choices, selection reasons, ordered
+attachments, exact actors/models, skill digests, versions, waivers, applicability
+and evidence references. Raw command output stays in the immutable result store.
+The gate digest, including terminal closure, participates in the workspace's
+material refresh signature. Reads never resolve from new project policy.
+
+The permanent composer has labelled native Automatic/On/Off radio groups below
+its toolbar. A project change fetches a fresh preview. QA Off reveals reason and
+affected-check inputs; security On reveals the exact-approval picker. Preview
+blockers use a polite live region and disable submission. Targeted refreshes
+preserve text, attachments, radio choices, focus and disclosure state. Stale
+previews reject inline and retain the draft.
+
+Task detail leads with the gate, blockers and shared shell-escaped recovery
+commands. Pending capability proposals have separate Accept/Reject controls,
+disabled with visible reasons for live attempts or stale identities. Corrections,
+QA waivers and finding risk acceptance use the same revision service as CLI,
+with existing login and CSRF protection. Attempt-context authority rejection is
+server-side; controls are not an authorization boundary. All eight result states
+have distinct text labels. Out-of-band closure preserves unrun/blocked checks
+and links its separate closure annotation to a receipt.
 
 The stored base context includes the observed target ref/tree as well as the
 incorporated merge base. Target tree changes stale checks even while task HEAD

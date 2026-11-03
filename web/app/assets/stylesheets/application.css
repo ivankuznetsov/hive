@@ -277,6 +277,20 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .composer-toolbar .spacer { flex: 1; }
 .composer select { max-width: 220px; }
 
+.composer-capabilities { margin: 6px 12px 10px; font-size: 0.88rem; }
+.composer-capabilities fieldset, .task-capabilities fieldset {
+  min-width: 0;
+  margin: 12px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+.composer-capabilities label { display: inline-block; margin: 4px 12px 4px 0; }
+.composer-capabilities input:not([type=radio]):not([type=checkbox]) { max-width: 100%; }
+.composer-capabilities p, .task-capabilities p, .task-capabilities code { overflow-wrap: anywhere; }
+.task-capabilities pre { overflow-x: auto; max-width: 100%; }
+.task-capabilities input[type=text], .task-capabilities textarea { max-width: 100%; }
+
 .daemon-panel {
   display: flex;
   align-items: center;

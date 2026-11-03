@@ -12,7 +12,7 @@ module Hive
       attr_reader :data
 
       def initialize(generated_at:, task:, status:, headline:, action:, result:,
-                     applicability:, usage:, evidence:, diagnostic:, limits: Limits.new)
+                     applicability:, usage:, evidence:, diagnostic:, capabilities: nil, limits: Limits.new)
         @limits = limits
         @data = TaskWorkspace.canonical(
           "schema" => SCHEMA,
@@ -28,6 +28,7 @@ module Hive
           "evidence" => evidence.to_h,
           "diagnostic" => diagnostic.to_h
         )
+        @data["capabilities"] = TaskWorkspace.canonical(capabilities) if capabilities
         validate_contract!
         TaskWorkspace.safe_value!(@data)
         if to_json.bytesize > @limits.fetch(:workspace_bytes)

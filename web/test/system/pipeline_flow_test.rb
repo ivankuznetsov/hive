@@ -202,6 +202,45 @@ class PipelineFlowTest < ApplicationSystemTestCase
     ), "a 422 must leave the upload transport retryable"
   end
 
+  test "capability previews preserve a draft across project changes streams and stale rejection" do
+    second = create_hive_project!("capability-second")
+    [ @project, second ].each do |name|
+      path = stage_dir(name, "1-inbox").parent.parent.join("config.yml")
+      config = YAML.safe_load_file(path)
+      config["task_capabilities"] = { "enabled" => true }
+      path.write(config.to_yaml)
+    end
+    sign_in!
+    compose_idea "Keep capability draft"
+    attach_composer_image fixture_image
+    assert_selector "#capability-qa-off", wait: 5
+    assert_selector "#composer-capabilities[aria-busy=false]", wait: 5
+    choose "capability-qa-off"
+    fill_in "QA waiver reason", with: "Operator checks this task manually"
+    check "All planned affected QA checks"
+    assert_selector "#composer-capabilities [data-blocked=false]", wait: 5
+    assert_button "Add idea", disabled: false
+    select second, from: "composer-project"
+    assert_selector "#composer-capabilities [data-blocked=false]", wait: 5
+    assert_checked_field "capability-qa-off"
+    assert_field "QA waiver reason", with: "Operator checks this task manually"
+    page.execute_script <<~JS
+      Turbo.renderStreamMessage('<turbo-stream action="replace" target="composer-project"><template><select id="composer-project" name="project"><option value="#{second}">#{second}</option></select></template></turbo-stream>')
+    JS
+    assert_field "New idea", with: "Keep capability draft [image1]"
+    assert_selector ".chip", text: "image1", count: 1
+    assert_equal 1, page.evaluate_script("document.querySelector('[data-composer-target=files]').files.length")
+    page.execute_script("document.querySelector('[name=capability_preview]').value = '#{'a' * 64}'")
+    click_button "Add idea"
+    assert_selector "#composer-capabilities [role=status]", text: "Selections changed", wait: 5
+    assert_field "New idea", with: "Keep capability draft [image1]"
+    assert_checked_field "capability-qa-off"
+    assert_field "QA waiver reason", with: "Operator checks this task manually"
+    assert_selector ".chip", text: "image1", count: 1
+    page.current_window.resize_to(390, 844)
+    assert_equal page.evaluate_script("document.documentElement.clientWidth"), page.evaluate_script("document.documentElement.scrollWidth")
+  end
+
   test "composer bounds a batch to the server image limits" do
     sign_in!
     compose_idea "Bound this upload batch"

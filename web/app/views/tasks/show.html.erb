@@ -9,7 +9,8 @@
        @semantic_workspace.dig("headline", "explanation"),
        @semantic_workspace.dig("action", "kind"),
        @semantic_workspace.dig("result", "primary", "reference"),
-       @semantic_workspace.dig("usage", "coverage")
+       @semantic_workspace.dig("usage", "coverage"),
+       @semantic_workspace.dig("capabilities", "refresh_digest")
      ) %>">
 <div class="task-header">
   <h1><%= @task.title %></h1>
@@ -32,6 +33,7 @@
       last_success_at: @status_last_success_at,
       error: @status_error %>
 <%= render "tasks/state" %>
+<%= render "tasks/capabilities", capabilities: @semantic_workspace["capabilities"] if @semantic_workspace["capabilities"] %>
 <%= render "tasks/diagnostic", diagnostic: @semantic_workspace.fetch("diagnostic") %>
 <%= render "tasks/primary_result", result: @semantic_workspace.fetch("result") %>
 <% if @semantic_workspace.dig("usage", "tokens") %>

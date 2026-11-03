@@ -38,10 +38,22 @@ module Hive
         fail!("manifest.invalid_yaml", FILE_NAME, "manifest is not valid UTF-8 YAML") unless utf8.valid_encoding?
         data = Psych.safe_load(utf8, permitted_classes: [], permitted_symbols: [], aliases: false)
         validate_shape!(data)
-        canonical = CanonicalYAML.dump_manifest(data)
-        fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML") unless bytes == canonical
-        release_input = data.reject { |key, _value| key == "release_sha256" }
-        expected = ::Digest::SHA256.hexdigest(CanonicalYAML.dump_manifest(release_input, include_release: false))
+        canonical = begin
+          CanonicalYAML.dump_manifest(data)
+        rescue ArgumentError
+          fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML")
+        end
+        release_input = if bytes == canonical
+          begin
+            CanonicalYAML.dump_manifest(data, include_release: false)
+          rescue ArgumentError
+            fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML")
+          end
+        else
+          CanonicalYAML.legacy_v1_release_input(data, bytes)
+        end
+        fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML") unless release_input
+        expected = ::Digest::SHA256.hexdigest(release_input)
         unless secure_equal?(data.fetch("release_sha256"), expected)
           fail!("manifest.release_digest_mismatch", FILE_NAME, "release_sha256 does not match canonical manifest content")
         end

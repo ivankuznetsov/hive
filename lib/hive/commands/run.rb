@@ -1,3 +1,4 @@
+require "hive/task_capabilities/admission"
 require "json"
 require "tmpdir"
 require "fileutils"
@@ -142,6 +143,7 @@ module Hive
         ) do
           Hive::DependencySnapshot.enforce_admission!(task)
           Hive::Attempts::Context.current&.validate_generation!(task)
+          Hive::TaskCapabilities::Admission.enforce!(task)
           @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
@@ -826,6 +828,7 @@ module Hive
       #     more general InvalidTaskPath case (when added) would shadow it.
       def error_kind_for(error)
         case error
+        when Hive::TaskCapabilities::Admission::Error then error.reason
         when Hive::PlanReview::TransitionBlocked then Hive::Schemas::RunErrorKind::PLAN_REVIEW_BLOCKED
         when Hive::WrongStage         then Hive::Schemas::RunErrorKind::WRONG_STAGE
         when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN

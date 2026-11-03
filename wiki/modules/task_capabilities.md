@@ -1,7 +1,7 @@
 ---
 title: Task capability contracts
 type: module
-source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb
+source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb
 created: 2026-11-03
 updated: 2026-11-03
 tags: [module, workflow, capabilities, policy]
@@ -155,3 +155,60 @@ then prepare the update again. Completed and terminal archived tasks retain
 history without blocking a fresh update. Package cleanup retains generations
 and configuration snapshots referenced by any accepted plan history. These
 historical assets do not authorize execution of an unselected managed generation.
+
+## Selection and capture
+
+`hive new --capability ID=automatic|on|off` accepts repeated named choices.
+`--preview` returns the effective choices, reasons, signals, recommendations,
+ordered bindings and blockers without writing or launching anything; `--json`
+works for preview without an idempotency key. A preview digest includes all
+selection inputs and the configuration identity. Capture rejects stale previews.
+Adoption remains disabled by default until review gates and recovery are complete.
+
+Automatic QA resolves On. Configured CI or browser behavior checks can supply its
+verification plan. Empty, review-only and unavailable verification plans block
+all dispatch. Explicit `qa=off` needs `--qa-waiver-reason TEXT` and repeatable
+`--qa-waiver-check CHECK_ID`, covering every planned check, or one `all` value.
+The durable state says `waived`; the next task still defaults QA On. Hard policy
+requirements reject conflicting choices.
+
+UI Automatic recommends guidance unless a configured finite-signal policy selects
+it within the existing stage envelope. Selected UI requires an installed named
+compatible skill, exact actor identity and pinned skill fingerprint. Security
+Automatic never executes. Explicit security On uses
+`--capability-approval security=REFERENCE` for an operator-written exact actor,
+tools, local target references and budget/timeout envelope. A missing or excessive
+approval prevents dispatch. An approved unavailable security route blocks
+finalization only; restore the approved route or archive/cancel the task.
+
+Feature-enabled coding creation, keyed or unkeyed, writes resolved version one
+and its accepted task-bound approval blobs in the same capture transaction.
+Blocked captures remain visible for correction. Keyed replay reads the original
+accepted plan before consulting changed policy or preview freshness. The first
+successful adopted capture commits one project notice explaining prerequisites,
+real behavior checks and the separate per-task QA exception requirement.
+
+Controller admission checks accepted blockers at durable dispatch, direct run,
+stage entry and agent spawn. Reads do not re-resolve current project policy.
+Operator authorization operations are rejected when Hive can resolve the caller
+as an active attempt, including nested CLI calls carrying the controller's
+denial-only parent attempt reference. This guard is not a sandbox or proof of
+humanity: same-user callers can evade attempt context, and yolo permissions or
+web loopback access do not establish strongly authenticated human authority.
+
+Capture rollback retains original directory observation and a process-local
+registration ticket. It removes only this capture's new, never-dispatched runtime
+subject after its lease is released and every task reference is absent. Changed,
+leased or referenced subjects remain intact for repair. This also applies when
+initial plan activation fails before pointer publication.
+
+Display-name generation also checks stored admission and wraps its direct model
+runtime in the shared fixed-anchor custody. The controller applies the final
+name only after inference passes custody; blocked captures do not schedule naming.
+
+Approval subset checks retain every approved denial and use the runtime policy's
+validated command-prefix matching, including narrower literal commands beneath
+an approved trailing wildcard. Automatic UI selection normalizes permission
+presets and permits provable grant/directory narrowing; unknown widening blocks.
+A forbidden QA exception is displayed as blocked with its requested reason,
+without recording an accepted waiver.

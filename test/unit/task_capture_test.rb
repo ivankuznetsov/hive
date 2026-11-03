@@ -269,3 +269,88 @@ class TaskCaptureTest < Minitest::Test
     )
   end
 end
+
+class TaskCaptureTest
+  def test_concurrent_first_captures_persist_exactly_one_project_adoption_notice
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      children = %w[first-task second-task].map do |slug|
+        fork do
+          options = capture_options(root)
+          options[:slug] = slug
+          options[:idempotency_key] = slug
+          options[:workflow_info] = options.fetch(:workflow_info).merge(managed_cfg: cfg)
+          Hive::TaskCapture.new(**options).call
+          exit! 0
+        rescue StandardError => error
+          warn error.full_message
+          exit! 1
+        end
+      end
+      children.each do |pid|
+        Process.wait(pid)
+        assert $?.success?
+      end
+      path = File.join(root, ".hive-state/task-capabilities-adoption.json")
+      notice = JSON.parse(File.read(path))
+      assert_includes %w[first-task second-task], notice.dig("task", "slug")
+      history = Hive::GitOps.new(root).run_git!("-C", File.join(root, ".hive-state"), "log", "--format=%H", "--", "task-capabilities-adoption.json").lines
+      assert_equal 1, history.length
+      assert_equal 2, Dir.glob(File.join(root, ".hive-state/stages/1-inbox/*/execution-plan-current.json")).length
+    end
+  end
+
+  def test_adoption_notice_rolls_back_on_commit_failure_and_can_be_emitted_later
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      capture = build_capture(root, cfg: cfg)
+      ops = capture.instance_variable_get(:@git_ops)
+      with_replaced_singleton_method(ops, :hive_commit, ->(**) { raise Hive::GitError, "commit failed" }) do
+        assert_raises(Hive::GitError) { capture.call }
+      end
+      notice = File.join(root, ".hive-state/task-capabilities-adoption.json")
+      refute File.exist?(notice)
+      assert build_capture(root, cfg: cfg).call.created
+      assert File.file?(notice)
+    end
+  end
+end
+
+class TaskCaptureTest
+  def test_pointer_failure_cleans_registration_so_same_slug_retry_with_next_id_succeeds
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      original = Hive::AtomicFile.method(:write)
+      with_replaced_singleton_method(Hive::AtomicFile, :write, lambda { |path, *args, **kwargs|
+        raise "pointer failed" if File.basename(path) == "execution-plan-current.json"
+        original.call(path, *args, **kwargs)
+      }) do
+        assert_raises(RuntimeError) { build_capture(root, cfg: cfg).call }
+      end
+      result = build_capture(root, cfg: cfg).call
+      assert result.created
+      assert Hive::TaskCapabilities::Store.new(result.folder).current
+    end
+  end
+
+  def test_rollback_refusal_preserves_referenced_task_and_notice_for_repair
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      capture = build_capture(root, cfg: cfg)
+      folder = File.join(root, ".hive-state/stages/1-inbox/patrol-fix-task")
+      database = Hive::Lock.task_lease_repository.database
+      with_replaced_singleton_method(capture.instance_variable_get(:@git_ops), :hive_commit, lambda { |**|
+        id = Hive::TaskMeta.read(folder).fetch(:id).to_s
+        database.transaction do |db|
+          db[:payload_references].insert(payload_id: "capture-reference", task_id: id, kind: "capture", relative_path: "state.json", state: "open", created_at: Time.now.utc.iso8601)
+        end
+        raise Hive::GitError, "commit failed"
+      }) do
+        assert_raises(Hive::RuntimeControlPlane::IdentityError) { capture.call }
+      end
+      assert File.directory?(folder)
+      assert Hive::TaskCapabilities::Store.new(folder).current
+      assert File.file?(File.join(root, ".hive-state/task-capabilities-adoption.json"))
+    end
+  end
+end

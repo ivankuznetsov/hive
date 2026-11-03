@@ -1393,6 +1393,9 @@ class SchemaFilesTest < Minitest::Test
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }
+    Hive::TaskCapabilities::Admission::REASONS.each do |reason|
+      representatives[reason] = Hive::TaskCapabilities::Admission::Error.new("blocked", reason: reason)
+    end
     missing = Hive::Schemas::RunErrorKind::ALL - representatives.keys
     assert_empty missing,
                  "every RunErrorKind value must have a representative exception in this test " \

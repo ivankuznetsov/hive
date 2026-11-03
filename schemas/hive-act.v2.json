@@ -300,7 +300,17 @@
             "command_prune_preview_unavailable",
             "command_orphaned_pin",
             "command_original_result_unavailable",
-            "command_intake_disabled"
+            "command_intake_disabled",
+            "task_capability_invalid_selection",
+            "task_capability_policy_conflict",
+            "task_capability_missing_skill",
+            "task_capability_verification_unavailable",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_stale_preview",
+            "task_capability_operator_required",
+            "task_capability_route_unavailable"
           ]
         },
         "exit_code": {
@@ -364,7 +374,17 @@
             "command_prune_preview_unavailable",
             "command_orphaned_pin",
             "command_original_result_unavailable",
-            "command_intake_disabled"
+            "command_intake_disabled",
+            "task_capability_invalid_selection",
+            "task_capability_policy_conflict",
+            "task_capability_missing_skill",
+            "task_capability_verification_unavailable",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_stale_preview",
+            "task_capability_operator_required",
+            "task_capability_route_unavailable"
           ]
         },
         "state": {

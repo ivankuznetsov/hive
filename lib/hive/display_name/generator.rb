@@ -32,6 +32,7 @@ module Hive
             return nil
           end
 
+          Hive::TaskCapabilities::Admission.enforce!(@task)
           name = generate_name_safely
           return nil unless name
 
@@ -76,7 +77,9 @@ module Hive
 
       def generate_name
         profile = Hive::Stages::Base.stage_profile(@cfg, "execute")
-        result = run_agent(profile)
+        result = Hive::Stages::Base.run_with_agent_custody(
+          Hive::Stages::Base.capability_anchor_custody(@task)
+        ) { run_agent(profile) }
         return nil unless result[:exit_code]&.zero?
 
         Hive::DisplayName::Sanitizer.sanitize(result[:final_message])

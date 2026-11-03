@@ -6,6 +6,7 @@ require "hive/agent"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
+require "hive/task_capabilities/admission"
 require "hive/events"
 require "base64"
 require "json"
@@ -473,6 +474,7 @@ module Hive
       WORKTREE_OWNING_STAGES = %w[4-execute 6-review 8-finalize].freeze # coding-scoped: worktree-owning coding stages that CleanExit enforces
 
       def with_stage_events(task, cfg: nil)
+        Hive::TaskCapabilities::Admission.enforce!(task)
         stage = stage_label(task)
         record_stage_activity(task, stage, "entered")
         Hive::Events.emit(
@@ -969,6 +971,7 @@ module Hive
                       isolate_environment: false, launch_environment: nil,
                       terminate_on_parent_signal: true,
                       receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+        Hive::TaskCapabilities::Admission.enforce!(task)
         agent_custody ||= capability_anchor_custody(task)
         mcp_launch = nil
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
@@ -977,6 +980,7 @@ module Hive
           raise ArgumentError, "controller launch environment is invalid"
         end
         context = Hive::Attempts::Context.current
+        launch_environment[Hive::Attempts::Context::OPERATOR_DENIAL_ENV] = context.attempt_id if context
         launch_binding = nil
         provider_route = nil
         if context&.explicit_routing?

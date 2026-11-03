@@ -747,6 +747,11 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :idempotency_key, type: :string,
                              desc: "return the original task on a retry with identical input; reject conflicting reuse"
+    option :capability, type: :string, repeatable: true, desc: "task capability ID=automatic|on|off (repeatable)"
+    option :qa_waiver_reason, type: :string, desc: "operator reason for explicit QA Off"
+    option :qa_waiver_check, type: :string, repeatable: true, desc: "affected QA check ID, or all (repeatable)"
+    option :capability_approval, type: :string, repeatable: true, desc: "capability ID=operator-written approval reference"
+    option :preview, type: :boolean, default: false, desc: "preview effective capabilities without writing or dispatching"
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
@@ -762,7 +767,12 @@ module Hive
         depends_on: declaration,
         workflow: options[:workflow],
         idempotency_key: options[:idempotency_key],
-        json: options[:json]
+        json: options[:json],
+        capabilities: Array(options[:capability]),
+        qa_waiver_reason: options[:qa_waiver_reason],
+        qa_waiver_checks: Array(options[:qa_waiver_check]),
+        capability_approvals: Array(options[:capability_approval]),
+        preview: options[:preview]
       ).call
       if occurrences.length >= 2
         warn "hive: note: multiple --depends-on values are scheduling-only, require 9-done, " \

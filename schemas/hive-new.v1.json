@@ -9,6 +9,9 @@
     },
     {
       "$ref": "#/$defs/ErrorPayload"
+    },
+    {
+      "$ref": "#/$defs/PreviewPayload"
     }
   ],
   "$defs": {
@@ -112,6 +115,20 @@
         },
         "command_receipt": {
           "$ref": "#/$defs/CommandReceipt"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/TaskCapabilities"
+        },
+        "execution_plan_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "execution_plan_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "capability_adoption_notice": {
+          "type": "string"
         }
       }
     },
@@ -159,7 +176,17 @@
             "command_prune_preview_unavailable",
             "command_orphaned_pin",
             "command_original_result_unavailable",
-            "command_intake_disabled"
+            "command_intake_disabled",
+            "task_capability_invalid_selection",
+            "task_capability_policy_conflict",
+            "task_capability_missing_skill",
+            "task_capability_verification_unavailable",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_stale_preview",
+            "task_capability_operator_required",
+            "task_capability_route_unavailable"
           ]
         },
         "exit_code": {
@@ -200,7 +227,17 @@
             "command_prune_preview_unavailable",
             "command_orphaned_pin",
             "command_original_result_unavailable",
-            "command_intake_disabled"
+            "command_intake_disabled",
+            "task_capability_invalid_selection",
+            "task_capability_policy_conflict",
+            "task_capability_missing_skill",
+            "task_capability_verification_unavailable",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_stale_preview",
+            "task_capability_operator_required",
+            "task_capability_route_unavailable"
           ]
         },
         "state": {
@@ -246,6 +283,85 @@
             "settled",
             "aborted"
           ]
+        }
+      }
+    },
+    "TaskCapabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputs": {
+          "type": "object"
+        },
+        "choices": {
+          "type": "object"
+        },
+        "bindings": {
+          "type": "array"
+        },
+        "waivers": {
+          "type": "array"
+        },
+        "recommendations": {
+          "type": "array"
+        },
+        "blockers": {
+          "type": "array"
+        },
+        "configuration_digest": {
+          "type": "string"
+        },
+        "catalog_digest": {
+          "type": "string"
+        },
+        "preview_digest": {
+          "type": "string"
+        },
+        "approval_references": {
+          "type": "object"
+        },
+        "policy": {
+          "type": "object"
+        },
+        "input_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "PreviewPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "preview",
+        "workflow",
+        "capabilities_enabled",
+        "capabilities"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-new"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "preview": {
+          "const": true
+        },
+        "workflow": {
+          "type": "string"
+        },
+        "capabilities_enabled": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/TaskCapabilities"
         }
       }
     }

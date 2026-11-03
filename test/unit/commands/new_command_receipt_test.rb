@@ -105,12 +105,14 @@ class NewCommandReceiptTest < Minitest::Test
 
     with_replaced_singleton_method(Hive::Task, :new, ->(_folder) { task }) do
       with_replaced_singleton_method(Hive::TaskAction, :for, ->(*_args) { action }) do
+        with_replaced_singleton_method(Hive::TaskCapabilities::Store, :new, ->(*) { Struct.new(:current).new(nil) }) do
         output, = capture_io do
           command.send(:emit_task_result, task.folder, workflow, created: false)
         end
 
         assert_includes output, "idempotent task already exists at /tmp/task"
         assert_includes output, "next: hive brainstorm task"
+        end
       end
     end
   end

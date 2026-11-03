@@ -11,6 +11,7 @@ require "hive/workflow_package/managed_store"
 require "hive/config"
 require "hive/daily_digest/task_creation_receipt"
 require "hive/task_capabilities/store"
+require "hive/task_capabilities/resolver"
 
 module Hive
   # Lower-level deterministic task capture shared by CLI task creation and
@@ -42,7 +43,7 @@ module Hive
                    depends_on: nil, base_branch: nil, initial_marker: nil,
                    git_ops: nil, task_id_provider: nil, before_lookup: nil,
                    before_candidate: nil, candidate_validator: nil, candidate_writer: nil, project: nil,
-                   clock: -> { Time.now.utc })
+                   clock: -> { Time.now.utc }, capability_inputs: {}, capability_preview: nil)
       @project_root = File.expand_path(project_root)
       @hive_state = File.expand_path(hive_state)
       @workflow_info = workflow_info
@@ -63,6 +64,8 @@ module Hive
       @candidate_writer = candidate_writer
       @project = project
       @clock = clock
+      @capability_inputs = capability_inputs
+      @capability_preview = capability_preview
     end
 
     def call
@@ -79,6 +82,7 @@ module Hive
           validate_stable_authored_workflow!
           return Result.new(folder: existing.fetch(:folder), created: false) if existing
 
+          Hive::TaskCapabilities::Admission.authorize_operator! if Hive::TaskCapabilities::Resolver.operator_authorization?(@capability_inputs)
           task_dir = task_folder
           @before_candidate&.call(task_dir)
           @candidate_validator&.call(task_dir)
@@ -87,12 +91,17 @@ module Hive
             @git_ops.hive_commit(
               stage_name: @workflow.stages.first.dir,
               slug: @slug,
-              action: "captured"
+              action: "captured",
+              **(@created_adoption_notice ? { pathspecs: [ task_dir.delete_prefix("#{@hive_state}/"), File.basename(adoption_notice_path) ] } : {})
             )
           rescue StandardError, Interrupt
             cleanup_failed_commit!(task_dir)
+            FileUtils.rm_f(adoption_notice_path) if @created_adoption_notice
             raise
           end
+          @capture_repository.finish_capture_rollback(@capture_ticket) if @capture_ticket
+          @capture_ticket = nil
+          close_capture_observation!
           Result.new(folder: task_dir, created: true)
         end
       end
@@ -196,7 +205,16 @@ module Hive
       @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
       metadata = write_task_meta!(task_dir, stable_selection: stable_selection)
-      Hive::TaskCapabilities::Store.new(task_dir).activate(@initial_execution_plan, expected_version: nil) if @initial_execution_plan
+      if @initial_execution_plan
+        @capture_observation = Hive::TaskMeta.observe(task_dir)
+        @capture_repository = Hive::Lock.task_lease_repository
+        @capture_ticket = @capture_repository.prepare_capture_rollback(task_dir, observation: @capture_observation)
+        Hive::TaskCapabilities::Store.new(task_dir).activate(@initial_execution_plan, expected_version: nil, approvals: @initial_approvals, observation: @capture_observation)
+        unless File.exist?(adoption_notice_path)
+          Hive::AtomicFile.write(adoption_notice_path, JSON.generate({ "schema_version" => 1, "task" => @initial_execution_plan.data.fetch("task"), "message" => Hive::TaskCapabilities::Resolver::NOTICE }), mode: 0o600, create: false)
+          @created_adoption_notice = true
+        end
+      end
       Hive::DailyDigest::TaskCreationReceipt.write!(
         task_folder: task_dir,
         project: project_identity!,
@@ -206,7 +224,9 @@ module Hive
         created_at: @clock.call
       )
     rescue StandardError, Interrupt
+      rollback_capture_registration!
       FileUtils.rm_rf(task_dir) if created
+      FileUtils.rm_f(adoption_notice_path) if @created_adoption_notice
       raise
     end
 
@@ -241,17 +261,23 @@ module Hive
       validate_stable_selection!(stable_selection)
       task_id = @task_id_provider.call
       cfg = @workflow_info.fetch(:managed_cfg, {})
+      if @workflow_info[:capability_config_digest]
+        cfg = Hive::Config.load(@project_root)
+        current_digest = ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(cfg))
+        unless current_digest == @workflow_info[:capability_config_digest]
+          raise Hive::TaskCapabilities::Admission::Error.new("capability configuration changed while creating the task; refresh the preview", reason: "task_capability_stale_preview")
+        end
+      end
       if Hive::Workflows.coding_id?(@workflow.id) && cfg.dig("task_capabilities", "enabled") == true
-        catalog = Hive::TaskCapabilities::Catalog.new(workflow: @workflow,
-          definitions: cfg.dig("task_capabilities", "catalog") || [], source: File.join(@hive_state, "config.yml"))
-        @initial_execution_plan = Hive::TaskCapabilities::Plan.minimal(
-          task_identity: { id: task_id&.to_s, slug: @slug, workflow: @workflow.id.to_s },
-          catalog: catalog, policy: cfg.dig("task_capabilities", "policy") || {},
-          configuration_digest: managed&.fetch("configuration_digest"),
+        resolver = Hive::TaskCapabilities::Resolver.new(workflow: @workflow, cfg: cfg,
+          project_root: @project_root, configuration_digest: managed&.fetch("configuration_digest"),
           source: { "workflow" => @workflow.id.to_s, "commit" => managed&.fetch("source_commit"),
                     "manifest_digest" => managed&.fetch("manifest_digest"),
-                    "configuration_digest" => managed&.fetch("configuration_digest") }
-        )
+                    "configuration_digest" => managed&.fetch("configuration_digest") })
+        resolution = resolver.resolve(task_identity: { "id" => task_id&.to_s, "slug" => @slug, "workflow" => @workflow.id.to_s },
+          expected_preview: @capability_preview, **@capability_inputs)
+        @initial_execution_plan = resolution.plan
+        @initial_approvals = resolution.approvals
       end
       Hive::TaskMeta.write(
         task_dir,
@@ -313,10 +339,26 @@ module Hive
     end
 
     def cleanup_failed_commit!(task_dir)
+      rollback_capture_registration!
       FileUtils.rm_rf(task_dir)
       relative = task_dir.delete_prefix("#{@hive_state}/")
-      @git_ops.run_git!("-C", @hive_state, "reset", "-q", "HEAD", "--", relative)
+      paths = [ relative ]
+      paths << File.basename(adoption_notice_path) if @created_adoption_notice
+      @git_ops.run_git!("-C", @hive_state, "reset", "-q", "HEAD", "--", *paths)
     end
+
+    def rollback_capture_registration!
+      @capture_repository.discard_uncommitted_capture!(@capture_ticket) if @capture_ticket
+      @capture_ticket = nil
+      close_capture_observation!
+    end
+
+    def close_capture_observation!
+      @capture_observation&.close
+      @capture_observation = nil
+    end
+
+    def adoption_notice_path = File.join(@hive_state, "task-capabilities-adoption.json")
 
     def project_identity!
       project = @project || Hive::Config.registered_projects.find do |entry|

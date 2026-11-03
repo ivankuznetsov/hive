@@ -1,3 +1,4 @@
+require "hive/task_capabilities/admission"
 require "securerandom"
 require "time"
 require "hive/attempts/contracts"
@@ -185,6 +186,7 @@ module Hive
                 inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil)
+        Hive::TaskCapabilities::Admission.enforce!(task) if task
         created = nil
         claim_capability = nil
         route_decision = nil

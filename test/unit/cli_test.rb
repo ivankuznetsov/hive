@@ -518,7 +518,8 @@ class HiveCliTest < Minitest::Test
       assert_empty err
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
-        { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
+        { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
+          capabilities: [], qa_waiver_reason: nil, qa_waiver_checks: [], capability_approvals: [], preview: false },
         calls.first.fetch(:kwargs)
       )
     end
@@ -535,7 +536,8 @@ class HiveCliTest < Minitest::Test
       assert_equal(
         {
           base: nil, depends_on: "base-task", workflow: "content_fixture",
-          idempotency_key: "creator:v1", json: true
+          idempotency_key: "creator:v1", json: true, capabilities: [], qa_waiver_reason: nil,
+          qa_waiver_checks: [], capability_approvals: [], preview: false
         },
         calls.first.fetch(:kwargs)
       )

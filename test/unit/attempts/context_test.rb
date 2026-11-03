@@ -564,3 +564,33 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 end
+
+class AttemptsContextTest
+  def test_inherited_attempt_identity_is_a_denial_only_reference_to_a_running_record
+    key = Hive::Attempts::Context::OPERATOR_DENIAL_ENV
+    with_env(key => nil) { refute Hive::Attempts::Context.operator_context? }
+    with_attempt_context(attempt_id: "running", task_generation: 0) do
+      assert Hive::Attempts::Context.operator_context?
+    end
+    with_env(key => "parent-attempt") do
+      state = "running"
+      record = Struct.new(:state).new(state)
+      repository = Object.new
+      repository.define_singleton_method(:fetch) { |_id| record }
+      test_case = self
+      with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, lambda { |**options|
+        test_case.assert_equal false, options.fetch(:create_directories)
+        repository
+      }) do
+        assert Hive::Attempts::Context.operator_context?
+        record.state = "terminal"
+        refute Hive::Attempts::Context.operator_context?
+        record = nil
+        refute Hive::Attempts::Context.operator_context?
+      end
+      with_replaced_singleton_method(Hive::Attempts::Repository, :open_default, ->(**) { raise Hive::Attempts::RepositoryError, "unavailable" }) do
+        assert Hive::Attempts::Context.operator_context?
+      end
+    end
+  end
+end

@@ -257,3 +257,21 @@ re-raises that encoding error and emits no fallback document. Programmatic
 - [[cli]] · [[commands/run]] · [[stages/inbox]]
 - [[modules/config]] · [[modules/git_ops]]
 - [[state-model]]
+
+### Optional task capabilities
+
+When project adoption is enabled for coding, use repeatable
+`--capability ID=automatic|on|off`, `--qa-waiver-reason TEXT`, repeatable
+`--qa-waiver-check CHECK_ID` (or `all`), and repeatable
+`--capability-approval ID=REFERENCE`. `--preview` is a no-write, no-dispatch dry run;
+`--preview --json` needs no idempotency key. Capture pins the resolved choices,
+reasons and blockers. A blocked capture still returns its task identity and plan.
+
+QA Automatic is On; without usable behavior checks, configure checks or record
+a separate reasoned operator QA exception for each task. QA Off is `waived`, never
+passed. UI needs an installed compatible named skill. Security On needs exact
+operator approval. Missing approval prevents dispatch; an unavailable approved
+security route permits unrelated work but blocks finalization until restoration,
+or the task may be archived/cancelled. See [[modules/task_capabilities]] for the
+selection, approval, authority and prerequisite contract. Adoption is dormant by
+default while the remaining execution gates are being integrated.

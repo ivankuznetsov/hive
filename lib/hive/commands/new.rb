@@ -98,7 +98,14 @@ module Hive
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
-                     task_capture_factory: nil, command_receipt_store: nil)
+                     task_capture_factory: nil, command_receipt_store: nil,
+                     capabilities: [], qa_waiver_reason: nil, qa_waiver_checks: [],
+                     capability_approvals: [], preview: false, capability_preview: nil)
+        @capability_inputs = { selections: capabilities, qa_waiver_reason: qa_waiver_reason,
+          qa_waiver_checks: qa_waiver_checks, approval_references: capability_approvals,
+          task_text: text.to_s }
+        @preview = preview
+        @capability_preview = capability_preview
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -113,7 +120,7 @@ module Hive
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
-        @json = json && !idempotency_key.nil?
+        @json = json && (!idempotency_key.nil? || preview)
       end
 
       class << self
@@ -137,7 +144,7 @@ module Hive
       # screen.
       def call
         call_with_envelope do
-          if @idempotency_key_raw.nil?
+          if @idempotency_key_raw.nil? || @preview
             call!
           else
             # Reject a malformed key before CommandOperation opens receipt
@@ -201,7 +208,11 @@ module Hive
             "depends_on" => dependency_receipt_value(@depends_on),
             "workflow" => @workflow_name,
             "attachments" => @attachments.map { |attachment| attachment_identity(attachment) }
-          },
+          }.tap do |request|
+            if capability_inputs_supplied?
+              request["capability_inputs_sha256"] = ::Digest::SHA256.hexdigest(JSON.generate(@capability_inputs.reject { |key, _| key == :task_text }))
+            end
+          end,
           project_root: lambda {
             project = Hive::Config.find_project(@project_name)
             raise ProjectNotFound.new(
@@ -232,7 +243,7 @@ module Hive
       end
 
       def call!
-        return perform_call! if @idempotency_key_raw.nil? || @inside_command_operation
+        return perform_call! if @idempotency_key_raw.nil? || @inside_command_operation || @preview
 
         keyed_call!
       end
@@ -279,10 +290,23 @@ module Hive
         project = require_project!
 
         @idempotency_key = validate_idempotency_key!
-        prepare_idempotent_attachments! if @idempotency_key
+        prepare_idempotent_attachments! if @idempotency_key && !@preview
         depends_on = validate_dependency!(@depends_on) unless @depends_on.nil?
+        if @idempotency_key && !@preview && (existing = adopted_replay(project, depends_on: depends_on))
+          return emit_task_result(existing.folder, existing.workflow, created: false) unless @inside_command_operation
+          raise Hive::CommandUnresolved.new(message: "legacy task creation matched, but its original caller response was not saved")
+        end
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
+        adopted = Hive::Workflows.coding_id?(workflow.id) && workflow_info.dig(:managed_cfg, "task_capabilities", "enabled") == true
+        if !adopted && capability_inputs_supplied?
+          raise Hive::TaskCapabilities::Admission::Error.new("task capabilities are not enabled for this coding workflow", reason: "task_capability_invalid_selection")
+        end
+        return emit_capability_preview(workflow_info, project, adopted: adopted) if @preview
+        if adopted && !@idempotency_key
+          @idempotency_key = "capture:#{SecureRandom.uuid}"
+          prepare_idempotent_attachments!
+        end
         draft_pr = workflow.draft_pr_handoff?
         if depends_on && draft_pr
           raise InvalidDraftPrCombination.new(
@@ -332,7 +356,9 @@ module Hive
               )
             end,
             git_ops: ops,
-            project: project
+            project: project,
+            capability_inputs: @capability_inputs,
+            capability_preview: @capability_preview
           ).call
           unless result.created
             return emit_task_result(result.folder, workflow, created: false) unless @inside_command_operation
@@ -368,6 +394,30 @@ module Hive
         emit_task_result(task_dir, workflow, created: true)
       ensure
         cleanup_prepared_attachments!
+      end
+
+      # Adopted retries consult their recorded identity before live policy or
+      # preview freshness. Switching adoption off cannot turn an old plan legacy.
+      def adopted_replay(project, depends_on:)
+        Hive::Lock.with_commit_lock(project.fetch("hive_state_path")) do
+          matches = Dir.glob(File.join(project.fetch("hive_state_path"), "stages", "*", "*", Hive::TaskMeta::FILENAME)).filter_map do |path|
+            read = Hive::TaskMeta.read_for_admission(File.dirname(path))
+            unless read.ok?
+              raise IdempotencyConflict.new("cannot prove idempotency while task metadata is unreadable at #{path}", value: @idempotency_key)
+            end
+            File.dirname(path) if read.data[:idempotency_key] == @idempotency_key && read.data[:task_capabilities]
+          end
+          return nil if matches.empty?
+          raise IdempotencyConflict.new("idempotency key is attached to multiple adopted tasks", value: @idempotency_key) if matches.length > 1
+          task = Hive::Task.new(matches.first)
+          info = { descriptor: task.workflow, managed: nil, managed_cfg: { "task_capabilities" => { "enabled" => true } } }
+          fingerprint = input_fingerprint(info, depends_on: depends_on, base_branch: nil)
+          unless Hive::TaskMeta.read_for_admission(task.folder).data[:input_fingerprint] == fingerprint
+            raise IdempotencyConflict.new("idempotency key was already used for different input or workflow", value: @idempotency_key)
+          end
+          Hive::TaskCapabilities::Store.new(task.folder).current
+          task
+        end
       end
 
       def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
@@ -451,6 +501,12 @@ module Hive
           "workflow_configuration_digest" => managed&.fetch("configuration_digest"),
           "workflow_content_digest" => workflow_info[:authored_digest]
         }
+        if workflow_info.dig(:managed_cfg, "task_capabilities", "enabled") == true && Hive::Workflows.coding_id?(workflow_info.fetch(:descriptor).id)
+          input = input.reject { |key, _| %w[workflow_commit workflow_configuration_digest workflow_content_digest].include?(key) }
+          input["capabilities"] = @capability_inputs.reject { |key, _| key == :task_text }
+          input["requested_workflow"] = @workflow_name
+          input["requested_base"] = @base
+        end
         ::Digest::SHA256.hexdigest(JSON.generate(input))
       end
 
@@ -472,6 +528,15 @@ module Hive
             "outcomes" => action.allowed_outcomes
           }
         }
+        if (plan = Hive::TaskCapabilities::Store.new(task.folder).current)
+          payload["capabilities"] = plan.data.slice("inputs", "choices", "bindings", "waivers", "recommendations", "blockers")
+          payload["execution_plan_digest"] = plan.digest
+          payload["execution_plan_version"] = plan.version
+          notice_path = File.join(task.hive_state_path, "task-capabilities-adoption.json")
+          if created && File.file?(notice_path) && JSON.parse(File.read(notice_path))["task"] == plan.data.fetch("task")
+            payload["capability_adoption_notice"] = Hive::TaskCapabilities::Resolver::NOTICE
+          end
+        end
         if @json
           puts JSON.generate(payload)
         elsif created
@@ -487,6 +552,33 @@ module Hive
         else
           puts "hive: idempotent task already exists at #{task.folder}"
           puts "next: #{action.command}" if action.command
+        end
+        unless @json
+          puts payload["capability_adoption_notice"] if payload["capability_adoption_notice"]
+          payload.dig("capabilities", "blockers")&.each { |blocker| puts "blocked: #{blocker.fetch('message')}" }
+        end
+        payload
+      end
+
+      def capability_inputs_supplied?
+        @capability_inputs.fetch(:selections) != [] || @capability_inputs[:qa_waiver_reason] ||
+          @capability_inputs.fetch(:qa_waiver_checks) != [] || @capability_inputs.fetch(:approval_references) != []
+      end
+
+      def emit_capability_preview(workflow_info, project, adopted:)
+        preview = if adopted
+          Hive::TaskCapabilities::Resolver.new(workflow: workflow_info.fetch(:descriptor), cfg: workflow_info.fetch(:managed_cfg), project_root: project.fetch("path"),
+            configuration_digest: workflow_info.dig(:managed, "configuration_digest")).preview(**@capability_inputs)
+        else
+          { "inputs" => {}, "choices" => {}, "bindings" => [], "waivers" => [], "recommendations" => [], "blockers" => [] }
+        end
+        payload = { "schema" => SCHEMA, "schema_version" => 1, "ok" => true, "preview" => true,
+          "workflow" => workflow_info.fetch(:descriptor).id.to_s, "capabilities_enabled" => adopted,
+          "capabilities" => preview }
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts JSON.pretty_generate(payload)
         end
         payload
       end
@@ -524,10 +616,17 @@ module Hive
       def workflow_resolution(descriptor, project, pin:)
         store = Hive::WorkflowPackage::ManagedStore.new(project.fetch("hive_state_path"))
         cfg = {}
-        managed = store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
+        managed = if @preview
+          store.selected_read_only(descriptor.id.to_s) { cfg = managed_project_config(project) }
+        else
+          store.selected(descriptor.id.to_s) { cfg = managed_project_config(project) }
+        end
+        cfg = managed_project_config(project) if !managed && Hive::Workflows.coding_id?(descriptor.id)
         {
           descriptor: descriptor, pin: pin,
           managed: managed, managed_cfg: cfg,
+          capability_config_digest: !managed && cfg.dig("task_capabilities", "enabled") == true ?
+            ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(cfg)) : nil,
           authored_digest: authored_workflow_digest(project.fetch("hive_state_path"), descriptor)
         }
       end
@@ -855,6 +954,7 @@ module Hive
 
       def spawn_name_generator(task_dir)
         return nil if defined?(Minitest) && !self.class.name_generator_spawn_configured?
+        Hive::TaskCapabilities::Admission.enforce!(Hive::Task.new(task_dir))
 
         FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))
         log_path = File.join(Hive::Paths.state_home, "logs", "display-name.log")

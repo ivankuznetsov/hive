@@ -319,6 +319,16 @@ module Hive
       ADMISSION_ERROR    = "admission_error".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
+      TASK_CAPABILITY_INVALID_SELECTION = "task_capability_invalid_selection".freeze
+      TASK_CAPABILITY_POLICY_CONFLICT = "task_capability_policy_conflict".freeze
+      TASK_CAPABILITY_MISSING_SKILL = "task_capability_missing_skill".freeze
+      TASK_CAPABILITY_VERIFICATION_UNAVAILABLE = "task_capability_verification_unavailable".freeze
+      TASK_CAPABILITY_APPROVAL_REQUIRED = "task_capability_approval_required".freeze
+      TASK_CAPABILITY_APPROVAL_SCOPE = "task_capability_approval_scope".freeze
+      TASK_CAPABILITY_BLOCKED = "task_capability_blocked".freeze
+      TASK_CAPABILITY_STALE_PREVIEW = "task_capability_stale_preview".freeze
+      TASK_CAPABILITY_OPERATOR_REQUIRED = "task_capability_operator_required".freeze
+      TASK_CAPABILITY_ROUTE_UNAVAILABLE = "task_capability_route_unavailable".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
@@ -356,6 +366,16 @@ module Hive
       COMMAND_ORPHANED_PIN = "command_orphaned_pin".freeze
       COMMAND_ORIGINAL_RESULT_UNAVAILABLE = "command_original_result_unavailable".freeze
       COMMAND_INTAKE_DISABLED = "command_intake_disabled".freeze
+      TASK_CAPABILITY_INVALID_SELECTION = "task_capability_invalid_selection".freeze
+      TASK_CAPABILITY_POLICY_CONFLICT = "task_capability_policy_conflict".freeze
+      TASK_CAPABILITY_MISSING_SKILL = "task_capability_missing_skill".freeze
+      TASK_CAPABILITY_VERIFICATION_UNAVAILABLE = "task_capability_verification_unavailable".freeze
+      TASK_CAPABILITY_APPROVAL_REQUIRED = "task_capability_approval_required".freeze
+      TASK_CAPABILITY_APPROVAL_SCOPE = "task_capability_approval_scope".freeze
+      TASK_CAPABILITY_BLOCKED = "task_capability_blocked".freeze
+      TASK_CAPABILITY_STALE_PREVIEW = "task_capability_stale_preview".freeze
+      TASK_CAPABILITY_OPERATOR_REQUIRED = "task_capability_operator_required".freeze
+      TASK_CAPABILITY_ROUTE_UNAVAILABLE = "task_capability_route_unavailable".freeze
       ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/display_name/generator"
+require "hive/task_capabilities/resolver"
 require "hive/task"
 
 # Exercises the process-management and error-recovery branches of the
@@ -398,6 +399,44 @@ class DisplayNameGeneratorTest < Minitest::Test
     ensure
       Hive::Lock.task_lease_repository = prior_repository if prior_repository
       database&.disconnect
+    end
+  end
+end
+
+class DisplayNameGeneratorTest
+  def adopt_generator_task(task, blocked: false)
+    prepare_test_task_lease_repository(task.folder)
+    identity = Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(task.folder))
+    resolution = Hive::TaskCapabilities::Resolver.new(workflow: task.workflow, cfg: Hive::Config::DEFAULTS).resolve(
+      task_identity: identity, **(blocked ? {} : { selections: [ "qa=off" ], qa_waiver_reason: "operator fixture", qa_waiver_checks: [ "all" ] }))
+    Hive::TaskMeta.rewrite(task.folder, task_capabilities: resolution.plan.adoption)
+    Hive::TaskCapabilities::Store.new(task.folder).activate(resolution.plan, expected_version: nil)
+    resolution.plan
+  end
+
+  def test_direct_generator_denies_blocked_adopted_task_before_model_launch
+    with_generator(commit: false) do |generator, task|
+      adopt_generator_task(task, blocked: true)
+      generator.define_singleton_method(:run_agent) { |*| raise "model launched despite admission blocker" }
+      assert_raises(Hive::TaskCapabilities::Admission::Error) { generator.call }
+      assert_nil Hive::TaskMeta.read(task.folder)[:display_name]
+    end
+  end
+
+  def test_adopted_generator_custody_protects_fixed_anchors_before_display_name_update
+    with_generator(commit: false) do |generator, task|
+      plan = adopt_generator_task(task)
+      anchors = %w[meta.yml execution-plan-current.json capability-accepted.jsonl].to_h { |name| [ name, File.binread(File.join(task.folder, name)) ] }
+      generator.define_singleton_method(:run_agent) do |*|
+        anchors.each_key { |name| File.write(File.join(task.folder, name), "tampered\n") }
+        { exit_code: 0, final_message: "Untrusted name" }
+      end
+      output = nil
+      capture_io { output = generator.call }
+      assert_nil output
+      anchors.each { |name, bytes| assert_equal bytes, File.binread(File.join(task.folder, name)) }
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(task.folder).current.digest
+      assert_nil Hive::TaskMeta.read(task.folder)[:display_name]
     end
   end
 end

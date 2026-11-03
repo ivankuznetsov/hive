@@ -37,6 +37,64 @@ module Hive
         end
       end
 
+      # The capture controller records absence before the first plan-store lease.
+      # The opaque ticket carries process-local directory custody, never authority
+      # to delete an existing or subsequently dispatched task.
+      def prepare_capture_rollback(task_folder, observation:)
+        folder = File.expand_path(task_folder)
+        Hive::TaskMeta.validate_observation!(folder, observation)
+        metadata = Hive::TaskMeta.read_for_admission(folder)
+        project = project_for(folder)
+        unless metadata.ok? && project && metadata.data[:id]
+          raise IdentityError.new("capture rollback requires an observed registered task identity", code: :task_identity_conflict)
+        end
+        expected = {
+          task_id: metadata.data.fetch(:id).to_s, project_id: project.fetch(:project_id),
+          workflow_id: (metadata.data[:workflow] || "coding").to_s,
+          task_slug: metadata.data.fetch(:slug), observed_path: folder
+        }
+        if @database.read { |db| db[:task_subjects].where(task_id: expected.fetch(:task_id)).first }
+          raise IdentityError.new("capture rollback cannot claim an existing task subject", code: :task_identity_conflict)
+        end
+        ticket = SecureRandom.hex(24)
+        (@capture_rollbacks ||= {})[ticket] = { expected: expected, observation: observation,
+          prepared_at: Codec.dump_time(@clock.call) }
+        ticket
+      end
+
+      def finish_capture_rollback(ticket)
+        (@capture_rollbacks ||= {}).delete(ticket)
+        true
+      end
+
+      def discard_uncommitted_capture!(ticket)
+        custody = (@capture_rollbacks ||= {})[ticket]
+        raise IdentityError.new("unknown capture rollback custody", code: :task_identity_conflict) unless custody
+        expected = custody.fetch(:expected)
+        folder = expected.fetch(:observed_path)
+        Hive::TaskMeta.validate_observation!(folder, custody.fetch(:observation))
+        @database.transaction do |db|
+          row = db[:task_subjects].where(task_id: expected.fetch(:task_id)).first
+          if row
+            lease = db[:task_leases].where(task_id: expected.fetch(:task_id)).first
+            references = db.tables.reject { |table| %i[task_subjects task_leases].include?(table) }.any? do |table|
+              db.schema(table).any? { |name, _| name == :task_id } &&
+                !db[table].where(task_id: expected.fetch(:task_id)).empty?
+            end
+            unless expected.all? { |key, value| row[key] == value } && row[:generation] == 0 &&
+                row[:source_fingerprint].to_s.empty? && row[:created_at] >= custody.fetch(:prepared_at) &&
+                row[:last_observed_at] == row[:created_at] && !references &&
+                (!lease || (lease[:holder_id].nil? && lease[:lease_version] == 1))
+              raise IdentityError.new("capture rollback refused: task subject was referenced, leased or changed; preserve it for repair", code: :task_identity_conflict)
+            end
+            Hive::TaskMeta.validate_observation!(folder, custody.fetch(:observation))
+            db[:task_leases].where(task_id: expected.fetch(:task_id)).delete
+            db[:task_subjects].where(expected).delete
+          end
+        end
+        finish_capture_rollback(ticket)
+      end
+
       def acquire(task_folder, payload, create: true, observation: nil)
         folder = File.expand_path(task_folder)
         if create && !observation

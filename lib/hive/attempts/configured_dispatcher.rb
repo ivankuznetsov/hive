@@ -1,4 +1,5 @@
 require "hive/config"
+require "hive/task_capabilities/admission"
 require "hive/task_resolver"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
@@ -69,6 +70,7 @@ module Hive
       private
 
       def dispatcher_for(task, argv:, cfg: nil)
+        Hive::TaskCapabilities::Admission.enforce!(task)
         dispatcher_for_project(
           task.project_root, argv: argv,
           task_resolver: ->(_request) { task }, cfg: cfg

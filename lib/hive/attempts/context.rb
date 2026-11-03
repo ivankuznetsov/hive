@@ -13,6 +13,7 @@ module Hive
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
+      OPERATOR_DENIAL_ENV = "HIVE_CAPABILITY_PARENT_ATTEMPT_ID".freeze
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
                   :progress_token, :command_context
@@ -24,6 +25,20 @@ module Hive
 
         def active?
           !current.nil?
+        end
+
+        # Denial-only inherited identity for nested CLI/web calls. This is not
+        # authentication or a sandbox against callers running as the same user.
+        def operator_context?
+          return true if current
+          reference = ENV[OPERATOR_DENIAL_ENV].to_s
+          return false if reference.empty?
+          record = Repository.open_default(create_directories: false).fetch(reference)
+          !!(record && record.state == "running")
+        rescue Hive::Error, SystemCallError, IOError
+          # A supplied reference whose store cannot be checked must not grant
+          # operator authority while an agent command is being resolved.
+          true
         end
 
         def projection

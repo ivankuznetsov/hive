@@ -10,6 +10,7 @@ module Hive
         task_capability_approval_required task_capability_approval_scope
         task_capability_blocked task_capability_stale_preview
         task_capability_operator_required task_capability_route_unavailable].freeze
+      GUIDANCE_STAGES = %w[plan execute].freeze
 
       class Error < Hive::Error
         attr_reader :reason
@@ -50,10 +51,21 @@ module Hive
         current.fetch("invocation")
       end
 
+      def guidance_stage_supported?(workflow, name)
+        GUIDANCE_STAGES.include?(name) && workflow.stage_named(name)&.execution_strategy == name.to_sym
+      end
+
       def enforce!(task)
         return true unless task.respond_to?(:folder)
         plan = Store.new(task.folder).current
         return true unless plan
+        unsupported = plan.data.fetch("bindings").find do |binding|
+          binding["kind"] == "guidance" && (!GUIDANCE_STAGES.include?(binding["stage"]) ||
+            (task.respond_to?(:workflow) && !guidance_stage_supported?(task.workflow, binding["stage"])))
+        end
+        if unsupported
+          raise Error.new("selected #{unsupported.fetch('id')} guidance has no execution attachment at #{unsupported['stage']}; change its execution-plan stage binding")
+        end
         blockers = plan.data.fetch("blockers").reject { |entry| entry["phase"] == "finalization" }
         return true if blockers.empty?
         first = blockers.first

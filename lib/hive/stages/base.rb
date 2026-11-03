@@ -151,6 +151,75 @@ module Hive
         support.verify_launch_skill(profile:, invocation:, project_root:)
       end
 
+      # A same-executor attachment shares the primary spawn's existing scope
+      # and resource limits. Distinct actors or narrower envelopes require the
+      # bounded specialist invocation boundary; prompt text cannot enforce them.
+      def task_capability_guidance(task, cfg, stage:, profile:, launch_arguments:, identity: nil)
+        plan = Hive::TaskCapabilities::Store.new(task.folder).current
+        bindings = plan&.data&.fetch("bindings")&.select { |entry| entry["kind"] == "guidance" && entry["stage"] == stage }
+        return [ "", launch_arguments ] if !bindings || bindings.empty?
+
+        Hive::TaskCapabilities::Admission.enforce!(task)
+        context = Hive::Attempts::Context.current
+        if context&.explicit_routing?
+          raise Hive::TaskCapabilities::Admission::Error.new("selected guidance requires its pinned specialist executor; the outer attempt's provider account is not an accepted capability route")
+        end
+        routing = launch_arguments[:routing_arguments]
+        legacy = legacy_model_routing_values(cfg, profile)
+        model = identity&.model || routing&.model || launch_arguments[:model] || legacy[:model]
+        if model.nil? || %w[default inherit].include?(model)
+          model = profile.concrete_default_model(cfg: cfg, project_root: task.project_root)
+        end
+        effort = identity ? identity.requested_effort : routing&.effort || launch_arguments[:effort] || legacy[:effort]
+        arguments = profile.identity_arguments(model: model, effort: effort)
+        provider, actual_model = execution_identity(profile, arguments.model)
+        actor = { "profile" => profile.name.to_s, "provider" => provider, "model" => actual_model }
+        actor["effort"] = arguments.requested_effort if arguments.requested_effort
+        text = bindings.map do |binding|
+          fingerprint = Hive::WorkflowPackage::Configuration.profile_fingerprint(profile)
+          if binding.dig("actor", "profile") == profile.name.to_s && binding["actor_fingerprint"] != fingerprint
+            raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} runtime identity changed; restore the pinned runtime or accept a revised execution plan")
+          end
+          unless binding["actor"] == actor && capability_stage_envelope_within?(binding, task, cfg, stage, profile)
+            raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} guidance requires its pinned bounded specialist executor; the #{stage} executor or scope does not match")
+          end
+          body = if binding["skill"]
+            Hive::TaskCapabilities::Admission.verify_skill_binding!(binding, project_root: task.project_root, cfg: cfg)
+            format_verified_skill_invocation(profile, binding.fetch("skill"), project_root: task.project_root)
+          else
+            content = binding["instruction_content"]
+            unless content.is_a?(String) && ::Digest::SHA256.hexdigest(content) == binding["instruction_digest"]
+              raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} instruction identity is invalid; accept a revised execution plan")
+            end
+            content
+          end
+          "### #{binding.fetch('id')}\n\n#{body}"
+        end.join("\n\n")
+        # Pin any provider-native default used for the comparison so launch
+        # cannot resolve a different model after the guidance was admitted.
+        pinned = routing ? launch_arguments : { identity_arguments: arguments.native_arguments }
+        [ "Execution plan #{plan.version} (#{plan.digest})\n\n#{text}", pinned ]
+      rescue Hive::ImplementationIdentity::Error => error
+        raise Hive::TaskCapabilities::Admission::Error.new("selected guidance requires an exact matching stage or specialist executor: #{error.message}")
+      end
+
+      def capability_stage_envelope_within?(binding, task, cfg, stage, profile)
+        resource = stage == "execute" ? "execute_implementation" : stage
+        budget = stage_budget_usd(cfg, resource, profile)
+        timeout = cfg.dig("timeout_sec", resource)
+        return false unless budget && profile.budget_flag && budget <= binding.fetch("budget_usd") && timeout && timeout <= binding.fetch("timeout_sec")
+        return false unless binding.fetch("targets").empty?
+        spec = binding.fetch("permissions")
+        return false if spec.is_a?(Hash) && !spec.key?("preset")
+        selected = Hive::PermissionScope.resolve(spec, task_folder: task.folder, profile: profile, stage: stage)
+        actual = Hive::PermissionScope.resolve(Hive::Config.permission_spec(cfg, stage), task_folder: task.folder, profile: profile, stage: stage)
+        return true if selected.yolo?
+        return false if actual.yolo?
+        actual.allowed_tools.all? do |tool|
+          selected.allowed_tools.include?(tool) || selected.allowed_tools.include?(Hive::PermissionScope.tool_name(tool))
+        end && (actual.add_dirs_extra - selected.add_dirs_extra).empty?
+      end
+
       # Production stage launches run inside a durable attempt. Direct unit
       # calls predating attempt supervision receive nil and retain their
       # explicit test profile seam; real launches always resolve and journal

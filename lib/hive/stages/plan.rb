@@ -96,6 +96,12 @@ module Hive
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
         skill = Hive::Config.stage_skill(cfg, "plan")
+        guidance, launch_arguments = Hive::Stages::Base.task_capability_guidance(
+          task, cfg, stage: "plan", profile: profile,
+          launch_arguments: Hive::Stages::Base.model_launch_arguments(
+            cfg, "plan", profile, current: Hive::Stages::Base.model_routing_current(cfg["plan"])
+          )
+        )
         prompt = Hive::Stages::Base.render(
           "plan_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -105,6 +111,7 @@ module Hive
             carried_decisions_text: carried_decisions_text(task),
             source_checkout: source_checkout,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            capability_guidance: guidance,
             skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
               profile, skill, project_root: task.project_root
             )
@@ -113,7 +120,7 @@ module Hive
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
         ensure_durable_checkpoint!(task)
-        result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout)
+        result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout, launch_arguments: launch_arguments)
         marker = Hive::Markers.current(task.state_file)
         adopt_plan_dependency!(task, marker, observation: observation)
         review = start_plan_review(
@@ -189,7 +196,7 @@ module Hive
         Hive::PlanDependencyAdoption.adopt!(task, observation: observation)
       end
 
-      def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)
+      def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil, launch_arguments: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "plan", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
@@ -202,10 +209,10 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
-          **Hive::Stages::Base.model_launch_arguments(
+          **(launch_arguments || Hive::Stages::Base.model_launch_arguments(
             cfg, "plan", profile,
             current: Hive::Stages::Base.model_routing_current(cfg["plan"])
-          ),
+          )),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }

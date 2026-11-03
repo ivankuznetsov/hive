@@ -200,6 +200,9 @@ module Hive
 
       def pin_guidance(definition, result, blockers, automatic:)
         stage = @workflow.stage_named(result.fetch("stage"))
+        unless Admission.guidance_stage_supported?(@workflow, stage.name)
+          block(blockers, definition.id, "blocked", "selected guidance #{definition.id} has no execution attachment at #{stage.name}; bind it to plan or execute")
+        end
         resource = { "execute" => "execute_implementation", "review" => "review_ci" }.fetch(stage.name, stage.name)
         inherited_permissions = stage.permissions || Hive::Config.permission_spec(@cfg, stage.name)
         inherited_budget = @cfg.dig("budget_usd", resource) || stage.budget_usd || Hive::Config::DEFAULTS.dig("budget_usd", resource)

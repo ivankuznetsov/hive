@@ -44,6 +44,13 @@ report paths share the transition guard. See [[modules/conditions]].
 
 Before execute creates its reviews directory, feature worktree, pointer, or initial task marker, `Hive::ImplementationIdentity::Store#capture_execute!` runs under the durable attempt context. It resolves provider, concrete model, launcher/profile identity, source, generation, originating attempt, requested/effective execute effort, and effort support; appends `implementation_identity_captured`; rebuilds the projection; and only then permits stage initialization and the spawn. Invalid effective routing or journal failure therefore leaves execute state untouched. The journal and projection are included in the protected-file snapshot after capture, so an implementation process with task-folder access cannot rewrite its durable owner unnoticed. Equivalent retries are idempotent, while a conflicting second identity for the same generation fails closed.
 
+Adopted tasks append ordered guidance from their accepted execution plan to the
+implementation prompt. Before launch Hive rechecks the pinned runtime and skill
+fingerprints and compares the implementation actor, permissions, spending and
+timeout with the attachment. A mismatch requires a bounded specialist
+contribution; it never silently substitutes a different skill or widens the
+implementation scope. See [[modules/task_capabilities]].
+
 Crash/provider retries, daemon adoption, restart, and project config edits stay within the generation and reuse the captured identity, including failure-marker provider attribution. An accepted input change through the generation tracker advances the epoch, after which execute may capture a new owner while history remains queryable. Legacy reconstruction is allowed only at a mutating implementation boundary: structured durable attempt metadata from the exact project/task/generation wins over sanitized launcher argv, which wins over explicit current execute config. Config fallback appends a visible warning and one `legacy_backfill`; status reads never invoke reconstruction. Downstream attempt admission treats only an absent journal as legacy generation zero; malformed, unreadable, empty, or attempt-unbound journals fail closed.
 
 ## Setup

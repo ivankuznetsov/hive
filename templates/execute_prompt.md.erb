@@ -2,6 +2,14 @@ You are running stage 4-execute for project <%= project_name %>.
 
 Worktree (cwd): <%= worktree_path %>
 Task folder (--add-dir): <%= task_folder %>
+<% if capability_guidance.to_s != "" -%>
+
+## Selected capability guidance
+
+Apply this accepted guidance within the implementation stage's existing permissions.
+
+<%= capability_guidance %>
+<% end -%>
 
 You implement the plan in the worktree and commit the changes. When the implementation is complete and committed, exit. The user will then `mv` this task folder into `.hive-state/stages/6-review/` to enter the autonomous review loop (CI-fix → multi-reviewer → auto-triage → fix → browser-test). 4-execute itself does NOT run a review pass.
 

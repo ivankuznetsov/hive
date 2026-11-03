@@ -3,6 +3,14 @@ You are running stage 3-plan of the hive pipeline for project <%= project_name %
 Working directory: <%= task_folder %>
 State file: plan.md
 Origin: <%= task_folder %>/brainstorm.md
+<% if capability_guidance.to_s != "" -%>
+
+## Selected capability guidance
+
+Apply this accepted guidance within the planning stage's existing permissions.
+
+<%= capability_guidance %>
+<% end -%>
 <% if source_checkout.to_s.strip != "" -%>
 Source checkout: <%= source_checkout %>
   A read-only detached checkout of the exact revision execution will start

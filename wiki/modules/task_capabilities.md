@@ -43,6 +43,12 @@ Coding verification attachments run within review; UI guidance attaches to
 both plan and execute. Configuring those names cannot change their kinds or
 move verification to another stage.
 
+Selected guidance currently has consumers in coding's bespoke `plan` and
+`execute` runners. Other stage names, and same-named descriptor stages that
+dispatch a generic agent or council, produce a durable dispatch blocker rather
+than silently dropping the attachment. Stage names alone do not establish a
+compatible consumer.
+
 The project `task_capabilities.catalog` is coding's custom-definition authoring
 surface. `Catalog` supplies unconfigured examples for `qa`, `ui`, and `security`;
 project definitions with those IDs supply their actual bindings. These examples
@@ -90,6 +96,31 @@ legacy policy adapter can enforce this bounded-command envelope. A `scoped`
 preset with `bash: true` is an unbounded shell and cannot serve as a bounded
 approval. External scanning domains and automatic credential injection reject.
 Only isolated local targets are admitted.
+
+## Guidance at plan and execute
+
+The plan and execute prompts include ordered selected guidance from the accepted
+execution plan, with its version and digest. They never re-resolve selections
+from current configuration. Before each consuming launch, Hive verifies the
+profile fingerprint and installed skill path, invocation and content digest.
+Missing or changed skills block with a restore-or-revise action. Pinned
+instruction attachments use the immutable content snapshot and verify its
+digest, so deleting the authoring file does not rewrite task history.
+
+A shared primary spawn can consume an attachment only when its profile,
+semantic provider, concrete model and requested effort match the pinned actor.
+The semantic provider comes from the runtime's existing execution-identity
+contract. A provider-native default used in that comparison is pinned in the
+launch arguments. The primary spawn must also have enforceable spending and
+time limits within the attachment's envelope and no broader permission scope.
+Unbounded stage budgets, unsupported native budget enforcement, narrower
+task-target scopes and distinct actors require a bounded specialist invocation;
+putting a restriction in the prompt does not establish enforcement.
+
+An outer attempt's explicit provider-account route is not automatically a
+capability route. Until a separately pinned specialist route can prove that
+account and launch binding, this case remains an explicit blocker. Guidance
+does not authorize a fallback or widen the primary stage's authority.
 
 Admission checks the compiler's real permission validators without creating
 files or requiring an installed command or live provider. Configuration alone

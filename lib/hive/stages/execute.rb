@@ -588,6 +588,22 @@ module Hive
                                agent_custody: nil, rework_feedback: nil)
         plan_path = File.join(task.folder, "plan.md")
         plan_text = File.read(plan_path)
+        identity ||= capture_implementation_identity(task, cfg)
+        profile = if identity
+          Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
+        else
+          Hive::Stages::Base.stage_profile(cfg, "execute")
+        end
+        launch_arguments = Hive::Stages::Base.implementation_launch_arguments(identity, profile)
+        if identity.nil?
+          launch_arguments.merge!(Hive::Stages::Base.model_launch_arguments(
+            cfg, "execute_implementation", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["execute"])
+          ))
+        end
+        guidance, launch_arguments = Hive::Stages::Base.task_capability_guidance(
+          task, cfg, stage: "execute", profile: profile, launch_arguments: launch_arguments, identity: identity
+        )
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
           Hive::Stages::Base::TemplateBindings.new(
@@ -596,36 +612,16 @@ module Hive
             task_folder: task.folder,
             plan_text: plan_text,
             rework_feedback_json: rework_feedback && JSON.pretty_generate(rework_feedback),
+            capability_guidance: guidance,
             completion_trailer: completion_trailer(File.binread(plan_path)),
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        identity ||= capture_implementation_identity(task, cfg)
-        profile = if identity
-          Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
-        else
-          Hive::Stages::Base.stage_profile(cfg, "execute")
-        end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
         scope = restrict_task_state_access(scope, task, profile)
-        launch_arguments = Hive::Stages::Base.implementation_launch_arguments(
-          identity, profile
-        )
-        # Direct/manual stage runs can legitimately lack an Attempts::Context,
-        # so there is no durable Selection to carry models.execute_implementation
-        # into the spawn. Resolve that same closed routing cell here instead of
-        # leaving a route-required profile with a nil model.
-        if identity.nil?
-          launch_arguments.merge!(
-            Hive::Stages::Base.model_launch_arguments(
-              cfg, "execute_implementation", profile,
-              current: Hive::Stages::Base.model_routing_current(cfg["execute"])
-            )
-          )
-        end
         # 4-execute's lifecycle contract is "stage runner writes
         # EXECUTE_COMPLETE after a clean spawn" (see run_pass below),
         # not "the agent writes its own marker" — `templates/

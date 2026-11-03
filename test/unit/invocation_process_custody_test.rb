@@ -119,6 +119,17 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_entries_that_exit_while_their_environment_is_opened_are_skipped
+    with_tmp_dir do |dir|
+      write_proc_entry(dir, 424_242, environ: custody_environ(TOKEN))
+      exited = ->(*) { raise Errno::ESRCH }
+
+      with_replaced_singleton_method(File, :binread, exited) do
+        assert_empty build_custody(dir).send(:procfs_matches)
+      end
+    end
+  end
+
   def test_an_oversized_process_environment_fails_the_cleanup
     skip "exact process-custody integration requires Linux procfs" unless
       RUBY_PLATFORM.include?("linux") && File.directory?("/proc")

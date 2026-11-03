@@ -91,7 +91,7 @@ module Hive
         next unless environment_matches?(File.join(root, "environ"))
 
         capture_identity(pid)
-      rescue Errno::ENOENT
+      rescue Errno::ENOENT, Errno::ESRCH
         nil
       # Same-uid service managers can be deliberately non-dumpable, making
       # their environ unreadable even to their owner. Omit those pre-existing

@@ -121,6 +121,61 @@ class E2ERunnerTest < Minitest::Test
     end
   end
 
+  def test_crashed_report_write_failure_preserves_original_exception_backtrace_and_cause
+    [ nil, ArgumentError.new("existing cause") ].product(
+      [ RuntimeError, Errno::EROFS, Errno::ENOSPC, Errno::EACCES ]
+    ).each do |cause, writer_error_class|
+      with_isolated_dirs do |scenarios_dir, runs_dir|
+        runner = Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir)
+        original = RuntimeError.new("selection exploded")
+        original_backtrace = nil
+        writes = []
+        runner.define_singleton_method(:select_scenarios) do |**|
+          begin
+            raise original, cause: cause
+          rescue StandardError => error
+            original_backtrace = error.backtrace.dup
+            raise
+          end
+        end
+        runner.define_singleton_method(:write_report) do |**args|
+          writes << args
+          raise writer_error_class, "report write exploded"
+        end
+
+        escaped = assert_raises(RuntimeError) { runner.run_all }
+
+        assert_same original, escaped
+        assert_equal original_backtrace, escaped.backtrace
+        if cause
+          assert_same cause, escaped.cause
+        else
+          assert_nil escaped.cause
+        end
+        assert_equal [ { status: "crashed", total: 0 } ], writes
+        refute File.exist?(File.join(runner.run_dir, "report.json"))
+      end
+    end
+  end
+
+  def test_selection_failure_writes_schema_valid_crashed_report_before_reraising
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      runner = Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir)
+      original = RuntimeError.new("selection exploded")
+      runner.define_singleton_method(:select_scenarios) { |**| raise original }
+
+      assert_same original, assert_raises(RuntimeError) { runner.run_all }
+      report = report_for(runs_dir)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::E2E::Schemas.schema_path("hive-e2e-report"))))
+      assert_empty schema.validate(report).to_a
+      assert_equal "crashed", report.fetch("status")
+      assert_equal runner.run_id, report.fetch("run_id")
+      assert_equal({ "total" => 0, "passed" => 0, "failed" => 0, "setup_failed" => 0 }, report.fetch("summary"))
+      assert_empty report.fetch("scenarios")
+      assert_empty report.fetch("scenario_metadata")
+    end
+  end
+
   def test_failed_step_keeps_run_complete_but_marks_scenario_failed
     with_isolated_dirs do |scenarios_dir, runs_dir|
       write_scenario(scenarios_dir, "smoke_fail", <<~YAML)

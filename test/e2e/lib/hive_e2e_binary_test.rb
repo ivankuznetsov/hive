@@ -60,6 +60,117 @@ class E2EBinaryTest < Minitest::Test
     run_dir
   end
 
+  def with_unexpected_run_failure(kind)
+    name = "binary_unexpected_#{Process.pid}"
+    with_temp_scenario(name, <<~YAML) do
+      name: #{name}
+      steps:
+        - kind: write_file
+          path: "{sandbox}/created.txt"
+          content: ok
+    YAML
+      Dir.mktmpdir("e2e-unexpected-run") do |scratch|
+        runs_dir = File.join(scratch, "runs")
+        if kind == :blocked_runs
+          File.write(runs_dir, "unchanged blocker")
+        else
+          path = File.join(Hive::E2E::Paths.scenarios_dir, "#{name}.yml")
+          File.unlink(path)
+          File.symlink(File.join(scratch, "missing.yml"), path)
+        end
+        yield(name, runs_dir)
+        if kind == :blocked_runs
+          assert File.file?(runs_dir)
+          assert_equal "unchanged blocker", File.read(runs_dir)
+          assert_equal [ "runs" ], Dir.children(scratch), "no partial run or crashed report may be created"
+        else
+          refute File.exist?(runs_dir), "catalog parsing must fail before Runner construction"
+        end
+      end
+    end
+  end
+
+  def assert_error_document(out, kind:, code:, command:)
+    payload = parse_single_json_document(out)
+    schema = JSONSchemer.schema(JSON.parse(File.read(
+      File.join(Hive::E2E::Paths.repo_root, "schemas", "hive-e2e-error.v1.json")
+    )))
+    assert_empty schema.validate(payload).to_a
+    assert_equal kind, payload.fetch("error_kind")
+    assert_equal code, payload.fetch("exit_code")
+    assert_equal command, payload["command"]
+    payload
+  end
+
+  def assert_run_failure_debug(err, message, kind:, human:)
+    lines = err.lines.map(&:chomp)
+    assert_equal "hive-e2e: #{message}", lines.shift if human
+    assert_equal "hive-e2e debug: #{message}", lines.shift
+    refute_empty lines, "debug block must contain the rescued exception's backtrace"
+    assert lines.all? { |line| line.match?(/\A  .+:\d+:in /) }, err
+    assert_equal lines.uniq, lines, "each frame must appear once"
+    refute_match(/cause|write_report|write_json|atomic_file\.rb/i, err)
+
+    file, method, operation = if kind == :blocked_runs
+                               [ "runner.rb", "run_all", 'FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))' ]
+    else
+                               [ "scenario_parser.rb", "parse", "File.read(@path)" ]
+    end
+    frame = lines.find { |line| line.match?(/#{file}:\d+:in .*#{method}/) }
+    refute_nil frame, "expected the original failure operation in #{err}"
+    line_number = frame.match(/#{file}:(\d+):/)[1].to_i
+    assert_includes File.readlines(File.join(__dir__, file))[line_number - 1], operation
+  end
+
+  def test_unexpected_run_failures_have_matching_human_and_json_diagnostics
+    [ :blocked_runs, :missing_scenario ].each do |kind|
+      with_unexpected_run_failure(kind) do |name, runs_dir|
+        messages = []
+        [ nil, "1" ].product([ false, true ]).each do |debug, json|
+          out, err, status = Open3.capture3(
+            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
+            hive_e2e, "run", name, *([ "--json" ] if json)
+          )
+          assert_equal 1, status.exitstatus
+          if json
+            message = assert_error_document(out, kind: "run_failed", code: 1, command: "run").fetch("message")
+          else
+            assert_empty out
+            message = err.lines.first.delete_prefix("hive-e2e: ").chomp
+          end
+          expected_class = kind == :blocked_runs ? /Errno::(?:EEXIST|ENOTDIR)/ : /Errno::ENOENT/
+          assert_match(/\A#{expected_class}: .+\z/, message)
+          messages << message
+          if debug == "1"
+            assert_run_failure_debug(err, message, kind: kind, human: !json)
+          else
+            assert_equal(json ? "" : "hive-e2e: #{message}\n", err)
+          end
+        end
+        assert_equal 1, messages.uniq.size, "human and JSON modes must share one canonical message"
+      end
+    end
+  end
+
+  def test_unexpected_run_debug_requires_exactly_one
+    with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
+      [ nil, "", "   ", "0", "true", "yes", "on" ].product([ false, true ]).each do |debug, json|
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
+          hive_e2e, "run", name, *([ "--json" ] if json)
+        )
+        assert_equal 1, status.exitstatus
+        if json
+          assert_error_document(out, kind: "run_failed", code: 1, command: "run")
+          assert_empty err
+        else
+          assert_empty out
+          assert_match(/\Ahive-e2e: Errno::(?:EEXIST|ENOTDIR): [^\n]+\n\z/, err)
+        end
+      end
+    end
+  end
+
   def test_list_json_emits_parseable_envelope_with_schema_version_1
     out, err, status = Open3.capture3(hive_e2e, "list", "--json")
     assert status.success?, "bin/hive-e2e list --json should exit 0, stderr was: #{err}"

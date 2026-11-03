@@ -63,6 +63,23 @@ class InitDoctorPreflightTest < Minitest::Test
     Hive::Commands::Init.new(dir, agent_skill_preflight: true).call
   end
 
+  def test_preflight_is_enabled_by_default_and_inspects_without_native_commands
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        options = nil
+        inspector = Struct.new(:inspect).new([])
+        factory = ->(**kwargs) { options = kwargs; inspector }
+        command = Hive::Commands::Init.new(dir)
+        assert_equal true, command.instance_variable_get(:@agent_skill_preflight)
+        with_replaced_singleton_method(Hive::AgentSkills, :hive_inspector, factory) do
+          command.send(:run_init_preflight!)
+        end
+        assert_equal false, options.fetch(:native_commands)
+        assert_equal dir, options.fetch(:project_root)
+      end
+    end
+  end
+
   # Installs a complete skill set so the preflight reports all-green
   # (matches the recommended-default config that `hive init` writes).
   # See `templates/project_config.yml.erb` for the reviewer roster.

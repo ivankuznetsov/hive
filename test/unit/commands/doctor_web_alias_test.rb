@@ -37,7 +37,7 @@ class HiveCommandsDoctorWebAliasTest < Minitest::Test
     assert_equal "warning", warning.fetch("kind")
     assert_equal "HIVEBOX_DIFF_TIMEOUT_SEC", warning.fetch("alias")
     assert_equal "HIVE_WEB_DIFF_TIMEOUT_SEC", warning.fetch("replacement")
-    assert_equal 1, payload.dig("summary", "warnings")
+    assert_equal payload.fetch("checks").count { |row| row["status"] == "warning" }, payload.dig("summary", "warnings")
   end
 
   private

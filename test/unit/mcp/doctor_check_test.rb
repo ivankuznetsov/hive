@@ -97,9 +97,12 @@ class McpDoctorCheckTest < Minitest::Test
     end
   end
 
-  def test_quiet_when_nothing_is_granted_or_configured
+  def test_personal_drift_is_explicitly_uninspected_without_discovery
     with_project({}) do |config|
-      assert_empty rows(config, environment: {})
+      found = rows(config, environment: {})
+      assert_equal [ "mcp/personal" ], found.map { |row| row[:label] }
+      assert_includes found.first[:message], "uninspected"
+      assert_includes found.first[:message], "hive mcp import --dry-run"
     end
   end
 
@@ -120,7 +123,7 @@ class McpDoctorCheckTest < Minitest::Test
     end
   end
 
-  def test_doctor_default_discovery_runs_outside_tests
+  def test_doctor_never_launches_default_discovery_even_for_legacy_default_sentinel
     with_project({}) do |config, dir|
       called = []
       fake = ->(cwd:) { called << cwd; Hive::Mcp::Discovery::Result.new(candidates: [], notices: []) }
@@ -130,7 +133,7 @@ class McpDoctorCheckTest < Minitest::Test
           environment: {}, mcp_discover: :default
         ).call
       end
-      assert_equal [ dir ], called
+      assert_empty called
     end
   end
 

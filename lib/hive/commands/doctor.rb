@@ -8,6 +8,7 @@ require "hive/invoked_binary"
 require "hive/agent_profiles"
 require "hive/agent_skills"
 require "hive/web/environment"
+require "hive/commands/doctor/agent_cli_check"
 
 module Hive
   module Commands
@@ -28,11 +29,10 @@ module Hive
       # JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
-      # `mcp_discover` compares personal agent MCP configs with Hive's catalog
-      # by running each agent's read-only listing; in-process tests skip it.
       def initialize(config:, project_root:, json: false, output: $stdout,
                      inspector: nil, environment: ENV,
-                     mcp_discover: defined?(Minitest) ? nil : :default)
+                     mcp_discover: nil, probe_agent_versions: false,
+                     service_contexts: nil, probe_budget: nil, probe_runner: nil)
         @config = config
         @project_root = project_root
         @json = json
@@ -40,13 +40,19 @@ module Hive
         @inspector = inspector
         @environment = environment
         @mcp_discover = mcp_discover
+        @agent_cli_options = {
+          config: config, project_root: project_root, environment: environment,
+          service_contexts: service_contexts, probe: probe_agent_versions,
+          budget: probe_budget, runner: probe_runner
+        }
         @rows = nil
       end
 
       def call
         legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
-                      check_web_environment_aliases + check_runtime_control_plane + check_mcp
-        managed_rows = managed_skill_rows
+                      check_web_environment_aliases + check_runtime_control_plane + check_mcp + agent_cli_check.rows
+        legacy_rows = redact_fields(legacy_rows)
+        managed_rows = redact_fields(managed_skill_rows)
         @rows = legacy_rows + managed_rows
         if @json
           @output.puts JSON.generate(envelope(legacy_rows, managed_rows))
@@ -57,22 +63,22 @@ module Hive
         @rows.any? { |row| failing_row?(row) } ? EXIT_MISSING_SKILL : EXIT_SUCCESS
       rescue Hive::ConfigError, KeyError, ArgumentError => e
         if @json
-          @output.puts JSON.generate(error: e.message)
+          @output.puts JSON.generate(error: Hive::SecretPatterns.redact(e.message))
         else
-          @output.puts "hive doctor: #{e.message}"
+          @output.puts "hive doctor: #{Hive::SecretPatterns.redact(e.message)}"
         end
         EXIT_CONFIG_ERROR
       end
 
       private
 
+      def agent_cli_check
+        @agent_cli_check ||= AgentCliCheck.new(**@agent_cli_options)
+      end
+
       def check_mcp
         require "hive/mcp/doctor_check"
-        discover = @mcp_discover
-        if discover == :default
-          require "hive/mcp/discovery"
-          discover = ->(root) { Hive::Mcp::Discovery.discover(cwd: root || Dir.pwd) }
-        end
+        discover = @mcp_discover.respond_to?(:call) ? @mcp_discover : nil
         Hive::Mcp::DoctorCheck.rows(
           config: @config, environment: @environment, project_root: @project_root, discover: discover
         )
@@ -168,6 +174,13 @@ module Hive
           ) ]
         end
 
+        if agent_cli_check.agent_executable?(qmd)
+          return [ warning_row(
+            stage: "wiki", label: "wiki/qmd", agent: "qmd", configured_skill: "@tobilu/qmd", skill: "qmd",
+            message: "qmd at #{qmd} is also a registered agent executable; version probe skipped; configure a separate qmd executable"
+          ) ]
+        end
+
         begin
           out, err, status = Timeout.timeout(15) { Open3.capture3(qmd, "--version") }
         rescue Timeout::Error, SystemCallError => e
@@ -212,16 +225,17 @@ module Hive
       end
 
       def find_qmd
-        env_qmd = ENV["HIVE_QMD_BIN"].to_s
+        env_qmd = @environment["HIVE_QMD_BIN"].to_s
         return env_qmd if !env_qmd.empty? && File.executable?(env_qmd)
 
         path_qmd = which("qmd")
         return path_qmd if path_qmd
 
-        data_home = ENV["XDG_DATA_HOME"].to_s.empty? ? File.expand_path("~/.local/share") : ENV["XDG_DATA_HOME"]
+        home = @environment["HOME"].to_s.empty? ? Dir.home : @environment["HOME"]
+        data_home = @environment["XDG_DATA_HOME"].to_s.empty? ? File.join(home, ".local/share") : @environment["XDG_DATA_HOME"]
         candidates = [
           File.join(data_home, "hive", "qmd", "bin", "qmd"),
-          File.expand_path("~/.local/share/hive/qmd/bin/qmd")
+          File.join(home, ".local/share/hive/qmd/bin/qmd")
         ]
 
         prefix_file = File.join(data_home, "hive", "install-prefix")
@@ -234,7 +248,16 @@ module Hive
       end
 
       def which(name)
-        Hive::InvokedBinary.which(name)
+        Hive::AgentCliIdentity.resolve(name, environment: @environment, cwd: @project_root || Dir.pwd)
+      end
+
+      def redact_fields(value)
+        case value
+        when String then Hive::SecretPatterns.redact(value)
+        when Array then value.map { |item| redact_fields(item) }
+        when Hash then value.transform_values { |item| redact_fields(item) }
+        else value
+        end
       end
 
       def first_diagnostic_line(*parts)
@@ -368,7 +391,7 @@ module Hive
         rows.each { |r| @output.puts row_line(r, widths) }
         @output.puts
         rows.each do |r|
-          next if %w[present healthy].include?(r[:status])
+          next if %w[present healthy].include?(r[:status]) && r[:stage] != "agent_cli"
 
           @output.puts "[#{r[:label]}/#{r[:agent]}] #{r[:message]}"
           @output.puts "  remediation: #{r[:remediation]}" if r[:remediation]

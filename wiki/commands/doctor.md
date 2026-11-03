@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
@@ -12,7 +12,7 @@ inspector. It always checks Hive's own operating skill for supported Claude,
 Codex, and Pi agents, adds capabilities derived from project configuration,
 and reads OpenClaw's durable ClawHub provenance without changing it. Durable
 filesystem evidence is joined with the real runtime resolver and exact
-projection digests; Doctor does not launch supported agent CLIs, because even
+projection digests; default doctor does not launch agent CLIs, because even
 nominally read-only upstream commands can initialize user state. `--json` is
 the versioned `hive-doctor.v2` contract.
 Legacy Claude auth/config, QMD, and deprecated-config checks remain separate rows. When a
@@ -24,14 +24,90 @@ application/schema/integrity health without creating or migrating anything.
 ```bash
 hive doctor
 hive doctor --json
+hive doctor --probe-agent-versions
 ```
 
 Run from a Hive-initialized project. Doctor reads installed-package registries,
 config, cache paths, canonical manifests, and ClawHub origin/lock metadata. It
-does not launch Claude, Codex, Pi, or OpenClaw; invoke install/update commands;
+does not launch agent CLIs by default; invoke install/update commands;
 write aliases or skills; or call a model. An absent agent binary is an
 `unavailable`, non-blocking row. Legacy dependency checks remain bounded and
 separate from managed-agent inventory.
+
+## Shell and installed-service CLI identities
+
+Doctor compares every registered profile, including project `agents` overrides,
+in the invoking process environment and each installed daemon and babysitter
+service. Stopped, disabled and unloaded installations remain visible. Only a
+proven absent service is omitted. Shell resolution uses the current process's
+PATH and environment, without interactive aliases, functions or a login shell.
+
+Rows identify the selection regime: plain spawn uses the first executable on
+the child PATH, isolated spawn uses Hive's existing trampoline-skipping
+selector before environment scrubbing, and managed spawn requires a prepared
+runtime binding. Doctor does not prepare a runtime, so absent binding evidence
+is explicitly unknown. A shared shim path with an unknown effective target is
+incomplete evidence. Different launch paths, effective targets and known
+versions are compared separately, including an explicit older-service verdict.
+Shell `0.156.1` versus an npm daemon `0.153.4` is a diagnostic fixture; those
+numbers make no claim about model support in either release.
+
+Service rows describe on-disk configuration and available read-only manager
+evidence. They do not prove the environment of a running process. Linux
+Environment entries, resets, drop-ins and EnvironmentFile sources, or launchd's
+named EnvironmentVariables dictionary, supply independent resolution inputs.
+Doctor never fills missing service activation variables from the shell or
+evaluates unit shell snippets. With no declared WorkingDirectory it models the
+invoking project root and labels that cwd inherited. Opaque wrappers and shim
+activation that cannot be established from filesystem evidence stay unknown.
+Changed sources or pending reloads warn that a running service may be stale:
+reload changed systemd configuration and restart the affected service, then
+rerun doctor. Missing process-start evidence remains unknown.
+
+Default version inspection uses a linked, provider-matching npm manifest,
+recognized Claude native version target, or supported provider Homebrew
+receipt with executable linkage. Node/Ruby version directories, arbitrary
+nearby manifests and copied standalone binaries do not establish an agent
+version. Install methods outside those recognized layouts render
+`version-uninspected` with a `--probe-agent-versions` hint. Advisory missing,
+unknown and divergent identities are warning rows in `hive-doctor.v2` checks;
+they do not add exit failures. Managed health failures still exit 65 and
+configuration errors still exit 78.
+
+`--probe-agent-versions` explicitly executes version commands under complete
+reconstructed contexts. This includes relative configured paths resolved
+against the modelling cwd, shared installations and opaque tool-manager shims:
+it runs whatever executable that context and selection regime resolve. A
+version command can execute launcher/manager code and have side effects. Time,
+capture and process-group bounds do not establish executable trust; no
+ownership/mode refusal or low-trust classification is added. Incomplete or
+stale service contexts are not probed as current complete environments.
+Managed skill inventory stays filesystem-only and this flag does not enable
+MCP discovery; use the existing `hive mcp import` discovery workflow
+for personal MCP inventory.
+
+Each version probe has at most 30 seconds including cleanup. All agent probes
+share a monotonic 60-second budget including cleanup; remaining work gets the
+typed `probe_budget_exhausted` reason while filesystem evidence remains visible.
+The manager-read pass has a separate 10-second budget, at most five seconds
+per query. Together with the existing 15-second QMD probe, the diagnostic
+subprocess allowance is at most 85 seconds, excluding filesystem and rendering
+work. Probe output and environment values are not emitted in diagnosis.
+
+To select an intended CLI and enforce its minimum at execution, configure:
+
+```yaml
+agents:
+  codex:
+    bin: /opt/agent-clis/codex
+    min_version: "0.156.1"
+```
+
+An optional `agents.codex.env_override` names a project-specific binary
+environment key. Its nonempty value wins first; package override keys remain
+fallbacks before `bin`. Clear unintended override values in the relevant
+shell/service environment when pinning a CLI. Doctor reports advisory evidence;
+the existing launch-time minimum-version check remains authoritative.
 
 ## Runtime control-plane diagnosis
 

@@ -25,7 +25,13 @@ module Hive
         end
 
         rows = grant_rows(config, environment) + adapter_rows(environment)
-        rows.concat(discovery_rows(project_root, discover)) if discover
+        if discover
+          rows.concat(discovery_rows(project_root, discover))
+        else
+          rows << warning("mcp/personal", "hive", "mcp-import", "personal",
+                          "personal MCP drift is uninspected: agent discovery commands are disabled in doctor; " \
+                          "run `hive mcp import --dry-run` for explicit discovery")
+        end
         rows
       end
 

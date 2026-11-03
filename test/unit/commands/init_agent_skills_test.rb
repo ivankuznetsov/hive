@@ -138,10 +138,10 @@ class InitAgentSkillsTest < Minitest::Test
     end
   end
 
-  def test_in_process_minitest_default_suppresses_post_init_skill_preflight
+  def test_post_init_skill_preflight_has_the_same_enabled_default_in_tests
     command = Hive::Commands::Init.new(Dir.pwd)
 
-    assert_equal false, command.instance_variable_get(:@agent_skill_preflight)
+    assert_equal true, command.instance_variable_get(:@agent_skill_preflight)
     assert_equal true, Hive::Commands::Init.new(
       Dir.pwd, agent_skill_preflight: true
     ).instance_variable_get(:@agent_skill_preflight)

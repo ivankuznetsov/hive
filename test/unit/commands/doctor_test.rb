@@ -329,9 +329,10 @@ class HiveCommandsDoctorTest < Minitest::Test
       assert_equal 0, env.fetch("summary").fetch("legacy_failures"),
                    "an exported key is a warning, not a failing check"
       assert_doctor_schema_valid(env)
-      warnings = env.fetch("checks").select { |check| check["status"] == "warning" }
+      all_warnings = env.fetch("checks").select { |check| check["status"] == "warning" }
+      warnings = all_warnings.select { |check| check["label"] == "claude/auth" }
       assert_equal 1, warnings.length
-      assert_equal 1, env.fetch("summary").fetch("warnings")
+      assert_equal all_warnings.length, env.fetch("summary").fetch("warnings")
       warning = warnings.first
       assert_equal "claude/auth", warning.fetch("label")
       assert_equal "billing-auth", warning.fetch("configured_skill")
@@ -369,7 +370,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       env = JSON.parse(out.string)
       assert_doctor_schema_valid(env)
       refute(env.fetch("checks").any? { |check| check["label"] == "claude/auth" })
-      assert_equal 0, env.fetch("summary").fetch("warnings")
+      assert_equal env.fetch("checks").count { |row| row["status"] == "warning" }, env.dig("summary", "warnings")
     end
   end
 
@@ -403,7 +404,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       assert_equal "warning", row.fetch("status")
       assert_equal "claude.mode", row.fetch("configured_skill")
       assert_match(/claude\.mode is obsolete.*headless.*delete the claude\.mode line/, row.fetch("message"))
-      assert_equal 1, env.fetch("summary").fetch("warnings")
+      assert_equal env.fetch("checks").count { |row| row["status"] == "warning" }, env.dig("summary", "warnings")
       assert_equal 0, env.fetch("summary").fetch("legacy_failures")
     end
   end
@@ -415,7 +416,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       assert_equal 0, exit_code
       assert_doctor_schema_valid(env)
       refute(env.fetch("checks").any? { |check| check["label"] == "claude/config" })
-      assert_equal 0, env.fetch("summary").fetch("warnings")
+      assert_equal env.fetch("checks").count { |row| row["status"] == "warning" }, env.dig("summary", "warnings")
     end
   end
 

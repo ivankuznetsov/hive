@@ -293,7 +293,7 @@ module Hive
       Resolves the effective enabled stages, named reviewers, browser hooks,
       and their configured agent profiles (claude / codex / pi / grok)
       against Hive's packaged agent-skills manifest. For each managed
-      capability it combines bounded native CLI inventory with the exact
+      capability it combines filesystem-only native inventory with the exact
       filesystem path that would win at runtime. Custom skills and capabilities
       unsupported by the manifest remain visible but unmanaged.
 
@@ -327,6 +327,15 @@ module Hive
       managed rows include an exact `hive setup-agents --agent ... --skill ...`
       remediation. Doctor never installs or writes agent state.
 
+      Every registered agent profile is also compared across the invoking
+      shell and installed daemon/babysitter configurations, including stopped
+      services. Default observations never launch an agent CLI. Unknown
+      filesystem versions are version-uninspected. --probe-agent-versions
+      explicitly runs resolved version commands with a 30-second per-command
+      deadline and a 60-second aggregate budget. Incomplete or stale service
+      environments are not probed. Managed runtime bindings remain uninspected
+      until an invocation is prepared. These advisory rows never change exit status.
+
       --json emits the versioned hive-doctor.v2 envelope. The v1 schema file
       remains packaged for consumers pinned to the former resolution-only
       contract.
@@ -338,14 +347,18 @@ module Hive
 
         hive doctor                       # tabular output
         hive doctor --json                # machine-readable envelope
+        hive doctor --probe-agent-versions # explicitly execute version commands
     DESC
+    method_option :probe_agent_versions, type: :boolean, default: false,
+                  desc: "Run bounded agent CLI version commands in reconstructed contexts"
     def doctor
       require "hive/commands/doctor"
       cfg = Hive::Config.load(Dir.pwd)
       exit Hive::Commands::Doctor.new(
         config: cfg,
         project_root: Dir.pwd,
-        json: options[:json]
+        json: options[:json],
+        probe_agent_versions: options[:probe_agent_versions]
       ).call
     end
 

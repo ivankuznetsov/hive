@@ -253,6 +253,7 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "hive-doctor.v2"
     assert_includes out, "setup-agents"
     assert_includes out, "never installs"
+    assert_includes out, "--probe-agent-versions"
   end
 
   def test_circuits_command_is_absent
@@ -435,7 +436,18 @@ class HiveCliTest < Minitest::Test
 
         assert_equal 65, status
         assert_equal [ Dir.pwd ], loaded
-        assert_equal({ config: { "ok" => true }, project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
+        assert_equal({ config: { "ok" => true }, project_root: Dir.pwd, json: true,
+                       probe_agent_versions: false }, calls.first.fetch(:kwargs))
+      end
+    end
+  end
+
+  def test_doctor_explicit_version_probe_option_is_forwarded
+    with_replaced_singleton_method(Hive::Config, :load, ->(_) { {} }) do
+      with_command_new_stub(Hive::Commands::Doctor, return_value: 0) do |calls|
+        _, _, status = with_captured_exit { Hive::CLI.start([ "doctor", "--probe-agent-versions" ]) }
+        assert_equal 0, status
+        assert_equal true, calls.first.fetch(:kwargs).fetch(:probe_agent_versions)
       end
     end
   end

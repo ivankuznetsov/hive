@@ -100,7 +100,7 @@ module Hive
                      workflow_input: $stdin, workflow_output: $stderr,
                      provisioning_input: $stdin, provisioning_output: $stdout,
                      provisioning_error: $stderr, preflight_inspector: nil,
-                     setup_agents_factory: nil, agent_skill_preflight: !defined?(Minitest),
+                     setup_agents_factory: nil, agent_skill_preflight: true,
                      module_event_publisher: nil, mcp_import_offer: !defined?(Minitest))
         @project_path = File.expand_path(project_path)
         @force = force
@@ -1035,7 +1035,8 @@ module Hive
         cfg = Hive::Config.load(@project_path)
         inspector = @preflight_inspector || Hive::AgentSkills.hive_inspector(
           config: cfg,
-          project_root: @project_path
+          project_root: @project_path,
+          native_commands: false
         )
         rows = inspector.inspect
         actionable = rows.select do |row|

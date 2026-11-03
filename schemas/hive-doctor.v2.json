@@ -58,11 +58,57 @@
       "type": "object",
       "required": ["kind", "stage", "label", "agent", "configured_skill", "skill", "status", "message"],
       "properties": {
-        "kind": { "enum": ["dependency", "warning"] },
-        "status": { "enum": ["present", "missing", "version_too_old", "warning", "not_applicable"] },
+        "kind": { "enum": ["dependency", "warning", "runtime_control_plane"] },
+        "status": { "enum": ["present", "missing", "version_too_old", "warning", "not_applicable", "ok"] },
+        "regime": { "enum": ["plain", "isolated", "managed"] },
+        "identity": { "$ref": "#/$defs/ExecutableIdentity" },
+        "comparison": { "$ref": "#/$defs/ExecutableComparison" },
+        "execution_context": { "$ref": "#/$defs/ExecutionContext" },
         "alias": { "type": "string" },
         "replacement": { "type": "string" },
         "ignored": { "type": "boolean" }
+      }
+    },
+    "ExecutableIdentity": {
+      "type": "object",
+      "required": ["profile", "regime", "authority", "configured", "launch_path", "effective_target", "version", "version_source", "reason", "version_reason"],
+      "properties": {
+        "profile": { "type": "string" },
+        "regime": { "enum": ["plain", "isolated", "managed"] },
+        "authority": { "type": "string" },
+        "configured": { "type": "string" },
+        "launch_path": { "type": ["string", "null"] },
+        "effective_target": { "type": ["string", "null"] },
+        "version": { "type": ["string", "null"] },
+        "version_source": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "version_reason": { "type": ["string", "null"] },
+        "sandbox_executable": { "type": ["string", "null"] },
+        "command_prefix": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ExecutableComparison": {
+      "type": "object",
+      "required": ["state", "launch_path", "effective_target", "version", "regime_divergence"],
+      "properties": {
+        "state": { "enum": ["match", "drift", "incomplete", "uninspected"] },
+        "launch_path": { "enum": ["same", "different", "unknown"] },
+        "effective_target": { "enum": ["same", "different", "unknown"] },
+        "version": { "enum": ["same", "older", "newer", "unknown"] },
+        "regime_divergence": { "type": "boolean" }
+      }
+    },
+    "ExecutionContext": {
+      "type": "object",
+      "required": ["installation", "cwd", "cwd_provenance", "complete", "running_currency", "reasons", "sources"],
+      "properties": {
+        "installation": { "enum": ["installed", "absent", "indeterminate"] },
+        "cwd": { "type": "string" },
+        "cwd_provenance": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "running_currency": { "enum": ["current", "stopped", "stale", "unknown"] },
+        "reasons": { "type": "array", "items": { "type": "object" } },
+        "sources": { "type": "array", "items": { "type": "object" } }
       }
     }
   }

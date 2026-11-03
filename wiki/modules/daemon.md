@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-10-02
+updated: 2026-11-03
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -1013,7 +1013,9 @@ The fix gates the resume on whether any questions are still unanswered:
 This is surface-agnostic: it holds whether answers arrive incrementally
 via the bot or all at once via a direct edit. The bot's own "all
 answered → enqueue a dispatch request" path then just races the row-scan
-to the same gate; the per-slug in-flight gate dedups.
+to the same gate; durable request claims and attempt admission prevent a second
+owner. A pending failed-edit recovery owns that gate ahead of ordinary edit
+dispatch, including a bot-enqueued resume.
 
 ## Persisted dispatch baselines (restart survival)
 
@@ -1041,10 +1043,11 @@ AtomicFile are swept on construction.
 The controller
 write-throughs on every baseline mutation — first-sight record, dispatch,
 terminal-attempt replay, local-child completion, durable-attempt completion,
-AND prune — so there is no batched loss window for the critical value. A terminal replay means the
-durable attempts layer already completed that exact task generation; recording
-the observed state-file mtime prevents the unchanged waiting marker from being
-readmitted on every daemon tick, while a later edit still becomes eligible.
+AND prune — so there is no batched loss window for the critical value. These
+values brake repeated observations; they do not prove that a stage accepted a
+result. A successful terminal replay consumes unchanged work. An attributable
+failed edit enters coordinator recovery before baseline suppression, without
+deleting or rewinding the baseline to make the file appear new.
 When a local child or durable attempt completes in a different stage from the
 state file's current `stages/<stage>/...` location, the controller deletes and
 persists removal of the old `[project, slug]` baseline instead of applying it
@@ -1103,13 +1106,119 @@ all answers landed while the daemon was down — the non-empty structural
 first-sight baseline. After the normal debounce it resumes without a synthetic
 `touch`, another answer, or an operator-owned retry marker.
 
-Upgrade recovery covers baselines already written by an older daemon. The
-controller marks keys loaded from `daemon_dispatch_baselines.json` as restored
-until this process observes or dispatches them. For a fully answered brainstorm
-only, the dispatcher treats that uncorroborated restored value as first sight
-once. A real dispatch consumes the flag and restores ordinary duplicate-run
-protection; incomplete brainstorms and every non-brainstorm row continue using
-the persisted baseline unchanged.
+That first-sight exception does not override a restored baseline merely because
+answers are complete. After restart, unchanged successful work stays consumed;
+a stranded edit needs attributable terminal failure evidence to enter recovery.
+Complete answers, mtime equality, a touch, and daemon logs alone cannot establish
+failure. Generic `ready_to_run` restored-baseline handling described above is
+unchanged.
+
+## Failed edit-resume recovery
+
+`Attempts::FailedEdit` classifies bounded task-local durable evidence for every
+action covered by `Policy.edit_resume?`, including descriptor-backed workflows.
+It handles dispatches that fail before stage result handling runs, including a
+failed launch before an agent executes. A Brainstorm failure already handled by
+the stage and stamped `ERROR` stays on marker recovery; it is not admitted a
+second time. A lost or interrupted attempt without a trustworthy terminal
+failure receipt follows the existing lost-attempt custody rules.
+
+The existing attempt and dispatch-request JSON payloads carry three bindings:
+
+- `task_binding`: project, nonempty stable task ID, intended stage, and task
+  locator. It identifies an incarnation across answer edits. A replacement task
+  needs its own stable ID; uncertain attribution is nonautomatic.
+- `source_binding`: the task binding plus failed request/attempt identity and
+  its dispatch generation, ownership generation, input epoch, and progress
+  token. This evidence stays immutable.
+- `input_binding`: the current input epoch and content-derived progress token.
+  Recovery can refresh it under the task lock without changing the failure
+  series. Content-derived dispatch/ownership generations are fences, not stable
+  task identity.
+
+Launch intent is persisted before handoff. Detached attempts retain terminal
+receipts; the supervising dispatch owner records legacy command outcomes even
+when the child could not write its own receipt. Receipt format versions must be
+supported and non-regressing. A later receipt for the same attempt is ordered
+by terminal lease version, or dispatch revision for a supervised command,
+rather than `created_at`. A distinct successor must explicitly bind its source;
+unrelated attempts' lease counters are not comparable. An active owner or an
+accepted result defeats failure adoption. Historical receipts without launch
+intent are adopted only when their full dispatch/input identity still matches
+the current task. Missing/ambiguous receipts never authorize replay. A missing
+task ID produces Hive-owned `missing_task_id` remediation through the existing
+manual task-ID migration flow.
+
+Brainstorm owns result acceptance: changed bytes must also satisfy its numbered
+Round or nonempty Requirements contract. Stage acceptance and output digest are
+published through the existing bounded diagnostic channel before later command
+reporting, so a trailing nonzero exit cannot erase accepted output. An operator
+edit alone is not stage acceptance. Other edit-resume stages currently use
+terminal outcome until they define a stage-owned acceptance predicate.
+
+`RecoveryCoordinator` admits the `failed_edit` variant under the task lock and
+retains WAITING and all answers. It neither clears a marker nor stamps an ERROR
+over input. Resumption observes the real marker, revalidates the source,
+generation, safety, dependency, enablement, capacity, quiescence, and ownership
+fences, and uses the ordinary durable claim/attempt admission path. The current
+coding brainstorm is reparsed immediately before dispatch; incomplete or
+structurally unknown answers hold recovery, and complete input still debounces.
+Plan-approval behavior is unchanged.
+
+The coordinator uses the existing 5, 10, 60, 300, 900, and 3600 second backoff
+ladder. One observed failed attempt counts once. Its persisted eligibility time
+survives restart, repeated scans, edits, and capacity deferral. Retry history and
+receipt cleanup are isolated by recovery variant and stage. When inputs change,
+a locked replacement request maps the old and current bindings, retains count,
+fingerprint history, eligibility, and any park, and removes the superseded row
+in the same transaction. Exactly one live recovery row remains. Clearing an
+answer suspends dispatch; refilling resumes after the existing deadline and
+debounce. Stage advancement, true replacement, or accepted output retires the
+old recovery. Pending queue deadlines trigger exact-task reevaluation on full,
+incremental, and one-shot paths without another file edit or a separate timer.
+
+Repeated identical non-`limits_reached` failures park only after reaching both
+the existing backoff ceiling and deterministic threshold of three. Parking is
+`blocked_reason=deterministic_failure`, owner `operator`, and projected
+`escalation_tier=parked`. Failed edits alone use this remediation:
+
+> edits do not release this park; use the current workflow.retry action
+
+Ordinary edits cannot unpark or reset eligibility. The explicit Retry action
+uses a fresh observation token bound to the task, source, and current input,
+then the same coordinator safety/ownership fences. For example,
+`hive act workflow.retry demo:task --observation TOKEN --json` uses the token
+from current operational status; stale tokens are rejected. Marker,
+admission-failure, and markerless-failure recovery retain their existing
+“change the failing input, provider, or implementation before retrying” text.
+
+### Operator projection
+
+CLI, TUI, and web consume canonical recovery evidence through
+`OperationalStatus` and `Recovery::Presentation`. The payload distinguishes the
+failed source attempt from a live retry and carries variant, bindings, reason,
+owner, escalation, and known `next_eligible_at`. When the daemon snapshot is
+stale or unavailable, a read-only task/stage-bound SQL lookup can retain durable
+recovery metadata without creating storage, admitting recovery, or promising an
+imminent retry.
+
+Freshness precedes repair/parking, then genuine dependency blocks and missing
+answers, running recovery, cooldown/queue, and the actual no-evidence scheduler
+disposition. Missing answers keep the editor action and recovery detail;
+complete recovering answers do not. Descriptor workflows do not infer missing
+answers from an absent coding-brainstorm completeness signal. A parked task
+shows Needs execution repair and the explicit token-guarded Retry action.
+Cooldown and queue show Needs recovery plus the known time, or “retry time
+unavailable”; other holds retain their real reason without a retry promise.
+Complete answers with no failure evidence show the actual scheduler disposition
+without inventing recovery or another answer prompt.
+
+Focused regressions are in `attempts/dispatcher_test`, `stages/brainstorm_runtime_test`,
+`daemon/recovery_coordinator_test`, `daemon/dispatcher_test`, and the dispatch
+repository/status/action/TUI suites under `test/unit/`. Integration fixtures in
+`daemon_auto_retry_test` and `dispatch_request_concurrency_test` use fake
+children, persisted restart state, competing sources, and a controlled clock.
+Rails consumer and Chromium recovery-row smoke tests live under `web/test/`.
 
 ## Single-dispatcher: producers write requests, daemon dispatches
 
@@ -1164,8 +1273,12 @@ attempt, inherited output references, and a restartable recovery object with
 canonical task, stage, marker ID, expected attrs, dispatch generation,
 owner/remediation, phase, stage-scoped retry count, terminal outcome/time, bounded routing
 admission observation, and immutable source terminal-receipt identity. Its
-closed recovery union distinguishes ordinary marker recovery from markerless
-initial route exhaustion keyed by task generation and frozen policy digest.
+closed recovery union distinguishes ordinary marker recovery, markerless
+initial route exhaustion keyed by task generation and frozen policy digest,
+and failed-edit recovery with immutable source and refreshable input bindings.
+These optional JSON fields extend v5 in place; there is no new SQLite column,
+table, index, or migration. The operational-status and action schemas share the
+same optional recovery fields.
 Expected marker attrs are normalized through the policy-free `Hive::Recovery`
 compatibility boundary before JSON persistence. Live binary marker scans and
 JSON-restored UTF-8 attrs therefore compare by the same valid UTF-8 bytes, so
@@ -1283,13 +1396,15 @@ controller frees patrol capacity without applying per-task CONFIG/drop state;
 the patrol scheduler is the sole owner of scan backoff. Patrol scans also run
 outside the ordinary per-project daily task quota.
 
-Both completion paths refresh the controller's `last_dispatched_mtime`
-baseline. `reap_completed` handles ancillary `ChildSupervisor` children;
+Both completion paths reconcile the controller's `last_dispatched_mtime`
+baseline for accepted results. `reap_completed` handles ancillary `ChildSupervisor` children;
 `reconcile_attempt_deliveries` handles detached task attempts before their
-terminal records are finalized. Durable refresh adopts only a state-file mtime
-at or before the attempt's validated `ended_at`; a later operator edit remains
-newer than the baseline and eligible for dispatch. The agent's own final marker
-write therefore cannot masquerade as operator input on the next tick.
+terminal records are finalized. Failed edit completions do not consume unrelated
+operator edits, even when those edits arrived before the attempt ended. When
+stage acceptance supplies an output digest, the current bytes must still match
+it before refresh. The mtime must also be at or before validated completion;
+later edits remain new. The agent's accepted final marker write therefore cannot
+masquerade as operator input on the next tick.
 
 See [[architecture]] §"Process model" for the cross-layer picture.
 

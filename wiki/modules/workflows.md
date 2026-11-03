@@ -218,6 +218,9 @@ absolute `/usr/bin/rm -f --` emits
 go to stdout, which the driver tees into `stages.out` and captures; both stop
 the cell with exit 4, including continuation failures. Each removal's status
 governs, including dangling symlinks and entries that disappear afterward.
+The caller's marker contract documents these stdout diagnostics explicitly;
+the plan-continuation helper returns 1 on cleanup failure and its top-level
+caller maps that failure to exit 4.
 Managed-name directories fail without
 recursive deletion. Unrelated entries and external symlink targets survive;
 partial cleanup can be retried after repairing permissions. Sealed controller

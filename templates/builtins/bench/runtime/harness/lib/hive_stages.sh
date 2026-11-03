@@ -9,7 +9,10 @@
 #   HB_REVIEW=0 skips open-pr + review (plan+execute only).
 #
 # Markers on stdout (parsed by the driver): `HB_STAGE <name> rc=<n>`,
-# `HB_NOTE <x>`, `HB_DIFF <label> lines=<n> files=<n>`, `HB_DONE`.
+# `HB_NOTE <x>`, `HB_DIFF <label> lines=<n> files=<n>`, `HB_DONE`, and
+# `HB_ERROR controller_bin_setup_failed` / `legacy_agent_shim_cleanup_failed`.
+# Keep controller-bin setup and cleanup diagnostics on stdout: the driver tees
+# only stdout into /work/.hb/stages.out. Other HB_ERROR diagnostics use stderr.
 set -uo pipefail
 
 SLUG="$1"
@@ -309,7 +312,7 @@ ensure_plan_artifact() {
     return 1
   fi
 
-  cleanup_legacy_agent_shims || return 4
+  cleanup_legacy_agent_shims || return 1
   hive run "$plan_task" --json >"$hb_root/plan-run.json" 2>>"$hb_root/stage.err"
   rc=$?
   stage plan-run "$rc"

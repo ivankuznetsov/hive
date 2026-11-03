@@ -10,8 +10,9 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
 
   # Only filesystem roots are adapted. The caller's branches, PATH handling,
   # cleanup and exit propagation all execute unchanged.
-  def with_caller
-    Dir.mktmpdir("hive-bench-agent-shims", "/tmp") do |root|
+  def with_caller(temp_parent: "/tmp")
+    Dir.mktmpdir("hive-bench-agent-shims", temp_parent) do |root|
+      root = File.realpath(root)
       paths = FIXED_ROOTS.zip(%w[target runtime user ce execute-resume.sh].map { |name| File.join(root, name) }).to_h
       fixture = { root: root, work: paths.fetch("/work"), bin: File.join(paths.fetch("/work"), ".hb/bin") }
       fixture[:script] = File.join(root, "stages.sh")
@@ -65,7 +66,9 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
       # Observe gh after repeated cleanup, before review setup rewrites it.
       observer = File.join(root, "observe-cleanup.sh")
       File.write(observer, <<~'BASH')
+        [ "$0" = "${SHIM_CALLER:-}" ] || return 0
         observe_cleanup() {
+          [ -n "${CONTROLLER_BIN:-}" ] && [ "${SHIM_GH_EXPECTED+x}" = x ] || return 0
           local gh_after_cleanup
           case "$BASH_COMMAND" in
             'hive develop '*|'hive run '*|'ORIGIN='*)
@@ -79,6 +82,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
         trap observe_cleanup DEBUG
       BASH
       fixture[:env]["BASH_ENV"] = observer
+      fixture[:env]["SHIM_CALLER"] = fixture[:script]
       yield fixture
     ensure
       FileUtils.chmod(0o755, fixture[:bin]) if fixture && File.directory?(fixture[:bin]) && !File.symlink?(fixture[:bin])
@@ -190,6 +194,18 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     with_caller do |fixture|
       out, err, status = run_caller(fixture)
       assert_success(fixture, out, err, status, stages: %w[plan develop review], agents: %w[codex codex codex])
+    end
+  end
+
+  def test_fixture_canonicalizes_a_symlinked_temporary_root
+    Dir.mktmpdir("hive-bench-temp-parent", "/tmp") do |parent|
+      linked_parent = File.join(parent, "alias")
+      File.symlink(File.realpath(parent), linked_parent)
+      with_caller(temp_parent: linked_parent) do |fixture|
+        assert_equal File.realpath(fixture[:root]), fixture[:root]
+        out, err, status = run_caller(fixture)
+        assert_success(fixture, out, err, status, stages: %w[plan develop review], agents: %w[codex codex codex])
+      end
     end
   end
 
@@ -464,16 +480,41 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     end
   end
 
+  def post_removal_filesystem_probe(cleanup)
+    removal = cleanup.index("/usr/bin/rm")
+    refute_nil removal
+    cleanup[removal..].match(/(?:\[\[?|\btest\b)[^\n]*\s-[efLh](?=\s)/)
+  end
+
   def test_cleanup_has_no_post_removal_absence_reprobe
     script = File.read(File.join(RUNTIME, "hive_stages.sh"))
     cleanup = script[/^cleanup_legacy_agent_shims\(\) \{.*?^\}/m]
     refute_nil cleanup
     # Executable denial rows prove status handling. Supplement them by checking
     # that acceptance after removal does not depend on another filesystem probe.
-    removal = cleanup.index("/usr/bin/rm")
-    refute_nil removal
-    after_removal = cleanup[removal..]
-    refute_match(/(?:\[|test\b)[^\n]*(?:-[efL]|-h)[^\n]*\$CONTROLLER_BIN\/\$name/, after_removal)
+    refute post_removal_filesystem_probe(cleanup)
+  end
+
+  def test_absence_reprobe_guard_rejects_alternate_path_spellings
+    [ '[ ! -e "$CONTROLLER_BIN/$name" ]', '[[ ! -e "${CONTROLLER_BIN}/${name}" ]]',
+      'test ! -f "$path"', '[ ! -L "$path" ]', 'test ! -h "$path"' ].each do |probe|
+      regression = "path=\"${CONTROLLER_BIN}/${name}\"\nif ! /usr/bin/rm -f -- \"$path\"; then\n  #{probe} && return 0\nfi"
+      assert post_removal_filesystem_probe(regression), "missed acceptance probe: #{probe}"
+    end
+  end
+
+  def test_cleanup_observer_ignores_child_shells_and_unset_optional_variables
+    with_caller do |fixture|
+      [ [ "child.sh" ], [ "child.sh", "CONTROLLER_BIN", "SHIM_GH_EXPECTED" ],
+        [ fixture[:script], "CONTROLLER_BIN" ], [ fixture[:script], "SHIM_GH_EXPECTED" ] ].each do |caller, *unset|
+        env = fixture[:env].merge("CONTROLLER_BIN" => fixture[:bin], "SHIM_GH_EXPECTED" => "gh sentinel\n")
+        unset.each { |name| env[name] = nil }
+        out, err, status = Open3.capture3(env, "/bin/bash", "-uc", "ORIGIN=observer-safety-check", caller,
+                                        unsetenv_others: true)
+        assert status.success?, out + err
+        refute_path_exists File.join(fixture[:root], "gh-after-cleanup")
+      end
+    end
   end
 
   def test_sealed_cleanup_repeatedly_preserves_managed_entries_and_skips_validation

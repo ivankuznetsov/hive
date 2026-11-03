@@ -1394,9 +1394,12 @@ checks all copied scripts before subprocesses and before privilege-fixture
 chown/chmod. No cleanup, PATH, branch, or exit logic is replaced. Stub Hive
 stage actions create valid plan/worktree/capture artifacts and call recording
 agent executables under a 20-second caller timeout. Fixtures use `/tmp`
-explicitly so an inherited `TMPDIR` containing a fixed root cannot reintroduce
-it during adaptation. Pi uses the copied packaged launcher, preserving its
-extension and caller arguments.
+explicitly and canonicalize the resulting temporary root before adaptation,
+so a symlinked temporary directory satisfies the caller's canonical-path
+precondition. An inherited `TMPDIR` containing a fixed root cannot reintroduce
+it during adaptation; the zero-residual guard remains in place. A full-caller
+regression also runs beneath a symlinked temporary parent. Pi uses the copied
+packaged launcher, preserving its extension and caller arguments.
 
 Run the focused acceptance files with:
 
@@ -1416,8 +1419,10 @@ denial, the caller exited 4 without agent calls, and a retry in the same work
 directory succeeded after permission repair. Root runners use `setpriv` to
 drop to UID/GID 65534; unavailable privilege-drop support fails the test.
 Executable denial rows verify direct removal-status handling. A supplementary
-source assertion checks for absence probes only after removal, allowing
-equivalent shell conditionals and validation before removal. Shell syntax and
+source assertion checks for absence probes only after removal, independently
+of path-variable spelling; representative regressions cover braced variables,
+a hoisted path, and `[`, `[[`, and `test` forms. Validation before removal
+remains allowed. Shell syntax and
 ShellCheck 0.11.0 passed on the final committed script using the unchanged
 install-smoke lint invocation. Locked Ruby style checking passed for the test.
 The initial plain-Ruby combined run lacked dependencies for eight neighboring
@@ -1431,7 +1436,10 @@ removal failures emit driver-visible stdout diagnostics and stop with exit 4
 before the next agent launches. Tests reject both bin and ancestor symlinks,
 preserve external targets, and prove that a Grok failure reports its own path
 after successful Codex/Pi removals. A Bash DEBUG observer verifies gh bytes
-after repeated cleanup before its legitimate review-setup rewrite. The shared
+after repeated cleanup before its legitimate review-setup rewrite. Its
+`BASH_ENV` hook installs the observer only in the intended caller and guards
+optional controller-bin and expected-gh variables. Direct subprocess tests
+exercise inherited child shells and missing variables under `bash -u`. The shared
 helper is also executed repeatedly in sealed mode with a symlinked bin to
 prove that neither validation nor removal occurs. Each reuse iteration
 replants all managed names before invocation.

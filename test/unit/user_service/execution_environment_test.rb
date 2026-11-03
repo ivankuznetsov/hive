@@ -609,6 +609,40 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
+  def test_manager_output_written_at_process_exit_is_not_lost
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux)
+      write(definitions.fetch("daemon").target_path, "[Service]\nEnvironment=PATH=/bin\nExecStart=/fixture/hive\n")
+      helper = File.join(home, "systemctl")
+      write(helper, "#!#{RbConfig.ruby}\nif ARGV.include?('show-environment')\nputs 'CODEX_BIN=/manager/codex'\nelse\nputs 'LoadState=loaded\\nActiveState=inactive\\nMainPID=0'\nend\n")
+      File.chmod(0o755, helper)
+      original_pipe = IO.method(:pipe)
+      pipe = ->(*) do
+        input, output = original_pipe.call
+        read = input.method(:read_nonblock)
+        first = true
+        input.define_singleton_method(:read_nonblock) do |*args, **kwargs|
+          if first
+            first = false
+            :wait_readable
+          else
+            read.call(*args, **kwargs)
+          end
+        end
+        [ input, output ]
+      end
+      wait = Process.method(:wait2)
+      with_env("PATH" => home) do
+        with_replaced_singleton_method(IO, :pipe, pipe) do
+          with_replaced_singleton_method(Process, :wait2, ->(pid, *) { wait.call(pid) }) do
+            result = reader(home, definitions: definitions, status_reader: nil).call.first
+            assert_equal "/manager/codex", result.environment["CODEX_BIN"]
+          end
+        end
+      end
+    end
+  end
+
   def plist(content)
     "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>#{content}</dict></plist>"
   end

@@ -7,6 +7,18 @@ updated: 2026-10-30
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Agent CLI identity validation (2026-11-03)
+
+Installed systemd and launchd environment parsing, freshness, manager budgets
+and error branches have host-independent fixtures. This execution environment
+has no macOS manager and the live Linux user-manager integration skips without
+an explicitly provisioned session. Real manager smoke evidence is therefore
+unavailable. Filesystem version coverage is installation-layout-dependent;
+opaque shims, copied binaries and unrecognized provider layouts intentionally
+retain typed unknowns. The exhaustive `bundle exec rake coverage` merge gate
+remains CI-owned; local execution uses focused coverage and the broad parallel
+test checkpoint.
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

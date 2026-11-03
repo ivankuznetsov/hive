@@ -5,6 +5,7 @@ require "hive/reviewers/synthetic_task"
 require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/mcp"
+require "hive/model_unsupported"
 
 module Hive::AgentSupport::Codex
   # Native Codex review reviewer.
@@ -152,6 +153,7 @@ module Hive::AgentSupport::Codex
     end
 
     def run!(deadline: nil)
+      @model_unsupported_message = nil
       ensure_reviews_dir!
 
       profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
@@ -208,6 +210,7 @@ module Hive::AgentSupport::Codex
         run = run_codex_review(
           profile, prompt, spawn_timeout || configured_timeout, routing_arguments, mcp_launch
         )
+        break if @model_unsupported_message
         break if usable_review?(run)
         break if attempts >= max_attempts
 
@@ -268,6 +271,8 @@ module Hive::AgentSupport::Codex
     end
 
     def finalize(run, attempts, max_attempts)
+      return error_result(@model_unsupported_message) if @model_unsupported_message
+
       case review_status(run)
       when :findings
         @runtime.write(staged_output_path, format_body(findings_markdown(review_body(run.stdout))))
@@ -540,6 +545,13 @@ module Hive::AgentSupport::Codex
         profile: profile, log_path: @spawn_log_path, label: "review/#{name}/#{ctx.pass}"
       )
       @cli_identity = run.cli_identity
+      if Hive::ModelUnsupported.detected?(run.stdout)
+        task = Hive::Reviewers.synthetic_task_for(ctx)
+        reference = Hive::ModelUnsupported.record_diagnostic(run.stdout, agent: profile.name,
+          cli_identity: run.cli_identity, log_file: run.log_file, task: task)
+        @model_unsupported_message = Hive::ModelUnsupported.marker_message(run.stdout,
+          agent: profile.name, diagnostic_reference: reference, task: task)
+      end
       run
     end
 

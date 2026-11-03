@@ -460,8 +460,9 @@ module Hive
               reason: Hive::ModelUnsupported::REASON,
               provider: implementation_provider(impl_result, cfg),
               model: Hive::ModelUnsupported.model_name(impl_result[:error_message].to_s),
-              message: Hive::ModelUnsupported.operator_message(
-                impl_result[:error_message].to_s, agent: implementation_provider(impl_result, cfg)
+              message: Hive::ModelUnsupported.marker_message(
+                impl_result[:error_message].to_s, agent: implementation_provider(impl_result, cfg),
+                diagnostic_reference: impl_result[:diagnostic_reference], task: task
               )
             },
             commit: Hive::ModelUnsupported::REASON, status: :error,

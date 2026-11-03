@@ -1120,7 +1120,7 @@ module Hive
       end
 
       def model_unsupported_summary(error_message, phase)
-        review_phase_error_summary("#{phase}: #{Hive::ModelUnsupported.operator_message(error_message)}")
+        Hive::ModelUnsupported.marker_message(error_message)
       end
 
       def limit_failure?(limit_text:, error_message:)

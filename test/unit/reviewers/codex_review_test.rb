@@ -66,6 +66,26 @@ class ReviewersCodexReviewTest < Minitest::Test
     end
   end
 
+  def test_native_reviewer_retains_terminal_model_diagnosis_and_returns_compact_log_reference
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      reviewer = build_reviewer(dir, "max_attempts" => 3)
+      result = nil
+      _, diagnostic = capture_io { result = reviewer.run! }
+      assert_equal :error, result.status
+      assert_includes diagnostic, FAKE_BIN
+      assert_includes diagnostic, "version=0.139.0"
+      assert_includes diagnostic, "agents.codex.bin"
+      assert_includes diagnostic, "agents.codex.min_version"
+      assert_includes File.read(reviewer.spawn_log_path), diagnostic.strip
+      assert_includes result.error_message, "model unsupported"
+      assert_includes result.error_message, "hive task test --log"
+      refute_includes result.error_message, FAKE_BIN
+      refute_includes result.error_message, "after 3 attempt"
+    end
+  end
+
   def test_builds_codex_exec_review_argv_with_title_and_prompt
     with_tmp_dir do |dir|
       log = File.join(dir, "argv.log")

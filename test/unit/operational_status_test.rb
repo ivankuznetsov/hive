@@ -516,7 +516,8 @@ class OperationalStatusTest < Minitest::Test
   # never reads as scheduler-owned automatic retry work, even without a
   # current scheduler snapshot.
   def test_model_unsupported_error_needs_the_operator_not_the_scheduler
-    message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+    message = "model unsupported for codex: 'gpt-6-sol' is not available; choose supported model; " \
+              "diagnostic=attempt:original; hive task 43359 --log"
     refused = task(
       action: "recover_review", slug: "refused", stage: "6-review", marker: "review_error",
       attrs: { "phase" => "triage", "reason" => "model_unsupported", "model" => "gpt-6-sol",
@@ -531,6 +532,8 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "needs_repair", projected.fetch("state")
     assert_equal "operator", projected.fetch("blocker_owner")
     assert_equal message, projected.fetch("reason")
+    assert_includes projected.fetch("reason"), "hive task 43359 --log"
+    assert_includes projected.fetch("reason"), "attempt:original"
     assert_equal "model_unsupported", projected.dig("evidence", "marker_attrs", "reason")
   end
 

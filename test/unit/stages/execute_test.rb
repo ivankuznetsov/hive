@@ -667,8 +667,8 @@ class HiveStagesExecuteTest < Minitest::Test
         assert_equal "model_unsupported", marker.attrs["reason"]
         assert_equal "codex", marker.attrs["provider"]
         assert_equal model, marker.attrs["model"]
-        assert_equal "model unsupported for codex: '#{model}' is not available to this account; " \
-                     "#{Hive::ModelUnsupported::CONFIG_HINT}", marker.attrs["message"]
+        assert_includes marker.attrs["message"], "'#{model}' is not available"
+        assert_match(/diagnostic=task-log; hive task \d+ --log\z/, marker.attrs["message"])
         assert_nil marker.attrs["retry_after"]
         refute Hive::AgentLimit.held?(marker.name, marker.attrs)
       end

@@ -325,11 +325,11 @@ module Hive
         # complete task prompt, and even stdin profiles may carry sensitive
         # identity/config arguments. Operational metadata is enough to debug
         # which runner launched.
-        log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
+        log.puts Hive::SecretPatterns.redact("[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
                  "profile=#{Hive::SecretPatterns.redact(@profile.name.to_s)} " \
                  "executable=#{@cli_identity.launch_path} argc=#{cmd.length}" \
-                 "#{launch_identity_log_fields}#{Hive::AgentCliIdentity.log_fields(@cli_identity)}"
+                 "#{launch_identity_log_fields}#{Hive::AgentCliIdentity.log_fields(@cli_identity)}")
         write_mcp_log(log)
       end
       r, w = IO.pipe
@@ -1262,7 +1262,10 @@ module Hive
     end
 
     def handle_model_unsupported(result, text)
-      message = Hive::ModelUnsupported.error_message(text, agent: @profile.name)
+      reference = Hive::ModelUnsupported.record_diagnostic(text, agent: @profile.name,
+        cli_identity: result[:cli_identity], log_file: result[:log_file], task: @task)
+      message = Hive::ModelUnsupported.marker_message(text, agent: @profile.name,
+        diagnostic_reference: reference, task: @task)
       if effective_status_mode == :state_file_marker
         Hive::Markers.set(
           @task.state_file, :error,
@@ -1277,6 +1280,7 @@ module Hive
       result[:status] = :error
       result[:error_reason] = Hive::ModelUnsupported::REASON
       result[:error_message] = message
+      result[:diagnostic_reference] = reference
     end
 
     def recovered_provider_error?(result)

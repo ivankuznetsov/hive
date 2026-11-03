@@ -2654,8 +2654,12 @@ class AgentTest < Minitest::Test
       assert_equal "model_unsupported", result[:error_reason]
       assert_nil result[:limit_text]
       assert_nil result[:retry_at]
-      assert_equal "model unsupported for claude: 'gpt-6-sol' is not available to this account; " \
-                   "#{Hive::ModelUnsupported::CONFIG_HINT}", result[:error_message]
+      assert_match(/\Amodel unsupported for claude: 'gpt-6-sol' is not available; choose supported model; diagnostic=task-log; hive task \d+ --log\z/,
+        result[:error_message])
+      diagnostic = File.read(result.fetch(:log_file)).lines.last
+      assert_includes diagnostic, FAKE_BIN
+      assert_includes diagnostic, "version=2.1.118"
+      assert_includes diagnostic, "agents.claude.min_version"
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name
       assert_equal "model_unsupported", marker.attrs["reason"]
@@ -2679,6 +2683,39 @@ class AgentTest < Minitest::Test
       assert_equal "model_unsupported", result[:error_reason]
       assert_match(/'gpt-6\.1-sol'/, result[:error_message])
       assert_equal "gpt-6.1-sol", Hive::Markers.current(task.state_file).attrs["model"]
+    end
+  end
+
+  def test_unsupported_model_diagnostic_redacts_profile_path_and_probe_stderr_secrets
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      token = "ghp_#{'A' * 36}"
+      executable = File.join(dir, token, "agent")
+      FileUtils.mkdir_p(File.dirname(executable))
+      File.write(executable, <<~SH)
+        #!/bin/sh
+        if [ "$1" = --version ]; then echo 'API_KEY=abcdefghijklmnopqrstuvwx' >&2; exit 1; fi
+        echo "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account."
+        exit 1
+      SH
+      File.chmod(0o755, executable)
+      profile = Hive::AgentProfile.new(name: token.to_sym, bin_default: executable,
+        headless_flag: "-p", version_flag: "--version", skill_syntax_format: "/%{skill}",
+        status_detection_mode: :state_file_marker)
+      result = nil
+      _, diagnostic = capture_io do
+        result = Hive::Agent.new(task: task, prompt: "private", max_budget_usd: nil,
+          timeout_sec: 5, profile: profile).run!
+      end
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_equal "model_unsupported", marker.attrs.fetch("reason")
+      assert_includes diagnostic, "version=unknown"
+      assert_includes diagnostic, "[REDACTED:github_token]"
+      [diagnostic, File.read(result.fetch(:log_file)), marker.raw, result[:error_message]].each do |sink|
+        refute_includes sink, token
+        refute_includes sink, "abcdefghijklmnopqrstuvwx"
+      end
     end
   end
 

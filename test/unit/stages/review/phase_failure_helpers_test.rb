@@ -53,7 +53,8 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
       assert_equal "model_unsupported", marker.attrs["reason"]
       assert_equal "fix", marker.attrs["phase"]
       assert_equal "gpt-6.1-sol", marker.attrs["model"]
-      assert_equal "fix: #{formatted}", marker.attrs["message"]
+      assert_equal "model unsupported: 'gpt-6.1-sol' is not available; choose supported model; " \
+                   "diagnostic=task-log; hive task TARGET --log", marker.attrs["message"]
       assert_nil marker.attrs["retry_after"]
     end
   end

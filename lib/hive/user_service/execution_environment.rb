@@ -577,13 +577,9 @@ module Hive
         output = +""
         deadline = @monotonic.call + timeout - CLEANUP_SECONDS
         loop do
-          16.times do
-            chunk = reader.read_nonblock(4096, exception: false)
-            break if chunk.nil? || chunk == :wait_readable
-            return { ok: false, failure: :manager_output_limit } if output.bytesize + chunk.bytesize > MAX_CAPTURE_BYTES
-            output << chunk
-          end
+          return { ok: false, failure: :manager_output_limit } unless drain_manager(reader, output)
           if (waited = Process.wait2(pid, Process::WNOHANG))
+            return { ok: false, failure: :manager_output_limit } unless drain_manager(reader, output)
             return { ok: waited.last.success?, output: output }
           end
           return { ok: false, failure: :manager_timeout } if @monotonic.call >= deadline
@@ -604,6 +600,16 @@ module Hive
             nil
           end
         end
+      end
+
+      def drain_manager(reader, output)
+        (MAX_CAPTURE_BYTES / 4096 + 1).times do
+          chunk = reader.read_nonblock(4096, exception: false)
+          break if chunk.nil? || chunk == :wait_readable
+          return false if output.bytesize + chunk.bytesize > MAX_CAPTURE_BYTES
+          output << chunk
+        end
+        true
       end
 
       def reason(state, code, path: nil, line: nil)

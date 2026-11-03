@@ -162,7 +162,8 @@ module Hive
             reason: Hive::ModelUnsupported::REASON,
             provider: profile&.name&.to_s,
             model: Hive::ModelUnsupported.model_name(text),
-            message: Hive::ModelUnsupported.operator_message(text, agent: profile&.name)
+            message: Hive::ModelUnsupported.marker_message(text, agent: profile&.name,
+              diagnostic_reference: spawn_result[:diagnostic_reference], task: task)
           }.compact
         )
         { commit: Hive::ModelUnsupported::REASON, status: :error }

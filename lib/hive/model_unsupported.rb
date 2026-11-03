@@ -1,4 +1,7 @@
 require "hive/agent_limit"
+require "hive/secret_patterns"
+require "hive/attempts/context"
+require "shellwords"
 
 module Hive
   # A provider refused the configured model outright (for example Codex on a
@@ -54,29 +57,111 @@ module Hive
       match && match[1]
     end
 
-    # Single-line, operator-facing message that names the model and the fix.
-    # Kept short enough to survive the 200-byte marker-message caps used by
-    # several stage boundaries.
-    def error_message(text, agent: nil)
+    # Full local diagnosis; markers use marker_message's compact log pointer.
+    def error_message(text, agent: nil, cli_identity: nil, diagnostic_reference: nil, task: nil)
       prefix = "model unsupported"
       prefix = "#{prefix} for #{agent}" if agent && !agent.to_s.empty?
       model = model_name(text)
       subject = model ? "'#{model}' is not available to this account" : "the configured model is not available to this account"
-      "#{prefix}: #{subject}; #{CONFIG_HINT}"
+      message = "#{prefix}: #{subject}; #{CONFIG_HINT}"
+      if cli_identity
+        name = agent || cli_identity.profile
+        version = cli_identity.version || "unknown (#{cli_identity.version_reason || 'identity_unavailable'})"
+        message += "; CLI launch_path=#{cli_identity.launch_path || 'unavailable'}" \
+                   "; effective_target=#{cli_identity.effective_target || 'unknown'}" \
+                   "; version=#{version}; evidence=#{cli_identity.version_source || 'unknown'}" \
+                   "; regime=#{cli_identity.regime}; authority=#{cli_identity.authority}" \
+                   "; a stale CLI may reject this model; verify agents.#{name}.bin and agents.#{name}.min_version"
+      end
+      diagnostic_reference ||= self.diagnostic_reference(text)
+      if diagnostic_reference
+        message += "; diagnostic=#{diagnostic_reference}; retrieve with #{log_command(text, task: task)}"
+      end
+      Hive::SecretPatterns.redact(message)
     end
 
     # Hive's own formatted line when the text already carries one (it names
     # the agent, the model and the fix); otherwise format the raw provider
     # text so every surface shows both the model and the remedy.
-    def operator_message(text, agent: nil)
-      lines(text).find { |line| line.match?(OWN_MESSAGE_RE) } ||
-        error_message(text, agent: agent)
+    def operator_message(text, agent: nil, cli_identity: nil, diagnostic_reference: nil)
+      formatted = lines(text).find { |line| line.match?(OWN_MESSAGE_RE) }
+      if cli_identity || diagnostic_reference
+        error_message(text, agent: agent || formatted&.match(/\Amodel unsupported for ([a-z0-9_-]+):/i)&.[](1),
+          cli_identity: cli_identity, diagnostic_reference: diagnostic_reference)
+      else
+        Hive::SecretPatterns.redact(formatted || error_message(text, agent: agent))
+      end
+    end
+
+    # Only the private attempt stream and per-run log receive the full identity.
+    # Worker stderr is drained into the supervisor's integrity-bearing StreamLog
+    # before its terminal receipt is sealed, so this final line survives the tail.
+    def record_diagnostic(text, agent:, cli_identity:, log_file: nil, task: nil)
+      reference = current_reference
+      message = error_message(text, agent: agent, cli_identity: cli_identity,
+        diagnostic_reference: reference, task: task)
+      unless cli_identity
+        message += "; CLI identity/version unavailable; verify agents.#{agent}.bin and agents.#{agent}.min_version; a stale CLI may reject this model"
+      end
+      message = Hive::SecretPatterns.redact(message)
+      warn message
+      if log_file
+        flags = File::WRONLY | File::APPEND | File::NOFOLLOW
+        File.open(log_file, flags) { |log| log.puts(message) }
+      end
+      reference
+    rescue SystemCallError, IOError
+      reference
+    end
+
+    def current_reference
+      attempt_id = Hive::Attempts::Context.current&.attempt_id
+      attempt_id ? "attempt:#{attempt_id}" : "task-log"
+    end
+
+    def diagnostic_reference(text)
+      text.to_s[/\bdiagnostic=(attempt:[a-zA-Z0-9_-]+|task-log)\b/, 1]
+    end
+
+    def log_command(text = nil, task: nil)
+      existing = text.to_s[/\bhive task (?:[a-zA-Z0-9_-]+) --log\b/]
+      return existing if existing
+
+      id = task.id if task.respond_to?(:id)
+      target = if id.to_s.match?(/\A[0-9]+\z/)
+        id.to_s
+      else
+        task.respond_to?(:slug) ? task.slug : Hive::Attempts::Context.current&.task_slug
+      end
+      target = "TARGET" unless target.to_s.match?(/\A[a-zA-Z0-9_-]{1,64}\z/)
+      "hive task #{Shellwords.escape(target)} --log"
+    end
+
+    # A marker is a bounded pointer to the private diagnosis, never a truncated
+    # path. Keep the recognizer prefix even when provider/model names are long.
+    def marker_message(text, agent: nil, diagnostic_reference: nil, task: nil)
+      reference = diagnostic_reference || self.diagnostic_reference(text) || current_reference
+      reference = "task-log" unless reference.match?(/\A(?:attempt:[a-zA-Z0-9_-]{1,64}|task-log)\z/)
+      model = model_name(text)
+      prefix = "model unsupported"
+      prefix += " for #{agent}" if agent.to_s.match?(/\A[a-zA-Z0-9_-]{1,16}\z/)
+      subject = model && model.bytesize <= 40 ? "'#{model}' is not available" : "configured model unavailable"
+      suffix = "; choose supported model; diagnostic=#{reference}; #{log_command(text, task: task)}"
+      message = "#{prefix}: #{subject}#{suffix}"
+      message = "model unsupported: configured model unavailable#{suffix}" if message.bytesize > 198
+      message = "model unsupported: diagnostic=#{reference}; #{log_command(text, task: task)}; set supported model" if message.bytesize > 198
+      Hive::SecretPatterns.redact(message)
     end
 
     # Remediation shown on recovery receipts and the operational status row.
     def remediation(attrs = {})
       message = attrs.respond_to?(:[]) ? (attrs["message"] || attrs[:message]).to_s : ""
-      return message unless message.strip.empty?
+      unless message.strip.empty?
+        if marker?(attrs) && !diagnostic_reference(message)
+          message += "; CLI identity/version unavailable; see #{log_command(task: nil)}"
+        end
+        return Hive::SecretPatterns.redact(message)
+      end
 
       "the provider rejected the configured model; #{CONFIG_HINT}"
     end

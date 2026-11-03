@@ -435,7 +435,8 @@ class HiveStagesOpenPrTest < Minitest::Test
           assert_equal "model_unsupported", attrs.fetch("reason")
           assert_equal "gpt-6-sol", attrs.fetch("model")
           assert_nil attrs["retry_after"]
-          assert_includes attrs.fetch("message"), ".hive-state/config.yml"
+          assert_includes attrs.fetch("message"), "choose supported model"
+          assert_match(/hive task \d+ --log/, attrs.fetch("message"))
         end
 
         typed = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
@@ -448,7 +449,8 @@ class HiveStagesOpenPrTest < Minitest::Test
             task, cfg, pointer, nil, profile, {}
           )
           assert_equal({ commit: "model_unsupported", status: :error }, result)
-          assert_equal typed, Hive::Markers.current(task.state_file).attrs.fetch("message")
+          assert_includes Hive::Markers.current(task.state_file).attrs.fetch("message"), "'gpt-6.1-sol'"
+          assert_match(/hive task \d+ --log/, Hive::Markers.current(task.state_file).attrs.fetch("message"))
         end
       end
     end

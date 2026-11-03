@@ -2,6 +2,7 @@ require "securerandom"
 require "tempfile"
 require "hive/attempts/context"
 require "hive/recovery"
+require "hive/model_unsupported"
 
 module Hive
   module Markers
@@ -332,8 +333,28 @@ module Hive
     end
 
     def build_marker(name, attrs)
+      if Hive::ModelUnsupported.marker?(attrs)
+        attrs = attrs.to_h.transform_values { |value| value.nil? ? nil : Hive::SecretPatterns.redact(value.to_s) }
+        key = attrs.key?("message") ? "message" : :message
+        attrs[key] = Hive::ModelUnsupported.marker_message(attrs[key],
+          agent: attrs["provider"] || attrs[:provider])
+        attrs[key] = bounded_message(attrs[key], max: 200)
+      end
       pairs = attrs.compact.map { |k, v| "#{k}=#{format_attr(v)}" }
       pairs.empty? ? "<!-- #{name} -->" : "<!-- #{name} #{pairs.join(' ')} -->"
+    end
+
+    def bounded_message(value, max: 200, ellipsis: "…")
+      text = Hive::SecretPatterns.redact(value.to_s)
+      return text if format_attr(text).bytesize <= max
+
+      output = +""
+      text.each_char do |character|
+        break if format_attr("#{output}#{character}#{ellipsis}").bytesize > max
+
+        output << character
+      end
+      "#{output}#{ellipsis}"
     end
 
     def parse_attrs(raw_attrs)
@@ -354,7 +375,7 @@ module Hive
     # being mistaken for a marker boundary by MARKER_RE. The mapping is
     # lossy/one-way; readers may see `< !--` in state files and that is intentional.
     def format_attr(value)
-      str = value.to_s.gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
+      str = Hive::SecretPatterns.redact(value.to_s).gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
       str =~ /\s/ ? "\"#{str}\"" : str
     end
 

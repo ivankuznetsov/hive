@@ -53,7 +53,12 @@ module Hive
           Signal.trap("TERM", prev_term) if prev_term
         end
       rescue StandardError
-        write_report(status: "crashed", total: @total || @results.size)
+        begin
+          write_report(status: "crashed", total: @total || @results.size)
+        rescue StandardError
+          # Reporting must not replace the original run failure.
+          nil
+        end
         raise
       end
 

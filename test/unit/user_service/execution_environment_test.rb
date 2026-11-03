@@ -593,6 +593,22 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
+  def test_manager_output_limit_marks_reconstruction_incomplete
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux)
+      write(definitions.fetch("daemon").target_path, "[Service]\nEnvironment=PATH=/bin\nExecStart=/fixture/hive\n")
+      helper = File.join(home, "systemctl")
+      write(helper, "#!#{RbConfig.ruby}\nSTDOUT.sync = true\nloop { STDOUT.write('x' * 4096) }\n")
+      File.chmod(0o755, helper)
+      with_env("PATH" => home) do
+        result = reader(home, definitions: definitions, status_reader: nil,
+          monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) * 5 }).call.first
+        assert_includes codes(result), :manager_output_limit
+        refute result.probe_allowed?
+      end
+    end
+  end
+
   def plist(content)
     "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>#{content}</dict></plist>"
   end

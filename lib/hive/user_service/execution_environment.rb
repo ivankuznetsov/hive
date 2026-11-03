@@ -577,10 +577,11 @@ module Hive
         output = +""
         deadline = @monotonic.call + timeout - CLEANUP_SECONDS
         loop do
-          loop do
+          16.times do
             chunk = reader.read_nonblock(4096, exception: false)
             break if chunk.nil? || chunk == :wait_readable
-            output << chunk.byteslice(0, [ MAX_CAPTURE_BYTES - output.bytesize, 0 ].max)
+            return { ok: false, failure: :manager_output_limit } if output.bytesize + chunk.bytesize > MAX_CAPTURE_BYTES
+            output << chunk
           end
           if (waited = Process.wait2(pid, Process::WNOHANG))
             return { ok: waited.last.success?, output: output }

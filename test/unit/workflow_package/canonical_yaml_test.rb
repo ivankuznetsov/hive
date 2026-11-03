@@ -1,7 +1,21 @@
 require "test_helper"
 require "hive/workflow_package/canonical_yaml"
+require_relative "../../support/canonical_manifest_helpers"
 
 class WorkflowPackageCanonicalYAMLTest < Minitest::Test
+  include CanonicalManifestHelpers
+
+  def test_established_canonical_fixtures_reemit_exact_bytes
+    %w[canonical canonical_with_recommendations].each do |name|
+      bytes = manifest_fixture(name)
+      document = YAML.safe_load(bytes)
+      assert_equal bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document)
+      assert_equal document.fetch("release_sha256"), Digest::SHA256.hexdigest(
+        Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document, include_release: false)
+      )
+    end
+  end
+
   def test_encodes_empty_nested_and_scalar_values_deterministically
     serializer = Hive::WorkflowPackage::CanonicalYAML
 

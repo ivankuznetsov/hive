@@ -10,6 +10,10 @@ class ModulePackageManifestTest < Minitest::Test
     with_module_package do |root, document|
       manifest = Hive::ModulePackage::Manifest.load(File.join(root, "module.yml"))
 
+      fixture = File.binread(File.expand_path("../../fixtures/workflow_package/canonical_module_manifest_v1.yml", __dir__))
+      assert_equal fixture, manifest.bytes
+      assert_equal "9103a7c29216814c2f234c0dfe78c54d4613636f1746e21cf940a70f826f3b8f", manifest.digest
+      assert_equal "e7720f660b5db099d42e1e7a5e5fee9e639735cde98c1eb1a7de040de9bd2670", Digest::SHA256.hexdigest(manifest.bytes)
       assert_equal "patrol", manifest.name
       assert_equal "1.0.0", manifest.version
       assert_equal %w[scheduled-scan setup task-completed], manifest.hooks.map { |hook| hook.fetch("id") }

@@ -2,9 +2,31 @@ require "test_helper"
 require "json"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/validator"
+require_relative "../../support/canonical_manifest_helpers"
 
 class WorkflowPackageValidatorTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_owned_extension_semantics_are_validated_after_lossless_byte_admission
+    with_tmp_dir do |root|
+      destination = File.join(root, "package")
+      build = canonical_builder(destination)
+      document = Marshal.load(Marshal.dump(build.manifest.data))
+      document["x-hive"]["author"] = { "custom" => "must-survive" }
+      yaml = Hive::WorkflowPackage::CanonicalYAML
+      document["release_sha256"] = Digest::SHA256.hexdigest(yaml.dump_manifest(document, include_release: false))
+      bytes = yaml.dump_manifest(document)
+      File.binwrite(File.join(destination, "manifest.yml"), bytes)
+      admitted = Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes)
+      assert_equal document, admitted.data
+      assert_equal({ "custom" => "must-survive" }, admitted.data.dig("x-hive", "author"))
+
+      result = Hive::WorkflowPackage::Validator.validate(destination)
+      assert_includes result.errors.map(&:rule_id), "x-hive.invalid_shape"
+    end
+  end
+
 
   def test_validates_manifest_inventory_digest_and_package_descriptor_name
     with_package do |root|

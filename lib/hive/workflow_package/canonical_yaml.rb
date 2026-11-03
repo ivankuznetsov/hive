@@ -9,16 +9,32 @@ module Hive
       ].freeze
       EXTENSION_PATTERN = /\Ax-[a-z0-9][a-z0-9-]*\z/
 
+      MANIFEST_ORDERS = {
+        [] => MANIFEST_KEYS,
+        [ "author" ] => %w[name url],
+        [ "source" ] => %w[url revision],
+        [ "permissions" ] => %w[risk capabilities network_hosts filesystem_read filesystem_write secrets],
+        [ "files" ] => [],
+        [ "x-hive" ] => %w[tools prompt_assets optional_inputs external_skills mapping_recommendations],
+        [ "x-hive", "tools", :item ] => %w[path],
+        [ "x-hive", "prompt_assets", :item ] => %w[path],
+        [ "x-hive", "optional_inputs", :item ] => %w[name authorized_slots],
+        [ "x-hive", "mapping_recommendations", :item ] => %w[slot effort]
+      }.freeze
+      private_constant :MANIFEST_ORDERS
+
       module_function
 
       def dump_manifest(manifest, include_release: true)
-        ordered = {}
-        MANIFEST_KEYS.each do |key|
-          next if key == "release_sha256" && !include_release
-          ordered[key] = ordered_value(key, manifest[key]) if manifest.key?(key)
-        end
-        manifest.keys.grep(EXTENSION_PATTERN).sort.each { |key| ordered[key] = manifest[key] }
-        dump(ordered)
+        dump(normalize_manifest(manifest, [], include_release: include_release))
+      end
+
+      # Reader-only compatibility: pair an exact historical byte match with its
+      # unsigned digest input. Producers always use dump_manifest.
+      def legacy_v1_release_input(manifest, bytes)
+        return unless bytes == legacy_v1_dump(manifest)
+
+        legacy_v1_dump(manifest, include_release: false)
       end
 
       def dump(value)
@@ -28,20 +44,52 @@ module Hive
         output.encode(Encoding::UTF_8)
       end
 
-      def ordered_value(key, value)
+      def normalize_manifest(value, path, include_release:)
+        case value
+        when Hash
+          unless value.keys.all? { |key| key.is_a?(String) }
+            raise ArgumentError, "canonical YAML keys must be strings"
+          end
+          known = MANIFEST_ORDERS.fetch(path, [])
+          keys = (known & value.keys) + (value.keys - known).sort
+          keys.each_with_object({}) do |key, result|
+            next if path.empty? && key == "release_sha256" && !include_release
+
+            result[key] = normalize_manifest(value[key], path + [ key ], include_release: include_release)
+          end
+        when Array
+          value.map { |child| normalize_manifest(child, path + [ :item ], include_release: include_release) }
+        else value
+        end
+      end
+      private_class_method :normalize_manifest
+
+      def legacy_v1_dump(manifest, include_release: true)
+        ordered = {}
+        MANIFEST_KEYS.each do |key|
+          next if key == "release_sha256" && !include_release
+
+          ordered[key] = legacy_v1_value(key, manifest[key]) if manifest.key?(key)
+        end
+        manifest.keys.grep(EXTENSION_PATTERN).sort.each { |key| ordered[key] = manifest[key] }
+        dump(ordered)
+      end
+      private_class_method :legacy_v1_dump
+
+      def legacy_v1_value(key, value)
         return value unless value.is_a?(Hash)
 
         order = case key
         when "author" then %w[name url]
         when "source" then %w[url revision]
         when "permissions" then %w[risk capabilities network_hosts filesystem_read filesystem_write secrets]
-        when "files" then value.keys.sort
         else value.keys.sort
         end
         order.each_with_object({}) do |child_key, result|
           result[child_key] = value[child_key] if value.key?(child_key)
         end
       end
+      private_class_method :legacy_v1_value
 
       def emit(value, output, indent)
         case value

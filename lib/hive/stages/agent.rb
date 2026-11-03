@@ -83,6 +83,16 @@ module Hive
           elsif !marker_unchanged
             # The agent wrote another specific terminal marker (for example a
             # timeout or exit-code error); its recovery metadata wins.
+          elsif result[:error_reason].to_s == Hive::ModelUnsupported::REASON ||
+                Hive::ModelUnsupported.detected?(result[:error_message])
+            Hive::Markers.set(
+              output_path, :error,
+              reason: Hive::ModelUnsupported::REASON,
+              provider: profile.name,
+              model: Hive::ModelUnsupported.model_name(result[:error_message]),
+              message: Hive::ModelUnsupported.marker_message(result[:error_message],
+                agent: profile.name, diagnostic_reference: result[:diagnostic_reference], task: task)
+            )
           elsif limit_error_envelope?(result)
             Hive::Markers.set(
               output_path, :error,

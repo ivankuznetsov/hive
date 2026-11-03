@@ -1662,7 +1662,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  dispatcher.send(:retry_pending_item, unsafe, now: T0).values_at("bucket", "reason")
     refused = row(slug: "refused",
                   marker_attrs: { "reason" => "model_unsupported", "message" => "set a supported model" })
-    assert_equal [ :model_unsupported, "operator", "set a supported model" ],
+    assert_equal [ :model_unsupported, "operator",
+                   "set a supported model; CLI identity/version unavailable; see hive task TARGET --log" ],
                  dispatcher.send(:retry_disposition, refused, assessment)
   end
 

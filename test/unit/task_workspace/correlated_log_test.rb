@@ -11,10 +11,10 @@ require "hive/task_workspace/publication"
 class TaskWorkspaceCorrelatedLogTest < Minitest::Test
   include HiveTestHelper
 
-  def test_failed_spawns_preserve_original_identity_in_sealed_task_log_after_long_output
+  def test_concurrent_failed_spawns_preserve_original_identity_in_sealed_task_logs_after_long_output
     with_tmp_dir do |root|
       paths = []
-      %w[0.153.4 unknown].each_with_index do |version, index|
+      runs = %w[0.153.4 unknown].each_with_index.map do |version, index|
         attempt_id = "11111111-1111-1111-1111-11111111111#{index}"
         folder = File.join(root, ".hive-state/stages/4-execute", "diagnostic-#{index}")
         FileUtils.mkdir_p(folder)
@@ -51,11 +51,20 @@ class TaskWorkspaceCorrelatedLogTest < Minitest::Test
           "-I#{File.expand_path('../../../lib', __dir__)}", "-e", script,
           folder, attempt_id, result_path, err: write_pipe, out: File::NULL)
         write_pipe.close
-        while (chunk = read_pipe.read(16_384))
-          writer.append("stderr", chunk)
+        drainer = Thread.new do
+          while (chunk = read_pipe.read(16_384))
+            writer.append("stderr", chunk)
+          end
+          read_pipe.close
+          Process.wait2(child).last
         end
-        read_pipe.close
-        _, status = Process.wait2(child)
+        { version: version, task: task, executable: executable, frames_path: frames_path,
+          writer: writer, read_pipe: read_pipe, drainer: drainer, result_path: result_path,
+          attempt_id: attempt_id }
+      end
+      runs.each_with_index do |run, index|
+        run => { version:, task:, executable:, frames_path:, writer:, result_path:, attempt_id: }
+        status = run.fetch(:drainer).value
         assert_predicate status, :success?, Hive::Attempts::StreamLog.read(writer.path).last(3).map(&:bytes).join
         writer.close
         result = JSON.parse(File.read(result_path))
@@ -92,10 +101,12 @@ class TaskWorkspaceCorrelatedLogTest < Minitest::Test
         published = publication.send(:scrub_paths, output)
         refute_includes published, root
         assert_includes published, "[REDACTED:path]"
-      ensure
-        writer&.close unless writer&.closed?
-        read_pipe&.close unless read_pipe&.closed?
-        write_pipe&.close unless write_pipe&.closed?
+      end
+    ensure
+      runs&.each do |run|
+        run.fetch(:drainer).join
+        run.fetch(:writer).close unless run.fetch(:writer).closed?
+        run.fetch(:read_pipe).close unless run.fetch(:read_pipe).closed?
       end
     end
   end

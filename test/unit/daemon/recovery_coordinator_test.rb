@@ -291,7 +291,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   def test_model_unsupported_is_never_auto_admitted_but_operator_retry_is
     attrs = {
       "reason" => "model_unsupported", "marker_id" => "marker-1", "model" => "gpt-6-sol",
-      "message" => "model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+      "message" => "model unsupported: 'gpt-6-sol' is not available; choose supported model; " \
+                   "diagnostic=attempt:original; hive task 43359 --log"
     }
     with_fixture(marker_attrs: attrs, mtime: NOW - (30 * 24 * 3600)) do |coordinator, row, state_home|
       assessment = coordinator.assessment(row, now: NOW)
@@ -305,6 +306,8 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal "model_unsupported", receipt.reason
       assert_equal "model_unsupported", receipt.failure_origin
       assert_equal attrs.fetch("message"), receipt.remediation
+      assert_includes receipt.remediation, "diagnostic=attempt:original"
+      assert_includes receipt.remediation, "hive task 43359 --log"
       assert_empty Q.pending(state_home:)
 
       operator = coordinator.request(row:, requestor: "cli", request_id: "manual-fix", now: NOW)

@@ -398,8 +398,8 @@ class BabysitterPrFixerTest < Minitest::Test
       FileUtils.mkdir_p(worktree_path)
       labels = []
       comments = []
-      message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; " \
-                "#{Hive::ModelUnsupported::CONFIG_HINT}"
+      message = "model unsupported for codex: 'gpt-6-sol' is not available; choose supported model; " \
+                "diagnostic=attempt:original; hive task 43359 --log"
       refused = lambda do |*_args, **_kwargs|
         { status: :error, error_reason: "model_unsupported", error_message: message,
           final_message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
@@ -425,6 +425,8 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_equal 1, labels.size
       assert_includes comments.fetch(0), "Outcome: model_unsupported"
       assert_includes comments.fetch(0), "Error: #{message}"
+      assert_includes comments.fetch(0), "diagnostic=attempt:original"
+      assert_includes comments.fetch(0), "hive task 43359 --log"
       refute File.exist?(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")),
              "a refused model must not record a provider limit hold"
       events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }

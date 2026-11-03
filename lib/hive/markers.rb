@@ -375,7 +375,7 @@ module Hive
     # being mistaken for a marker boundary by MARKER_RE. The mapping is
     # lossy/one-way; readers may see `< !--` in state files and that is intentional.
     def format_attr(value)
-      str = Hive::SecretPatterns.redact(value.to_s).gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
+      str = value.to_s.gsub('"', "'").gsub("<!--", "< !--").gsub("-->", "-- >")
       str =~ /\s/ ? "\"#{str}\"" : str
     end
 

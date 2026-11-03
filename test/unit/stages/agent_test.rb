@@ -1393,6 +1393,27 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_preserves_unsupported_model_reference_after_a_long_forwarded_diagnosis
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      text = "model unsupported for claude: 'gpt-6-sol' is not available; " \
+        "CLI path=/#{'long 空間/' * 50}claude; diagnostic=attempt:original; hive task 43359 --log"
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        { status: :error, error_reason: "model_unsupported", error_message: text }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "model_unsupported", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "diagnostic=attempt:original"
+        assert_includes marker.attrs.fetch("message"), "hive task 43359 --log"
+        assert_includes marker.attrs.fetch("message"), "supported model"
+        assert_operator Hive::Markers.format_attr(marker.attrs.fetch("message")).bytesize, :<=, 200
+        refute marker.attrs.key?("retry_after")
+      end
+    end
+  end
+
   def test_run_does_not_overwrite_quota_marker_written_by_agent
     with_tmp_dir do |project|
       task = task_for(project, "plan")

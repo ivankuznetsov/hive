@@ -109,6 +109,21 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_build_result_forwards_unsupported_model_reference_without_private_identity_paths
+    with_tmp_dir do |dir|
+      reviewer = Hive::Reviewers::Agent.new(make_spec, make_ctx(dir))
+      text = "model unsupported for codex: 'gpt-6-sol' is not available; CLI path=/#{'private/' * 50}codex"
+      result = reviewer.send(:build_result, { status: :error, error_message: text,
+        diagnostic_reference: "attempt:original" }, 1, 2)
+      assert_includes result.error_message, "diagnostic=attempt:original"
+      assert_includes result.error_message, "hive task"
+      assert_includes result.error_message, "--log"
+      refute_includes result.error_message, "/private/"
+      assert Hive::ModelUnsupported.detected?(result.error_message)
+      assert_nil result.limit_text
+    end
+  end
+
   def test_explicit_route_formats_prompt_with_admitted_adapter_profile
     with_tmp_dir do |dir|
       ctx = make_ctx(dir)

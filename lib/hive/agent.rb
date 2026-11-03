@@ -1539,8 +1539,8 @@ module Hive
     # MCP isolation state and notices; names and reasons only, never values.
     def write_mcp_log(log)
       launch = mcp_launch
-      log.puts "[hive] mcp isolation=#{launch ? launch.isolation : 'managed'}"
-      Array(launch&.notices).each { |notice| log.puts "[hive] mcp notice: #{notice}" }
+      log.puts Hive::SecretPatterns.redact("[hive] mcp isolation=#{launch ? launch.isolation : 'managed'}")
+      Array(launch&.notices).each { |notice| log.puts Hive::SecretPatterns.redact("[hive] mcp notice: #{notice}") }
     end
 
     def launch_identity_log_fields
@@ -1549,9 +1549,9 @@ module Hive
       model = Hive::SecretPatterns.redact(@launch_arguments.model)
       requested_effort = @launch_arguments.requested_effort || "none"
       effective_effort = @launch_arguments.effective_effort || "provider-default"
-      " model=#{model} requested_effort=#{requested_effort} " \
+      Hive::SecretPatterns.redact(" model=#{model} requested_effort=#{requested_effort} " \
         "effective_effort=#{effective_effort} model_pinned=#{@launch_arguments.model_pinned} " \
-        "effort_supported=#{@launch_arguments.effort_supported}"
+        "effort_supported=#{@launch_arguments.effort_supported}")
     end
   end
 end

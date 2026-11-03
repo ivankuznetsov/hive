@@ -224,6 +224,11 @@ module Hive
         else
           base_msg = spawn_result[:error_message] ||
                      "agent exited with status=#{spawn_result[:status]}"
+          if Hive::ModelUnsupported.detected?(base_msg)
+            base_msg = Hive::ModelUnsupported.marker_message(base_msg,
+              diagnostic_reference: spawn_result[:diagnostic_reference],
+              task: Hive::Reviewers.synthetic_task_for(ctx))
+          end
           # With max_attempts=1 retry is disabled by config; an
           # "after 1 attempt(s)" suffix would be redundant and slightly
           # misleading (it implies a retry policy that's been turned

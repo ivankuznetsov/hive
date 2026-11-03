@@ -7,6 +7,33 @@ updated: 2026-10-30
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Canonical hive-bench Pi self-resolution follow-up (2026-11-03)
+
+The planning inspection of canonical hive-bench `main` at
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326` (2026-11-01) found an unresolved
+Pi self-resolution defect in `harness/lib/hive_stages.sh:132`: after placing
+the reused `/work/.hb/bin` first on PATH, `PI_REAL="$(command -v pi)"` can
+discover the existing wrapper that the script then overwrites. Hive's packaged
+script has no such discovery; its explicit `HIVE_PI_BIN` launcher owns the
+transport extension. Hive's persisted-entry cleanup is independently
+deliverable and does not resolve this canonical defect.
+
+The separate repair belongs to hive-bench. It must avoid discovering its own
+wrapper, preserve extension injection and caller argv, and fail when the real
+Pi executable is unavailable. Future proof should run the full caller twice
+against one temporary work directory, with the managed bin first on inherited
+PATH, a legacy Pi wrapper, and a sentinel real Pi elsewhere. Require bounded
+termination, exactly one sentinel call per run, preserved extension/caller
+arguments, and missing-real-Pi failure. Inspect `harness/lib/hive_stages.sh`
+and `test/hive_stages_test.rb`; a launcher-based repair may also need
+`harness/lib/{pi_bench_launcher.sh,hive_driver.rb}` and
+`test/pi_bench_launcher_test.rb`. Select the runner from canonical `AGENTS.md`
+and `Rakefile`; extracted shell blocks alone are insufficient proof.
+
+No canonical task identifier, fix, tested commit, or passing external result is
+known from this execution. None is a completion condition for Hive's cleanup.
+The inspected revision is evidence from planning, not a new external test run.
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

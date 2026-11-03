@@ -1878,3 +1878,7 @@ that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
   a real held-lock claim test. Crash/restart pending-operation persistence,
   end-to-end transient attribution and the combined daemon/four-supervisor
   workload still require their planned recovery and qualification evidence.
+
+- The November 3 runtime CI repair is locally reproduced and checked against
+  the failed test files and both dependency audits. Hosted checks for the new
+  commit remain pending; this does not close the workload qualification gaps.

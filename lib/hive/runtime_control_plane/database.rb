@@ -260,7 +260,9 @@ module Hive
           phase = :sql
           ProcessGuard.checkout(transaction: true) do
             sqlite_timeout = deadline ? remaining_timeout(deadline) : fence_timeout
-            if deadline && sqlite_timeout < 0.001
+            # Explicit zero permits a nonblocking lifecycle rollback after its
+            # deadline; an exhausted positive budget must never start SQL.
+            if deadline && fence_timeout.positive? && sqlite_timeout < 0.001
               raise FileFence::Busy, "runtime write budget expired before SQL acquisition"
             end
             ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?

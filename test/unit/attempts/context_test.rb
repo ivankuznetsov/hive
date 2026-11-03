@@ -106,8 +106,8 @@ class AttemptsContextTest < Minitest::Test
       command_contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
       real_database = store.database
       database = Object.new
-      database.define_singleton_method(:read) do |&block|
-        real_database.read do |real_connection|
+      database.define_singleton_method(:read) do |**options, &block|
+        real_database.read(**options) do |real_connection|
           connection = Object.new
           connection.define_singleton_method(:table_exists?) do |name|
             name == :command_dispatch_contexts || real_connection.table_exists?(name)

@@ -347,8 +347,7 @@ class AttemptsSupervisorTest < Minitest::Test
       )
 
       _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
-      assert_includes err, "lost its lease"
-      assert_includes err, "runtime_bookkeeping_busy"
+      assert_includes err, "runtime_bookkeeping_busy: heartbeat exhausted"
       assert_equal store.fetch(attempt.attempt_id).to_h, supervisor.last_durable_record.to_h
       assert_equal "running", supervisor.last_durable_record.state
     end

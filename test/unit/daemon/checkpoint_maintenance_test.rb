@@ -132,13 +132,13 @@ class HiveDaemonCheckpointMaintenanceTest < Minitest::Test
         now = 3.0
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         fenced = maintenance.sweep
-        assert_equal "Hive::ConcurrentRunError", fenced.fetch(:error_class)
+        assert_equal "Hive::RuntimeControlPlane::FileFence::Busy", fenced.fetch(:error_class)
         assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.5
       end
       Hive::RuntimeControlPlane::OperationLock.new(state_home: root).synchronize do
         now = 4.0
         fenced = maintenance.sweep
-        assert_equal "Hive::ConcurrentRunError", fenced.fetch(:error_class)
+        assert_equal "Hive::RuntimeControlPlane::FileFence::Busy", fenced.fetch(:error_class)
       end
     ensure
       reader&.close

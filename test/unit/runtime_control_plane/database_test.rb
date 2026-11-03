@@ -318,6 +318,31 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_zero_timeout_controller_cleanup_attempts_sql_without_waiting
+    with_database do |database, path|
+      database.with_exclusive_writer(role: :controller) do |authority|
+        observed = database.transaction(authority: authority, timeout_sec: 0) do |db|
+          db[:installations].update(activation_epoch: 1)
+          db.fetch("PRAGMA busy_timeout").get
+        end
+        assert_equal 0, observed
+
+        blocker = SQLite3::Database.new(path)
+        blocker.execute("BEGIN IMMEDIATE")
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        assert_raises(Sequel::DatabaseError) do
+          database.transaction(authority: authority, timeout_sec: 0) { flunk "blocked cleanup must not run" }
+        end
+        assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.5
+        assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                     database.read { |db| db.fetch("PRAGMA busy_timeout").get }
+      ensure
+        blocker&.execute("ROLLBACK")
+        blocker&.close
+      end
+    end
+  end
+
   def test_failed_open_and_fence_acquisition_keep_their_phase_timings
     with_database do |database|
       measurements = []

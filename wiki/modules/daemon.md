@@ -21,6 +21,11 @@ fence and running-phase check prevent overlap with pause/upgrade work. The
 duration and deferred errors. Quiescence performs a bounded PASSIVE drain
 while still quiescing under controller authority, then preserves the checked
 FULL checkpoint and proof boundary. Upgrade source TRUNCATE checks remain.
+The quiesce v1 schema accepts the nested `checkpoint.passive_drain` metrics.
+Explicit zero-timeout writer transactions retain nonblocking SQL semantics so
+an expired proof-publication deadline can roll its paused candidate back to
+quiescing under the held controller fence. Exhausted positive write budgets
+still refuse SQL acquisition; cleanup never receives an extra busy wait.
 Measured storage-policy evidence is in
 `docs/implementation/runtime-database-contention.md`.
 

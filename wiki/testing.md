@@ -947,10 +947,13 @@ pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
 failure, and feeds the functional job result into the protected
 `rake test (Ruby 3.4)` aggregate. That job treats missing enabled results,
 duplicate metadata/results, and invalid durations as functional failures. A
-separate `continue-on-error` job downloads the retained report and runs only
+separate advisory job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
 incidents at or above sixteen seconds (including sandbox bootstrap) or a group
-total at or above thirty-six seconds without blocking the merge. The #9771
+total at or above thirty-six seconds without blocking the merge. Only the timing
+step uses `continue-on-error`; the job records the result in its summary and
+finishes successfully after an overrun so exact-head CI polling does not treat
+the advisory as a functional failure. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules
 live in `test/e2e/scenarios/README.md`.

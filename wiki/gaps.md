@@ -140,6 +140,13 @@ separate budgets for each runner class. Revisit the cap after representative
 hosted timing history exists; timing remains advisory and does not replace
 functional E2E coverage.
 
+A 2026-11-03 hosted run totaled 39.886 seconds (15.904, 14.690, and
+9.292 seconds), exceeding the aggregate advisory while all functional checks
+passed. This sample does not distinguish runner variance from a performance
+regression. The limits remain unchanged; step-level advisory handling now keeps
+the overrun visible without a failed job conclusion triggering exact-head CI
+repair loops.
+
 ## Operator cancellation awaits live validation (2026-09-09)
 
 `archive --reason cancelled` is covered locally for cancellation without GitHub

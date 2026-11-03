@@ -295,9 +295,12 @@ into the protected `rake test (Ruby 3.4)` aggregate. A downstream advisory job
 downloads the artifact and reads enabled incident durations from `report.json`.
 Durations include sandbox bootstrap; each enabled incident targets below sixteen
 seconds and the group targets below thirty-six seconds. Timing failures remain
-visible without blocking a merge. Missing enabled results, duplicate
-metadata/results, and invalid durations remain functional failures in the E2E
-job. Neither job folds e2e into the local default `rake test` task.
+visible in the timing step and job summary without blocking a merge. The timing
+step uses `continue-on-error`, so the advisory job finishes successfully after an
+overrun and exact-head CI consumers can reach terminal success. Missing enabled
+results, duplicate metadata/results, and invalid durations remain functional
+failures in the E2E job. Neither job folds e2e into the local default `rake test`
+task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional: when
 it is unavailable or too old, TUI scenarios run without cast capture while the

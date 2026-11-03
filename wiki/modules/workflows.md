@@ -204,20 +204,25 @@ unsealed origin on both initial and resumed setup.
 
 The packaged `hive_driver.rb` mounts its `STAGES_SH` as the actual stage caller.
 For non-sealed runs, that caller checks creation of `/work/.hb/bin` and
-`/work/.hb`, then requires the bin to be a directory and not a symlink. It
+`/work/.hb`, then requires the bin to be a directory whose full canonical path
+matches the managed path, rejecting symlinks in the bin or any ancestor. It
 prunes exactly `codex`, `pi`, and `grok` before prepending the bin to PATH,
 agent preflight, or fresh/resumed stage routing. It repeats the directory
-validation and cleanup immediately before `hive develop`, and on entry to
-review before the existing `gh` write and review launch, to remove entries
-planted by earlier stages. Directory setup
+validation and cleanup before a plan-stage `hive run` continuation, immediately
+before `hive develop`, on entry to review before the existing `gh` write, and
+again immediately before `hive review` after the publication agent has run.
+These boundaries remove entries planted by earlier agents. Directory setup
 or validation failure emits `HB_ERROR controller_bin_setup_failed`; a failed
 absolute `/usr/bin/rm -f --` emits
-`HB_ERROR legacy_agent_shim_cleanup_failed path=<managed-path>`. Both stop the
-cell with exit 4. Each removal's status governs, including dangling symlinks
-and entries that disappear afterward. Managed-name directories fail without
+`HB_ERROR legacy_agent_shim_cleanup_failed path=<managed-path>`. Both diagnostics
+go to stdout, which the driver tees into `stages.out` and captures; both stop
+the cell with exit 4, including continuation failures. Each removal's status
+governs, including dangling symlinks and entries that disappear afterward.
+Managed-name directories fail without
 recursive deletion. Unrelated entries and external symlink targets survive;
 partial cleanup can be retried after repairing permissions. Sealed controller
-setup retains its existing behavior.
+setup retains its existing behavior: the shared cleanup function returns
+success immediately in sealed mode, before validation or removal.
 
 The allowlist comes from historical commit `b1fd4b1862`'s older wrappers:
 `pi`, `codex`, and `grok` re-executed `$PI_REAL`, `$HB_CODEX_REAL`, and

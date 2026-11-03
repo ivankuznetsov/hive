@@ -62,6 +62,23 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
         fixture[:preserved][path] = File.binread(path)
       end
       File.write(File.join(fixture[:bin], "gh"), "gh sentinel\n")
+      # Observe gh after repeated cleanup, before review setup rewrites it.
+      observer = File.join(root, "observe-cleanup.sh")
+      File.write(observer, <<~'BASH')
+        observe_cleanup() {
+          local gh_after_cleanup
+          case "$BASH_COMMAND" in
+            'hive develop '*|'hive run '*|'ORIGIN='*)
+              IFS= read -r -d '' gh_after_cleanup <"$CONTROLLER_BIN/gh" || :
+              [ "$gh_after_cleanup" = "$SHIM_GH_EXPECTED" ] || exit 99
+              printf '%s\n' "$BASH_COMMAND" >>"$SHIM_FIXTURE/gh-after-cleanup"
+              ;;
+          esac
+        }
+        set -T
+        trap observe_cleanup DEBUG
+      BASH
+      fixture[:env]["BASH_ENV"] = observer
       yield fixture
     ensure
       FileUtils.chmod(0o755, fixture[:bin]) if fixture && File.directory?(fixture[:bin]) && !File.symlink?(fixture[:bin])
@@ -127,7 +144,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
 
   def assert_preflight_failure(fixture, out, err, status, diagnostic)
     assert_equal 4, status.exitstatus, out + err
-    assert_includes err, "HB_ERROR #{diagnostic}"
+    assert_includes out, "HB_ERROR #{diagnostic}"
     refute_includes out, "HB_DONE"
     assert_empty calls(fixture)
     refute_path_exists File.join(fixture[:root], "hive.jsonl")
@@ -161,6 +178,9 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
           observations = File.readlines(File.join(fixture[:root], "gh-at-start.jsonl"))
           assert_equal iteration + 1, observations.size
           assert_equal "gh sentinel\n", JSON.parse(observations.first)
+          repeated = File.readlines(File.join(fixture[:root], "gh-after-cleanup"), chomp: true)
+          assert_equal iteration + 1, repeated.count { |command| command.start_with?("hive develop ") }
+          assert_equal iteration + 1, repeated.count { |command| command.start_with?("ORIGIN=") }
         end
       end
     end
@@ -194,8 +214,22 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
       File.write(File.join(path, "keep"), "directory sentinel\n")
       out, err, status = run_caller(fixture)
       assert_preflight_failure(fixture, out, err, status, "legacy_agent_shim_cleanup_failed")
-      assert_includes err, "path=#{path}"
+      assert_includes out, "path=#{path}"
       assert_equal "directory sentinel\n", File.read(File.join(path, "keep"))
+    end
+  end
+
+  def test_later_grok_failure_reports_partial_cleanup_and_preserves_unrelated_state
+    with_caller do |fixture|
+      %w[codex pi].each { |name| plant(fixture, name, :regular) }
+      path = File.join(fixture[:bin], "grok")
+      FileUtils.mkdir_p(path)
+      File.write(File.join(path, "keep"), "grok sentinel\n")
+      out, err, status = run_caller(fixture)
+      assert_preflight_failure(fixture, out, err, status, "legacy_agent_shim_cleanup_failed")
+      assert_includes out, "path=#{path}"
+      %w[codex pi].each { |name| refute_path_exists File.join(fixture[:bin], name) }
+      assert_equal "grok sentinel\n", File.read(File.join(path, "keep"))
     end
   end
 
@@ -206,7 +240,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
       fixture[:preserved].reject! { |path, _| path.start_with?("#{fixture[:bin]}/") }
       out, err, status = run_caller(fixture)
       assert_preflight_failure(fixture, out, err, status, "controller_bin_setup_failed")
-      refute_includes err, "legacy_agent_shim_cleanup_failed"
+      refute_includes out, "legacy_agent_shim_cleanup_failed"
       assert_equal "bin is a file\n", File.read(fixture[:bin])
     end
   end
@@ -231,6 +265,42 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     end
   end
 
+  def test_symlinked_bin_ancestor_is_rejected_without_touching_external_entries
+    with_caller do |fixture|
+      MANAGED_NAMES.each { |name| plant(fixture, name, :regular) }
+      parent = File.dirname(fixture[:bin])
+      external = File.join(fixture[:root], "external-hb")
+      FileUtils.mv(parent, external)
+      fixture[:preserved] = fixture[:preserved].transform_keys { |path| path.sub("#{parent}/", "#{external}/") }
+      File.symlink(external, parent)
+      before = MANAGED_NAMES.to_h { |name| [ name, File.binread(File.join(external, "bin", name)) ] }
+      out, err, status = run_caller(fixture)
+      assert_preflight_failure(fixture, out, err, status, "controller_bin_setup_failed")
+      assert File.symlink?(parent)
+      assert_equal before, MANAGED_NAMES.to_h { |name| [ name, File.binread(File.join(external, "bin", name)) ] }
+    end
+  end
+
+  def test_plan_continuation_removes_replanted_wrapper_before_launch
+    with_caller do |fixture|
+      out, err, status = run_caller(fixture, SHIM_PLAN_CONTINUATION: "1", SHIM_REPLANT: "wrapper")
+      assert_success(fixture, out, err, status, stages: %w[plan run develop review], agents: %w[codex codex codex codex])
+      assert_includes out, "HB_NOTE plan_stage_resumed"
+      assert File.readlines(File.join(fixture[:root], "gh-after-cleanup")).any? { |line| line.start_with?("hive run ") }
+    end
+  end
+
+  def test_plan_continuation_cleanup_failure_stops_without_launch
+    with_caller do |fixture|
+      out, err, status = run_caller(fixture, SHIM_PLAN_CONTINUATION: "1", SHIM_REPLANT: "directory")
+      assert_equal 4, status.exitstatus, out + err
+      assert_includes out, "HB_ERROR legacy_agent_shim_cleanup_failed"
+      assert_equal [ "plan" ], calls(fixture).map { |call| call.fetch("argv").last(3).first }
+      refute_includes out, "HB_STAGE plan-run"
+      assert_preserved(fixture)
+    end
+  end
+
   def test_replanted_wrapper_is_removed_before_execute
     %w[0 1].each do |review|
       with_caller do |fixture|
@@ -251,14 +321,24 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     end
   end
 
+  def test_open_pr_agent_replant_is_removed_before_review
+    with_caller do |fixture|
+      out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_OPEN_PR_AGENT: "codex",
+                                           SHIM_REVIEW_AGENT: "codex", SHIM_REPLANT: "wrapper", SHIM_REPLANT_STAGE: "open-pr")
+      assert_success(fixture, out, err, status, stages: %w[plan develop open-pr review], agents: %w[pi pi codex codex])
+      assert_path_exists File.join(fixture[:root], "replanted")
+    end
+  end
+
   def test_execute_and_review_revalidate_bin_and_removal_failures
-    %w[plan develop].product(%w[symlink directory]).each do |replant_stage, kind|
+    %w[plan develop open-pr].product(%w[symlink ancestor directory]).each do |replant_stage, kind|
       with_caller do |fixture|
-        out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_REPLANT: kind, SHIM_REPLANT_STAGE: replant_stage)
+        out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_OPEN_PR_AGENT: "pi",
+                                             SHIM_REPLANT: kind, SHIM_REPLANT_STAGE: replant_stage)
         assert_equal 4, status.exitstatus, out + err
-        diagnostic = kind == "symlink" ? "controller_bin_setup_failed" : "legacy_agent_shim_cleanup_failed"
-        assert_includes err, "HB_ERROR #{diagnostic}"
-        stages = replant_stage == "plan" ? %w[plan] : %w[plan develop]
+        diagnostic = kind == "directory" ? "legacy_agent_shim_cleanup_failed" : "controller_bin_setup_failed"
+        assert_includes out, "HB_ERROR #{diagnostic}"
+        stages = %w[plan develop open-pr].take(%w[plan develop open-pr].index(replant_stage) + 1)
         assert_equal stages, calls(fixture).map { |call| call.fetch("argv").last(3).first }
         assert_preserved(fixture)
         assert_path_exists File.join(fixture[:bin], "codex")
@@ -375,7 +455,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
         assert_equal(kind == :dangling ? "link" : "file", File.lstat(path).ftype)
         out, err, status = run_caller(fixture)
         assert_preflight_failure(fixture, out, err, status, "legacy_agent_shim_cleanup_failed")
-        assert_includes err, "path=#{path}"
+        assert_includes out, "path=#{path}"
         assert_equal(kind == :dangling ? "link" : "file", File.lstat(path).ftype)
         File.chmod(0o755, fixture[:bin])
         out, err, status = run_caller(fixture)
@@ -384,12 +464,33 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     end
   end
 
-  def test_removal_status_is_checked_directly_without_an_absence_reprobe
+  def test_cleanup_has_no_post_removal_absence_reprobe
     script = File.read(File.join(RUNTIME, "hive_stages.sh"))
     cleanup = script[/^cleanup_legacy_agent_shims\(\) \{.*?^\}/m]
     refute_nil cleanup
-    assert_match(/if ! \/usr\/bin\/rm -f -- "\$CONTROLLER_BIN\/\$name"; then/, cleanup)
-    refute_match(/(?:\[|test\b).*\$CONTROLLER_BIN\/\$name/, cleanup)
+    # Executable denial rows prove status handling. Supplement them by checking
+    # that acceptance after removal does not depend on another filesystem probe.
+    removal = cleanup.index("/usr/bin/rm")
+    refute_nil removal
+    after_removal = cleanup[removal..]
+    refute_match(/(?:\[|test\b)[^\n]*(?:-[efL]|-h)[^\n]*\$CONTROLLER_BIN\/\$name/, after_removal)
+  end
+
+  def test_sealed_cleanup_repeatedly_preserves_managed_entries_and_skips_validation
+    with_caller do |fixture|
+      MANAGED_NAMES.each { |name| plant(fixture, name, :regular) }
+      external = symlink_bin(fixture)
+      before = Dir.children(external).to_h { |name| [ name, File.binread(File.join(external, name)) ] }
+      cleanup = File.read(fixture[:script])[/^cleanup_legacy_agent_shims\(\) \{.*?^\}/m]
+      out, err, status = Open3.capture3(
+        { "HB_SEALED_AGENT_RUNTIME" => "1", "CONTROLLER_BIN" => fixture[:bin] },
+        "/bin/bash", "-uc", "#{cleanup}\nfor attempt in 1 2 3 4; do cleanup_legacy_agent_shims || exit 4; done"
+      )
+      assert status.success?, out + err
+      assert_empty out
+      assert_equal before, Dir.children(external).to_h { |name| [ name, File.binread(File.join(external, name)) ] }
+      assert_preserved(fixture)
+    end
   end
 
   AGENT_STUB = <<~'RUBY'
@@ -416,20 +517,26 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     work = File.join(root, "target")
     action = ARGV.fetch(0)
     File.open(File.join(root, "hive.jsonl"), "a") { |file| file.puts JSON.generate(ARGV) }
-    if %w[plan develop review].include?(action)
-      agent = action == "review" ? ENV.fetch("SHIM_REVIEW_AGENT", ENV.fetch("SHIM_AGENT")) : ENV.fetch("SHIM_AGENT")
+    if %w[plan run develop review].include?(action) || (action == "open-pr" && ENV["SHIM_OPEN_PR_AGENT"])
+      agent = case action
+      when "review" then ENV.fetch("SHIM_REVIEW_AGENT", ENV.fetch("SHIM_AGENT"))
+      when "open-pr" then ENV.fetch("SHIM_OPEN_PR_AGENT")
+      else ENV.fetch("SHIM_AGENT")
+      end
       executable = agent == "pi" ? ENV.fetch("HIVE_PI_BIN") : agent
       abort "agent failed" unless system(executable, action, "--label", "two words")
     end
     case action
-    when "plan"
+    when "plan", "run"
       path = File.join(work, ".hive-state/stages/3-plan/demo")
       FileUtils.mkdir_p(path)
-      File.write(File.join(path, "plan.md"), "fixture plan\n<!-- COMPLETE -->\n")
+      unless action == "plan" && ENV["SHIM_PLAN_CONTINUATION"] == "1"
+        File.write(File.join(path, "plan.md"), "fixture plan\n<!-- COMPLETE -->\n")
+      end
     when "develop", "review"
       File.write(File.join(root, "candidate/tracked.txt"), "#{action} change\n")
     when "open-pr"
-      # Offline publication requires no agent.
+      # Some publication configurations launch the optional agent above.
     when "markers"
       abort "unexpected marker operation" unless ARGV[1] == "clear"
       path = File.join(ARGV.fetch(2), "task.md")
@@ -450,6 +557,12 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
         FileUtils.mv(bin, external)
         File.write(File.join(external, "codex"), "external sentinel\n")
         File.symlink(external, bin)
+      when "ancestor"
+        parent = File.dirname(bin)
+        external = File.join(root, "review-external-hb")
+        FileUtils.mv(parent, external)
+        File.write(File.join(external, "bin/codex"), "external sentinel\n")
+        File.symlink(external, parent)
       end
       File.write(File.join(root, "replanted"), "#{ENV.fetch("SHIM_REPLANT")}\n")
     end

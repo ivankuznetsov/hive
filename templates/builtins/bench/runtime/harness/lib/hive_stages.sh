@@ -17,14 +17,15 @@ BASE="$2"
 export HOME=/home/asterio
 
 cleanup_legacy_agent_shims() {
+  [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ] && return 0
   local name
-  if [ ! -d "$CONTROLLER_BIN" ] || [ -L "$CONTROLLER_BIN" ]; then
-    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN" >&2
+  if [ ! -d "$CONTROLLER_BIN" ] || [ "$(/usr/bin/readlink -f -- "$CONTROLLER_BIN")" != "$CONTROLLER_BIN" ]; then
+    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN"
     return 1
   fi
   for name in codex pi grok; do
     if ! /usr/bin/rm -f -- "$CONTROLLER_BIN/$name"; then
-      echo "HB_ERROR legacy_agent_shim_cleanup_failed path=$CONTROLLER_BIN/$name" >&2
+      echo "HB_ERROR legacy_agent_shim_cleanup_failed path=$CONTROLLER_BIN/$name"
       return 1
     fi
   done
@@ -52,7 +53,7 @@ else
   CONTROLLER_BIN=/work/.hb/bin
   CONTROLLER_STATE=/work/.hb
   if ! mkdir -p "$CONTROLLER_BIN" "$CONTROLLER_STATE"; then
-    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN" >&2
+    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN"
     exit 4
   fi
   cleanup_legacy_agent_shims || exit 4
@@ -308,6 +309,7 @@ ensure_plan_artifact() {
     return 1
   fi
 
+  cleanup_legacy_agent_shims || return 4
   hive run "$plan_task" --json >"$hb_root/plan-run.json" 2>>"$hb_root/stage.err"
   rc=$?
   stage plan-run "$rc"
@@ -440,9 +442,7 @@ fi
 if [ "$RESUME_REVIEW" = "1" ] || [ "$EXECUTE_RESIDUE_RECOVERED" -eq 1 ]; then
   stage develop 0
 elif [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
-  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" != "1" ]; then
-    cleanup_legacy_agent_shims || exit 4
-  fi
+  cleanup_legacy_agent_shims || exit 4
   hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
   stage develop $?
 fi
@@ -467,9 +467,7 @@ task_dir() { find /work/.hive-state/stages -maxdepth 2 -type d -name "$SLUG" 2>/
 
 REVIEW_RC=""
 if [ "${HB_REVIEW:-1}" = "1" ] && [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
-  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" != "1" ]; then
-    cleanup_legacy_agent_shims || exit 4
-  fi
+  cleanup_legacy_agent_shims || exit 4
   ORIGIN="$CONTROLLER_STATE/origin.git"
   rm -rf -- "$ORIGIN"
   env -i PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
@@ -515,6 +513,7 @@ GH
     hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
     stage open-pr $?
   fi
+  cleanup_legacy_agent_shims || exit 4
   hive review "$(task_dir)" --json >/work/.hb/review.json 2>>/work/.hb/stage.err
   REVIEW_RC=$?
   stage review "$REVIEW_RC"

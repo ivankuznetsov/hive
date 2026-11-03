@@ -147,7 +147,7 @@ The inspected revision is evidence from planning, not a new external test run.
 Hive's non-sealed controller cleanup deliberately retains the three-name
 legacy-wrapper set (`codex`, `pi`, `grok`) enumerated in historical commit
 `b1fd4b1862`. See [[modules/workflows]] for the driver executable-selection
-table and [[testing]] for current full-caller cleanup evidence. Two residual
+table and [[testing]] for current full-caller cleanup evidence. Three residual
 exposures remain outside this repair's scope and do not gate its completion:
 
 - **Stale Claude wrapper:** the driver does not pin `HIVE_CLAUDE_BIN`, so a
@@ -160,6 +160,11 @@ exposures remain outside this repair's scope and do not gate its completion:
   chmods it; `HB_REVIEW=0` never rewrites it. Cleanup leaves `gh` untouched.
   Tests observe its preservation immediately after cleanup, before review
   setup can replace it; they do not bless stale plan/execute behavior.
+- **Other stale commands:** the non-sealed caller prepends `/work/.hb/bin`
+  to PATH for all commands. Unrelated entries such as `hive`, `git`, or `ruby`
+  can therefore shadow their intended executables. The initial Hive version
+  check uses an absolute runtime path and does not detect a stale PATH-resolved
+  `hive`. These names remain outside the three-name cleanup allowlist.
 
 These accepted Hive scope limitations are separate from the unresolved
 canonical Pi self-resolution follow-up above. Hive's cleanup does not claim

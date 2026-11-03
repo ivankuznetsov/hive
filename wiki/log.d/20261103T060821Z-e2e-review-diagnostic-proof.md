@@ -23,3 +23,9 @@ Validation: the focused binary and Runner files pass together (88 tests,
 1,685 assertions), and the three changed Ruby files pass RuboCop. Temporarily
 rendering the cause backtrace makes the new binary regression fail; the
 production formatter was restored before the passing run.
+
+Pass-2 review verification of the pass-1 tree reported passing binary tests
+(74 tests / 1,589 assertions), Runner tests (14 tests / 96 assertions), and
+`bundle exec rake e2e:lib_test` (229 tests / 2,374 assertions). These figures
+come from the reviewer's reruns and supplement the focused validation above;
+the `20261103T040000Z` fragment retains the earlier implementation-run evidence.

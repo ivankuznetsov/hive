@@ -12,7 +12,11 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 Binary tests temporarily edit the shared coverage catalog and scenario tree.
 Attempt-unique unexpected-failure scenario names avoid name collisions, but do
 not make the shared catalog updates safe for parallel execution. Keep these
-fixtures serial unless catalog isolation or coordination is added.
+fixtures serial unless catalog isolation or coordination is added. The
+`:missing_scenario` fixture also leaves a dangling symlink in the real scenario
+tree for the duration of its block. Concurrent catalog readers (`list`, `run`,
+and `coverage`) can fail during that window, even if they never write the
+catalog; avoid running them alongside these tests.
 
 ## E2E errors after report emission (2026-11-03)
 

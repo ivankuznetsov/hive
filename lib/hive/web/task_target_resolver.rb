@@ -26,14 +26,15 @@ module Hive
       def call
         native_task = @task_resolver.call
         validate_native_identity!(native_task)
-        # The cached fleet row can lag a task mutation by up to one poll
-        # interval. Resolve the exact current row first, then overlay only the
-        # daemon-owned recovery receipt that the targeted status path does not
-        # derive. This keeps task controls current without a fleet scan.
+        # The exact status path owns durable failed-edit recovery too. Cached
+        # failure/input bindings may have been superseded by edits or accepted
+        # output. Legacy marker receipts retain their existing cache overlay.
         attributes = targeted_attributes(native_task)
         cached = cached_attributes(native_task)
-        attributes["recovery"] = cached["recovery"] if
-          attributes && cached && cached["recovery"].is_a?(Hash)
+        if attributes && attributes.dig("recovery", "variant") != "failed_edit" &&
+           cached && cached["recovery"].is_a?(Hash) && cached.dig("recovery", "variant") != "failed_edit"
+          attributes["recovery"] = cached["recovery"]
+        end
         raise Hive::InvalidTaskPath, "unknown task #{@slug}" unless attributes
 
         Result.new(native_task:, attributes:, source: "targeted")
@@ -65,6 +66,13 @@ module Hive
           raise Hive::Error,
                 "project #{@project.fetch('name')} status is unavailable — " \
                 "repair its configuration or workflow, then reload"
+        end
+        if @status_command.respond_to?(:with_operational_recoveries)
+          envelope = {
+            "schema" => "hive-status", "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+            "ok" => true, "generated_at" => Time.now.utc.iso8601(6), "projects" => [ payload ]
+          }
+          payload = @status_command.with_operational_recoveries(envelope).fetch("projects").first
         end
         Array(payload["tasks"]).find do |candidate|
           candidate["slug"].to_s == @slug &&

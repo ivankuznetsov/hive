@@ -323,6 +323,7 @@ module Hive
 
       def publish_active_snapshot(payload, admission_context: nil,
                                   generation: @lifecycle_generation)
+        payload = Hive::Commands::Status.new.with_operational_recoveries(payload)
         payload = @payload_transform.call(payload) if @payload_transform
         active_snapshot = Snapshot.from_payload(payload)
         next_mtime_fingerprint = mtime_fingerprint_for(active_snapshot)

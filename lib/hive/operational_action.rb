@@ -50,6 +50,7 @@ module Hive
 
     class << self
       def descriptor(project:, row:)
+        row = row.merge("project" => project)
         action_id = action_id_for(row)
         return nil unless action_id
 
@@ -93,7 +94,7 @@ module Hive
       end
 
       def recoverable?(row)
-        Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+        (Hive::Recovery::API.recoverable_marker?(row["marker"]) || failed_edit_recovery?(row)) &&
           !Hive::TaskProjection.history_invalid_row?(row) &&
           !Hive::TerminalOutcome.outcome_evidence_rework?(row["attrs"] || {}) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
@@ -101,6 +102,22 @@ module Hive
             marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
           ) &&
           row["marker"] != "manual_steering"
+      end
+
+      def failed_edit_recovery?(row)
+        recovery = row["recovery"]
+        return false unless recovery.is_a?(Hash) && recovery["variant"] == "failed_edit"
+        return false if %w[running terminal unavailable].include?(recovery["status"]) ||
+          %w[stale unavailable invalid].include?(recovery["scheduler_status"]) ||
+          %w[stale unavailable invalid].include?(row["scheduler_status"])
+        return false if row["id"].to_s.empty?
+
+        binding = { "project" => row["project"], "task_id" => row["id"].to_s,
+          "intended_stage" => row["stage"], "task_locator" => "id:#{row['id']}" }
+        source = recovery["source_binding"]
+        recovery["task_binding"] == binding && source.is_a?(Hash) &&
+          source.slice(*binding.keys) == binding && !source["attempt_id"].to_s.empty? &&
+          recovery["input_binding"].is_a?(Hash)
       end
 
       def action_id_for(row)
@@ -111,6 +128,7 @@ module Hive
       end
 
       def token(project:, row:)
+        row = row.merge("project" => project)
         if recoverable?(row)
           return Hive::Recovery::API.observation_token(
             row.merge(
@@ -166,8 +184,9 @@ module Hive
           task, action_marker, projection: projection, config: config, project_name: project
         )
         projection_data = projection.to_h
-        {
+        row = {
           "project" => project,
+          "id" => task.respond_to?(:id) ? task.id : nil,
           "slug" => task.slug,
           "folder" => task.folder,
           "state_file" => task.state_file,
@@ -187,6 +206,14 @@ module Hive
           "blocked" => false,
           "held" => nil
         }
+        require "hive/runtime_control_plane/dispatch_repository"
+        repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: Hive::RuntimeControlPlane.database)
+        request = repository.observed_recovery(project: project, slug: task.slug,
+          stage: row["stage"], task_id: row["id"])
+        row["recovery"] = Hive::Daemon::RecoveryCoordinator.new.receipt_for_request(request).to_h if request
+        row
+      rescue Hive::RuntimeControlPlane::Error
+        row
       end
 
       def descriptor_for_task(task, project:)

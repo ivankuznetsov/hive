@@ -54,6 +54,27 @@ class TuiSnapshotTest < Minitest::Test
     }
   end
 
+  def test_recovery_and_answer_state_survive_payload_conversion
+    recovery = {
+      "variant" => "failed_edit", "status" => "cooldown", "reason" => "exit_code",
+      "source_attempt_id" => "failed-attempt", "next_eligible_at" => "2026-04-27T12:01:00Z"
+    }
+    task = sample_task(slug: "recovering").merge(
+      "recovery" => recovery, "answers_complete" => true, "scheduler_status" => "unavailable"
+    )
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [ task ] }
+    ]))
+
+    assert_equal recovery, snapshot.rows.first.recovery
+    assert_equal true, snapshot.rows.first.answers_complete
+    assert_equal "unavailable", snapshot.rows.first.scheduler_status
+    old_row = Hive::Tui::Snapshot.build_row(sample_task(slug: "old"), "alpha")
+    assert_nil old_row.recovery
+    assert_nil old_row.answers_complete
+    assert_nil old_row.scheduler_status
+  end
+
   def test_from_payload_preserves_all_task_fields_verbatim
     payload = sample_payload([
                                {

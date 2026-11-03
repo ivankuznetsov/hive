@@ -4,6 +4,7 @@ require "time"
 require "hive/attempts/repository"
 require "hive/markers"
 require "hive/secret_patterns"
+require "hive/recovery/presentation"
 require "hive/task_projection/reader"
 require "hive/task_workspace"
 require "hive/task_workspace/attempts"
@@ -134,7 +135,8 @@ module Hive
         operator = operator_payload
         answerable_questions = status["freshness"] == "fresh" ? operator.fetch("questions") : []
         action_evidence_current = status["state"] == "current" &&
-                                  decision_panels_current?(attempts, resources)
+                                  (decision_panels_current?(attempts, resources) ||
+                                   failed_edit_recovery? && task_predicate(:recovery_action_enabled?))
 
         snapshot_with_budget(
           generated_at: now,
@@ -147,7 +149,7 @@ module Hive
           status: status,
           operator: operator,
           decision: decision_payload(
-            attempts: attempts, resources: resources,
+            attempts: attempts, resources: resources, status: status,
             action_evidence_current: action_evidence_current,
             answerable_questions: answerable_questions
           ),
@@ -294,6 +296,9 @@ module Hive
       end
 
       def semantic_action(status)
+        presentation = recovery_presentation(status)
+        return recovery_action(presentation, status) if presentation
+
         kind = task_value("action")&.to_s
         enabled = status["freshness"] == "fresh" && status["state"] == "current" &&
                   !@archive && !semantic_completed? && semantic_actionable?(kind)
@@ -303,6 +308,38 @@ module Hive
           "enabled" => enabled,
           "reason" => semantic_action_reason(enabled, status)
         }
+      end
+
+      def failed_edit_recovery?
+        task_value("recovery").is_a?(Hash) && task_value("recovery")["variant"] == "failed_edit"
+      end
+
+      def recovery_presentation(status = nil)
+        fresh = (@status_availability.empty? || @status_availability == "fresh") &&
+                (!status || status["state"] == "current")
+        return @task.recovery_presentation(fresh: fresh) if @task.respond_to?(:recovery_presentation)
+        return nil unless failed_edit_recovery? || !task_value("answers_complete").nil? ||
+                          task_value("unanswered_questions").to_i.positive?
+
+        row = %w[action action_key answers_complete unanswered_questions recovery scheduler_status held blocked blocked_by unmet_dependencies]
+              .to_h { |key| [ key, task_value(key) ] }
+        unless fresh
+          row["scheduler_status"] = "unavailable"
+          row["recovery"] = row["recovery"].merge("scheduler_status" => "unavailable") if row["recovery"]
+        end
+        Hive::Recovery::Presentation.for_row(row)
+      end
+
+      def recovery_action(presentation, status)
+        current = status["freshness"] == "fresh" && status["state"] == "current" && !@archive
+        kind, label, enabled = case presentation.kind
+        when "input" then [ "needs_input", presentation.label, current ]
+        when "repair"
+          [ "workflow.retry", "Retry stage", current && task_predicate(:recovery_action_enabled?) ]
+        else [ nil, "Inspect status", false ]
+        end
+        { "kind" => kind, "label" => label, "enabled" => enabled,
+          "reason" => enabled ? nil : presentation.detail }
       end
 
       def semantic_actionable?(kind)
@@ -329,6 +366,17 @@ module Hive
             "state" => "completed", "label" => "Completed",
             "explanation" => "This task is complete and read-only."
           }
+        end
+        presentation = recovery_presentation(status)
+        if presentation
+          state = case presentation.kind
+          when "unavailable" then "unavailable"
+          when "repair", "input" then "needs_attention"
+          when "running" then "running"
+          else "waiting"
+          end
+          return { "state" => state, "label" => presentation.label,
+                   "explanation" => presentation.detail }
         end
         summary = semantic_diagnostic_summary
         if summary
@@ -675,20 +723,28 @@ module Hive
         }
       end
 
-      def decision_payload(attempts:, resources:, action_evidence_current:,
+      def decision_payload(attempts:, resources:, status:, action_evidence_current:,
                            answerable_questions:)
         action_kind = task_value("action")&.to_s
         action_label = task_value("action_label")&.to_s
-        answer_evidence_current = answerable_questions.any?
+        presentation = recovery_presentation(status)
+        answer_evidence_current = answerable_questions.any? &&
+                                  (!presentation || presentation.kind == "input")
         enabled, action_reason = action_enabled(
           evidence_current: action_evidence_current,
-          answer_evidence_current: answer_evidence_current
+          answer_evidence_current: answer_evidence_current, presentation: presentation
         )
         posture, reason = if @archive
           [ "investigate", "Archived task evidence is read-only." ]
+        elsif presentation&.kind == "unavailable"
+          [ "investigate", presentation.detail ]
+        elsif presentation&.kind == "repair"
+          [ enabled ? "retry" : "investigate", presentation.detail ]
         elsif answer_evidence_current
           count = answerable_questions.length
           [ "answer", "#{count} required #{count == 1 ? 'question is' : 'questions are'} unanswered." ]
+        elsif presentation && %w[running cooldown queued hold waiting].include?(presentation.kind)
+          [ "wait", presentation.detail ]
         elsif !action_evidence_current
           [ "investigate", "Action-driving workspace evidence is degraded or incomplete." ]
         elsif task_predicate(:passable?)
@@ -701,6 +757,10 @@ module Hive
           [ "wait", "The daemon owns the next canonical dispatch." ]
         else
           [ "investigate", "No safe wait, answer, approval, or retry decision is established." ]
+        end
+        if presentation
+          action = recovery_action(presentation, status)
+          action_kind, action_label = action.values_at("kind", "label")
         end
         {
           "posture" => posture, "reason" => reason,
@@ -774,8 +834,11 @@ module Hive
         nil_if_empty && text.empty? ? nil : text
       end
 
-      def action_enabled(evidence_current:, answer_evidence_current:)
+      def action_enabled(evidence_current:, answer_evidence_current:, presentation: nil)
         return [ false, "Archived tasks are read-only." ] if @archive
+        if presentation && !%w[input repair].include?(presentation.kind)
+          return [ false, presentation.detail ]
+        end
         return [ true, nil ] if answer_evidence_current
         unless evidence_current
           return [ false, "Refresh complete workspace evidence before acting." ]

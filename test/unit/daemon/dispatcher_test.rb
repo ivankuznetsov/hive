@@ -2910,6 +2910,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_queued_failed_edit_reports_the_existing_capacity_hold_without_dispatch
+    observed = row(action: "needs_input", stage: "2-brainstorm", command: "hive brainstorm s1 --from 2-brainstorm")
+    snapshot = FakeOperationalSnapshot.new
+    coordinator = Object.new
+    receipt = Hive::Daemon::RecoveryCoordinator::Receipt.from_h(
+      "status" => "queued", "request_id" => "failed-edit-recovery", "phase" => "admitted",
+      "variant" => "failed_edit", "owner" => "scheduler")
+    coordinator.define_singleton_method(:request_failed_edit) { |**| receipt }
+    dispatcher, supervisor, controller = make_dispatcher(rows: [ observed ],
+      recovery_coordinator: coordinator, operational_snapshot: snapshot)
+    controller.instance_variable_set(:@max_concurrent_runs, 0)
+    dispatcher.send(:handle_row, observed, now: T0)
+    assert_equal "global_cap", snapshot.calls.last.last.fetch(:decision).to_s
+    assert_includes snapshot.calls.last.last.fetch(:reason), "capacity"
+    assert_empty supervisor.spawned
+  end
+
   def test_scheduler_snapshot_completes_before_project_patrol_candidate_scan
     snapshot = FakeOperationalSnapshot.new
     snapshot_calls_at_patrol = nil

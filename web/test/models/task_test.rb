@@ -139,6 +139,97 @@ class TaskTest < ActiveSupport::TestCase
     assert fresh.recovery_action_enabled?
   end
 
+  test "failed edit retry uses a current bound workflow retry descriptor" do
+    task = failed_edit_task
+
+    assert task.recovery_action_visible?
+    assert task.recovery_action_enabled?
+    assert_equal "Needs execution repair", task.recovery_primary_label
+    descriptor = task.recovery_action_descriptor
+    assert_equal Hive::OperationalAction::RETRY_ACTION_ID, descriptor.fetch("action_id")
+    assert_match(/\A[0-9a-f]{64}\z/, descriptor.fetch("observation_token"))
+    assert_includes task.recovery_context, "failed attempt source-attempt"
+
+    %w[stale unavailable].each do |status|
+      task["recovery"]["scheduler_status"] = status
+      refute task.recovery_action_enabled?
+    end
+    task["recovery"]["scheduler_status"] = "current"
+    task["recovery"]["status"] = "running"
+    refute task.recovery_action_enabled?
+  end
+
+  test "failed edit Retry rejects missing and stale observation tokens before writing" do
+    task = failed_edit_task
+    writes = []
+    writer = ->(**kwargs) { writes << kwargs }
+    native = Object.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { native }
+    guard = lambda do |_native, **kwargs|
+      raise Hive::StaleOperationalObservation, "take a fresh operational snapshot" unless
+        kwargs.fetch(:observation_token) == "current-token"
+    end
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::OperationalAction, :assert_current!, guard) do
+        with_replaced_singleton_method(Hive::Recovery::API, :recover!, writer) do
+          [ nil, "stale-token" ].each do |token|
+            assert_raises(Hive::StaleOperationalObservation) { task.recover!(observation_token: token) }
+          end
+        end
+      end
+    end
+    assert_empty writes
+  end
+
+  test "failed edit Retry rejects changed input through the real observation guard" do
+    task = failed_edit_task
+    token = task.recovery_action_descriptor.fetch("observation_token")
+    observed = task.instance_variable_get(:@attributes).deep_dup
+    observed["recovery"]["input_binding"]["task_input_epoch"] += 1
+    native = Object.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { native }
+    writes = []
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::OperationalAction, :observed_row, ->(*) { observed }) do
+        with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**kwargs) { writes << kwargs }) do
+          assert_raises(Hive::StaleOperationalObservation) { task.recover!(observation_token: token) }
+        end
+      end
+    end
+    assert_empty writes
+  end
+
+  test "failed edit Retry sends its freshly observed binding through the shared action API" do
+    task = failed_edit_task
+    writes = []
+    native = Object.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) { native }
+    observed = { "slug" => task.slug, "recovery" => task.recovery }
+    checks = []
+    guard = ->(checked, **kwargs) { checks << [ checked, kwargs ] }
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::OperationalAction, :assert_current!, guard) do
+        with_replaced_singleton_method(Hive::OperationalAction, :observed_row, ->(*) { observed }) do
+          with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**kwargs) { writes << kwargs }) do
+            task.recover!(observation_token: "current-token")
+          end
+        end
+      end
+    end
+    assert_equal 1, checks.length
+    assert_same native, checks.first.first
+    assert_equal "alpha:#{task.slug}", checks.first.last.fetch(:target)
+    assert_equal Hive::OperationalAction::RETRY_ACTION_ID, checks.first.last.fetch(:action_id)
+    assert_equal "current-token", checks.first.last.fetch(:observation_token)
+    assert_equal 1, writes.length
+    assert_same observed, writes.first.fetch(:row)
+    assert_equal "action", writes.first.fetch(:requestor)
+    assert_equal "current-token", writes.first.fetch(:observation_token)
+  end
+
   test "max pass review escalation is visible but not directly retryable" do
     folder = Pathname(Dir.mktmpdir("hive-web-review-escalation"))
     folder.join("reviews").mkpath
@@ -687,5 +778,21 @@ class TaskTest < ActiveSupport::TestCase
       "diagnostic" => nil,
       "evidence" => { "type" => "project_provider", "details" => {} }
     }
+  end
+  def failed_edit_task
+    binding = { "project" => "alpha", "task_id" => "42", "intended_stage" => "2-brainstorm", "task_locator" => "id:42" }
+    Task.new(project: Project.new("name" => "alpha"), attributes: {
+      "id" => 42, "slug" => "failed-edit-261103-abcd", "folder" => "/tmp/failed-edit-261103-abcd",
+      "state_file" => "/tmp/failed-edit-261103-abcd/brainstorm.md", "mtime" => "2026-11-03T12:00:00Z",
+      "stage" => "2-brainstorm", "workflow" => "coding", "marker" => "waiting", "attrs" => {},
+      "action" => "needs_input", "answers_complete" => true,
+      "recovery" => {
+        "variant" => "failed_edit", "status" => "blocked", "reason" => "deterministic_failure",
+        "owner" => "operator", "escalation_tier" => "parked", "scheduler_status" => "current",
+        "task_binding" => binding,
+        "source_binding" => binding.merge("attempt_id" => "source-attempt", "request_id" => "source-request"),
+        "input_binding" => { "task_input_epoch" => 1, "progress_token" => "a" * 64 }
+      }
+    })
   end
 end

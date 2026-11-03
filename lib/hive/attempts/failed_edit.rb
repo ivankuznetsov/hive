@@ -66,7 +66,7 @@ module Hive
         source = evidence.fetch("source_binding")
         return false unless source_binding(record) == source && record.state == "terminal"
         receipt = record.receipt
-        return false unless [Record::LEGACY_RECEIPT_VERSION, Record::RECEIPT_VERSION].include?(receipt["receipt_version"])
+        return false unless [ Record::LEGACY_RECEIPT_VERSION, Record::RECEIPT_VERSION ].include?(receipt["receipt_version"])
         return false if receipt["receipt_version"] < evidence.fetch("source_receipt_version")
         version_key = record.is_a?(SupervisedRecord) ? "dispatch_revision" : "terminal_lease_version"
         source_version_key = record.is_a?(SupervisedRecord) ? "source_dispatch_revision" : "source_terminal_lease_version"

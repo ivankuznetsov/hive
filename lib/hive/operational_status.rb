@@ -3,6 +3,8 @@ require "hive/attempts/storage_status"
 require "hive/operational_action"
 require "hive/model_unsupported"
 require "hive/recovery"
+require "hive/recovery/presentation"
+require "hive/runtime_control_plane/dispatch_repository"
 require "hive/workflows"
 require "hive/task_closure"
 require "hive/task_projection"
@@ -127,15 +129,16 @@ module Hive
         next unless recovery_candidate?(project, row, scheduler)
 
         disposition, freshness = scheduler_disposition_for(project, row, scheduler)
-        recovery = recovery_payload(row, disposition, freshness)
-        next unless recovery
+        recovery = recovery_payload(row, disposition, freshness, project: project)
+        next unless recovery || !row["answers_complete"].nil?
 
         {
           "identity" => {
             "project" => project.fetch("name"),
             "slug" => row.fetch("slug")
           },
-          "recovery" => recovery
+          "recovery" => recovery,
+          "scheduler_status" => freshness
         }
       end
     end
@@ -405,7 +408,24 @@ module Hive
           owner = scheduler_owner
         end
       end
-      action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
+      recovery = recovery_payload(row, scheduler_disposition, scheduler_freshness, project: project)
+      present_recovery = recovery&.fetch("variant", nil) == "failed_edit" ||
+        !row["answers_complete"].nil? || scheduler_disposition&.fetch("recovery", nil).is_a?(Hash)
+      presentation = Hive::Recovery::Presentation.for_row(row.merge("recovery" => recovery,
+        "scheduler_status" => scheduler_freshness)) if present_recovery
+      if presentation
+        state, owner = case presentation.kind
+        when "unavailable" then [ "unknown", "hive" ]
+        when "repair" then [ "needs_repair", recovery["owner"] || "operator" ]
+        when "input" then [ "waiting_on_you", "operator" ]
+        when "running" then [ "running", "agent" ]
+        else [ "waiting_on_provider_or_scheduler", recovery&.fetch("owner", nil) || "scheduler" ]
+        end
+        reasons.unshift(reason("recovery_#{presentation.kind}", presentation.detail, "scheduler"))
+      end
+      action = if presentation&.kind != "unavailable"
+        Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row.merge("recovery" => recovery))
+      end
       if daemon_enabled?(project.fetch("name")) &&
          action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
@@ -436,7 +456,7 @@ module Hive
           project_name: project.fetch("name")
         ),
         "retry" => retry_payload(scheduler_disposition),
-        "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
+        "recovery" => recovery,
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
         "dependency" => {
@@ -540,6 +560,10 @@ module Hive
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
       }
+      if observed.fetch("identity", {}).key?("id")
+        expected["id"] = row["id"]
+        actual["id"] = observed.dig("identity", "id")
+      end
       if legacy_controller_payload_mtime_unknown?(observed, row)
         expected.delete("status_payload_mtime")
         actual.delete("status_payload_mtime")
@@ -741,11 +765,24 @@ module Hive
       end
     end
 
-    def recovery_payload(row, disposition, scheduler_freshness)
+    def recovery_payload(row, disposition, scheduler_freshness, project: nil)
+      if project && scheduler_freshness != "current"
+        durable = durable_recovery(project, row)
+        if durable
+          projected = normalized_recovery(durable, row).merge("scheduler_status" => scheduler_freshness)
+          projected["scheduler_hold"] = "daemon dispatch is disabled for this project; operator action is required" if scheduler_freshness == "not_applicable"
+          return projected
+        end
+      end
       canonical = disposition["recovery"] if disposition.is_a?(Hash)
       if canonical.is_a?(Hash)
-        return normalized_recovery(canonical, row) unless
-          canonical["status"] == "queued" && canonical["request_id"].to_s.empty?
+        unless canonical["status"] == "queued" && canonical["request_id"].to_s.empty?
+          projected = normalized_recovery(canonical, row).merge("scheduler_status" => scheduler_freshness)
+          if Hive::Recovery::Presentation::HOLD_DECISIONS.include?(disposition["decision"])
+            projected["scheduler_hold"] = disposition["reason"]
+          end
+          return projected
+        end
       end
 
       return nil unless Hive::Recovery::API.recoverable_marker?(row["marker"])
@@ -811,7 +848,8 @@ module Hive
 
     def recovery_candidate?(project, row, scheduler)
       return true if Hive::Recovery::API.recoverable_marker?(row["marker"])
-      return false unless scheduler.fetch("status") == "current"
+      return true unless row["answers_complete"].nil?
+      return !row["id"].to_s.empty? unless scheduler.fetch("status") == "current"
 
       observed = (@scheduler_task_index || {})[
         [ project.fetch("name"), row.fetch("slug") ]
@@ -836,8 +874,22 @@ module Hive
         "terminal_at" => recovery["terminal_at"],
         "failure_fingerprint" => recovery["failure_fingerprint"],
         "identical_failure_count" => recovery["identical_failure_count"],
-        "escalation_tier" => recovery["escalation_tier"]
+        "escalation_tier" => recovery["escalation_tier"],
+        **recovery.slice("variant", "task_binding", "source_binding", "input_binding",
+          "source_receipt_version", "source_terminal_lease_version", "source_dispatch_revision")
       }
+    end
+
+    def durable_recovery(project, row)
+      @durable_recoveries ||= {}
+      key = [ project.fetch("name"), row["slug"], row["id"], row["stage"] ]
+      return @durable_recoveries[key] if @durable_recoveries.key?(key)
+
+      repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: Hive::RuntimeControlPlane.database)
+      request = repository.observed_recovery(project: key[0], slug: key[1], task_id: key[2], stage: key[3])
+      @durable_recoveries[key] = request && Hive::Daemon::RecoveryCoordinator.new.receipt_for_request(request, now: @now).to_h
+    rescue Hive::RuntimeControlPlane::Error, Hive::Error, SystemCallError, IOError, ArgumentError
+      @durable_recoveries[key] = nil
     end
 
     def provider_hint(row)

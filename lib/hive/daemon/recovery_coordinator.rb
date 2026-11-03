@@ -1835,7 +1835,7 @@ module Hive
       # An explicit, freshness-bound operator retry still releases a park
       # immediately. A validated runtime replacement does the same once per
       # runtime digest through +rearm_changed_runtime+.
-      def expedite_operator_recovery(request, now:)
+      def expedite_operator_recovery(request, now:, requestor: nil)
         recovery = request.recovery || {}
         return request unless recovery["phase"] == "admitted"
         blocked_reason = recovery["blocked_reason"]
@@ -1849,6 +1849,8 @@ module Hive
           request.request_id,
           expected_phase: "admitted",
           changes: changes,
+          requestor: requestor,
+          trigger: requestor ? "recovery" : nil,
           state_home: @state_home
         )
         refreshed = request_queue.fetch(request.request_id, state_home: @state_home)

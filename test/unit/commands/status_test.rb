@@ -1233,6 +1233,8 @@ class CommandsStatusTest < Minitest::Test
       assert_equal "needs_input", brainstorm.fetch("action"),
                    "precondition: the brainstorm row is a needs_input hold"
       assert_equal 1, brainstorm.fetch("unanswered_questions")
+      assert_equal false, brainstorm.fetch("answers_complete")
+      assert_nil execute.fetch("answers_complete")
       assert_equal 0, execute.fetch("unanswered_questions"),
                    "non-brainstorm rows always report 0"
     end

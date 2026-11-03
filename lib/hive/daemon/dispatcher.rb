@@ -899,7 +899,7 @@ module Hive
         items.concat(active.map { |attempt| active_attempt_pending_item(attempt) })
         recovering_slugs = queue.filter_map do |request|
           request.slug.to_s if request.recovery&.fetch("variant", nil) == "failed_edit"
-        end.to_h { |slug| [slug, true] }
+        end.to_h { |slug| [ slug, true ] }
         result.rows.each do |row|
           next if active_slugs.key?(row.slug.to_s) || recovering_slugs.key?(row.slug.to_s)
 
@@ -1023,7 +1023,7 @@ module Hive
           elsif hold == "wait_for_debounce"
             due = current.state_file_mtime + @edit_debounce_sec
             eligibility = request.recovery["next_eligible_at"]
-            due = [due, Time.iso8601(eligibility)].max if eligibility
+            due = [ due, Time.iso8601(eligibility) ].max if eligibility
             return pending_item("waiting_external", id, "edit_debounce",
               next_check_at: due, condition: time_condition(due))
           end
@@ -1454,7 +1454,7 @@ module Hive
         if @has_failed_edit_recoveries
           dispatch_repository.due_failed_edit_requests(now: now,
             state_home: dispatch_request_state_home).each do |request|
-            key = [request.project.to_s, request.slug.to_s]
+            key = [ request.project.to_s, request.slug.to_s ]
             row = @known_rows_by_key[key]
             next unless row && scoped_project?(request.project)
             next if failed_edit_input_hold(row, now: now)
@@ -1604,8 +1604,8 @@ module Hive
 
       def controller_completion_exit_code(entry)
         code = entry.exit_code
-        return code if code.nil? || [Hive::ExitCodes::SUCCESS, Hive::ExitCodes::TASK_IN_ERROR,
-          Hive::ExitCodes::WRONG_STAGE, Hive::ExitCodes::CONFIG, Hive::ExitCodes::TEMPFAIL].include?(code)
+        return code if code.nil? || [ Hive::ExitCodes::SUCCESS, Hive::ExitCodes::TASK_IN_ERROR,
+          Hive::ExitCodes::WRONG_STAGE, Hive::ExitCodes::CONFIG, Hive::ExitCodes::TEMPFAIL ].include?(code)
         return code unless entry.request_id
 
         request = dispatch_repository.fetch(entry.request_id, state_home: dispatch_request_state_home)
@@ -2334,6 +2334,21 @@ module Hive
         end
 
         if (recovery = observe_failed_edit_recovery(row, now: now))
+          if recovery.status == "queued"
+            if row.blocked == true
+              observe_operational_disposition(row,
+                **Policy.operational_disposition(:blocked_on_dependency), recovery: recovery.to_h)
+              return :recovery_owned
+            end
+            gate = capacity_fence || @controller.can_dispatch?(
+              project: row.project, slug: row.slug, now: now, mutate: false,
+              external_global_count: @external_active_agent_total,
+              external_project_count: external_active_agent_count_for(row.project))
+            unless gate == :ok
+              observe_dispatch_outcome(row, gate, recovery: recovery.to_h)
+              return :recovery_owned
+            end
+          end
           observe_operational_disposition(
             row, decision: "recovery_#{recovery.status}", owner: recovery.owner || "hive",
             reason: recovery.reason || "edit-resume recovery owns this task",
@@ -2690,10 +2705,10 @@ module Hive
       end
 
       def process_changed_failed_edit_requests(rows, now:)
-        indexed = rows.to_h { |row| [[row.project.to_s, row.slug.to_s], row] }
+        indexed = rows.to_h { |row| [ [ row.project.to_s, row.slug.to_s ], row ] }
         dispatch_repository.pending(state_home: dispatch_request_state_home).each do |request|
           next unless request.recovery&.fetch("variant", nil) == "failed_edit"
-          next unless indexed.key?([request.project.to_s, request.slug.to_s])
+          next unless indexed.key?([ request.project.to_s, request.slug.to_s ])
 
           process_dispatch_request_iteration(request, now: now, rows: rows, row_index: indexed)
         end
@@ -2782,7 +2797,7 @@ module Hive
         observe_operational_disposition(row, **disposition)
       end
 
-      def observe_dispatch_outcome(row, outcome)
+      def observe_dispatch_outcome(row, outcome, recovery: nil)
         owner, reason = case outcome.to_sym
         when :dispatched
           [ "scheduler", "child dispatch was accepted" ]
@@ -2828,6 +2843,7 @@ module Hive
           [ "unknown", "dispatch outcome is not recognized" ]
         end
         details = {}
+        details[:recovery] = recovery if recovery
         routing = @routing_observations.delete([ row.project.to_s, row.slug.to_s ])
         details[:routing] = routing if routing
         observe_operational_disposition(
@@ -4926,7 +4942,7 @@ module Hive
           failure = envelope["error"].is_a?(Hash) ? envelope["error"] : envelope
           receipt["failure"] = %w[reason provider status_code message].filter_map do |key|
             value = failure[key]
-            [key, value.to_s[0, 512]] if value && !value.to_s.empty?
+            [ key, value.to_s[0, 512] ] if value && !value.to_s.empty?
           end.to_h
         end
         dispatch_repository.record_supervised_edit_terminal!(request_id, receipt: receipt,

@@ -103,7 +103,20 @@ module TaskMutations
     raise Hive::Error, "cannot queue this dispatch: #{e.message}"
   end
 
-  def recover!
+  def recover!(observation_token: nil)
+    if failed_edit_recovery?
+      native = Hive::TaskResolver.new(folder, project_filter: project.name).resolve
+      Hive::OperationalAction.assert_current!(
+        native, project: project.name,
+        action_id: Hive::OperationalAction::RETRY_ACTION_ID,
+        target: "#{project.name}:#{slug}", observation_token: observation_token
+      )
+      return Hive::Recovery::API.recover!(
+        row: Hive::OperationalAction.observed_row(native, project: project.name),
+        project: project.name, requestor: "action", observation_token: observation_token
+      )
+    end
+
     marker = self["marker"]
     marker_name = marker.to_s.downcase
     if marker_name.empty? || %w[none agent_working].include?(marker_name)

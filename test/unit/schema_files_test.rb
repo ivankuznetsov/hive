@@ -37,6 +37,17 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_public_recovery_definitions_match_and_keep_failed_edit_bindings_optional
+    operational = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    act = JSON.parse(File.read(Hive::Schemas.schema_path("hive-act")))
+    definition = operational.dig("$defs", "Recovery")
+    assert_equal definition, act.dig("$defs", "Recovery")
+    %w[variant task_binding source_binding input_binding source_receipt_version source_terminal_lease_version source_dispatch_revision scheduler_status scheduler_hold].each do |key|
+      assert definition.fetch("properties").key?(key), key
+      refute_includes definition.fetch("required"), key
+    end
+  end
+
   def test_dispatch_recovery_variants_include_failed_edits
     schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
     assert_equal %w[marker admission_failure markerless_failure failed_edit],
@@ -687,7 +698,7 @@ class SchemaFilesTest < Minitest::Test
       unanswered_questions: 0,
       next_action: nil
     }
-    producer_keys = Hive::Commands::Status.new.task_payload(row).keys.sort
+    producer_keys = (Hive::Commands::Status.new.task_payload(row).keys - %w[answers_complete recovery scheduler_status]).sort
     schema_task_required = doc.dig("$defs", "Task", "required").sort
     assert_equal producer_keys, schema_task_required,
                  "schema/producer required-key drift in hive-status Task"

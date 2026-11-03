@@ -8,6 +8,7 @@ require "hive/tui/text"
 require "hive/tui/views/format"
 require "hive/tui/views/hyperlink"
 require "hive/terminal_outcome"
+require "hive/recovery/presentation"
 
 module Hive
   module Tui
@@ -257,6 +258,11 @@ module Hive
         # dependency block. Shared by status_label so the blocked and
         # unblocked paths compute the same base label.
         def action_state_label(row)
+          if (presentation = Hive::Recovery::Presentation.for_row(row))
+            return [ presentation.label, Hive::Tui::Text.sanitize(presentation.detail) ]
+              .reject { |part| part.to_s.empty? }.join(": ")
+          end
+
           return admission_error_status(row) if row.action_key.to_s == "admission_error"
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"

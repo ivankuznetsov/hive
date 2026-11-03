@@ -14,7 +14,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   }.freeze
 
   Row = Struct.new(
-    :project, :slug, :folder, :workflow, :stage, :marker, :marker_attrs,
+    :project, :slug, :id, :folder, :workflow, :stage, :marker, :marker_attrs,
     :task_generation, :condition_task_generation, :commit_generation,
     :attempt_id, :status_payload_mtime, :state_file_mtime, :action, :depends_on, :blocked_by,
     :dependency_stage, :unmet_dependencies, :dependency_base_mode, :blocked, :admission_error,
@@ -22,6 +22,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
   )
 
   def row(stage: "4-execute", marker: "waiting", task_generation: "task-generation-1",
+          id: nil,
           slug: "ship-it", marker_attrs: { "marker_id" => "marker-1" },
           status_payload_mtime: nil, state_file_mtime: T0, action: "ready_to_run", depends_on: nil,
           blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
@@ -29,7 +30,7 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
           folder: nil)
     folder ||= "/tmp/#{slug}"
     Row.new(
-      project: "demo", slug: slug, folder: folder,
+      project: "demo", slug: slug, id: id, folder: folder,
       workflow: "coding", stage: stage, marker: marker,
       marker_attrs: marker_attrs,
       task_generation: task_generation, condition_task_generation: "condition-1",
@@ -41,6 +42,28 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
       dependency_base_mode: dependency_base_mode,
       blocked: blocked, admission_error: admission_error
     )
+  end
+
+  def test_failed_edit_receipt_binds_retained_waiting_and_preserves_a_capacity_hold
+    with_tmp_dir do |dir|
+      _store, assembler, reader = build(File.join(dir, "private", "operational-snapshot.json"))
+      observed = row(id: 81, marker: "waiting", marker_attrs: {}, action: "needs_input")
+      binding = { "project" => "demo", "task_id" => "81", "intended_stage" => "4-execute", "task_locator" => "id:81" }
+      receipt = { "variant" => "failed_edit", "status" => "queued", "phase" => "admitted",
+        "request_id" => "failed-edit-recovery", "task_binding" => binding, "owner" => "scheduler" }
+      recoveries = { "coordinator" => { "receipts" => [ { "project" => "demo", "slug" => "ship-it",
+        "stage" => "4-execute", "recovery_variant" => "failed_edit", "recovery_phase" => "admitted", "receipt" => receipt } ] } }
+      assembler.begin_tick(now: T0)
+      assembler.observe(observed, decision: "global_cap", owner: "scheduler", reason: "global dispatch capacity is exhausted")
+      assembler.complete(rows: [ observed ], controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1)
+      disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+      assert_equal "global_cap", disposition["decision"]
+      assert_equal receipt, disposition["recovery"]
+      observed.id = 82
+      assembler.begin_tick(now: T0 + 3)
+      assembler.complete(rows: [ observed ], controller: {}, queue: {}, recoveries: recoveries, now: T0 + 4)
+      refute reader.read(now: T0 + 5).dig("tasks", 0, "disposition").key?("recovery")
+    end
   end
 
   def test_snapshot_serializes_dependency_lists_and_full_blocker_records_natively

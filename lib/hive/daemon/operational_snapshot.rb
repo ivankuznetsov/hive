@@ -7,6 +7,7 @@ require "hive/attempts/storage_status"
 require "hive/lock"
 require "hive/paths"
 require "hive/recovery"
+require "hive/recovery/presentation"
 require "hive/runtime_control_plane/operational_repository"
 require "hive/runtime_identity"
 
@@ -345,6 +346,7 @@ module Hive
             "identity" => {
               "project" => value(row, :project).to_s,
               "slug" => value(row, :slug).to_s,
+              "id" => value(row, :id),
               "folder" => value(row, :folder).to_s
             },
             "workflow" => nullable_string(value(row, :workflow)),
@@ -405,6 +407,12 @@ module Hive
             next unless receipt.is_a?(Hash)
 
             status = receipt["status"].to_s
+            previous = task["disposition"]
+            if %w[queued cooldown].include?(status) && previous.is_a?(Hash) &&
+                Hive::Recovery::Presentation::HOLD_DECISIONS.include?(previous["decision"])
+              task["disposition"] = previous.merge("recovery" => receipt)
+              next
+            end
             task["disposition"] = {
               "status" => "available",
               "decision" => {
@@ -440,7 +448,15 @@ module Hive
 
           phase = identity["recovery_phase"].to_s
           markerless = identity["recovery_variant"].to_s == "admission_failure"
-          if markerless
+          if identity["recovery_variant"].to_s == "failed_edit"
+            binding = identity.dig("receipt", "task_binding")
+            task_id = task.dig("identity", "id").to_s
+            return if task_id.empty? || binding != {
+              "project" => task.dig("identity", "project"), "task_id" => task_id,
+              "intended_stage" => task["stage"], "task_locator" => "id:#{task_id}"
+            }
+            return if Hive::Recovery.recoverable_marker?(task["marker"])
+          elsif markerless
             expected_generation = identity["task_generation"].to_s
             current_generation = task["task_generation"].to_s
             return if !expected_generation.empty? &&

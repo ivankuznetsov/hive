@@ -3,8 +3,10 @@ require "hive/markers"
 require "hive/task_action"
 require "hive/tui/snapshot"
 require "hive/tui/messages"
+require "hive/tui/text"
 require "hive/tui/red_status_detail_keys"
 require "hive/workflows"
+require "hive/recovery/presentation"
 
 module Hive
   module Tui
@@ -154,6 +156,13 @@ module Hive
       end
 
       def verb_message(row, key)
+        if (presentation = Hive::Recovery::Presentation.for_row(row))
+          if key == "r" && failed_edit_retry?(row, presentation)
+            return Messages::RecoverError.new(row: row)
+          end
+          return presentation_message(presentation)
+        end
+
         # Verb-on-agent-running refusal pre-empts ConcurrentRunError
         # from `Hive::Lock`; the stale-pid escape hatch only fires when
         # the lock is *provably* dead (claude_pid_alive == false). Nil
@@ -193,6 +202,16 @@ module Hive
       end
 
       def enter_message(row)
+        if (presentation = Hive::Recovery::Presentation.for_row(row))
+          case presentation.kind
+          when "input" then return needs_input_message(row)
+          when "running" then return Messages::OpenLogTail.new(row: row)
+          when "repair"
+            return Messages::RecoverError.new(row: row) if failed_edit_parked?(row)
+          end
+          return presentation_message(presentation)
+        end
+
         return Messages::OpenSummary.new(row: row) if finalize_complete_row?(row)
         return Messages::OpenRedStatusDetail.new(row: row) if red_detail_row?(row)
 
@@ -203,6 +222,22 @@ module Hive
         when "needs_input" then needs_input_message(row)
         else enter_fallback_message(row)
         end
+      end
+
+      def presentation_message(presentation)
+        text = [ presentation.label, presentation.detail ].compact.join(": ")
+        Messages::Flash.new(text: Hive::Tui::Text.sanitize(text))
+      end
+
+      def failed_edit_parked?(row)
+        row.recovery.is_a?(Hash) && row.recovery["variant"] == "failed_edit" &&
+          row.recovery["escalation_tier"] == "parked"
+      end
+
+      def failed_edit_retry?(row, presentation)
+        row.recovery.is_a?(Hash) && row.recovery["variant"] == "failed_edit" &&
+          (%w[cooldown queued].include?(presentation.kind) ||
+            (presentation.kind == "repair" && failed_edit_parked?(row)))
       end
 
       # The "completed finalize" row routes Enter to the final-summary

@@ -154,7 +154,10 @@ module Hive
         :implementation_identity,
         :plan_review,
         :auto_residue,
-        :unanswered_questions
+        :unanswered_questions,
+        :answers_complete,
+        :scheduler_status,
+        :recovery
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
@@ -171,6 +174,8 @@ module Hive
         # emit the integer explicitly.
         # outcomes defaults to [] for pre-human-stage payloads and factories;
         # current status payloads always emit the descriptor-derived array.
+        # Recovery, answer completeness and scheduler freshness retain status evidence;
+        # nil means the older payload supplied no observation.
         def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
                        condition_task_generation: nil, commit_generation: nil,
@@ -186,7 +191,7 @@ module Hive
                        blocked_by: nil, dependency_stage: nil,
                        unmet_dependencies: [], dependency_base_mode: "default",
                        blocked: false, admission_error: nil, task_history_invalid: false,
-                       held: nil, **rest)
+                       held: nil, answers_complete: nil, scheduler_status: nil, recovery: nil, **rest)
           super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
@@ -225,6 +230,9 @@ module Hive
                 plan_review: plan_review,
                 auto_residue: auto_residue,
                 unanswered_questions: unanswered_questions,
+                answers_complete: answers_complete,
+                scheduler_status: scheduler_status,
+                recovery: recovery,
                 outcomes: outcomes, **rest)
         end
       end
@@ -356,7 +364,10 @@ module Hive
           implementation_identity: payload["implementation_identity"],
           plan_review: payload["plan_review"],
           auto_residue: payload["auto_residue"],
-          unanswered_questions: payload["unanswered_questions"].to_i
+          unanswered_questions: payload["unanswered_questions"].to_i,
+          answers_complete: payload["answers_complete"],
+          scheduler_status: payload["scheduler_status"],
+          recovery: payload["recovery"]
         ).freeze
       end
 

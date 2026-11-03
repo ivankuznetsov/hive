@@ -98,6 +98,44 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_active_publication_attaches_canonical_recovery_before_transform_once_per_publication
+    with_direct_project do |_project, hive_state|
+      folder = write_task(hive_state, "2-brainstorm", "failed-edit-261103-abcd", marker: "WAITING", id: 1)
+      recovery = {
+        "variant" => "failed_edit", "status" => "cooldown", "reason" => "exit_code",
+        "next_eligible_at" => "2026-11-03T12:01:00Z", "scheduler_status" => "unavailable"
+      }
+      overlay_calls = []
+      producer = Hive::Commands::Status.new
+      producer.define_singleton_method(:with_operational_recoveries) do |payload, **|
+        overlay_calls << payload
+        payload.merge("projects" => payload.fetch("projects").map do |project|
+          project.merge("tasks" => project.fetch("tasks").map do |task|
+            task.merge("recovery" => recovery, "answers_complete" => true)
+          end)
+        end)
+      end
+      transformed = []
+      source = Hive::Tui::StateSource.new(payload_transform: ->(payload) {
+        transformed << payload.dig("projects", 0, "tasks", 0, "recovery")
+        payload
+      })
+
+      with_replaced_singleton_method(Hive::Commands::Status, :new, ->(**) { producer }) do
+        snapshot = source.refresh_now
+        assert_equal recovery, snapshot.rows.first.recovery
+        assert_equal true, snapshot.rows.first.answers_complete
+        assert_equal folder, snapshot.rows.first.folder
+        source.refresh_now
+      end
+
+      assert_equal [ recovery ], transformed
+      assert_equal 1, overlay_calls.length
+    ensure
+      source&.stop
+    end
+  end
+
   def test_web_source_retains_compact_reviews_while_native_status_keeps_route_history
     with_direct_project do |project, hive_state|
       write_task(hive_state, "1-inbox", "active-task-260828-abcd", marker: "WAITING", id: 1)

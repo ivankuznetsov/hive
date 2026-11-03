@@ -77,7 +77,7 @@ module Hive
       def validate_document!(document)
         if document.is_a?(Hash) && document["schema"] == "hive-stage-result"
           unless document.keys.sort == %w[accepted handled output_digest schema].sort &&
-                 [true, false].include?(document["accepted"]) && document["handled"] == true &&
+                 [ true, false ].include?(document["accepted"]) && document["handled"] == true &&
                  document["output_digest"].to_s.match?(/\A[0-9a-f]{64}\z/)
             raise Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic, "invalid stage result"
           end

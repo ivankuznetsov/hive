@@ -11,6 +11,8 @@ require "hive/task_workspace/publication"
 require "hive/task_workspace/correlated_log"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/output_reference"
+require "hive/operational_action"
+require "hive/recovery/presentation"
 
 class Task
   include TaskMutations
@@ -373,7 +375,7 @@ class Task
   end
 
   def recovery_action?
-    RECOVERY_ACTIONS.include?(self["action"].to_s)
+    failed_edit_recovery? || RECOVERY_ACTIONS.include?(self["action"].to_s)
   end
 
   def recovery
@@ -386,11 +388,37 @@ class Task
   end
 
   def recovery_action_enabled?
+    return recovery_action_descriptor.present? if failed_edit_recovery?
+
     recovery_action? && recovery.nil? && !recovery_intervention_required?
+  end
+
+  def recovery_presentation(fresh: true)
+    return nil unless failed_edit_recovery? || !self["answers_complete"].nil? ||
+                      self["unanswered_questions"].to_i.positive?
+
+    row = @attributes
+    unless fresh
+      row = row.merge("scheduler_status" => "unavailable")
+      row = row.merge("recovery" => recovery.merge("scheduler_status" => "unavailable")) if recovery
+    end
+    Hive::Recovery::Presentation.for_row(row)
+  end
+
+  def failed_edit_recovery?
+    recovery&.dig("variant") == "failed_edit"
+  end
+
+  def recovery_action_descriptor
+    return nil unless failed_edit_recovery?
+
+    descriptor = Hive::OperationalAction.descriptor(project: project.name, row: @attributes)
+    descriptor if descriptor&.dig("action_id") == Hive::OperationalAction::RETRY_ACTION_ID
   end
 
   def recovery_primary_label
     return unless recovery
+    return recovery_presentation.label if failed_edit_recovery? && recovery_presentation
 
     status = recovery["status"].to_s
     return recovery_terminal_success? ? "Completed" : "Failed" if status == "terminal"
@@ -404,8 +432,10 @@ class Task
     context = []
     context << "request #{recovery['request_id']}" if recovery["request_id"].present?
     context << "attempt #{recovery['attempt_id']}" if recovery["attempt_id"].present?
+    source_attempt = recovery.dig("source_binding", "attempt_id")
+    context << "failed attempt #{source_attempt}" if source_attempt.present?
     context << "eligible #{recovery['next_eligible_at']}" if
-      recovery["status"] == "cooldown" && recovery["next_eligible_at"].present?
+      %w[cooldown queued].include?(recovery["status"]) && recovery["next_eligible_at"].present?
     context << "origin #{recovery['failure_origin']}" if recovery["failure_origin"].present?
     context << recovery["terminal_outcome"].to_s.tr("_", " ") if
       recovery["status"] == "terminal" && recovery["terminal_outcome"].present?

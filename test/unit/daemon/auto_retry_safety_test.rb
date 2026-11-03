@@ -166,7 +166,7 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "brainstorm.md"), "## Round 1\n### Q1.\nWhat?\n### A1.\nHandwritten answer\n")
       waiting = row(folder: dir, stage: "2-brainstorm", marker: "waiting")
-      assert_equal [true, "brainstorm WAITING input is retained"], Hive::Daemon::AutoRetrySafety.safe_to_retry?(waiting)
+      assert_equal [ true, "brainstorm WAITING input is retained" ], Hive::Daemon::AutoRetrySafety.safe_to_retry?(waiting)
       %w[error none].each do |marker|
         safe, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-brainstorm", marker: marker))
         refute safe

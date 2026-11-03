@@ -75,6 +75,54 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_match(/Ready to plan.*owner=codex\/gpt-5\.6-s…/, out)
   end
 
+  def test_status_uses_shared_failed_edit_dispositions_and_keeps_recovery_detail
+    row = Hive::Tui::Snapshot.build_row(make_task(
+      slug: "failed-edit", action: "needs_input", action_label: "Needs your input",
+      marker: "waiting"
+    ).merge("answers_complete" => true, "recovery" => {
+      "variant" => "failed_edit", "status" => "cooldown", "reason" => "exit_code",
+      "next_eligible_at" => "2026-05-01T12:01:00Z", "scheduler_status" => "current"
+    }), "hive")
+    label = Hive::Tui::Views::TasksPane.status_label(row)
+    assert_includes label, "Needs recovery"
+    assert_includes label, "2026-05-01T12:01:00Z"
+    refute_includes label, "Needs your input"
+
+    missing = row.with(answers_complete: false)
+    assert_includes Hive::Tui::Views::TasksPane.status_label(missing), "Answer questions"
+    assert_includes Hive::Tui::Views::TasksPane.status_label(missing), "exit_code"
+    parked = missing.with(recovery: row.recovery.merge(
+      "status" => "blocked", "reason" => "deterministic_failure", "escalation_tier" => "parked",
+      "remediation" => "edits do not release this park; use the current workflow.retry action"
+    ))
+    label = Hive::Tui::Views::TasksPane.status_label(parked)
+    assert_includes label, "Needs execution repair"
+    assert_includes label, "workflow.retry"
+    refute_includes label, "Answer questions"
+    unavailable = parked.with(recovery: parked.recovery.merge("scheduler_status" => "unavailable"))
+    assert_includes Hive::Tui::Views::TasksPane.status_label(unavailable), "Status unavailable"
+    queued = row.with(recovery: row.recovery.merge("status" => "queued", "next_eligible_at" => nil))
+    assert_includes Hive::Tui::Views::TasksPane.status_label(queued), "queued retry time unavailable"
+    running = row.with(recovery: row.recovery.merge("status" => "running"))
+    assert_includes Hive::Tui::Views::TasksPane.status_label(running), "Agent running"
+    no_evidence = Hive::Tui::Views::TasksPane.status_label(row.with(recovery: nil))
+    refute_includes no_evidence, "Answer questions"
+    refute_includes no_evidence, "Needs recovery"
+  end
+
+  def test_unavailable_answer_state_without_failure_evidence_precedes_input
+    [ true, false ].each do |complete|
+      row = Hive::Tui::Snapshot.build_row(make_task(
+        slug: "unobserved", action: "needs_input", action_label: "Needs your input", marker: "waiting"
+      ).merge("answers_complete" => complete, "scheduler_status" => "unavailable"), "hive")
+
+      label = Hive::Tui::Views::TasksPane.status_label(row)
+      assert_includes label, "Status unavailable"
+      refute_includes label, "Answer questions"
+      refute_includes label, "Needs recovery"
+    end
+  end
+
   def make_snapshot(projects)
     Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01T00:00:00Z",

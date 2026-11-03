@@ -135,6 +135,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
           assert_equal "stale_observation", stale.reason
           token = coordinator.observation_token_for(token_row)
           released = coordinator.request_failed_edit(row: token_row, requestor: "action", observation_token: token, now: NOW + 25_001)
+          explicit_request = Q.fetch(released.request_id, state_home: dir)
+          assert_equal "action", explicit_request.requestor
+          assert_equal "recovery", explicit_request.trigger
           assert_equal "queued", released.status
           assert_equal 1, released.retry_count
           break
@@ -2664,7 +2667,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         project: row.project, task_slug: task.slug, intended_stage: row.stage,
         task_generation: generation.task_generation, ownership_generation: generation.ownership_generation,
         task_input_epoch: 0, progress_token: generation.progress_token, provider: "codex",
-        worker_argv: ["hive", "run", task.slug], claim_capability_digest: "a" * 64,
+        worker_argv: [ "hive", "run", task.slug ], claim_capability_digest: "a" * 64,
         starting_revision: "b" * 40, retry_charge: 0, inherited_outputs: [], now: NOW - 5, launch_timeout_sec: 30
       )
       receipt = { "receipt_version" => 2, "terminal_lease_version" => 1,

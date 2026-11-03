@@ -350,19 +350,21 @@ module Hive
         )
         recoveries = Array(recovery_rows).to_h do |task|
           identity = task["identity"] || {}
-          [ [ identity["project"].to_s, identity["slug"].to_s ], task["recovery"] ]
+          [ [ identity["project"].to_s, identity["slug"].to_s ], task ]
         end
         changed = false
         projects_with_recoveries = Array(payload["projects"]).map do |project|
           project_changed = false
           tasks_with_recoveries = Array(project["tasks"]).map do |task|
-            recovery = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
-            next task unless recovery.is_a?(Hash)
-            next task if task["recovery"] == recovery
+            canonical = recoveries[[ project["name"].to_s, task["slug"].to_s ]]
+            next task unless canonical
+
+            metadata = canonical.slice("recovery", "scheduler_status")
+            next task if metadata.all? { |key, value| task[key] == value }
 
             changed = true
             project_changed = true
-            task.merge("recovery" => recovery)
+            task.merge(metadata)
           end
           project_changed ? project.merge("tasks" => tasks_with_recoveries) : project
         end

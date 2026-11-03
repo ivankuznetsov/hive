@@ -35,6 +35,49 @@ class OperationalActionTest < Minitest::Test
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)
   end
 
+  def test_waiting_failed_edit_retry_rechecks_durable_source_and_input_binding
+    with_tmp_global_config do
+      with_tmp_dir do |root|
+        folder = File.join(root, ".hive-state", "stages", "2-brainstorm", "failed-edit-261103-abcd")
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(root, ".hive-state", "config.yml"), Hive::Config::DEFAULTS.to_yaml)
+        File.write(File.join(folder, "brainstorm.md"), "## Round 1\n### Q1. What?\n### A1.\nLatest answer\n<!-- WAITING -->\n")
+        Hive::TaskMeta.write(folder, id: 82, slug: File.basename(folder), display_name: nil, workflow: "coding")
+        task = Hive::Task.new(folder)
+        Hive::TaskProjection::Reader.new(task_folder: folder).read(marker: Hive::Markers.current(task.state_file))
+        database = Hive::RuntimeControlPlane.database.migrate!
+        register_runtime_project(database: database, name: "demo", path: root)
+        repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+        binding = { "project" => "demo", "task_id" => "82", "intended_stage" => "2-brainstorm", "task_locator" => "id:82" }
+        source = binding.merge("attempt_id" => "failed-source", "request_id" => "source-request")
+        request_id = repository.write_request!(project: "demo", slug: task.slug, task_id: "82",
+          argv: [ "hive", "brainstorm", task.slug ], expected_stage: "2-brainstorm", recovery: {
+            "variant" => "failed_edit", "phase" => "admitted", "task_binding" => binding,
+            "source_binding" => source, "input_binding" => { "task_input_epoch" => 0, "progress_token" => "a" * 64 },
+            "owner" => "operator", "blocked_reason" => "deterministic_failure", "next_eligible_at" => Time.now.utc.iso8601(6)
+          })
+        row = Hive::OperationalAction.observed_row(task, project: "demo")
+        assert_equal source, row.dig("recovery", "source_binding")
+        action = Hive::OperationalAction.descriptor(project: "demo", row: row)
+        assert_equal "workflow.retry", action["action_id"]
+        assert_equal action, Hive::OperationalAction.assert_current!(task, project: "demo",
+          action_id: action["action_id"], target: action["target"], observation_token: action["observation_token"])
+        repository.update_recovery!(request_id, expected_phase: "admitted", changes: {
+          "input_binding" => { "task_input_epoch" => 0, "progress_token" => "b" * 64 }
+        })
+        assert_raises(Hive::StaleOperationalObservation) do
+          Hive::OperationalAction.assert_current!(task, project: "demo", action_id: action["action_id"],
+            target: action["target"], observation_token: action["observation_token"])
+        end
+        row["recovery"]["scheduler_status"] = "unavailable"
+        assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+        row["recovery"]["scheduler_status"] = "current"
+        row["id"] = 83
+        assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+      end
+    end
+  end
+
   def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token
     row = {
       "slug" => "delivered-task",

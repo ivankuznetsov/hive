@@ -16,8 +16,8 @@
       <span class="status-dot status-dot-waiting"></span>
       <span>
         <strong>Auto-advance is paused.</strong>
-        The daemon is not running. Run <code>hive daemon start --detach</code>;
-        this task will continue automatically when it is ready.
+        The daemon is not running. Run <code>hive daemon start --detach</code>
+        to restore automatic workflow processing.
       </span>
     </div>
   <% end %>
@@ -86,19 +86,5 @@
               data: { turbo_submits_with: "Sending…" } %></p>
       <% end %>
     </details>
-  <% elsif @task["stage"] == "2-brainstorm" && @task["marker"].to_s == "waiting" && !@task.passable? %>
-    <%# Post-answer limbo: everything answered, daemon not done yet. The
-        page morph-refreshes on every status push, so the banner hands off
-        to the next round's questions, a running dot, or a passable gate
-        on its own. %>
-    <div class="state-banner">
-      <span class="status-dot status-dot-waiting"></span>
-      <% if @task["claude_pid_alive"] %>
-        The agent is working — this page follows along automatically.
-      <% else %>
-        All questions answered — waiting for the daemon to resume this stage.
-        This page updates automatically.
-      <% end %>
-    </div>
   <% end %>
 </section>

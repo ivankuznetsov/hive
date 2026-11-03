@@ -311,6 +311,9 @@
           ]
         },
         "unanswered_questions": { "type": "integer", "minimum": 0 },
+        "answers_complete": { "type": ["boolean", "null"] },
+        "scheduler_status": { "enum": ["not_applicable", "unavailable", "current", "stale", "invalid", null] },
+        "recovery": { "type": ["object", "null"] },
         "action": {
           "type": "string",
           "enum": [

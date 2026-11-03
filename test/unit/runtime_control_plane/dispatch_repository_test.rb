@@ -20,6 +20,23 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
 
   NOW = Time.utc(2026, 8, 29, 12)
 
+  def test_observed_recovery_is_read_only_and_requires_the_current_task_incarnation_and_stage
+    with_repository do |repository|
+      binding = { "project" => "hive", "task_id" => "task-1", "intended_stage" => "2-fix", "task_locator" => "id:task-1" }
+      id = repository.write_request!(project: "hive", slug: "sqlite-cutover",
+        argv: %w[hive run sqlite-cutover], task_id: "task-1", expected_stage: "2-fix",
+        recovery: { "variant" => "failed_edit", "phase" => "admitted", "task_binding" => binding }, now: NOW)
+      before = repository.database.operational_read { |db| db[:dispatch_requests].all }
+      reader = Hive::RuntimeControlPlane::DispatchRepository.new(database: repository.database)
+      repository.database.define_singleton_method(:read) { |*| raise "operational observation must use the validated read-only path" }
+        assert_equal id, reader.observed_recovery(project: "hive", slug: "sqlite-cutover", stage: "2-fix", task_id: "task-1").request_id
+        assert_nil reader.observed_recovery(project: "hive", slug: "sqlite-cutover", stage: "2-fix", task_id: "replacement")
+        assert_nil reader.observed_recovery(project: "hive", slug: "sqlite-cutover", stage: "3-review", task_id: "task-1")
+        assert_nil reader.observed_recovery(project: "hive", slug: "sqlite-cutover", stage: "2-fix", task_id: nil)
+      assert_equal before, repository.database.operational_read { |db| db[:dispatch_requests].all }
+    end
+  end
+
   def test_supervised_edit_binding_terminal_cas_and_recovery_retention_round_trip
     with_repository do |repository|
       register_task(repository.database, task_id: "task-1")

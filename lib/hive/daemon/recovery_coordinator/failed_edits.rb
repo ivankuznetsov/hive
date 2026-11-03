@@ -43,7 +43,7 @@ module Hive
             if self.class::OPERATOR_REQUESTORS.include?(requestor.to_s)
               safe, reason = @safety.call(safety_observation(row, locked, marker))
               return block_request(existing, "safety_blocked", owner: "operator", remediation: reason) unless safe == true
-              existing = expedite_operator_recovery(existing, now: now)
+              existing = expedite_operator_recovery(existing, now: now, requestor: "action")
             end
             return receipt_for_request(existing, now: now)
           end
@@ -132,8 +132,8 @@ module Hive
       end
 
       def failed_edit_token(base, recovery)
-        Digest::SHA256.hexdigest(JSON.generate([base, recovery.slice(
-          "request_id", "source_binding", "input_binding", "reason", "next_eligible_at")]))
+        Digest::SHA256.hexdigest(JSON.generate([ base, recovery.slice(
+          "request_id", "source_binding", "input_binding", "reason", "next_eligible_at") ]))
       end
 
       def failed_edit_observation_token(row, task, marker, request)

@@ -224,6 +224,59 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_failed_edit_workspace_uses_canonical_recovery_and_input_precedence
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes.merge!("workflow" => "coding", "stage" => "2-brainstorm", "marker" => "waiting",
+        "answers_complete" => true, "recovery_visible" => true, "recovery_enabled" => true,
+        "recovery" => { "variant" => "failed_edit", "status" => "cooldown", "owner" => "scheduler",
+          "reason" => "spawn failed", "scheduler_status" => "current",
+          "next_eligible_at" => "2026-11-03T12:05:00Z" })
+
+      semantic = builder(native, task, questions: 0).semantic
+      assert_equal "Needs recovery", semantic.dig("headline", "label")
+      assert_includes semantic.dig("headline", "explanation"), "2026-11-03T12:05:00Z"
+      refute semantic.dig("action", "enabled")
+      assert_equal "wait", builder(native, task, questions: 0).page.dig("decision", "posture")
+
+      attributes["answers_complete"] = false
+      attributes["unanswered_questions"] = 1
+      assert_equal "Answer questions", builder(native, task, questions: 1).semantic.dig("headline", "label")
+      assert_equal "answer", builder(native, task, questions: 1).page.dig("decision", "posture")
+
+      attributes["recovery"].merge!("status" => "blocked", "escalation_tier" => "parked",
+        "owner" => "operator", "reason" => "deterministic_failure",
+        "remediation" => "edits do not release this park; use the current workflow.retry action")
+      parked = builder(native, task, questions: 1).semantic
+      assert_equal "Needs execution repair", parked.dig("headline", "label")
+      assert_includes parked.dig("headline", "explanation"), "edits do not release this park"
+      assert_equal "workflow.retry", parked.dig("action", "kind")
+      assert parked.dig("action", "enabled")
+      assert_equal "retry", builder(native, task, questions: 1).page.dig("decision", "posture")
+
+      attributes["recovery"]["scheduler_status"] = "unavailable"
+      unavailable = builder(native, task, questions: 1).semantic
+      assert_equal "Status unavailable", unavailable.dig("headline", "label")
+      assert_includes unavailable.dig("headline", "explanation"), "deterministic_failure"
+      refute unavailable.dig("action", "enabled")
+      assert_equal "investigate", builder(native, task, questions: 1).page.dig("decision", "posture")
+    end
+  end
+
+  def test_completed_brainstorm_without_failure_has_no_inferred_input_action
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes.merge!("workflow" => "coding", "stage" => "2-brainstorm", "marker" => "waiting",
+        "answers_complete" => true)
+
+      semantic = builder(native, task, questions: 0).semantic
+      assert_equal "Waiting", semantic.dig("headline", "label")
+      refute semantic.dig("action", "enabled")
+      assert_nil semantic.dig("action", "kind")
+      assert_equal "wait", builder(native, task, questions: 0).page.dig("decision", "posture")
+    end
+  end
+
   def test_semantic_v2_keeps_action_authority_independent_from_usage_and_omits_coding_audit_noise
     with_fixture do |native, task|
       task.instance_variable_get(:@attributes)["worktree_path"] = "/derived/not-observed"

@@ -7,6 +7,7 @@
   <% if recovery_visible %>
     <%= button_to "Retry stage",
           task_recover_path(task.project.name, task.slug, source: @task_source),
+          params: task.recovery_action_descriptor&.slice("observation_token"),
           disabled: !mutations_enabled || !recovery_enabled,
           aria: { disabled: (!mutations_enabled || !recovery_enabled).to_s },
           data: { turbo_submits_with: "Checking…" } %>

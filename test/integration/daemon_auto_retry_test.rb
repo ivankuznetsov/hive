@@ -350,7 +350,7 @@ class DaemonFailedEditRetryTest < Minitest::Test
     def initialize = @launched = []
     def preflight! = true
     def launch(record, claim_capability:)
-      @launched << [record, claim_capability]
+      @launched << [ record, claim_capability ]
       { "claimed" => true }
     end
   end
@@ -420,7 +420,7 @@ class DaemonFailedEditRetryTest < Minitest::Test
       suggested_command: "hive #{@stage == '2-brainstorm' ? 'brainstorm' : 'review'} #{@task.slug} --project #{@project} --from #{@stage}"
     )
     @status.result = Hive::Daemon::StatusConsumer::Result.new(ok: true,
-      rows: [@row], projects: [Hive::Daemon::StatusConsumer::ProjectInfo.new(name: @project, legacy_stage_dirs: [])])
+      rows: [ @row ], projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: @project, legacy_stage_dirs: []) ])
   end
 
   def new_daemon
@@ -537,7 +537,7 @@ class DaemonFailedEditRetryTest < Minitest::Test
       assert_equal NOW - 60, @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @task.slug),
         "failed completion must not consume the concurrent edit"
       deadline = Time.iso8601(request.recovery.fetch("next_eligible_at"))
-      tick([deadline, NOW + 29].max)
+      tick([ deadline, NOW + 29 ].max)
       assert_equal 2, @launcher.launched.length, @logger.events.inspect
       assert_equal Hive::Attempts::Generation.artifact_token(@task), @launcher.launched.last.first["progress_token"]
       assert_includes File.read(@task.state_file), "Edited while child was running"
@@ -549,7 +549,7 @@ class DaemonFailedEditRetryTest < Minitest::Test
       tick(NOW + 1)
       deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
       @queue.write_request!(project: @project, slug: @task.slug,
-        argv: ["hive", "brainstorm", @task.slug, "--project", @project, "--from", @stage],
+        argv: [ "hive", "brainstorm", @task.slug, "--project", @project, "--from", @stage ],
         requestor: "web", request_id: "ordinary-resume", now: NOW + 2)
       tick(deadline - 1)
       assert_equal 1, @launcher.launched.length
@@ -691,11 +691,10 @@ class DaemonFailedEditRetryTest < Minitest::Test
       deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
       assert_empty @daemon.send(:cheap_probe, now: deadline - 1).task_keys
       due = @daemon.send(:cheap_probe, now: deadline)
-      assert_equal [[@project, @task.slug]], due.task_keys
+      assert_equal [ [ @project, @task.slug ] ], due.task_keys
       @now = deadline
       @daemon.tick_changed(task_keys: due.task_keys, now: deadline)
       assert_equal 2, @launcher.launched.length
     end
   end
-
 end

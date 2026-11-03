@@ -18,6 +18,7 @@ class TaskDisplay
 
   def detail
     return nil if state == "completed"
+    return recovery_presentation.detail if recovery_presentation
     return "Live status could not be confirmed. Actions are paused until it refreshes." unless @fresh
     if task["action"] == "admission_error"
       return task.dig("admission_error", "safe_correction").presence || "Repair the task dependency before it can continue."
@@ -40,12 +41,39 @@ class TaskDisplay
 
   private
 
+  def recovery_presentation
+    return @recovery_presentation if defined?(@recovery_presentation)
+
+    @recovery_presentation = task.recovery_presentation(fresh: @fresh)
+  end
+
+  def recovery_status
+    presentation = recovery_presentation
+    state = case presentation.kind
+    when "unavailable" then "unknown"
+    when "repair", "input" then "attention"
+    when "running" then "running"
+    else "waiting"
+    end
+    label = if presentation.kind == "running"
+      "Running"
+    elsif !task.failed_edit_recovery? && task.recovery
+      { "queued" => "Retry queued", "cooldown" => "Waiting to retry", "repair" => "Retry blocked" }
+        .fetch(presentation.kind, presentation.label)
+    else
+      presentation.label
+    end
+    [ state, label ]
+  end
+
   def status
     @status ||= begin
       action = task["action"].to_s
       if completed?
         reason = task.dig("closure", "reason")
         [ "completed", reason.present? ? reason.humanize : (@archived ? "Archived" : "Completed") ]
+      elsif recovery_presentation
+        recovery_status
       elsif !@fresh
         [ "unknown", "Status unavailable" ]
       elsif task["action_label"] == Hive::TaskAction::ACTIONS.fetch(:patrol_fix_rejected).fetch(:label)

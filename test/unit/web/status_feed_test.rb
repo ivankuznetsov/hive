@@ -596,6 +596,28 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_snapshot_keeps_canonical_scheduler_freshness_without_inventing_recovery
+    base = { "projects" => [ { "name" => "demo", "tasks" => [
+      { "slug" => "consumed", "answers_complete" => true,
+        "recovery" => { "variant" => "failed_edit", "status" => "queued" } }
+    ] } ] }
+    status = CountingStatus.new([ base ])
+    status.define_singleton_method(:operational_recoveries) do |*, **|
+      [ { "identity" => { "project" => "demo", "slug" => "consumed" },
+         "recovery" => nil, "scheduler_status" => "unavailable" } ]
+    end
+    feed = Hive::Web::StatusFeed.new(status_command: status)
+
+    row = feed.snapshot.dig("projects", 0, "tasks", 0)
+
+    assert_equal "unavailable", row["scheduler_status"]
+    assert_nil row["recovery"], "an authoritative absence must clear a cached failed recovery"
+    assert_equal "queued", base.dig("projects", 0, "tasks", 0, "recovery", "status")
+    assert_equal 1, status.calls
+  ensure
+    feed&.stop
+  end
+
   def test_snapshot_falls_back_to_base_status_when_recovery_overlay_fails
     with_tmp_global_config do
       base = {

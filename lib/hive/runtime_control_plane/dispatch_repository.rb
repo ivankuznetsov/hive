@@ -348,11 +348,34 @@ module Hive
         end
       end
 
+      # Status readers retain durable intent when the daemon observation is
+      # absent or stale. This lookup never opens a writer connection and never
+      # adopts a failure: only coordinator-owned, incarnation-bound rows qualify.
+      def observed_recovery(project:, slug:, stage:, task_id:)
+        return nil if task_id.to_s.empty?
+
+        binding = { "project" => project.to_s, "task_id" => task_id.to_s,
+          "intended_stage" => stage.to_s, "task_locator" => "id:#{task_id}" }
+        database.operational_read do |db|
+          project_id = db[:projects].where(name: project.to_s).get(:project_id)
+          db[:dispatch_requests].where(project_id: project_id, task_slug: slug.to_s,
+            intended_stage: stage.to_s, recovery_request: 1)
+            .reverse_order(:updated_at, :request_id).each do |row|
+            request = request_from(row)
+            next unless request.task_id.to_s == task_id.to_s &&
+              request.recovery&.fetch("task_binding", nil) == binding
+
+            return request
+          end
+          nil
+        end
+      end
+
       # Replace queued input identity atomically. A payload update alone would
       # leave the SQL generation fence bound to the previous answer bytes.
       def replace_failed_edit!(request, recovery:, task_generation:, now:)
         replacement_id = "failed-edit-" + Digest::SHA256.hexdigest(Codec.dump_json(
-          [request.project, request.slug, recovery["source_binding"], recovery["input_binding"]]
+          [ request.project, request.slug, recovery["source_binding"], recovery["input_binding"] ]
         ))[0, 48]
         database.transaction do |db|
           current = db[:dispatch_requests].where(request_id: request.request_id,
@@ -385,8 +408,9 @@ module Hive
         end.max_by { |request| [ request.created_at, request.request_id ] }
       end
 
-      def update_recovery!(request_id, expected_phase:, changes:, **)
-        update_recovery(request_id, expected_phase, changes, state: nil)
+      def update_recovery!(request_id, expected_phase:, changes:, requestor: nil, trigger: nil, **)
+        update_recovery(request_id, expected_phase, changes, state: nil,
+          requestor: requestor, trigger: trigger)
       end
 
       def complete_delivery(request_id, now: @clock.call, **)
@@ -955,13 +979,16 @@ module Hive
         result.nil? ? true : result
       end
 
-      def update_recovery(request_id, expected_phase, changes, state:)
+      def update_recovery(request_id, expected_phase, changes, state:, requestor: nil, trigger: nil)
+        raise ArgumentError, "requestor is invalid" if requestor && !REQUESTORS.include?(requestor.to_s)
         mutate_payload(request_id) do |payload, row_changes|
           recovery = payload["recovery"]
           next false unless recovery.is_a?(Hash) && recovery["phase"] == expected_phase
           recovery.merge!(changes.to_h.transform_keys(&:to_s))
           recovery["phase"] = changes[:phase] if changes.key?(:phase)
           validate_recovery!(recovery)
+          payload["requestor"] = requestor.to_s if requestor
+          payload["trigger"] = trigger.to_s if trigger
           row_changes[:due_at] = recovery["next_eligible_at"] if recovery["next_eligible_at"]
           if state
             row_changes.merge!(cleared_claim_columns(state: state))

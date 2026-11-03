@@ -101,4 +101,69 @@ class TaskDisplayTest < ActiveSupport::TestCase
   test "unknown actions are not silently reported as ready" do
     assert_equal "Status unavailable", display("action" => "future_action", "action_label" => nil).label
   end
+  test "failed edit recovery uses canonical precedence and preserves reason and time" do
+    %w[cooldown queued].each do |status|
+      state = display(failed_edit_attributes(status))
+      assert_equal "Needs recovery", state.label
+      assert_includes state.detail, "spawn failed"
+      assert_includes state.detail, "2026-11-03T12:05:00Z"
+    end
+    assert_equal "Running", display(failed_edit_attributes("running")).label
+
+    missing = failed_edit_attributes("cooldown").merge("answers_complete" => false, "unanswered_questions" => 1)
+    assert_equal "Answer questions", display(missing).label
+    assert_includes display(missing).detail, "spawn failed"
+
+    parked = missing.merge("recovery" => missing.fetch("recovery").merge(
+      "status" => "blocked", "escalation_tier" => "parked", "reason" => "deterministic_failure",
+      "remediation" => "edits do not release this park; use the current workflow.retry action"
+    ))
+    assert_equal "Needs execution repair", display(parked).label
+    assert_includes display(parked).detail, "edits do not release this park"
+  end
+
+  test "unavailable failed edit scheduling retains durable reason without promising an imminent retry" do
+    attributes = failed_edit_attributes("cooldown")
+    [ "stale", "unavailable" ].each do |freshness|
+      attributes["recovery"]["scheduler_status"] = freshness
+      state = display(attributes)
+      assert_equal "Status unavailable", state.label
+      assert_includes state.detail, "spawn failed"
+      refute_match(/retry at/i, state.detail)
+    end
+    cached = display(failed_edit_attributes("cooldown"), fresh: false)
+    assert_equal "Status unavailable", cached.label
+    assert_includes cached.detail, "spawn failed"
+  end
+
+  test "complete brainstorm without failed evidence waits without an input or retry claim" do
+    state = display("workflow" => "coding", "stage" => "2-brainstorm", "marker" => "waiting",
+      "action" => "needs_input", "answers_complete" => true)
+    assert_equal "Waiting", state.label
+    refute_match(/answer questions|retry/i, state.detail.to_s)
+    cached = display({ "workflow" => "coding", "stage" => "2-brainstorm", "marker" => "waiting",
+      "action" => "needs_input", "answers_complete" => true }, fresh: false)
+    assert_equal "Status unavailable", cached.label
+    refute_match(/stored recovery|retry at/i, cached.detail.to_s)
+  end
+
+  test "recovery without an eligibility time reports the unknown time" do
+    attributes = failed_edit_attributes("queued")
+    attributes["recovery"]["next_eligible_at"] = nil
+    assert_includes display(attributes).detail.downcase, "retry time unavailable"
+  end
+
+  private
+
+  def failed_edit_attributes(status)
+    {
+      "workflow" => "coding", "stage" => "2-brainstorm", "marker" => "waiting",
+      "action" => "needs_input", "answers_complete" => true,
+      "recovery" => {
+        "variant" => "failed_edit", "status" => status, "reason" => "spawn failed",
+        "owner" => "scheduler", "scheduler_status" => "current",
+        "next_eligible_at" => "2026-11-03T12:05:00Z"
+      }
+    }
+  end
 end

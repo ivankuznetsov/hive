@@ -7695,6 +7695,45 @@ def test_project_enabled_returns_false_for_missing_or_invalid_project_config
   end
 end
 
+def test_project_concurrency_cap_reads_project_config_and_caches_result
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  load_calls = []
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/project" } }) do
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+      load_calls << path
+      { "daemon" => { "max_concurrent_per_project" => 1 } }
+    }) do
+      assert_equal 1, dispatcher.send(:project_concurrency_cap, "p1")
+      assert_equal 1, dispatcher.send(:project_concurrency_cap, "p1")
+    end
+  end
+
+  assert_equal [ "/tmp/project" ], load_calls
+end
+
+def test_project_concurrency_cap_is_nil_for_missing_or_invalid_project_config
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { nil }) do
+    assert_nil dispatcher.send(:project_concurrency_cap, "missing")
+  end
+
+  with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/project" } }) do
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_nil dispatcher.send(:project_concurrency_cap, "bad")
+    end
+  end
+end
+
+def test_project_concurrency_cap_lowers_the_controller_cap_for_that_project
+  dispatcher, _sup, controller, _logger, _mw = make_dispatcher
+  dispatcher.instance_variable_get(:@project_cap_cache)["hive"] = 1
+  assert_equal 1, controller.project_limit("hive")
+  dispatcher.instance_variable_get(:@project_cap_cache)["other"] = nil
+  assert_equal controller.max_concurrent_per_project, controller.project_limit("other")
+end
+
 def test_project_enabled_contains_malformed_on_disk_project_config
   dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
   dispatcher.singleton_class.send(:remove_method, :project_enabled?)

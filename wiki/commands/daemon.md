@@ -386,7 +386,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
-| `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
+| `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. A project may lower its own cap with `daemon.max_concurrent_per_project` in `<project>/.hive-state/config.yml` (read per tick like `daemon.enabled`); a project value can only lower the daemon-wide cap, never raise it. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
 | `transient_retry_backoff_sec` | 60 | First retry hold for a durable task attempt that exits `75 (TEMPFAIL)`; also the base of the ancillary-child `60 → 120 → 300 s` transient backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |

@@ -937,6 +937,9 @@ Dependency lock uncertainty is unchanged: the root bundle has
 `concurrent-ruby` 1.3.7 and Brakeman 8.0.5, while `web/Gemfile.lock` resolves
 `concurrent-ruby` 1.3.6 and Brakeman 8.0.4; release preparation synchronizes only the local
 `hive-cli` path-gem version in that independently resolved web bundle.
+The web lock's November 2026 security refresh was verified with its isolated
+bundle and `bundler-audit`; the root changed-test selector could not run in
+that checkout because its unrelated root bundle was not installed.
 
 1. **Release tag creation is protected, while signed git-tag verification remains deferred.** Homebrew and AUR publishing are implemented and public install docs route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The live repository has an active `v*` tag ruleset restricting creation, update, deletion, and non-fast-forward changes to the configured repository-role bypass. Release automation still publishes the commit selected by an authorized tag without independently verifying a maintainer cryptographic git-tag signature.
 2. **macOS x86_64 install.sh support remains unsupported.** Current `install.sh` still accepts only `darwin-arm64` on macOS and glibc Linux `x86_64`/`aarch64`; a future follow-up can add best-effort Rosetta behavior once the release smoke matrix covers it.

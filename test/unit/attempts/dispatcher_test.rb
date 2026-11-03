@@ -96,6 +96,50 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_concurrent_admission_winner_is_adopted_without_launching_again
+    [ false, true ].each do |claimed|
+      with_dispatcher do |dispatcher, launcher, task, store|
+        persist = dispatcher.method(:persist_launching_attempt)
+        dispatcher.define_singleton_method(:persist_launching_attempt) do |**attributes|
+          winner = persist.call(**attributes.merge(attempt_id: "concurrent-winner"))
+          if claimed
+            winner = store.claim(
+              winner, owner: { "pid" => 123, "start_fingerprint" => "owner",
+                               "session_id" => 123, "process_group_id" => 123 },
+              claim_capability: CLAIM_CAPABILITY, first_heartbeat_timeout_sec: 30, now: NOW
+            )
+          end
+          winner
+        end
+        result = dispatch(dispatcher, task, request_id: "admission-race")
+        assert_equal claimed ? :accepted : :deferred, result.status
+        assert_equal "request_already_admitted", result.reason unless claimed
+        assert_equal "concurrent-winner", result.attempt.attempt_id
+        assert_empty launcher.launched
+        assert_equal 1, store.active_attempts.length
+      end
+    end
+  end
+
+  def test_default_retry_sleeper_waits_between_busy_admission_tries
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      original = store.method(:create_launching)
+      calls = 0
+      sleeps = []
+      dispatcher.define_singleton_method(:sleep) { |seconds| sleeps << seconds }
+      store.define_singleton_method(:create_launching) do |**attributes|
+        calls += 1
+        raise SQLite3::BusyException, "busy once" if calls == 1
+        original.call(**attributes)
+      end
+      assert_equal :accepted, dispatch(dispatcher, task, request_id: "one-busy-try").status
+      assert_equal 2, calls
+      assert_equal 1, sleeps.length
+      assert_operator sleeps.first, :>, 0
+      assert_operator sleeps.first, :<=, 1
+    end
+  end
+
   def test_same_and_different_request_ids_share_one_live_generation
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one", interactive: true)

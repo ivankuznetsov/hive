@@ -180,4 +180,14 @@ class AttemptsBookkeepingRetryTest < Minitest::Test
       assert_raises(ArgumentError) { retryer(budget: budget) }
     end
   end
+
+  def test_busy_failure_rejects_an_unknown_reason
+    error = assert_raises(ArgumentError) do
+      Hive::Attempts::BookkeepingBusy.new(
+        operation: "claim", attempt_id: nil, retry_count: 0,
+        elapsed_sec: 0, budget_sec: 30, reason: "provider_failure"
+      )
+    end
+    assert_equal "unsupported bookkeeping failure reason", error.message
+  end
 end

@@ -55,6 +55,53 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_cleanup_failures_preserve_original_read_and_transaction_errors
+    [ :read, :transaction ].each do |operation|
+      [ false, true ].each do |body_fails|
+        with_database do |database|
+          connection = database.instance_variable_get(:@connection)
+          original_run = connection.method(:run)
+          cleanup = RuntimeError.new("timeout cleanup failed")
+          original = RuntimeError.new("body failed")
+          restore = "PRAGMA busy_timeout = #{Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS}"
+          connection.define_singleton_method(:run) do |sql, *args|
+            raise cleanup if sql == restore
+            original_run.call(sql, *args)
+          end
+          error = assert_raises(RuntimeError) do
+            database.public_send(operation, timeout_sec: 0.2) do
+              raise original if body_fails
+              :saved
+            end
+          end
+          assert_same body_fails ? original : cleanup, error
+        end
+      end
+    end
+  end
+
+  def test_writer_debug_measurement_is_emitted_after_commit
+    with_database do |database|
+      with_env("HIVE_SQL_DEBUG" => "1") do
+        _out, err = capture_io do
+          assert_equal :saved, database.transaction(operation: "test.debug") { :saved }
+        end
+        measurement = JSON.parse(err)
+        assert_equal "runtime_writer", measurement.fetch("event")
+        assert_equal "test.debug", measurement.fetch("operation")
+        assert_equal "committed", measurement.fetch("result")
+      end
+    end
+  end
+
+  def test_wal_bytes_is_zero_before_database_creation
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(root, "missing.sqlite3"))
+      assert_equal 0, database.wal_bytes
+      refute_path_exists database.path
+    end
+  end
+
   def test_explicit_migration_creates_exact_database_and_normal_open_is_lazy
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime-control-plane.sqlite3")

@@ -14,7 +14,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days result stages x-hive].freeze
+      TOP_LEVEL_KEYS = %w[id archive_visibility_retention_days result stages task_capabilities x-hive].freeze
       RESULT_KEYS = %w[kind primary_artifact capabilities].freeze
       RESULT_KINDS = { "document" => :document, "change" => :change }.freeze
       STAGE_KEYS = %w[
@@ -109,7 +109,14 @@ module Hive
         validate_deliverable_position!(stages)
         result = parse_result(descriptor["result"]) if descriptor.key?("result")
 
-        build_workflow(id, stages, archive_visibility_retention_days, result)
+        capabilities = descriptor.fetch("task_capabilities", [])
+        unless capabilities.is_a?(Array)
+          raise descriptor_error("task_capabilities must be an array")
+        end
+        capabilities = capabilities.map do |value|
+          Hive::TaskCapabilities::Definition.new(value, stages: stages, source: @path, package_root: @package_root)
+        end
+        build_workflow(id, stages, archive_visibility_retention_days, result, capabilities)
       end
 
       private
@@ -236,12 +243,13 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages, archive_visibility_retention_days, result)
+      def build_workflow(id, stages, archive_visibility_retention_days, result, capabilities)
         Hive::Workflow.new(
           id: id.to_sym,
           stages: stages,
           archive_visibility_retention_days: archive_visibility_retention_days,
-          result: result
+          result: result,
+          task_capabilities: capabilities
         )
       rescue ArgumentError => e
         raise descriptor_error(e.message)

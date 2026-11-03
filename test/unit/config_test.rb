@@ -2,6 +2,26 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_task_capabilities_are_dormant_and_validate_before_capture
+    with_tmp_dir do |dir|
+      path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(path))
+      assert_equal false, Hive::Config.load(dir).dig("task_capabilities", "enabled")
+      [ { "enabled" => "yes" }, { "catalog" => {} }, { "unexpected" => true },
+        { "policy" => { "required" => [ "missing" ] } }, "wrong" ].each do |settings|
+        File.write(path, YAML.dump({ "task_capabilities" => settings }))
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes error.message, "config.yml"
+      end
+      File.write(path, YAML.dump({ "task_capabilities" => { "enabled" => true, "catalog" => [
+        { "id" => "links", "kind" => "verification", "stages" => [ "review" ], "permissions" => "read-only" }
+      ] } }))
+      cfg = Hive::Config.load(dir)
+      assert_equal true, cfg.dig("task_capabilities", "enabled")
+      assert_equal "links", cfg.dig("task_capabilities", "catalog").first.fetch("id")
+    end
+  end
+
   def test_plan_review_defaults_are_closed_and_conservative
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)

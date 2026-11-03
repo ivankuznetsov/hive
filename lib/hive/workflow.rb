@@ -1,7 +1,8 @@
 require "hive/work_ledger"
+require "hive/task_capabilities/catalog"
 
 module Hive
-  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days, :result, :controller)
+  Workflow = Data.define(:id, :stages, :archive_visibility_retention_days, :result, :controller, :task_capabilities)
 
   # Reopened (not redefined) so the nested Stage/AdvanceVerb constants resolve as
   # Workflow::Stage — Data.define's block can't host constant declarations.
@@ -95,7 +96,7 @@ module Hive
 
     def initialize(id:, stages:,
                    archive_visibility_retention_days: DEFAULT_ARCHIVE_VISIBILITY_RETENTION_DAYS,
-                   result: nil, controller: nil)
+                   result: nil, controller: nil, task_capabilities: [])
       retention = normalize_archive_visibility_retention(
         archive_visibility_retention_days, workflow_id: id
       )
@@ -105,12 +106,24 @@ module Hive
       normalized_result = frozen_stages.empty? ? result : normalize_result(
         result, frozen_stages, workflow_id: id
       )
+      unless task_capabilities.is_a?(Array)
+        raise ArgumentError, "workflow #{id.inspect} task_capabilities must be an array"
+      end
+      definitions = task_capabilities.map do |value|
+        value.is_a?(Hive::TaskCapabilities::Definition) ? value : Hive::TaskCapabilities::Definition.new(
+          value, stages: frozen_stages, source: "workflow descriptor #{id}"
+        )
+      end.freeze
+      unless definitions.map(&:id).uniq.length == definitions.length
+        raise ArgumentError, "workflow descriptor #{id} has duplicate task capability IDs"
+      end
       super(
         id: id, stages: frozen_stages,
         archive_visibility_retention_days: retention,
-        result: normalized_result, controller: controller
+        result: normalized_result, controller: controller, task_capabilities: definitions
       )
       validate_structure!
+      Hive::TaskCapabilities::Catalog.new(workflow: self, source: "workflow descriptor #{id}", include_defaults: false)
     end
 
     ExecutableSlot = Data.define(:id, :kind, :actor, :default_role)

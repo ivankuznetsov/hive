@@ -70,6 +70,9 @@ module Hive
           "mappings" => mappings.sort.to_h,
           "input_bindings" => bindings.sort.to_h
         }
+        unless workflow.task_capabilities.empty?
+          data["task_capabilities"] = workflow.task_capabilities.map(&:to_h)
+        end
         new(data)
       end
 
@@ -93,6 +96,9 @@ module Hive
       end
 
       def apply(workflow, cfg: {}, verify_profiles: true)
+        unless data.fetch("task_capabilities", []) == workflow.task_capabilities.map(&:to_h)
+          raise Hive::ConfigError, "managed workflow configuration task capability bindings do not match descriptor"
+        end
         specs = self.class.slots_for(workflow)
         expected = specs.map(&:id).sort
         actual = data.fetch("mappings").keys.sort
@@ -126,7 +132,9 @@ module Hive
           id: workflow.id,
           stages: stages,
           archive_visibility_retention_days: workflow.archive_visibility_retention_days,
-          result: workflow.result
+          result: workflow.result,
+          controller: workflow.controller,
+          task_capabilities: workflow.task_capabilities
         )
       end
 
@@ -367,8 +375,12 @@ module Hive
       end
 
       def validate!
-        unless data.keys.sort == %w[generation input_bindings mappings schema_version] && data["schema_version"] == SCHEMA_VERSION
+        required_keys = %w[generation input_bindings mappings schema_version]
+        unless (data.keys - [ "task_capabilities" ]).sort == required_keys && data["schema_version"] == SCHEMA_VERSION
           raise Hive::ConfigError, "managed workflow configuration has an unsupported shape"
+        end
+        if data.key?("task_capabilities") && !data["task_capabilities"].is_a?(Array)
+          raise Hive::ConfigError, "managed workflow configuration task capabilities are malformed"
         end
         generation = data["generation"]
         required_generation = %w[manifest_digest name source_commit]

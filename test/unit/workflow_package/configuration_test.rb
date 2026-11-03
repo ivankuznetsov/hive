@@ -5,6 +5,46 @@ require "hive/workflow_package/configuration"
 class WorkflowPackageConfigurationTest < Minitest::Test
   include HiveTestHelper
 
+  def test_snapshot_includes_exact_capability_bindings_and_rejects_drift
+    definition = { "id" => "links", "kind" => "verification", "stages" => [ "review" ],
+                   "permissions" => "read-only", "budget_usd" => 3, "timeout_sec" => 60 }
+    source = workflow.with(task_capabilities: [ definition ])
+    changed = workflow.with(task_capabilities: [ definition.merge("budget_usd" => 4) ])
+    generation = { "name" => "demo", "source_commit" => "a" * 40, "manifest_digest" => "b" * 64 }
+    configuration = Hive::WorkflowPackage::Configuration.build(source, generation: generation)
+    different = Hive::WorkflowPackage::Configuration.build(changed, generation: generation)
+    refute_equal configuration.digest, different.digest
+    loaded = Hive::WorkflowPackage::Configuration.load(configuration.bytes)
+    assert_equal source.task_capabilities, loaded.apply(source).task_capabilities
+    assert_equal source.task_capabilities.map(&:to_h), loaded.data.fetch("task_capabilities")
+    assert_raises(Hive::ConfigError) { loaded.apply(changed) }
+    malformed = configuration.data.merge("task_capabilities" => {})
+    assert_raises(Hive::ConfigError) { Hive::WorkflowPackage::Configuration.new(malformed) }
+    assert_raises(Hive::ConfigError) { build_configuration.apply(source) }
+  end
+
+  def test_capability_instruction_identity_survives_managed_generation_relocation
+    with_tmp_dir do |dir|
+      workflows = %w[staging selected].map do |name|
+        root = File.join(dir, name)
+        FileUtils.mkdir_p(root)
+        File.write(File.join(root, "guide.md"), "Stable instructions")
+        path = File.join(root, "workflow.yml")
+        File.write(path, YAML.dump({ "id" => "demo", "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "instruction" => "guide.md", "permissions" => "read-only" }
+        ], "task_capabilities" => [ { "id" => "guide", "kind" => "guidance", "stages" => [ "draft" ],
+          "instruction" => "guide.md", "permissions" => "read-only" } ] }))
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "demo")
+      end
+      generation = { "name" => "demo", "source_commit" => "a" * 40, "manifest_digest" => "b" * 64 }
+      before, after = workflows.map { |entry| Hive::WorkflowPackage::Configuration.build(entry, generation: generation) }
+      assert_equal before.digest, after.digest
+      refute_equal workflows.first.task_capabilities.first.instruction_path, workflows.last.task_capabilities.first.instruction_path
+      assert_equal "guide.md", before.data.fetch("task_capabilities").first.fetch("instruction")
+      assert_equal workflows.last.task_capabilities, before.apply(workflows.last).task_capabilities
+    end
+  end
+
   def test_contract_constants_reuse_workflow_and_manifest_authorities
     assert_same Hive::Workflow::MAPPING_ROLES,
                 Hive::WorkflowPackage::Configuration::ROLES

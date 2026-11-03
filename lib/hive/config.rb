@@ -28,6 +28,14 @@ module Hive
       "worktree_root" => nil,
       "default_branch" => nil,
       "default_workflow" => "coding",
+      # Adoption stays disabled until capture, evidence gates, and recovery are
+      # integrated. Pinned plans keep their gates when adoption is disabled.
+      "task_capabilities" => {
+        "enabled" => false,
+        "catalog" => [],
+        "policy" => { "required" => [], "auto_select" => [] },
+        "approvals" => {}
+      },
       "honeycomb" => {
         "repository" => "ivankuznetsov/honeycomb",
         "base_branch" => "main"
@@ -2177,6 +2185,7 @@ module Hive
       validate_provider_routing!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
+      validate_task_capabilities!(cfg, source_path)
       validate_mcp!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
@@ -2233,7 +2242,26 @@ module Hive
       bot
       rebase
       command_receipts
+      task_capabilities
     ].freeze
+
+    def validate_task_capabilities!(cfg, source_path)
+      require "hive/task_capabilities/policy"
+      require "hive/workflows/coding"
+      settings = Hive::TaskCapabilities::Definition.mapping(
+        cfg.fetch("task_capabilities"), keys: %w[enabled catalog policy approvals],
+        label: "task_capabilities in #{describe_source(source_path)}"
+      )
+      unless [ true, false ].include?(settings["enabled"])
+        raise ConfigError, "task_capabilities.enabled in #{describe_source(source_path)} must be true or false"
+      end
+      catalog = Hive::TaskCapabilities::Catalog.new(
+        workflow: Hive::Workflows::Coding::DESCRIPTOR, definitions: settings.fetch("catalog", []),
+        source: describe_source(source_path)
+      )
+      Hive::TaskCapabilities::Policy.new(settings.fetch("policy", {}), catalog: catalog,
+                                        approvals: settings.fetch("approvals", {}), source: describe_source(source_path))
+    end
 
     COMMAND_RECEIPT_KEYS = %w[
       keyed_intake_enabled nonterminal_limit concurrency_limit byte_admission_limit staffing

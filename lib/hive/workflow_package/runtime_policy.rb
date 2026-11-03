@@ -236,6 +236,20 @@ module Hive
         new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile
       end
 
+      # Configuration admission shares the compiler's exact validators without
+      # creating files, resolving installed commands, or launching a provider.
+      def self.validate_spec!(permissions, profile: nil)
+        allowed = %w[tools deny directories commands domains credentials]
+        raise Hive::ConfigError, "managed permissions must be a map" unless permissions.is_a?(Hash)
+        unknown = permissions.keys.map(&:to_s) - allowed
+        raise Hive::ConfigError, "managed permissions contain unknown fields: #{unknown.join(', ')}" unless unknown.empty?
+        policy = new(permissions, task_folder: "/", profile: profile, policy_dir: "/")
+        policy.send(:validate_profile!) if profile
+        policy.send(:validate_envelope!)
+        policy.send(:validate_directory_declarations!)
+        true
+      end
+
       # Builds an isolated child environment around one descriptor actor's
       # exact permission block. Unlike #compile, this does not reconstruct a
       # policy from the package-wide catalog disclosure.
@@ -620,14 +634,7 @@ module Hive
 
       def compile
         validate_profile!
-        tools = normalize_array("tools")
-        denied = normalize_array("deny")
-        validate_tools!(tools, denied)
-        commands = normalize_array("commands")
-        domains = normalize_array("domains").map(&:downcase)
-        validate_commands!(tools, commands)
-        validate_domains!(tools, domains)
-        validate_credentials!
+        tools, denied, commands, domains = validate_envelope!
         directories = resolve_directories
         executables = resolve_executables(commands)
         environment = sanitized_environment(executables)
@@ -699,6 +706,18 @@ module Hive
       end
 
       private
+
+      def validate_envelope!
+        tools = normalize_array("tools")
+        denied = normalize_array("deny")
+        validate_tools!(tools, denied)
+        commands = normalize_array("commands")
+        domains = normalize_array("domains").map(&:downcase)
+        validate_commands!(tools, commands)
+        validate_domains!(tools, domains)
+        validate_credentials!
+        [ tools, denied, commands, domains ]
+      end
 
       # honeycomb-manifest/v1 publishes a deliberately coarse disclosure, not
       # the legacy command/tool policy. Only the one lossless subset supported
@@ -785,11 +804,16 @@ module Hive
         raise Hive::ConfigError, "managed credential injection is not supported by this Hive runtime"
       end
 
-      def resolve_directories
-        [ @task_folder ] + normalize_array("directories").map do |entry|
-          if entry.start_with?("/") || entry.split(/[\\\/]/).include?("..") || entry.include?("\0")
+      def validate_directory_declarations!
+        normalize_array("directories").each do |entry|
+          if entry.start_with?("/", "~") || entry.split(/[\\\/]/).include?("..") || entry.include?("\0")
             raise Hive::ConfigError, "managed directory declarations must be relative task paths"
           end
+        end
+      end
+
+      def resolve_directories
+        [ @task_folder ] + validate_directory_declarations!.map do |entry|
           resolved = File.expand_path(entry, @task_folder)
           effective = begin
             File.realpath(resolved)

@@ -11,6 +11,12 @@ tags: [module, workflow, result, verbs, selection, human-stage, outcomes, termin
 
 ## Descriptor and registry
 
+Descriptors may also declare a separate `task_capabilities` array for guidance
+and verification attached to existing stages. Definitions use the same
+normalizer as the project catalog; descriptor IDs remain authoritative when a
+project entry collides. This does not change the workflow result capability
+vocabulary. See [[modules/task_capabilities]] for catalog and policy contracts.
+
 Local blank and research scaffolds omit `permissions`, inheriting the project's
 normal execution policy. Do not add tool allowlists merely because a workflow
 is a Honeycomb. Explicit owner-requested permission scopes remain supported and

@@ -33,6 +33,11 @@ module Hive
           revise = stage.dig("council", "revise")
           merge_actor!(union, revise, "stage #{index + 1} revise") if revise
         end
+        capabilities = descriptor.fetch("task_capabilities", [])
+        fail!("task_capabilities must be an array") unless capabilities.is_a?(Array)
+        capabilities.each_with_index do |actor, index|
+          merge_actor!(union, actor, "task capability #{index + 1}")
+        end
         finalize(union)
       end
 
@@ -54,6 +59,15 @@ module Hive
           spec
         else
           fail!("#{label} permissions must be an explicit preset or map")
+        end
+        if normalized.is_a?(Hash) && !normalized.key?("preset")
+          require "hive/workflow_package/runtime_policy"
+          Hive::WorkflowPackage::RuntimePolicy.validate_spec!(normalized)
+          # The registry disclosure is deliberately coarse. Keep bounded
+          # command details in the immutable configuration, and disclose Bash
+          # conservatively rather than suggesting tool scope is a sandbox.
+          return unbounded if normalized.fetch("tools", []).include?("Bash")
+          return normalize_scoped!({ "tools" => normalized.fetch("tools"), "dirs" => normalized.fetch("directories", []) }, label)
         end
         preset = normalized["preset"]
         fail!("#{label} permission preset is unsupported") unless %w[yolo read-only scoped].include?(preset)

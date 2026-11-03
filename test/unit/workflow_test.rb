@@ -3,6 +3,11 @@ require "hive/workflow"
 require "hive/workflows/registry"
 
 class WorkflowTest < Minitest::Test
+  def test_task_capability_collection_must_be_an_array
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+    assert_raises(ArgumentError) { Hive::Workflow.new(id: :invalid, stages: [ stage ], task_capabilities: {}) }
+  end
+
   def test_archive_visibility_retention_defaults_and_normalizes_never
     stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
 

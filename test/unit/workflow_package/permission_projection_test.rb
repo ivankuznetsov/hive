@@ -4,6 +4,18 @@ require "hive/workflow_package/permission_projection"
 class WorkflowPackagePermissionProjectionTest < Minitest::Test
   Projection = Hive::WorkflowPackage::PermissionProjection
 
+  def test_capability_actors_are_included_in_permission_disclosure
+    base = { "stages" => [ { "kind" => "agent", "permissions" => "read-only" } ] }
+    with_capability = base.merge("task_capabilities" => [ { "id" => "guide", "permissions" => "yolo" } ])
+    assert_equal "high", Projection.derive!(with_capability).fetch("risk")
+    bounded = base.merge("task_capabilities" => [ { "permissions" => { "tools" => [ "Read", "Bash" ], "commands" => [ "ruby check.rb" ] } } ])
+    assert_equal "high", Projection.derive!(bounded).fetch("risk")
+    read = base.merge("task_capabilities" => [ { "permissions" => { "tools" => [ "Read" ] } } ])
+    assert_equal "low", Projection.derive!(read).fetch("risk")
+    assert_raises(Hive::ConfigError) { Projection.derive!(base.merge("task_capabilities" => "wrong")) }
+    assert_raises(Hive::ConfigError) { Projection.derive!(base.merge("task_capabilities" => [ { "id" => "unsafe" } ])) }
+  end
+
   def test_projects_every_actor_into_one_exact_conservative_union
     descriptor = {
       "stages" => [

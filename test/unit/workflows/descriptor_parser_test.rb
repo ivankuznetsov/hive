@@ -3,6 +3,35 @@ require "securerandom"
 require "hive/workflows/descriptor_parser"
 
 class WorkflowsDescriptorParserTest < Minitest::Test
+  def test_task_capabilities_are_a_separate_validated_descriptor_contract
+    base = { "id" => "attached", "stages" => [ { "name" => "review", "kind" => "terminal", "state_file" => "done.md" } ],
+             "task_capabilities" => [ { "id" => "links", "kind" => "verification", "stages" => [ "review" ],
+               "permissions" => "read-only", "checks" => [ { "id" => "behavior", "kind" => "behavior", "claim" => "Links resolve" } ] } ] }
+    value = Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/attached.yml")
+    assert_equal [ "links" ], value.task_capabilities.map(&:id)
+    assert_equal :document, value.result.kind
+    refute_includes value.result.capabilities, :links
+    [ "wrong", base.fetch("task_capabilities") * 2,
+      [ base.fetch("task_capabilities").first.merge("stages" => [ "missing" ]) ] ].each do |definitions|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_hash(base.merge("task_capabilities" => definitions), path: "/tmp/attached.yml")
+      end
+      assert_includes error.message, "attached"
+    end
+  end
+
+  def test_task_capability_instruction_is_confined_to_package_root
+    with_tmp_dir do |dir|
+      path = File.join(dir, "workflow.yml")
+      File.write(path, YAML.dump({ "id" => "attached", "stages" => [ { "name" => "review", "kind" => "terminal", "state_file" => "done.md" } ],
+        "task_capabilities" => [ { "id" => "guide", "kind" => "guidance", "stages" => [ "review" ], "instruction" => "../outside.md" } ] }))
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "attached")
+      end
+      assert_match(/instruction.*inside.*package/, error.message)
+    end
+  end
+
   def test_archive_visibility_retention_accepts_omission_positive_integer_and_never
     base = {
       "id" => "retention",

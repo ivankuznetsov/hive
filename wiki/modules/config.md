@@ -301,6 +301,11 @@ reference.
  "worktree_root" => nil,
  "default_branch" => nil,
  "default_workflow" => "coding",
+ "task_capabilities" =>
+  {"enabled" => false,
+   "catalog" => [],
+   "policy" => {"required" => [], "auto_select" => []},
+   "approvals" => {}},
  "honeycomb" =>
   {"repository" => "ivankuznetsov/honeycomb", "base_branch" => "main"},
  "dependency_gate_stage" => "8-finalize",

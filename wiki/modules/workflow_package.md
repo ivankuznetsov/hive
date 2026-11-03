@@ -157,6 +157,13 @@ Managed locks/generations/configurations are Hive-owned. Lifecycle commands cann
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.
 
+Configuration snapshots with descriptor task capabilities include their exact
+normalized definitions in the configuration digest. Applying a snapshot rejects
+changed capability bindings, and actor mapping preserves the definitions.
+Capability actors contribute to conservative package permission disclosure.
+Snapshots predating this optional field retain their existing shape and remain
+readable. See [[modules/task_capabilities]].
+
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
 Owner-trusted actors declare `permissions: yolo`. They run directly with the
 ordinary agent environment plus explicit package input bindings, without a

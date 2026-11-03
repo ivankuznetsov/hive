@@ -4,6 +4,13 @@ require "hive/workflow"
 module Hive
   module Workflows
     module Coding
+      # Examples contain no invented skill, runner, or approved provider. A
+      # project supplies complete bindings through its capability catalog.
+      TASK_CAPABILITY_DEFAULTS = [
+        { "id" => "qa", "kind" => "verification", "stages" => [ "review" ] },
+        { "id" => "ui", "kind" => "guidance", "stages" => %w[plan execute] },
+        { "id" => "security", "kind" => "verification", "stages" => [ "review" ] }
+      ].map { |entry| Hive::TaskCapabilities::Definition.deep_freeze(entry) }.freeze
       # Per-stage user-facing action keys for coding's `:agent`/`:inert`
       # descriptor stages, consumed by `TaskAction#coding_table_action`. This
       # table covers ONLY those stages — coding's runtime-kind stages

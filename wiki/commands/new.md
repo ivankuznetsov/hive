@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
@@ -13,6 +13,8 @@ tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow
 
 ```
 hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on TASK]... TEXT...
+hive new PROJECT TEXT --preview --capability ID=automatic|on|off --json
+hive new PROJECT TEXT --capability qa=off --qa-waiver-reason TEXT --qa-waiver-check all
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
@@ -21,6 +23,29 @@ Both ordinary default-workflow resolution and managed-workflow configuration
 loading preserve `UnsupportedProjectConfigError` as a configuration failure
 (exit 78). They do not reclassify strict root-key failures as the generic
 `ProjectConfigUnreadable` exit-1 path, and no task directory is seeded.
+
+New coding tasks atomically adopt an immutable execution plan. QA Automatic
+resolves On. Disabled CI/browser settings remain disabled and produce a visible
+verification blocker: configure a real behavior check or have the human creator
+record a separate reasoned QA exception for this task. There is no standing
+project exception. Old tasks without adoption metadata retain legacy behavior.
+The first adopted capture emits one durable project notice with prerequisites.
+
+Repeat `--capability ID=automatic|on|off` for selections,
+`--qa-waiver-check CHECK_ID` for affected checks (`all` acknowledges all planned
+QA checks), and `--capability-approval ID=REFERENCE` for exact operator-written
+approvals. Explicit choices beat inference within hard policy. UI Automatic
+recommends an installed skill; bounded project policy may select it. Security
+Automatic never executes. Missing skills/approvals block dispatch. An approved
+unavailable security route blocks finalization and needs restoration or task
+archive/cancellation.
+
+`--preview` writes and dispatches nothing. It supports `--json` without an
+idempotency key and returns the same choices, reasons, blockers and shell-escaped
+recovery commands as web. Invalid selections are errors. Blocked captures stay
+durable for correction through `hive task-capabilities`; reads never repin them
+from live policy. Active attempts cannot create operator QA waivers. The context
+guard is not proof of humanity against same-user or loopback callers.
 
 One `--depends-on` accepts one scalar reference. Repeat the flag to require
 every named prerequisite. A bare slug or numeric id is scoped to the new
@@ -51,8 +76,9 @@ reject `--base`, and draft-PR workflows reject `--depends-on` stacking in v1.
 The executable wrapper lifts standalone allow-listed `new` options from anywhere
 outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`, `--base BRANCH`,
 `--base=BRANCH`,
-repeated `--depends-on VALUE` / `--depends-on=VALUE`, and Thor-style JSON
-booleans. The
+repeated `--depends-on VALUE` / `--depends-on=VALUE`, capability and approval
+selections, QA waiver reason/checks, `--preview` (including `--no-preview` and
+true/false assignments), and Thor-style JSON booleans. The
 first remaining positional is `PROJECT`; the rest remains literal task text
 behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
 `hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
@@ -78,7 +104,7 @@ When `Hive::TaskCounter.next_or_nil` allocates an id, the final token in the
 next-step hint is that numeric id. If the runtime control plane is unavailable,
 capture still succeeds and the hint falls back to the task path.
 
-The CLI argv surface is unchanged. Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
+Internally, `Hive::Commands::New.new(project, text, body_override: nil, attachments: [[abs_path, dest_name], …])` also supports the TUI rich composer (the `attachments:` argument is an array of `[src_abs_path, dest_filename]` tuples, not a flat array of paths):
 
 - `call!` performs the capture without calling `exit`, raising typed `ProjectNotFound`, `InvalidSlugError`, or `SlugCollisionError` for TUI callers.
 - `body_override:` replaces the markdown body while frontmatter `original_text:` and slug derivation still use `text`.

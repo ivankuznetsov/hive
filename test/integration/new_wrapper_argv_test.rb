@@ -250,6 +250,31 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  def test_capability_choices_waiver_and_preview_are_lifted_without_becoming_task_text
+    with_cli_project do |home, project_root, project|
+      config_path = File.join(project_root, ".hive-state/config.yml")
+      config = YAML.safe_load_file(config_path)
+      config["task_capabilities"] = { "enabled" => true }
+      File.write(config_path, config.to_yaml)
+      options = [ "--capability", "qa=off", "--capability", "ui=off", "--qa-waiver-reason", "Operator checks this task", "--qa-waiver-check", "all", "--json" ]
+      out, err, status = run_hive(home, "new", project, "Wrapper capability task", *options, "--preview", chdir: project_root)
+      assert status.success?, err
+      preview = JSON.parse(out)
+      assert_equal true, preview.fetch("preview")
+      assert_equal "off", preview.dig("capabilities", "choices", "qa", "effective")
+      assert_equal "off", preview.dig("capabilities", "choices", "ui", "input")
+      assert_empty task_folders(project_root)
+      out, err, status = run_hive(home, "new", project, "Wrapper capability task", *options, "--idempotency-key", "wrapper-capabilities", chdir: project_root)
+      assert status.success?, err
+      result = JSON.parse(out)
+      assert_equal "off", result.dig("capabilities", "choices", "qa", "effective")
+      assert_equal "Operator checks this task", result.dig("capabilities", "waivers", 0, "reason")
+      folder = only_task_folder(project_root)
+      assert_includes File.read(File.join(folder, "idea.md")), "Wrapper capability task"
+      refute_includes File.read(File.join(folder, "idea.md")), "--capability"
+    end
+  end
+
   private
 
   def with_workflow_project

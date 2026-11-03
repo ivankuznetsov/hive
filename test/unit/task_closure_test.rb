@@ -1598,6 +1598,7 @@ class TaskClosureTest < Minitest::Test
         assert_equal terminal.first, projected.dig("capability_disposition", "result_digest")
         assert_equal receipt, service.send(:persist_receipt!, archived, receipt)
         assert_equal "Closed out-of-band — gate not evaluated", projected.dig("capability_disposition", "label")
+        assert Hive::TaskCapabilities::Admission.enforce!(archived), "a receipt-verified terminal task may finish without relabelling unrun checks"
       end
     end
   end

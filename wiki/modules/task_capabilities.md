@@ -12,12 +12,14 @@ already exist. They are separate from `Workflow::Result.capabilities` (result
 presentation facilities) and AgentProfile's runtime tool vocabulary. Coding
 keeps its nine stages.
 
-`task_capabilities.enabled` defaults to `false` until the complete operator
-recovery flow is verified. When enabled, new coding captures atomically install
+`task_capabilities.enabled` defaults to `true`. New coding captures atomically install
 a resolved initial execution plan: Automatic QA selects behavior verification;
 UI remains a recommendation unless pinned policy selects it; security needs an
 explicit selection and approval. Existing tasks without adoption metadata and
 other workflows retain their previous behavior.
+
+Capability configuration belongs in the project's `.hive-state/config.yml`.
+It is not inherited from the global registered-projects file.
 
 ## Definition and catalog
 
@@ -245,7 +247,8 @@ historical assets do not authorize execution of an unselected managed generation
 ordered bindings and blockers without writing or launching anything; `--json`
 works for preview without an idempotency key. A preview digest includes all
 selection inputs and the configuration identity. Capture rejects stale previews.
-Adoption remains disabled by default until review gates and recovery are complete.
+Adoption is enabled for new coding tasks. Switching it off changes only future
+captures; already pinned gates remain enforced.
 
 Automatic QA resolves On. Configured CI or browser behavior checks can supply its
 verification plan. Empty, review-only and unavailable verification plans block
@@ -374,8 +377,7 @@ check configuration, prerequisite identity, actor/scope and environment.
 `ResultStore#aggregate(plan:, sha:, environment:)` returns
 `state`, `execution_plan_digest`, `evaluated_sha`, `capabilities`, and flattened
 `checks`. Waivers stay distinct from passed checks. This aggregate is read state,
-not transition authority, and the default adoption switch remains disabled while
-publication gates and operator controls are completed.
+not transition authority.
 
 Review returns this aggregate as `:capability_verification`. Its adopted
 `REVIEW_COMPLETE` retry path evaluates missing/stale checks instead of permanently

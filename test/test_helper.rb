@@ -90,8 +90,25 @@ else
 end
 
 require "hive"
+require "hive/commands/init"
 require_relative "support/workflow_helpers"
 require_relative "support/failure_evidence"
+
+# Capability policy is project-local. Put legacy fixture choices in the real
+# initialized project file, including the initialization commit, rather than
+# pretending that this policy can be inherited from global configuration.
+module HiveTestCapabilityProjectConfig
+  private
+
+  def render_project_config(*args, **options)
+    content = super
+    enabled = Thread.current[:hive_test_capability_default]
+    return content if enabled.nil?
+
+    "#{content}\ntask_capabilities:\n  enabled: #{enabled}\n"
+  end
+end
+Hive::Commands::Init.prepend(HiveTestCapabilityProjectConfig)
 
 # CI failure evidence: registers on every suite; emits only when running on a
 # hosted runner (CI + GITHUB_STEP_SUMMARY) and only when tests failed.
@@ -646,8 +663,10 @@ module HiveTestHelper
     out
   end
 
-  def with_tmp_global_config(home: nil, runtime: true)
+  def with_tmp_global_config(home: nil, runtime: true, task_capabilities: false)
     dir = Dir.mktmpdir("hive-global")
+    prior_capability_default = Thread.current[:hive_test_capability_default]
+    Thread.current[:hive_test_capability_default] = task_capabilities
     begin
       fake_bin = File.join(dir, "fake-bin")
       FileUtils.mkdir_p(fake_bin)
@@ -668,6 +687,7 @@ module HiveTestHelper
         end
       end
     ensure
+      Thread.current[:hive_test_capability_default] = prior_capability_default
       # Same verified cleanup as `with_tmp_dir`.
       cleanup_tmp_dir!(dir) if dir
     end
@@ -679,6 +699,8 @@ module HiveTestHelper
   # developer's actual $HOME.
   def with_tmp_global_config_and_home(runtime: true)
     dir = Dir.mktmpdir("hive-global")
+    prior_capability_default = Thread.current[:hive_test_capability_default]
+    Thread.current[:hive_test_capability_default] = false
     old_hive_home = ENV["HIVE_HOME"]
     old_home = ENV["HOME"]
     ENV["HIVE_HOME"] = dir
@@ -690,6 +712,7 @@ module HiveTestHelper
         yield(dir)
       end
     ensure
+      Thread.current[:hive_test_capability_default] = prior_capability_default
       old_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = old_hive_home
       old_home.nil? ? ENV.delete("HOME") : ENV["HOME"] = old_home
       # Same verified cleanup as `with_tmp_dir`.

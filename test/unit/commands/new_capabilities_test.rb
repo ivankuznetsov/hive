@@ -30,6 +30,26 @@ class NewCapabilitiesTest < Minitest::Test
     Hive::Commands::New.new(project, "some behavior", slug_override: "capability-task", **options)
   end
 
+  def test_production_default_adopts_new_coding_tasks_without_a_standing_exception
+    assert_equal true, Hive::Config::DEFAULTS.dig("task_capabilities", "enabled")
+    with_tmp_global_config(task_capabilities: nil) do
+      with_tmp_git_repo do |root|
+        capture_io { Hive::Commands::Init.new(root, agent_skill_preflight: false).call }
+        project = File.basename(root)
+        payload = nil
+        capture_io { payload = command(project).call! }
+        assert_equal "on", payload.dig("capabilities", "choices", "qa", "effective")
+        assert payload.fetch("capability_recovery").any? { |item| item["reason"] == "task_capability_verification_unavailable" }
+        assert_includes payload.fetch("capability_adoption_notice"), "separate human QA waiver"
+        second = nil
+        capture_io { second = Hive::Commands::New.new(project, "Another task", slug_override: "another-task").call! }
+        refute second.key?("capability_adoption_notice")
+        assert_equal "on", second.dig("capabilities", "choices", "qa", "effective")
+        assert_equal 1, second.fetch("execution_plan_version")
+      end
+    end
+  end
+
   def test_unkeyed_creation_uses_atomic_resolved_capture_and_displays_notice
     with_project do |root, project|
       output, = capture_io { command(project).call! }

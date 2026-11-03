@@ -3,6 +3,14 @@ profiles:
   release:
     description: Blocking semantic E2E proof for a Hive release candidate.
 coverage:
+  - id: workflow.task_capabilities
+    title: Task capability composition
+    description: Default QA and a configuration-only verifier retain final-revision evidence and reject forced stale advancement.
+    maturity: required
+    profiles: [release]
+    constraints: { platforms: [], providers: [] }
+    docs: [wiki/modules/task_capabilities.md]
+    code: [test/e2e/scenarios/task_capabilities.yml, lib/hive/task_capabilities/gate.rb]
   - id: attempt.terminal_replay
     title: Durable attempt terminal replay
     description: A CLI-originated multi-commit attempt survives caller loss and reaches one terminal receipt.

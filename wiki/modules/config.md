@@ -302,7 +302,7 @@ reference.
  "default_branch" => nil,
  "default_workflow" => "coding",
  "task_capabilities" =>
-  {"enabled" => false,
+  {"enabled" => true,
    "catalog" => [],
    "policy" => {"required" => [], "auto_select" => []},
    "approvals" => {}},

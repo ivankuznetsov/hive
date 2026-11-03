@@ -239,7 +239,8 @@ class TriageTest < Minitest::Test
       with_triage_dir do |dir, task_folder|
         ctx = make_ctx(dir, task_folder)
         File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
-        File.write(File.join(task_folder, protected_file), "original #{protected_file} content\n")
+        capability_anchor = %w[execution-plan-current.json capability-accepted.jsonl].include?(protected_file)
+        File.write(File.join(task_folder, protected_file), "original #{protected_file} content\n") unless capability_anchor
 
         escalations = File.join(task_folder, "reviews", "escalations-01.md")
         target = File.join(task_folder, protected_file)
@@ -264,8 +265,12 @@ class TriageTest < Minitest::Test
         assert_includes result.tampered_files, protected_file,
                         "#{protected_file}: expected in tampered_files=#{result.tampered_files.inspect}"
         assert_match(/protected files/, result.error_message)
-        assert_equal "original #{protected_file} content\n", File.binread(target),
-                     "#{protected_file}: triage must restore the controller-owned bytes"
+        if capability_anchor
+          refute File.exist?(target), "#{protected_file}: triage must restore the absent legacy anchor"
+        else
+          assert_equal "original #{protected_file} content\n", File.binread(target),
+                       "#{protected_file}: triage must restore the controller-owned bytes"
+        end
       end
     end
   end

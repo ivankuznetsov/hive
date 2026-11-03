@@ -1,6 +1,27 @@
 ---
 registered_projects: []
 
+# New coding tasks adopt capability plans with QA On. Existing tasks retain
+# their original behavior. Turning adoption off does not disable pinned gates.
+# This policy is PROJECT-LOCAL: put it in .hive-state/config.yml, not here.
+# task_capabilities:
+#   enabled: true
+#   catalog: []
+#   policy:
+#     required: []
+#     auto_select: []
+#   approvals: {}
+
+# Configure a real behavior check in each project's .hive-state/config.yml:
+# review:
+#   ci:
+#     command: "bin/test"
+# Without a runnable check, each new task needs a separate operator QA waiver
+# (reason and affected checks); there is no standing project exception.
+# UI requires a named installed skill with its exact actor. Security requires
+# an exact-envelope operator approval and an enforceable local runtime route.
+# See wiki/modules/task_capabilities.md for configuration and recovery.
+
 # Global daemon defaults. Project enrollment still lives in each
 # project's .hive-state/config.yml; this kill-switch disables daemon
 # auto-clearing of allowlisted recoverable terminal error markers.

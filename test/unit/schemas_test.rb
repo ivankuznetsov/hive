@@ -86,8 +86,8 @@ class SchemasTest < Minitest::Test
     end
   end
 
-  def test_run_error_kind_all_contains_fifteen_values
-    assert_equal 15, Hive::Schemas::RunErrorKind::ALL.length,
+  def test_run_error_kind_all_contains_twenty_seven_values
+    assert_equal 27, Hive::Schemas::RunErrorKind::ALL.length,
                  "RunErrorKind::ALL count is locked; adding a kind requires bumping this assertion deliberately"
   end
 
@@ -96,6 +96,12 @@ class SchemasTest < Minitest::Test
       concurrent_run task_in_error plan_review_blocked wrong_stage stage config agent git
       worktree ambiguous_slug invalid_task_path internal error dependency_wait
       admission_error
+      task_capability_invalid_selection task_capability_policy_conflict
+      task_capability_missing_skill task_capability_verification_unavailable
+      task_capability_approval_required task_capability_approval_scope
+      task_capability_blocked task_capability_stale_preview
+      task_capability_operator_required task_capability_route_unavailable
+      task_capability_stale_revision task_capability_running_attempt
     ].sort
     assert_equal expected, Hive::Schemas::RunErrorKind::ALL.sort
   end

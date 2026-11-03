@@ -81,6 +81,9 @@ Each run also carries a random invocation-custody ID. After the run exits,
 Hive terminates only same-user processes carrying that exact ID, closing a
 `setsid` escape without affecting another invocation. A custody-cleanup
 failure overrides an otherwise successful transcript.
+Linux inventory treats `ESRCH` while reading a vanished process environment as
+an exited non-match, alongside an already removed procfs entry. It still checks
+the invocation token and process identity before signalling any live process.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that

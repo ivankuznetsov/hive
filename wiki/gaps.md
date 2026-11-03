@@ -47,9 +47,10 @@ items:
   `Review.admitted_pass_ceiling`: `max_passes + 1`, extended by one for each
   consecutive `kind=ci_repaired` sentinel from the verify pass upward. A pass
   with no admitting receipt still fails loudly.
-- **No finalize-side backstop.** 8-finalize does not check that the review's
+- **Legacy tasks have no finalize-side backstop.** 8-finalize does not check that the legacy review's
   `REVIEW_COMPLETE` HEAD matches the branch it finalizes; the fix relies on the
-  review loop alone.
+  review loop alone. Adopted execution plans now independently gate the final
+  Git revision at transition and readiness boundaries.
 - **Operator edits on a `final_fix_unverified` STALE are not consumed.** The TUI
   still opens the verify pass's `escalations-NN.md`, but a retry re-runs the
   reviewers instead of fixing from edited marks. To act on those findings the
@@ -1895,8 +1896,8 @@ legacy browser output templates require explicit configured verification
 checks rather than inferred requirements. Current
 environment identity covers controller runtime, direct command executables and
 declared environment selectors; project-specific dependency integrity remains
-part of the configured check contract. Adoption remains disabled until separate
-publication gates and operator controls are complete.
+part of the configured check contract. Revision-bound publication gates and
+shared operator recovery controls now have deterministic integration proofs.
 
 - Closed: new command checks use a fixed verification environment across Rails,
   daemon and CLI callers. A real Rails capture, durable check and advancement

@@ -157,7 +157,9 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
 end
 
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
-NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key
+  --capability --qa-waiver-reason --qa-waiver-check --capability-approval].freeze
+NEW_BOOLEAN_OPTIONS = %w[--preview --no-preview --preview=true --preview=false].freeze
 
 # Each command boundary (lib/hive/commands/<command>.rb) declares its own
 # pre-dispatch JSON usage contract via Hive::CliUsageContracts.declare; the
@@ -184,12 +186,12 @@ original_argv = ARGV.dup
 
 begin
   ARGV.replace(Hive::CliArgvPolicy.validate_encoding(ARGV))
-  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS)
+  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS, boolean_options: NEW_BOOLEAN_OPTIONS)
   ARGV.replace(Hive::CliArgvPolicy.reject_unsupported_json_assignments(ARGV, before_index: text_start))
   ARGV.replace(Hive::CliArgvPolicy.normalize_leading_json_options(ARGV))
-  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS)
+  text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS, boolean_options: NEW_BOOLEAN_OPTIONS)
   ARGV.replace(Hive::CliArgvPolicy.rewrite_help(ARGV, text_start_index: text_start))
-  ARGV.replace(Hive::CliArgvPolicy.lift_new_options(ARGV, value_options: NEW_VALUE_OPTIONS))
+  ARGV.replace(Hive::CliArgvPolicy.lift_new_options(ARGV, value_options: NEW_VALUE_OPTIONS, boolean_options: NEW_BOOLEAN_OPTIONS))
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   contract = Hive::CliUsageContracts.contract(original_argv, on_failure: ->(exception_class) {

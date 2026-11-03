@@ -22,6 +22,12 @@ an inferred default cannot establish that authority. Live child routes count
 against account concurrency in their parent's attempt diagnostics and in the
 atomic SQL admission check. They do not consume another task/fleet reservation.
 
+An approved security route becoming unavailable permits unrelated implementation
+and review while blocking finalization. Shared CLI/Web recovery names only
+restoration of that exact route or task archive/cancellation. Neither automatic
+fallback nor capability removal can turn an unavailable check into a pass or
+waiver. Configuration alone is not proof that the runtime enforces tool scope.
+
 ## Configuration
 
 Provider accounts live in global Hive config because adapter sessions and

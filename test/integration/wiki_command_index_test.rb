@@ -12,13 +12,19 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
   WIKI_ROOT = File.join(ROOT, "wiki")
 
   def test_public_help_metadata_and_navigation_are_one_read_only_contract
-    before = repository_snapshot
-    stdout, stderr, status = render_public_help
+    with_repository_copy do |root|
+      assert_public_help_read_only(root)
+    end
+  end
+
+  def assert_public_help_read_only(root)
+    before = repository_snapshot(root)
+    stdout, stderr, status = render_hive("help", root: root)
 
     assert status.success?, "bin/hive help failed (#{status.exitstatus}): #{stderr}"
 
-    guard = WikiCommandIndex::Guard.new(wiki_root: WIKI_ROOT, expected_owners: nil)
-    index_text = File.read(File.join(WIKI_ROOT, "cli.md"))
+    guard = WikiCommandIndex::Guard.new(wiki_root: File.join(root, "wiki"), expected_owners: nil)
+    index_text = File.read(File.join(root, "wiki", "cli.md"))
     first = guard.evaluate(help_text: stdout, index_text: index_text)
     second = guard.evaluate(help_text: stdout, index_text: index_text)
 
@@ -43,13 +49,13 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
       refute_includes first.index_commands, alias_name
     end
 
-    canonical_version = render_hive("version")
+    canonical_version = render_hive("version", root: root)
     [ "--version", "-v" ].each do |wrapper_alias|
-      assert_equal canonical_version, render_hive(wrapper_alias),
+      assert_equal canonical_version, render_hive(wrapper_alias, root: root),
         "bin/hive #{wrapper_alias} diverged from the version command"
     end
 
-    assert_equal before, repository_snapshot,
+    assert_equal before, repository_snapshot(root),
       "public help or the command-index guard modified the repository"
   end
 
@@ -96,11 +102,30 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
 
   private
 
-  def render_public_help
-    render_hive("help")
+  # The real source tree is copied so parallel workers, coverage files and
+  # editor changes cannot masquerade as writes made by the help subprocess.
+  # Snapshot coverage still includes every ignored/untracked fixture entry.
+  def with_repository_copy
+    Dir.mktmpdir("wiki-command-index-source") do |root|
+      files, error, status = Open3.capture3("git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", chdir: ROOT)
+      assert status.success?, error
+      files.split("\0").uniq.each do |relative|
+        source = File.join(ROOT, relative)
+        next unless File.file?(source)
+        destination = File.join(root, relative)
+        FileUtils.mkdir_p(File.dirname(destination))
+        FileUtils.cp(source, destination, preserve: true)
+      end
+      _out, error, status = Open3.capture3("git", "init", "--quiet", root)
+      assert status.success?, error
+      File.write(File.join(root, "untracked-help-probe"), "unchanged\n")
+      FileUtils.mkdir_p(File.join(root, ".bundle"))
+      File.write(File.join(root, ".bundle", "ignored-help-probe"), "unchanged\n")
+      yield root
+    end
   end
 
-  def render_hive(*argv)
+  def render_hive(*argv, root: ROOT)
     Dir.mktmpdir("hive-public-help") do |sandbox|
       home = File.join(sandbox, "home")
       hive_home = File.join(sandbox, "hive")
@@ -149,9 +174,9 @@ class WikiCommandIndexIntegrationTest < Minitest::Test
       Open3.capture3(
         environment,
         RbConfig.ruby,
-        File.join(ROOT, "bin/hive"),
+        File.join(root, "bin/hive"),
         *argv,
-        chdir: ROOT
+        chdir: root
       )
     end
   end

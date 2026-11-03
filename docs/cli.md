@@ -13,6 +13,7 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive status [--json]` | Poll bounded daemon health and identity-verified live tasks through `hive-running-status.v1`; scan/output truncation is explicit. | `hive status --json` |
 | `hive status --operational [--json]` | Inspect the active workflow queue, blocker ownership, and safe next actions. | `hive status --operational --json` |
 | `hive task TARGET --json` | Inspect one task in depth without materializing every task's details. | `hive task demo:my-task --json` |
+| `hive task-capabilities ACTION TARGET --project PROJECT --json` | Inspect execution-plan history or propose, accept, reject, waive QA and accept specific security findings at a safe boundary. | `hive task-capabilities show my-task --project demo --json` |
 | `hive new PROJECT [--workflow ID] [--idempotency-key KEY] [--json] TEXT` | Capture an idea in the workflow entry stage; optional idempotency makes agent retries return the existing task. | `hive new xbookmark --workflow editorial --idempotency-key creator:42 --json "draft a launch post"` |
 | `hive brainstorm TARGET` | Promote inbox to brainstorm or re-run brainstorm. | `hive brainstorm <slug>` |
 | `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan <slug> --from 2-brainstorm` |
@@ -26,6 +27,38 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive decide TARGET OUTCOME --from STAGE --decision-id ID [--note TEXT] [--json]` | Apply one descriptor-declared outcome to the observed visit of a durable human stage. | `hive decide <slug> approve --from approval --decision-id abcdef0123456789 --json` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
+
+New coding tasks pin capability selections. QA Automatic means On; code review,
+skipped CI and browser warnings do not satisfy it. Configure an actual behavior
+check under `review.ci.command`, or have the human creator record a separate
+reasoned QA exception for each task:
+
+```sh
+hive new demo "Add export" --preview --capability ui=automatic --json
+hive new demo "Editorial change" --capability qa=off \
+  --qa-waiver-reason "Operator verifies the rendered copy" --qa-waiver-check all
+hive new demo "Inspect dependencies" --capability security=on \
+  --capability-approval security=approved-local-audit
+```
+
+Repeat `--capability ID=automatic|on|off`, `--qa-waiver-check CHECK_ID` and
+`--capability-approval ID=REFERENCE` as needed. `--preview` writes nothing and
+shows the same reasons, blockers and recovery commands as the web composer.
+Explicit choices override inference within hard policy. A QA exception is
+displayed as **Waived by operator**, never Passed; it does not affect the next
+task. UI needs its named installed compatible skill. Security requires an
+operator-written exact actor/profile/model/tools/local-target/budget approval.
+An unavailable approved security route must be restored, or the task archived
+or cancelled; capability removal, fallback and forced finalization cannot clear
+that block.
+
+`hive task` shows the persisted plan and gate. Start an operator correction with
+`hive task-capabilities show TARGET --project PROJECT --json`; use its identity,
+plan-version and SHA fences for subsequent mutations. Accept/reject capability
+changes are separate from stage approval. Active attempt callers cannot record
+operator waivers, approvals or risk acceptance. This context guard is not a
+sandbox or proof of humanity against same-user callers or local loopback access.
+See the [complete command contract](../wiki/modules/task_capabilities.md).
 
 The untouched setup path is loopback-only at `http://127.0.0.1:4567` and never
 creates LAN/public or Tailscale exposure. `--no-service` performs the other

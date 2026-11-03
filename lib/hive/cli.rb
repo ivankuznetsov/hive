@@ -712,6 +712,16 @@ module Hive
       returns the original task after it moves stages, and rejects reuse for
       different input. Pair it with --json for the hive-new.v1 result.
 
+      New coding tasks pin optional capabilities. QA Automatic means On: configure
+      a real behavior check or have the human creator record --capability qa=off
+      with --qa-waiver-reason and --qa-waiver-check all for this task. There is
+      no standing project exception. UI needs an installed named skill; security
+      On needs an exact operator-written --capability-approval ID=REFERENCE.
+      Repeat --capability ID=automatic|on|off to compose choices. --preview --json
+      shows effective choices, reasons, blockers and recovery without writes.
+      Existing tasks retain their pinned behavior. Use hive task-capabilities
+      for later version-fenced proposals and operator decisions.
+
       One --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until it reaches the project's configured dependency gate.
       Repeat --depends-on to require every prerequisite. A repeated declaration

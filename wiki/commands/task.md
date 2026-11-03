@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-09-02
+updated: 2026-11-03
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -16,6 +16,21 @@ coverage, and receipt-correlated diagnostic-log reference. It is read-only and
 does not expand the former fleet-wide status graph.
 `hive task TARGET --project NAME --log` re-resolves a current diagnostic and
 prints only its integrity-checked bounded receipt-correlated tail.
+
+Adopted tasks include optional `capabilities` in the existing v2 schema: pinned
+choices/reasons, ordered stages and skill/actor/model identities, execution-plan
+version/digests, proposals/history and current gate/check evidence. CLI and Web
+read the same persisted projection. The gate leads with failed, blocked, stale,
+pending/running or operator-waived checks and concrete recovery. Passed and
+individual Not applicable evidence remain expandable in web. Out-of-band
+closure has its own receipt-linked annotation and never cleans up unrun checks.
+The capability aggregate participates in the task workspace refresh signature.
+
+Use `hive task-capabilities show TARGET --project NAME --json` for version-fenced
+corrections. Active attempts and stale versions disable acceptance with visible
+reasons; server-side checks remain authoritative. Tasks without adoption metadata
+show legacy behavior without fabricated plan details. See
+[[modules/task_capabilities]] for prerequisites, authorization and recovery.
 
 ## Synopsis
 

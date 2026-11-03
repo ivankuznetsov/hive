@@ -2,11 +2,11 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
-  def test_task_capabilities_are_dormant_and_validate_before_capture
+  def test_task_capabilities_default_on_and_validate_before_capture
     with_tmp_dir do |dir|
       path = File.join(dir, ".hive-state", "config.yml")
       FileUtils.mkdir_p(File.dirname(path))
-      assert_equal false, Hive::Config.load(dir).dig("task_capabilities", "enabled")
+      assert_equal true, Hive::Config.load(dir).dig("task_capabilities", "enabled")
       [ { "enabled" => "yes" }, { "catalog" => {} }, { "unexpected" => true },
         { "policy" => { "required" => [ "missing" ] } }, "wrong" ].each do |settings|
         File.write(path, YAML.dump({ "task_capabilities" => settings }))

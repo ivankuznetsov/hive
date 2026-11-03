@@ -130,11 +130,11 @@ module Hive
     module_function
 
     def validate_encoding(argv) = argv
-    def new_text_start_index(_argv, value_options:) = 0
+    def new_text_start_index(_argv, value_options:, boolean_options: []) = 0
     def reject_unsupported_json_assignments(argv, before_index:) = argv
     def normalize_leading_json_options(argv) = argv
     def rewrite_help(argv, text_start_index:) = argv
-    def lift_new_options(argv, value_options:) = argv
+    def lift_new_options(argv, value_options:, boolean_options: []) = argv
     def one_shot_requested?(_argv) = false
     def json_requested?(argv) = argv.include?("--json")
   end

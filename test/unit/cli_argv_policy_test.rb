@@ -79,4 +79,15 @@ class HiveCliArgvPolicyTest < Minitest::Test
                    %w[new demo text --workflow=content], value_options: VALUE_OPTIONS
                  )
   end
+
+  def test_declared_preview_booleans_are_lifted_without_changing_literal_tail_rules
+    booleans = %w[--preview --no-preview --preview=true --preview=false]
+    booleans.each do |flag|
+      argv = [ "new", flag, "demo", "describe" ]
+      assert_equal 3, Hive::CliArgvPolicy.new_text_start_index(argv, value_options: VALUE_OPTIONS, boolean_options: booleans)
+      assert_equal [ "new", flag, "demo", "--", "describe" ], Hive::CliArgvPolicy.lift_new_options([ "new", "demo", "describe", flag ], value_options: VALUE_OPTIONS, boolean_options: booleans)
+      literal = [ "new", "demo", "--", flag, "literal" ]
+      assert_equal literal, Hive::CliArgvPolicy.lift_new_options(literal, value_options: VALUE_OPTIONS, boolean_options: booleans)
+    end
+  end
 end

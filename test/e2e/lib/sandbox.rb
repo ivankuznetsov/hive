@@ -182,6 +182,9 @@ module Hive
       def tune_project_config(path)
         cfg_path = File.join(path, ".hive-state", "config.yml")
         cfg = YAML.safe_load(File.read(cfg_path)) || {}
+        # Retained scenarios characterize legacy tasks; adoption scenarios
+        # explicitly enable the new capture contract before creating tasks.
+        cfg["task_capabilities"] = { "enabled" => false }
         cfg["worktree_root"] = File.join(@run_dir, "worktrees")
         cfg["execute"] ||= {}
         # The synthetic Codex binary has no provider-owned config to inspect.

@@ -417,7 +417,10 @@ components:
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_workspace/builder.rb
-        reason: "Existing Hive composition, quiescence process evidence, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
+          - lib/hive/task_capabilities/actor_runner.rb
+          - lib/hive/task_capabilities/revision.rb
+          - lib/hive/task_capabilities/projection.rb
+        reason: "Existing Hive composition, quiescence process evidence, read-only consumers, execution-boundary checks, closure verification and in-attempt capability actors share the canonical runtime-control-plane repository. Capability actors retain their parent reservation; revision/read consumers only check ownership. None is an alternate admission producer."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb

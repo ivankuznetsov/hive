@@ -28,10 +28,10 @@ module Hive
       "worktree_root" => nil,
       "default_branch" => nil,
       "default_workflow" => "coding",
-      # Adoption stays disabled until capture, evidence gates, and recovery are
-      # integrated. Pinned plans keep their gates when adoption is disabled.
+      # New coding captures adopt immutable capability plans. Existing tasks
+      # retain their semantics; disabling adoption never disables pinned gates.
       "task_capabilities" => {
-        "enabled" => false,
+        "enabled" => true,
         "catalog" => [],
         "policy" => { "required" => [], "auto_select" => [] },
         "approvals" => {}

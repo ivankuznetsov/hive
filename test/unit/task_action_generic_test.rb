@@ -17,17 +17,18 @@ class TaskActionGenericTest < Minitest::Test
 
   def with_research_task(stage_name, descriptor: research_workflow)
     with_registered_workflow(descriptor) do
-      with_tmp_dir do |root|
-        stage = descriptor.stage_named(stage_name)
-        folder = File.join(root, ".hive-state", "stages", stage.dir, SLUG)
-        FileUtils.mkdir_p(folder)
-        File.write(
-          File.join(folder, "meta.yml"),
-          { "slug" => SLUG, "workflow" => descriptor.id.to_s }.to_yaml
-        )
+      # Actions read accepted state lazily, so their task remains available
+      # through assertions after this helper returns. Teardown owns cleanup.
+      root = tracked_tmp_dir("hive-test-generic-action")
+      stage = descriptor.stage_named(stage_name)
+      folder = File.join(root, ".hive-state", "stages", stage.dir, SLUG)
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "meta.yml"),
+        { "slug" => SLUG, "workflow" => descriptor.id.to_s }.to_yaml
+      )
 
-        yield Hive::Task.new(folder)
-      end
+      yield Hive::Task.new(folder)
     end
   end
 

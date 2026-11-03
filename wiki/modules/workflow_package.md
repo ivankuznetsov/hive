@@ -175,6 +175,12 @@ retains package generations and configuration snapshots referenced by accepted
 plan history, even after task metadata has moved to the new generation. Runtime
 execution still requires the currently selected generation.
 
+`hive task-capabilities` revisions compare against the task's captured envelope,
+never an unselected candidate generation. They cannot accept candidate authority
+to bypass an incompatible update. A long-running incompatible task can therefore
+block workflow activation indefinitely; finish, archive or cancel it and
+prepare the update again.
+
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
 Owner-trusted actors declare `permissions: yolo`. They run directly with the
 ordinary agent environment plus explicit package input bindings, without a

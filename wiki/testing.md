@@ -116,6 +116,22 @@ called from a bundled parent: the fallback must not re-enter the parent's bundle
 under a different system Ruby. Set `HIVE_TEST_REQUIRE_BUNDLE=1` for authoritative
 coverage or CI checks, where an unlocked fallback must fail closed instead.
 
+Legacy task fixtures explicitly set `task_capabilities.enabled: false`; rollout
+fixtures omit that override to prove the production default. Capability suites
+use real Git repositories and durable parent attempts with deterministic actor
+responses, including compiled local command enforcement. The semantic E2E
+`workflow.task_capabilities` covers an installed UI skill preview, automatic QA,
+a configured fourth verifier, exact-revision results and forced stale-gate
+refusal. CLI/Web parity and operator-context refusal also have Rails integration
+coverage; native radio/fieldset labels and every textual state are asserted
+without depending on optional browser tests.
+
+The wiki command-index read-only integration test copies the current tracked
+and untracked source into a disposable repository before invoking public help.
+It snapshots all entries there, including ignored probes and Git control files.
+Concurrent test logs, coverage and editor writes in the development checkout
+therefore cannot be attributed to that isolated help subprocess.
+
 ### Generated configuration defaults reference
 
 `Hive::Config::DEFAULTS` is the sole owner of the values in the managed block

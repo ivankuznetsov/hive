@@ -282,13 +282,18 @@ Tasks with a controller-accepted execution plan evaluate selected verification
 attachments at the clean review boundary through
 [[modules/task_capabilities|TaskCapabilities::Verification]]. Commands and
 independent actors retain revision-bound results in the protected accepted chain.
+New coding captures adopt these gates by default; legacy tasks do not gain them
+on read. `task_capabilities.enabled: false` affects future captures only.
 The review result exposes `:capability_verification`; the complete marker also
 records its state. A complete adopted review still evaluates missing/stale
 checks on retry. Direct invocation without an installed durable parent names
 `--durable` recovery without rewriting a complete marker into an error shortcut.
 
 Unchanged clean local CI can populate the same contract when command, timeout,
-output bound and environment match the pinned check. Skipped CI cannot do so.
+output bound and controlled verification environment match the pinned check.
+Commands run under a fixed PATH/locale and UTC without inherited Rails/Node or
+Bundler variables. Dependencies and meaningful behavior assertions remain the
+check author's responsibility. Skipped CI cannot satisfy QA.
 Adopted browser checks use their own pinned actor through the generic adapter;
 legacy browser warnings and passed JSON alone never establish adopted QA proof.
 Legacy tasks keep the existing complete shortcut and browser soft-warning path.

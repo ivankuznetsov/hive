@@ -14,6 +14,60 @@ workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
 
+## Per-task capabilities
+
+Coding keeps its nine stages. New task capture pins optional guidance and
+independent verification in an immutable execution plan, separate from human
+`plan.md`. QA defaults On, UI is recommended unless finite project policy
+selects it, and security never runs automatically. Explicit On/Off choices,
+selection reasons, approved bindings, results and history appear in CLI and web.
+Old inbox, in-flight and archived tasks without adoption metadata stay legacy;
+reads and managed updates never silently add default gates.
+
+Projects add capabilities through `task_capabilities.catalog`; authored workflow
+descriptors declare their own definitions. A configuration-only verifier uses
+the same adapter as QA/security, without adding or renumbering stages:
+
+```yaml
+task_capabilities:
+  catalog:
+    - id: links
+      kind: verification
+      stages: [review]
+      checks:
+        - id: local-links
+          kind: behavior
+          claim: Local documentation links resolve
+          command: ruby script/check-links.rb
+```
+
+Create with `hive new PROJECT "Check docs" --capability links=on`. The named
+script must exist and demonstrate the stated behavior. QA still needs its own
+usable behavior check or an explicit per-task operator exception. A standing
+project waiver is not supported.
+
+Selected UI guidance pins its installed skill and executor at plan/execute;
+a different executor contributes through a bounded specialist within the parent
+attempt. Security pins its exact approved route and enforceable local scope.
+Configuration does not prove tool enforcement. Current bounded Bash admission
+supports Claude's compiled command allowlist and isolated task-owned targets,
+with external scanning denied; unsupported adapters/scopes block. Missing
+approval blocks dispatch, while an approved unavailable route permits unrelated
+work and always blocks finalization until restored.
+
+Verification results bind the execution plan, check, environment and Git
+revision. Changes stale evidence; only a controller-proven patch-identical
+rewrite with unchanged base and environment may reuse it. Gates run at review
+exit, transition admission and final readiness. Force and manual folder moves
+cannot clear them. External closure is recorded as gate not evaluated.
+
+Safe-boundary plan changes preserve historical versions and approvals. Expansion
+and every active-task security addition require operator acceptance within the
+existing captured envelope. Managed updates that change selected bindings name
+each blocking task: finish, archive or cancel it, then prepare the update again.
+Historical generations remain readable and do not authorize old-generation
+execution. See [capability configuration and recovery](../wiki/modules/task_capabilities.md).
+
 ## Build And Share A Private Workflow
 
 The companion website guide, [Build and share a private workflow](https://hivecli.sh/docs/build-private-workflow/),

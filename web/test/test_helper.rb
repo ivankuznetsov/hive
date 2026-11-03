@@ -58,6 +58,14 @@ module ActiveSupport
         # A helper invoked twice for the same project inside one example can
         # reuse the already initialized repository and registration.
       end
+      # Existing web fixtures retain legacy semantics. Capability examples
+      # explicitly enable adoption after creating their project.
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      config = YAML.safe_load_file(config_path)
+      unless config.key?("task_capabilities")
+        config["task_capabilities"] = { "enabled" => false }
+        File.write(config_path, config.to_yaml)
+      end
       name
     end
 

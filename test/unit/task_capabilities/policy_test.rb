@@ -6,8 +6,8 @@ class TaskCapabilitiesPolicyTest < Minitest::Test
     Hive::TaskCapabilities::Catalog.new(workflow: Hive::Workflows::Coding::DESCRIPTOR)
   end
 
-  def test_switch_is_dormant_and_signal_provenance_is_explicit
-    assert_equal false, Hive::Config::DEFAULTS.dig("task_capabilities", "enabled")
+  def test_adoption_defaults_on_and_signal_provenance_is_explicit
+    assert_equal true, Hive::Config::DEFAULTS.dig("task_capabilities", "enabled")
     policy = Hive::TaskCapabilities::Policy.new(
       { "required" => [ "qa" ], "auto_select" => [ { "capability" => "ui", "signals" => [
         { "type" => "task_text", "value" => "screen" }, { "type" => "changed_path", "value" => "web/**" }

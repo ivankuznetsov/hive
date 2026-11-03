@@ -1,0 +1,122 @@
+name: task_capabilities
+description: Adopted coding tasks compose QA and a configured fourth verifier, retain exact-revision evidence and refuse forced stale advancement.
+tags: [capabilities, cli-only, acceptance]
+coverage:
+  primary: workflow.task_capabilities
+  supporting: []
+steps:
+  - kind: write_file
+    path: "{run_home}/.claude/skills/ui-fixture/SKILL.md"
+    content: "# UI fixture\nKeep controls labelled and keyboard reachable.\n"
+  - kind: write_file
+    path: "{sandbox}/.hive-state/config.yml"
+    content: |
+      default_branch: master
+      worktree_root: "{run_home}/worktrees"
+      rebase: { enabled: false }
+      task_capabilities:
+        enabled: true
+        catalog:
+          - id: ui
+            kind: guidance
+            stages: [plan, execute]
+            skill: ui-fixture
+            actor: { profile: claude, provider: anthropic, model: approved }
+            permissions: read-only
+            budget_usd: 1
+            timeout_sec: 30
+          - id: syntax
+            kind: verification
+            stages: [review]
+            checks:
+              - id: ruby-syntax
+                kind: behavior
+                claim: Every Ruby module parses successfully
+                command: "ruby -rripper -e 'abort unless Dir[%q{lib/**/*.rb}].all? { |p| Ripper.sexp(File.read(p)) }; puts :syntax_checked'"
+      review:
+        reviewers: []
+        github_checks: { enabled: false }
+        triage: { enabled: false }
+        browser_test: { enabled: false }
+        ci:
+          command: "ruby -Ilib -rsample -e 'abort unless Sample::Calculator.new.square(4) == 16; puts :behavior_verified'"
+
+  - kind: json_assert
+    args: [new, "{project}", "Add calculator square", --capability, syntax=on, --idempotency-key, composed-task, --json]
+    schema: hive-new
+    pick: [execution_plan_version]
+    equals: 1
+
+  - kind: json_assert
+    args: [new, "{project}", "Preview installed UI guidance", --preview, --capability, ui=on, --capability, syntax=on, --json]
+    schema: hive-new
+    pick: [capabilities, choices, ui, effective]
+    equals: "on"
+
+  - kind: ruby_block
+    block: |
+      preview = @ctx.last_json.fetch("capabilities")
+      raise "installed UI skill not admitted" unless preview.fetch("blockers").empty?
+      ui = preview.fetch("bindings").find { |binding| binding["id"] == "ui" }
+      raise "skill identity missing" unless ui.dig("skill_identity", "digest")
+
+  - kind: ruby_block
+    block: |
+      require "hive/worktree"
+      require "hive/task_capabilities/store"
+      folder = File.join(sandbox, ".hive-state/stages/1-inbox", slug)
+      plan = Hive::TaskCapabilities::Store.new(folder).current
+      raise "default QA not selected" unless plan.data.dig("choices", "qa", "effective") == "on"
+      raise "fourth verifier missing" unless plan.data.fetch("bindings").map { |b| b.fetch("id") } == %w[qa syntax]
+      destination = File.join(sandbox, ".hive-state/stages/6-review", slug)
+      FileUtils.mv(folder, destination)
+      File.write(File.join(destination, "task.md"), "# Implement calculator square\n")
+      owned = Hive::Worktree.new(sandbox, slug, worktree_root: File.join(run_home, "worktrees"))
+      owned.create!(slug, default_branch: "master")
+      owned.write_pointer!(destination, slug)
+      source = File.join(owned.path, "lib/sample/calculator.rb")
+      File.write(source, File.read(source) + "\nmodule Sample\n  class Calculator\n    def square(value)\n      multiply(value, value)\n    end\n  end\nend\n")
+      system("git", "-C", owned.path, "add", ".", exception: true)
+      system("git", "-C", owned.path, "commit", "-qm", "Implement calculator square", exception: true)
+      File.write(File.join(run_home, "capability-plan-digest"), plan.digest)
+
+  - kind: cli
+    args: [run, "{slug}", --project, "{project}"]
+    timeout: 60
+
+  - kind: state_assert
+    path: "{task_dir:6-review}/task.md"
+    marker: { current: REVIEW_COMPLETE }
+
+  - kind: json_assert
+    args: [task, "{slug}", --project, "{project}", --json]
+    schema: hive-task-workspace
+    pick: [capabilities, gate, state]
+    equals: passed
+
+  - kind: ruby_block
+    block: |
+      require "hive/task_capabilities/result_store"
+      folder = File.join(sandbox, ".hive-state/stages/6-review", slug)
+      worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+      sha = Hive::GitOps.new(worktree).head_sha
+      results = Hive::TaskCapabilities::ResultStore.new(folder).history
+      raise "independent results missing" unless results.map { |_, result| result.data.fetch("capability_id") }.uniq.sort == %w[qa syntax]
+      raise "wrong evidence identity" unless results.all? { |_, result| result.data.fetch("evaluated_sha") == sha && result.data.fetch("execution_plan_digest") == File.read(File.join(run_home, "capability-plan-digest")) && !result.data.fetch("parent_attempt_id").empty? }
+      File.write(File.join(worktree, "lib/sample/calculator.rb"), File.read(File.join(worktree, "lib/sample/calculator.rb")) + "\n# Changed after verification\n")
+      system("git", "-C", worktree, "add", ".", exception: true)
+      system("git", "-C", worktree, "commit", "-qm", "Change verified source", exception: true)
+
+  - kind: json_assert
+    args: [task, "{slug}", --project, "{project}", --json]
+    schema: hive-task-workspace
+    pick: [capabilities, gate, state]
+    equals: stale
+
+  - kind: cli
+    args: [approve, "{slug}", --from, 6-review, --project, "{project}", --force]
+    expect_exit: 64
+
+  - kind: state_assert
+    path: "{task_dir:6-review}/task.md"
+    marker: { current: REVIEW_COMPLETE }

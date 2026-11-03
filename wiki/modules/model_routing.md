@@ -18,6 +18,10 @@ through `capability_resolution`. Their model and effort have exact provenance
 from the accepted actor, without stage/default inheritance. These internal slots
 do not expand the public `models:` configuration vocabulary.
 
+CLI and Web task detail expose the pinned actor/model and plan version through
+the shared capability projection. Retry/resume and inspection do not select a
+replacement model from current project defaults.
+
 Explicit provider-account pools reuse this field-wise resolver independently
 for every candidate through `resolve_candidate`. That stricter seam validates
 candidate fallback values as routed controls, materializes a concrete model,

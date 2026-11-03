@@ -116,7 +116,10 @@ class ComponentBoundariesTest < Minitest::Test
           "lib/hive/daemon/recovery_coordinator.rb",
           "lib/hive/task_activity.rb",
           "lib/hive/task_closure.rb",
-          "lib/hive/task_workspace/builder.rb"
+          "lib/hive/task_workspace/builder.rb",
+          "lib/hive/task_capabilities/actor_runner.rb",
+          "lib/hive/task_capabilities/revision.rb",
+          "lib/hive/task_capabilities/projection.rb"
         ],
         "Hive::Attempts::Supervisor" => [ "lib/hive/commands/attempt_supervise.rb" ]
       },

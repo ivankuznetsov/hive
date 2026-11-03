@@ -119,6 +119,19 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_a_lost_process_during_environment_read_is_a_non_match
+    skip "exact process-custody integration requires Linux procfs" unless RUBY_PLATFORM.include?("linux")
+
+    with_tmp_dir do |dir|
+      write_proc_entry(dir, 424_242, environ: custody_environ(TOKEN))
+      original = File.method(:binread)
+      vanished = ->(path, *args) { path.start_with?(dir) ? raise(Errno::ESRCH) : original.call(path, *args) }
+      with_replaced_singleton_method(File, :binread, vanished) do
+        assert build_custody(dir).cleanup!
+      end
+    end
+  end
+
   def test_an_oversized_process_environment_fails_the_cleanup
     skip "exact process-custody integration requires Linux procfs" unless
       RUBY_PLATFORM.include?("linux") && File.directory?("/proc")

@@ -84,7 +84,7 @@ module Hive
       normalized[0...command_index] + [ "help", target ]
     end
 
-    def new_text_start_index(argv, value_options:)
+    def new_text_start_index(argv, value_options:, boolean_options: [])
       options = option_argv(argv)
       command_index = options.index { |arg| !arg.start_with?("-") }
       return nil unless command_index && argv[command_index] == "new"
@@ -93,7 +93,7 @@ module Hive
       project_index = nil
       while index < options.length
         arg = options[index]
-        if Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(arg)
+        if Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(arg) || boolean_options.include?(arg)
           index += 1
           next
         end
@@ -115,7 +115,7 @@ module Hive
       project_index && project_index + 1
     end
 
-    def lift_new_options(argv, value_options:)
+    def lift_new_options(argv, value_options:, boolean_options: [])
       normalized = argv.dup
       command_index = option_argv(normalized).index { |arg| !arg.start_with?("-") }
       return normalized unless command_index && normalized[command_index] == "new"
@@ -130,7 +130,7 @@ module Hive
           rest << arg
         elsif arg == "--"
           protected_tail = true
-        elsif Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(arg)
+        elsif Hive::CliJsonOptions::BOOLEAN_OPTIONS.include?(arg) || boolean_options.include?(arg)
           lifted << arg
         elsif value_options.include?(arg)
           value = normalized[index + 1]

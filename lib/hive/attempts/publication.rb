@@ -11,15 +11,15 @@ module Hive
         "dispatch" => :publication_dispatch_acknowledged
       }.freeze
 
-      def seal_terminal_payloads(record)
+      def seal_terminal_payloads(record, timeout_sec: nil)
         unless record.is_a?(Record) && record.final?
           raise RepositoryError, "only final attempt payloads can be sealed"
         end
 
-        seal_payloads(record, terminal_payload_specs(record))
+        seal_payloads(record, terminal_payload_specs(record), timeout_sec: timeout_sec)
       end
 
-      def seal_lost_capture_payloads(record, references)
+      def seal_lost_capture_payloads(record, references, timeout_sec: nil)
         unless record.is_a?(Record) && record.state == "lost"
           raise RepositoryError, "only lost attempt captures can be sealed"
         end
@@ -35,17 +35,21 @@ module Hive
             kind: "lost_capture", source: source
           }
         end
-        seal_payloads(record, specs).values.uniq.freeze
+        seal_payloads(record, specs, timeout_sec: timeout_sec).values.uniq.freeze
       rescue InvalidOutputReference => error
         raise RepositoryError, error.message
       end
 
-      def seal_payloads(record, specs)
+      def seal_payloads(record, specs, timeout_sec: nil)
+        deadline = timeout_sec && Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_sec
         payload_store.with_reference_custody(specs.map { |spec| spec.fetch(:source) }) do
           prepared = specs.map do |spec|
             spec.merge(reference: prepare_sealed_reference(spec.fetch(:source)))
           end
-          database.transaction(operation: "publication.seal_payloads") do |db|
+          remaining = deadline && deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          raise RuntimeControlPlane::FileFence::Busy, "payload publication budget expired" if remaining && remaining <= 0
+
+          database.transaction(operation: "publication.seal_payloads", timeout_sec: remaining) do |db|
             prepared.each { |spec| persist_sealed_reference(db, record, spec) }
           end
           remove_open_sources(prepared)
@@ -90,11 +94,11 @@ module Hive
         database.read { |db| publication_in(db, id) }
       end
 
-      def acknowledge_publication(attempt_id, consumer:)
+      def acknowledge_publication(attempt_id, consumer:, timeout_sec: nil)
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         name = consumer_name(consumer)
         column = PUBLICATION_COLUMNS.fetch(name)
-        database.transaction(operation: "publication.acknowledge_publication") do |db|
+        database.transaction(operation: "publication.acknowledge_publication", timeout_sec: timeout_sec) do |db|
           row = db[:attempts].where(attempt_id: id).first
           unless row && row[:terminal_receipt_json]
             raise RepositoryError, "final attempt is not pending publication"
@@ -110,9 +114,9 @@ module Hive
         !!entry && entry.fetch("consumers").values.all?
       end
 
-      def finish_publication(attempt_id)
+      def finish_publication(attempt_id, timeout_sec: nil)
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
-        database.transaction(operation: "publication.finish_publication") do |db|
+        database.transaction(operation: "publication.finish_publication", timeout_sec: timeout_sec) do |db|
           row = db[:attempts].where(attempt_id: id).first
           next false unless row && row[:terminal_receipt_json]
           unless PUBLICATION_COLUMNS.values.all? { |column| row.fetch(column) == 1 }

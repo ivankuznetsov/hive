@@ -206,15 +206,120 @@ class AttemptsSupervisorTest < Minitest::Test
     original = store.method(name)
     store.define_singleton_method(name) do |*args, **kwargs|
       calls += 1
-      raise Hive::Attempts::RepositoryError, message if calls <= times
+      if calls <= times
+        cause = message == BUSY ? SQLite3::BusyException.new("database is locked") : nil
+        raise Hive::Attempts::RepositoryError, message, cause: cause
+      end
 
       original.call(*args, **kwargs)
     end
     -> { calls }
   end
 
+  def test_real_sql_lock_delays_claim_with_bounded_positive_tries_and_one_worker
+    with_tmp_dir do |directory|
+      invocations = File.join(directory, "invocations")
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "printf run >> #{invocations}" ]) do |store, attempt|
+        measurements = []
+        store.database.instance_variable_set(:@transaction_observer, ->(entry) { measurements << entry })
+        with_sql_holder(store, seconds: 2.2) do
+          supervisor = Hive::Attempts::Supervisor.new(
+            store: store, attempt_id: attempt.attempt_id,
+            claim_io: StringIO.new(CLAIM_CAPABILITY),
+            heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5
+          )
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          assert_equal 0, supervisor.run
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+          assert_operator elapsed, :>=, 2.0
+          assert_operator elapsed, :<, 5.0
+        end
+        assert_equal "run", File.read(invocations)
+        claims = measurements.select { |entry| entry[:operation] == "attempt.claim" }
+        assert_operator claims.length, :>=, 3
+        blocked = claims.reject { |entry| entry[:result] == "committed" }
+        assert blocked.all? { |entry| entry[:sqlite_wait_sec] > 0.0 && entry[:sqlite_wait_sec] < 1.1 }, blocked.inspect
+        assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+      end
+    end
+  end
+
+  def test_contended_claim_exhausts_strictly_before_lifecycle_expiry_without_work
+    with_tmp_dir do |directory|
+      invocations = File.join(directory, "invocations")
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "touch #{invocations}" ]) do |store, attempt|
+        store.arm_launch_handoff(attempt, launch_timeout_sec: 0.2, now: Time.now.utc)
+        with_sql_holder(store, seconds: 0.5) do
+          supervisor = Hive::Attempts::Supervisor.new(
+            store: store, attempt_id: attempt.attempt_id,
+            claim_io: StringIO.new(CLAIM_CAPABILITY)
+          )
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          _, error = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run }
+          assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.35
+          assert_includes error, "runtime_bookkeeping_busy"
+          refute_includes error, "launch claim deadline expired"
+        end
+        refute File.exist?(invocations)
+        assert_equal "launching", store.fetch(attempt.attempt_id).state
+      end
+    end
+  end
+
+  def test_ambiguous_claim_first_heartbeat_and_terminal_commit_fetch_the_winner
+    %i[claim first_heartbeat checkpoint terminalize heartbeat].each do |operation|
+      script = operation == :heartbeat ? [ "/bin/sleep", "0.2" ] : [ "/bin/true" ]
+      with_attempt(worker_argv: script) do |store, attempt|
+        original = store.method(operation)
+        calls = 0
+        store.define_singleton_method(operation) do |*arguments, **keywords|
+          calls += 1
+          result = original.call(*arguments, **keywords)
+          raise SQLite3::BusyException, "ambiguous commit" if calls == 1
+
+          result
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY),
+          heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5
+        )
+        assert_equal 0, supervisor.run, operation.to_s
+        terminal = store.fetch(attempt.attempt_id)
+        assert_equal "succeeded", terminal.outcome
+        if operation == :heartbeat
+          assert_operator terminal.lease_version, :>, 4
+          assert_operator calls, :>=, 1
+        else
+          assert_equal 4, terminal.lease_version
+          assert_equal operation == :terminalize ? 2 : 1, calls
+        end
+      end
+    end
+  end
+
+  def test_worker_registration_contention_keeps_timeout_and_output_drain_responsive
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "printf started; sleep 30" ]) do |store, attempt|
+      fail_store_calls(store, :checkpoint, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), timeout_sec: 0.1,
+        heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5,
+        kill_grace_sec: 0.05
+      )
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      assert_equal 124, Timeout.timeout(2) { supervisor.run }
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1.0
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      reference = terminal.receipt.fetch("log_reference")
+      frames = Hive::Attempts::StreamLog.read(File.join(store.root, reference.fetch("path")))
+      assert frames.any? { |frame| frame.bytes.include?("started") }
+    end
+  end
+
   def test_busy_heartbeats_are_deferred_while_the_lease_is_unexpired
-    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.3; exit 0" ]) do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.7; exit 0" ]) do |store, attempt|
       heartbeats = fail_store_calls(store, :heartbeat, times: 3)
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
@@ -243,7 +348,9 @@ class AttemptsSupervisorTest < Minitest::Test
 
       _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
       assert_includes err, "lost its lease"
-      assert_includes err, "database is locked"
+      assert_includes err, "runtime_bookkeeping_busy"
+      assert_equal store.fetch(attempt.attempt_id).to_h, supervisor.last_durable_record.to_h
+      assert_equal "running", supervisor.last_durable_record.state
     end
   end
 
@@ -1228,11 +1335,11 @@ class AttemptsSupervisorTest < Minitest::Test
     with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       original_fetch = store.method(:fetch)
       fetches = 0
-      store.define_singleton_method(:fetch) do |attempt_id|
+      store.define_singleton_method(:fetch) do |attempt_id, **options|
         fetches += 1
         raise "store unavailable" if fetches > 1
 
-        original_fetch.call(attempt_id)
+        original_fetch.call(attempt_id, **options)
       end
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
@@ -1373,6 +1480,32 @@ class AttemptsSupervisorTest < Minitest::Test
       File.basename(candidate.fetch("path")) == Hive::PatrolFix::AttemptDiagnostic::FILENAME
     end
     JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
+  end
+
+  def with_sql_holder(store, seconds:)
+    reader, writer = IO.pipe
+    script = <<~'RUBY'
+      connection = SQLite3::Database.new(ARGV.fetch(0))
+      connection.execute("BEGIN IMMEDIATE")
+      writer = IO.for_fd(Integer(ARGV.fetch(2)))
+      writer.write("1")
+      writer.close
+      sleep Float(ARGV.fetch(1))
+      connection.execute("ROLLBACK")
+      connection.close
+    RUBY
+    holder = Process.spawn(
+      RbConfig.ruby, "-I", $LOAD_PATH.join(File::PATH_SEPARATOR), "-rsqlite3", "-e", script,
+      store.database.path, seconds.to_s, writer.fileno.to_s,
+      writer.fileno => writer.fileno, close_others: true
+    )
+    writer.close
+    assert_equal "1", reader.read(1)
+    yield
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+    Process.wait(holder) if holder
   end
 
   def with_attempt(worker_argv:, routing: { "mode" => "legacy" }, intended_stage: "4-execute",

@@ -15,9 +15,9 @@ module Hive
       end
 
       def call(attributes:, source_fingerprint:, admission:, limits:,
-               route_decision:, recovery_source_attempt_id: nil)
+               route_decision:, recovery_source_attempt_id: nil, timeout_sec: nil)
         record = nil
-        @database.transaction(operation: "admission.call") do |db|
+        @database.transaction(operation: "admission.call", timeout_sec: timeout_sec) do |db|
           subject = attributes[:subject] || Attempts::Record.task_stage_subject(
             task_id: attributes[:task_id], task_slug: attributes[:task_slug],
             intended_stage: attributes[:intended_stage]

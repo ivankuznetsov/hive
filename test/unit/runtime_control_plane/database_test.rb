@@ -264,6 +264,117 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     database&.disconnect
   end
 
+  def test_capped_transactions_restore_the_default_timeout_after_fresh_open_and_busy
+    with_database do |database, path|
+      database.disconnect
+      timeout = database.transaction(timeout_sec: 0.2) do |connection|
+        connection.fetch("PRAGMA busy_timeout").get
+      end
+      assert_operator timeout, :>, 0
+      assert_operator timeout, :<=, 200
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |connection| connection.fetch("PRAGMA busy_timeout").get }
+      database.disconnect
+      blocker = SQLite3::Database.new(path)
+      blocker.execute("BEGIN IMMEDIATE")
+      assert_raises(Sequel::DatabaseError) do
+        database.transaction(timeout_sec: 0.1) { flunk "contended SQL must not enter the body" }
+      end
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |connection| connection.fetch("PRAGMA busy_timeout").get }
+    ensure
+      blocker&.execute("ROLLBACK")
+      blocker&.close
+    end
+  end
+
+  def test_submillisecond_remaining_budget_cannot_issue_zero_timeout_sql
+    with_database do |database|
+      fake_now = 0.0
+      calls = []
+      original_clock = Process.method(:clock_gettime)
+      clock = ->(kind, *options) { kind == Process::CLOCK_MONOTONIC ? fake_now : original_clock.call(kind, *options) }
+      original_fence = database.method(:with_writer_fence)
+      database.define_singleton_method(:with_writer_fence) do |**options, &block|
+        original_fence.call(**options) do
+          fake_now = 0.0099
+          block.call
+        end
+      end
+      connection = database.instance_variable_get(:@connection)
+      original_transaction = connection.method(:transaction)
+      connection.define_singleton_method(:transaction) do |**options, &block|
+        calls << options
+        original_transaction.call(**options, &block)
+      end
+      with_replaced_singleton_method(Process, :clock_gettime, clock) do
+        assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+          database.transaction(timeout_sec: 0.01) { flunk "budget must expire before SQL" }
+        end
+      end
+      assert_empty calls
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |db| db.fetch("PRAGMA busy_timeout").get }
+    end
+  end
+
+  def test_failed_open_and_fence_acquisition_keep_their_phase_timings
+    with_database do |database|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, ->(item) { measurements << item })
+      database.with_exclusive_writer(role: :controller, timeout_sec: 1) do |_authority|
+        assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+          database.transaction(timeout_sec: 0.05) { flunk "held fence must exclude SQL" }
+        end
+      end
+      fenced = measurements.last
+      assert_equal "acquisition_failed", fenced.fetch(:result)
+      assert_operator fenced.fetch(:fence_sec), :>=, 0.01
+      assert_equal 0, fenced.fetch(:sqlite_wait_sec)
+      assert_nil fenced.fetch(:hold_sec)
+
+      database.define_singleton_method(:ensure_open!) do |**|
+        sleep 0.02
+        raise Hive::RuntimeControlPlane::FileFence::Busy, "injected opening contention"
+      end
+      assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+        database.transaction(timeout_sec: 0.05) { flunk "failed open must exclude SQL" }
+      end
+      opening = measurements.last
+      assert_operator opening.fetch(:open_sec), :>=, 0.01
+      assert_equal 0, opening.fetch(:fence_sec)
+      assert_equal 0, opening.fetch(:sqlite_wait_sec)
+      assert_nil opening.fetch(:hold_sec)
+    end
+  end
+
+  def test_bounded_reads_restore_timeout_and_query_only_after_success_error_and_tiny_budget
+    with_database do |database|
+      connection = database.instance_variable_get(:@connection)
+      connection.run("PRAGMA busy_timeout = 3456")
+      observed = database.read(timeout_sec: 0.2) do |db|
+        db.fetch("PRAGMA busy_timeout").get
+      end
+      assert_operator observed, :>, 0
+      assert_operator observed, :<=, 200
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+
+      error = assert_raises(RuntimeError) do
+        database.read(timeout_sec: 0.1) { raise "original read failure" }
+      end
+      assert_equal "original read failure", error.message
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+
+      assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+        database.read(timeout_sec: 0.0001) { flunk "submillisecond read must not yield SQL" }
+      end
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+    end
+  end
+
   def test_database_is_the_only_runtime_control_plane_connection_owner
     root = File.expand_path("../../../lib/hive/runtime_control_plane", __dir__)
     offenders = Dir.glob(File.join(root, "**/*.rb")).reject do |path|

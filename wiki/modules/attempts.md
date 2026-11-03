@@ -266,3 +266,30 @@ measurements are enabled by `HIVE_SQL_DEBUG=1`; holds over one second warn even
 without debug logging. Measurements never log SQL or projection payloads and
 are emitted after SQL and writer-fence release. See
 `docs/implementation/runtime-database-contention.md` for observed evidence.
+
+Attempt bookkeeping uses `BookkeepingRetry` with a single monotonic deadline
+per operation. Admission through wrapper registration, claim, first heartbeat
+and worker registration shares `attempt_bookkeeping_timeout_sec` (30 seconds
+by default), capped at 30 seconds and clamped strictly inside persisted
+launch/first-heartbeat expiry.
+The detached handoff exports the remaining absolute deadline through its private
+supervisor transport; it never retries the launcher, process spawn or agent body.
+A delayed claim still requires the capability, unchanged lease and a matching
+live identity for the current wrapper.
+
+Later heartbeat and terminal writes retain separate 600-second deferral
+envelopes. Scheduled heartbeat and worker-registration retries leave output
+capture, cancellation and stage timeout polling active between tries. Every
+SQL try is capped at one second or its remaining budget, with connection/fence
+work sharing that cap and reserving a positive SQL wait. Backoff starts at
+50 ms with bounded jitter and caps at one second. There is no independent
+try-count termination rule. Writer measurements also separate connection,
+fence and SQLite acquisition time, including failures.
+
+Only actual SQLite BUSY errors (including extended primary result codes),
+wrapped driver causes and the runtime file-fence busy type are retryable.
+Messages containing `database is locked` alone are ordinary errors. Exhaustion
+raises `BookkeepingBusy`, a TEMPFAIL carrying the attempt, operation, count,
+elapsed time and `runtime_bookkeeping_busy` reason; it does not enter generic
+launch-handoff failure handling. The repository resolves an identical ambiguous
+terminal commit from its authoritative receipt rather than overwriting it.

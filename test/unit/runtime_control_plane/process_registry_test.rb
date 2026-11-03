@@ -1,10 +1,51 @@
 require "test_helper"
 require "hive/attempts/process_custody"
+require "hive/attempts/bookkeeping_retry"
 require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/runtime_control_plane/process_registry"
 
 class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
   include HiveTestHelper
+
+  def test_reservation_fence_exhaustion_is_bounded_typed_tempfail_without_sql
+    with_registry do |database, registry, root|
+      fence = Hive::RuntimeControlPlane::LaunchFence.new(state_home: root, timeout_sec: 0.1)
+      fence.acquire_exclusive!
+      retries = Hive::Attempts::BookkeepingRetry.new(
+        operation: "reserve_wrapper", attempt_id: "a-1", budget_sec: 0.15
+      )
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      error = assert_raises(Hive::Attempts::BookkeepingBusy) do
+        retries.run do |timeout|
+          registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "a-1", timeout_sec: timeout)
+        end
+      end
+      assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+      assert_equal "runtime_bookkeeping_busy", error.reason
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.35
+      assert_empty database.read { |db| db[:launch_reservations].all }
+    ensure
+      fence&.release!
+    end
+  end
+
+  def test_reservation_sql_wait_uses_remaining_budget_and_restores_timeout
+    with_registry do |database, registry, _root|
+      holder = SQLite3::Database.new(database.path)
+      holder.execute("BEGIN IMMEDIATE")
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      error = assert_raises(Sequel::DatabaseError) do
+        registry.reserve!(origin: "attempt", role: "attempt_wrapper", timeout_sec: 0.08)
+      end
+      assert Hive::InternalError.sqlite_busy?(error)
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.25
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |db| db.fetch("PRAGMA busy_timeout").get }
+    ensure
+      holder&.execute("ROLLBACK")
+      holder&.close
+    end
+  end
 
   def test_reservation_and_identity_registration_are_durable
     with_registry do |database, registry, _root|

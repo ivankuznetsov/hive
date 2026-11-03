@@ -2,6 +2,11 @@ require "hive"
 
 module Hive
   module Attempts
+    class RepositoryError < Hive::Error; end
+    class CompareAndSwapFailed < RepositoryError; end
+    class CapacityExceeded < RepositoryError; end
+    class StaleTaskSource < RepositoryError; end
+
     ClientResult = Data.define(
       :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes,
       :output_status

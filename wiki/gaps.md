@@ -1873,3 +1873,8 @@ that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 - Runtime contention qualification has not reproduced the historical long
   publisher hold. Initial measurements include one residual manual writer
   hold over one second; checkpoint and recovery qualification remain pending.
+
+- The bounded bookkeeping interface has deterministic full-envelope tests and
+  a real held-lock claim test. Crash/restart pending-operation persistence,
+  end-to-end transient attribution and the combined daemon/four-supervisor
+  workload still require their planned recovery and qualification evidence.

@@ -3,6 +3,9 @@ require "digest"
 require "fileutils"
 require "json"
 require "hive/attempts/capability"
+require "hive/attempts/contracts"
+require "hive/attempts/bookkeeping_retry"
+require "hive/attempts/process_identity"
 require "hive/attempts/record"
 require "hive/attempts/coordination"
 require "hive/attempts/publication"
@@ -15,11 +18,6 @@ require "hive/stringify_keys"
 
 module Hive
   module Attempts
-    class RepositoryError < Hive::Error; end
-    class CompareAndSwapFailed < RepositoryError; end
-    class CapacityExceeded < RepositoryError; end
-    class StaleTaskSource < RepositoryError; end
-
     # The attempt facade persists lifecycle state in the runtime control plane.
     # The filesystem root contains only retained bytes referenced by those rows.
     class Repository
@@ -152,16 +150,16 @@ module Hive
       end
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
-                           route_decision: nil, **attributes)
+                           route_decision: nil, timeout_sec: nil, **attributes)
         recovery_source_attempt_id = attributes.delete(:recovery_source_attempt_id)
         source_fingerprint ||= attributes[:progress_token]
         RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
           route_decision: route_decision,
-          recovery_source_attempt_id: recovery_source_attempt_id
+          recovery_source_attempt_id: recovery_source_attempt_id, timeout_sec: timeout_sec
         )
-      rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error => error
+      rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error, Hive::ConcurrentRunError => error
         translate_store_error(error, "attempt could not be created")
       end
 
@@ -170,7 +168,7 @@ module Hive
       # separate, short transaction: task/file inspection stays outside the
       # admission lock, while a concurrent newer observation still fences this
       # caller at admission_validate_subject_in.
-      def observe_task_source(task:, generation:, observed_at:)
+      def observe_task_source(task:, generation:, observed_at:, timeout_sec: nil)
         task_id = generation.task_id.to_s
         fingerprint = generation.progress_token.to_s
         input_epoch = Integer(generation.task_input_epoch)
@@ -183,7 +181,7 @@ module Hive
         workflow_id = (workflow.respond_to?(:id) ? workflow.id : workflow).to_s
         workflow_id = "coding" if workflow_id.empty?
         timestamp = Record.iso8601(observed_at)
-        database.transaction(operation: "attempt.observe_task_source") do |db|
+        database.transaction(operation: "attempt.observe_task_source", timeout_sec: timeout_sec) do |db|
           project = db[:projects].where(state_root_path: File.dirname(stages)).first
           unless project && project.fetch(:name) == generation.project.to_s
             raise StaleTaskSource, "attempt project identity is not registered for the task path"
@@ -234,8 +232,8 @@ module Hive
         translate_store_error(error, "attempt task source could not be observed")
       end
 
-      def arm_launch_handoff(observed, launch_timeout_sec:, now:)
-        mutate(observed, operation: "attempt.arm_launch_handoff", allowed_states: [ "launching" ]) do |data|
+      def arm_launch_handoff(observed, launch_timeout_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.arm_launch_handoff", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "claim_deadline" => Record.iso8601(now + launch_timeout_sec),
@@ -246,13 +244,13 @@ module Hive
         end
       end
 
-      def fetch(attempt_id)
-        row = read_row(attempt_id)
+      def fetch(attempt_id, timeout_sec: nil)
+        row = read_row(attempt_id, timeout_sec: timeout_sec)
         row && record_from(row)
       end
 
-      def fetch_hot(attempt_id)
-        row = read_row(attempt_id)
+      def fetch_hot(attempt_id, timeout_sec: nil)
+        row = read_row(attempt_id, timeout_sec: timeout_sec)
         return nil unless row
         return record_from(row) if %w[launching running].include?(row.fetch(:state))
         return nil unless publication_pending_row?(row)
@@ -309,8 +307,8 @@ module Hive
         true
       end
 
-      def active_attempts
-        rows = database.read do |db|
+      def active_attempts(timeout_sec: nil)
+        rows = database.read(timeout_sec: timeout_sec) do |db|
           publication_pending = Sequel.lit(
             "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
           )
@@ -336,14 +334,20 @@ module Hive
         translate_store_error(error, "live attempt query failed")
       end
 
-      def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)
-        raise CompareAndSwapFailed, "launch claim deadline expired" if
-          observed.active_deadline && now > observed.active_deadline
-        mutate(observed, operation: "attempt.claim", allowed_states: [ "launching" ]) do |data|
+      def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.claim", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           unless Capability.matches?(data["claim_capability_digest"], claim_capability)
             raise CompareAndSwapFailed, "attempt claim capability is invalid"
           end
           raise CompareAndSwapFailed, "attempt is already claimed" if data["wrapper"]
+          # A try that began within the launch deadline may acquire SQL after
+          # it. Only the exact live wrapper holding the capability may repair
+          # that transition; the caller's finite retry deadline is unchanged.
+          deadline = data["claim_deadline"] && Time.iso8601(data["claim_deadline"])
+          if deadline && now > deadline &&
+             (owner.fetch("pid", owner[:pid]) != Process.pid || ProcessIdentity.new.status(Hive::StringifyKeys.call(owner)) != :matching)
+            raise CompareAndSwapFailed, "launch claim deadline expired"
+          end
 
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
@@ -355,10 +359,10 @@ module Hive
         end
       end
 
-      def first_heartbeat(observed, stale_sec:, now:)
+      def first_heartbeat(observed, stale_sec:, now:, timeout_sec: nil)
         raise CompareAndSwapFailed, "first heartbeat deadline expired" if
           observed.active_deadline && now > observed.active_deadline
-        mutate(observed, operation: "attempt.first_heartbeat", allowed_states: [ "launching" ]) do |data|
+        mutate(observed, operation: "attempt.first_heartbeat", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           raise CompareAndSwapFailed, "attempt has not been claimed" unless data["wrapper"]
 
           timestamp = Record.iso8601(now)
@@ -370,8 +374,8 @@ module Hive
         end
       end
 
-      def heartbeat(observed, stale_sec:, now:)
-        mutate(observed, operation: "attempt.heartbeat", allowed_states: [ "running" ]) do |data|
+      def heartbeat(observed, stale_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.heartbeat", allowed_states: [ "running" ], timeout_sec: timeout_sec) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "heartbeat_at" => Record.iso8601(now),
@@ -380,8 +384,8 @@ module Hive
         end
       end
 
-      def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil)
-        mutate(observed, operation: "attempt.checkpoint", allowed_states: [ "running" ]) do |data|
+      def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil, timeout_sec: nil)
+        mutate(observed, operation: "attempt.checkpoint", allowed_states: [ "running" ], timeout_sec: timeout_sec) do |data|
           outputs = output_references.nil? ? data.fetch("current_outputs") :
             Hive::StringifyKeys.call(output_references)
           outputs.each { |reference| OutputReference.validate_shape!(reference) }
@@ -503,6 +507,15 @@ module Hive
         ) do |db|
           row = db[:attempts].where(attempt_id: observed.attempt_id).first
           current = row && record_from(row)
+          if pending_receipt && !pending_receipt.empty? && current&.state == "terminal" &&
+             current.lease_version == observed.lease_version + 1 &&
+             current.wrapper == observed.wrapper && current.worker == observed.worker &&
+             current.receipt.reject { |key, _| key == "ended_at" } == pending_receipt.reject { |key, _| key == "ended_at" }
+            # An ambiguous commit is resolved from the authoritative winner;
+            # the retry may have rebuilt its wall timestamp, never its inputs.
+            replacement = current
+            next
+          end
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
@@ -535,7 +548,7 @@ module Hive
         end
         replacement
       rescue InvalidRecord, InvalidOutputReference, Sequel::Error,
-             RuntimeControlPlane::Error => error
+             RuntimeControlPlane::Error, Hive::ConcurrentRunError => error
         translate_store_error(error, "attempt transition failed")
       end
 
@@ -575,9 +588,9 @@ module Hive
         raise RepositoryError, "attempt #{row.fetch(:attempt_id)} is unreadable: #{error.message}"
       end
 
-      def read_row(attempt_id)
+      def read_row(attempt_id, timeout_sec: nil)
         id = safe_id(attempt_id)
-        database.read { |db| db[:attempts].where(attempt_id: id).first }
+        database.read(timeout_sec: timeout_sec) { |db| db[:attempts].where(attempt_id: id).first }
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt lookup failed")
       end

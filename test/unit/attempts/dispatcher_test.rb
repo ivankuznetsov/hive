@@ -41,6 +41,61 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_admission_retry_uses_one_request_and_launch_deadline_without_replaying_launcher
+    with_dispatcher do |dispatcher, launcher, task, store|
+      mono = 0.0
+      dispatcher.instance_variable_set(:@monotonic, -> { mono })
+      dispatcher.instance_variable_set(:@sleeper, ->(seconds) { mono += seconds })
+      dispatcher.instance_variable_set(:@random, -> { 0.5 })
+      dispatcher.instance_variable_set(:@bookkeeping_timeout_sec, 0.5)
+      original = store.method(:create_launching)
+      requests = []
+      store.define_singleton_method(:create_launching) do |**attributes|
+        requests << [ attributes.fetch(:attempt_id), attributes.fetch(:request_id) ]
+        if requests.length == 1
+          mono += 0.2
+          raise SQLite3::BusyException, "busy"
+        end
+        original.call(**attributes)
+      end
+      deadline = nil
+      launch = launcher.method(:launch)
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        deadline = Hive::Attempts::BookkeepingRetry.launch_deadline
+        launch.call(record, claim_capability: claim_capability)
+      end
+      result = dispatch(dispatcher, task, request_id: "same-request")
+      assert_equal :accepted, result.status
+      assert_equal 2, requests.length
+      assert_equal 1, requests.uniq.length
+      assert_equal 1, launcher.launched.length
+      assert_equal 0.5, deadline
+    end
+  end
+
+  def test_admitted_contention_exhaustion_is_typed_and_does_not_mark_failed_handoff
+    with_dispatcher do |dispatcher, launcher, task, store|
+      mono = 0.0
+      dispatcher.instance_variable_set(:@monotonic, -> { mono })
+      dispatcher.instance_variable_set(:@sleeper, ->(seconds) { mono += seconds })
+      dispatcher.instance_variable_set(:@bookkeeping_timeout_sec, 0.2)
+      store.define_singleton_method(:arm_launch_handoff) do |*_, timeout_sec:, **|
+        mono += timeout_sec
+        raise SQLite3::BusyException, "busy"
+      end
+      error = assert_raises(Hive::Attempts::BookkeepingBusy) do
+        dispatch(dispatcher, task, request_id: "busy-handoff")
+      end
+      assert_equal "arm_handoff", error.operation
+      assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+      assert_equal 0.2, mono
+      attempt = store.fetch(store.attempt_id_for_request(request_id: "busy-handoff"))
+      assert_equal "launching", attempt.state
+      assert_nil attempt["loss"]
+      assert_empty launcher.launched
+    end
+  end
+
   def test_same_and_different_request_ids_share_one_live_generation
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one", interactive: true)
@@ -1104,9 +1159,9 @@ class AttemptsDispatcherTest < Minitest::Test
     with_dispatcher(limits: { max_global: 2, max_per_project: 2, max_daily: 2 }) do |dispatcher, launcher, task, store|
       scans = 0
       original_active_attempts = store.method(:active_attempts)
-      store.define_singleton_method(:active_attempts) do
+      store.define_singleton_method(:active_attempts) do |**options|
         scans += 1
-        original_active_attempts.call
+        original_active_attempts.call(**options)
       end
       admission_view = Hive::Attempts::Reconciler.new(store: store).reconcile(now: NOW).admission_view
       state_root = task_state_root(task)
@@ -1140,13 +1195,13 @@ class AttemptsDispatcherTest < Minitest::Test
       external_active_attemptss = 0
       tick_active_attempts = tick_store.method(:active_attempts)
       external_active_attempts = external_store.method(:active_attempts)
-      tick_store.define_singleton_method(:active_attempts) do
+      tick_store.define_singleton_method(:active_attempts) do |**options|
         tick_active_attemptss += 1
-        tick_active_attempts.call
+        tick_active_attempts.call(**options)
       end
-      external_store.define_singleton_method(:active_attempts) do
+      external_store.define_singleton_method(:active_attempts) do |**options|
         external_active_attemptss += 1
-        external_active_attempts.call
+        external_active_attempts.call(**options)
       end
       admission_view = Hive::Attempts::Reconciler.new(store: tick_store)
                                                   .reconcile(now: NOW)

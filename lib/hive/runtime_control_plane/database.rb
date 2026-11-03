@@ -113,15 +113,30 @@ module Hive
                                  details: { error_class: error.class.name })
       end
 
-      def read
-        return operational_read { |database| yield database } if operational_inspection_active?
+      def read(timeout_sec: nil)
+        return operational_read(timeout_sec: timeout_sec) { |database| yield database } if operational_inspection_active?
 
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        deadline = timeout_sec && started + Float(timeout_sec)
         ProcessGuard.checkout do
-          ensure_open!
+          ensure_open!(timeout_sec: timeout_sec)
+          prior = integer_pragma(@connection, "busy_timeout") if deadline
+          if deadline
+            remaining_ms = (remaining_timeout(deadline) * 1000).floor
+            raise FileFence::Busy, "runtime read budget expired before SQL" unless remaining_ms.positive?
+
+            @connection.run("PRAGMA busy_timeout = #{remaining_ms}")
+          end
           @connection.run("PRAGMA query_only = ON")
           yield @connection
         ensure
-          @connection&.run("PRAGMA query_only = OFF")
+          active_error = $!
+          begin
+            @connection&.run("PRAGMA query_only = OFF")
+            @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+          rescue StandardError
+            raise unless active_error
+          end
         end
       end
 
@@ -212,7 +227,9 @@ module Hive
                       timeout_sec: nil, track_mutation: true,
                       operation: "runtime.write", identifiers: {})
         wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        acquired_at = released_at = nil
+        acquired_at = released_at = opened_at = fenced_at = nil
+        open_elapsed = fence_elapsed = sqlite_wait = 0.0
+        phase = :open
         result = "acquisition_failed"
         if operational_inspection_active?
           raise Unavailable.new(
@@ -224,20 +241,27 @@ module Hive
 
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
-        ProcessGuard.checkout { ensure_open!(timeout_sec: fence_timeout) }
-        writer_timeout = if timeout_sec.nil?
-          fence_timeout
-        else
-          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
-          [ fence_timeout - elapsed, 0.0 ].max
+        deadline = timeout_sec.nil? ? nil : wait_started + fence_timeout
+        prepare_timeout = lambda do
+          next fence_timeout unless deadline
+
+          available = remaining_timeout(deadline)
+          # Keep a positive SQL wait after connection validation and fences.
+          reserve_sql = available > 0.1 ? 0.1 : available / 2.0
+          [ available - reserve_sql, 0.0 ].max
         end
-        with_writer_fence(authority: authority, timeout_sec: writer_timeout) do
+        ProcessGuard.checkout { ensure_open!(timeout_sec: prepare_timeout.call) }
+        opened_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        open_elapsed = opened_at - wait_started
+        phase = :fence
+        with_writer_fence(authority: authority, timeout_sec: prepare_timeout.call) do
+          fenced_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          fence_elapsed = fenced_at - opened_at
+          phase = :sql
           ProcessGuard.checkout(transaction: true) do
-            sqlite_timeout = if timeout_sec.nil?
-              fence_timeout
-            else
-              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
-              [ fence_timeout - elapsed, 0.0 ].max
+            sqlite_timeout = deadline ? remaining_timeout(deadline) : fence_timeout
+            if deadline && sqlite_timeout < 0.001
+              raise FileFence::Busy, "runtime write budget expired before SQL acquisition"
             end
             ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?
             prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
@@ -245,6 +269,7 @@ module Hive
             begin
               @connection.transaction(mode: mode, rollback: :reraise) do
                 acquired_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+                sqlite_wait = acquired_at - fenced_at
                 result = "rolled_back"
                 authorize_mutation!(@connection, authority: authority,
                                     cleanup_attempt_id: cleanup_attempt_id)
@@ -254,17 +279,27 @@ module Hive
               .tap { result = "committed" }
             ensure
               released_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-              @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+              sqlite_wait = released_at - fenced_at unless acquired_at
+              active_error = $!
+              begin
+                @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+              rescue StandardError
+                raise unless active_error
+              end
             end
           end
         end
       ensure
         finished_at = released_at || Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        open_elapsed = finished_at - wait_started if phase == :open
+        fence_elapsed = finished_at - opened_at if phase == :fence
+        sqlite_wait = finished_at - fenced_at if phase == :sql && !acquired_at
         emit_transaction_measurement(
           operation: operation, identifiers: identifiers, result: result,
           wait_sec: (acquired_at || finished_at) - wait_started,
           hold_sec: acquired_at && finished_at - acquired_at,
-          elapsed_sec: finished_at - wait_started
+          elapsed_sec: finished_at - wait_started,
+          open_sec: open_elapsed, fence_sec: fence_elapsed, sqlite_wait_sec: sqlite_wait
         )
       end
 
@@ -673,6 +708,7 @@ module Hive
         %w[foreign_keys\ =\ ON synchronous\ =\ FULL trusted_schema\ =\ OFF]
           .each { |setting| @connection.run("PRAGMA #{setting}") }
         validate_database_custody!
+        @connection.run("PRAGMA busy_timeout = #{@busy_timeout_ms}") unless timeout_sec.nil?
         @connection
       rescue Error
         disconnect_preserving_error

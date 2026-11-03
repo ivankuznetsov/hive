@@ -146,6 +146,11 @@ regular-expression denial of service and URI host/path normalization flaws.
 
 ## Web app bundle
 
+The web lock resolves Loofah 2.25.3, Nokogiri 1.19.7 across all packaged
+platforms, and rails-html-sanitizer 1.7.2. These compatible patch updates
+satisfy the November 2026 advisory floors of 2.25.3, 1.19.5, and 1.7.2
+respectively. CI audits this separate lockfile as well as the root bundle.
+
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
 execs the Rails app from the managed bundle or a source checkout, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.

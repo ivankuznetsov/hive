@@ -706,6 +706,21 @@ exposures remain outside this repair's scope and do not gate its completion:
 These accepted Hive scope limitations are separate from the unresolved
 canonical Pi self-resolution follow-up above. Hive's cleanup does not claim
 cross-repository behavioral parity.
+updated: 2026-11-03
+tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
+---
+
+## E2E errors after report emission (2026-11-03)
+
+`bin/hive-e2e run --json` emits its report before the final summary lookup and
+exit decision. A later `StandardError` still appends a `run_failed` error
+envelope, so stdout then contains two JSON documents. This pre-existing
+ordering remains unchanged by the run-failure diagnostic fix; there is no
+suppression guard. The filesystem regressions in
+`test/e2e/lib/hive_e2e_binary_test.rb` prove a single schema-valid error
+document only for failures before report emission. No dedicated post-emission
+regression exists. See [[e2e]] for the scoped class prefix and stderr-only
+`HIVE_E2E_DEBUG=1` contract.
 
 ## Task observation boundary (2026-10-02)
 

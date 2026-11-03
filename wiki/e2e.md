@@ -105,7 +105,7 @@ class prefix or debug block. A `StandardError` after report emission still
 appends a `run_failed` envelope to stdout; the one-document guarantee applies
 only to failures before emission (see [[gaps]]).
 
-Independently of debug mode or caller, Runner attempts its existing
+Independently of debug mode or caller, `Runner#run_all` attempts its existing
 `status: "crashed"` report write before re-raising an unexpected run failure.
 A secondary `StandardError` from that write is swallowed so the original
 exception object, backtrace, and any existing cause reach the caller intact.

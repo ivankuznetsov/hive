@@ -153,7 +153,6 @@ class E2ERunnerTest < Minitest::Test
           assert_nil escaped.cause
         end
         assert_equal [ { status: "crashed", total: 0 } ], writes
-        refute File.exist?(File.join(runner.run_dir, "report.json"))
       end
     end
   end

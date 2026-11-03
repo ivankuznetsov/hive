@@ -731,6 +731,14 @@ These accepted Hive scope limitations are separate from the unresolved
 canonical Pi self-resolution follow-up above. Hive's cleanup does not claim
 cross-repository behavioral parity.
 
+## Historical Honeycomb manifest inventory (2026-11-03)
+
+The lossless YAML change proves compatibility with pre-change fixtures and the
+preserved legacy-v1 algorithm; it does not inventory a live registry corpus.
+A future version that requires single-form byte admission needs an explicit
+migration contract and an inventory of retained manifest identities first.
+See [[modules/workflow_package]] and [[testing]].
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

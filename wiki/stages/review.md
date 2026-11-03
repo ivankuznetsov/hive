@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,remote_ci,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -276,6 +276,25 @@ no-change where every finding is `RESOLVED/NO-FIX:` with no unapplied
 
 No frontmatter edits required: pass count is filename-derived, not stored.
 
+## Adopted task verification
+
+Tasks with a controller-accepted execution plan evaluate selected verification
+attachments at the clean review boundary through
+[[modules/task_capabilities|TaskCapabilities::Verification]]. Commands and
+independent actors retain revision-bound results in the protected accepted chain.
+The review result exposes `:capability_verification`; the complete marker also
+records its state. A complete adopted review still evaluates missing/stale
+checks on retry. Direct invocation without an installed durable parent names
+`--durable` recovery without rewriting a complete marker into an error shortcut.
+
+Unchanged clean local CI can populate the same contract when command, timeout,
+output bound and environment match the pinned check. Skipped CI cannot do so.
+Adopted browser checks use their own pinned actor through the generic adapter;
+legacy browser warnings and passed JSON alone never establish adopted QA proof.
+Legacy tasks keep the existing complete shortcut and browser soft-warning path.
+The aggregate is evidence state for a separate finalization consumer; adoption
+remains disabled until publication gates and operator controls are complete.
+
 ## Tests
 
 - `test/integration/run_review_test.rb` — pre-flight short-circuits, missing-worktree handling, clean fast path, local/hosted CI hard-blocks, exact-head CI-repair re-review, final-fix verify pass (clean → CI-gated completion, findings → `final_fix_unverified`, reviewer failure → not complete, restart and retry into the verify pass), CI gating of a final-pass guardrail approval, wall-clock cap including triage-retry handoff to `REVIEW_STALE`, reviewers all-limit markers, triage/fix limit vs non-limit failure classification, triage-limited retry reusing succeeded reviewers at the same HEAD (and re-running all of them once HEAD moves or the error is not a limit), transient triage retry, ad-hoc fix-off/fix-opt-in branching, a failed fix agent that committed still recording `REVIEW_ERROR` with no `claude_completion_fallback` event, and `message=` surfacing on terminal phase-agent errors.
@@ -284,6 +303,9 @@ No frontmatter edits required: pass count is filename-derived, not stored.
 - `test/unit/stages/review/reviewer_reuse_test.rb` — receipt round-trip and single use, triage-edited outputs dropped, moved-HEAD/other-pass/malformed receipts rejected, write failure degrading to a warning.
 - `test/unit/reviewers_test.rb`, `test/unit/reviewers/agent_test.rb`, `test/unit/reviewers/codex_review_test.rb` — adapter dispatch, agent-kind reviewer (including no inline retry of a provider-limit failure), and native Codex-review adapter behavior including transcript trimming before triage.
 - `test/unit/metrics_test.rb`, `test/integration/metrics_command_test.rb` — `hive metrics rollback-rate` against trailered fixture commits.
+- `test/unit/task_capabilities/verification_test.rb` — real command outcomes,
+  independent actor identities/proof, reuse/staleness, runner blocks, explicit
+  waivers, N/A, malformed reports, optional capture and custom verifier composition.
 
 ## Backlinks
 

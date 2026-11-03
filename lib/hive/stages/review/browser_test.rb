@@ -4,6 +4,7 @@ require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
+require "hive/task_capabilities/result"
 
 module Hive
   module Stages
@@ -26,11 +27,23 @@ module Hive
       # decides whether to ship anyway.
       module BrowserTest
         SKILL = "ce-test-browser".freeze
-        Result = Data.define(:status, :attempts, :summary, :details, :error_message)
+        Result = Data.define(:status, :attempts, :summary, :details, :error_message, :verification) do
+          def initialize(status:, attempts:, summary:, details:, error_message:, verification: nil)
+            super
+          end
+        end
 
         DEFAULT_MAX_ATTEMPTS = 2
 
         module_function
+
+        def verification_proposal(result)
+          unless %i[passed failed].include?(result.status) && result.verification.is_a?(Hive::TaskCapabilities::Result) &&
+              result.verification.state == result.status.to_s && result.verification.data["spawn_id"]
+            raise Hive::TaskCapabilities::Result::Invalid, "browser warning, skip or unbound agent verdict is not verification evidence"
+          end
+          result.verification
+        end
 
         def run!(cfg:, ctx:)
           enabled = cfg.dig("review", "browser_test", "enabled")

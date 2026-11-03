@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/task_capabilities/resolver"
 require "base64"
 require "json"
 require "time"
@@ -154,6 +155,83 @@ class RunReviewTest < Minitest::Test
         # Marker untouched.
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name
+      end
+    end
+  end
+
+  def adopt_verification(folder, cfg)
+    task = Hive::Task.new(folder)
+    resolution = Hive::TaskCapabilities::Resolver.new(workflow: task.workflow, cfg: cfg).resolve(
+      task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)))
+    Hive::TaskMeta.rewrite(folder, task_capabilities: resolution.plan.adoption)
+    Hive::TaskCapabilities::Store.new(folder).activate(resolution.plan, expected_version: nil)
+    task
+  end
+
+  def test_adopted_complete_review_runs_missing_checks_and_retries_after_revision_changes
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        cfg = Hive::Config.load(dir)
+        cfg["review"]["ci"]["command"] = "ruby -e 'puts %q{behavior verified}'"
+        task = adopt_verification(folder, cfg)
+        File.write(task.state_file, "<!-- REVIEW_COMPLETE pass=2 browser=passed -->\n")
+        context = Hive::Attempts::Context.send(:new, attempt_id: "review-parent", task_generation: 0)
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          first = Hive::Stages::Review.run!(task, cfg)
+          assert_equal "passed", first.dig(:capability_verification, "state")
+          check = first.dig(:capability_verification, "checks", 0)
+          assert_equal "review-parent", check.dig("result", "parent_attempt_id")
+          worktree = YAML.safe_load_file(task.worktree_yml_path).fetch("path")
+          File.write(File.join(worktree, "README.md"), "new revision\n")
+          run!("git", "-C", worktree, "commit", "-am", "new revision", "--quiet")
+          second = Hive::Stages::Review.run!(task, cfg)
+          assert_equal "passed", second.dig(:capability_verification, "state")
+          refute_equal check.fetch("result_digest"), second.dig(:capability_verification, "checks", 0, "result_digest")
+          assert_equal run!("git", "-C", worktree, "rev-parse", "HEAD").strip, second.dig(:capability_verification, "evaluated_sha")
+        end
+      ensure
+        context&.close
+      end
+    end
+  end
+
+  def test_adopted_direct_review_names_durable_recovery_without_poisoning_complete_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        cfg = Hive::Config.load(dir)
+        cfg["review"]["ci"]["command"] = "ruby -e 'exit 0'"
+        task = adopt_verification(folder, cfg)
+        File.write(task.state_file, "<!-- REVIEW_COMPLETE pass=2 browser=passed -->\n")
+        error = assert_raises(Hive::TaskCapabilities::Admission::Error) { Hive::Stages::Review.run!(task, cfg) }
+        assert_includes error.message, "--durable"
+        assert_equal :review_complete, Hive::Markers.current(task.state_file).name
+        assert_empty Hive::TaskCapabilities::Store.new(folder).blobs("result")
+      end
+    end
+  end
+
+  def test_adopted_review_accepts_current_clean_ci_evidence_without_running_it_twice
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        cfg = Hive::Config.load(dir)
+        counter = File.join(dir, "ci-runs")
+        cfg["review"]["ci"]["command"] = "ruby -e 'File.open(ARGV.fetch(0), %q{a}) { |f| f.puts :ran }; puts %q{ci behavior checked}' #{Shellwords.escape(counter)}"
+        task = adopt_verification(folder, cfg)
+        context = Hive::Attempts::Context.send(:new, attempt_id: "review-ci-parent", task_generation: 0)
+        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+          result = Hive::Stages::Review.run!(task, cfg)
+          assert_equal :review_complete, result.fetch(:status)
+          assert_equal "passed", result.dig(:capability_verification, "state")
+          assert_equal [ "ran\n" ], File.readlines(counter)
+          evidence = result.dig(:capability_verification, "checks", 0, "result", "evidence", 0)
+          assert_equal 0, evidence.fetch("exit_status")
+          assert_includes evidence.fetch("output"), "ci behavior checked"
+        end
+      ensure
+        context&.close
       end
     end
   end

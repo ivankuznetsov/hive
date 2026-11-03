@@ -698,6 +698,20 @@ class CiFixTest < Minitest::Test
     assert_equal "CI command is empty after parsing", result.reason
   end
 
+  def test_running_ci_is_terminated_when_its_parent_cancels
+    with_tmp_dir do |dir|
+      pid_file = File.join(dir, "child.pid")
+      run = Hive::Stages::Review::CiFix.run_ci_once(
+        [ RbConfig.ruby, "-e", "File.write(ARGV.fetch(0), Process.pid.to_s); sleep 30", pid_file ],
+        dir, 1024, 5, cancelled: -> { File.file?(pid_file) })
+      assert_instance_of Hive::Stages::Review::CiFix::CommandError, run
+      assert_includes run.reason, "cancelled with its parent"
+      pid = Integer(File.read(pid_file))
+      assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
+      assert_raises(Errno::ECHILD) { Process.waitpid(pid, Process::WNOHANG) }
+    end
+  end
+
   def test_run_ci_once_reports_pipe_launch_failure
     with_replaced_singleton_method(IO, :pipe, -> { raise "pipe exploded" }) do
       result = Hive::Stages::Review::CiFix.run_ci_once([ "ci" ], Dir.pwd, 1024, 1)

@@ -30,6 +30,7 @@ require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
 require "hive/workflows"
+require "hive/task_capabilities/verification"
 
 module Hive
   module Stages
@@ -148,14 +149,21 @@ module Hive
         # exits (return, raise, or system_exit), so events.jsonl
         # readers always see balanced brackets.
         @open_phase_event = nil
+        @capability_ci_observations = {}
+        capability_plan = Hive::TaskCapabilities::Store.new(task.folder).current
+        if capability_plan && !Hive::Attempts::Context.current
+          raise Hive::TaskCapabilities::Admission::Error, "adopted review verification requires a durable parent attempt; run this task with --durable"
+        end
 
         # Pre-flight terminal markers
         marker = Hive::Markers.current(task.state_file)
         case marker.name
         when :review_complete
-          next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
-          warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
-          return { commit: nil, status: :review_complete }
+          unless capability_plan
+            next_dir = Hive::Workflows.next_dir_after("6-review") # coding-scoped: coding review clears into artifacts
+            warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
+            return { commit: nil, status: :review_complete }
+          end
         when :review_ci_stale
           warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
                "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
@@ -194,6 +202,10 @@ module Hive
 
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
+        if marker.name == :review_complete && capability_plan
+          return complete_capability_verification(task, cfg, ctx.with(pass: marker.attrs.fetch("pass", "1").to_i),
+            started_at: started_at, max_wall_clock_sec: max_wall_clock)
+        end
 
         # --- Phase 1: CI fix ---
         # Resume rule: if marker is :review_waiting, the CI was already
@@ -859,6 +871,10 @@ module Hive
         end
 
         # --- Phase 5: browser test ---
+        if capability_plan
+          return complete_capability_verification(task, cfg, ctx.with(pass: pass),
+            started_at: started_at, max_wall_clock_sec: max_wall_clock)
+        end
         @current_phase = :browser
         mark_working(task, phase: :browser, pass: pass)
         browser_result = Hive::Stages::Review::BrowserTest.run!(cfg: cfg, ctx: ctx.with(pass: pass))
@@ -874,6 +890,10 @@ module Hive
                             phase: :browser, reason: "browser_unexpected", pass: pass)
           { commit: "browser_error_pass_#{format('%02d', pass)}", status: :review_error }
         end
+      rescue Hive::TaskCapabilities::Admission::Error
+        # Missing durable context is recoverable without poisoning an
+        # already-complete review marker into a permanent error shortcut.
+        raise
       rescue SystemExit
         # `exit 1` calls in pre-flight (worktree.yml missing, worktree
         # path missing) are intentional terminations — let them through
@@ -931,6 +951,19 @@ module Hive
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
         close_phase_event!(task) if @open_phase_event
+      end
+
+      def complete_capability_verification(task, cfg, ctx, started_at:, max_wall_clock_sec:)
+        @current_phase = :verification
+        remaining = [ max_wall_clock_sec - (Time.now - started_at), 0 ].max
+        verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg,
+          worktree_path: ctx.worktree_path, timeout_sec: remaining).run!(existing_results: @capability_ci_observations || {})
+        browser = verification.fetch("checks").find { |check| check["check_id"] == "browser" }
+        browser_status = browser ? (browser["state"] == "passed" ? :passed : :warned) : :skipped
+        Hive::Markers.set(task.state_file, :review_complete, pass: ctx.pass, browser: browser_status,
+          verification: verification.fetch("state"))
+        { commit: "review_verification_#{verification.fetch('state')}_pass_#{format('%02d', ctx.pass)}",
+          status: :review_complete, capability_verification: verification }
       end
 
       # Marker attr values are scanned by the internal task graph and read by
@@ -2113,7 +2146,20 @@ module Hive
         ]
 
         gates.each do |gate, run_gate|
+          capability_plan = Hive::TaskCapabilities::Store.new(task.folder).current
+          clean_before = capability_plan && Hive::AgentGitGate.read(ctx.worktree_path, :status)
+          observed_environment = Hive::TaskCapabilities::Verification.environment(plan: capability_plan) if capability_plan
           result = run_gate.call
+          if gate == "local" && result.status == :green && clean_before&.success? && clean_before.stdout.empty? &&
+              git_head(ctx.worktree_path) == before_head
+            clean_after = Hive::AgentGitGate.read(ctx.worktree_path, :status)
+            if clean_after.success? && clean_after.stdout.empty? && observed_environment == Hive::TaskCapabilities::Verification.environment(plan: capability_plan)
+              @capability_ci_observations ||= {}
+              @capability_ci_observations.merge!(Hive::TaskCapabilities::Verification.ci_observations(plan: capability_plan,
+                cfg: cfg, context: Hive::Attempts::Context.current, sha: before_head, environment: observed_environment,
+                output: result.last_output))
+            end
+          end
           if wall_clock_exceeded?(started_at, max_wall_clock_sec)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
           end

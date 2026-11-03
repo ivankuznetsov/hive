@@ -1,7 +1,7 @@
 ---
 title: Task capability contracts
 type: module
-source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb, lib/hive/task_capabilities/actor_runner.rb
+source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb, lib/hive/task_capabilities/actor_runner.rb, lib/hive/task_capabilities/result.rb, lib/hive/task_capabilities/result_store.rb, lib/hive/task_capabilities/verification.rb
 created: 2026-11-03
 updated: 2026-11-03
 tags: [module, workflow, capabilities, policy]
@@ -294,3 +294,90 @@ an approved trailing wildcard. Automatic UI selection normalizes permission
 presets and permits provable grant/directory narrowing; unknown widening blocks.
 A forbidden QA exception is displayed as blocked with its requested reason,
 without recording an accepted waiver.
+
+## Independent verification results
+
+`Verification.new(task:, cfg:, worktree_path:, context:, session: nil,
+budget_usd: nil, timeout_sec: nil).run!(existing_results: {})` evaluates review
+attachments through the same command/actor adapter for built-in and configured
+capabilities. Check dependencies order checks within the attachment; this is not
+a workflow scheduler. Review supplies its remaining wall-clock deadline and one
+shared actor session. A supplied finite budget is shared across every check;
+without one, parent money is explicitly uncapped and each actor still requires
+an enforceable child cap. Checks never create their own Attempts or usage rows.
+Adopted direct review requires `hive run ... --durable` before any check effects.
+
+Capture pins each check's command/provider, timeouts, output bound, environment,
+and relevant actor route/profile/model, permissions, targets and resource caps.
+Browser checks pin their own concrete actor and installed browser skill; an
+enabled browser setting alone does not establish a usable route. Retry uses the
+accepted snapshot and verifies route/skill identity instead of replacing it from
+live configuration. Custom legacy browser output templates require an explicit
+verification check rather than inferred requirements. Executable references reject secret-shaped arguments before
+redaction; operator reasons and captured output are redacted before persistence.
+
+`Verification.environment(plan: plan)` returns the controller environment
+identity: Ruby engine/version/platform and executable digest, resolved PATH
+executables used directly by planned commands, and digests of PATH, locale,
+timezone, Bundler paths and application environment selectors. Relative source
+commands are bound by the evaluated commit. Project checks remain responsible
+for their own dependencies and meaningful assertions. The controller proves a
+clean Git worktree and unchanged revision/environment before and after checks;
+a successful command against dirty or changed code is not current evidence.
+
+Each immutable `Result` has schema version 1 and these identities: stable task,
+execution-plan digest, capability/check IDs, real parent attempt ID, actor spawn
+ID when applicable, evaluated Git SHA, check-configuration digest and environment
+digest. It also retains check kind/claim/runner, state, applicability, evidence,
+findings and reason. States are `pending`, `running`, `passed`, `failed`,
+`blocked`, `not-applicable`, and `stale`. Missing runners, invalid proposals,
+timeouts and cancellation are blocked observations; a completed nonzero command
+is failed. Findings are `{id, severity, summary, details}` with stable IDs and
+actionable text, associated with the enclosing capability/check/result identity.
+
+Command evidence stores evaluated SHA, actual exit status, redacted bounded
+output and its digest. Actor reports are JSON proposals with exact supplied
+identity, state, applicability, evidence, findings and reason. The controller
+validates their schema and hash-checked OutcomeEvidence proof for exactly that
+check and SHA. It retains proof bytes before releasing the source snapshot.
+Actors read an exact detached commit materialized into their single approved
+task-relative target; existing unregistered directories and symlink/outside
+targets cannot substitute for it. Runtime restrictions remain the ActorRunner
+restrictions above, with no fallback or credential injection.
+
+Browser warnings/skips and unbound `status: passed` JSON cannot qualify. The
+optional `BrowserTest::Result#verification` metadata must be a controller
+`TaskCapabilities::Result` with matching status and spawn correlation, and still
+passes normal identity/evidence validation. Document or terminal outcome proof
+can qualify; screenshots and recordings are optional. A missing optional visual
+capture is recorded in the reason when other usable proof exists. Missing or
+tampered required proof blocks. Zero reviewer findings, skipped CI, an empty
+checklist, source-review-only checks and an all-N/A checklist never pass QA.
+Individual N/A needs a reason and proof. A whole-QA exception remains `waived`,
+with expanded current check IDs/fingerprints, the requested scope and explicit
+whole-gate scope when there were no planned checks. It does not waive future
+checks.
+
+`ResultStore#accept` validates the accepted plan/check and proof before appending
+through `Store#accept_blob`. `Store#blobs(kind)` lists only accepted-chain
+references. `ResultStore#history` strictly validates every check result and
+retained proof; neither directories nor proposal blobs establish authority.
+`ResultStore#current(binding:, check:, plan:, sha:, environment:)` returns state,
+result digest and retained result, or pending when absent; identity changes make
+it stale. Successful reuse requires the same plan, revision, check configuration
+and environment. `ResultStore#aggregate(plan:, sha:, environment:)` returns
+`state`, `execution_plan_digest`, `evaluated_sha`, `capabilities`, and flattened
+`checks`. Waivers stay distinct from passed checks. This aggregate is read state,
+not transition authority, and the default adoption switch remains disabled while
+publication gates and operator controls are completed.
+
+Review returns this aggregate as `:capability_verification`. Its adopted
+`REVIEW_COMPLETE` retry path evaluates missing/stale checks instead of permanently
+short-circuiting; legacy tasks retain the old shortcut and browser soft warning.
+Existing local CI can supply the same typed contract only after clean before/after
+Git observations and full pinned command/timeout/output/environment matches.
+An early legacy CI terminal failure still records its CI marker/report before
+this clean verification boundary; the separate gate/rework consumer must explain
+those pending independent checks using the terminal CI evidence.
+The finalization consumer must validate the aggregate independently and preserve
+blocked/unrun checks when recording separate terminal closure dispositions.

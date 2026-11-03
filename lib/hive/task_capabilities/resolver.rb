@@ -1,5 +1,6 @@
 require "hive/task_capabilities/approval"
 require "hive/task_capabilities/admission"
+require "hive/task_capabilities/verification"
 require "hive/config"
 require "hive/workflow_package/configuration"
 require "hive/provider_routing/configuration"
@@ -61,9 +62,14 @@ module Hive
         selected = choices.select { |_id, choice| choice.fetch("effective") == "on" }.keys
         ordered = composition(selected, blockers)
         bindings = ordered.map { |definition, stage| binding(definition, stage, references, blockers, automatic: inputs.fetch(definition.id) == "automatic") }
+        environment = Verification.environment(commands: bindings.flat_map { |entry| entry.fetch("checks").filter_map { |check| check["command"] } })
+        bindings.each { |entry| entry.fetch("checks").each { |check| check.fetch("runner")["environment"] = environment } }
         waivers = []
         if inputs["qa"] == "off"
-          checks = planned_checks(catalog.fetch("qa"))
+          waived_binding = binding(catalog.fetch("qa"), "review", {}, [], automatic: false)
+          checks = waived_binding.fetch("checks")
+          waived_environment = Verification.environment(commands: checks.filter_map { |check| check["command"] })
+          checks.each { |check| check.fetch("runner")["environment"] = waived_environment }
           ids = checks.map { |check| check.fetch("id") }
           unless qa_waiver_checks == [ "all" ] || (ids - qa_waiver_checks).empty? && (qa_waiver_checks - ids).empty? && !ids.empty?
             invalid!("QA Off must acknowledge all planned affected checks (#{ids.join(', ')}), or use all")
@@ -71,7 +77,9 @@ module Hive
           if policy.required?("qa")
             choices.fetch("qa")["requested_waiver"] = { "reason" => Hive::SecretPatterns.redact(qa_waiver_reason), "checks" => qa_waiver_checks }
           else
-            waivers << { "capability" => "qa", "reason" => Hive::SecretPatterns.redact(qa_waiver_reason), "checks" => qa_waiver_checks, "state" => "waived", "source" => "task-creator" }
+            waivers << { "capability" => "qa", "reason" => Hive::SecretPatterns.redact(qa_waiver_reason), "checks" => ids,
+              "requested_checks" => qa_waiver_checks, "check_fingerprints" => checks.to_h { |check| [ check.fetch("id"), Result.check_digest(waived_binding, check) ] },
+              "whole_gate" => ids.empty?, "state" => "waived", "source" => "task-creator" }
           end
         end
         result = Plan.redact({ "configuration_digest" => configuration_digest, "catalog_digest" => catalog.digest,
@@ -160,6 +168,13 @@ module Hive
         return definition.checks unless definition.id == "qa" && definition.checks.empty?
         checks = []
         command = @cfg.dig("review", "ci", "command")
+        if command.is_a?(String) && !command.strip.empty?
+          begin
+            invalid!("configured verification command must be a non-secret executable reference") unless !Shellwords.split(command).empty? && Hive::SecretPatterns.redact(command) == command
+          rescue ArgumentError
+            invalid!("configured verification command has invalid quoting")
+          end
+        end
         checks << { "id" => "ci", "kind" => "behavior", "claim" => "configured repository behavior checks", "command" => command, "provider" => "ci", "depends_on" => [] } if command.is_a?(String) && !command.strip.empty?
         checks << { "id" => "browser", "kind" => "behavior", "claim" => "configured browser behavior checks", "provider" => "browser", "depends_on" => [] } if @cfg.dig("review", "browser_test", "enabled") == true
         checks
@@ -205,6 +220,23 @@ module Hive
             end
           rescue Hive::ConfigError => error
             block(blockers, definition.id, "route_unavailable", "#{definition.id} approved route unavailable: #{error.message}; restore the approved route#{definition.id == 'security' ? ' or archive/cancel the task without finalization' : ' or revise the execution plan'}", phase: definition.id == "security" ? "finalization" : "dispatch")
+          end
+        end
+        if definition.kind == "verification"
+          if result["actor"] && result["skill"]
+            begin
+              result["skill_identity"] = Admission.skill_identity(result, project_root: @project_root, cfg: @cfg)
+            rescue Admission::Error => error
+              block(blockers, definition.id, "missing_skill", error.message, phase: definition.id == "security" ? "finalization" : "dispatch")
+            end
+          end
+          result["instruction_content"] = File.binread(definition.instruction_path) if definition.instruction_path
+          result["checks"] = result.fetch("checks").map do |check|
+            runner = Verification.pin_runner(check, binding: result, cfg: @cfg, project_root: @project_root)
+            if runner["type"] == "unavailable"
+              block(blockers, definition.id, "verification_unavailable", "#{definition.id}/#{check.fetch('id')} runner unavailable: #{runner['reason'] || 'configure a concrete verification plan'}", phase: definition.id == "security" ? "finalization" : "dispatch")
+            end
+            check.merge("runner" => runner)
           end
         end
         result

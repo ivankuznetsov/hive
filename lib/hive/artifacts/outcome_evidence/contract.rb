@@ -20,6 +20,16 @@ module Hive
 
         module_function
 
+        # A verification proposal must contain real, hash-checked proof for
+        # its planned check and revision. A review verdict alone is not QA.
+        def verification!(evidence, task_folder:, check_id:, expected_head:)
+          admitted = Proof.admit!(evidence, task_folder: task_folder, expected_head: expected_head)
+          unless admitted.fetch("claims") == [ check_id ]
+            raise StoreError, "verification evidence must name its exact planned check"
+          end
+          admitted
+        end
+
         def requirement!(implementation:, claims:, exclusions:, inference:)
           changed_paths = Array(implementation.fetch("changed_paths")).map do |path|
             Identity.validate_changed_path!(path)

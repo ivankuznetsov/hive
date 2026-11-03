@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-03
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1882,8 +1882,18 @@ executables under `/usr`, one task-owned target directory and no command
 network domains. Other adapters, external targets and runtime dependencies
 outside that namespace remain unsupported rather than implicitly widened.
 
-Direct stage invocation can lack a durable parent context. A distinct capability
-actor then gives `--durable` recovery; legacy direct execution and matching
-same-executor guidance retain their existing behavior. Review verification
-consumers must carry one shared parent session across checks and retain the
-same real parent correlation rather than minting independent attempts.
+Direct stage invocation can lack a durable parent context. Adopted review and a
+distinct capability actor give `--durable` recovery; legacy direct execution and
+matching same-executor guidance retain their existing behavior. Review now
+carries one shared parent session across checks and retains the real parent and
+spawn correlations. Deterministic tests claim a real durable attempt, exercise
+ActorRunner policy/route admission, retain exact-revision OutcomeEvidence proof,
+and simulate only the final provider response. No live provider or real browser
+session was added to that proof. An enabled browser option without a concrete
+pinned model, installed skill and enforceable scope remains unavailable. Custom
+legacy browser output templates require explicit configured verification
+checks rather than inferred requirements. Current
+environment identity covers controller runtime, direct command executables and
+declared environment selectors; project-specific dependency integrity remains
+part of the configured check contract. Adoption remains disabled until separate
+publication gates and operator controls are complete.

@@ -5,6 +5,8 @@ require "hive/permission_scope"
 require "hive/stringify_keys"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/runtime_policy"
+require "hive/secret_patterns"
+require "shellwords"
 
 module Hive
   module TaskCapabilities
@@ -170,6 +172,15 @@ module Hive
           end
           self.class.text(check["claim"], label: "#{label} check claim")
           %w[command provider].each { |key| self.class.text(check[key], label: "#{label} check #{key}") if check.key?(key) }
+          if check["command"]
+            begin
+              unless !Shellwords.split(check["command"]).empty? && Hive::SecretPatterns.redact(check["command"]) == check["command"]
+                raise Hive::ConfigError, "#{label} check command must be a non-secret executable reference"
+              end
+            rescue ArgumentError
+              raise Hive::ConfigError, "#{label} check command has invalid quoting"
+            end
+          end
           check["depends_on"] = self.class.strings(check.fetch("depends_on", []), label: "#{label} check dependencies")
           check
         end

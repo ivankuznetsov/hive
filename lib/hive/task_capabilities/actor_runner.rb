@@ -92,7 +92,9 @@ module Hive
       def verify_accepted_binding!(binding)
         store = Store.new(@task.folder)
         plan = store.current
-        unless plan && plan.data.fetch("bindings").include?(binding)
+        accepted_bindings = plan&.data&.fetch("bindings") || []
+        nested_bindings = accepted_bindings.flat_map { |entry| entry.fetch("checks", []).filter_map { |check| check.dig("runner", "actor_binding") } }
+        unless (accepted_bindings + nested_bindings).include?(binding)
           raise Admission::Error, "capability invocation does not match the current accepted execution-plan binding"
         end
         return unless binding["id"] == "security" || binding["approval_reference"]

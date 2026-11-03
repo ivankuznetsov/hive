@@ -233,7 +233,7 @@ module Hive
         # idle_timeout_sec is positive, a child that produces no output for
         # that long is killed the same way — the wall clock stays the
         # runaway backstop while the idle deadline fails wedges fast.
-        def run_ci_once(command, cwd, max_bytes, timeout_sec, idle_timeout_sec: nil)
+        def run_ci_once(command, cwd, max_bytes, timeout_sec, idle_timeout_sec: nil, cancelled: nil)
           # Always exec directly — no `sh -c` indirection. A String
           # command is shellword-split (so `bin/ci --flag` works as
           # YAML); an Array is exec'd as-is (so paths with spaces or
@@ -312,6 +312,12 @@ module Hive
           deadline = Time.now + timeout_sec
           status = nil
           loop do
+            if cancelled&.call
+              kill_process_group(pgid, pid)
+              reader.join(2)
+              reader.kill if reader.alive?
+              return CommandError.new("CI command cancelled with its parent attempt")
+            end
             if Time.now > deadline
               kill_process_group(pgid, pid)
               reader.join(2)

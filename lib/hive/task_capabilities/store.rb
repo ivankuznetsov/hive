@@ -87,6 +87,13 @@ module Hive
         load_blob(kind, digest)
       end
 
+      def blobs(kind)
+        raise InvalidState, "unsupported capability listing kind" unless DIRECTORIES.key?(kind)
+        accepted.select { |entry| entry["kind"] == kind }.map do |entry|
+          [ entry.fetch("digest"), load_blob(kind, entry.fetch("digest")) ]
+        end
+      end
+
       private
 
       def canonical(value) = Hive::WorkflowPackage::CanonicalJSON.generate(value)

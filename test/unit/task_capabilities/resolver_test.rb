@@ -168,7 +168,7 @@ class TaskCapabilitiesResolverTest
     cfg["task_capabilities"]["catalog"] = []
     cfg["review"]["browser_test"]["enabled"] = true
     preview = resolver(cfg).preview
-    assert_empty preview.fetch("blockers")
+    assert_includes preview.fetch("blockers").map { |entry| entry["reason"] }, "task_capability_verification_unavailable"
     assert_equal "browser", preview.fetch("bindings").first.fetch("checks").first.fetch("id")
   end
 end
@@ -203,6 +203,39 @@ class TaskCapabilitiesResolverTest
       assert unavailable.fetch("blockers").any? { |entry| entry["capability"] == "writing" && entry["reason"] == "task_capability_blocked" }
       cfg["task_capabilities"]["catalog"].first.delete("actor")
       assert resolver(cfg).preview(selections: [ "writing=on" ]).fetch("blockers").any? { |entry| entry["capability"] == "writing" }
+    end
+  end
+
+  def test_verification_actor_pins_named_skill_or_instruction_and_missing_skill_stays_visible
+    with_tmp_dir do |root|
+      path = File.join(root, ".claude/skills/audit-fixture/SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "# Audit fixture\n")
+      cfg = config
+      cfg["agents"]["claude"]["bin"] = "ruby"
+      definition = { "id" => "audit", "kind" => "verification", "stages" => [ "review" ],
+        "actor" => security_envelope.fetch("actor"), "skill" => "audit-fixture", "checks" => [ qa_check ] }
+      cfg["task_capabilities"]["catalog"] = [ definition ]
+      options = { selections: [ "qa=off", "audit=on" ], qa_waiver_reason: "Operator QA exception", qa_waiver_checks: [ "all" ] }
+      preview = resolver(cfg, project_root: root).preview(**options)
+      binding = preview.fetch("bindings").first
+      assert_equal Digest::SHA256.file(path).hexdigest, binding.dig("skill_identity", "digest")
+      File.unlink(path)
+      assert_includes resolver(cfg, project_root: root).preview(**options).fetch("blockers").map { |entry| entry["reason"] }, "task_capability_missing_skill"
+      definition.delete("skill")
+      instruction = File.join(root, "audit.md")
+      File.write(instruction, "Check the reference source independently.\n")
+      definition["instruction"] = instruction
+      binding = resolver(cfg, project_root: root).preview(**options).fetch("bindings").first
+      assert_equal File.read(instruction), binding.fetch("instruction_content")
+    end
+  end
+
+  def test_derived_ci_commands_are_validated_before_the_plan_can_redact_them
+    [ "ruby '", "ruby check.rb ghp_#{'a' * 36}" ].each do |command|
+      cfg = config
+      cfg["review"]["ci"]["command"] = command
+      assert_raises(Hive::TaskCapabilities::Admission::Error) { resolver(cfg).preview }
     end
   end
 

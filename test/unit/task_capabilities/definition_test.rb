@@ -56,6 +56,14 @@ class TaskCapabilitiesDefinitionTest < Minitest::Test
     end
   end
 
+  def test_check_commands_reject_bad_quoting_empty_argv_and_secret_arguments_before_redaction
+    [ "ruby '", "   ", "ruby check.rb ghp_#{'a' * 36}" ].each do |command|
+      assert_raises(Hive::ConfigError) do
+        definition("checks" => [ { "id" => "links", "kind" => "behavior", "claim" => "Check prose links", "command" => command } ])
+      end
+    end
+  end
+
   def test_actor_requires_a_profile_able_to_pin_identity
     original = Hive::AgentProfiles.lookup(:pi)
     profile = Hive::AgentProfile.new(name: :pi, bin_default: "test", headless_flag: "-p", version_flag: "--version", skill_syntax_format: "/%{skill}")

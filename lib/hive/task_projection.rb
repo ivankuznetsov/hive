@@ -208,6 +208,11 @@ module Hive
         record.dig("payload", "activity_kind") == "capability_gate_observed" && record["task_generation"] == generation &&
           record["commit_generation"] == commit_generation && record.dig("payload", "evaluated_sha") == head_sha
       end
+      revision = capability_records.reverse.find { |record| record.dig("payload", "activity_kind") == "capability_revision" }
+      if revision
+        @data["capability_revision"] = revision.fetch("payload").slice("status", "execution_plan_digest", "version", "proposal_digest", "result_digest", "reason")
+        gate = nil if gate && gate.dig("payload", "execution_plan_digest") != revision.dig("payload", "execution_plan_digest")
+      end
       @data["capability_gate"] = gate.fetch("payload").reject { |key, _| %w[activity_kind operation_id correlation_id].include?(key) } if gate
       terminal = capability_records.reverse.find { |record| record.dig("payload", "activity_kind") == "capability_terminal" }
       @data["capability_terminal"] = terminal.fetch("payload").slice("result_digest", "disposition", "reference", "label") if terminal

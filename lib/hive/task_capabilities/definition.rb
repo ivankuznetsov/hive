@@ -69,6 +69,20 @@ module Hive
         freeze
       end
 
+      def self.from_snapshot(value, stages:)
+        snapshot = mapping(value, keys: KEYS + [ "instruction_content" ], label: "pinned capability")
+        instruction = snapshot.slice("instruction", "instruction_digest", "instruction_content")
+        if instruction.any? && !(instruction.keys.sort == %w[instruction instruction_content instruction_digest] &&
+            instruction["instruction_content"].is_a?(String) && ::Digest::SHA256.hexdigest(instruction["instruction_content"]) == instruction["instruction_digest"])
+          raise Hive::ConfigError, "pinned instruction content digest mismatch"
+        end
+        normalized = new(snapshot.except(*instruction.keys), stages: stages, source: "pinned capability")
+        object = allocate
+        object.instance_variable_set(:@source, "pinned capability".freeze)
+        object.instance_variable_set(:@data, deep_freeze(normalized.to_h.merge(instruction)))
+        object.freeze
+      end
+
       def id = data.fetch("id")
       def kind = data.fetch("kind")
       def stages = data.fetch("stages")

@@ -203,6 +203,7 @@ module Hive
         # cannot resolve a different model after the guidance was admitted.
         pinned = routing ? launch_arguments : launch_arguments.merge(identity_arguments: arguments.native_arguments)
         pinned = pinned.merge(capability_session: session) if session
+        pinned = pinned.merge(capability_guidance_plan: plan.digest)
         [ "Execution plan #{plan.version} (#{plan.digest})\n\n#{text}", pinned ]
       rescue Hive::ImplementationIdentity::Error => error
         raise Hive::TaskCapabilities::Admission::Error.new("selected guidance requires an exact matching stage or specialist executor: #{error.message}")
@@ -1077,7 +1078,7 @@ module Hive
                       terminate_on_parent_signal: true,
                       receipt_model: nil, receipt_effort: nil, mcp_scope: nil,
                       spawn_control: nil, capability_invocation: nil,
-                      capability_session: nil)
+                      capability_session: nil, capability_guidance_plan: nil)
         Hive::TaskCapabilities::Admission.enforce!(task)
         agent_custody ||= capability_anchor_custody(task)
         mcp_launch = nil
@@ -1319,6 +1320,10 @@ module Hive
               raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
             end
             raise Hive::ProviderRouteFailed, "admitted provider route failed"
+          end
+          if capability_guidance_plan && %i[ok complete execute_complete].include?(result[:status]) && agent_custody_safe_after?(agent_custody)
+            require "hive/task_capabilities/revision"
+            Hive::TaskCapabilities::Revision.new(task: task).record_guidance!(stage: task.stage_name, plan_digest: capability_guidance_plan)
           end
           result
         ensure

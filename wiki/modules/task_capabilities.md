@@ -1,7 +1,7 @@
 ---
 title: Task capability contracts
 type: module
-source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb, lib/hive/task_capabilities/actor_runner.rb, lib/hive/task_capabilities/result.rb, lib/hive/task_capabilities/result_store.rb, lib/hive/task_capabilities/verification.rb
+source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb, lib/hive/task_capabilities/actor_runner.rb, lib/hive/task_capabilities/result.rb, lib/hive/task_capabilities/result_store.rb, lib/hive/task_capabilities/verification.rb, lib/hive/task_capabilities/gate.rb, lib/hive/task_capabilities/revision.rb, lib/hive/commands/task_capabilities.rb, schemas/hive-task-capabilities.v1.json
 created: 2026-11-03
 updated: 2026-11-03
 tags: [module, workflow, capabilities, policy]
@@ -12,12 +12,12 @@ already exist. They are separate from `Workflow::Result.capabilities` (result
 presentation facilities) and AgentProfile's runtime tool vocabulary. Coding
 keeps its nine stages.
 
-`task_capabilities.enabled` defaults to `false`. When explicitly enabled for
-the lower-level shared capture service, new coding captures atomically install
-an all-Automatic initial execution plan. Existing tasks and other workflows
-retain their previous behavior. Selection, actors, gates, and recovery must be
-integrated before adoption is enabled by default; this persistence substrate
-does not authorize security work or waive QA.
+`task_capabilities.enabled` defaults to `false` until the complete operator
+recovery flow is verified. When enabled, new coding captures atomically install
+a resolved initial execution plan: Automatic QA selects behavior verification;
+UI remains a recommendation unless pinned policy selects it; security needs an
+explicit selection and approval. Existing tasks without adoption metadata and
+other workflows retain their previous behavior.
 
 ## Definition and catalog
 
@@ -167,9 +167,9 @@ model's API transport stays outside this command namespace. The native Claude
 sandbox remains required with unsandboxed retries disabled; nesting failures
 remain failures. Ordinary managed-policy compilation retains its prior behavior.
 
-Accepted `policy.catalog_bindings` retains nonsecret guidance templates,
+Accepted `policy.catalog_bindings` retains nonsecret capability templates,
 including inherited scope/resources, route, runtime and available skill identity,
-even when guidance is off. Later routine proposals must compare against those
+even when a capability is off. Later routine proposals must compare against those
 immutable templates. Missing skills or routes make an unselected template
 unavailable without blocking its recommendation or unrelated capture.
 
@@ -364,8 +364,9 @@ references. `ResultStore#history` strictly validates every check result and
 retained proof; neither directories nor proposal blobs establish authority.
 `ResultStore#current(binding:, check:, plan:, sha:, environment:)` returns state,
 result digest and retained result, or pending when absent; identity changes make
-it stale. Successful reuse requires the same plan, revision, check configuration
-and environment. `ResultStore#aggregate(plan:, sha:, environment:)` returns
+it stale. Successful reuse across plan versions requires the same revision,
+check configuration, prerequisite identity, actor/scope and environment.
+`ResultStore#aggregate(plan:, sha:, environment:)` returns
 `state`, `execution_plan_digest`, `evaluated_sha`, `capabilities`, and flattened
 `checks`. Waivers stay distinct from passed checks. This aggregate is read state,
 not transition authority, and the default adoption switch remains disabled while
@@ -461,3 +462,135 @@ The retained task dependency base takes precedence over the configured default
 branch; otherwise the controller uses the existing origin default. Git reads
 and refreshes use the exact branch ref, so an ambiguous tag cannot supply base
 identity. Local repositories without origin retain their exact local base ref.
+
+## CLI
+
+`hive task-capabilities` is a top-level command for one task:
+
+```bash
+hive task-capabilities show TARGET [--project NAME] [--json]
+hive task-capabilities propose TARGET --identity JSON --plan-version N --sha SHA [OPTIONS]
+hive task-capabilities accept TARGET --identity JSON --plan-version N --sha SHA --proposal DIGEST
+hive task-capabilities reject TARGET --identity JSON --plan-version N --sha SHA --proposal DIGEST --reason TEXT
+hive task-capabilities waive TARGET --identity JSON --plan-version N --sha SHA --reason TEXT --checks all
+hive task-capabilities risk-accept TARGET --identity JSON --plan-version N --sha SHA --result DIGEST --findings ID... --reason TEXT
+```
+
+Use `show` first. Its `expected` object supplies the exact task identity, active
+plan version and Git SHA required by mutations. `TARGET` uses the shared task
+resolver; `--project NAME` disambiguates registered tasks. A legacy task has no
+execution plan and is never adopted by inspection. Retained terminal history
+remains readable after worktree cleanup: `expected` is null and
+`mutation_unavailable` explains why the task is read-only or Git is unavailable.
+
+## Options
+
+All `hive task-capabilities` actions accept `--project NAME` and `--json`.
+
+| Option | Meaning |
+|---|---|
+| `--identity JSON` | Task identity from `show.expected.expected_identity`. |
+| `--plan-version N` | Expected active execution-plan version. |
+| `--sha SHA` | Expected implementation Git revision. |
+| `--select ID=automatic\|on\|off ...` | Named selections for `propose`. |
+| `--verification-plan JSON` | Verifier IDs mapped to declared check arrays. |
+| `--capability-approval ID=REFERENCE ...` | Approval references in the pinned policy. |
+| `--task-approval ID=REFERENCE ...` | Propose an exact task-specific approval under a task-local reference. |
+| `--proposal DIGEST` | Exact proposal to accept or reject. |
+| `--reason TEXT` | Human waiver, rejection or finding-disposition reason. |
+| `--checks ID...` | Every current QA check ID, or `all`, for a waiver. |
+| `--result DIGEST` | Accepted failed security result for `risk-accept`. |
+| `--findings ID...` | Actual finding IDs covered by that disposition. |
+
+Array options take space-separated values. Creation uses the separate repeatable
+`hive new --capability` and `--qa-waiver-check` flags described above.
+
+## Behavior
+
+`hive task-capabilities propose` writes an inert, content-addressed proposal
+outside the protected anchors. `accept`, `reject`, `waive` and `risk-accept`
+reject resolvable attempt context before writing. They acquire the task lease,
+require no live owning attempt, and compare task identity, plan version and Git
+revision again. Exact retries recover interrupted activation without publishing
+a second version. Earlier plans, decisions and evidence remain readable.
+
+Revisions use embedded catalog/instruction/runtime/skill snapshots and captured
+stage permissions and resource limits. Current project settings or a candidate
+generation cannot expand that authority. An operator can declare QA checks
+within the captured command scope. Changed checks and their dependents become
+stale; unchanged checks may retain evidence. Routine UI additions already
+covered by pinned policy can activate at a safe boundary. Required guidance
+reruns stay visible; selecting an attachment does not prove it ran. Every active
+security addition requires explicit operator acceptance, even with reusable
+project approval.
+
+When no reusable project approval exists, `propose --task-approval
+security=task-owner` prepares an approval for the already captured security
+actor, tools, local targets, budget and timeout. The proposal exposes that exact
+envelope and its digest for human inspection before `accept` publishes a
+task-bound operator approval. It cannot authorize a new route or broader scope
+from current project settings. Proposal creation alone grants no authority.
+
+`waive` creates an audited QA Off plan with a reason and current affected checks.
+`all` expands at that version, including an explicitly empty checklist; it grants
+no exception for future checks. Hard-required QA refuses. `risk-accept` names
+actual failed security findings. It cannot waive an unrun/unavailable check,
+remove selected security, authorize a fallback, or permit finalization while the
+approved route is unavailable. Restore that route or archive/cancel without
+finalization. Stage approval and `--force` supply no capability waiver authority.
+
+## Examples
+
+A human starts with `hive task-capabilities show example --project demo --json`.
+To record a permitted exception, substitute the current identity/version/SHA
+from `show` below and supply the actual task-specific reason:
+
+```bash
+hive task-capabilities waive example --project demo \
+  --identity '{"id":"TASK_ID","slug":"example","workflow":"coding"}' \
+  --plan-version 1 --sha COMMIT_SHA \
+  --reason 'I accept the missing automated check for this task after checking it manually' \
+  --checks all
+```
+
+To configure verification instead, `hive task-capabilities propose` accepts, for
+example, `--verification-plan '{"qa":[{"id":"tests","kind":"behavior","claim":"Repository tests demonstrate the changed behavior","command":"bundle exec rake test"}]}'`
+when that command is within the captured stage authority. Inspect the proposal,
+then accept its digest with the same freshness arguments. A project config edit
+alone neither updates this task nor waives the next task's QA gate.
+
+## JSON schema
+
+`hive task-capabilities --json` uses `hive-task-capabilities` schema version 1,
+registered at `schemas/hive-task-capabilities.v1.json`. Success contains
+`schema`, `schema_version`, `ok: true`, `action` and `data`. `show` data includes
+the persisted plan, history, proposals, freshness arguments and required guidance
+stages. Mutation data identifies the proposal, decision or accepted version.
+Without `--json`, success prints readable JSON data. Neither mode re-resolves
+choices from current project policy.
+
+## Output exceptions
+
+`hive task-capabilities --json` emits the shared `ok: false` error envelope for
+typed errors, preserving a nonzero exit and stderr diagnostic. Invalid
+selections, stale identity/version/SHA, a live owning attempt and missing
+operator authority have distinct reasons. Corrupt accepted state fails closed.
+A blocked or rejected mutation never reports a passing gate or implies security
+work ran.
+
+## Serialization fallback
+
+`hive task-capabilities` has no prose or success-shaped JSON serialization
+fallback. `JSON::GeneratorError` propagates if an envelope cannot be encoded.
+Operator text is redacted before proposal, decision, plan or journal publication.
+Executable targets must be non-secret references, never redacted substitutions.
+
+## Exit codes
+
+For `hive task-capabilities`, exit 0 means inspection or the requested operation
+completed. Exit 64 covers usage, invalid selections, stale revision fences,
+running-attempt boundaries and attempt-context refusal. Exit 75 covers concurrent
+lease/version conflicts, 78 invalid configuration, 70 an unexpected internal
+error, and 1 other stored-state or operational failures. Read the typed JSON
+reason before retrying. An accepted QA exception remains `waived`; an accepted
+proposal still needs current verification before finalization.

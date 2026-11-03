@@ -18,6 +18,7 @@ module WikiCommandIndex
     "plan-review" => "modules/plan_review",
     "plan-review-run" => "modules/plan_review",
     "review" => "commands/stage_action",
+    "task-capabilities" => "modules/task_capabilities",
     "worktree" => "modules/worktree"
   }.freeze
 

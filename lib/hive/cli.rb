@@ -1585,6 +1585,36 @@ module Hive
       ).call
     end
 
+    desc "task-capabilities ACTION TARGET", "Show, propose or authorize a pinned execution-plan revision"
+    long_desc <<~DESC
+      Actions: propose, show, accept, reject, waive, risk-accept. Read show first
+      for exact task identity, current plan version and Git SHA. Proposals stay
+      inert until controller acceptance at a safe boundary. Every active security
+      addition and every waiver/risk acceptance requires operator authority.
+      Restore an unavailable approved security route or archive/cancel the task.
+    DESC
+    option :project, type: :string
+    option :identity, type: :string, desc: "expected task identity JSON from show"
+    option :plan_version, type: :numeric, desc: "expected active plan version"
+    option :sha, type: :string, desc: "expected implementation Git SHA"
+    option :select, type: :array, desc: "capability ID=automatic|on|off values"
+    option :verification_plan, type: :string, desc: "JSON object mapping verifier IDs to declared checks"
+    option :capability_approval, type: :array, desc: "capability ID=pinned-approval-reference values"
+    option :task_approval, type: :array, desc: "capability ID=REFERENCE task approval for its exact captured envelope"
+    option :proposal, type: :string, desc: "proposal digest from propose"
+    option :reason, type: :string, desc: "operator QA waiver, rejection or risk reason"
+    option :checks, type: :array, desc: "all current QA check IDs acknowledged by waiver"
+    option :result, type: :string, desc: "accepted failed security result digest"
+    option :findings, type: :array, desc: "actual failed security finding IDs"
+    def task_capabilities(action, target)
+      require "hive/commands/task_capabilities"
+      Hive::Commands::TaskCapabilities.new(action, target, project: options[:project], json: options[:json],
+        identity: options[:identity], plan_version: options[:plan_version], sha: options[:sha], selections: options[:select] || [],
+        verification_plan: options[:verification_plan], approval_references: options[:capability_approval] || [], task_approvals: options[:task_approval] || [], proposal: options[:proposal],
+        reason: options[:reason], checks: options[:checks] || [], result: options[:result], findings: options[:findings] || []).call
+    end
+    map "task-capabilities" => :task_capabilities
+
     desc "task TARGET", "Inspect one task through the semantic read-only workspace"
     long_desc <<~DESC
       Resolves one exact task from registered projects and emits the same

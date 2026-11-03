@@ -566,6 +566,7 @@ class SchemaFilesTest < Minitest::Test
         rollback_failed invalid_task_path dependency_wait admission_error error
       ] + receipt_kinds,
       "hive-new" => %w[usage config concurrent_run internal error] + receipt_kinds,
+      "hive-task-capabilities" => %w[usage config concurrent_run internal error] + receipt_kinds,
       "hive-answer" => %w[
         invalid_binding invalid_answer wrong_stage stale ambiguous_slug invalid_task_path
         config usage internal
@@ -578,9 +579,47 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds.each do |schema, kinds|
       document = JSON.parse(File.read(Hive::Schemas.schema_path(schema)))
-      actual = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+      error_payload = document.dig("$defs", "ErrorPayload") || document.fetch("oneOf").find { |arm| arm.dig("properties", "ok", "const") == false }
+      actual = error_payload.dig("properties", "error_kind", "enum")
       assert_equal kinds.sort, actual.sort, "schema/producer error_kind drift in #{schema}"
     end
+  end
+
+  def test_capability_blockers_validate_on_every_affected_command_surface
+    commands = %w[hive-act hive-answer hive-approve hive-command-receipt hive-new
+      hive-receipt-prune hive-stage-action hive-run hive-task-capabilities]
+    commands.each do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      schemer = JSONSchemer.schema(document)
+      error_payload = document.dig("$defs", "ErrorPayload") || document.fetch("oneOf").find { |arm| arm.dig("properties", "ok", "const") == false }
+      extras = case name
+      when "hive-act" then { "action_id" => "workflow.advance", "target" => "demo:task" }
+      when "hive-stage-action" then { "verb" => "develop" }
+      else {}
+      end
+      Hive::TaskCapabilities::Admission::REASONS.each do |reason|
+        error = Hive::TaskCapabilities::Admission::Error.new("operator action required", reason: reason)
+        payload = Hive::Schemas::ErrorEnvelope.build(schema: name, error: error, error_kind: reason, extras: extras)
+        assert_empty schemer.validate(payload).to_a, "#{name} must accept #{reason}"
+        reason_enum = error_payload.dig("properties", "reason", "enum")
+        assert_includes reason_enum, reason, "#{name} reason enum drift" if reason_enum
+      end
+    end
+  end
+
+  def test_task_capability_schema_is_registered_and_closes_the_public_envelope
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-task-capabilities")
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-capabilities")))
+    schemer = JSONSchemer.schema(document)
+    legacy = { "schema" => "hive-task-capabilities", "schema_version" => 1,
+      "ok" => true, "action" => "show", "data" => { "plan" => nil, "history" => [], "proposals" => [] } }
+    assert_empty schemer.validate(legacy).to_a
+    read_only = legacy.merge("data" => legacy.fetch("data").merge("expected" => nil,
+      "mutation_unavailable" => "Task was cancelled; retained history is read-only"))
+    assert_empty schemer.validate(read_only).to_a
+    refute_empty schemer.validate(legacy.merge("unregistered" => true)).to_a
+    refute_empty schemer.validate(legacy.merge("data" => legacy.fetch("data").merge("unregistered" => true))).to_a
+    refute_empty schemer.validate(legacy.merge("action" => "override-security")).to_a
   end
 
   def test_each_keyed_command_validates_emitted_conflict_progress_and_unresolved_errors

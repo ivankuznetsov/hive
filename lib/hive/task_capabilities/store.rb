@@ -49,6 +49,9 @@ module Hive
           unless expected_version == current_plan&.version && plan.version == (current_plan&.version || 0) + 1
             raise Conflict, "execution-plan version changed; refresh before accepting"
           end
+          if File.exist?(File.join(@folder, CHAIN)) && history.any? { |accepted_plan| accepted_plan.version == plan.version && accepted_plan.digest != plan.digest }
+            raise Conflict, "execution-plan version already has different accepted bytes; retry its original activation"
+          end
           unless adoption && plan.data.fetch("task") == identity &&
               (!initial || adoption.fetch("initial_plan_digest") == plan.digest)
             raise InvalidState, "execution-plan adoption or task identity mismatch"

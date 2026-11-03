@@ -716,6 +716,8 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_documented_json_surfaces_wrap_thor_arity_errors
     cases = [
+      [ %w[task-capabilities --json], "hive-task-capabilities", "usage" ],
+      [ %w[task-capabilities show --json], "hive-task-capabilities", "usage" ],
       [ %w[status extra --json], "hive-running-status", "error" ],
       [ %w[status --diagnose task extra --json], "hive-status-diagnose", "error" ],
       [ %w[status --json -- extra --diagnose=task], "hive-running-status", "error" ],

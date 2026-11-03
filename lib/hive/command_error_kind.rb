@@ -13,6 +13,7 @@ module Hive
       task_capability_approval_required task_capability_approval_scope
       task_capability_blocked task_capability_stale_preview
       task_capability_operator_required task_capability_route_unavailable
+      task_capability_stale_revision task_capability_running_attempt
     ].freeze
 
     module_function

@@ -36,6 +36,7 @@ module Hive
       pr_observed
       capability_gate_observed
       capability_terminal
+      capability_revision
       check_observed
       review_observed
       merge_observed
@@ -142,6 +143,7 @@ module Hive
         end
         @stream_task_id ||= task_id unless task_id.empty?
 
+        return if record["attempt_id"] == "capability-controller"
         attempt_id = record.fetch("attempt_id")
         binding = [
           record.fetch("stage"), record.fetch("task_generation"),
@@ -176,6 +178,13 @@ module Hive
       end
 
       def validate_attempt!(record)
+        if record["attempt_id"] == "capability-controller"
+          unless record["event_type"] == "activity_recorded" && record.dig("payload", "activity_kind") == "capability_revision" &&
+              %w[operator stage_service].include?(record.dig("provenance", "source"))
+            raise AttemptMismatch, "capability controller identity is valid only for capability revision audit"
+          end
+          return
+        end
         if record["attempt_id"] == LEGACY_ATTEMPT_ID
           unless record["event_type"] == "legacy_baseline" && record["task_generation"].zero?
             raise AttemptMismatch, "legacy attempt identity is valid only for a generation-0 baseline"

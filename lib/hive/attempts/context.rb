@@ -34,7 +34,7 @@ module Hive
           reference = ENV[OPERATOR_DENIAL_ENV].to_s
           return false if reference.empty?
           record = Repository.open_default(create_directories: false).fetch(reference)
-          !!(record && record.state == "running")
+          !record.nil?
         rescue Hive::Error, SystemCallError, IOError
           # A supplied reference whose store cannot be checked must not grant
           # operator authority while an agent command is being resolved.

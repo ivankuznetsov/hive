@@ -71,8 +71,11 @@ module Hive
 
         case task_state(task)
         when :complete
-          warn "hive: already complete; mv this folder to 5-open-pr/ to continue"
-          return { commit: nil, status: :execute_complete }
+          require "hive/task_capabilities/revision"
+          unless Hive::TaskCapabilities::Revision.new(task: task).pending_guidance.include?("execute")
+            warn "hive: already complete; mv this folder to 5-open-pr/ to continue"
+            return { commit: nil, status: :execute_complete }
+          end
         when :worktree_missing
           warn "hive: worktree pointer present but worktree missing; recover with `git -C <root> worktree prune`, delete worktree.yml, then re-run"
           exit 1

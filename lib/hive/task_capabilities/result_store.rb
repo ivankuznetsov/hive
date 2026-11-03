@@ -75,9 +75,16 @@ module Hive
         return { "state" => "pending" } unless candidate
         digest, result = candidate
         value = result.data
-        fresh = value["evaluated_sha"] == sha && value["check_digest"] == Result.check_digest(binding, check) && value["environment_digest"] == Result.digest(environment) &&
+        fresh = value["evaluated_sha"] == sha && value["check_digest"] == Result.check_digest(binding, check) && dependencies_match?(result: value, plan: plan, binding: binding, check: check) && value["environment_digest"] == Result.digest(environment) &&
           (task_delta == :unobserved || Result.same_base_context?(value["task_delta"], task_delta))
         { "state" => fresh ? result.state : "stale", "result_digest" => digest, "result" => value }
+      end
+
+      def dependencies_match?(result:, plan:, binding:, check:)
+        previous = @store.read_plan(result.fetch("execution_plan_digest"))
+        old_binding = previous.data.fetch("bindings").find { |entry| entry["id"] == binding["id"] && entry["stage"] == binding["stage"] }
+        old_check = old_binding && old_binding.fetch("checks").find { |entry| entry["id"] == check["id"] }
+        dependency_fingerprint(plan, binding, check) == dependency_fingerprint(previous, old_binding, old_check)
       end
 
       # This is read state, consumed by the finalization gate separately. It
@@ -118,6 +125,20 @@ module Hive
       end
 
       private
+
+      def dependency_fingerprint(plan, binding, check)
+        return nil unless binding && check
+        checks = binding.fetch("checks")
+        dependencies = check.fetch("depends_on", []).map do |id|
+          prerequisite = checks.find { |entry| entry["id"] == id }
+          [ id, prerequisite && Result.check_digest(binding, prerequisite), prerequisite && dependency_fingerprint(plan, binding, prerequisite) ]
+        end
+        capabilities = binding.fetch("depends_on", []).map do |id|
+          prerequisite = plan.data.fetch("bindings").select { |entry| entry["id"] == id }
+          [ id, prerequisite ]
+        end
+        Result.digest("checks" => dependencies, "capabilities" => capabilities)
+      end
 
       def validated_records
         @store.blobs("result").each do |digest, data|

@@ -9,7 +9,8 @@ module Hive
         task_capability_missing_skill task_capability_verification_unavailable
         task_capability_approval_required task_capability_approval_scope
         task_capability_blocked task_capability_stale_preview
-        task_capability_operator_required task_capability_route_unavailable].freeze
+        task_capability_operator_required task_capability_route_unavailable
+        task_capability_stale_revision task_capability_running_attempt].freeze
       GUIDANCE_STAGES = %w[plan execute].freeze
 
       class Error < Hive::Error
@@ -57,6 +58,10 @@ module Hive
 
       def enforce!(task)
         return true unless task.respond_to?(:folder)
+        unless Hive::Attempts::Context.operator_context?
+          require "hive/task_capabilities/revision"
+          Revision.new(task: task).activate_pending!
+        end
         plan = Store.new(task.folder).current
         return true unless plan
         # A validated external closure retires the task without evaluating its

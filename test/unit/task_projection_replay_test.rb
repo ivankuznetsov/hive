@@ -3,9 +3,11 @@ require "support/task_projection_replay"
 require "hive/gh"
 require "hive/git_ops"
 require "open3"
+require_relative "../support/task_capabilities_revision_fixture"
 
 class TaskProjectionReplayTest < Minitest::Test
   include HiveTestHelper
+  include TaskCapabilitiesRevisionFixture
 
   FIXTURES = File.expand_path("../fixtures/incidents", __dir__)
   TASK_1849 = File.join(FIXTURES, "task-1849")
@@ -90,6 +92,25 @@ class TaskProjectionReplayTest < Minitest::Test
       File.write(manifest_path, JSON.pretty_generate(manifest))
 
       assert_equal "sample-attempt", replay(bundle).replay.canonical.dig("identity", "attempt_id")
+    end
+  end
+
+  def test_capability_revision_replays_without_live_policy_or_git
+    with_revision do |service, task, store|
+      service.waive(reason: "operator QA exception", checks: [ "all" ], **expectation(service))
+      records = Hive::TaskProjection.read_journal(File.join(task.folder, "task-journal.jsonl"))
+      replayed = nil
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { raise "live Git consulted" }) do
+        replayed = Hive::TaskProjection.project(records: records).to_h
+      end
+      assert_equal store.current.digest, replayed.dig("capability_revision", "execution_plan_digest")
+      assert_equal 2, replayed.dig("capability_revision", "version")
+      assert_equal "accepted", replayed.dig("capability_revision", "status")
+      assert_nil replayed.dig("identity", "attempt_id")
+      Hive::TaskJournal::Validator.new(require_attempt_store: true).validate!(records.first)
+      forged = Marshal.load(Marshal.dump(records.first))
+      forged.fetch("payload")["activity_kind"] = "capability_gate_observed"
+      assert_raises(Hive::TaskJournal::AttemptMismatch) { Hive::TaskJournal::Validator.new(require_attempt_store: true).validate!(forged) }
     end
   end
 

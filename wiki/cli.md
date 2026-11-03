@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-version.v1.json
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 
@@ -103,6 +103,7 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
 | `hive status [--json \| --operational [--json] \| --diagnose SLUG ...]` | Default text/JSON is bounded daemon and verified-live-task status (`hive-running-status.v2` for JSON); `--operational --json` emits `hive-operational-status.v5`; `--diagnose` inspects one red task. Use `hive task TARGET --json` for general single-task detail. | `Hive::Commands::Status` | [[commands/status]] |
 | `hive task TARGET [--project NAME] [--json]` | Resolve one registered task and emit the same bounded semantic `hive-task-workspace` v2 projection used by normal Web HTML: canonical headline/action, workflow result, primary artifact, applicable evidence, exact usage/API-equivalent coverage, and correlated diagnostic-log reference. Read-only; no provider-health or billing-invoice claim. | `Hive::Commands::Task` | [[commands/task]] |
+| `hive task-capabilities ACTION TARGET [--project NAME] [--json]` | Inspect or propose a pinned execution-plan revision; accept, reject, waive QA, or accept specific failed security findings at an identity/version/SHA-fenced safe boundary. JSON is `hive-task-capabilities.v1`. | `Hive::Commands::TaskCapabilities` → `Hive::TaskCapabilities::Revision` | [[modules/task_capabilities]] |
 | `hive answer TARGET [--project NAME] [--binding TOKEN] [--json]` | Without a binding, inventory every coding-brainstorm slot in physical document order without a write or task lock. With a fresh opaque binding, read one final literal answer from stdin and atomically write only that exact slot under identity, stage, generation, and fingerprint checks. Never recommends or dispatches. | `Hive::Commands::Answer` | [[commands/answer]] |
 | `hive watch TARGET... [--project NAME] [--until settled\|completion] [--json-lines]` | Resolve at most 100 tasks once and emit only semantic initial/transition/warning/final events until a terminal condition, timeout, or event cap. Read-only; global `--json` is rejected. | `Hive::Commands::Watch` | [[commands/watch]] |
 | `hive act ACTION_ID TARGET --observation TOKEN [--json]` | Re-resolve and lock one exact task, verify a fresh command-free routine action descriptor, and dispatch only the recomputed closed workflow advance. | `Hive::Commands::Act` → `Hive::OperationalAction::Executor` | [[commands/status]] |

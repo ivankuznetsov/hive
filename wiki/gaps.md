@@ -1904,3 +1904,26 @@ publication gates and operator controls are complete.
   reconcile web-created versus daemon-run environment parity (Rails/Node/bundle
   variables and runtime paths) before enabling adoption; reader-process ENV must
   never become execution evidence.
+
+## Execution-plan revision rollout proof (2026-11-03)
+
+The native capability revision service now covers operator acceptance, rejection,
+QA exceptions, task-specific exact-envelope security approvals, finding-scoped
+security risk acceptance, immutable history and safe-boundary concurrency. Its local proof uses isolated runtime databases,
+real Git repositories and deterministic provider fixtures. No live provider
+session or authenticated browser interaction is claimed by these checks.
+
+The per-task Web controls still need to consume this shared service and its
+explicit unavailable mutation token for retained tasks without worktrees.
+Adoption remains disabled pending that cross-surface work. Old captured plans
+without verifier revision authority or unselected execution templates fail
+closed; current project configuration cannot supply missing historical
+permission or policy authority.
+
+Installing a previously missing named skill can produce an explicit proposal
+with its resolved path and content digest, while retaining the captured actor,
+runtime, route and execution envelope. Acceptance rechecks that identity. An
+already pinned skill that drifts requires restoration; ordinary re-selection
+and automatic admission do not silently repin it. The attempt-context denial
+checks remain a supported-process boundary, not proof of humanity or isolation
+from a hostile process running as the same user.

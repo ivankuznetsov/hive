@@ -973,6 +973,8 @@ module Hive
       end
 
       def complete_capability_verification(task, cfg, ctx, started_at:, max_wall_clock_sec:)
+        require "hive/task_capabilities/revision"
+        Hive::TaskCapabilities::Revision.new(task: task, worktree_path: ctx.worktree_path).propose_from_signals!
         @current_phase = :verification
         remaining = [ max_wall_clock_sec - (Time.now - started_at), 0 ].max
         verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg,

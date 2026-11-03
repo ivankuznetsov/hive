@@ -343,12 +343,12 @@ class TaskCapabilitiesResolverTest
         "actor" => { "profile" => "claude", "provider" => "anthropic", "model" => "approved" }, "permissions" => "read-only", "budget_usd" => 1, "timeout_sec" => 5 } ]
       result = resolver(cfg, project_root: root).resolve(task_identity: { "id" => "1", "slug" => "task", "workflow" => "coding" })
       assert_empty result.plan.data.fetch("blockers")
-      snapshot = result.plan.data.fetch("policy").fetch("catalog_bindings").first
+      snapshot = result.plan.data.fetch("policy").fetch("catalog_bindings").find { |entry| entry["id"] == "ui" }
       refute snapshot.fetch("available")
       assert_equal 1, snapshot.fetch("budget_usd")
       assert_equal "default", snapshot.dig("actor_route", "launch_binding_id")
       cfg["budget_usd"]["plan"] = 100
-      assert_equal snapshot, result.plan.data.fetch("policy").fetch("catalog_bindings").first
+      assert_equal snapshot, result.plan.data.fetch("policy").fetch("catalog_bindings").find { |entry| entry["id"] == "ui" }
     end
   end
 end

@@ -566,7 +566,7 @@ class AttemptsContextTest < Minitest::Test
 end
 
 class AttemptsContextTest
-  def test_inherited_attempt_identity_is_a_denial_only_reference_to_a_running_record
+  def test_inherited_attempt_identity_denies_operator_authority_for_any_resolvable_record
     key = Hive::Attempts::Context::OPERATOR_DENIAL_ENV
     with_env(key => nil) { refute Hive::Attempts::Context.operator_context? }
     with_attempt_context(attempt_id: "running", task_generation: 0) do
@@ -584,7 +584,7 @@ class AttemptsContextTest
       }) do
         assert Hive::Attempts::Context.operator_context?
         record.state = "terminal"
-        refute Hive::Attempts::Context.operator_context?
+        assert Hive::Attempts::Context.operator_context?
         record = nil
         refute Hive::Attempts::Context.operator_context?
       end

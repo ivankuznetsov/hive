@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-capabilities:v1",
+  "title": "Task capability revisions",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "action",
+        "data"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-task-capabilities"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "action": {
+          "enum": [
+            "propose",
+            "show",
+            "accept",
+            "reject",
+            "waive",
+            "risk-accept"
+          ]
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "plan": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "execution_plan_digest": {
+              "type": "string"
+            },
+            "expected": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "history": {
+              "type": "array"
+            },
+            "proposals": {
+              "type": "array"
+            },
+            "required_stages": {
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "proposed",
+                "accepted",
+                "rejected",
+                "risk-accepted"
+              ]
+            },
+            "proposal_digest": {
+              "type": "string"
+            },
+            "result_digest": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "mutation_unavailable": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "approval_previews": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "reference",
+                  "envelope",
+                  "digest"
+                ],
+                "properties": {
+                  "reference": {
+                    "type": "string"
+                  },
+                  "envelope": {
+                    "type": "object"
+                  },
+                  "digest": {
+                    "type": "string",
+                    "pattern": "^[0-9a-f]{64}$"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-task-capabilities"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "enum": [
+            "command_capacity_exhausted",
+            "command_concurrency_limit",
+            "command_conflict",
+            "command_in_progress",
+            "command_intake_disabled",
+            "command_nonterminal_limit",
+            "command_original_result_unavailable",
+            "command_orphaned_pin",
+            "command_pin_horizon_elapsed",
+            "command_prune_busy",
+            "command_prune_preview_unavailable",
+            "command_prune_storage_unavailable",
+            "command_unresolved_pending",
+            "concurrent_run",
+            "config",
+            "error",
+            "internal",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_invalid_selection",
+            "task_capability_missing_skill",
+            "task_capability_operator_required",
+            "task_capability_policy_conflict",
+            "task_capability_route_unavailable",
+            "task_capability_running_attempt",
+            "task_capability_stale_preview",
+            "task_capability_stale_revision",
+            "task_capability_verification_unavailable",
+            "usage"
+          ]
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "message": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "integer"
+          ]
+        },
+        "idempotency_key_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "lock_path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled",
+            "task_capability_invalid_selection",
+            "task_capability_policy_conflict",
+            "task_capability_missing_skill",
+            "task_capability_verification_unavailable",
+            "task_capability_approval_required",
+            "task_capability_approval_scope",
+            "task_capability_blocked",
+            "task_capability_stale_preview",
+            "task_capability_operator_required",
+            "task_capability_route_unavailable",
+            "task_capability_stale_revision",
+            "task_capability_running_attempt"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "namespace",
+            "installation"
+          ]
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
+      }
+    }
+  ]
+}

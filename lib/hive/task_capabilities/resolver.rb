@@ -85,7 +85,7 @@ module Hive
         result = Plan.redact({ "configuration_digest" => configuration_digest, "catalog_digest" => catalog.digest,
           "inputs" => inputs, "choices" => choices, "bindings" => bindings, "waivers" => waivers,
           "recommendations" => recommendations, "blockers" => blockers,
-          "approval_references" => references, "policy" => policy.to_h.merge("catalog_bindings" => catalog_guidance_bindings),
+          "approval_references" => references, "policy" => policy.to_h.merge("catalog_bindings" => catalog_bindings, "verification_authority" => verification_authority),
           "input_digest" => digest({ "selections" => selections, "qa_waiver_reason" => qa_waiver_reason,
             "qa_waiver_checks" => qa_waiver_checks, "approval_references" => approval_references,
             "task_text" => task_text, "task_labels" => task_labels,
@@ -249,13 +249,26 @@ module Hive
       # Retain the initial authority for later routine UI proposals even when
       # UI is currently off. Missing skills/routes remain an unavailable
       # proposal template, never a blocker on an unselected recommendation.
-      def catalog_guidance_bindings
-        catalog.definitions.select { |definition| definition.kind == "guidance" }.flat_map do |definition|
+      def catalog_bindings
+        references = policy.approvals.each_with_object({}) { |(reference, envelope), result| result[envelope.fetch("capability")] ||= reference }
+        catalog.definitions.flat_map do |definition|
           definition.stages.map do |stage|
             blockers = []
-            snapshot = binding(definition, stage, {}, blockers, automatic: true)
+            snapshot = binding(definition, stage, references.slice(definition.id), blockers, automatic: true)
+            environment = Verification.environment(commands: snapshot.fetch("checks").filter_map { |check| check["command"] })
+            snapshot.fetch("checks").each { |check| check.fetch("runner")["environment"] = environment }
             snapshot.merge("available" => blockers.empty?, "blockers" => blockers)
           end
+        end
+      end
+
+      # Command changes are accepted only within this captured stage authority.
+      # Actor templates already carry their exact runtime, route and scope.
+      def verification_authority
+        catalog.definitions.select { |definition| definition.kind == "verification" }.to_h do |definition|
+          scope = definition.data["permissions"] || @workflow.stage_named("review").permissions || Hive::Config.permission_spec(@cfg, "review.ci")
+          runner = Verification.pin_runner({ "command" => "true" }, binding: definition.to_h, cfg: @cfg, project_root: @project_root)
+          [ definition.id, { "permissions" => scope, "runner" => runner } ]
         end
       end
 

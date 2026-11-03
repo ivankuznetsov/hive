@@ -16,6 +16,7 @@ module Hive
       "hive-init" => 3,
       "hive-init-preview" => 1,
       "hive-new" => 1,
+      "hive-task-capabilities" => 1,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-version" => 1,
@@ -329,6 +330,8 @@ module Hive
       TASK_CAPABILITY_STALE_PREVIEW = "task_capability_stale_preview".freeze
       TASK_CAPABILITY_OPERATOR_REQUIRED = "task_capability_operator_required".freeze
       TASK_CAPABILITY_ROUTE_UNAVAILABLE = "task_capability_route_unavailable".freeze
+      TASK_CAPABILITY_STALE_REVISION = "task_capability_stale_revision".freeze
+      TASK_CAPABILITY_RUNNING_ATTEMPT = "task_capability_running_attempt".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
@@ -376,6 +379,8 @@ module Hive
       TASK_CAPABILITY_STALE_PREVIEW = "task_capability_stale_preview".freeze
       TASK_CAPABILITY_OPERATOR_REQUIRED = "task_capability_operator_required".freeze
       TASK_CAPABILITY_ROUTE_UNAVAILABLE = "task_capability_route_unavailable".freeze
+      TASK_CAPABILITY_STALE_REVISION = "task_capability_stale_revision".freeze
+      TASK_CAPABILITY_RUNNING_ATTEMPT = "task_capability_running_attempt".freeze
       ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 

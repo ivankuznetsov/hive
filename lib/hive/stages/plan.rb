@@ -49,7 +49,8 @@ module Hive
           task, missing_message: "plan task is missing before execution"
         )
 
-        if cleared_plan_ready?(task, cfg)
+        require "hive/task_capabilities/revision"
+        if !Hive::TaskCapabilities::Revision.new(task: task).pending_guidance.include?("plan") && cleared_plan_ready?(task, cfg)
           return { commit: action_for(:complete), status: :complete, plan_review: nil }
         end
 
@@ -121,6 +122,8 @@ module Hive
         # prompt-injected brainstorm.md cannot reach the project source.
         ensure_durable_checkpoint!(task)
         result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout, launch_arguments: launch_arguments)
+        require "hive/task_capabilities/revision"
+        Hive::TaskCapabilities::Revision.new(task: task).propose_from_signals!
         marker = Hive::Markers.current(task.state_file)
         adopt_plan_dependency!(task, marker, observation: observation)
         review = start_plan_review(

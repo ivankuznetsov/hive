@@ -41,6 +41,15 @@ module Hive
         freeze
       end
 
+      def self.from_snapshot(workflow:, definitions:)
+        object = allocate
+        object.instance_variable_set(:@workflow, workflow)
+        object.instance_variable_set(:@source, "pinned catalog")
+        object.instance_variable_set(:@definitions, definitions.map { |entry| Definition.from_snapshot(entry, stages: workflow.stages) }.freeze)
+        object.send(:validate_graph!)
+        object.freeze
+      end
+
       def fetch(id)
         definitions.find { |definition| definition.id == id } ||
           raise(Hive::ConfigError, "#{source} unknown capability #{id.inspect}")

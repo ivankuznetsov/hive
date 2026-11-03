@@ -50,6 +50,9 @@ module Hive
         validate_task!(plan) if plan || @task.instance_variable_get(:@meta)&.dig(:task_capabilities)
         return { "state" => "legacy", "allowed" => true, "capabilities" => [], "checks" => [] } unless plan
         validate_composition!(plan)
+        require "hive/task_capabilities/revision"
+        pending = Revision.new(task: @task).pending_guidance(plan)
+        raise Blocked, "selected guidance awaits actual delivery; return the task to #{pending.first} and rerun that stage" unless pending.empty?
         results = ResultStore.new(@task.folder)
         terminal_dispositions = results.terminal_history.map(&:last)
         @worktree ||= @task.worktree_path
@@ -71,7 +74,8 @@ module Hive
             end
             next unless check["state"] == "stale" && check.dig("result", "state") == "passed"
             old = check.fetch("result")
-            next unless old["check_digest"] == Result.check_digest(binding, binding.fetch("checks").find { |item| item["id"] == check["check_id"] }) && old["environment_digest"] == Result.digest(environment)
+            next unless old["check_digest"] == Result.check_digest(binding, binding.fetch("checks").find { |item| item["id"] == check["check_id"] }) &&
+              results.dependencies_match?(result: old, plan: plan, binding: binding, check: binding.fetch("checks").find { |item| item["id"] == check["check_id"] }) && old["environment_digest"] == Result.digest(environment)
             next unless Result.equivalent_delta?(old["task_delta"], delta)
             proof = { "old_sha" => old.fetch("evaluated_sha"), "new_sha" => sha,
               "old_delta" => old.fetch("task_delta"), "new_delta" => delta }
@@ -176,7 +180,8 @@ module Hive
       def validate_composition!(plan)
         definitions = plan.data.fetch("definitions")
         ids = plan.data.fetch("bindings").map { |binding| binding.fetch("id") }
-        raise Result::Invalid, "duplicate capability binding" unless ids.uniq == ids
+        attachments = plan.data.fetch("bindings").map { |binding| binding.values_at("id", "stage") }
+        raise Result::Invalid, "duplicate capability binding" unless attachments.uniq == attachments
         plan.data.fetch("choices").each do |id, choice|
           next unless choice["effective"] == "on" && definitions.any? { |item| item["id"] == id && item["kind"] == "verification" }
           raise Result::Invalid, "selected verifier #{id} has no accepted binding" unless ids.include?(id)

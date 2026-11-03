@@ -53,7 +53,18 @@ module HiveBench
     def admitted_judges(record)
       return {} unless execution_eligible?(record)
 
+      bound_judges(record)
+    end
+
+    def bound_judges(record)
       (record["judges"] || {}).select { |_, judge| valid_judge?(judge) && evaluation_bound?(record, judge) }
+    end
+
+    def evaluation_key(record)
+      return unless bound_generation?(record) && valid_context?(record["evaluation_context"])
+
+      [record["task_id"].to_s, record["agent_id"].to_s, record["generation_id"],
+       record["artifact_binding"], record["evaluation_context"]]
     end
 
     def admitted_gate?(record)

@@ -90,9 +90,10 @@ module HiveBench
       path = File.join(opts[:out], "results.json")
       File.write(path, "#{JSON.pretty_generate(outcome.results)}\n")
       warn "wrote #{path}: #{outcome.results["cells"].size} cell(s), #{outcome.pending.size} pending, #{outcome.failed.size} failed"
+      Driver.report_coverage(outcome.results)
       outcome.results["cells"].each do |c|
-        judges = (c["judges"] || {}).map { |n, j| "#{n}=#{j["mean"]}" }.join(" ")
-        warn "  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  judge[#{judges}]"
+        judges = ResultEvidence.admitted_judges(c).map { |n, j| "#{n}=#{j["mean"]}" }.join(" ")
+        warn "  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  ranked judge[#{judges.empty? ? "n/a" : judges}] diagnostic_judges=#{(c["judges"] || {}).size - ResultEvidence.admitted_judges(c).size}"
       end
       exit(2) unless outcome.failed.empty?
     end

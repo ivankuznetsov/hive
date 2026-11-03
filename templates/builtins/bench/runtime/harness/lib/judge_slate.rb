@@ -2,6 +2,7 @@
 
 require "json"
 require "lib/campaign_contract"
+require "lib/result_evidence"
 
 module HiveBench
   # Owns the configured judge-slate contract shared by the judge stage's
@@ -53,15 +54,21 @@ module HiveBench
           manual << "MISSING_CELL #{candidate} #{task}"
           next
         end
-        if campaign["require_successful_execution"] == true &&
-           !%w[generated empty_diff].include?(cell["run_status"])
-          manual << "INVALID_RUN_STATUS #{candidate} #{task} #{cell["run_status"]} " \
-                    "(campaign requires generated or empty_diff)"
+        unless ResultEvidence.execution_eligible?(cell)
+          manual << if campaign["require_successful_execution"] == true
+                      "INVALID_RUN_STATUS #{candidate} #{task} #{cell["run_status"]} (campaign requires generated or empty_diff)"
+                    else
+                      "MISSING_CELL #{candidate} #{task} (no admissible execution: #{cell["run_status"] || "unknown"})"
+                    end
+          next
+        end
+        unless ResultEvidence.evaluation_key(cell)
+          manual << "MISSING_CELL #{candidate} #{task} (select current artifacts and establish generation provenance)"
           next
         end
         next if cell["run_status"] == "empty_diff"
 
-        records = cell.fetch("judges", {})
+        records = ResultEvidence.admitted_judges(cell)
         missing_judges = judge_slate - records.keys
         unless missing_judges.empty?
           retryable << "MISSING_JUDGES #{candidate} #{task} " \

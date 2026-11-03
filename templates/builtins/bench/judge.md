@@ -144,12 +144,15 @@ ruby -ryaml -e '
 }
 mapfile -t JUDGE_ARGS <.judge-args.out
 
-# pending/failed must be checked BEFORE the rejudge rewrite: rejudge output
-# (Score#results) carries no pending/failed keys, so checking the rewritten
-# file would always vacuously see [] and silently erase surviving entries
-# under a COMPLETE.
-ruby -rjson -e '
+# Parked attempts remain in rejudge output. Resolve current generation
+# failures before spending on judging; rejudge preserves their diagnostics.
+ruby -I"$BENCH_ROOT/harness" -rjson -ryaml -rlib/result_evidence -e '
   data = JSON.parse(File.read(ARGV.fetch(0)))
+  campaign = YAML.safe_load_file("campaign.yml")
+  if campaign["require_successful_execution"] == true
+    invalid = data.fetch("cells", []).reject { |cell| HiveBench::ResultEvidence.execution_eligible?(cell) }
+    abort("campaign requires generated or empty_diff before judging: #{invalid.map { |cell| cell.values_at("agent_id", "task_id", "run_status").join("/") }.join(", ")}") unless invalid.empty?
+  end
   pending = data.fetch("pending", [])
   failed = data.fetch("failed", [])
   unless pending.empty? && failed.empty?
@@ -269,7 +272,7 @@ ruby -ryaml -rjson -e '
 }
 DELIBERATE_ERR_TAIL="$(tail -n 15 .judge-deliberate.err)" || DELIBERATE_ERR_TAIL=""
 
-# Union old+new transcript cells by [task_id, agent_id] and replace via tmp+mv;
+# Union transcripts by task, candidate, generation and evaluated context and replace via tmp+mv;
 # the summary is recomputed over the union (mirrors DeliberateCli.summary —
 # the scratch file's summary covers only the newly deliberated cells).
 ruby -rjson -e '
@@ -278,7 +281,7 @@ ruby -rjson -e '
   fresh = read.(new_path) or abort("deliberate wrote no transcript at #{new_path}")
   old = read.(old_path)
   union = ((old ? old["cells"].to_a : []) + fresh["cells"].to_a)
-          .each_with_object({}) { |t, acc| acc[[t["task_id"], t["agent_id"]]] = t }
+          .each_with_object({}) { |t, acc| acc[t.values_at("task_id", "agent_id", "generation_id", "artifact_binding", "evaluation_context")] = t }
           .values
   per_judge = Hash.new { |h, k| h[k] = [] }
   spreads = { before: [], after: [] }
@@ -320,21 +323,21 @@ ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rlib/judge_slate -e '
   judge_slate = validation.judge_slate
   expected_efforts = validation.expected_efforts
   incomplete_result_cells = validation.incomplete_keys.to_h { |task, candidate, _judge| [[task, candidate], true] }
-  deliberated = delib.fetch("cells", []).to_a.to_h { |t| [[t["task_id"].to_s, t["agent_id"].to_s], t] }
+  deliberated = delib.fetch("cells", []).to_a.to_h { |t| [HiveBench::ResultEvidence.evaluation_key(t), t] }
   manual = validation.problems.dup
   retryable = []
   incomplete_judges = []
   incomplete_deliberation_cells = []
   expected.each do |task, candidate|
     cell = by_key[[task, candidate]]
-    next if cell.nil?
+    next unless cell && HiveBench::ResultEvidence.evaluation_key(cell) && HiveBench::ResultEvidence.execution_eligible?(cell)
     next if cell["run_status"] == "empty_diff"
     next if incomplete_result_cells.key?([task, candidate])
 
     # deliberate.rb silently drops cells it cannot resolve (e.g. a task_id
     # missing from the corpus); COMPLETE must not claim transcript coverage it
     # does not have.
-    transcript = deliberated[[task, candidate]]
+    transcript = deliberated[HiveBench::ResultEvidence.evaluation_key(cell)]
     unless transcript
       retryable << "MISSING_DELIBERATION #{candidate} #{task} (dual-judged but absent from #{ARGV.fetch(1)})"
       incomplete_deliberation_cells << [task, candidate]

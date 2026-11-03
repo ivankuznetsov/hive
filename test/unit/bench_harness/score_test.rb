@@ -84,4 +84,15 @@ class BenchHarnessScoreTest < Minitest::Test
     assert only_parked.fetch("preliminary")
     assert_equal 2.0, only_parked.dig("efficiency", "total_cost_usd")
   end
+  def test_retired_parked_attempts_cannot_inflate_current_eligible_coverage
+    current = record("timed_out")
+    retired = record.merge("generation_id" => "retired")
+    agent = results([current], pending: [retired]).dig("agents", "A")
+    assert_equal 1, agent.dig("coverage", "attempted_cells")
+    assert_equal 0, agent.dig("coverage", "eligible_executions")
+    assert_equal 0.0, agent.dig("coverage", "eligible_fraction")
+    assert_nil agent.dig("efficiency", "eligible", "total_cost_usd")
+    assert_equal 4.0, agent.dig("efficiency", "total_cost_usd")
+  end
+
 end

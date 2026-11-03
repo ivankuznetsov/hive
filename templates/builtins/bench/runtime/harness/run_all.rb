@@ -366,15 +366,24 @@ module HiveBench
       exit(2) unless outcome.failed.empty?
     end
 
+    def report_coverage(results)
+      results.fetch("agents", {}).each do |agent, summary|
+        coverage = summary.fetch("coverage", {})
+        warn "  #{agent} coverage attempted=#{coverage['attempted_cells']} eligible=#{coverage['eligible_executions']} " \
+             "judged=#{coverage['judged_cells']} gated=#{coverage['gated_cells']} preliminary=#{summary['preliminary']}"
+      end
+    end
+
     def report(outcome, path)
+      report_coverage(outcome.results)
       cells = outcome.results["cells"]
       warn "wrote #{path}: #{cells.size} scored cell(s), #{outcome.pending.size} pending, #{outcome.failed.size} failed"
       outcome.pending.each { |p| warn "  pending  #{p["agent_id"]}  #{p["task_id"]}  (#{p["reason"]})" }
       outcome.failed.each { |f| warn "  FAILED   #{f["agent_id"]}  #{f["task_id"]}  (#{f["reason"]})" }
       cells.each do |c|
-        judges = (c["judges"] || {}).map { |name, j| "#{name}=#{j["mean"]}" }.join(" ")
+        judges = ResultEvidence.admitted_judges(c).map { |name, j| "#{name}=#{j["mean"]}" }.join(" ")
         warn "  #{c["subset"]}  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  " \
-             "gate=#{c.dig("gate", "status")}  judge[#{judges.empty? ? "—" : judges}]"
+             "ranked_gate=#{ResultEvidence.admitted_gate?(c) ? c.dig("gate", "status") : "n/a"}  judge[#{judges.empty? ? "n/a" : judges}] diagnostic_judges=#{(c["judges"] || {}).size - ResultEvidence.admitted_judges(c).size}"
       end
     end
   end

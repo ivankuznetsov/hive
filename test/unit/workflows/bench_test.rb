@@ -1400,7 +1400,7 @@ class WorkflowsBenchTest < Minitest::Test
       results_path = File.join(root, "results.json")
       stderr_path = File.join(root, "rejudge.err")
       File.write(campaign_path, campaign.to_yaml)
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       failure_event = lambda do |judge, limits_reached|
         "HIVE_BENCH_JUDGE_FAILURE #{JSON.generate(
           "task_id" => "task-one",
@@ -1434,7 +1434,7 @@ class WorkflowsBenchTest < Minitest::Test
       assert_empty err
 
       sol_record = results.dig("cells", 0, "judges").delete("gpt-5.6-sol")
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       File.write(
         stderr_path,
         failure_event.call("fable-5", true) + failure_event.call("gpt-5.6-sol", false)
@@ -1455,7 +1455,7 @@ class WorkflowsBenchTest < Minitest::Test
         "sample_count" => 2,
         "reasoning_effort" => "unspecified"
       }
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       File.write(stderr_path, failure_event.call("fable-5", true))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
@@ -1476,7 +1476,7 @@ class WorkflowsBenchTest < Minitest::Test
                    "an undersampled judge without exact quota evidence must remain manual: #{out}#{err}"
 
       results.dig("cells", 0, "judges", "gpt-5.6-sol")["reasoning_effort"] = "high"
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       File.write(stderr_path, failure_event.call("fable-5", true))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
@@ -1490,7 +1490,7 @@ class WorkflowsBenchTest < Minitest::Test
 
       expected_cell = results.fetch("cells").first
       results["cells"] = []
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
         "-e", validator[:code], results_path, stderr_path,
@@ -1500,7 +1500,7 @@ class WorkflowsBenchTest < Minitest::Test
       assert_includes out, "MISSING_CELL candidate-one task-one"
 
       results["cells"] = [ expected_cell, expected_cell.merge("task_id" => "unexpected-task") ]
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
         "-e", validator[:code], results_path, stderr_path,
@@ -1515,7 +1515,7 @@ class WorkflowsBenchTest < Minitest::Test
         "sample_count" => 3,
         "reasoning_effort" => "unspecified"
       }
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
         "-e", validator[:code], results_path, stderr_path,
@@ -1529,7 +1529,7 @@ class WorkflowsBenchTest < Minitest::Test
       campaign["require_successful_execution"] = true
       results.dig("cells", 0)["run_status"] = "execute_failed"
       File.write(campaign_path, campaign.to_yaml)
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       out, err, status = Open3.capture3(
         RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
         "-e", validator[:code], results_path, stderr_path,
@@ -1771,13 +1771,15 @@ class WorkflowsBenchTest < Minitest::Test
           }
         } ]
       }
+      bound_bench_fixture_json(results)
+      deliberation["cells"].first.merge!(results["cells"].first.slice("generation_id", "record_kind", "artifact_binding", "evaluation_context"))
       campaign_path = File.join(root, "campaign.yml")
       results_path = File.join(root, "results.json")
       deliberation_path = File.join(root, "deliberation.json")
       stderr_path = File.join(root, "deliberate.err")
       runtime_harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
       File.write(campaign_path, campaign.to_yaml)
-      File.write(results_path, JSON.generate(results))
+      File.write(results_path, bound_bench_fixture_json(results))
       File.write(deliberation_path, JSON.generate(deliberation))
       File.write(stderr_path, "")
 
@@ -1794,6 +1796,16 @@ class WorkflowsBenchTest < Minitest::Test
         chdir: root
       )
       assert status.success?, "complete deliberation should validate: #{out}#{err}"
+
+      deliberation["cells"].first["generation_id"] = "retired-generation"
+      File.write(deliberation_path, JSON.generate(deliberation))
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-ryaml", "-rjson", "-rlib/judge_slate",
+        "-e", validator[:code], results_path, deliberation_path, stderr_path, chdir: root
+      )
+      assert_equal 2, status.exitstatus, out + err
+      assert_includes out, "MISSING_DELIBERATION"
+      deliberation["cells"].first["generation_id"] = results["cells"].first["generation_id"]
 
       deliberation.dig("cells", 0, "judges", "gpt-5.6-sol")["final"] = nil
       File.write(deliberation_path, JSON.generate(deliberation))
@@ -1901,4 +1913,99 @@ class WorkflowsBenchTest < Minitest::Test
     assert_equal [ nil, "extract", "generate", "judge", "publish", nil ],
                  descriptor.stages.map { |stage| stage.advance_verb&.name }
   end
+  def bound_bench_fixture_json(data)
+    data.fetch("cells").each do |cell|
+      cell["generation_id"] ||= "fixture-generation"
+      cell["record_kind"] ||= "generation"
+      cell["artifact_binding"] ||= { "task_id" => cell["task_id"], "base_commit" => "base", "patch_sha256" => "a" * 64, "plan_sha256" => "b" * 64 }
+      cell["evaluation_context"] ||= { "plan_sha256" => "b" * 64, "reference_mode" => "withheld" }
+      cell.fetch("judges", {}).each_value do |judge|
+        judge["mean"] ||= 7.0
+        judge["evidence_binding"] = cell.slice("generation_id", "artifact_binding", "evaluation_context")
+      end
+    end
+    JSON.generate(data)
+  end
+
+  def test_publish_recomputes_mixed_and_all_ineligible_rankings_and_repeats_safely
+    instruction = File.read(stages_by_name.fetch("publish").instruction)
+    script = instruction.match(/<!-- bench-stage-script -->\n```bash\n(.*?)\n```/m)[1]
+    Dir.mktmpdir("bench-publication") do |root|
+      task = File.join(root, ".hive-state", "stages", "5-publish", "fixture")
+      runtime = File.join(root, ".hive-state", "bench-runtime")
+      run = File.join(root, "runs", "publication")
+      FileUtils.mkdir_p([task, run])
+      FileUtils.cp_r(Hive::Workflows::Bench::RUNTIME_DIR, runtime)
+      File.write(File.join(task, "campaign.yml"), { "campaign_id" => "publication", "corpus_version" => "v" }.to_yaml)
+      cell = { "task_id" => "t", "agent_id" => "A", "mode" => "hive", "run_status" => "generated", "subset" => "gated",
+               "gate" => { "status" => "pass" }, "judges" => { "X" => { "mean" => 2.0 } }, "efficiency" => { "cost_usd" => 3.0 } }
+      bound_bench_fixture_json("cells" => [cell])
+      cell["gate"]["evidence_binding"] = cell.slice("generation_id", "artifact_binding", "evaluation_context")
+      failed = Marshal.load(Marshal.dump(cell))
+      failed.merge!("task_id" => "failed", "run_status" => "timed_out", "generation_id" => "failed-attempt")
+      failed["artifact_binding"]["task_id"] = "failed"
+      failed["judges"]["X"]["mean"] = 9.0
+      bound_bench_fixture_json("cells" => [failed])
+      failed["gate"]["evidence_binding"] = failed.slice("generation_id", "artifact_binding", "evaluation_context")
+      [[cell, failed], [failed]].each do |cells|
+        path = File.join(run, "results.json")
+        File.write(path, JSON.generate("cells" => cells, "agents" => { "stale" => { "judged" => { "mean_quality" => { "X" => 10 } } } }))
+        first = nil
+        2.times do
+          File.write(File.join(task, "publish.md"), "# Publication\n")
+          out, err, status = Open3.capture3("bash", "-c", script, chdir: task)
+          assert status.success?, out + err
+          summary = File.read(File.join(task, "publish.md"))
+          assert_includes summary, "<!-- COMPLETE -->"
+          assert_includes summary, "Diagnostic judged"
+          refute_includes summary, "X=9.0"
+          refute_includes summary, "stale"
+          merged = JSON.parse(File.read(path))
+          assert_equal cells.size - 1, merged.dig("agents", "A", "judged", "scored_cells")
+          assert_equal 3.0 * cells.size, merged.dig("agents", "A", "efficiency", "total_cost_usd")
+          assert_equal first, merged["agents"] if first
+          first = merged["agents"]
+          assert_includes summary, "preliminary / unranked" if cells.size == 1
+        end
+      end
+    end
+  end
+
+  def test_strict_judge_stage_rejects_partial_execution_before_any_judge_call
+    instruction = File.read(stages_by_name.fetch("judge").instruction)
+    script = instruction.match(/<!-- bench-stage-script -->\n```bash\n(.*?)\n```/m)[1]
+    Dir.mktmpdir("bench-strict-judging") do |root|
+      task = File.join(root, ".hive-state", "stages", "4-judge", "fixture")
+      runtime = File.join(root, ".hive-state", "bench-runtime")
+      run = File.join(root, "runs", "strict-judging")
+      FileUtils.mkdir_p([task, run])
+      FileUtils.cp_r(Hive::Workflows::Bench::RUNTIME_DIR, runtime)
+      # The runtime capability probe loads rejudge without invoking it. A fake
+      # adapter leaves a durable trace only if judging actually gets called.
+      adapter = File.join(root, "judge_probe.rb")
+      calls = File.join(root, "judge.calls")
+      File.write(adapter, <<~RUBY)
+        require #{File.join(runtime, 'harness/rejudge').inspect}
+        module HiveBench::Rejudge
+          def self.run(**)
+            File.write(#{calls.inspect}, "called")
+            raise "strict execution guard failed"
+          end
+        end
+      RUBY
+      campaign = { "campaign_id" => "strict-judging", "source" => root, "seeds" => 1,
+                   "require_successful_execution" => true, "tasks" => ["t"], "candidates" => ["A"],
+                   "judges" => { "claude" => { "model" => "claude-fable-5" },
+                                 "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra" } } }
+      File.write(File.join(task, "campaign.yml"), campaign.to_yaml)
+      File.write(File.join(run, "results.json"), JSON.generate("cells" => [{ "task_id" => "t", "agent_id" => "A", "run_status" => "execute_failed" }]))
+      out, err, status = Open3.capture3({ "RUBYOPT" => "-r#{adapter}" }, "bash", "-c", script, chdir: task)
+      assert status.success?, out + err
+      summary = File.read(File.join(task, "judge.md"))
+      assert_includes summary, "campaign requires generated or empty_diff before judging"
+      assert_includes summary, "<!-- WAITING -->"
+      refute_path_exists calls
+    end
+  end
+
 end

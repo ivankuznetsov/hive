@@ -361,19 +361,29 @@ if [ "$outcome_status" -ne 0 ]; then
   exit 0
 fi
 
-# Judge and publish consume ONE campaign-root results.json; hive_run.rb only
-# writes per-cell files, so merging them here is the handoff. An EXISTING
-# campaign root is merged in FIRST: rejudge backfills live only there, and
-# rebuilding purely from per-cell files would silently discard every
-# backfilled judge score (per-cell files listed after it stay authoritative
-# for run_status/gate while judges union). Written via .next + mv so a crash
-# mid-write can never truncate the only copy of paid judge work.
-merge_inputs=()
-if [ -f "$REPO_ROOT/runs/$CAMPAIGN_ID/results.json" ]; then
-  merge_inputs+=("runs/$CAMPAIGN_ID/results.json")
-fi
-(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/merge_results.rb" --out "runs/$CAMPAIGN_ID/results.json.next" --corpus-version "$CORPUS_VERSION" "${merge_inputs[@]}" runs/"$CAMPAIGN_ID"/*--*/results.json \
-  && mv "runs/$CAMPAIGN_ID/results.json.next" "runs/$CAMPAIGN_ID/results.json") \
+# The campaign root is the active snapshot and carries paid backfill. Supply
+# only explicit new/replacement generations after it, oldest to newest, then
+# judge-only overlays. Never replay a per-cell glob: it can contain an older
+# attempt already represented in root/history. CampaignMerge proves continuity
+# for unchanged per-cell evidence and skips retired generations. Matrix order
+# supplies the inputs; timestamps and filename sorting have no authority.
+ruby -I"$BENCH_ROOT/harness" -ryaml -rjson -rtime -rmerge_results -rlib/campaign_merge -e '
+  repo = ARGV.fetch(0)
+  campaign = YAML.safe_load_file("campaign.yml")
+  path = File.join(repo, "runs", campaign.fetch("campaign_id"), "results.json")
+  root = File.file?(path) ? JSON.parse(File.read(path)) : nil
+  excluded = campaign.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
+  snapshots = campaign.fetch("tasks").flat_map do |task|
+    campaign.fetch("candidates").filter_map do |candidate|
+      next if excluded.include?([task.to_s, candidate.to_s])
+      JSON.parse(File.read(File.join(repo, "runs", campaign.fetch("campaign_id"), "#{candidate}--#{task}", "results.json")))
+    end
+  end
+  documents = HiveBench::CampaignMerge.documents(root: root, snapshots: snapshots)
+  merged = HiveBench::Merge.combine(documents, corpus_version: campaign.fetch("corpus_version"), generated_at: Time.now.utc.iso8601)
+  File.write("#{path}.next", "#{JSON.pretty_generate(merged)}\n")
+  File.rename("#{path}.next", path)
+' "$REPO_ROOT" \
   >.generate-merge.out 2>.generate-merge.err || {
   rm -f "$REPO_ROOT/runs/$CAMPAIGN_ID/results.json.next"
   write_waiting "${run_note}Per-cell merge failed: $(cat .generate-merge.err .generate-merge.out)"

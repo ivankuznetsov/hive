@@ -60,7 +60,15 @@ module HiveBench
       attempts = ResultEvidence.deduplicate_buckets(parked + records)
       agents = attempts.group_by { |r| r["agent_id"] }.to_h do |agent, tried|
         active = records.select { |r| r["agent_id"] == agent }
-        [agent, agent_summary(active, tried, min_cells)]
+        summary = agent_summary(active, tried, min_cells)
+        parked_pending = pending.select { |r| r["agent_id"] == agent }
+        parked_failed = failed.select { |r| r["agent_id"] == agent }
+        summary["operational_failures"] = {
+          "pending_attempts" => parked_pending.size, "failed_attempts" => parked_failed.size,
+          "pending_evaluations" => parked_pending.count { |r| ResultEvidence.execution_eligible?(r) },
+          "evaluation_errors" => parked_failed.count { |r| ResultEvidence.execution_eligible?(r) }
+        }
+        [agent, summary]
       end
       {
         "schema" => "hive-bench-results", "schema_version" => 2,
@@ -89,7 +97,16 @@ module HiveBench
     end
 
     def agent_summary(records, attempts, min_cells)
-      eligible = attempts.select { |r| ResultEvidence.execution_eligible?(r) }
+      active_keys = records.map { |r| r.values_at("agent_id", "task_id") }
+      current = records + attempts.reject { |r| active_keys.include?(r.values_at("agent_id", "task_id")) }
+      eligible = current.select { |r| ResultEvidence.execution_eligible?(r) }
+      eligible_count = eligible.map { |r| r.values_at("agent_id", "task_id") }.uniq.size
+      diagnostic_attempts = attempts.reject do |record|
+        eligible.any? do |admitted|
+          record == admitted || (!record["generation_id"].to_s.empty? &&
+            record.values_at("agent_id", "task_id", "generation_id") == admitted.values_at("agent_id", "task_id", "generation_id"))
+        end
+      end
       ranked = records.map { |r| r.merge("judges" => ResultEvidence.admitted_judges(r)) }
       gates = records.select { |r| ResultEvidence.admitted_gate?(r) }
       diagnostics = records.map do |r|
@@ -100,19 +117,19 @@ module HiveBench
       attempted_cells = attempts.map { |r| [r["agent_id"], r["task_id"]] }.uniq.size
       {
         "cells" => records.size,
-        "preliminary" => eligible.empty? || eligible.size < min_cells || eligible.size < attempted_cells,
+        "preliminary" => eligible_count.zero? || eligible_count < min_cells || eligible_count < attempted_cells,
         "generation" => attempts.each_with_object(Hash.new(0)) { |r, h| h[r["run_status"] || "unknown"] += 1 },
         "coverage" => { "attempted_cells" => attempted_cells, "attempts" => attempts.size,
-                        "eligible_executions" => eligible.size,
-                        "eligible_fraction" => attempted_cells.zero? ? nil : (eligible.size.to_f / attempted_cells).round(3),
+                        "eligible_executions" => eligible_count,
+                        "eligible_fraction" => attempted_cells.zero? ? nil : (eligible_count.to_f / attempted_cells).round(3),
                         "judged_cells" => ranked.count { |r| r["judges"].any? }, "gated_cells" => gates.size },
         "gated" => gate_summary(gates), "judged" => judged_summary(ranked),
         "efficiency" => efficiency_summary(attempts).merge(
           "eligible" => efficiency_summary(eligible),
-          "diagnostic" => efficiency_summary(attempts.reject { |r| ResultEvidence.execution_eligible?(r) })
+          "diagnostic" => efficiency_summary(diagnostic_attempts)
         ),
         "diagnostics" => { "judged" => judged_summary(diagnostics), "gated" => gate_summary(diagnostic_gates),
-                           "efficiency" => efficiency_summary(attempts.reject { |r| ResultEvidence.execution_eligible?(r) }) },
+                           "efficiency" => efficiency_summary(diagnostic_attempts) },
         "provenance" => %w[fresh reused pipeline hive].to_h { |mode| [mode, attempts.count { |r| r["mode"] == mode }] }
       }
     end

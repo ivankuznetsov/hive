@@ -169,7 +169,10 @@ Direct web development/test dependencies include `debug`,
 `capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
-`Rack::Test::UploadedFile`.
+`Rack::Test::UploadedFile`. The web lock also pins the sanitization chain at
+`nokogiri` 1.19.7, `loofah` 2.25.3, and `rails-html-sanitizer` 1.7.2: the
+2026-11 advisory refresh requires those patch levels for the active
+`bundler-audit` database.
 
 Rails 8.1.3.1 is the minimum locked web release for the
 CVE-2026-66066 Active Storage/libvips security fix. Production images install

@@ -16,6 +16,21 @@ uninstall remain thin command adapters around this boundary.
 
 ## Linux user-unit invariant
 
+`UserService::ExecutionEnvironment` reads installed daemon and babysitter
+definitions for local CLI diagnosis, including stopped and unloaded services.
+It reconstructs only PATH, HOME and profile binary override keys from manager
+evidence, unit/drop-in/EnvironmentFile precedence or the named launchd
+environment dictionary. Absent WorkingDirectory is modelled with the invoking
+project root and labelled inherited. It never sources shell code or changes
+service lifecycle. Metadata subprocesses share a ten-second deadline, with
+at most five seconds per call including process-group cleanup.
+
+Declared reconstruction completeness and running-definition currency are
+separate verdicts. Missing manager/process-start evidence is unknown; modified
+sources or a pending systemd reload are stale. Advisory probes require a
+complete context whose currency is current or stopped. Raw immutable selection
+inputs remain private to resolution; diagnostic serialization redacts secrets.
+
 Every shipped `examples/systemd/*.service` file is a user-manager unit. The
 whole glob, including future templates, must:
 

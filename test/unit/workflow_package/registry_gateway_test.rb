@@ -1,4 +1,5 @@
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "digest"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/publisher"
@@ -6,6 +7,20 @@ require "hive/workflow_package/registry_gateway"
 
 class WorkflowPackageRegistryGatewayTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_observes_original_identities_for_canonical_and_legacy_manifest_bytes
+    %w[canonical legacy_order legacy_recommendations].each do |name|
+      bytes = manifest_fixture(name)
+      runner = ->(_args, chdir:) { [ bytes, "", OK ] }
+      gateway = Hive::WorkflowPackage::RegistryGateway.new(runner: runner)
+      package = Hive::WorkflowPackage::Publisher::Package.new(name: "demo", version: "1.0.0", root: "/unused")
+      identity = gateway.version_present?("owner/registry", "a" * 40, package)
+      assert_equal YAML.safe_load(bytes).fetch("release_sha256"), identity.fetch(:release_digest)
+      assert_equal Digest::SHA256.hexdigest(bytes), identity.fetch(:package_digest)
+    end
+  end
+
 
   Status = Data.define(:success?)
   OK = Status.new(success?: true)

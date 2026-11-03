@@ -55,6 +55,8 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
         "tools" => [ { "z" => 1, "path" => "tool", "a" => 2 } ]
       }
     }
+    document["x-hive"]["optional_inputs"] << { "authorized_slots" => [ "review" ], "name" => "SECOND", "z" => 3, "a" => 4 }
+    document["x-hive"]["mapping_recommendations"] << { "effort" => "low", "slot" => "review", "z" => 3, "a" => 4 }
     actual = YAML.safe_load(Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document))
     assert_equal document, actual
     assert_equal %w[schema author source permissions files a x-hive z], actual.keys
@@ -64,8 +66,8 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
     assert_equal %w[a z], actual.fetch("files").keys
     hive = actual.fetch("x-hive")
     assert_equal %w[tools prompt_assets optional_inputs external_skills mapping_recommendations a z], hive.keys
-    assert_equal %w[name authorized_slots a z], hive.fetch("optional_inputs").first.keys
-    assert_equal %w[slot effort a z], hive.fetch("mapping_recommendations").first.keys
+    hive.fetch("optional_inputs").each { |entry| assert_equal %w[name authorized_slots a z], entry.keys }
+    hive.fetch("mapping_recommendations").each { |entry| assert_equal %w[slot effort a z], entry.keys }
     %w[tools prompt_assets].each { |key| assert_equal %w[path a z], hive.fetch(key).first.keys }
   end
 
@@ -94,6 +96,13 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
     assert_equal bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document)
     assert_equal before, document
     assert_equal reverse_maps(before), reversed
+    identities = [ document, reversed ].map do |data|
+      yaml = Hive::WorkflowPackage::CanonicalYAML
+      data = data.merge("release_sha256" => Digest::SHA256.hexdigest(yaml.dump_manifest(data, include_release: false)))
+      manifest = Hive::WorkflowPackage::RegistryManifest.load_bytes(yaml.dump_manifest(data))
+      [ manifest.digest, Digest::SHA256.hexdigest(manifest.bytes) ]
+    end
+    assert_equal identities.first, identities.last
   end
 
   def test_sequences_and_ambiguous_schema_paths_preserve_positions_and_values

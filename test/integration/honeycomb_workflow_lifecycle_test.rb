@@ -1,4 +1,5 @@
 require "test_helper"
+require_relative "../support/canonical_manifest_helpers"
 require "digest"
 require "hive/commands/workflow/install"
 require "hive/commands/workflow/list"
@@ -12,6 +13,15 @@ require "hive/workflow_package/registry_manifest"
 
 class HoneycombWorkflowLifecycleTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_installs_legacy_extension_fixture_without_rewriting_then_updates_to_canonical_bytes
+    assert_legacy_fixture_lifecycle("legacy_order")
+  end
+
+  def test_installs_legacy_recommendations_fixture_without_rewriting_then_updates_to_canonical_bytes
+    assert_legacy_fixture_lifecycle("legacy_recommendations")
+  end
 
   class TTYInput < StringIO
     def tty? = true
@@ -423,6 +433,40 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
 
   private
 
+  def assert_legacy_fixture_lifecycle(name)
+    with_tmp_git_repo do |registry|
+      versions = {}
+      old = publish_version(registry, versions, "1.0.0", nil, fixture: name)
+      with_project do |project|
+        client = Hive::WorkflowPackage::RegistryClient.new(repository: registry)
+        installed = Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo@1.0.0", project_root: project, json: true, yes: true,
+          stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+        ).call!
+        assert_equal "installed", installed.fetch("status")
+        store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+        manifest = store.manifest("demo", old.fetch(:source_commit), old.fetch(:manifest_digest))
+        assert_equal manifest_fixture(name), manifest.bytes
+        assert_equal old.fetch(:manifest_digest), manifest.digest
+        refute_equal manifest.bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(manifest.data)
+        task = write_pinned_task(project, old, configuration_digest: installed.fetch("configuration_digest"))
+        assert_equal :demo, Hive::Task.new(task).workflow.id
+
+        candidate = publish_version(registry, versions, "1.1.0", "Read the task and report.\n")
+        updated = Hive::Commands::Workflow::Update.new(
+          "demo", project_root: project, json: true, yes: true, allow_escalation: true,
+          stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+        ).call!
+        assert_equal "updated", updated.fetch("status")
+        assert_equal candidate.fetch(:source_commit), Hive::Task.new(task).workflow_commit
+        current = store.manifest("demo", candidate.fetch(:source_commit), candidate.fetch(:manifest_digest))
+        assert_equal current.bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(current.data)
+        assert_equal manifest_fixture(name), File.binread(File.join(registry, "packages/demo/1.0.0/manifest.yml"))
+      end
+    end
+  end
+
+
   def update(project, client, dry_run: false, yes: false, json: true, stdin: $stdin,
              stdout: StringIO.new, input_bindings: [])
     Hive::Commands::Workflow::Update.new(
@@ -466,13 +510,19 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     }
   end
 
-  def publish_version(repository, versions, version, instruction, mapping_recommendations: nil)
+  def publish_version(repository, versions, version, instruction, mapping_recommendations: nil, fixture: nil)
     package = File.join(repository, "packages", "demo", version)
     source_revision = Digest::SHA1.hexdigest("demo-#{version}")
-    manifest = write_package(
-      package, version, instruction, source_revision: source_revision,
-      mapping_recommendations: mapping_recommendations
-    )
+    manifest = if fixture
+      fixture_package(package, fixture)
+      YAML.safe_load(File.binread(File.join(package, "manifest.yml")))
+    else
+      write_package(
+        package, version, instruction, source_revision: source_revision,
+        mapping_recommendations: mapping_recommendations
+      )
+    end
+    source_revision = manifest.dig("source", "revision")
     run!("git", "-C", repository, "add", "packages/demo/#{version}")
     run!("git", "-C", repository, "commit", "-m", "package #{version}", "--quiet")
     review_head = run!("git", "-C", repository, "rev-parse", "HEAD").strip
@@ -480,6 +530,7 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
       version, source_revision: source_revision, review_head: review_head,
       release_sha256: manifest.fetch("release_sha256")
     )
+    versions[version]["description"] = manifest.fetch("description")
     versions.each_value { |entry| entry["latest_version"] = version }
     catalog = {
       "schema" => "honeycomb-catalog/v2",

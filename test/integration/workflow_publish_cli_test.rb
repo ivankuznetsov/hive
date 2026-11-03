@@ -18,6 +18,13 @@ class WorkflowPublishCliTest < Minitest::Test
       assert_match(/\A[0-9a-f]{64}\z/, payload.fetch("package_digest"))
       assert_match(/\A[0-9a-f]{64}\z/, payload.fetch("release_digest"))
       assert_equal payload, JSON.parse(stdout.string)
+      package = Hive::WorkflowPackage::Publisher.new(
+        "demo", project_root: project, version: "1.0.0"
+      ).package(destination: File.join(project, "package"))
+      bytes = File.binread(File.join(package.root, "manifest.yml"))
+      assert_equal bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(YAML.safe_load(bytes))
+      assert_equal package.package_digest, payload.fetch("package_digest")
+      assert_equal package.release_digest, payload.fetch("release_digest")
       refute File.exist?(File.join(state_home, "workflow-publish"))
     end
   end

@@ -1,8 +1,34 @@
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/publisher"
 
 class WorkflowPackagePublisherTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_publication_and_builder_converge_for_permuted_authored_maps
+    with_tmp_dir do |root|
+      first = canonical_builder(File.join(root, "first"))
+      second = canonical_builder(File.join(root, "second"), reverse: true)
+      assert_equal first.bytes, second.bytes
+      assert_equal first.release_digest, second.release_digest
+      assert_equal first.package_digest, second.package_digest
+    end
+    with_authored_workflow do |project, authored|
+      original = publisher(project).package(destination: File.join(project, "first"))
+      metadata_path = File.join(authored, "honeycomb.yml")
+      data = YAML.safe_load(File.read(metadata_path))
+      %w[author source].each { |key| data[key] = data.fetch(key).to_a.reverse.to_h }
+      File.write(metadata_path, YAML.dump(data.to_a.reverse.to_h))
+      permuted = publisher(project).package(destination: File.join(project, "second"))
+      assert_equal original.release_digest, permuted.release_digest
+      assert_equal original.package_digest, permuted.package_digest
+      bytes = File.binread(File.join(original.root, "manifest.yml"))
+      assert_equal bytes, File.binread(File.join(permuted.root, "manifest.yml"))
+      assert_equal bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(YAML.safe_load(bytes))
+    end
+  end
+
 
   Package = Hive::WorkflowPackage::Publisher::Package
   RetainedReceipt = Data.define(

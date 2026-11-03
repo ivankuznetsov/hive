@@ -1,10 +1,30 @@
 require "digest"
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_client"
 
 class WorkflowPackageRegistryClientTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_fetches_canonical_and_legacy_fixtures_with_exact_catalog_bound_identity
+    %w[canonical legacy_order legacy_recommendations].each do |name|
+      with_registry(fixture: name) do |repository, _revision, commit|
+        with_tmp_dir do |destination|
+          resolution = Hive::WorkflowPackage::RegistryClient.new(repository: repository).fetch(
+            "honeycomb/demo@1.0.0", destination: destination
+          )
+          bytes = File.binread(File.join(destination, "manifest.yml"))
+          assert_equal manifest_fixture(name), bytes
+          assert_equal commit, resolution.catalog_commit
+          assert_equal YAML.safe_load(bytes).fetch("release_sha256"), resolution.manifest_digest
+          assert_equal Digest::SHA256.hexdigest(manifest_fixture(name)), Digest::SHA256.hexdigest(bytes)
+        end
+      end
+    end
+  end
+
 
   def test_fetches_bare_version_and_listed_full_source_sha_to_verified_package
     with_registry do |repository, source_revision, catalog_commit|
@@ -335,11 +355,16 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
 
   private
 
-  def with_registry
+  def with_registry(fixture: nil)
     with_tmp_git_repo do |repository|
       package = File.join(repository, "packages", "demo", "1.0.0")
       source_revision = "c" * 40
-      manifest = write_v2_package(package, repository_root: repository, source_revision: source_revision)
+      manifest = if fixture
+        fixture_package(package, fixture)
+        YAML.safe_load(File.binread(File.join(package, "manifest.yml")))
+      else
+        write_v2_package(package, repository_root: repository, source_revision: source_revision)
+      end
       run!("git", "-C", repository, "add", "packages/demo/1.0.0")
       run!("git", "-C", repository, "commit", "-m", "package", "--quiet")
       review_head = run!("git", "-C", repository, "rev-parse", "HEAD").strip

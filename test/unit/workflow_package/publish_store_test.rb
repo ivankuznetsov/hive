@@ -1,4 +1,5 @@
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/publish_lock"
 require "hive/workflow_package/publish_store"
@@ -6,6 +7,22 @@ require "hive/workflow_package/publisher"
 
 class WorkflowPackagePublishStoreTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_retains_canonical_and_legacy_fixture_bytes_and_both_identities
+    %w[canonical canonical_with_recommendations legacy_order legacy_recommendations].each do |name|
+      with_tmp_dir do |root|
+        package = fixture_package(File.join(root, "package"), name)
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(root, "publish"))
+        receipt = store.create_or_load(package, registry: "owner/registry")
+        retained = store.verify_bundle(receipt)
+        assert_equal manifest_fixture(name), File.binread(File.join(retained, "manifest.yml"))
+        assert_equal package.release_digest, receipt.release_digest
+        assert_equal package.package_digest, receipt.package_digest
+      end
+    end
+  end
+
 
   def test_persists_one_private_receipt_and_validated_digest_bundle
     with_package do |package|

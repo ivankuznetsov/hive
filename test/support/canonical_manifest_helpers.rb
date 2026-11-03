@@ -1,5 +1,6 @@
 require "hive/workflow_package/registry_manifest_builder"
 require "hive/workflow_package/source_snapshot"
+require "hive/workflow_package/publisher"
 
 module CanonicalManifestHelpers
   FIXTURES = File.expand_path("../fixtures/workflow_package", __dir__)
@@ -24,10 +25,12 @@ module CanonicalManifestHelpers
       metadata = metadata.with(author: metadata.author.to_a.reverse.to_h, source: metadata.source.to_a.reverse.to_h)
       files = files.to_a.reverse.to_h
     end
+    input = { "name" => "CONTEXT", "authorized_slots" => [ "stages.work" ] }
+    input = input.to_a.reverse.to_h if reverse
     snapshot = Hive::WorkflowPackage::SourceSnapshot::Snapshot.new(
       name: "demo", descriptor: YAML.safe_load(canonical_payloads.fetch("workflow.yml")), files: files,
       tools: [ "tools/check.sh" ], prompt_assets: [ "prompts/context.md" ],
-      optional_inputs: [ { "name" => "CONTEXT", "authorized_slots" => [ "stages.work" ] } ],
+      optional_inputs: [ input ],
       external_skills: [ "external/reviewer" ]
     )
     Hive::WorkflowPackage::RegistryManifestBuilder.build!(
@@ -69,5 +72,32 @@ module CanonicalManifestHelpers
             advance_verb: done
       YAML
     }
+  end
+  def fixture_package(destination, name, canonicalize: false)
+    canonical_payloads.each do |path, bytes|
+      target = File.join(destination, path)
+      FileUtils.mkdir_p(File.dirname(target))
+      File.binwrite(target, bytes)
+      File.chmod(0o755, target) if path.start_with?("tools/")
+    end
+    bytes = manifest_fixture(name)
+    if canonicalize
+      data = YAML.safe_load(bytes)
+      data["release_sha256"] = Digest::SHA256.hexdigest(
+        Hive::WorkflowPackage::CanonicalYAML.dump_manifest(data, include_release: false)
+      )
+      bytes = Hive::WorkflowPackage::CanonicalYAML.dump_manifest(data)
+    end
+    File.binwrite(File.join(destination, "manifest.yml"), bytes)
+    manifest = Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes)
+    Hive::WorkflowPackage::Publisher::Package.new(
+      name: "demo", version: "1.0.0", root: destination,
+      package_digest: Digest::SHA256.hexdigest(bytes), release_digest: manifest.digest,
+      lint_contract: {
+        "version" => "v1", "upstream_commit" => "a" * 40,
+        "upstream_policy_sha256" => "c" * 64, "fixture_corpus_sha256" => "d" * 64,
+        "expected_output_sha256" => "e" * 64, "contract_sha256" => "b" * 64
+      }
+    )
   end
 end

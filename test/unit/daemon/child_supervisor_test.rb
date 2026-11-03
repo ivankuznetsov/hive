@@ -73,6 +73,14 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_closed_stage_result_reader_does_not_prevent_reaping
+    reader, writer = IO.pipe
+    reader.close
+    assert_nil make.send(:read_stage_result, reader)
+  ensure
+    writer&.close
+  end
+
   def test_spawn_with_log_state_replaces_log_outside_project_git_state
     with_tmp_dir do |dir|
       state_home = File.join(dir, "state-home")

@@ -187,6 +187,58 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_failed_edit_rejects_changed_identity_invalid_history_and_unavailable_storage
+    with_failed_edit_fixture do |coordinator, row, _dir, _store, _task|
+      result = coordinator.request_failed_edit(row: row.with(slug: "replacement"), requestor: "healer", now: NOW)
+      assert_equal "task_identity_conflict", result.reason
+      result = coordinator.request_failed_edit(row: row.with(task_history_invalid: true), requestor: "healer", now: NOW)
+      assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON, result.reason
+      coordinator.define_singleton_method(:resolve_task_for) { |_row| raise IOError, "storage unavailable" }
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      assert_equal "unavailable", result.status
+      assert_equal "recovery_unavailable", result.reason
+    end
+  end
+
+  def test_failed_edit_source_acceptance_blocks_resume_and_retires_the_pending_request
+    with_failed_edit_fixture do |coordinator, row, dir, store, _task|
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      request = Q.fetch(result.request_id, state_home: dir)
+      source = store.fetch(request.recovery.dig("source_binding", "attempt_id"))
+      store.put(source.with("outcome" => "succeeded", "receipt" => source.receipt.merge("outcome" => "succeeded", "exit_status" => 0)))
+      blocked = coordinator.resume(request: request, row: row, now: NOW + 4000)
+      assert_equal "generation_conflict", blocked.reason
+      assert_nil coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW + 4001)
+      assert_nil Q.fetch(request.request_id, state_home: dir)
+    end
+  end
+
+  def test_explicit_failed_edit_retry_rechecks_safety_before_expedition
+    with_failed_edit_fixture do |coordinator, row, dir, _store, _task|
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      coordinator.instance_variable_set(:@safety, ->(_row) { [ false, "ownership changed" ] })
+      observed = row.to_h.merge(recovery: result.to_h)
+      token = coordinator.observation_token_for(observed)
+      blocked = coordinator.request_failed_edit(row: observed, requestor: "action", observation_token: token, now: NOW + 1)
+      assert_equal "safety_blocked", blocked.reason
+      assert_equal result.next_eligible_at, Q.fetch(result.request_id, state_home: dir).recovery["next_eligible_at"]
+    end
+  end
+
+  def test_failed_edit_recovery_yields_to_an_existing_task_lock
+    with_failed_edit_fixture do |coordinator, row, dir, _store, _task|
+      lock = Hive::Lock.acquire_task_lock(row.folder, "attempt_id" => "active-owner")
+      begin
+        result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+        assert_equal "running", result.status
+        assert_equal "existing_live", result.reason
+        assert_empty Q.pending(state_home: dir)
+      ensure
+        Hive::Lock.release_task_lock(row.folder, lock_id: lock.fetch("lock_id"))
+      end
+    end
+  end
+
   def test_request_reports_missing_observation_when_assessment_has_no_retry_time
     with_tmp_dir do |state_home|
       coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)

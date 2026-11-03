@@ -2,6 +2,16 @@ require "test_helper"
 require "hive/recovery/presentation"
 
 class RecoveryPresentationTest < Minitest::Test
+  def test_missing_answers_without_recovery_remain_input_when_scheduler_is_unavailable
+    %w[stale unavailable invalid].each do |status|
+      row = input_row.merge("answers_complete" => false, "unanswered_questions" => 1,
+        "scheduler_status" => status)
+      assert_equal "input", Hive::Recovery::Presentation.for_row(row).kind
+      assert_equal "unavailable", Hive::Recovery::Presentation.for_row(
+        row.merge("recovery" => recovery("cooldown"))).kind
+    end
+  end
+
   def test_descriptor_failed_edit_does_not_infer_missing_answers_from_unparsed_input
     %w[queued cooldown].each do |status|
       row = input_row.merge("workflow" => "content", "stage" => "2-research",
@@ -25,6 +35,14 @@ class RecoveryPresentationTest < Minitest::Test
       refute_includes view.detail.downcase, "recovery"
       assert_includes view.detail, hold["blocked_by"] || hold["held"]
     end
+  end
+
+  def test_structured_and_unspecified_holds_have_readable_details
+    view = Hive::Recovery::Presentation.for_row(input_row.merge("held" => { "reason" => "quota", "provider" => "codex" }))
+    assert_equal "hold", view.kind
+    assert_includes view.detail, "quota; codex"
+    view = Hive::Recovery::Presentation.for_row(input_row.merge("blocked" => true))
+    assert_includes view.detail, "current scheduler hold"
   end
 
   def test_dependency_hold_precedes_missing_answers_but_cooldown_does_not

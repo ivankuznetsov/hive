@@ -2,6 +2,26 @@ require "test_helper"
 require "hive/recovery/api"
 
 class HiveRecoveryAPITest < Minitest::Test
+  def test_failed_edit_adapter_preserves_the_observation_token_and_uses_its_own_route
+    calls = []
+    coordinator = Object.new
+    coordinator.define_singleton_method(:request_failed_edit) do |**args|
+      calls << args
+      Hive::Daemon::RecoveryCoordinator::Receipt.from_h("status" => "queued", "owner" => "scheduler")
+    end
+    row = { "project" => "demo", "slug" => "task", "stage" => "2-brainstorm",
+      "recovery" => { "variant" => "failed_edit" } }
+    result = Hive::Recovery::API.recover!(row: row, coordinator: coordinator,
+      observation_token: "fresh-token", requestor: "action")
+    assert_equal "queued", result.status
+    assert_equal "fresh-token", calls.fetch(0).fetch(:observation_token)
+    assert_equal "failed_edit", calls.fetch(0).fetch(:row).recovery["variant"]
+    with_replaced_singleton_method(Hive::Daemon::RecoveryCoordinator, :new, ->(**) { coordinator }) do
+      Hive::Recovery::API.recover_failed_edit!(row: row, requestor: "action", observation_token: "direct-token")
+    end
+    assert_equal "direct-token", calls.fetch(1).fetch(:observation_token)
+  end
+
   include HiveTestHelper
 
   def test_observation_derives_the_state_file_from_a_task_folder

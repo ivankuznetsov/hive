@@ -1202,8 +1202,8 @@ stale or unavailable, a read-only task/stage-bound SQL lookup can retain durable
 recovery metadata without creating storage, admitting recovery, or promising an
 imminent retry.
 
-Freshness precedes repair/parking, then genuine dependency blocks and missing
-answers, running recovery, cooldown/queue, and the actual no-evidence scheduler
+For recovery, freshness precedes repair/parking, then genuine dependency blocks
+and missing answers, running recovery, cooldown/queue, and the actual no-evidence scheduler
 disposition. Missing answers keep the editor action and recovery detail;
 complete recovering answers do not. Descriptor workflows do not infer missing
 answers from an absent coding-brainstorm completeness signal. A parked task
@@ -1212,6 +1212,12 @@ Cooldown and queue show Needs recovery plus the known time, or “retry time
 unavailable”; other holds retain their real reason without a retry promise.
 Complete answers with no failure evidence show the actual scheduler disposition
 without inventing recovery or another answer prompt.
+
+Unanswered questions without recovery evidence remain operator input even when
+the scheduler snapshot is unavailable or workspace history is partial. The
+answer command revalidates the bound questions on write. This preserves web
+editing and focus through pushed morphs and lets `hive watch` settle on
+`waiting_on_you` without requiring a running daemon.
 
 Focused regressions are in `attempts/dispatcher_test`, `stages/brainstorm_runtime_test`,
 `daemon/recovery_coordinator_test`, `daemon/dispatcher_test`, and the dispatch

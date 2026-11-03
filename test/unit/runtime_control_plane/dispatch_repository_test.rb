@@ -52,6 +52,12 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       bound = repository.bind_supervised_edit!(id, launch: launch, task_id: "task-1",
         intended_stage: "2-fix", task_generation: "a" * 64)
       assert_equal launch, bound.edit_resume
+      assert_equal bound.revision, repository.bind_supervised_edit!(id, launch: launch,
+        task_id: "task-1", intended_stage: "2-fix", task_generation: "a" * 64).revision
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.bind_supervised_edit!(id, launch: launch.merge("input_binding" => {}),
+          task_id: "task-1", intended_stage: "2-fix", task_generation: "a" * 64)
+      end
       repository.claim(id, pid: Process.pid, process_start_time: "start", now: NOW)
       request = repository.fetch(id)
       receipt = { "receipt_version" => 2, "attempt_id" => "supervised-#{id}", "outcome" => "failed",
@@ -62,6 +68,12 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       stored = repository.record_supervised_edit_terminal!(id, receipt: receipt, expected_revision: request.revision)
       assert_equal request.revision + 1, stored.fetch("dispatch_revision")
       refute stored.key?("terminal_lease_version")
+      assert_equal stored, repository.record_supervised_edit_terminal!(id, receipt: receipt,
+        expected_revision: request.revision)
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.record_supervised_edit_terminal!(id, receipt: receipt.merge("exit_status" => 2),
+          expected_revision: request.revision)
+      end
       repository.remove(id)
       record = repository.supervised_edit_records(project: "hive", slug: "sqlite-cutover", task_id: "task-1", intended_stage: "2-fix").first
       assert_equal "failed", record.outcome

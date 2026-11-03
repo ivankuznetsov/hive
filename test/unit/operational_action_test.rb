@@ -58,6 +58,13 @@ class OperationalActionTest < Minitest::Test
           })
         row = Hive::OperationalAction.observed_row(task, project: "demo")
         assert_equal source, row.dig("recovery", "source_binding")
+        with_replaced_singleton_method(Hive::RuntimeControlPlane::DispatchRepository, :new, ->(**) {
+          raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+        }) do
+          unavailable = Hive::OperationalAction.observed_row(task, project: "demo")
+          assert_equal task.slug, unavailable["slug"]
+          assert_nil unavailable["recovery"]
+        end
         action = Hive::OperationalAction.descriptor(project: "demo", row: row)
         assert_equal "workflow.retry", action["action_id"]
         assert_equal action, Hive::OperationalAction.assert_current!(task, project: "demo",

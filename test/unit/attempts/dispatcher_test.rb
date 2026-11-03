@@ -61,6 +61,40 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_failed_edit_provider_evidence_preserves_quota_and_bounded_failure_details
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "quota-edit")
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      failure = { "failure_class" => "account_quota", "provider" => "codex", "status_code" => 429,
+        "message" => "q" * 600 }
+      failed = Hive::Attempts::FailedEdit::SupervisedRecord.new(
+        launch: { "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+          "source_binding" => Hive::Attempts::FailedEdit.source_binding(failed),
+          "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation) },
+        receipt: failed.receipt.merge("failure" => failure, "dispatch_revision" => 3), state: "terminal")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ failed ])
+      assert_equal "limits_reached", evidence["reason"]
+      assert_equal "codex", evidence["provider"]
+      assert_equal "429", evidence["status_code"]
+      assert_equal "q" * 512, evidence["message"]
+    end
+  end
+
+  def test_failed_edit_request_rejects_changed_input_before_launch
+    with_dispatcher do |dispatcher, launcher, task, _store|
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      request = FakeRequest.new(slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "stale-edit", recovery: { "variant" => "failed_edit",
+          "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+          "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation) })
+      File.write(task.state_file, "changed input\n<!-- WAITING -->\n")
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      assert_raises(Hive::Attempts::StaleTaskSource) { dispatcher.dispatch_request(request) }
+      assert_empty launcher.launched
+    end
+  end
+
   def test_failed_edit_evidence_rejects_success_missing_receipt_and_stage_errors
     with_dispatcher do |dispatcher, launcher, task, store|
       result = dispatch(dispatcher, task, request_id: "consumed-edit")

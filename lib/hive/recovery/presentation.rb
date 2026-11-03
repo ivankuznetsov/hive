@@ -41,7 +41,8 @@ module Hive
         scheduler_status = value(row, :scheduler_status) || recovery&.fetch("scheduler_status", nil)
         return nil unless recovery || complete_waiting || !value(row, :answers_complete).nil?
 
-        if %w[stale unavailable invalid].include?(scheduler_status) || recovery&.fetch("status", nil) == "unavailable"
+        if (recovery || !missing_input?(row)) &&
+           (%w[stale unavailable invalid].include?(scheduler_status) || recovery&.fetch("status", nil) == "unavailable")
           return View.new(kind: "unavailable", label: "Status unavailable",
             detail: recovery ? "Scheduler observation unavailable; stored recovery #{recovery['status']}: #{failure_detail(recovery)}" :
               "Scheduler observation unavailable; refresh status before choosing an action.")

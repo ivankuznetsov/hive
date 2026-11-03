@@ -263,4 +263,69 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
                  "exactly one :dispatch_request_dispatched event — no shadow second dispatch"
     assert_equal 1, completed_via_request, "exactly one :dispatch_request_completed event"
   end
+
+  def test_supervised_edit_spawn_failure_records_terminal_evidence_before_cleanup
+    @supervisor.define_singleton_method(:spawn) { |**| raise IOError, "spawn failed" }
+    assert_raises(IOError) do
+      @dispatcher.send(:dispatch_command, "hive run #{@slug}", project: @project, slug: @slug,
+        stage: "2-brainstorm", state_file_mtime: T_BOT_ANSWER, state_file_path: @brainstorm_path,
+        now: T_FIRST_TICK, edit_resume: true)
+    end
+    repository = @dispatcher.send(:dispatch_repository)
+    record = repository.supervised_edit_records(project: @project, slug: @slug,
+      task_id: "2503", intended_stage: "2-brainstorm").fetch(0)
+    assert_equal "failed", record.outcome
+    assert_equal Hive::ExitCodes::SOFTWARE, record.receipt["exit_status"]
+    assert_empty repository.pending
+  end
+
+  def test_supervised_edit_recovery_refuses_changed_input_before_spawn
+    task = Hive::Task.new(@stage_dir)
+    generation = Hive::Attempts::Generation.resolve(task: task, project: @project, intended_stage: "2-brainstorm")
+    repository = @dispatcher.send(:dispatch_repository)
+    id = repository.write_request!(project: @project, slug: @slug, argv: [ "hive", "run", @slug ],
+      task_id: "2503", expected_stage: "2-brainstorm", task_generation: generation.task_generation,
+      recovery: { "variant" => "failed_edit", "phase" => "admitted",
+        "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+        "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation) }, now: T_FIRST_TICK)
+    File.write(@brainstorm_path, "updated answers\n<!-- WAITING -->\n")
+    assert_raises(Hive::Attempts::StaleTaskSource) do
+      @dispatcher.send(:prepare_supervised_edit, "hive run #{@slug}", project: @project, slug: @slug,
+        stage: "2-brainstorm", request_id: id, now: T_FIRST_TICK)
+    end
+    assert_empty @supervisor.spawned
+    assert_nil repository.fetch(id).edit_resume
+  end
+
+  def test_supervised_edit_failure_envelope_retains_bounded_provider_details
+    id = @dispatcher.send(:prepare_supervised_edit, "hive run #{@slug}", project: @project, slug: @slug,
+      stage: "2-brainstorm", request_id: nil, now: T_FIRST_TICK)
+    @dispatcher.send(:record_supervised_edit_completion, id, exit_code: 1, now: T_REAP_TICK,
+      envelope: { "error" => { "reason" => "limits_reached", "provider" => "codex", "status_code" => 429,
+        "message" => "q" * 600 } })
+    record = @dispatcher.send(:dispatch_repository).supervised_edit_records(project: @project, slug: @slug,
+      task_id: "2503", intended_stage: "2-brainstorm").fetch(0)
+    assert_equal "limits_reached", record.receipt.dig("failure", "reason")
+    assert_equal "429", record.receipt.dig("failure", "status_code")
+    assert_equal "q" * 512, record.receipt.dig("failure", "message")
+  end
+
+  def test_failed_edit_capacity_deferral_releases_the_claim_without_consuming_recovery
+    repository = @dispatcher.send(:dispatch_repository)
+    id = repository.write_request!(project: @project, slug: @slug, argv: [ "hive", "run", @slug ],
+      task_id: "2503", expected_stage: "2-brainstorm", recovery: {
+        "variant" => "failed_edit", "phase" => "cleared", "next_eligible_at" => T_FIRST_TICK.iso8601 }, now: T_FIRST_TICK)
+    repository.claim(id, pid: Process.pid, now: T_FIRST_TICK)
+    deferred = Hive::Attempts::DispatchResult.new(status: :deferred, attempt: nil, receipt: nil,
+      attach_descriptor: nil, reason: "capacity")
+    attempts = Object.new
+    attempts.define_singleton_method(:dispatch_request) { |*, **| deferred }
+    @dispatcher.instance_variable_set(:@attempt_dispatcher, attempts)
+    assert_equal deferred, @dispatcher.send(:dispatch_request!, repository.fetch(id), now: T_FIRST_TICK)
+    request = repository.fetch(id)
+    assert_equal "queued", request.state
+    assert_empty repository.claimed
+    assert_equal "cleared", request.recovery["phase"]
+    assert_empty @supervisor.spawned
+  end
 end

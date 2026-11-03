@@ -45,6 +45,30 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  def test_failed_edit_recovery_semantics_preserve_freshness_and_running_state
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["answers_complete"] = true
+      attributes["recovery"] = { "variant" => "failed_edit", "status" => "running", "owner" => "agent" }
+      semantic = builder(native, task, questions: 0).semantic
+      assert_equal "running", semantic.dig("headline", "state")
+      refute semantic.dig("action", "enabled")
+      stale = builder(native, task, questions: 0, status_availability: "degraded")
+      view = stale.send(:recovery_presentation)
+      assert_equal "unavailable", view.kind
+      assert_includes view.detail, "stored recovery running"
+    end
+  end
+
+  def test_partial_checkpoint_does_not_disable_bound_unanswered_questions
+    with_fixture do |native, task|
+      task.instance_variable_get(:@attributes).merge!("answers_complete" => false, "unanswered_questions" => 1)
+      page = builder(native, task, questions: 1, projection_state: "partial").page
+      assert_equal "answer", page.dig("decision", "posture")
+      assert page.dig("decision", "action", "enabled")
+    end
+  end
+
   def test_page_preserves_question_and_execution_authority_without_audit_work
     with_fixture do |native, task|
       [

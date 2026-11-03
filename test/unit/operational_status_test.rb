@@ -3,6 +3,7 @@ require "json_schemer"
 require "hive/operational_status"
 
 class OperationalStatusTest < Minitest::Test
+  include HiveTestHelper
   STATES = %w[
     unknown running needs_repair waiting_on_you
     waiting_on_provider_or_scheduler completion_ready idle
@@ -114,6 +115,33 @@ class OperationalStatusTest < Minitest::Test
     entry = status.recovery_rows.first
     assert_nil entry["recovery"]
     assert_equal "unavailable", entry["scheduler_status"]
+  end
+
+  def test_scheduler_identity_and_capacity_hold_preserve_the_recovery_reason
+    row = task(action: "needs_input", slug: "held-edit", stage: "2-brainstorm").merge("id" => 83, "answers_complete" => true)
+    snapshot = scheduler_snapshot_for(row, decision: "global_cap", reason: "capacity is full")
+    snapshot["tasks"][0]["identity"]["id"] = row["id"]
+    snapshot["tasks"][0]["disposition"]["recovery"] = {
+      "variant" => "failed_edit", "status" => "queued", "request_id" => "held-retry", "owner" => "scheduler" }
+    result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } }, scheduler_snapshot: snapshot)
+    projected = result["tasks"].first
+    assert_equal "current", projected.dig("freshness", "scheduler_status")
+    assert_equal "capacity is full", projected.dig("recovery", "scheduler_hold")
+    assert_includes projected["reason"], "capacity is full"
+    snapshot["tasks"][0]["identity"]["id"] = 84
+    result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } }, scheduler_snapshot: snapshot)
+    refute_equal "current", result["tasks"].first.dig("freshness", "scheduler_status")
+  end
+
+  def test_unavailable_durable_recovery_storage_does_not_break_status
+    row = task(action: "needs_input", slug: "offline-edit", stage: "2-brainstorm").merge("id" => 84, "answers_complete" => true)
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::DispatchRepository, :new, ->(**) {
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    }) do
+      result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } })
+      assert_equal "unknown", result["tasks"].first["state"]
+      assert_nil result["tasks"].first["recovery"]
+    end
   end
 
   def test_canonical_missing_task_id_block_displays_repair_without_a_retry_action

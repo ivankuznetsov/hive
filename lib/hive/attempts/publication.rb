@@ -45,7 +45,7 @@ module Hive
           prepared = specs.map do |spec|
             spec.merge(reference: prepare_sealed_reference(spec.fetch(:source)))
           end
-          database.transaction do |db|
+          database.transaction(operation: "publication.seal_payloads") do |db|
             prepared.each { |spec| persist_sealed_reference(db, record, spec) }
           end
           remove_open_sources(prepared)
@@ -94,7 +94,7 @@ module Hive
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
         name = consumer_name(consumer)
         column = PUBLICATION_COLUMNS.fetch(name)
-        database.transaction do |db|
+        database.transaction(operation: "publication.acknowledge_publication") do |db|
           row = db[:attempts].where(attempt_id: id).first
           unless row && row[:terminal_receipt_json]
             raise RepositoryError, "final attempt is not pending publication"
@@ -112,7 +112,7 @@ module Hive
 
       def finish_publication(attempt_id)
         id = safe_id(attempt_id, error: "pending finalization attempt id is invalid")
-        database.transaction do |db|
+        database.transaction(operation: "publication.finish_publication") do |db|
           row = db[:attempts].where(attempt_id: id).first
           next false unless row && row[:terminal_receipt_json]
           unless PUBLICATION_COLUMNS.values.all? { |column| row.fetch(column) == 1 }

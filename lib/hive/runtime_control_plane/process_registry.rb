@@ -63,7 +63,7 @@ module Hive
         fence.acquire_shared!
         reservation_id = @id_generator.call
         owner = @process_identity.capture(owner_pid)
-        @database.transaction do |db|
+        @database.transaction(operation: "process.reserve") do |db|
           lifecycle = db[:runtime_lifecycle].first
           db[:launch_reservations].insert(
             reservation_id: reservation_id,
@@ -92,7 +92,7 @@ module Hive
         evidence = custody_evidence || @custody.evidence_for(pid)
         process_id = @id_generator.call
         row = nil
-        @database.transaction do |db|
+        @database.transaction(operation: "process.register") do |db|
           reservation = db[:launch_reservations].where(
             reservation_id: reservation_id, state: "reserved"
           ).first
@@ -135,7 +135,7 @@ module Hive
           )
         end
         row = nil
-        @database.transaction do |db|
+        @database.transaction(operation: "process.rebind") do |db|
           scope = db[:owned_processes].where(reservation_id: reservation_id, state: "running")
           raise StaleLifecycle.new("owned process registration is no longer active") unless scope.first
 
@@ -194,16 +194,16 @@ module Hive
           process
         end
         if authority
-          @database.transaction(authority: authority, &operation)
+          @database.transaction(operation: "process.mark_stopped_by_reservation", authority: authority, &operation)
         else
           process = @database.read { |db| db[:owned_processes].where(reservation_id: reservation_id).first }
           cleanup_owner = process&.fetch(:attempt_id, nil) || "reservation:#{reservation_id}"
-          @database.transaction(cleanup_attempt_id: cleanup_owner, &operation)
+          @database.transaction(operation: "process.mark_stopped_by_reservation", cleanup_attempt_id: cleanup_owner, &operation)
         end
       end
 
       def mark_stopped_by_process!(process_id, authority:, reason: nil, timeout_sec: nil)
-        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+        @database.transaction(operation: "process.mark_stopped_by_process", authority: authority, timeout_sec: timeout_sec) do |db|
           process = db[:owned_processes].where(process_id: process_id.to_s).first
           next false unless process && process.fetch(:state) != "stopped"
 
@@ -224,7 +224,7 @@ module Hive
       def settle_preclose_reservations!(generation:, authority:, timeout_sec: nil)
         cancelled = []
         generation = Integer(generation)
-        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+        @database.transaction(operation: "process.settle_preclose_reservations", authority: authority, timeout_sec: timeout_sec) do |db|
           scope = db[:launch_reservations].where(state: "reserved")
             .where { admission_generation < generation }
           cancelled = scope.select_map(:reservation_id)

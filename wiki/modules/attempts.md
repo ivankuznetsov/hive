@@ -259,3 +259,10 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Runtime writer transactions report monotonic acquisition wait separately from
+lock hold, including commit/rollback, with stable operation labels. Debug
+measurements are enabled by `HIVE_SQL_DEBUG=1`; holds over one second warn even
+without debug logging. Measurements never log SQL or projection payloads and
+are emitted after SQL and writer-fence release. See
+`docs/implementation/runtime-database-contention.md` for observed evidence.

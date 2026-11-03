@@ -183,7 +183,7 @@ module Hive
         workflow_id = (workflow.respond_to?(:id) ? workflow.id : workflow).to_s
         workflow_id = "coding" if workflow_id.empty?
         timestamp = Record.iso8601(observed_at)
-        database.transaction do |db|
+        database.transaction(operation: "attempt.observe_task_source") do |db|
           project = db[:projects].where(state_root_path: File.dirname(stages)).first
           unless project && project.fetch(:name) == generation.project.to_s
             raise StaleTaskSource, "attempt project identity is not registered for the task path"
@@ -235,7 +235,7 @@ module Hive
       end
 
       def arm_launch_handoff(observed, launch_timeout_sec:, now:)
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+        mutate(observed, operation: "attempt.arm_launch_handoff", allowed_states: [ "launching" ]) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "claim_deadline" => Record.iso8601(now + launch_timeout_sec),
@@ -339,7 +339,7 @@ module Hive
       def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)
         raise CompareAndSwapFailed, "launch claim deadline expired" if
           observed.active_deadline && now > observed.active_deadline
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+        mutate(observed, operation: "attempt.claim", allowed_states: [ "launching" ]) do |data|
           unless Capability.matches?(data["claim_capability_digest"], claim_capability)
             raise CompareAndSwapFailed, "attempt claim capability is invalid"
           end
@@ -358,7 +358,7 @@ module Hive
       def first_heartbeat(observed, stale_sec:, now:)
         raise CompareAndSwapFailed, "first heartbeat deadline expired" if
           observed.active_deadline && now > observed.active_deadline
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+        mutate(observed, operation: "attempt.first_heartbeat", allowed_states: [ "launching" ]) do |data|
           raise CompareAndSwapFailed, "attempt has not been claimed" unless data["wrapper"]
 
           timestamp = Record.iso8601(now)
@@ -371,7 +371,7 @@ module Hive
       end
 
       def heartbeat(observed, stale_sec:, now:)
-        mutate(observed, allowed_states: [ "running" ]) do |data|
+        mutate(observed, operation: "attempt.heartbeat", allowed_states: [ "running" ]) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "heartbeat_at" => Record.iso8601(now),
@@ -381,7 +381,7 @@ module Hive
       end
 
       def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil)
-        mutate(observed, allowed_states: [ "running" ]) do |data|
+        mutate(observed, operation: "attempt.checkpoint", allowed_states: [ "running" ]) do |data|
           outputs = output_references.nil? ? data.fetch("current_outputs") :
             Hive::StringifyKeys.call(output_references)
           outputs.each { |reference| OutputReference.validate_shape!(reference) }
@@ -423,7 +423,7 @@ module Hive
           terminal_lease_version: version, routing: observed["routing"]
         )
         mutate(
-          observed, allowed_states: [ "running" ], pending_receipt: receipt,
+          observed, operation: "attempt.terminalize", allowed_states: [ "running" ], pending_receipt: receipt,
           authority: authority, cleanup_attempt_id: observed.attempt_id,
           timeout_sec: timeout_sec
         ) do |data|
@@ -456,7 +456,7 @@ module Hive
       def mark_lost(observed, reason:, now:, diagnostics: {}, authority: nil,
                     timeout_sec: nil)
         mutate(
-          observed, allowed_states: %w[launching running], pending_receipt: {},
+          observed, operation: "attempt.mark_lost", allowed_states: %w[launching running], pending_receipt: {},
           authority: authority, cleanup_attempt_id: observed.attempt_id,
           timeout_sec: timeout_sec
         ) do |data|
@@ -494,10 +494,10 @@ module Hive
         ).count
       end
 
-      def mutate(observed, allowed_states:, pending_receipt: nil, authority: nil,
+      def mutate(observed, operation:, allowed_states:, pending_receipt: nil, authority: nil,
                  cleanup_attempt_id: nil, timeout_sec: nil)
         replacement = nil
-        database.transaction(
+        database.transaction(operation: operation, identifiers: { attempt_id: observed.attempt_id },
           authority: authority, cleanup_attempt_id: cleanup_attempt_id,
           timeout_sec: timeout_sec
         ) do |db|

@@ -5,6 +5,7 @@ require "securerandom"
 require "sequel"
 require "sequel/extensions/migration"
 require "sqlite3"
+require "json"
 require "hive/atomic_file"
 require "hive/runtime_control_plane/file_fence"
 require "hive/runtime_control_plane/command_schema"
@@ -32,7 +33,7 @@ module Hive
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
                      feature_probe: nil, clock: -> { Time.now.utc },
                      uuid_generator: -> { SecureRandom.uuid }, proc_root: "/proc",
-                     platform: RUBY_PLATFORM)
+                     platform: RUBY_PLATFORM, transaction_observer: nil)
         @path = File.expand_path(path)
         @migrations_dir = File.expand_path(migrations_dir)
         @busy_timeout_ms = Integer(busy_timeout_ms)
@@ -46,6 +47,7 @@ module Hive
         @connection = nil
         @validated = false
         @active_writer_authorities = {}
+        @transaction_observer = transaction_observer
       end
 
       def open!(revalidate: true, timeout_sec: nil)
@@ -190,7 +192,11 @@ module Hive
       end
 
       def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
-                      timeout_sec: nil, track_mutation: true)
+                      timeout_sec: nil, track_mutation: true,
+                      operation: "runtime.write", identifiers: {})
+        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        acquired_at = released_at = nil
+        result = "acquisition_failed"
         if operational_inspection_active?
           raise Unavailable.new(
             "Hive state is mounted read-only at #{File.dirname(path)}",
@@ -201,7 +207,6 @@ module Hive
 
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
-        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         ProcessGuard.checkout { ensure_open!(timeout_sec: fence_timeout) }
         writer_timeout = if timeout_sec.nil?
           fence_timeout
@@ -222,16 +227,43 @@ module Hive
             @connection.run("PRAGMA busy_timeout = #{(sqlite_timeout * 1000).floor}") if prior
             begin
               @connection.transaction(mode: mode, rollback: :reraise) do
+                acquired_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+                result = "rolled_back"
                 authorize_mutation!(@connection, authority: authority,
                                     cleanup_attempt_id: cleanup_attempt_id)
                 increment_mutation_sequence!(@connection) if track_mutation
                 yield @connection
               end
+              .tap { result = "committed" }
             ensure
+              released_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
               @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
             end
           end
         end
+      ensure
+        finished_at = released_at || Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        emit_transaction_measurement(
+          operation: operation, identifiers: identifiers, result: result,
+          wait_sec: (acquired_at || finished_at) - wait_started,
+          hold_sec: acquired_at && finished_at - acquired_at,
+          elapsed_sec: finished_at - wait_started
+        )
+      end
+
+      # Called after SQL and the writer fence have released. Diagnostics must
+      # never change a mutation's return value or replace its original error.
+      def emit_transaction_measurement(operation:, identifiers:, **measurement)
+        bounded = identifiers.slice(:task_id, :attempt_id).transform_values { |value| value.to_s.byteslice(0, 128) }
+        measurement = measurement.merge(operation: operation.to_s.byteslice(0, 96), **bounded)
+        measurement[:level] = measurement[:hold_sec].to_f > 1 ? "warning" : "debug"
+        if @transaction_observer
+          @transaction_observer.call(measurement.freeze)
+        elsif measurement[:level] == "warning" || ENV["HIVE_SQL_DEBUG"] == "1"
+          warn JSON.generate(event: "runtime_writer", **measurement)
+        end
+      rescue StandardError
+        nil
       end
 
       def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)

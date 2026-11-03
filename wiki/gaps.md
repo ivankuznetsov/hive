@@ -1869,3 +1869,7 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+- Runtime contention qualification has not reproduced the historical long
+  publisher hold. Initial measurements include one residual manual writer
+  hold over one second; checkpoint and recovery qualification remain pending.

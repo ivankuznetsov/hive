@@ -9,6 +9,52 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     super
   end
 
+  def test_writer_measurements_separate_acquisition_from_hold_and_follow_release
+    with_database do |database, path|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, lambda do |measurement|
+        probe = SQLite3::Database.new(path)
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+        probe.close
+        measurements << measurement
+      end)
+      database.transaction(operation: "test.commit", identifiers: { attempt_id: "a" * 200 }) { 42 }
+      error = assert_raises(RuntimeError) do
+        database.transaction(operation: "test.rollback") { raise "original" }
+      end
+      assert_equal "original", error.message
+      assert_equal %w[committed rolled_back], measurements.map { |item| item.fetch(:result) }
+      assert_equal "test.commit", measurements.first.fetch(:operation)
+      assert_equal 128, measurements.first.fetch(:attempt_id).length
+      measurements.each do |item|
+        assert_operator item.fetch(:wait_sec), :>=, 0
+        assert_operator item.fetch(:hold_sec), :>=, 0
+      end
+      database.instance_variable_set(:@transaction_observer, ->(*) { raise "logging unavailable" })
+      assert_equal 42, database.transaction { 42 }
+      assert_raises(RuntimeError) { database.transaction { raise "rollback" } }
+    end
+  end
+
+  def test_busy_acquisition_is_not_reported_as_a_long_writer_hold
+    with_database do |database, path|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, ->(item) { measurements << item })
+      blocker = SQLite3::Database.new(path)
+      blocker.execute("BEGIN IMMEDIATE")
+      assert_raises(Sequel::DatabaseError) do
+        database.transaction(operation: "test.busy", timeout_sec: 0.05) { flunk }
+      end
+      assert_equal "acquisition_failed", measurements.last.fetch(:result)
+      assert_nil measurements.last.fetch(:hold_sec)
+      assert_operator measurements.last.fetch(:wait_sec), :>=, 0.03
+    ensure
+      blocker&.execute("ROLLBACK")
+      blocker&.close
+    end
+  end
+
   def test_explicit_migration_creates_exact_database_and_normal_open_is_lazy
     with_tmp_dir do |root|
       path = File.join(root, "state", "runtime-control-plane.sqlite3")

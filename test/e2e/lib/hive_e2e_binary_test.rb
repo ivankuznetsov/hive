@@ -98,7 +98,11 @@ class E2EBinaryTest < Minitest::Test
     assert_empty schema.validate(payload).to_a
     assert_equal kind, payload.fetch("error_kind")
     assert_equal code, payload.fetch("exit_code")
-    assert_equal command, payload["command"]
+    if command
+      assert_equal command, payload["command"]
+    else
+      assert_nil payload["command"]
+    end
     payload
   end
 
@@ -120,6 +124,31 @@ class E2EBinaryTest < Minitest::Test
     refute_nil frame, "expected the original failure operation in #{err}"
     line_number = frame.match(/#{file}:(\d+):/)[1].to_i
     assert_includes File.readlines(File.join(__dir__, file))[line_number - 1], operation
+  end
+
+  def assert_compatible_error(args, kind:, code:, command:, message:, env: {})
+    messages = []
+    [ nil, "1" ].product([ false, true ]).each do |debug, json|
+      out, err, status = Open3.capture3(
+        env.merge("HIVE_E2E_DEBUG" => debug), RbConfig.ruby, hive_e2e, *args, *([ "--json" ] if json)
+      )
+      assert_equal code, status.exitstatus, "#{args.inspect}: #{out}#{err}"
+      if json
+        actual = assert_error_document(out, kind: kind, code: code, command: command).fetch("message")
+        assert_empty err
+      else
+        assert_empty out
+        actual = err.delete_prefix("hive-e2e: ").chomp
+        assert_equal "hive-e2e: #{actual}\n", err
+      end
+      if message.is_a?(Regexp)
+        assert_match message, actual
+      else
+        assert_equal message, actual
+      end
+      messages << actual
+    end
+    assert_equal 1, messages.uniq.size, "expected errors must stay identical across debug and presentation modes"
   end
 
   def test_unexpected_run_failures_have_matching_human_and_json_diagnostics
@@ -168,6 +197,55 @@ class E2EBinaryTest < Minitest::Test
           assert_match(/\Ahive-e2e: Errno::(?:EEXIST|ENOTDIR): [^\n]+\n\z/, err)
         end
       end
+    end
+  end
+
+  def test_repeated_unexpected_run_failure_keeps_diagnostics_complete_and_fixture_unchanged
+    with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
+      messages = 2.times.map do
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => "1" },
+          hive_e2e, "run", name, "--json"
+        )
+        assert_equal 1, status.exitstatus
+        message = assert_error_document(out, kind: "run_failed", code: 1, command: "run").fetch("message")
+        assert_match(/\AErrno::(?:EEXIST|ENOTDIR): .+\z/, message)
+        assert_run_failure_debug(err, message, kind: :blocked_runs, human: false)
+        assert File.file?(runs_dir)
+        assert_equal "unchanged blocker", File.read(runs_dir)
+        assert_empty Dir.glob(File.join(runs_dir, "**", "*"))
+        message
+      end
+      assert_equal messages.first, messages.last
+    end
+  end
+
+  def test_debug_preserves_unknown_coverage_and_mutually_exclusive_selector_errors
+    assert_compatible_error(
+      [ "run", "--coverage", "definitely-no-coverage" ], kind: "no_scenarios", code: 64, command: "run",
+      message: 'unknown coverage ID "definitely-no-coverage"'
+    )
+    assert_compatible_error(
+      [ "run", "--coverage", "runtime.error_envelope", "--profile", "release" ],
+      kind: "usage", code: 64, command: "run",
+      message: "--profile and --coverage are mutually exclusive and cannot be combined with PATTERN or --filter"
+    )
+  end
+
+  def test_debug_preserves_outer_thor_usage_error
+    assert_compatible_error(
+      [ "clean", "--retain-days" ], kind: "usage", code: 64, command: nil,
+      message: "No value provided for option '--retain-days'"
+    )
+  end
+
+  def test_debug_preserves_outer_generic_error_without_run_failure_formatting
+    with_unexpected_run_failure(:missing_scenario) do |name, runs_dir|
+      assert_compatible_error(
+        [ "list" ], kind: "error", code: 1, command: nil,
+        message: /\ANo such file or directory[^\n]*#{name}\.yml\z/,
+        env: { "HIVE_E2E_RUNS_DIR" => runs_dir }
+      )
     end
   end
 
@@ -224,12 +302,10 @@ class E2EBinaryTest < Minitest::Test
     assert_includes out, "recovery.provider_limit"
     assert_includes out, "bin/hive-e2e run --coverage recovery.provider_limit"
 
-    out, err, status = Open3.capture3(
-      hive_e2e, "coverage", "--match", "definitely-no-coverage", "--json"
+    assert_compatible_error(
+      [ "coverage", "--match", "definitely-no-coverage" ],
+      kind: "no_scenarios", code: 64, command: "coverage", message: "no coverage matches definitely-no-coverage"
     )
-    assert_equal 64, status.exitstatus
-    assert_empty err
-    assert_equal "no_scenarios", JSON.parse(out).fetch("error_kind")
   end
 
   def test_run_coverage_executes_only_primary_and_writes_selection_companion
@@ -662,17 +738,17 @@ class E2EBinaryTest < Minitest::Test
     refute_match(/Usage:/, err)
   end
 
-  def test_replay_missing_repro_emits_json_error_when_requested
-    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "missing-run", "missing-scenario")
-    assert_equal 78, status.exitstatus
-    assert_empty err
-
-    payload = JSON.parse(out)
-    assert_equal "hive-e2e-error", payload["schema"]
-    assert_equal false, payload["ok"]
-    assert_equal "missing_repro", payload["error_kind"]
-    assert_equal 78, payload["exit_code"]
-    assert_equal "replay", payload["command"]
+  def test_replay_missing_repro_preserves_human_and_json_errors_with_debug
+    Dir.mktmpdir("e2e-replay-test") do |runs_dir|
+      script = File.join(runs_dir, "missing-run", "scenarios", "missing-scenario", "repro.sh")
+      assert_compatible_error(
+        [ "replay", "missing-run", "missing-scenario" ], kind: "missing_repro", code: 78, command: "replay",
+        message: "Run #missing-run scenario missing-scenario has no repro.sh; " \
+                 "the run may have completed successfully (#{script})",
+        env: { "HIVE_E2E_RUNS_DIR" => runs_dir }
+      )
+      assert_empty Dir.children(runs_dir)
+    end
   end
 
   def test_run_error_envelope_names_run_command
@@ -707,38 +783,42 @@ class E2EBinaryTest < Minitest::Test
           - kind: state_assert
             path: "{sandbox}/missing.txt"
       YAML
-        out, err, status = Open3.capture3(
-          { "HIVE_E2E_RUNS_DIR" => runs_dir }, hive_e2e, "run", failing, "--json"
-        )
-        assert_equal 1, status.exitstatus, err
-        report = JSON.parse(out)
-        assert_equal 1, report.dig("summary", "failed")
-        assert_equal "failed", report.fetch("scenarios").first.fetch("status")
+        [ nil, "1" ].product([ false, true ]).each do |debug, json|
+          out, err, status = Open3.capture3(
+            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
+            hive_e2e, "run", failing, *([ "--json" ] if json)
+          )
+          assert_equal 1, status.exitstatus, err
+          assert_empty err
+          refute_includes out, "run_failed"
+          refute_match(/hive-e2e debug:|\.rb:\d+:in /, out)
+          if json
+            report = parse_single_json_document(out)
+            assert_equal "hive-e2e-report", report.fetch("schema")
+            assert_equal "complete", report.fetch("status")
+            assert_equal 1, report.dig("summary", "failed")
+            assert_equal "failed", report.fetch("scenarios").first.fetch("status")
+          else
+            assert_equal "selected 1, executed 1, pending 0, passed 0, failed 1\n", out
+          end
+        end
       end
     end
   end
 
-  def test_replay_non_executable_repro_emits_json_artifact_error_when_requested
-    Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
-      script = File.join(tmp_runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+  def test_replay_non_executable_repro_preserves_human_and_json_errors_with_debug
+    Dir.mktmpdir("e2e-replay-test") do |runs_dir|
+      script = File.join(runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
       FileUtils.mkdir_p(File.dirname(script))
       File.write(script, "#!/usr/bin/env bash\nexit 0\n")
       File.chmod(0o644, script)
-
-      out, err, status = Open3.capture3(
-        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
-        hive_e2e, "replay", "--json", "run-1", "scenario-1"
+      assert_compatible_error(
+        [ "replay", "run-1", "scenario-1" ], kind: "unusable_repro", code: 78, command: "replay",
+        message: "Run #run-1 scenario scenario-1 repro.sh is not executable (#{script})",
+        env: { "HIVE_E2E_RUNS_DIR" => runs_dir }
       )
-
-      assert_equal 78, status.exitstatus
-      assert_empty err
-
-      payload = JSON.parse(out)
-      assert_equal "hive-e2e-error", payload["schema"]
-      assert_equal false, payload["ok"]
-      assert_equal "unusable_repro", payload["error_kind"]
-      assert_equal 78, payload["exit_code"]
-      assert_match(/not executable/, payload["message"])
+      assert_equal "#!/usr/bin/env bash\nexit 0\n", File.read(script)
+      refute File.executable?(script)
     end
   end
 
@@ -922,44 +1002,22 @@ class E2EBinaryTest < Minitest::Test
     refute_match(/invalid boolean value for --json/, err)
   end
 
-  def test_run_no_match_emits_json_error_when_requested
-    out, err, status = Open3.capture3(hive_e2e, "run", "definitely-no-scenario", "--json")
-    assert_equal 64, status.exitstatus
-    assert_empty err
-
-    payload = JSON.parse(out)
-    assert_equal "hive-e2e-error", payload["schema"]
-    assert_equal "no_scenarios", payload["error_kind"]
-    assert_equal 64, payload["exit_code"]
-    assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  def test_run_no_match_preserves_human_and_json_errors_with_debug
+    assert_compatible_error(
+      [ "run", "definitely-no-scenario" ], kind: "no_scenarios", code: 64, command: "run",
+      message: "no scenarios match definitely-no-scenario"
+    )
   end
 
-  def test_malformed_scenario_is_preflight_error_in_json_mode
+  def test_malformed_scenario_is_preflight_error_in_human_and_json_modes_with_debug
     name = "malformed_scenario_#{Process.pid}"
     with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
       [ [ "list" ], [ "run", name ] ].each do |args|
-        out, err, status = Open3.capture3(hive_e2e, *args, "--json")
-
-        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
-        assert_empty err
-        payload = JSON.parse(out)
-        assert_equal "hive-e2e-error", payload["schema"]
-        assert_equal "preflight", payload["error_kind"]
-        assert_equal 78, payload["exit_code"]
-        assert_match(/#{name}\.yml/, payload["message"])
-      end
-    end
-  end
-
-  def test_malformed_scenario_is_preflight_error_in_human_mode
-    name = "malformed_scenario_#{Process.pid}"
-    with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
-      [ [ "list" ], [ "run", name ] ].each do |args|
-        out, err, status = Open3.capture3(hive_e2e, *args)
-
-        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
-        assert_empty out
-        assert_match(/hive-e2e: .*#{name}\.yml/, err)
+        path = File.join(Hive::E2E::Paths.scenarios_dir, "#{name}.yml")
+        assert_compatible_error(
+          args, kind: "preflight", code: 78, command: args.first,
+          message: /\A#{Regexp.escape(path)}:\d+: /
+        )
       end
     end
   end
@@ -994,16 +1052,10 @@ class E2EBinaryTest < Minitest::Test
           anchor: "not present"
     YAML
       Dir.mktmpdir("missing-tmux") do |empty_path|
-        out, err, status = Open3.capture3(
-          { "PATH" => empty_path },
-          RbConfig.ruby, hive_e2e, "run", name, "--json"
+        assert_compatible_error(
+          [ "run", name ], kind: "preflight", code: 78, command: "run",
+          message: /\Atmux not found\. Install with: /, env: { "PATH" => empty_path }
         )
-
-        assert_equal 78, status.exitstatus
-        assert_empty err
-        payload = JSON.parse(out)
-        assert_equal "preflight", payload["error_kind"]
-        assert_match(/tmux not found/, payload["message"])
       end
     end
   end
@@ -1031,18 +1083,13 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/invalid byte sequence/, payload["message"])
   end
 
-  def test_clean_rejects_invalid_retention_values
-    Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
-      out, err, status = Open3.capture3(
-        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
-        hive_e2e, "clean", "--json", "--retain-days", "-1"
+  def test_clean_rejects_invalid_retention_values_with_and_without_debug
+    Dir.mktmpdir("e2e-clean-test") do |runs_dir|
+      assert_compatible_error(
+        [ "clean", "--retain-days", "-1" ], kind: "usage", code: 64, command: "clean",
+        message: "retain_days must be >= 0", env: { "HIVE_E2E_RUNS_DIR" => runs_dir }
       )
-      assert_equal 64, status.exitstatus
-      assert_empty err
-
-      payload = JSON.parse(out)
-      assert_equal "usage", payload["error_kind"]
-      assert_match(/retain_days must be >= 0/, payload["message"])
+      assert_empty Dir.children(runs_dir)
     end
   end
 

@@ -712,6 +712,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
     dispatcher.define_singleton_method(:project_enabled?) { |_| project_enabled }
+    unless recovery_coordinator
+      # These rows deliberately have no canonical task metadata. Durable
+      # failed-edit attribution is exercised with real tasks in integration.
+      dispatcher.instance_variable_get(:@recovery_coordinator)
+        .define_singleton_method(:request_failed_edit) { |**| nil }
+    end
     [
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       answer_digest_scheduler, daily_digest_close_scheduler, daily_digest_delivery_scheduler
@@ -11336,7 +11342,7 @@ end
     })
   end
 
-  def test_handle_row_resumes_complete_brainstorm_from_a_restored_baseline_once
+  def test_handle_row_does_not_replay_complete_brainstorm_from_a_restored_baseline_without_failure
     Dir.mktmpdir("restored-brainstorm-baseline") do |dir|
       path = File.join(dir, "baselines.json")
       baseline = T0 - 60
@@ -11353,10 +11359,9 @@ end
 
       dispatcher.send(:handle_row, r, now: T0)
 
-      assert_equal 1, supervisor.spawned.size,
-                   "a completed Q&A stranded behind a restored baseline must resume"
-      refute controller.restored_dispatch_baseline_for?(project: "p1", slug: "s1"),
-             "a real dispatch must consume the one-shot restart recovery"
+      assert_empty supervisor.spawned,
+                   "complete answers and a restored baseline do not prove a failed dispatch"
+      assert_equal baseline, controller.last_dispatched_state_file_mtime_for(project: "p1", slug: "s1")
     end
   end
 

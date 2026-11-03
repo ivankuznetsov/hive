@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/runtime_control_plane/command_schema_installation"
 
@@ -18,6 +19,44 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
   end
 
   NOW = Time.utc(2026, 8, 29, 12)
+
+  def test_supervised_edit_binding_terminal_cas_and_recovery_retention_round_trip
+    with_repository do |repository|
+      register_task(repository.database, task_id: "task-1")
+      id = repository.write_request!(project: "hive", slug: "sqlite-cutover",
+        argv: %w[hive run sqlite-cutover], task_id: "task-1", expected_stage: "2-fix",
+        task_generation: "a" * 64, request_id: "supervised-edit", now: NOW)
+      task_binding = { "project" => "hive", "task_id" => "task-1",
+        "intended_stage" => "2-fix", "task_locator" => "id:task-1" }
+      input = { "task_input_epoch" => 1, "progress_token" => "b" * 64 }
+      source = task_binding.merge(input).merge("request_id" => id, "attempt_id" => "supervised-#{id}",
+        "task_generation" => "a" * 64, "ownership_generation" => "a" * 64)
+      launch = { "task_binding" => task_binding, "source_binding" => source, "input_binding" => input }
+      bound = repository.bind_supervised_edit!(id, launch: launch, task_id: "task-1",
+        intended_stage: "2-fix", task_generation: "a" * 64)
+      assert_equal launch, bound.edit_resume
+      repository.claim(id, pid: Process.pid, process_start_time: "start", now: NOW)
+      request = repository.fetch(id)
+      receipt = { "receipt_version" => 2, "attempt_id" => "supervised-#{id}", "outcome" => "failed",
+        "exit_status" => 1, "ended_at" => NOW.iso8601(6), "final_checkpoint" => { "edit_resume_input_binding" => input } }
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.record_supervised_edit_terminal!(id, receipt: receipt, expected_revision: bound.revision)
+      end
+      stored = repository.record_supervised_edit_terminal!(id, receipt: receipt, expected_revision: request.revision)
+      assert_equal request.revision + 1, stored.fetch("dispatch_revision")
+      refute stored.key?("terminal_lease_version")
+      repository.remove(id)
+      record = repository.supervised_edit_records(project: "hive", slug: "sqlite-cutover", task_id: "task-1", intended_stage: "2-fix").first
+      assert_equal "failed", record.outcome
+      assert_equal stored, record.receipt
+      payload = repository.database.read { |db| JSON.parse(db[:dispatch_requests].where(request_id: id).get(:payload_json)) }
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
+      assert_empty schema.validate(payload).to_a
+      repository.prune_results(now: NOW + 7200)
+      refute_nil repository.fetch(id), "ordinary result cleanup must retain supervised failure attribution"
+      assert_empty repository.supervised_edit_records(project: "hive", slug: "sqlite-cutover", task_id: "replacement", intended_stage: "2-fix")
+    end
+  end
 
   def test_only_the_evidence_rework_subcommand_is_dispatchable
     assert Hive::RuntimeControlPlane::DispatchRepository.valid_argv?(

@@ -25,6 +25,10 @@ if (launch_gate_fd = ENV.delete("HIVE_LAUNCH_GATE_FD"))
 end
 
 require "hive"
+if ENV.key?("HIVE_SUPERVISED_STAGE_RESULT_FD")
+  require "hive/attempts/diagnostic_channel"
+  Hive::Attempts::DiagnosticChannel.install_supervised_from_env!
+end
 require "hive/runtime_control_plane/activation_gate"
 require "hive/runtime_control_plane/command_registration"
 require "hive/runtime_control_plane/operational_inspection"

@@ -3,6 +3,8 @@ require "json"
 require "shellwords"
 require "time"
 require "tmpdir"
+require "stringio"
+require "hive/attempts/diagnostic_channel"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/runtime_control_plane/command_registration"
@@ -23,7 +25,7 @@ module Hive
 
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
-                             :request_id, :dispatch_token,
+                             :request_id, :dispatch_token, :stage_result,
                              keyword_init: true)
 
       # A child that breached its wall-clock timeout. The dispatcher logs
@@ -249,10 +251,19 @@ module Hive
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
+        diagnostic_reader, diagnostic_writer = IO.pipe
+        descriptor = diagnostic_writer.fileno
+        spawner = lambda do |*child_argv, **options|
+          environment = child_argv.first.is_a?(Hash) ? child_argv.shift : {}
+          environment = environment.merge(Hive::Attempts::DiagnosticChannel::SUPERVISED_ENV => descriptor.to_s)
+          Process.spawn(environment, *child_argv, **options)
+        end
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: argv[1] || "daemon-child",
-          pgroup: true, out: log_io, err: log_io, close_others: true
+          *argv, role: argv[1] || "daemon-child", spawner: spawner,
+          pgroup: true, out: log_io, err: log_io, close_others: true,
+          descriptor => diagnostic_writer
         )
+        diagnostic_writer.close
         log_io.close
 
         @running[pid] = {
@@ -262,9 +273,15 @@ module Hive
           request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec,
           # Process.spawn(pgroup: true) creates a group led by this exact PID.
           # Persist it before any shutdown race can make getpgid unavailable.
-          pgid: pid
+          pgid: pid, stage_result_reader: diagnostic_reader
         }
         pid
+      rescue StandardError
+        diagnostic_reader&.close unless diagnostic_reader&.closed?
+        raise
+      ensure
+        diagnostic_writer&.close unless diagnostic_writer&.closed?
+        log_io&.close unless log_io&.closed?
       end
 
       # R-02: enforce per-child wall-clock timeouts. Called once per
@@ -466,8 +483,25 @@ module Hive
           command: entry[:command], state_file_path: entry[:state_file_path],
           started_at: entry[:started_at], finished_at: now,
           json_envelope: completion_envelope(entry),
-          request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
+          request_id: entry[:request_id], dispatch_token: entry[:dispatch_token],
+          stage_result: read_stage_result(entry[:stage_result_reader])
         )
+      end
+
+      def read_stage_result(reader)
+        return unless reader
+
+        # A leaked descriptor in a descendant must never block reaping. One
+        # complete bounded frame is atomic and available when its writer exits.
+        bytes = reader.read_nonblock(Hive::Attempts::DiagnosticChannel::MAX_FRAME_BYTES + 1, exception: false)
+        return unless bytes.is_a?(String)
+
+        result = Hive::Attempts::DiagnosticChannel.read(StringIO.new(bytes))
+        result.document if result.document&.fetch("schema", nil) == "hive-stage-result"
+      rescue IOError, SystemCallError
+        nil
+      ensure
+        reader&.close unless reader&.closed?
       end
 
       def parse_command(command_string)

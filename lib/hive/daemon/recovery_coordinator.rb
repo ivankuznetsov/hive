@@ -41,19 +41,20 @@ module Hive
         :provider_hint, :terminal_outcome, :terminal_at,
         :failure_fingerprint, :identical_failure_count, :escalation_tier,
         :variant, :task_binding, :source_binding, :input_binding,
-        :source_receipt_version, :source_terminal_lease_version
+        :source_receipt_version, :source_terminal_lease_version, :source_dispatch_revision
       ) do
         def initialize(terminal_outcome: nil, terminal_at: nil,
                        failure_fingerprint: nil, identical_failure_count: nil,
                        escalation_tier: nil, variant: nil, task_binding: nil, source_binding: nil,
-                       input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil, **rest)
+                       input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil, source_dispatch_revision: nil, **rest)
           super(
             terminal_outcome: terminal_outcome, terminal_at: terminal_at,
             failure_fingerprint: failure_fingerprint,
             identical_failure_count: identical_failure_count,
             escalation_tier: escalation_tier, variant: variant, task_binding: task_binding,
             source_binding: source_binding, input_binding: input_binding,
-            source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version, **rest
+            source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version,
+            source_dispatch_revision: source_dispatch_revision, **rest
           )
         end
 
@@ -1151,6 +1152,7 @@ module Hive
           source_binding: recovery["source_binding"], input_binding: recovery["input_binding"],
           source_receipt_version: recovery["source_receipt_version"],
           source_terminal_lease_version: recovery["source_terminal_lease_version"],
+          source_dispatch_revision: recovery["source_dispatch_revision"],
           escalation_tier: escalation_tier_for(recovery)
         )
       end
@@ -1435,7 +1437,8 @@ module Hive
                   provider_hint: nil, terminal_outcome: nil, terminal_at: nil,
                   failure_fingerprint: nil, identical_failure_count: nil,
                   escalation_tier: nil, variant: nil, task_binding: nil, source_binding: nil,
-                  input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil)
+                  input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil,
+                  source_dispatch_revision: nil)
         raise ArgumentError, "unknown recovery lifecycle #{status}" unless LIFECYCLE_STATES.include?(status)
 
         Receipt.new(
@@ -1448,7 +1451,8 @@ module Hive
           identical_failure_count: identical_failure_count,
           escalation_tier: escalation_tier, variant: variant, task_binding: task_binding,
           source_binding: source_binding, input_binding: input_binding,
-          source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version
+          source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version,
+          source_dispatch_revision: source_dispatch_revision
         )
       end
 

@@ -55,7 +55,7 @@ module Hive
                    interactive: false, generation: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
                    admission_view: nil, routing_policy: nil, retry_release: false,
-                   replay_semantic_terminal: false)
+                   replay_semantic_terminal: false, edit_resume_source_binding: nil, edit_resume: false)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
@@ -69,7 +69,8 @@ module Hive
           recovery_source_attempt_id: nil, now: now, admission_view: admission_view,
           routing_policy: policy, retry_release: retry_release,
           replay_semantic_terminal: replay_semantic_terminal,
-          failed_route_id: nil
+          failed_route_id: nil, edit_resume_source_binding: edit_resume_source_binding,
+          edit_resume: edit_resume
         )
         result
       end
@@ -137,6 +138,13 @@ module Hive
           progress_token: command_progress_token(request.argv, task),
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
         )
+        if request.respond_to?(:recovery) && request.recovery&.fetch("variant", nil) == "failed_edit"
+          require "hive/attempts/failed_edit"
+          unless request.recovery["task_binding"] == FailedEdit.task_binding(generation) &&
+                 request.recovery["input_binding"] == FailedEdit.input_binding(generation)
+            raise StaleTaskSource, "failed-edit input changed before attempt admission"
+          end
+        end
         source_attempt = recovery_source_attempt(request)
         return dispatch_recovery(
           source_attempt: source_attempt, task: task, project: request.project, argv: request.argv,
@@ -154,7 +162,12 @@ module Hive
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
           retry_release: explicit_retry_release?(request),
-          replay_semantic_terminal: replay_semantic_terminal
+          replay_semantic_terminal: replay_semantic_terminal,
+          edit_resume_source_binding: request.respond_to?(:recovery) &&
+            request.recovery&.fetch("variant", nil) == "failed_edit" ?
+              request.recovery["source_binding"] : nil,
+          edit_resume: (request.respond_to?(:edit_resume) && request.edit_resume&.fetch("intent", false)) ||
+            (request.respond_to?(:recovery) && request.recovery&.fetch("variant", nil) == "failed_edit")
         )
       end
 
@@ -184,7 +197,8 @@ module Hive
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
-                replay_semantic_terminal: false, failed_route_id: nil)
+                replay_semantic_terminal: false, failed_route_id: nil,
+                edit_resume_source_binding: nil, edit_resume: false)
         created = nil
         claim_capability = nil
         route_decision = nil
@@ -290,7 +304,8 @@ module Hive
           inherited_outputs: inherited_outputs,
           subject: subject,
           now: now,
-          admission: patrol_admission_metadata(task: task)
+          admission: patrol_admission_metadata(task: task),
+          edit_resume_source_binding: edit_resume_source_binding, edit_resume: edit_resume
         }
 
         if routing_policy.explicit?
@@ -693,7 +708,7 @@ module Hive
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:,
-                                    route_decision: nil)
+                                    route_decision: nil, edit_resume_source_binding: nil, edit_resume: false)
         @store.create_launching(
           attempt_id: attempt_id,
           request_id: request_id,
@@ -716,6 +731,7 @@ module Hive
           inherited_outputs: inherited_outputs || [],
           subject: subject,
           source_fingerprint: generation.progress_token,
+          edit_resume_source_binding: edit_resume_source_binding, edit_resume: edit_resume,
           admission: admission,
           limits: @limits,
           launch_timeout_sec: @launch_timeout_sec,

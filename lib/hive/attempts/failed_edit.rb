@@ -7,6 +7,23 @@ module Hive
     # Task-local terminal evidence. Neither a baseline nor a valid WAITING
     # document proves that a stage accepted an agent result.
     module FailedEdit
+      # Supervised commands use the existing dispatch request/result rows as
+      # custody. Their owner records launch identity before spawn and terminal
+      # outcome after wait; an abandoned claim has no terminal failure evidence.
+      SupervisedRecord = Data.define(:launch, :receipt, :state) do
+        def [](key) = launch["source_binding"][key] || (key == "provider" ? "unknown" : nil)
+        def attempt_id = self["attempt_id"]
+        def task_generation = self["task_generation"]
+        def ownership_generation = self["ownership_generation"]
+        def task_input_epoch = self["task_input_epoch"]
+        def checkpoint
+          { "edit_resume_task_binding" => launch["task_binding"],
+            "edit_resume_input_binding" => launch["input_binding"] }
+        end
+        def outcome = receipt && receipt["outcome"]
+        def live? = state != "terminal"
+      end
+
       module_function
 
       def task_binding(generation)
@@ -51,9 +68,12 @@ module Hive
         receipt = record.receipt
         return false unless [Record::LEGACY_RECEIPT_VERSION, Record::RECEIPT_VERSION].include?(receipt["receipt_version"])
         return false if receipt["receipt_version"] < evidence.fetch("source_receipt_version")
-        version = receipt["terminal_lease_version"]
-        return false if version < evidence.fetch("source_terminal_lease_version")
-        return false if accepted?(record) && version >= evidence.fetch("source_terminal_lease_version")
+        version_key = record.is_a?(SupervisedRecord) ? "dispatch_revision" : "terminal_lease_version"
+        source_version_key = record.is_a?(SupervisedRecord) ? "source_dispatch_revision" : "source_terminal_lease_version"
+        version = receipt[version_key]
+        expected = evidence[source_version_key]
+        return false unless version.is_a?(Integer) && expected.is_a?(Integer) && version >= expected
+        return false if accepted?(record)
 
         record.outcome == "failed" && receipt["exit_status"].to_i != 0 &&
           receipt.dig("final_checkpoint", "stage_result", "handled") != true
@@ -68,20 +88,39 @@ module Hive
         return nil if bound.any?(&:live?)
         candidates = bound.filter_map do |record|
           next unless record.state == "terminal" && record.outcome == "failed"
-          next unless record.task_generation == generation.task_generation &&
+          launch_bound = record.checkpoint["edit_resume_task_binding"] == binding &&
+            record.checkpoint["edit_resume_input_binding"] == {
+              "task_input_epoch" => record.task_input_epoch, "progress_token" => record["progress_token"]
+            }
+          unchanged_input = record.task_generation == generation.task_generation &&
             record.ownership_generation == generation.ownership_generation &&
             record.task_input_epoch == generation.task_input_epoch &&
             record["progress_token"] == generation.progress_token
+          next unless launch_bound || unchanged_input
           receipt = record.receipt
           evidence = {
             "task_binding" => binding, "source_binding" => source_binding(record),
             "input_binding" => input_binding(generation),
             "source_receipt_version" => receipt.fetch("receipt_version"),
-            "source_terminal_lease_version" => receipt.fetch("terminal_lease_version"),
             "failed_at" => receipt.fetch("ended_at"),
             "reason" => "edit_resume_dispatch_failed", "provider" => record["provider"],
             "status_code" => receipt["exit_status"].to_s
           }
+          if record.is_a?(SupervisedRecord)
+            evidence["source_dispatch_revision"] = receipt.fetch("dispatch_revision")
+          else
+            evidence["source_terminal_lease_version"] = receipt.fetch("terminal_lease_version")
+          end
+          provider_failure = receipt["failure"] || receipt["provider_evidence"]
+          if provider_failure.is_a?(Hash)
+            if %w[account_quota exhausted_credits].include?(provider_failure["failure_class"])
+              evidence["reason"] = "limits_reached"
+            end
+            %w[reason provider status_code message].each do |key|
+              value = provider_failure[key]
+              evidence[key] = value.to_s[0, 512] unless value.nil? || value.to_s.empty?
+            end
+          end
           next unless valid_source?(record, evidence)
           next if bound.any? do |other|
             other.state == "terminal" && other.attempt_id != record.attempt_id &&
@@ -91,8 +130,7 @@ module Hive
           # independent attempts have no ordering relationship.
           next if bound.any? do |other|
             accepted?(other) && (other.attempt_id == record.attempt_id ||
-              other.receipt.dig("final_checkpoint", "edit_resume_source_binding") == evidence["source_binding"] ||
-              (other["progress_token"] == record["progress_token"] && other.task_generation == record.task_generation))
+              other.receipt.dig("final_checkpoint", "edit_resume_source_binding") == evidence["source_binding"])
           end
           evidence
         end

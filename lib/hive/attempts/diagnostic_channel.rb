@@ -9,6 +9,7 @@ module Hive
     module DiagnosticChannel
       module_function
 
+      SUPERVISED_ENV = "HIVE_SUPERVISED_STAGE_RESULT_FD".freeze
       MAX_FRAME_BYTES = 3_584
       STATUSES = Hive::PatrolFix::AttemptDiagnostic::TRANSPORT_STATUSES
       ReadResult = Data.define(:document, :status)
@@ -52,6 +53,25 @@ module Hive
         rescue IOError
           false
         end
+      end
+
+      # Install before command/provider work so the one-shot pipe cannot be
+      # inherited by an agent process. It carries stage acceptance only; task
+      # and launch identity remain with the supervising dispatch owner.
+      def install_supervised_from_env!(environment = ENV)
+        value = environment.delete(SUPERVISED_ENV)
+        @supervised_writer = Writer.for_fd(value) if value
+      end
+
+      def publish_supervised_stage_result(accepted:, output_digest:)
+        return false unless @supervised_writer
+
+        writer = @supervised_writer
+        @supervised_writer = nil
+        writer.write("schema" => "hive-stage-result", "handled" => true,
+          "accepted" => accepted, "output_digest" => output_digest)
+      rescue IOError, SystemCallError
+        false
       end
 
       def validate_document!(document)

@@ -129,10 +129,10 @@ module Hive
       end
 
       def publish_result(task, accepted:)
-        Hive::Attempts::Context.current&.publish_stage_result(
-          accepted: accepted,
-          output_digest: Digest::SHA256.hexdigest(artifact_snapshot(task.state_file).to_s)
-        )
+        publisher = Hive::Attempts::Context.current || Hive::Attempts::DiagnosticChannel
+        method = Hive::Attempts::Context.current ? :publish_stage_result : :publish_supervised_stage_result
+        publisher.public_send(method, accepted: accepted,
+          output_digest: Digest::SHA256.hexdigest(artifact_snapshot(task.state_file).to_s))
       end
 
       # A Brainstorm success is a durable artifact, not merely a process exit

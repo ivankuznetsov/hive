@@ -94,6 +94,46 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_failed_edit_accepted_source_version_and_proven_successor_beat_failure_without_time_ordering
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [failed])
+      accepted = failed.with("outcome" => "succeeded", "lease_version" => failed.lease_version + 1,
+        "created_at" => (NOW - 100).iso8601(6),
+        "receipt" => failed.receipt.merge("outcome" => "succeeded", "exit_status" => 0,
+          "terminal_lease_version" => failed.lease_version + 1))
+      refute Hive::Attempts::FailedEdit.valid_source?(accepted, evidence)
+      assert_equal failed.receipt["receipt_version"], accepted.receipt["receipt_version"]
+
+      independent = accepted.with("attempt_id" => "independent", "request_id" => "other",
+        "receipt" => accepted.receipt.merge("attempt_id" => "independent"))
+      assert_equal evidence, Hive::Attempts::FailedEdit.observe(task: task, generation: generation,
+        records: [failed, independent]), "same input alone does not prove successor ancestry"
+      successor = independent.with("receipt" => independent.receipt.merge(
+        "final_checkpoint" => independent.checkpoint.merge("edit_resume_source_binding" => evidence["source_binding"])))
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [failed, successor])
+    end
+  end
+
+  def test_failed_edit_launch_intent_allows_new_input_but_legacy_evidence_does_not
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatcher.dispatch(task: task, project: "demo", intended_stage: "4-execute",
+        argv: ["hive", "run", task.slug], request_id: "edit-intent", provider: "codex", edit_resume: true)
+      assert_equal result.attempt.checkpoint, launcher.launched.first.first.checkpoint,
+        "launch input and edit intent are durable before child handoff"
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      File.write(task.state_file, "latest operator answers\n<!-- WAITING -->\n")
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [failed])
+      assert_equal generation.progress_token, evidence.dig("input_binding", "progress_token")
+      assert_equal failed["progress_token"], evidence.dig("source_binding", "progress_token")
+      legacy = failed.with("checkpoint" => failed.checkpoint.except("edit_resume_task_binding"))
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [legacy])
+    end
+  end
+
   def test_same_and_different_request_ids_share_one_live_generation
     with_dispatcher do |dispatcher, launcher, task|
       first = dispatch(dispatcher, task, request_id: "request-one", interactive: true)
@@ -1599,10 +1639,7 @@ class AttemptsDispatcherTest < Minitest::Test
       running,
       outcome: outcome,
       exit_status: exit_status,
-      final_checkpoint: {
-        "revision" => "b" * 40,
-        "progress_token" => result.attempt["progress_token"]
-      },
+      final_checkpoint: result.attempt.checkpoint.merge("revision" => "b" * 40),
       output_references: output_references,
       log_reference: log_reference,
       now: now

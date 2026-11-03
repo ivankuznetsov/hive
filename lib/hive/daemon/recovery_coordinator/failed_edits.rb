@@ -30,8 +30,8 @@ module Hive
             return receipt("blocked", owner: "operator", reason: "stale_observation",
               remediation: "refresh status and use the current workflow.retry action")
           end
-          records = attempts_store.task_stage_records(task_id: locked.id, intended_stage: value(row, :stage))
-          if records.any?(&:live?)
+          records = failed_edit_records(locked, value(row, :stage), project: value(row, :project))
+          if failed_edit_live_owner?(locked, records)
             return receipt("running", owner: "agent", reason: "existing_live")
           end
           if existing && %w[admitted cleared].include?(existing.recovery["phase"])
@@ -96,14 +96,29 @@ module Hive
         recovery = request.recovery
         marker = Hive::Markers.current(task.state_file)
         return false unless marker.name == :waiting || marker.none?
-        records ||= attempts_store.task_stage_records(task_id: task.id, intended_stage: request.expected_stage)
-        return false if records.any?(&:live?)
-        source = attempts_store.fetch(recovery.dig("source_binding", "attempt_id"))
+        records ||= failed_edit_records(task, request.expected_stage, project: request.project)
+        return false if failed_edit_live_owner?(task, records)
+        source = records.find { |record| record.attempt_id == recovery.dig("source_binding", "attempt_id") }
+        source ||= attempts_store.fetch(recovery.dig("source_binding", "attempt_id"))
         return false unless source && Hive::Attempts::FailedEdit.valid_source?(source, recovery)
         !records.any? do |record|
           Hive::Attempts::FailedEdit.accepted?(record) &&
             record.receipt.dig("final_checkpoint", "edit_resume_source_binding") == recovery["source_binding"]
         end
+      end
+
+      def failed_edit_records(task, stage, project:)
+        records = attempts_store.task_stage_records(task_id: task.id, intended_stage: stage)
+        if request_queue.respond_to?(:supervised_edit_records)
+          records += request_queue.supervised_edit_records(project: project, slug: task.slug,
+            task_id: task.id, intended_stage: stage)
+        end
+        records
+      end
+
+      def failed_edit_live_owner?(task, records)
+        records.any?(&:live?) || (attempts_store.respond_to?(:live_attempt_for) &&
+          attempts_store.live_attempt_for(task_id: task.id)&.live?)
       end
 
       def rebind_failed_edit(request, generation, now:)

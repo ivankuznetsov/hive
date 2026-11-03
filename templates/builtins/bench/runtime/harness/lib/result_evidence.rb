@@ -18,6 +18,8 @@ module HiveBench
     def digest?(value) = value.is_a?(String) && value.match?(/\A[0-9a-f]{64}\z/)
 
     def bound_generation?(record)
+      return false if record["provenance_conflict"] || record["artifact_verification_error"]
+
       binding = record["artifact_binding"]
       !record["generation_id"].to_s.empty? && RECORD_KINDS.include?(record["record_kind"]) &&
         binding.is_a?(Hash) && binding["task_id"] == record["task_id"] &&
@@ -61,6 +63,8 @@ module HiveBench
 
     def rejudging_reasons(record)
       reasons = []
+      reasons << "generation provenance conflict" if record["provenance_conflict"]
+      reasons << record["artifact_verification_error"] if record["artifact_verification_error"]
       reasons << "execution status is not eligible: #{record['run_status'] || 'unknown'}" unless execution_eligible?(record)
       reasons << "select current artifacts and establish generation identity before rejudging" unless bound_generation?(record)
       reasons << "evaluation context is missing or invalid" unless valid_context?(record["evaluation_context"])
@@ -84,10 +88,30 @@ module HiveBench
 
     def snapshot_digest(record) = Digest::SHA256.hexdigest(JSON.generate(canonical(record)))
 
+    def history_entry(record, reason)
+      record.slice("agent_id", "task_id", "generation_id", "record_kind").merge(
+        "snapshot_sha256" => snapshot_digest(record), "record" => record, "reasons" => [reason]
+      )
+    end
+
+    def deduplicate_history(entries)
+      entries.group_by do |entry|
+        record = entry.fetch("record")
+        [record["agent_id"], record["task_id"], record["generation_id"], record["record_kind"], snapshot_digest(record)]
+      end.values.map do |group|
+        group.first.merge("reasons" => group.flat_map { |entry| Array(entry["reasons"]) }.uniq.sort)
+      end
+    end
+
     def deduplicate_buckets(records)
-      records.group_by { |r| [r["agent_id"], r["task_id"], r["generation_id"]] }.values.map do |group|
+      records.group_by do |r|
+        identity = r["generation_id"].to_s.empty? ? snapshot_digest(r) : r["generation_id"]
+        [r["agent_id"], r["task_id"], identity]
+      end.values.map do |group|
         group.reduce do |prev, cur|
-          prev.merge(cur).merge("efficiency" => (prev["efficiency"] || {}).merge(cur["efficiency"] || {}))
+          prev.merge(cur.reject { |_, value| value.nil? }).merge(
+            "efficiency" => (prev["efficiency"] || {}).merge((cur["efficiency"] || {}).compact)
+          )
         end
       end
     end

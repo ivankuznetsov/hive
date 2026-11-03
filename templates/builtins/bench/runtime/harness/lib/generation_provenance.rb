@@ -32,12 +32,14 @@ module HiveBench
       FileUtils.rm_f(next_path) if next_path
     end
 
-    def start!(out_dir:, entry:, agent_id:)
+    def start!(out_dir:, entry:, agent_id:, clear_artifacts: true)
       manifest = { "schema" => "hive-bench-generation-attempt", "schema_version" => 1,
                    "generation_id" => SecureRandom.uuid, "task_id" => entry.fetch("task_id"),
                    "agent_id" => agent_id, "base_commit" => entry.dig("source", "base_commit"),
                    "state" => "started", "started_at" => Time.now.utc.iso8601 }
       persist(out_dir, manifest)
+      return manifest unless clear_artifacts
+
       %w[candidate.patch generation-plan.md target/candidate.patch].each { |rel| FileUtils.rm_f(File.join(out_dir, rel)) }
       manifest
     end

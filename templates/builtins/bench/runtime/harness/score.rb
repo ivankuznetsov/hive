@@ -52,7 +52,12 @@ module HiveBench
     def results(records:, corpus_version:, generated_at:, min_cells: PRELIMINARY_MIN_CELLS, pending: [], failed: [])
       pending = ResultEvidence.deduplicate_buckets(pending)
       failed = ResultEvidence.deduplicate_buckets(failed)
-      attempts = ResultEvidence.deduplicate_buckets(pending + failed + records)
+      # Adoption explicitly identifies the original legacy snapshot. This avoids
+      # charging its overlapping parked entry again without inferring continuity
+      # from a cell key or equal patch bytes.
+      adopted = records.filter_map { |record| record["adopted_attempt_snapshot_sha256"] }
+      parked = (pending + failed).reject { |record| adopted.include?(ResultEvidence.snapshot_digest(record)) }
+      attempts = ResultEvidence.deduplicate_buckets(parked + records)
       agents = attempts.group_by { |r| r["agent_id"] }.to_h do |agent, tried|
         active = records.select { |r| r["agent_id"] == agent }
         [agent, agent_summary(active, tried, min_cells)]

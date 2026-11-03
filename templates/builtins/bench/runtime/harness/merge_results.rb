@@ -4,48 +4,87 @@
 $LOAD_PATH.unshift(__dir__) unless $LOAD_PATH.include?(__dir__)
 
 require "json"
+require "time"
 require "score"
 
 module HiveBench
-  # Combines several per-agent results.json files (each from a separate `run_all`
-  # pass) into ONE leaderboard results.json: unions their cells, re-aggregates the
-  # per-agent summaries, and unions pending/failed. This lets agents run in
-  # separate passes — the expensive fresh glm/claude passes, the cheap reused 4.7
-  # pass — without re-running everything to get a single artifact.
-  #
-  # Cells are merged by (agent_id, task_id): when the SAME cell appears in more
-  # than one file — e.g. the inline run scored it with opus and a later rejudge
-  # backfilled gpt-5.5-pro — their `judges` maps are unioned into one dual-judged
-  # cell, and the richer `efficiency`/`gate` is kept (a judge-only rejudge carries
-  # no generation telemetry, so it must not clobber the run's cost/wall-clock).
+  # Generation snapshots are explicit oldest-to-newest input. Judge-only overlays
+  # are resolved afterwards and can never choose or roll back the active attempt.
   module Merge
     module_function
 
     def combine(results_list, corpus_version:, generated_at:, scorer: Score.new)
-      cells = merge_cells(results_list.flat_map { |r| r["cells"] || [] })
-      out = scorer.results(records: cells, corpus_version: corpus_version, generated_at: generated_at)
-      out["pending"] = results_list.flat_map { |r| r["pending"] || [] }
-      out["failed"] = results_list.flat_map { |r| r["failed"] || [] }
+      history = results_list.flat_map { |r| r["generation_history"] || [] }
+      cells = merge_cells(results_list.flat_map { |r| r["cells"] || [] }, history: history)
+      pending = ResultEvidence.deduplicate_buckets(results_list.flat_map { |r| r["pending"] || [] })
+      failed = ResultEvidence.deduplicate_buckets(results_list.flat_map { |r| r["failed"] || [] })
+      out = scorer.results(records: cells, corpus_version: corpus_version, generated_at: generated_at,
+                           pending: pending, failed: failed)
+      out["generation_history"] = ResultEvidence.deduplicate_history(history)
       out
     end
 
-    def merge_cells(cells)
-      cells.group_by { |c| [c["agent_id"], c["task_id"]] }
-           .map { |_, group| group.reduce { |acc, c| merge_pair(acc, c) } }
+    def merge_cells(cells, history: [])
+      cells.group_by { |c| [c["agent_id"], c["task_id"]] }.filter_map do |_, group|
+        snapshots, overlays = group.partition { |record| record["record_kind"] != "judge_only" }
+        # A rejudge document is also usable alone. It carries the full unchanged
+        # generation snapshot; ambiguous overlay-only generations stay diagnostic.
+        if snapshots.empty?
+          first = overlays.first
+          if overlays.all? { |record| ResultEvidence.same_generation?(first, record) }
+            snapshots = [first]
+            overlays = overlays.drop(1)
+          else
+            overlays.each { |record| history << ResultEvidence.history_entry(record, "no unambiguous active generation snapshot") }
+            next
+          end
+        end
+        active = snapshots.reduce do |previous, current|
+          if ResultEvidence.same_generation?(previous, current) && previous["evaluation_context"] == current["evaluation_context"]
+            merge_pair(previous, current)
+          else
+            history << ResultEvidence.history_entry(previous, "replaced by explicitly later generation snapshot")
+            if conflicting_identity?(previous, current)
+              history << ResultEvidence.history_entry(current, "generation identity has inconsistent artifact bindings")
+              current.merge("provenance_conflict" => true)
+            else
+              current
+            end
+          end
+        end
+        overlays.each do |overlay|
+          if ResultEvidence.same_generation?(active, overlay) && active["evaluation_context"] == overlay["evaluation_context"]
+            active = merge_pair(active, overlay)
+          else
+            history << ResultEvidence.history_entry(overlay, "stale or incompatible judge-only evidence")
+          end
+        end
+        if !active["generation_id"].to_s.empty? && group.any? { |record| conflicting_identity?(active, record) }
+          active = active.merge("provenance_conflict" => true)
+        end
+        active
+      end
     end
 
-    # b's scalar fields win, but judges are unioned and efficiency/gate keep the
-    # non-empty side so a judge-only backfill never erases generation telemetry.
-    def merge_pair(prev, cur)
-      prev.merge(cur).merge(
-        "judges" => (prev["judges"] || {}).merge(cur["judges"] || {}),
-        "efficiency" => richer(prev["efficiency"], cur["efficiency"]),
-        "gate" => richer(prev["gate"], cur["gate"])
-      )
+    def conflicting_identity?(left, right)
+      !left["generation_id"].to_s.empty? && left["generation_id"] == right["generation_id"] &&
+        left["artifact_binding"] != right["artifact_binding"]
     end
 
-    def richer(old, new)
-      new.nil? || new.empty? ? (old || {}) : new
+    def merge_pair(previous, current)
+      return current unless ResultEvidence.same_generation?(previous, current) &&
+                            previous["evaluation_context"] == current["evaluation_context"]
+
+      fresh = (current["judges"] || {}).select do |_, judge|
+        ResultEvidence.valid_judge?(judge) && ResultEvidence.evaluation_bound?(current, judge)
+      end
+      # Evidence overlays have no authority over generation telemetry/subset/gate.
+      result = previous.merge("judges" => (previous["judges"] || {}).merge(fresh))
+      if !ResultEvidence.evaluation_bound?(previous, previous["gate"]) &&
+         ResultEvidence.evaluation_bound?(current, current["gate"])
+        result = result.merge("gate" => current["gate"], "subset" => current["subset"])
+      end
+      result
     end
   end
 end
@@ -57,6 +96,7 @@ if $PROGRAM_NAME == __FILE__
   opts = { out: "runs/results.json", corpus_version: "v1" }
   OptionParser.new do |o|
     o.banner = "Usage: ruby harness/merge_results.rb [--out PATH] [--corpus-version V] <results.json>..."
+    o.separator "Generation snapshots: oldest to newest; last snapshot replaces the active cell. Judge-only overlays never select generations."
     o.on("--out PATH", "combined output (default: runs/results.json)") { |v| opts[:out] = v }
     o.on("--corpus-version V", "default: v1") { |v| opts[:corpus_version] = v }
   end.parse!(ARGV)

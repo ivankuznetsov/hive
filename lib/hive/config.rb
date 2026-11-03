@@ -2358,6 +2358,8 @@ module Hive
       end
       validate_plan_review_level!(review.dig("coding", "minimum_level"),
                                   "plan_review.coding.minimum_level", source_path)
+      # YAML 1.1 parses a bare `off` as false; accept it as the "off" level.
+      review["adversarial_min_level"] = "off" if review["adversarial_min_level"] == false
       unless %w[standard mandatory off].include?(review["adversarial_min_level"])
         raise ConfigError,
               "plan_review.adversarial_min_level in #{describe_source(source_path)} must be " \

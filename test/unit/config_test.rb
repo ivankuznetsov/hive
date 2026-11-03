@@ -1000,6 +1000,19 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_accepts_unquoted_off_for_adversarial_min_level
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan_review:
+          adversarial_min_level: off
+      YAML
+
+      assert_equal "off", Hive::Config.load(dir).dig("plan_review", "adversarial_min_level"),
+                   "YAML 1.1 parses bare off as false; it must still mean the off level"
+    end
+  end
+
   def test_load_allows_daemon_auto_retry_enabled_override
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

@@ -1393,8 +1393,10 @@ helper in deterministic subprocess fixtures. Only the fixed filesystem roots
 checks all copied scripts before subprocesses and before privilege-fixture
 chown/chmod. No cleanup, PATH, branch, or exit logic is replaced. Stub Hive
 stage actions create valid plan/worktree/capture artifacts and call recording
-agent executables under a 20-second caller timeout. Pi uses the copied
-packaged launcher, preserving its extension and caller arguments.
+agent executables under a 20-second caller timeout. Fixtures use `/tmp`
+explicitly so an inherited `TMPDIR` containing a fixed root cannot reintroduce
+it during adaptation. Pi uses the copied packaged launcher, preserving its
+extension and caller arguments.
 
 Run the focused acceptance files with:
 
@@ -1414,6 +1416,20 @@ Direct removal-status handling and the absence of an entry re-probe also have
 a supplementary source assertion. That assertion supplements executable
 denial evidence. Shell syntax and ShellCheck 0.11.0 passed using the unchanged
 install-smoke lint configuration. Ruby style checking passed for the new test.
+
+The review fix pass adds a PATH-resolved Codex wrapper planted during plan,
+with review both enabled and disabled, and separately plants a wrapper during
+develop to verify review-entry cleanup. Both execute and review boundaries
+reject replanted bin symlinks and managed-name directories with exit 4. Each
+reuse iteration replants all managed names before invocation. The source
+assertion checks direct removal-status handling without pinning the loop's
+formatting, and still rejects an absence re-probe.
+
+Review-pass validation on 2026-11-03 passed both focused files: 64 tests,
+3,066 assertions, no failures, errors, or skips, with inherited `TMPDIR`
+containing `/work`. Ruby style and shell syntax checks passed. ShellCheck
+was unavailable in that environment; the earlier lint result above remains
+historical.
 
 The new file remains in `HIVE_DEFAULT_TEST_FILES` and exactly one coverage
 shard; its measured 14.2161-second sample is in

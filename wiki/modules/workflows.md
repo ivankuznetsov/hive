@@ -207,8 +207,9 @@ For non-sealed runs, that caller checks creation of `/work/.hb/bin` and
 `/work/.hb`, then requires the bin to be a directory and not a symlink. It
 prunes exactly `codex`, `pi`, and `grok` before prepending the bin to PATH,
 agent preflight, or fresh/resumed stage routing. It repeats the directory
-validation and cleanup on entry to review, before the existing `gh` write and
-review launch, to remove entries planted by earlier stages. Directory setup
+validation and cleanup immediately before `hive develop`, and on entry to
+review before the existing `gh` write and review launch, to remove entries
+planted by earlier stages. Directory setup
 or validation failure emits `HB_ERROR controller_bin_setup_failed`; a failed
 absolute `/usr/bin/rm -f --` emits
 `HB_ERROR legacy_agent_shim_cleanup_failed path=<managed-path>`. Both stop the

@@ -440,6 +440,9 @@ fi
 if [ "$RESUME_REVIEW" = "1" ] || [ "$EXECUTE_RESIDUE_RECOVERED" -eq 1 ]; then
   stage develop 0
 elif [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
+  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" != "1" ]; then
+    cleanup_legacy_agent_shims || exit 4
+  fi
   hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
   stage develop $?
 fi

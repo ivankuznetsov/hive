@@ -11,7 +11,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
   # Only filesystem roots are adapted. The caller's branches, PATH handling,
   # cleanup and exit propagation all execute unchanged.
   def with_caller
-    Dir.mktmpdir("hive-bench-agent-shims") do |root|
+    Dir.mktmpdir("hive-bench-agent-shims", "/tmp") do |root|
       paths = FIXED_ROOTS.zip(%w[target runtime user ce execute-resume.sh].map { |name| File.join(root, name) }).to_h
       fixture = { root: root, work: paths.fetch("/work"), bin: File.join(paths.fetch("/work"), ".hb/bin") }
       fixture[:script] = File.join(root, "stages.sh")
@@ -152,8 +152,8 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
   def test_wrappers_and_dangling_symlinks_are_removed_for_each_agent_and_reused_work_directory
     MANAGED_NAMES.product([ :regular, :dangling ]).each do |agent, kind|
       with_caller do |fixture|
-        MANAGED_NAMES.each { |name| plant(fixture, name, kind) }
         2.times do |iteration|
+          MANAGED_NAMES.each { |name| plant(fixture, name, kind) }
           out, err, status = run_caller(fixture, SHIM_AGENT: agent)
           expected_stages = %w[plan develop review] * (iteration + 1)
           assert_success(fixture, out, err, status, stages: expected_stages, agents: [ agent ] * expected_stages.size)
@@ -231,24 +231,38 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     end
   end
 
+  def test_replanted_wrapper_is_removed_before_execute
+    %w[0 1].each do |review|
+      with_caller do |fixture|
+        out, err, status = run_caller(fixture, SHIM_AGENT: "codex", SHIM_REPLANT: "wrapper", HB_REVIEW: review)
+        stages = review == "1" ? %w[plan develop review] : %w[plan develop]
+        assert_success(fixture, out, err, status, stages: stages, agents: [ "codex" ] * stages.size)
+        assert_path_exists File.join(fixture[:root], "replanted")
+      end
+    end
+  end
+
   def test_replanted_wrapper_is_removed_before_review
     with_caller do |fixture|
-      out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_REVIEW_AGENT: "codex", SHIM_REPLANT: "wrapper")
+      out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_REVIEW_AGENT: "codex",
+                                           SHIM_REPLANT: "wrapper", SHIM_REPLANT_STAGE: "develop")
       assert_success(fixture, out, err, status, stages: %w[plan develop review], agents: %w[pi pi codex])
       assert_path_exists File.join(fixture[:root], "replanted")
     end
   end
 
-  def test_review_revalidates_bin_and_removal_failures
-    %w[symlink directory].each do |kind|
+  def test_execute_and_review_revalidate_bin_and_removal_failures
+    %w[plan develop].product(%w[symlink directory]).each do |replant_stage, kind|
       with_caller do |fixture|
-        out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_REPLANT: kind)
+        out, err, status = run_caller(fixture, SHIM_AGENT: "pi", SHIM_REPLANT: kind, SHIM_REPLANT_STAGE: replant_stage)
         assert_equal 4, status.exitstatus, out + err
         diagnostic = kind == "symlink" ? "controller_bin_setup_failed" : "legacy_agent_shim_cleanup_failed"
         assert_includes err, "HB_ERROR #{diagnostic}"
-        assert_equal %w[plan develop], calls(fixture).map { |call| call.fetch("argv").last(3).first }
+        stages = replant_stage == "plan" ? %w[plan] : %w[plan develop]
+        assert_equal stages, calls(fixture).map { |call| call.fetch("argv").last(3).first }
         assert_preserved(fixture)
         assert_path_exists File.join(fixture[:bin], "codex")
+        refute_includes out, "HB_STAGE develop" if replant_stage == "plan"
         refute_includes out, "HB_STAGE review"
       end
     end
@@ -374,7 +388,7 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
     script = File.read(File.join(RUNTIME, "hive_stages.sh"))
     cleanup = script[/^cleanup_legacy_agent_shims\(\) \{.*?^\}/m]
     refute_nil cleanup
-    assert_match(/for name in codex pi grok; do\s+if ! \/usr\/bin\/rm -f -- "\$CONTROLLER_BIN\/\$name"; then\s+echo "HB_ERROR legacy_agent_shim_cleanup_failed path=\$CONTROLLER_BIN\/\$name" >&2\s+return 1\s+fi\s+done/m, cleanup)
+    assert_match(/if ! \/usr\/bin\/rm -f -- "\$CONTROLLER_BIN\/\$name"; then/, cleanup)
     refute_match(/(?:\[|test\b).*\$CONTROLLER_BIN\/\$name/, cleanup)
   end
 
@@ -412,22 +426,6 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
       path = File.join(work, ".hive-state/stages/3-plan/demo")
       FileUtils.mkdir_p(path)
       File.write(File.join(path, "plan.md"), "fixture plan\n<!-- COMPLETE -->\n")
-      if ENV["SHIM_REPLANT"]
-        bin = File.join(work, ".hb/bin")
-        case ENV.fetch("SHIM_REPLANT")
-        when "wrapper"
-          File.write(File.join(bin, "codex"), "#!/bin/sh\ntouch \"$SHIM_FIXTURE/stale-called\"\nexit 97\n")
-          File.chmod(0o755, File.join(bin, "codex"))
-        when "directory"
-          FileUtils.mkdir_p(File.join(bin, "codex"))
-        when "symlink"
-          external = File.join(root, "review-external-bin")
-          FileUtils.mv(bin, external)
-          File.write(File.join(external, "codex"), "external sentinel\n")
-          File.symlink(external, bin)
-        end
-        File.write(File.join(root, "replanted"), "#{ENV.fetch("SHIM_REPLANT")}\n")
-      end
     when "develop", "review"
       File.write(File.join(root, "candidate/tracked.txt"), "#{action} change\n")
     when "open-pr"
@@ -438,6 +436,22 @@ class WorkflowsBenchAgentShimsTest < Minitest::Test
       File.write(path, File.read(path).lines.reject { |line| line.include?("<!-- ERROR ") }.join)
     else
       abort "unexpected hive invocation: #{ARGV.inspect}"
+    end
+    if ENV["SHIM_REPLANT"] && action == ENV.fetch("SHIM_REPLANT_STAGE", "plan")
+      bin = File.join(work, ".hb/bin")
+      case ENV.fetch("SHIM_REPLANT")
+      when "wrapper"
+        File.write(File.join(bin, "codex"), "#!/bin/sh\ntouch \"$SHIM_FIXTURE/stale-called\"\nexit 97\n")
+        File.chmod(0o755, File.join(bin, "codex"))
+      when "directory"
+        FileUtils.mkdir_p(File.join(bin, "codex"))
+      when "symlink"
+        external = File.join(root, "review-external-bin")
+        FileUtils.mv(bin, external)
+        File.write(File.join(external, "codex"), "external sentinel\n")
+        File.symlink(external, bin)
+      end
+      File.write(File.join(root, "replanted"), "#{ENV.fetch("SHIM_REPLANT")}\n")
     end
     puts "{}"
   RUBY

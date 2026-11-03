@@ -442,6 +442,15 @@ it bounds capture, terminates the probe process group, and accepts a deadline
 of at most 30 seconds including cleanup. Doctor can share a monotonic
 60-second `AgentCliIdentity::ProbeBudget` across observations.
 
+Grok package evidence is restricted to `@xai-official/grok`, as declared in
+the [provider package](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/npm/grok/package.json).
+Its linked `.grok/bin/grok-<version>` installation also requires the matching
+canonical symlink and `[cli] installer = "npm"` metadata written by the
+[provider installer](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/npm/grok/bin/postinstall.js).
+The Node bootstrap can choose a separately updated native CLI, so its effective
+target and version remain unknown without an explicit probe. An unrelated
+third-party Grok package never supplies the registered provider's version.
+
 ## Tests
 
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence

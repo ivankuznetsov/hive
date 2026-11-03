@@ -48,7 +48,7 @@ class AgentCliIdentityTest < Minitest::Test
 
   def test_all_registered_provider_manifests_require_matching_name_and_bin_linkage
     { claude: "@anthropic-ai/claude-code", pi: "@earendil-works/pi-coding-agent",
-      grok: "@vibe-kit/grok-cli", opencode: "opencode-ai" }.each do |name, package|
+      grok: "@xai-official/grok", opencode: "opencode-ai" }.each do |name, package|
       target = npm(name.to_s, package, "1.2.3-beta.1")
       profile = Hive::AgentProfiles.lookup(name)
       assert_equal "1.2.3-beta.1", observe(profile).version
@@ -126,6 +126,45 @@ class AgentCliIdentityTest < Minitest::Test
     assert_equal "0.156.1-rc.10+build.2", observe.version
     assert_equal "0.156.1-rc.10+build.2",
                  observe(probe: true, runner: ->(**) { [ "codex 0.156.1-rc.10+build.2", "", true ] }).version
+  end
+
+  def test_grok_native_version_requires_provider_installer_metadata_and_selected_link
+    target = executable("home/.grok/bin/grok-0.2.90")
+    launcher = File.join(File.dirname(target), "grok")
+    File.symlink(target, launcher)
+    metadata = File.join(@root, "home/.grok/config.toml")
+    File.write(metadata, "[cli]\ninstaller = \"npm\"\n")
+    profile = Hive::AgentProfiles.lookup(:grok).with_overrides("bin" => launcher)
+    assert_equal "0.2.90", observe(profile).version
+    File.write(metadata, "[unrelated]\ninstaller = \"npm\"\n")
+    assert_nil observe(profile).version
+    File.write(metadata, "[cli]\ninstaller = \"npm\"\n")
+    File.unlink(launcher)
+    assert_nil observe(profile.with_overrides("bin" => target)).version
+  end
+
+  def test_unrelated_grok_package_is_not_the_registered_provider
+    npm("grok", "@vibe-kit/grok-cli")
+    identity = observe(Hive::AgentProfiles.lookup(:grok))
+    assert_nil identity.version
+    assert_equal "provider_metadata_mismatch", identity.version_reason
+  end
+
+  def test_grok_bootstrap_package_does_not_claim_the_dynamic_native_target_version
+    target = npm("grok", "@xai-official/grok", "0.2.90")
+    File.write(target, "#!/usr/bin/env node\nrequire('./grok-bootstrap.js');\n")
+    identity = observe(Hive::AgentProfiles.lookup(:grok))
+    assert_equal "#{@root}/bin/grok", identity.launch_path
+    assert_nil identity.effective_target
+    assert_nil identity.version
+    assert_equal "opaque_launcher", identity.reason
+    original = File.method(:open)
+    with_replaced_singleton_method(File, :open, ->(path, *args, &block) {
+      raise Errno::EACCES if path == target
+      original.call(path, *args, &block)
+    }) do
+      assert_equal "opaque_launcher", observe(Hive::AgentProfiles.lookup(:grok)).reason
+    end
   end
 
   def test_homebrew_receipts_require_provider_and_exact_linked_install

@@ -20,7 +20,7 @@ module Hive
       "claude" => %w[@anthropic-ai/claude-code],
       "codex" => %w[@openai/codex],
       "pi" => %w[@earendil-works/pi-coding-agent @mariozechner/pi-coding-agent],
-      "grok" => %w[@vibe-kit/grok-cli],
+      "grok" => %w[@xai-official/grok],
       "opencode" => %w[opencode-ai]
     }.freeze
     BREW_NAMES = { "claude" => %w[claude-code], "codex" => %w[codex],
@@ -113,7 +113,7 @@ module Hive
         regime.to_sym == :managed && executable.nil? ? "prepared_binding_unavailable" : "executable_unavailable"
       end
       target = path && File.realpath(path)
-      if target && tool_manager_launcher?(target)
+      if target && (tool_manager_launcher?(target) || dynamic_provider_launcher?(profile.name, target))
         target = nil
         reason = "opaque_launcher"
       end
@@ -262,10 +262,30 @@ module Hive
       false
     end
 
+    def dynamic_provider_launcher?(profile, target)
+      return false unless profile.to_s == "grok"
+
+      source = File.open(target, File::RDONLY | File::NOFOLLOW) { |file| file.read(4096) }
+      source.start_with?("#!") && source.include?("grok-bootstrap.js")
+    rescue SystemCallError
+      true
+    end
+
     def filesystem_version(profile, target)
       return [ nil, nil, "effective_target_unknown" ] unless target
 
       directory = File.dirname(target)
+      if profile == "grok" && (match = target.match(%r{/\.grok/bin/grok-([^/]+)\z})) && VERSION.match?(match[1])
+        metadata = File.join(File.dirname(directory), "config.toml")
+        launcher = File.join(directory, "grok")
+        if File.file?(metadata) && File.symlink?(launcher) && File.realpath(launcher) == target
+          content = File.read(metadata, 128 * 1024)
+          cli = content[/^\[cli\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\z)/m, 1]
+          if cli && cli.match?(/^installer[ \t]*=[ \t]*["']npm["'][ \t]*(?:#[^\n]*)?$/)
+            return [ match[1], "grok_native_install", nil ]
+          end
+        end
+      end
       7.times do
         cask_receipt = File.join(directory, ".metadata", "INSTALL_RECEIPT.json")
         if File.file?(cask_receipt)

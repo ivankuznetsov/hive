@@ -7,9 +7,36 @@ require "hive/workflow_package/registry_manifest_builder"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
+require_relative "../../support/canonical_manifest_helpers"
 
 class WorkflowPackageRegistryManifestTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_pinned_v1_fixtures_retain_both_digest_identities
+    {
+      "canonical" => %w[66c9e4e7c2808a490c35743f437be7244498e8ba340477c9245eaae8f6db6b2c 375698cd54a6452955ee63d8ccfd8a7c0d363ec188d4e3f5d3d6c9818703167a],
+      "canonical_with_recommendations" => %w[f06b92e3bb7a9ede930032bccee3ab20964805e45e44822c17afd20a8b0dc5ca 136993f905b5e4d157839e8c77d2702cb214ed90367cc16563926940b941540e],
+      "legacy_order" => %w[7a54bb56bb6f6943df04aaa2d359526cffdce7aef634e8327bfefc0ea299cc4e 87411610118de6ef758ed367c9f8f44d44711e9c08b09ddfbb75b9f39caed259],
+      "legacy_recommendations" => %w[727164bfdc2e8d086920520e679288e7b9b8b6947854db389931c84330740812 5d2466380fb9bf468f871bcc872beb774f9eb251843227500e12d29121434f9e]
+    }.each do |name, (release, package)|
+      bytes = manifest_fixture(name)
+      manifest = Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes)
+      assert_equal bytes, manifest.bytes
+      assert_equal release, manifest.digest
+      assert_equal package, Digest::SHA256.hexdigest(manifest.bytes)
+    end
+  end
+
+  def test_rich_builder_retains_prechange_bytes
+    with_tmp_dir do |root|
+      build = canonical_builder(File.join(root, "package"))
+      assert_equal manifest_fixture("canonical"), build.bytes
+      assert_equal "66c9e4e7c2808a490c35743f437be7244498e8ba340477c9245eaae8f6db6b2c", build.release_digest
+      assert_equal "375698cd54a6452955ee63d8ccfd8a7c0d363ec188d4e3f5d3d6c9818703167a", build.package_digest
+    end
+  end
+
 
   def test_validator_accepts_canonical_registry_manifest_and_release_digest
     with_registry_package do |root, document|

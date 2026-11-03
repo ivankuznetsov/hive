@@ -1,0 +1,82 @@
+schema: "hive-module/v1"
+name: "patrol"
+version: "1.0.0"
+description: "First-party ordinary patrol"
+type: "patrol"
+author:
+  name: "Hive"
+  url: "https://hivecli.sh"
+license: "MIT"
+hive_min_version: "0.6.7"
+source:
+  url: "https://github.com/ivankuznetsov/honeycomb"
+  revision: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+workflows: []
+hooks:
+  -
+    id: "scheduled-scan"
+    target:
+      kind: "entrypoint"
+      id: "patrol.scan"
+    default_enabled: false
+    schedules:
+      - "0 */6 * * *"
+    events: []
+    concurrency: "drop"
+  -
+    id: "setup"
+    target:
+      kind: "entrypoint"
+      id: "patrol.setup"
+    default_enabled: false
+    schedules: []
+    events:
+      - "project.registered"
+    concurrency: "drop"
+  -
+    id: "task-completed"
+    target:
+      kind: "entrypoint"
+      id: "patrol.task-completed"
+    default_enabled: false
+    schedules: []
+    events:
+      - "task.completed"
+    concurrency: "drop"
+settings:
+  -
+    name: "mode"
+    type: "enum"
+    required: true
+    default: "medium"
+    values:
+      - "low"
+      - "medium"
+      - "high"
+  -
+    name: "reviewer"
+    type: "string"
+    required: false
+    secret: false
+permissions:
+  repository_write: true
+  github_mutations:
+    - "pull_requests"
+  external_commands:
+    - "bin/test"
+  network_hosts:
+    - "github.com"
+  filesystem_read:
+    - "repository"
+  filesystem_write:
+    - ".hive-state/patrol"
+  secrets:
+    - "GH_TOKEN"
+templates: []
+docs:
+  - "README.md"
+  - "docs/operator.md"
+files:
+  "README.md": "7c4ba49c0956e8abfd23d12d009f32cb211fab48455b66914c24fe806f86952e"
+  "docs/operator.md": "92ef9f1bc4532dc194987aa1e178864b5154ecada5ad5a3852ba96667a6a2bbe"
+release_sha256: "9103a7c29216814c2f234c0dfe78c54d4613636f1746e21cf940a70f826f3b8f"

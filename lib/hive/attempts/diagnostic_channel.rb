@@ -32,9 +32,7 @@ module Hive
 
           @attempted = true
 
-          Hive::PatrolFix::AttemptDiagnostic.validate!(
-            document, require_log_reference: false
-          )
+          DiagnosticChannel.validate_document!(document)
           frame = JSON.generate(document) + "\n"
           if frame.bytesize > MAX_FRAME_BYTES
             raise IOError, "attempt diagnostic frame exceeds #{MAX_FRAME_BYTES} bytes"
@@ -56,6 +54,18 @@ module Hive
         end
       end
 
+      def validate_document!(document)
+        if document.is_a?(Hash) && document["schema"] == "hive-stage-result"
+          unless document.keys.sort == %w[accepted handled output_digest schema].sort &&
+                 [true, false].include?(document["accepted"]) && document["handled"] == true &&
+                 document["output_digest"].to_s.match?(/\A[0-9a-f]{64}\z/)
+            raise Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic, "invalid stage result"
+          end
+        else
+          Hive::PatrolFix::AttemptDiagnostic.validate!(document, require_log_reference: false)
+        end
+      end
+
       def read(io)
         return ReadResult.new(document: nil, status: "missing") unless io
 
@@ -68,9 +78,7 @@ module Hive
         return ReadResult.new(document: nil, status: "duplicate") unless lines.length == 1
 
         document = JSON.parse(lines.fetch(0))
-        Hive::PatrolFix::AttemptDiagnostic.validate!(
-          document, require_log_reference: false
-        )
+        validate_document!(document)
         ReadResult.new(document: document, status: "valid")
       rescue JSON::ParserError, Hive::PatrolFix::AttemptDiagnostic::InvalidDiagnostic
         ReadResult.new(document: nil, status: "malformed")

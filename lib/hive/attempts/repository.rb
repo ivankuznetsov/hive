@@ -322,6 +322,17 @@ module Hive
         translate_store_error(error, "active attempt query failed")
       end
 
+      # Bounded task-local history for recovery attribution; callers still
+      # validate incarnation, stage, input, receipt, and successor bindings.
+      def task_stage_records(task_id:, intended_stage:, limit: 64)
+        database.read do |db|
+          db[:attempts].where(task_id: task_id.to_s)
+            .reverse_order(:accepted_at, :attempt_id).limit(limit).all
+            .map { |row| record_from(row) }
+            .select { |record| record["intended_stage"] == intended_stage.to_s }
+        end
+      end
+
       def live_attempt_for(task_id:)
         id = safe_id(task_id, error: "unsafe task id")
         row = database.read do |db|

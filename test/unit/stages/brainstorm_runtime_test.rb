@@ -7,6 +7,28 @@ require "hive/task"
 class BrainstormRuntimeTest < Minitest::Test
   include HiveTestHelper
 
+  def test_stage_acceptance_is_published_on_the_supervisor_channel
+    with_brainstorm_task do |task|
+      before = "## Round 1\n### Q1. Question?\n### A1. answer\n<!-- WAITING -->\n"
+      File.write(task.state_file, before + "## Round 2\n### Q1. Next?\n### A1.\n")
+      reader, writer = IO.pipe
+      channel = Hive::Attempts::DiagnosticChannel::Writer.new(writer)
+      context = Object.new
+      context.define_singleton_method(:publish_stage_result) do |accepted:, output_digest:|
+        channel.write("schema" => "hive-stage-result", "handled" => true,
+                      "accepted" => accepted, "output_digest" => output_digest)
+      end
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        result = Hive::Stages::Brainstorm.result_for_spawn(task, { status: :error }, before)
+        assert_equal :waiting, result[:status]
+      end
+      frame = Hive::Attempts::DiagnosticChannel.read(reader)
+      assert_equal "valid", frame.status
+      assert_equal true, frame.document["accepted"]
+      assert_equal Digest::SHA256.hexdigest(File.binread(task.state_file)), frame.document["output_digest"]
+    end
+  end
+
   def test_run_routes_default_claude_brainstorm_through_headless_claude_launch
     with_brainstorm_task do |task|
       captured = nil

@@ -95,6 +95,12 @@ module Hive
           record: record,
           source_reference: log_reference
         )
+        if diagnostic_frame&.document&.fetch("schema", nil) == "hive-stage-result"
+          record = record.with("checkpoint" => record.checkpoint.merge(
+            "stage_result" => diagnostic_frame.document
+          ))
+          diagnostic_frame = nil
+        end
         output_references = record["current_outputs"].dup
         diagnostic_reference = materialize_attempt_diagnostic(
           record, diagnostic_frame, log_reference: log_reference,

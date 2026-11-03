@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/dispatcher"
+require "hive/attempts/failed_edit"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
@@ -38,6 +39,58 @@ class AttemptsDispatcherTest < Minitest::Test
       raise @error if @error
 
       @result
+    end
+  end
+
+  def test_failed_edit_evidence_survives_terminal_receipt_round_trip
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      terminal = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [store.fetch(terminal.attempt_id)])
+
+      assert_equal terminal.attempt_id, evidence.fetch("source_binding").fetch("attempt_id")
+      assert_equal "id:42", evidence.fetch("task_binding").fetch("task_locator")
+      assert_equal terminal.receipt.fetch("terminal_lease_version"), evidence.fetch("source_terminal_lease_version")
+      assert_equal generation.progress_token, evidence.fetch("input_binding").fetch("progress_token")
+      File.utime(NOW + 6, NOW + 6, task.state_file)
+      assert_equal evidence, Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [terminal])
+      File.write(task.state_file, "operator changed answers\n<!-- WAITING -->\n")
+      edited = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: edited, records: [terminal])
+    end
+  end
+
+  def test_failed_edit_evidence_rejects_success_missing_receipt_and_stage_errors
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "consumed-edit")
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [result.attempt])
+      terminal = terminalize_attempt(store, launcher, result, outcome: "succeeded", exit_status: 0, now: NOW + 5)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [terminal])
+      Hive::Markers.set(task.state_file, :error, reason: "agent_failed")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [terminal])
+    end
+  end
+
+  def test_failed_edit_excludes_handled_stage_results_and_foreign_bindings
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      terminal = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [terminal])
+      assert Hive::Attempts::FailedEdit.valid_source?(terminal, evidence)
+      handled_receipt = terminal.receipt.merge("final_checkpoint" => terminal.checkpoint.merge(
+        "stage_result" => { "handled" => true, "accepted" => false }
+      ))
+      handled = terminal.with("receipt" => handled_receipt)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [handled])
+      task.id = 43
+      replacement = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute", task_input_epoch: 0)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: replacement, records: [terminal])
+      wrong_stage = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "6-review", task_input_epoch: 0)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: wrong_stage, records: [terminal])
+      assert_equal [terminal.attempt_id], store.task_stage_records(task_id: "42", intended_stage: "4-execute").map(&:attempt_id)
     end
   end
 

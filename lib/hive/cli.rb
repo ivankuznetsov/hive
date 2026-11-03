@@ -328,8 +328,8 @@ module Hive
       remediation. Doctor never installs or writes agent state.
 
       Every registered agent profile is also compared across the invoking
-      shell and installed daemon/babysitter configurations, including stopped
-      services. Default observations never launch an agent CLI. Unknown
+      shell and installed daemon, babysitter, bot, and web configurations,
+      including stopped services. Default observations never launch an agent CLI. Unknown
       filesystem versions are version-uninspected. --probe-agent-versions
       explicitly runs resolved version commands with a 30-second per-command
       deadline and a 60-second aggregate budget. Incomplete or stale service

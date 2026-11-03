@@ -44,9 +44,12 @@ class DoctorAgentCliTest < Minitest::Test
       shell = binary(File.join(root, "shell"), version: "0.156.1")
       daemon = binary(File.join(root, "daemon"), version: "0.153.4")
       babysitter = binary(File.join(root, "baby"), version: "0.156.1")
-      rows = check(root, shell, contexts: [ service("daemon", daemon), service("babysitter", babysitter) ]).rows
+      bot = binary(File.join(root, "bot"), version: "0.156.0")
+      web = binary(File.join(root, "web"), version: "0.156.2")
+      rows = check(root, shell, contexts: [ service("daemon", daemon), service("babysitter", babysitter),
+        service("bot", bot), service("web", web) ]).rows
 
-      assert_equal Hive::AgentProfiles.registered_names.size * 9, rows.length
+      assert_equal Hive::AgentProfiles.registered_names.size * 15, rows.length
       entry = row(rows, "daemon")
       assert_equal "warning", entry[:status]
       assert_equal "agent_cli", entry[:stage]
@@ -59,6 +62,10 @@ class DoctorAgentCliTest < Minitest::Test
       assert_includes entry[:message], daemon
       assert_includes entry[:message], "cwd_inherited"
       assert_equal "prepared_binding_unavailable", row(rows, "daemon", "managed").dig(:identity, :reason)
+      assert_equal bot, row(rows, "bot").dig(:identity, :launch_path)
+      assert_equal "older", row(rows, "bot").dig(:comparison, :version)
+      assert_equal web, row(rows, "web").dig(:identity, :launch_path)
+      assert_equal "newer", row(rows, "web").dig(:comparison, :version)
     end
   end
 
@@ -273,8 +280,10 @@ class DoctorAgentCliTest < Minitest::Test
         shell = binary(File.join(root, "shell"), version: "0.156.1")
         daemon = binary(File.join(root, "daemon"), version: "0.153.4")
         babysitter = binary(File.join(root, "babysitter"), version: "0.156.1")
+        bot = binary(File.join(root, "bot"), version: "0.156.0")
+        web = binary(File.join(root, "web"), version: "0.156.2")
         secret = "sk-abcdefghijklmnopqrstuvwx"
-        definitions = { "daemon" => daemon, "babysitter" => babysitter }.to_h do |label, executable|
+        definitions = { "daemon" => daemon, "babysitter" => babysitter, "bot" => bot, "web" => web }.to_h do |label, executable|
           path = File.join(root, "#{label}.#{platform == :linux ? 'service' : 'plist'}")
           content = if platform == :linux
             "[Service]\nEnvironment=PATH=#{File.dirname(executable)} SECRET=#{secret}\nExecStart=/fixture/hive\n"
@@ -315,6 +324,14 @@ class DoctorAgentCliTest < Minitest::Test
         assert_equal "0.153.4", entry.dig("identity", "version")
         assert_equal "older", entry.dig("comparison", "version")
         assert payload.fetch("checks").any? { |item| item["skill"] == "babysitter" }
+        %w[bot web].each do |label|
+          service_entry = payload.fetch("checks").find do |item|
+            item["agent"] == "codex" && item["skill"] == label && item["regime"] == "plain"
+          end
+          assert_equal({ "bot" => bot, "web" => web }.fetch(label), service_entry.dig("identity", "launch_path"))
+          assert_equal "stopped", service_entry.dig("execution_context", "running_currency")
+          assert_includes service_entry.fetch("message"), "declared configuration"
+        end
         refute_includes output.string, secret
       end
     end

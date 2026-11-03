@@ -137,6 +137,8 @@ module Hive
                      one_shot_drain_timeout_sec: nil)
         @config = config
         @controller = controller
+        # A project may lower its own task cap in its config (daemon.max_concurrent_per_project).
+        @controller.project_cap = ->(project) { project_concurrency_cap(project) } if @controller.respond_to?(:project_cap=)
         @supervisor = supervisor
         @status_consumer = status_consumer
         @logger = logger
@@ -262,6 +264,8 @@ module Hive
         # interval without the operator having to send SIGHUP.
         # PR-40 follow-up #2.
         @enabled_cache = {}
+        # Per-tick project concurrency cap cache, cleared with @enabled_cache.
+        @project_cap_cache = {}
         # Per-tick set of project names whose layout is half-migrated
         # (non-empty legacy_stage_dirs). Populated at the start of each
         # tick from StatusConsumer::Result#projects; row dispatch refuses
@@ -322,6 +326,7 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        @project_cap_cache.clear
         unless refresh_project_ownership
           @one_shot_failure = "project ownership unavailable" if scoped_execution?
           publish_operational_snapshot(
@@ -650,6 +655,7 @@ module Hive
         return true if keys.empty?
 
         @enabled_cache.clear
+        @project_cap_cache.clear
         return false unless refresh_project_ownership
         @logger.event(:tick_begin, now: now.utc.iso8601, scope: "changed_tasks", tasks: keys.length)
         result = @status_consumer.fetch_tasks(keys)
@@ -4966,6 +4972,19 @@ module Hive
         @enabled_cache[project_name] = false
       end
 
+      # A project's own daemon.max_concurrent_per_project, read the same way
+      # as daemon.enabled. The controller only lets it lower the daemon-wide
+      # cap; an unreadable config or a non-integer value leaves the global cap.
+      def project_concurrency_cap(project_name)
+        return @project_cap_cache[project_name] if @project_cap_cache.key?(project_name)
+
+        entry = Hive::Config.find_project(project_name)
+        @project_cap_cache[project_name] =
+          entry && Hive::Config.load(entry["path"]).dig("daemon", "max_concurrent_per_project")
+      rescue Hive::ConfigError
+        @project_cap_cache[project_name] = nil
+      end
+
       def project_owned?(project_name)
         !@project_ownership || @project_ownership.owned?(project_name)
       rescue StandardError
@@ -5095,6 +5114,7 @@ module Hive
         # values.
         @stale_agent_healer = stale_agent_healer
         @enabled_cache.clear
+        @project_cap_cache.clear
         @logger.event(
           :config_reloaded,
           max_concurrent_runs: @controller.max_concurrent_runs,

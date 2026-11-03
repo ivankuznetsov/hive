@@ -808,7 +808,7 @@
     "test/unit/workflow_package/validator_test.rb": 0.0297,
     "test/unit/workflow_selection_test.rb": 0.0084,
     "test/unit/workflow_test.rb": 0.0056,
-    "test/unit/workflows/bench_agent_shims_test.rb": 14.2161,
+    "test/unit/workflows/bench_agent_shims_test.rb": 27.1951,
     "test/unit/workflows/bench_test.rb": 9.3615,
     "test/unit/workflows/coding_test.rb": 0.0009,
     "test/unit/workflows/content_test.rb": 0.0007,
@@ -825,7 +825,7 @@
     303
   ],
   "source": {
-    "note": "Mean method runtimes across complete seeds 101, 202, 303. Failed nightly diagnostic baseline; scheduling weights only, never test selection or pass evidence.",
+    "note": "Mean method runtimes across complete seeds 101, 202, 303. Failed nightly diagnostic baseline; scheduling weights only, never test selection or pass evidence. bench_agent_shims_test.rb is overridden by a focused seed 63509 method-runtime sample at 5eecd4e72b02b3a00a3214110be70ec9d9c28285 on 2026-11-03 (21 passing tests).",
     "url": "https://github.com/ivankuznetsov/hive/actions/runs/33848365560"
   }
 }

@@ -914,7 +914,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `llm_wiki_post_commit_refresh_test.rb` | Transactional wiki refresh plus the scheduled compatibility wrapper — shared-runner preference, bounded-systemd commit dispatch with headless bus recovery and durable marker retention on signal failure, compiled-log-only no-op filtering, machine-wide fallback admission, project-local fallback, configured-provider-only production dispatch with a disposable test-copy seam, exact `--project <root> --drain` delegation, committed/template/generated copy parity, source-ref transaction chunking for large queues, reconstruction of interrupted queue writes, fast-forward publication to `llm-wiki/refresh`, freshly fetched remote-default reconciliation, crash-safe receipt revalidation after remote deletion, mixed retained/new and no-diff publication without duplicate agent runs, durable merge-conflict blocking, and dirty primary-checkout preservation. Each fixture uses a private `XDG_RUNTIME_DIR`, so a real operator refresh cannot consume its stub-agent work; explicit lock tests override that directory to retain machine-wide serialization coverage. |
 | `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. Legacy-upgrade coverage pins one-commit archive/runtime/config rebinding, same-process descriptor cache reset, tracked instruction archives, safe retry after a rejected commit, Ctrl-C cleanup at archive and both runtime-move boundaries, preservation after a post-commit interrupt, symlink-root and raced-target refusal, descriptor/child-name/parent-directory replacement rejection at classification, quarantine, and post-staging boundaries, dirty-config isolation, staged-index preflight, and previous-runtime retention when rollback deletion fails. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image, the opt-in same-judge Codex/OpenRouter route with secret-free argv, explicit provider provenance, child-local executable-directory PATH resolution for pinned npm runtimes, a private Codex home for OpenRouter, and an empty ephemeral/config-free/rules-free workspace for both OpenRouter and ChatGPT while ChatGPT retains its subscription auth home. It also executes the packaged Ox Alpha `max` route contract with plan review disabled, proves that sealed root-controller commands restore the target to the host UID/GID on exit, proves that redacted OpenCode logs recover token buckets from Hive's cell-local usage database, verifies that candidate Git history contains only the depth-one historical base and not a descendant gold object, and pins the provider-only network/proxy arguments plus their generation-identity receipt. The judge-stage invariant rejects a null round-two final while the incomplete cell remains eligible for retry. |
 | `workflows/bench_test.rb` (judge adapter) | Pins stderr quota classification, Claude CLI's exact standalone stdout reset and usage-credits banners and structured 429 failed-result envelope, plus rejection of model-authored quota prose. |
-| `workflows/bench_agent_shims_test.rb` | Executes the full packaged stage caller with root-only path adaptation: first/reused Codex, Pi, and Grok reachability; regular, executable-symlink, and dangling legacy entries; setup and unlink failures; execute/review resume; repeated review cleanup; unrelated-state and symlink-target preservation. Real unlink denial runs under an unprivileged effective UID, including privilege drop when the runner is root, followed by permission repair and retry. No permission row skips silently. |
+| `workflows/bench_agent_shims_test.rb` | Executes the full packaged stage caller with root-only path adaptation: first/reused Codex, Pi, and Grok reachability; regular, executable-symlink, and dangling legacy entries; setup and unlink failures; execute/review resume; plan-continuation and publication-agent replanting; bin/ancestor symlink rejection; stdout diagnostics; later Grok failure and partial cleanup; repeated gh preservation before review setup; unrelated-state and symlink-target preservation. An executable helper test proves the shared sealed no-op. Real unlink denial runs under an unprivileged effective UID, including privilege drop when the runner is root, followed by permission repair and retry. No permission row skips silently. |
 | `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — bundled Hive projection plus native package argv/JSON, fresh convergence and second-run no-op, unattended refusal with a per-invocation tripwire proving zero native discovery calls and byte-for-byte home stability, unavailable skips, independent offline failure, cache/resolution/provenance verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and conflict byte preservation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `brainstorm_answering_skill_contract_test.rb` | Guided/YOLO answer orchestration over the real literal command — read-only status inventory and preview, deterministic task traversal despite reordered refreshes, degraded project isolation and stale aggregate counts, Guided approval/replacement/pause/resume/idempotency/stale behavior, YOLO zero-write and mixed-write scans with one-at-a-time escalation, same-number cross-round targeting, relocation/ambiguity/move/generation/conflict gates, final-slot no-dispatch plus normal daemon completion eligibility, sanitized 2026-07-25 regression data, and byte-identical policy/scenario payloads across OpenClaw, Claude, Codex, and Pi. |
@@ -1384,8 +1384,8 @@ See [[commands/bench-submit]] for the command surface.
 
 ## Persisted benchmark agent shims
 
-Hive verification at
-[`2b76f330c79d6395064dcc64d54772a3ae31150d`](https://github.com/ivankuznetsov/hive/commit/2b76f330c79d6395064dcc64d54772a3ae31150d)
+Current Hive verification at
+[`5eecd4e72b02b3a00a3214110be70ec9d9c28285`](https://github.com/ivankuznetsov/hive/commit/5eecd4e72b02b3a00a3214110be70ec9d9c28285)
 on 2026-11-03 uses the actual packaged `hive_stages.sh` and execute-resume
 helper in deterministic subprocess fixtures. Only the fixed filesystem roots
 (`/work`, `/opt/hb`, `/home/asterio`, `/opt/compound-engineering`, and
@@ -1401,42 +1401,65 @@ extension and caller arguments.
 Run the focused acceptance files with:
 
 ```bash
-bin/test test/unit/workflows/bench_test.rb test/unit/workflows/bench_agent_shims_test.rb
+bin/test test/unit/workflows/bench_test.rb test/unit/workflows/bench_agent_shims_test.rb test/integration/bench_workflow_install_test.rb
 bash -n templates/builtins/bench/runtime/harness/lib/hive_stages.sh
 shellcheck templates/builtins/bench/runtime/harness/lib/hive_stages.sh
 ```
 
-The focused run passed 63 tests with no failures, errors, or skips, including
-the existing Pi launcher argv test. Regular and dangling unlink-denial rows
-ran as Linux UID 1000: an independent absolute-rm probe proved permission
+The final focused run passed 73 tests and 4,004 assertions with no failures,
+errors, or skips, including the existing Pi launcher argv and installation
+integration tests. A post-commit run of the completed shim file at the linked
+revision passed all 21 tests and 3,481 assertions (seed 63509). Regular and
+dangling unlink-denial rows ran under an unprivileged effective UID: an
+independent absolute-rm probe proved permission
 denial, the caller exited 4 without agent calls, and a retry in the same work
 directory succeeded after permission repair. Root runners use `setpriv` to
 drop to UID/GID 65534; unavailable privilege-drop support fails the test.
-Direct removal-status handling and the absence of an entry re-probe also have
-a supplementary source assertion. That assertion supplements executable
-denial evidence. Shell syntax and ShellCheck 0.11.0 passed using the unchanged
-install-smoke lint configuration. Ruby style checking passed for the new test.
+Executable denial rows verify direct removal-status handling. A supplementary
+source assertion checks for absence probes only after removal, allowing
+equivalent shell conditionals and validation before removal. Shell syntax and
+ShellCheck 0.11.0 passed on the final committed script using the unchanged
+install-smoke lint invocation. Locked Ruby style checking passed for the test.
+The initial plain-Ruby combined run lacked dependencies for eight neighboring
+tests; installing the locked bundle in an ignored worktree-local directory
+resolved them. No dependency manifest or lockfile changed.
 
-The review fix pass adds a PATH-resolved Codex wrapper planted during plan,
-with review both enabled and disabled, and separately plants a wrapper during
-develop to verify review-entry cleanup. Both execute and review boundaries
-reject replanted bin symlinks and managed-name directories with exit 4. Each
-reuse iteration replants all managed names before invocation. The source
-assertion checks direct removal-status handling without pinning the loop's
-formatting, and still rejects an absence re-probe.
+The review fixes plant PATH-resolved wrappers during plan, develop, and an
+agent-backed open-pr action. Cleanup precedes plan continuation and review
+after publication as well as develop and review-block entry. Validation and
+removal failures emit driver-visible stdout diagnostics and stop with exit 4
+before the next agent launches. Tests reject both bin and ancestor symlinks,
+preserve external targets, and prove that a Grok failure reports its own path
+after successful Codex/Pi removals. A Bash DEBUG observer verifies gh bytes
+after repeated cleanup before its legitimate review-setup rewrite. The shared
+helper is also executed repeatedly in sealed mode with a symlinked bin to
+prove that neither validation nor removal occurs. Each reuse iteration
+replants all managed names before invocation.
 
-Review-pass validation on 2026-11-03 passed both focused files: 64 tests,
+Historical initial validation at `2b76f330c7` passed 63 tests and 2,729
+assertions, with ShellCheck 0.11.0. That test revision predates pre-develop
+cleanup. Historical first-review validation at `694e1bc80c` passed 64 tests,
 3,066 assertions, no failures, errors, or skips, with inherited `TMPDIR`
 containing `/work`. Ruby style and shell syntax checks passed. ShellCheck
-was unavailable in that environment; the earlier lint result above remains
-historical.
+was unavailable in that environment. These earlier results describe their
+respective snapshots; current acceptance evidence is the linked revision above.
 
-The new file remains in `HIVE_DEFAULT_TEST_FILES` and exactly one coverage
-shard; its measured 14.2161-second sample is in
-`test/support/shard_timings.json`. `bin/test --changed --list` reports a shared
+The completed file remains in `HIVE_DEFAULT_TEST_FILES` and exactly one coverage
+shard. Its 27.1951-second method-runtime sample in
+`test/support/shard_timings.json` was remeasured at the linked final revision
+using the repository collector (single focused seed 63509, 21 passing tests,
+3,481 assertions, no skips). This replaces the pre-expansion 14.2161-second
+sample; it is a scheduling weight, not a latency guarantee. Reproduce it with:
+
+```bash
+HIVE_SWEEP_TEST_FILES=test/unit/workflows/bench_agent_shims_test.rb \
+  bundle exec ruby script/flake_sweep.rb --seed 63509 --report tmp/bench-shim-timings.json
+```
+
+`bin/test --changed --list` reports a shared
 runtime change and falls back to offline suites; this leaf fix uses the
 explicit focused files above. Runtime installation and snapshot layout are
-unchanged, so the existing install integration contract is retained. No full
+unchanged, and the installation integration tests passed. No full
 suite, coverage run, provider call, or container demonstration is claimed.
 
 Ownership across the divergent scripts is explicit. Canonical revision
@@ -1452,8 +1475,8 @@ Ownership across the divergent scripts is explicit. Canonical revision
 
 See [[modules/workflows]] for driver pins and the three-name allowlist's
 historical derivation. [[gaps]] separates the canonical defect from accepted
-Hive stale-`claude` and stale-`gh` limitations. Historical checks are not current
-acceptance evidence.
+Hive stale-`claude`, stale-`gh`, and unrelated-command limitations. Historical
+checks are not current acceptance evidence.
 
 ## Hive web Golden-Path E2E
 

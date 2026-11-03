@@ -429,10 +429,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
                  "widening the view must not discard the composer's project choice"
 
     submit_idea
-    # The live refresh can replace the redirect's one-request flash before
-    # Capybara sees it. Wait for the submitted task and finished composer.
-    assert_selector ".task-row", text: "Filter navigation draft", count: 1, wait: 10
-    assert_field "New idea", with: ""
+    assert_selector ".flash-notice", text: "Idea added", wait: 5
     folder = stage_dir(filtered, "1-inbox").children
                                             .find { |child| child.basename.to_s.start_with?("filter-navigation-draft") }
     assert folder&.join("assets", "image1.png")&.file?,

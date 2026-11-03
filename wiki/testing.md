@@ -1048,10 +1048,6 @@ current-DOM query and visits that stable route directly. The project-rail test
 uses the same discipline for the broadcaster-replaced rail and composer:
 button lookup/click and ordered-value reads each happen in one current-DOM
 JavaScript turn, so Turbo cannot detach a saved node between lookup and action.
-After submitting the preserved draft, that test waits for the new live task row
-and cleared composer before checking the saved attachment. The redirect's
-one-request flash can disappear on a subsequent status refresh, so it is not
-the synchronization point for this filtering/attachment scenario.
 `web/test/system/status_stream_source_test.rb` is the focused status-source
 lifecycle suite. It retains the real browser/server pre-confirmation cases:
 `DOM teardown waits for Cable confirmation before server unsubscribe` observes

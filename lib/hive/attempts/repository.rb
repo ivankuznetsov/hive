@@ -9,6 +9,7 @@ require "hive/attempts/process_identity"
 require "hive/attempts/record"
 require "hive/attempts/coordination"
 require "hive/attempts/publication"
+require "hive/attempts/pending_bookkeeping"
 require "hive/output_reference"
 require "hive/paths"
 require "hive/runtime_control_plane"
@@ -55,7 +56,7 @@ module Hive
         end
       end
 
-      attr_reader :database
+      attr_reader :database, :installation_id
 
       def self.open_default(create_directories: true, state_home: Hive::Paths.state_home)
         requested_home = File.expand_path(state_home)
@@ -73,6 +74,7 @@ module Hive
         database_exists = File.file?(database.path)
         database.open!(revalidate: !database_exists) if database_exists || create_directories
         prepare_payload_root! if create_directories
+        @installation_id = database.read { |db| db[:installations].get(:installation_id) } if database_exists || create_directories
       rescue RuntimeControlPlane::Unavailable => error
         raise if storage_unavailable?(error)
         raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"
@@ -90,6 +92,10 @@ module Hive
 
       def payload_store
         @payload_store ||= RuntimeControlPlane::PayloadStore.new(root: @root)
+      end
+
+      def pending_bookkeeping
+        @pending_bookkeeping ||= PendingBookkeeping.new(store: self)
       end
 
       def log_archive
@@ -153,12 +159,14 @@ module Hive
                            route_decision: nil, timeout_sec: nil, **attributes)
         recovery_source_attempt_id = attributes.delete(:recovery_source_attempt_id)
         source_fingerprint ||= attributes[:progress_token]
-        RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
+        record = RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
           route_decision: route_decision,
           recovery_source_attempt_id: recovery_source_attempt_id, timeout_sec: timeout_sec
         )
+        output_directory(record.attempt_id, create: true)
+        record
       rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error, Hive::ConcurrentRunError => error
         translate_store_error(error, "attempt could not be created")
       end
@@ -401,7 +409,7 @@ module Hive
         end
       end
 
-      def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
+      def prepare_terminal_receipt(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
                       log_reference:, now:, provider_evidence: nil, pause_generation: nil,
                       authority: nil, timeout_sec: nil)
         version = observed.lease_version + 1
@@ -426,6 +434,32 @@ module Hive
           task_input_epoch: observed.task_input_epoch,
           terminal_lease_version: version, routing: observed["routing"]
         )
+        receipt
+      end
+
+      def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
+                      log_reference:, now:, provider_evidence: nil, pause_generation: nil,
+                      authority: nil, timeout_sec: nil)
+        receipt = prepare_terminal_receipt(
+          observed, outcome: outcome, exit_status: exit_status,
+          final_checkpoint: final_checkpoint, output_references: output_references,
+          log_reference: log_reference, now: now, provider_evidence: provider_evidence,
+          pause_generation: pause_generation
+        )
+        commit_prepared_terminal(observed, receipt, authority: authority, timeout_sec: timeout_sec)
+      end
+
+      def commit_prepared_terminal(observed, receipt, authority: nil, timeout_sec: nil, reason: nil)
+        version = observed.lease_version + 1
+        Record.validate_receipt!(
+          receipt, attempt_id: observed.attempt_id, task_generation: observed.task_generation,
+          ownership_generation: observed.ownership_generation, task_input_epoch: observed.task_input_epoch,
+          terminal_lease_version: version, routing: observed["routing"]
+        )
+        final_checkpoint = receipt.fetch("final_checkpoint")
+        output_references = receipt.fetch("output_references")
+        log_reference = receipt.fetch("log_reference")
+        outcome = receipt.fetch("outcome")
         mutate(
           observed, operation: "attempt.terminalize", allowed_states: [ "running" ], pending_receipt: receipt,
           authority: authority, cleanup_attempt_id: observed.attempt_id,
@@ -433,7 +467,8 @@ module Hive
         ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
-            "heartbeat_deadline" => nil, "ended_at" => Record.iso8601(now),
+            "heartbeat_deadline" => nil, "ended_at" => receipt.fetch("ended_at"),
+            "diagnostics" => reason ? data.fetch("diagnostics").merge("bookkeeping_reason" => reason) : data.fetch("diagnostics"),
             "latest_revision" => final_checkpoint["revision"] || final_checkpoint[:revision] || data["latest_revision"],
             "checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
             "current_outputs" => Hive::StringifyKeys.call(output_references),

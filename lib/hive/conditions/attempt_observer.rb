@@ -134,6 +134,7 @@ module Hive
       end
 
       def health(attempt)
+        return [ "pending", attempt.bookkeeping_reason ] if attempt.bookkeeping_reason
         return [ "unsatisfied", "attempt_lost" ] if attempt.state == "lost"
         return [ "satisfied", "attempt_terminal_succeeded" ] if attempt.outcome == "succeeded"
         if attempt.receipt&.fetch("exit_status", nil) == Hive::ExitCodes::TEMPFAIL

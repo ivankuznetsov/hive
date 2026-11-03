@@ -7,16 +7,19 @@ module Hive
     # The owner persists this reason through PendingBookkeeping when SQL cannot
     # record it. It never grants permission to execute or replace a worker.
     class BookkeepingBusy < RepositoryError
-      attr_reader :operation, :attempt_id, :retry_count, :elapsed_sec, :budget_sec
+      attr_reader :operation, :attempt_id, :retry_count, :elapsed_sec, :budget_sec, :reason
 
-      def initialize(operation:, attempt_id:, retry_count:, elapsed_sec:, budget_sec:)
+      def initialize(operation:, attempt_id:, retry_count:, elapsed_sec:, budget_sec:, reason: "runtime_bookkeeping_busy")
+        unless %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].include?(reason)
+          raise ArgumentError, "unsupported bookkeeping failure reason"
+        end
+        @reason = reason
         @operation, @attempt_id = operation.to_s, attempt_id&.to_s
         @retry_count, @elapsed_sec, @budget_sec = retry_count, elapsed_sec, budget_sec
-        super("runtime_bookkeeping_busy: #{@operation} exhausted after #{@elapsed_sec.round(3)}s " \
+        super("#{reason}: #{@operation} exhausted after #{@elapsed_sec.round(3)}s " \
               "(#{@retry_count} busy tries)")
       end
 
-      def reason = "runtime_bookkeeping_busy"
       def exit_code = Hive::ExitCodes::TEMPFAIL
     end
 

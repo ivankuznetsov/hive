@@ -3,6 +3,7 @@ require "set"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/process_identity"
 require "hive/attempts/storage_status"
+require "hive/attempts/pending_bookkeeping"
 require "hive/markers"
 require "hive/output_reference"
 require "hive/task"
@@ -70,12 +71,16 @@ module Hive
           terminals << reconciled.attempt if reconciled.classification == :terminal
           effective_records << reconciled.attempt
           log_reconciliation(reconciled)
-        rescue CompareAndSwapFailed
+        rescue RepositoryError, Hive::ConcurrentRunError, RuntimeControlPlane::Error, Sequel::Error => error
+          raise unless error.is_a?(CompareAndSwapFailed) || BookkeepingRetry.busy?(error)
           # Another wrapper/reconciler won the transition. Re-read on the next
           # point lookup; no duplicate loss/terminal outcome is emitted by
           # this loser, and no second historical scan is needed for capacity.
           current = @store.fetch_hot(record.attempt_id)
           effective_records << current if current
+          if BookkeepingRetry.busy?(error) && current
+            statuses << reconciled(current, :suspect, :unverifiable, { "bookkeeping" => "deferred" })
+          end
           next
         end
         hot_attempts = effective_records.freeze
@@ -132,6 +137,17 @@ module Hive
             current, classification, wrapper_status,
             { wrapper: wrapper_status.to_s, worker_group: worker_status.to_s }
           )
+        end
+
+        pending = @store.pending_bookkeeping.read(current)
+        if pending.status == :valid && pending.document["terminal_receipt"]
+          begin
+            terminal = @store.pending_bookkeeping.replay(current, pending.document, authority: authority, timeout_sec: timeout_sec)
+            return reconciled(terminal, :terminal, wrapper_status, { "pending_bookkeeping" => "replayed" })
+          rescue PendingBookkeeping::InvalidEvidence, InvalidReceipt, Hive::InvalidOutputReference,
+                 SystemCallError, IOError
+            # Invalid completion cannot bypass the controller's interruption.
+          end
         end
 
         log_reference = interruption_log_reference(current)
@@ -216,10 +232,12 @@ module Hive
 
         owner_status = @process_identity.status(record.wrapper)
         if record.state == "launching"
-          return expire(
-            record, "first_heartbeat_timeout", now: now,
-            owner_status: owner_status, authority: authority, timeout_sec: timeout_sec
-          ) if expired?(record, now)
+          if expired?(record, now) && !%i[matching unverifiable].include?(owner_status)
+            return completion_first_disposition(
+              record, reason: "first_heartbeat_timeout", now: now,
+              owner_status: owner_status, authority: authority, timeout_sec: timeout_sec
+            )
+          end
           classification = owner_status == :matching ? :adopted : :suspect
           return reconciled(record, classification, owner_status, { deadline: record.active_deadline_value })
         end
@@ -233,25 +251,75 @@ module Hive
           )
         end
 
-        evidence = completion_evidence(record)
+        completion_first_disposition(
+          record, reason: owner_status == :mismatched ? "owner_identity_mismatch" : "owner_gone",
+          now: now, owner_status: owner_status, authority: authority, timeout_sec: timeout_sec
+        )
+      end
+
+      # Identity/custody policy is owned here. The bounded claimed-launch
+      # policy can supply its already-resolved custody result without forcing
+      # replay to re-prove absence and retain an unverifiable owner forever.
+      def completion_first_disposition(record, reason:, now:, owner_status:,
+                                       authority: nil, timeout_sec: nil,
+                                       custody_resolved: false, diagnostics: {})
+        current = @store.fetch(record.attempt_id, timeout_sec: timeout_sec)
+        return reconciled(current, :terminal, :not_applicable, { receipt: "valid" }) if current&.state == "terminal"
+        unless current && current.to_h == record.to_h
+          raise CompareAndSwapFailed, "attempt changed before completion-first disposition"
+        end
+        unless custody_resolved
+          owner_status = @process_identity.status(current.wrapper) if current.claimed?
+          if %i[matching unverifiable].include?(owner_status)
+            return reconciled(current, :suspect, owner_status, { "custody" => "owner_retained" })
+          end
+          custody = resolve_worker_custody(current)
+          unless %i[absent terminated no_worker].include?(custody)
+            return reconciled(current, :suspect, owner_status, { "worker_group" => custody.to_s })
+          end
+          diagnostics = diagnostics.merge("worker_group" => custody.to_s)
+        end
+        evidence = completion_evidence(current).merge(Hive::StringifyKeys.call(diagnostics))
+        pending = @store.pending_bookkeeping.read(current)
+        evidence["pending_bookkeeping"] = pending.status.to_s
+        evidence["pending_bookkeeping_diagnostic"] = pending.diagnostic if pending.diagnostic
+        if pending.status == :valid
+          if pending.document["terminal_receipt"]
+            begin
+              terminal = @store.pending_bookkeeping.replay(
+                current, pending.document, authority: authority, timeout_sec: timeout_sec || 1.0
+              )
+              return reconciled(terminal, :terminal, owner_status, evidence.merge("pending_bookkeeping" => "replayed"))
+            rescue PendingBookkeeping::InvalidEvidence, InvalidReceipt, Hive::InvalidOutputReference,
+                   SystemCallError, IOError => error
+              evidence["pending_bookkeeping"] = "invalid"
+              evidence["pending_bookkeeping_diagnostic"] = error.message.to_s.byteslice(0, 512)
+            end
+          else
+            reason = pending.document.fetch("reason") unless reason == "first_heartbeat_owner_unverifiable_ceiling"
+          end
+        end
         lost = @store.mark_lost(
-          record,
-          reason: owner_status == :mismatched ? "owner_identity_mismatch" : "owner_gone",
-          now: now,
+          current, reason: reason, now: now,
           diagnostics: evidence.merge("owner_status" => owner_status.to_s),
-          authority: authority, timeout_sec: timeout_sec
+          authority: authority, timeout_sec: timeout_sec || 1.0
         )
         reconciled(lost, :lost, owner_status, evidence)
       end
 
+      def resolve_worker_custody(record)
+        return :no_worker unless record.worker
+        status = @process_identity.orphan_group_status(wrapper: record.wrapper, worker: record.worker)
+        return status unless status == :matching
+        @process_identity.terminate_orphan_group(wrapper: record.wrapper, worker: record.worker).to_sym
+      end
+
       def expire(record, reason, now:, owner_status: :not_applicable,
                  authority: nil, timeout_sec: nil)
-        lost = @store.mark_lost(
-          record, reason: reason, now: now,
-          diagnostics: { "owner_status" => owner_status.to_s },
+        completion_first_disposition(
+          record, reason: reason, now: now, owner_status: owner_status,
           authority: authority, timeout_sec: timeout_sec
         )
-        reconciled(lost, :lost, owner_status, { deadline: record.active_deadline_value })
       end
 
       def expired?(record, now)

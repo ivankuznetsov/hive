@@ -142,13 +142,21 @@ module Hive
           provider_signal: provider_signal
         )
         output_references << diagnostic_reference if diagnostic_reference
+        @prepared_completion = @store.prepare_terminal_receipt(
+          record, outcome: outcome, exit_status: exit_status,
+          final_checkpoint: record.checkpoint, output_references: output_references,
+          log_reference: log_reference, provider_evidence: provider_evidence,
+          pause_generation: @pause_generation, now: @clock.call
+        )
+        @store.pending_bookkeeping.prepare_completion(record, receipt: @prepared_completion)
+        completed_at = Time.iso8601(@prepared_completion.fetch("ended_at"))
         terminal = with_store_retry(operation: "terminalize") do |timeout|
           if outcome == "interrupted"
             @store.interrupt(
               record, pause_generation: @pause_generation, exit_status: exit_status,
               final_checkpoint: record.checkpoint,
               output_references: output_references,
-              log_reference: log_reference, now: @clock.call, timeout_sec: timeout
+              log_reference: log_reference, now: completed_at, timeout_sec: timeout
             )
           else
             @store.terminalize(
@@ -156,7 +164,7 @@ module Hive
               final_checkpoint: record.checkpoint,
               output_references: output_references,
               log_reference: log_reference, provider_evidence: provider_evidence,
-              now: @clock.call, timeout_sec: timeout
+              now: completed_at, timeout_sec: timeout
             )
           end
         end
@@ -168,6 +176,13 @@ module Hive
           "state" => "quiescing", "error" => e.message
         )
         Hive::ExitCodes::TEMPFAIL
+      rescue BookkeepingBusy => busy
+        handle_bookkeeping_busy(busy, log)
+      rescue PendingBookkeeping::StorageError => error
+        terminate_worker_group
+        warn "hive attempt supervisor: #{@attempt_id} #{error.message}; completion remains uncommitted"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => error.message)
+        Hive::ExitCodes::SOFTWARE
       rescue CompareAndSwapFailed, RepositoryError => e
         warn "hive attempt supervisor: #{@attempt_id} lost its lease: #{e.class}: #{e.message}"
         terminate_worker_group
@@ -187,6 +202,13 @@ module Hive
               exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed"
             )
             output_references << diagnostic_reference if diagnostic_reference
+            @last_durable_record = current
+            failure_receipt = @store.prepare_terminal_receipt(
+              current, outcome: "failed", exit_status: Hive::ExitCodes::SOFTWARE,
+              final_checkpoint: current.checkpoint, output_references: output_references,
+              log_reference: reference, now: @clock.call
+            )
+            @store.pending_bookkeeping.prepare_completion(current, receipt: failure_receipt)
             with_store_retry(operation: "terminalize_failure") do |timeout|
               @store.terminalize(
                 current, outcome: "failed", exit_status: Hive::ExitCodes::SOFTWARE,
@@ -196,8 +218,7 @@ module Hive
             end
           end
         rescue BookkeepingBusy => busy
-          signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => busy.message)
-          return Hive::ExitCodes::TEMPFAIL
+          return handle_bookkeeping_busy(busy, log)
         rescue StandardError
           nil
         end
@@ -212,6 +233,26 @@ module Hive
       end
 
       private
+
+      def handle_bookkeeping_busy(busy, log)
+        terminate_worker_group
+        log&.append(:supervisor, "hive attempt supervisor: #{busy.reason} (#{busy.operation})\n") unless log&.closed?
+        log&.close unless log&.closed?
+        if @last_durable_record && !@last_durable_record.final?
+          @store.pending_bookkeeping.record_busy(
+            @last_durable_record, operation: busy.operation, reason: busy.reason
+          )
+        end
+        warn "hive attempt supervisor: #{@attempt_id} #{busy.message}"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id,
+                     "error" => busy.message, "reason" => busy.reason)
+        Hive::ExitCodes::TEMPFAIL
+      rescue PendingBookkeeping::StorageError, SystemCallError, IOError => storage_error
+        warn "hive attempt supervisor: #{@attempt_id} pending bookkeeping storage failed: #{storage_error.message}"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id,
+                     "error" => storage_error.message, "reason" => busy.reason)
+        Hive::ExitCodes::TEMPFAIL
+      end
 
       def register_wrapper!(timeout_sec: nil)
         registry.register!(

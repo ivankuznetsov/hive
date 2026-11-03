@@ -377,9 +377,13 @@ module Hive
           created, interactive: interactive,
           error: handoff.is_a?(Hash) ? handoff["error"] : nil
         )
-      rescue BookkeepingBusy
-        # The next recovery seam persists admitted-attempt evidence. Never
-        # translate a finite contention budget into launch_handoff_failed.
+      rescue BookkeepingBusy => busy
+        # No file is created before admission. A known admitted attempt owns
+        # bounded evidence even while SQL remains locked; the deterministic
+        # request still resolves an ambiguous admission on the next call.
+        if created && !created.final?
+          @store.pending_bookkeeping.record_busy(created, operation: busy.operation, reason: busy.reason)
+        end
         raise
       rescue CapacityExceeded
         deferred_result("capacity")

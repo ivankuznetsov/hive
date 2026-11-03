@@ -15,6 +15,21 @@ set -uo pipefail
 SLUG="$1"
 BASE="$2"
 export HOME=/home/asterio
+
+cleanup_legacy_agent_shims() {
+  local name
+  if [ ! -d "$CONTROLLER_BIN" ] || [ -L "$CONTROLLER_BIN" ]; then
+    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN" >&2
+    return 1
+  fi
+  for name in codex pi grok; do
+    if ! /usr/bin/rm -f -- "$CONTROLLER_BIN/$name"; then
+      echo "HB_ERROR legacy_agent_shim_cleanup_failed path=$CONTROLLER_BIN/$name" >&2
+      return 1
+    fi
+  done
+}
+
 if [ "${HB_SEALED_AGENT_RUNTIME:-0}" = "1" ]; then
   HIVE_RUNTIME_BIN=/opt/hb/control-bundle/bin
   CONTROLLER_BIN=/opt/hb/controller-bin
@@ -36,7 +51,11 @@ else
   HIVE_RUNTIME_BIN=/opt/hb/hive-current/bin
   CONTROLLER_BIN=/work/.hb/bin
   CONTROLLER_STATE=/work/.hb
-  mkdir -p "$CONTROLLER_BIN" "$CONTROLLER_STATE"
+  if ! mkdir -p "$CONTROLLER_BIN" "$CONTROLLER_STATE"; then
+    echo "HB_ERROR controller_bin_setup_failed path=$CONTROLLER_BIN" >&2
+    exit 4
+  fi
+  cleanup_legacy_agent_shims || exit 4
 fi
 if [ ! -x "$HIVE_RUNTIME_BIN/hive" ] || [ -z "${HB_HIVE_VERSION:-}" ]; then
   echo "HB_ERROR hive_runtime_missing" >&2
@@ -445,6 +464,9 @@ task_dir() { find /work/.hive-state/stages -maxdepth 2 -type d -name "$SLUG" 2>/
 
 REVIEW_RC=""
 if [ "${HB_REVIEW:-1}" = "1" ] && [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
+  if [ "${HB_SEALED_AGENT_RUNTIME:-0}" != "1" ]; then
+    cleanup_legacy_agent_shims || exit 4
+  fi
   ORIGIN="$CONTROLLER_STATE/origin.git"
   rm -rf -- "$ORIGIN"
   env -i PATH=/usr/bin:/bin GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \

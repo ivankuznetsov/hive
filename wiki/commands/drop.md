@@ -3,19 +3,20 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, web/app/models/task.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-09-02
+updated: 2026-11-03
 tags: [command, task, cleanup, json, tui, web]
 ---
 
 **TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]`
-hard-deletes an active task. It identity-checks the agent recorded in the typed
+cancels an active task. It identity-checks the agent recorded in the typed
 task lease, cleans that recorded process plus identity-stable descendants, and
 fences the remaining destructive work with the project commit lock and
 deterministic task leases. An unresolved `kill_failed` candidate aborts before
 those leases or any PR/worktree/branch/task/log deletion. Successful Drop
-closes the draft PR best-effort, removes worktree/branch/folders/logs, and
-records an audit commit on `hive/state`. There is no dropped bucket, archive,
-undo, reason prompt, or confirmation.
+closes the draft PR best-effort, removes its worktree, branch and runtime logs,
+and records an audit commit on `hive/state`. Tasks with an adopted execution
+plan retain their task folder in the workflow's terminal stage. Legacy task
+folders are deleted. No confirmation or reason prompt is added.
 
 ## Usage
 
@@ -31,6 +32,28 @@ Numeric task ids and path targets use [[modules/task_resolver]] lookup; bare
 slugs use Drop's project/stage scan with the same `--project` and `--from`
 scoping rules. Pass `--project` to disambiguate cross-project collisions and
 `--from` to assert the current stage on retry.
+
+## Capability cancellation history
+
+For an adopted coding task, Drop validates the accepted execution-plan/result
+chain and the `9-done/<slug>` destination before recording cancellation or
+cleaning publication/worktree state. It retains the whole task folder,
+including plan versions, approval and result blobs, accepted-chain anchors,
+task-local journal and evidence. A separate accepted terminal record says
+`Cancelled — gate not evaluated`; blocked and unrun checks keep their states.
+Cancellation does not authorize readiness, merge or a passing verification
+result. `hive task <slug> --project <name>` can inspect the retained task.
+
+An existing archive, duplicate adopted source folders, or a symlinked archive
+parent refuses cancellation before the accepted history changes. The move
+uses exclusive destination creation and the existing task-identity custody
+checks. A destination created during cleanup is preserved, and the source
+remains available for recovery. Completion metadata is written only after
+successful retention. Reconcile an archive collision or restore its regular
+Hive state directory before retrying; Drop never replaces the existing archive.
+
+Runtime logs under `.hive-state/logs/<slug>/` retain their existing cleanup
+behavior. Task-local history and evidence remain in the retained folder.
 
 ## Refusals
 
@@ -98,8 +121,11 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
    aborts Drop before deletion.
 6. Re-resolve and revalidate folder/stage context while the commit lock and
    task leases are held.
-7. Close `pr_url` best-effort; remove owned worktree and branch; delete every
-   active-stage folder and `.hive-state/logs/<slug>/`; then commit
+7. For adopted tasks, validate retained history and archive destinations, then
+   append the separate cancellation annotation. Close `pr_url` best-effort;
+   remove the owned worktree and branch; retain adopted task folders in the
+   terminal stage and delete legacy active-stage folders. Remove
+   `.hive-state/logs/<slug>/`; then commit
    `hive: dropped/<slug> dropped`.
 
 The logical leases remain held across this external work, but no SQLite

@@ -31,6 +31,7 @@ require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
 require "hive/workflows"
 require "hive/task_capabilities/verification"
+require "hive/task_capabilities/gate"
 
 module Hive
   module Stages
@@ -150,6 +151,7 @@ module Hive
         # readers always see balanced brackets.
         @open_phase_event = nil
         @capability_ci_observations = {}
+        @capability_session = nil
         capability_plan = Hive::TaskCapabilities::Store.new(task.folder).current
         if capability_plan && !Hive::Attempts::Context.current
           raise Hive::TaskCapabilities::Admission::Error, "adopted review verification requires a durable parent attempt; run this task with --durable"
@@ -202,9 +204,17 @@ module Hive
 
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
-        if marker.name == :review_complete && capability_plan
-          return complete_capability_verification(task, cfg, ctx.with(pass: marker.attrs.fetch("pass", "1").to_i),
+        if capability_plan
+          @capability_session = Hive::TaskCapabilities::ActorRunner::Session.new(
+            budget_usd: nil, timeout_sec: max_wall_clock, parent: Hive::Attempts::Context.current)
+        end
+        if capability_plan && (marker.name == :review_complete || marker.attrs["phase"] == "verification")
+          verified = complete_capability_verification(task, cfg, ctx.with(pass: marker.attrs.fetch("pass", "1").to_i),
             started_at: started_at, max_wall_clock_sec: max_wall_clock)
+          return verified unless verified.dig(:capability_verification, "checks").any? { |check| check["state"] == "failed" }
+          # A newly failing check uses the same remaining pass budget and
+          # triage/fix machinery as ordinary reviewer findings.
+          marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
         end
 
         # --- Phase 1: CI fix ---
@@ -516,6 +526,13 @@ module Hive
 
             if wall_clock_exceeded?(started_at, max_wall_clock)
               return finalize_wall_clock_stale(task, started_at, pass: pass)
+            end
+
+            if capability_plan
+              remaining = [ max_wall_clock - (Time.now - started_at), 0 ].max
+              verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg,
+                worktree_path: worktree_path, session: @capability_session, timeout_sec: remaining).run!(existing_results: @capability_ci_observations || {})
+              write_capability_findings(ctx_pass, verification)
             end
 
             if triage_enabled?(cfg)
@@ -950,6 +967,8 @@ module Hive
         # rescue, SystemExit) so the events.jsonl bracket structure
         # stays balanced. Swallow failures here — a torn events file
         # must not mask the underlying control-flow result/exception.
+        @capability_session&.close
+        @capability_session = nil
         close_phase_event!(task) if @open_phase_event
       end
 
@@ -957,13 +976,40 @@ module Hive
         @current_phase = :verification
         remaining = [ max_wall_clock_sec - (Time.now - started_at), 0 ].max
         verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg,
-          worktree_path: ctx.worktree_path, timeout_sec: remaining).run!(existing_results: @capability_ci_observations || {})
+          worktree_path: ctx.worktree_path, session: @capability_session, timeout_sec: remaining).run!(existing_results: @capability_ci_observations || {})
+        gate_service = Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg, worktree_path: ctx.worktree_path)
+        gate = gate_service.evaluate
+        gate_service.record(gate)
+        unless gate.fetch("allowed")
+          Hive::Markers.set(task.state_file, :review_waiting, pass: ctx.pass, phase: "verification",
+            reason: "task_capability_blocked", verification: gate.fetch("state"))
+          return { commit: "review_verification_blocked_pass_#{format('%02d', ctx.pass)}",
+            status: :review_waiting, capability_verification: gate }
+        end
         browser = verification.fetch("checks").find { |check| check["check_id"] == "browser" }
         browser_status = browser ? (browser["state"] == "passed" ? :passed : :warned) : :skipped
         Hive::Markers.set(task.state_file, :review_complete, pass: ctx.pass, browser: browser_status,
           verification: verification.fetch("state"))
         { commit: "review_verification_#{verification.fetch('state')}_pass_#{format('%02d', ctx.pass)}",
           status: :review_complete, capability_verification: verification }
+      end
+
+      def write_capability_findings(ctx, verification)
+        findings = verification.fetch("checks").select { |check| check["state"] == "failed" }.flat_map do |check|
+          check.fetch("result").fetch("findings").map do |finding|
+            id = "#{check.fetch('capability_id')}:#{check.fetch('check_id')}:#{finding.fetch('id')}"
+            "- [ ] [#{finding.fetch('severity')}] #{id} — #{finding.fetch('summary')}\n" \
+              "  #{finding.fetch('details').gsub("\n", "\n  ")}\n" \
+              "  Accepted result: #{check.fetch('result_digest')}. Fix only within existing task scope; scope expansion or risk acceptance requires an operator disposition.\n"
+          end
+        end
+        path = File.join(ctx.task_folder, "reviews", "capabilities-#{format('%02d', ctx.pass)}.md")
+        if findings.empty?
+          File.delete(path) if File.file?(path)
+        else
+          FileUtils.mkdir_p(File.dirname(path))
+          File.write(path, "# Independent verification findings\n\n#{findings.join("\n")}")
+        end
       end
 
       # Marker attr values are scanned by the internal task graph and read by
@@ -2167,6 +2213,12 @@ module Hive
           terminal = ci_terminal_result(
             task, result, gate: gate, pass: pass, ctx: ctx
           )
+          if terminal && capability_plan
+            remaining = [ max_wall_clock_sec - (Time.now - started_at), 0 ].max
+            verification = Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg,
+              worktree_path: ctx.worktree_path, session: @capability_session, timeout_sec: remaining).run!(existing_results: @capability_ci_observations || {})
+            terminal[:capability_verification] = verification.merge("controller_blocker" => "#{gate} CI #{result.status}; inspect reviews/ci-blocked.md or the review error")
+          end
           return terminal if terminal
         end
 

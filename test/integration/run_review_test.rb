@@ -1,3 +1,4 @@
+require_relative "../support/task_capabilities_fixture"
 require "test_helper"
 require "hive/task_capabilities/resolver"
 require "base64"
@@ -15,6 +16,7 @@ require "hive/stages/review"
 # wall-clock cap, pass cap, ci-stale path, clean run end-to-end.
 class RunReviewTest < Minitest::Test
   include HiveTestHelper
+  include TaskCapabilitiesFixture
 
   INVOKE_AGENT_CUSTODY = lambda do |agent_custody, &block|
     agent_custody ? agent_custody.call(&block) : block.call
@@ -165,7 +167,7 @@ class RunReviewTest < Minitest::Test
       task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)))
     Hive::TaskMeta.rewrite(folder, task_capabilities: resolution.plan.adoption)
     Hive::TaskCapabilities::Store.new(folder).activate(resolution.plan, expected_version: nil)
-    task
+    Hive::Task.new(folder)
   end
 
   def test_adopted_complete_review_runs_missing_checks_and_retries_after_revision_changes
@@ -176,12 +178,11 @@ class RunReviewTest < Minitest::Test
         cfg["review"]["ci"]["command"] = "ruby -e 'puts %q{behavior verified}'"
         task = adopt_verification(folder, cfg)
         File.write(task.state_file, "<!-- REVIEW_COMPLETE pass=2 browser=passed -->\n")
-        context = Hive::Attempts::Context.send(:new, attempt_id: "review-parent", task_generation: 0)
-        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_capability_parent(task) do |context|
           first = Hive::Stages::Review.run!(task, cfg)
           assert_equal "passed", first.dig(:capability_verification, "state")
           check = first.dig(:capability_verification, "checks", 0)
-          assert_equal "review-parent", check.dig("result", "parent_attempt_id")
+          assert_equal context.attempt_id, check.dig("result", "parent_attempt_id")
           worktree = YAML.safe_load_file(task.worktree_yml_path).fetch("path")
           File.write(File.join(worktree, "README.md"), "new revision\n")
           run!("git", "-C", worktree, "commit", "-am", "new revision", "--quiet")
@@ -190,8 +191,6 @@ class RunReviewTest < Minitest::Test
           refute_equal check.fetch("result_digest"), second.dig(:capability_verification, "checks", 0, "result_digest")
           assert_equal run!("git", "-C", worktree, "rev-parse", "HEAD").strip, second.dig(:capability_verification, "evaluated_sha")
         end
-      ensure
-        context&.close
       end
     end
   end
@@ -220,8 +219,7 @@ class RunReviewTest < Minitest::Test
         counter = File.join(dir, "ci-runs")
         cfg["review"]["ci"]["command"] = "ruby -e 'File.open(ARGV.fetch(0), %q{a}) { |f| f.puts :ran }; puts %q{ci behavior checked}' #{Shellwords.escape(counter)}"
         task = adopt_verification(folder, cfg)
-        context = Hive::Attempts::Context.send(:new, attempt_id: "review-ci-parent", task_generation: 0)
-        with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_capability_parent(task) do
           result = Hive::Stages::Review.run!(task, cfg)
           assert_equal :review_complete, result.fetch(:status)
           assert_equal "passed", result.dig(:capability_verification, "state")
@@ -230,8 +228,90 @@ class RunReviewTest < Minitest::Test
           assert_equal 0, evidence.fetch("exit_status")
           assert_includes evidence.fetch("output"), "ci behavior checked"
         end
-      ensure
-        context&.close
+      end
+    end
+  end
+
+  def test_capability_findings_use_bounded_triage_fix_and_reverify_the_changed_sha
+    [ true, false ].each do |fixes_behavior|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir, cfg_overrides: { "execute" => { "agent" => "claude", "model" => "approved" }, "review" => { "fix" => { "agent" => "claude", "model" => "approved" } } })
+          cfg = Hive::Config.load(dir)
+          cfg["review"]["max_passes"] = 1
+          cfg["execute"].merge!("agent" => "claude", "model" => "approved")
+          cfg["review"]["fix"].merge!("agent" => "claude", "model" => "approved")
+          cfg["task_capabilities"]["catalog"] = [ { "id" => "qa", "kind" => "verification", "stages" => [ "review" ],
+            "checks" => [ { "id" => "behavior", "kind" => "behavior", "claim" => "Exercise task behavior", "command" => "ruby -e 'abort unless File.exist?(%q{test/capability.txt})'" } ] } ]
+          task = adopt_verification(folder, cfg)
+          Hive::Markers.set(task.state_file, :review_complete, pass: 1) if fixes_behavior
+          code = task.worktree_path
+          observed = []
+          triage = lambda do |cfg:, ctx:|
+            path = File.join(ctx.task_folder, "reviews/capabilities-#{format('%02d', ctx.pass)}.md")
+            if File.file?(path)
+              observed << File.read(path)
+              File.write(path, File.read(path).gsub("[ ]", "[x]"))
+            end
+            escalation = File.join(ctx.task_folder, "reviews/escalations-#{format('%02d', ctx.pass)}.md")
+            File.write(escalation, "# Escalations\n")
+            Hive::Stages::Review::Triage::Result.new(status: :ok, escalations_path: escalation, error_message: nil, tampered_files: [], limit_text: nil)
+          end
+          fixes = 0
+          testcase = self
+          fix = lambda do |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil|
+            fixes += 1
+            testcase.assert_includes accepted, "qa:behavior:qa:behavior:command-failed"
+            agent_custody.call do
+              FileUtils.mkdir_p(File.join(code, "test"))
+              File.write(File.join(code, "test", fixes_behavior ? "capability.txt" : "unrelated.txt"), "fix\n")
+              testcase.run!("git", "-C", code, "add", "test")
+              testcase.run!("git", "-C", code, "commit", "-qm", "fix behavior")
+              { status: :ok }
+            end
+          end
+          with_capability_parent(task) do
+            with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage) do
+              with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, fix) do
+                result = Hive::Stages::Review.run!(task, cfg)
+                assert_equal fixes_behavior ? :review_complete : :review_stale, result.fetch(:status)
+              end
+            end
+          end
+          assert_equal 1, fixes
+          refute_empty observed
+          assert_includes observed.first, "scope expansion or risk acceptance requires an operator disposition"
+          states = Hive::TaskCapabilities::ResultStore.new(task.folder).history.map { |_digest, result| result.state }
+          assert_includes states, "failed"
+          assert_equal fixes_behavior, Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg).evaluate.fetch("allowed")
+        end
+      end
+    end
+  end
+
+  def test_unavailable_adopted_ci_retains_controller_blocker_and_complete_retry_stays_recoverable
+    [ false, true ].each do |already_complete|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir)
+          cfg = Hive::Config.load(dir)
+          cfg["review"]["ci"]["command"] = "absent-capability-ci-program"
+          task = adopt_verification(folder, cfg)
+          Hive::Markers.set(task.state_file, :review_complete, pass: 1) if already_complete
+          with_capability_parent(task) do
+            result = Hive::Stages::Review.run!(task, cfg)
+            assert_equal already_complete ? :review_waiting : :review_error, result.fetch(:status)
+            check = result.fetch(:capability_verification).fetch("checks").first
+            assert_equal "blocked", check.fetch("state")
+            assert_empty check.fetch("result").fetch("findings")
+            assert_empty check.fetch("result").fetch("evidence")
+            if already_complete
+              assert_equal "verification", Hive::Markers.current(task.state_file).attrs["phase"]
+            else
+              assert_includes result.fetch(:capability_verification).fetch("controller_blocker"), "CI error"
+            end
+          end
+        end
       end
     end
   end

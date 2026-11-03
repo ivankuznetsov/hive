@@ -1,3 +1,4 @@
+require "hive/task_capabilities/gate"
 require "yaml"
 require "fileutils"
 require "hive/git_ops"
@@ -362,6 +363,14 @@ module Hive
     def publish_rebased_branch!(task, cfg, publish_lease, warnings)
       return unless publish_lease
 
+      if task.respond_to?(:stage_name) && task.stage_name == "finalize"
+        begin
+          Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg, worktree_path: task.worktree_path).enforce!
+        rescue Hive::TaskCapabilities::Gate::Blocked => error
+          warnings << "rebased branch not published: #{error.message}"
+          return
+        end
+      end
       push = lambda do
         Hive::Gh.push_branch(
           task.worktree_path, publish_lease.branch, cfg: cfg,

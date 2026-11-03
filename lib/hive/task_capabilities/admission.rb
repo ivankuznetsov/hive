@@ -59,6 +59,16 @@ module Hive
         return true unless task.respond_to?(:folder)
         plan = Store.new(task.folder).current
         return true unless plan
+        # A validated external closure retires the task without evaluating its
+        # checks. Only the terminal archive runner may finish that protocol.
+        if task.respond_to?(:workflow) && task.respond_to?(:stage_index) && task.stage_index == task.workflow.stages.last.index
+          require "hive/task_closure"
+          require "hive/task_capabilities/result_store"
+          closure = Hive::TaskClosure.read(task, quarantine: false)
+          if closure.valid? && ResultStore.new(task.folder).terminal_history.any? { |_digest, record| record["reference"] == "closure:#{closure.receipt.fetch('receipt_digest')}" }
+            return true
+          end
+        end
         unsupported = plan.data.fetch("bindings").find do |binding|
           binding["kind"] == "guidance" && (!GUIDANCE_STAGES.include?(binding["stage"]) ||
             (task.respond_to?(:workflow) && !guidance_stage_supported?(task.workflow, binding["stage"])))

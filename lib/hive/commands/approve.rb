@@ -21,6 +21,7 @@ require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
 require "hive/task_activity"
+require "hive/task_capabilities/gate"
 require "hive/command_operation"
 require "hive/command_error_kind"
 
@@ -72,7 +73,7 @@ module Hive
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
                      clock: DEFAULT_CLOCK, dependency_admission: true,
-                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil)
+                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil, closure_receipt_digest: nil)
         @target = target
         @to = to
         @from = from
@@ -91,6 +92,7 @@ module Hive
         @idempotency_key = idempotency_key
         @command_receipt_store = command_receipt_store
         @task_observation = task_observation
+        @closure_receipt_digest = closure_receipt_digest
       end
 
       def call
@@ -354,6 +356,7 @@ module Hive
         @plan_review_observation = Hive::PlanReview::TransitionGuard.prepare!(
           task:, destination: dest_stage, config: @plan_review_config
         )
+        Hive::TaskCapabilities::Gate.transition!(task: task, destination: dest_stage, cfg: @plan_review_config, closure_receipt_digest: @closure_receipt_digest)
         return if @force
         if task.workflow.controller?
           projection = Hive::PatrolFix::Projection.new(
@@ -434,6 +437,7 @@ module Hive
               Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
               Hive::Attempts::Context.current&.validate_generation!(task)
               @observation_guard&.call(task)
+              Hive::TaskCapabilities::Gate.transition!(task: task, destination: dest_stage, cfg: @plan_review_config || Hive::Config.load(task.project_root), closure_receipt_digest: @closure_receipt_digest)
               Hive::PlanReview::TransitionGuard.verify!(
                 task:, destination: dest_stage, observation: @plan_review_observation,
                 config: @plan_review_config

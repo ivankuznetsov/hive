@@ -211,6 +211,7 @@ module Hive
           end
         end
         if result["actor"]
+          result["actor_binary"] = ActorRunner.runtime_identity(Hive::AgentProfiles.lookup(result.fetch("actor").fetch("profile"), cfg: @cfg))
           result["actor_fingerprint"] = Hive::WorkflowPackage::Configuration.profile_fingerprint(
             Hive::AgentProfiles.lookup(result.fetch("actor").fetch("profile"), cfg: @cfg))
           begin
@@ -219,6 +220,9 @@ module Hive
               block(blockers, definition.id, "approval_scope", "approved capability actor must name its exact provider_account and launch_binding; an inferred default account cannot reuse this approval")
             end
           rescue Hive::ConfigError => error
+            # Account availability cannot erase the exact operator-approved
+            # actor tuple. Billing evidence is observed when that tuple returns.
+            result["actor_route"] = { "unavailable" => true, "approved_actor" => result.fetch("actor") }
             block(blockers, definition.id, "route_unavailable", "#{definition.id} approved route unavailable: #{error.message}; restore the approved route#{definition.id == 'security' ? ' or archive/cancel the task without finalization' : ' or revise the execution plan'}", phase: definition.id == "security" ? "finalization" : "dispatch")
           end
         end

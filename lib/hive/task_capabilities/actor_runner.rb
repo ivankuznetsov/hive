@@ -4,6 +4,7 @@ require "hive/task_capabilities/admission"
 require "hive/task_capabilities/approval"
 require "hive/process_kill"
 require "tmpdir"
+require "hive/invoked_binary"
 require "hive/provider_routing/configuration"
 require "hive/workflow_package/configuration"
 require "hive/artifacts/project_command_sandbox"
@@ -34,6 +35,41 @@ module Hive
         raise Admission::Error, "capability specialist requires an available durable parent attempt: #{error.message}"
       end
 
+      def self.runtime_identity(profile)
+        binary = profile.bin.to_s
+        path = binary.include?(File::SEPARATOR) ? File.expand_path(binary) : Hive::InvokedBinary.which(binary)
+        return nil unless path && File.file?(path) && File.executable?(path)
+        { "path" => File.realpath(path), "sha256" => ::Digest::SHA256.file(path).hexdigest }
+      end
+
+      def self.route_matches?(pinned, route, actor)
+        return pinned == route unless pinned.is_a?(Hash) && pinned["unavailable"] == true
+        pinned.keys.sort == %w[approved_actor unavailable] && pinned["approved_actor"] == actor &&
+          route.slice("provider_account_id", "adapter", "model", "effort", "launch_binding_id") == {
+            "provider_account_id" => actor["provider_account"], "adapter" => actor.fetch("profile"),
+            "model" => actor.fetch("model"), "effort" => actor["effort"], "launch_binding_id" => actor.fetch("launch_binding", "default") }
+      end
+
+      # Read-only availability check, including historical passing results.
+      def self.available!(task:, cfg:, binding:)
+        checker = allocate
+        checker.instance_variable_set(:@task, task)
+        checker.instance_variable_set(:@cfg, cfg)
+        checker.send(:verify_accepted_binding!, binding)
+        actor = binding.fetch("actor")
+        profile = Hive::AgentProfiles.lookup(actor.fetch("profile"), cfg: cfg)
+        runtime = runtime_identity(profile)
+        unless runtime && (!binding["actor_binary"] || binding["actor_binary"] == runtime)
+          raise Admission::Error, "approved actor executable is unavailable or changed; restore the approved runtime or archive/cancel the task"
+        end
+        unless binding.fetch("actor_fingerprint") == Hive::WorkflowPackage::Configuration.profile_fingerprint(profile) &&
+            route_matches?(binding.fetch("actor_route"), Hive::ProviderRouting::Configuration.capability_route(cfg: cfg, actor: actor), actor)
+          raise Admission::Error, "approved route or runtime changed; restore the approved route or archive/cancel the task"
+        end
+        Admission.verify_skill_binding!(binding, project_root: task.project_root, cfg: cfg) if binding["skill"]
+        true
+      end
+
       def run(binding, prompt:)
         actor = binding.fetch("actor")
         Definition.positive(binding.fetch("budget_usd"), label: "capability actor budget_usd")
@@ -42,13 +78,16 @@ module Hive
         unless profile.budget_flag
           raise Admission::Error, "capability actor #{profile.name} cannot enforce a per-spawn budget"
         end
+        if binding["actor_binary"] && binding["actor_binary"] != self.class.runtime_identity(profile)
+          raise Admission::Error, "approved actor executable changed; restore the pinned runtime"
+        end
         fingerprint = Hive::WorkflowPackage::Configuration.profile_fingerprint(profile)
         unless binding.fetch("actor_fingerprint") == fingerprint
           raise Admission::Error, "selected #{binding.fetch('id')} runtime identity changed; restore the pinned runtime or revise the execution plan"
         end
         verify_accepted_binding!(binding)
         route = Hive::ProviderRouting::Configuration.capability_route(cfg: @cfg, actor: actor)
-        unless binding.fetch("actor_route") == route
+        unless self.class.route_matches?(binding.fetch("actor_route"), route, actor)
           raise Admission::Error, "selected #{binding.fetch('id')} approved route changed; restore its exact provider account and launch binding"
         end
         Admission.verify_skill_binding!(binding, project_root: @task.project_root, cfg: @cfg) if binding["skill"]
@@ -75,7 +114,7 @@ module Hive
           result = result.merge(status: :error, error_reason: "capability_actor_identity_unverified")
         end
         @session.settle!(spawn, result)
-        result.merge(capability_spawn_id: spawn.id, parent_attempt_id: @context.attempt_id,
+        result.merge(capability_spawn_id: spawn.id, capability_route: route, parent_attempt_id: @context.attempt_id,
           capability_stop_reason: spawn.stop_reason)
       rescue Hive::ConfigError, Hive::Attempts::RepositoryError, Hive::Artifacts::ProjectCommandSandbox::SandboxError, SystemCallError => error
         recovery = binding["id"] == "security" ? "restore the approved route or archive/cancel the task without finalization" : "restore the pinned route or accept a revised execution plan"

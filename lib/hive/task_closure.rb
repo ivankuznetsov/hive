@@ -17,6 +17,7 @@ require "hive/task_resolver"
 require "hive/task_closure_contract"
 require "hive/workflow_package/canonical_json"
 require "hive/worktree"
+require "hive/task_capabilities/gate"
 
 module Hive
   # Evidence-bound operator closure for work delivered outside a task's
@@ -137,7 +138,10 @@ module Hive
           task, project: project, task_projection: task_projection
         )
         return nil if result.absent?
-        return result.receipt if result.valid?
+        if result.valid?
+          terminal = Hive::TaskCapabilities::ResultStore.new(task.folder).terminal_history.last
+          return terminal ? result.receipt.merge("capability_disposition" => terminal.last.merge("result_digest" => terminal.first)) : result.receipt
+        end
 
         {
           "status" => "invalid",
@@ -1022,14 +1026,24 @@ module Hive
       if File.file?(path)
         current = JSON.parse(File.binread(path))
         validate_receipt!(current, task: task, project: receipt.dig("task", "project"))
-        return current if current.fetch("receipt_digest") == receipt.fetch("receipt_digest")
+        if current.fetch("receipt_digest") == receipt.fetch("receipt_digest")
+          record_capability_closure!(task, receipt)
+          return current
+        end
 
         raise InvalidReceipt, "a different closure receipt already exists for this task"
       end
       Hive::AtomicFile.write(path, "#{self.class.canonical_json(receipt)}\n", mode: 0o600)
       File.chmod(0o600, path)
       Hive::AtomicFile.fsync_directory(task.folder)
+      record_capability_closure!(task, receipt)
       receipt
+    end
+
+    def record_capability_closure!(task, receipt)
+      Hive::TaskCapabilities::Gate.record_terminal!(task: task,
+        disposition: receipt["reason"] == "cancelled" ? "cancelled" : "closed-out-of-band",
+        reference: "closure:#{receipt.fetch('receipt_digest')}")
     end
 
     def validate_receipt!(receipt, task:, project:, task_projection: nil)
@@ -1309,6 +1323,7 @@ module Hive
     end
 
     def transition!(task, project, receipt)
+      record_capability_closure!(task, receipt)
       require "hive/commands/guarded_archive"
       target_stage = task.workflow.stages.last.dir
       digest = receipt.fetch("receipt_digest")
@@ -1317,6 +1332,7 @@ module Hive
         current_stage: "#{task.stage_index}-#{task.stage_name}",
         target_stage: target_stage,
         project: project,
+        closure_receipt_digest: digest,
         terminal_outcome: receipt["reason"] == "cancelled" ? "cancelled" : nil,
         transition_guard: lambda do |locked_task|
           Hive::Conditions::TransitionGuard.validate_closure!(

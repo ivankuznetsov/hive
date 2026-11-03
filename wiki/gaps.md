@@ -1897,3 +1897,10 @@ environment identity covers controller runtime, direct command executables and
 declared environment selectors; project-specific dependency integrity remains
 part of the configured check contract. Adoption remains disabled until separate
 publication gates and operator controls are complete.
+
+- Adopted capability capture currently pins runner environment from the creating
+  process. Shared read state now uses that persisted execution environment,
+  while controller enforcement verifies its actual environment. Prove or
+  reconcile web-created versus daemon-run environment parity (Rails/Node/bundle
+  variables and runtime paths) before enabling adoption; reader-process ENV must
+  never become execution evidence.

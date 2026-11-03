@@ -1,11 +1,14 @@
+require_relative "../support/task_capabilities_fixture"
 require "test_helper"
 require "hive/commands/init"
+require "hive/commands/approve"
 require "hive/commands/run"
 require "hive/stages/finalize"
 require "hive/task"
 
 class RunFinalizeTest < Minitest::Test
   include HiveTestHelper
+  include TaskCapabilitiesFixture
 
   def setup
     @prev_path = ENV["PATH"]
@@ -1415,6 +1418,140 @@ class RunFinalizeTest < Minitest::Test
 
         assert_equal "publication:attempt-1:ready", records.first.last.fetch(:operation_id)
         assert_equal "ready", records.first.last.dig(:payload, "pr_state")
+      end
+    end
+  end
+
+  def adopt_capability_finalize(folder, cfg)
+    task = Hive::Task.new(folder)
+    cfg["review"]["ci"]["command"] = "ruby -e 'puts :verified'"
+    base = Hive::GitOps.new(task.project_root).default_branch
+    run!("git", "-C", task.worktree_path, "push", "-q", "origin", base)
+    cfg["default_branch"] = base
+    resolution = Hive::TaskCapabilities::Resolver.new(workflow: task.workflow, cfg: cfg, project_root: task.project_root).resolve(
+      task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)))
+    Hive::TaskMeta.rewrite(folder, task_capabilities: resolution.plan.adoption)
+    Hive::TaskCapabilities::Store.new(folder).activate(resolution.plan, expected_version: nil)
+    Hive::Task.new(folder)
+  end
+
+  def test_adopted_summary_and_manual_finalize_entry_cannot_bypass_pending_verification
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, code, _pr_md = setup_finalize_task(dir)
+        cfg = Hive::Config.load(dir)
+        task = adopt_capability_finalize(folder, cfg)
+        File.write(File.join(folder, "summary.md"), "previous complete marker\n")
+        result = Hive::Stages::Finalize.run!(task, cfg)
+        assert_equal :error, result.fetch(:status)
+        assert_equal "task_capability_blocked", Hive::Markers.current(task.state_file).attrs["reason"]
+        refute_match(/arg=ready\n/, gh_argv_log)
+        refute_match(/arg=edit\n/, gh_argv_log)
+        assert_equal run!("git", "-C", code, "rev-parse", "HEAD").strip,
+          Hive::Gh.remote_branch_oid(code, task.slug, cfg: cfg)
+      end
+    end
+  end
+
+  def test_force_cannot_advance_adopted_review_or_finalize_with_missing_gate_proof
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _code, _pr_md = setup_finalize_task(dir)
+        cfg = Hive::Config.load(dir)
+        task = adopt_capability_finalize(folder, cfg)
+        %w[8-finalize 6-review].each do |stage|
+          next_folder = File.join(dir, ".hive-state/stages", stage, task.slug)
+          if next_folder != folder
+            FileUtils.mv(folder, next_folder)
+            folder = next_folder
+          end
+          assert_raises(Hive::TaskCapabilities::Gate::Blocked) do
+            Hive::Commands::Approve.new(folder, to: "9-done", force: true, quiet: true).call
+          end
+          assert File.directory?(folder)
+          refute File.exist?(File.join(dir, ".hive-state/stages/9-done", task.slug))
+        end
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
+  def test_adopted_finalizer_code_change_blocks_readiness_until_review_reruns
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, code, pr_md = setup_finalize_task(dir)
+        cfg = Hive::Config.load(dir)
+        task = adopt_capability_finalize(folder, cfg)
+        with_capability_parent(task) do |context|
+          Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg, worktree_path: code, context: context).run!
+          before_head = run!("git", "-C", code, "rev-parse", "HEAD").strip
+          spawn = lambda do |spawned_task, *_args, agent_custody:, **_kwargs|
+            agent_custody.call do
+              body = File.read(pr_md).sub("is_draft=true", "is_draft=false")
+              File.write(pr_md, body)
+              FileUtils.mkdir_p(File.join(code, "test"))
+              File.write(File.join(code, "test/capability.txt"), "changed after verification\n")
+              { status: :ok }
+            end
+          end
+          with_replaced_singleton_method(Hive::Stages::Finalize, :spawn_finalize_agent, spawn) do
+            result = Hive::Stages::Finalize.run!(task, cfg)
+            assert_equal :error, result.fetch(:status)
+            assert_equal "task_capability_blocked", Hive::Markers.current(task.state_file).attrs["reason"]
+            refute_equal before_head, run!("git", "-C", code, "rev-parse", "HEAD").strip
+            assert_equal before_head, Hive::Gh.remote_branch_oid(code, task.slug, cfg: cfg)
+            refute_match(/arg=ready\n/, gh_argv_log)
+            refute File.exist?(File.join(folder, "summary.md"))
+          end
+        end
+      end
+    end
+  end
+
+  def test_adopted_already_merged_shortcut_preserves_unrun_gate_and_terminal_annotation
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, _code, _pr_md = setup_finalize_task(dir)
+        cfg = Hive::Config.load(dir)
+        task = adopt_capability_finalize(folder, cfg)
+        with_replaced_singleton_method(Hive::Stages::Finalize, :pr_already_merged?, ->(*) { true }) do
+          assert_equal :complete, Hive::Stages::Finalize.run!(task, cfg).fetch(:status)
+        end
+        results = Hive::TaskCapabilities::ResultStore.new(folder)
+        assert_empty results.history
+        assert_equal "closed-out-of-band", results.terminal_history.last.last.fetch("disposition")
+        projected = Hive::TaskProjection::Reader.new(task_folder: task.folder, task: task).read_routine.projection
+        assert_equal "Closed out-of-band — gate not evaluated", projected["capability_terminal"]["label"]
+        refute Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg).evaluate.fetch("allowed")
+        refute_match(/arg=ready\n/, gh_argv_log)
+      end
+    end
+  end
+
+  def test_adopted_finalization_refuses_remote_head_drift_and_preserves_exact_publication_lease
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder, code, _pr_md = setup_finalize_task(dir)
+        cfg = Hive::Config.load(dir)
+        task = adopt_capability_finalize(folder, cfg)
+        with_capability_parent(task) do |context|
+          Hive::TaskCapabilities::Verification.new(task: task, cfg: cfg, worktree_path: code, context: context).run!
+          metadata = Hive::Gh.pr_metadata(9, cfg: cfg, chdir: code)
+          remote = Hive::Gh.remote_branch_oid(code, task.slug, cfg: cfg)
+          options = Hive::Stages::Finalize.capability_publication_options(task, code, task.slug, cfg)
+          assert_equal remote, options.fetch(:expected_remote_oid)
+          with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata.with(head_ref_oid: "f" * 40) }) do
+            result = Hive::Stages::Finalize.run!(task, cfg)
+            assert_equal :error, result.fetch(:status)
+            assert_equal "finalize_pr_head_mismatch", Hive::Markers.current(task.state_file).attrs["reason"]
+            assert_equal :error, Hive::Stages::Finalize.capability_publication_options(task, code, task.slug, cfg).fetch(:status)
+            refute_match(/arg=ready\n/, gh_argv_log)
+            refute_match(/arg=edit\n/, gh_argv_log)
+          end
+          with_replaced_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { raise Hive::GhError, "unavailable" }) do
+            assert_equal :error, Hive::Stages::Finalize.capability_publication_options(task, code, task.slug, cfg).fetch(:status)
+          end
+        end
       end
     end
   end

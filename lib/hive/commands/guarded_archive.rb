@@ -16,7 +16,7 @@ module Hive
     # receipts — receipt semantics live entirely with their owner.
     class GuardedArchive
       def self.call(task, current_stage:, target_stage:, project: nil,
-                    transition_guard:, observation_guard: nil, terminal_outcome: nil)
+                    transition_guard:, observation_guard: nil, terminal_outcome: nil, closure_receipt_digest: nil)
         new(
           task: task,
           current_stage: current_stage,
@@ -24,12 +24,13 @@ module Hive
           project: project,
           transition_guard: transition_guard,
           observation_guard: observation_guard,
-          terminal_outcome: terminal_outcome
+          terminal_outcome: terminal_outcome,
+          closure_receipt_digest: closure_receipt_digest
         ).call
       end
 
       def initialize(task:, current_stage:, target_stage:, project: nil,
-                     transition_guard:, observation_guard:, terminal_outcome: nil)
+                     transition_guard:, observation_guard:, terminal_outcome: nil, closure_receipt_digest: nil)
         @task = task
         @current_stage = current_stage
         @target_stage = target_stage
@@ -37,6 +38,7 @@ module Hive
         @transition_guard = transition_guard
         @observation_guard = observation_guard
         @terminal_outcome = terminal_outcome
+        @closure_receipt_digest = closure_receipt_digest
       end
 
       def call
@@ -77,6 +79,7 @@ module Hive
           json: false,
           quiet: true,
           dependency_admission: @terminal_outcome.nil?,
+          closure_receipt_digest: @closure_receipt_digest,
           observation_guard: lambda do |locked_task|
             @transition_guard.call(locked_task)
             @observation_guard&.call(locked_task)

@@ -10,6 +10,7 @@ require "hive/stages"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
 require "hive/worktree"
+require "hive/task_capabilities/gate"
 
 module Hive
   module Stages
@@ -21,7 +22,7 @@ module Hive
         # as the gate (rather than `is_draft=false` in the marker)
         # makes a partial completion that ran `gh pr ready` but
         # crashed before write_summary recoverable via `hive run`.
-        if File.exist?(File.join(task.folder, "summary.md"))
+        if File.exist?(File.join(task.folder, "summary.md")) && !Hive::TaskCapabilities::Store.new(task.folder).current
           marker = Hive::Markers.current(task.state_file)
           warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
                "mv this folder to #{Hive::Stages::DIRS.last}/ to continue"
@@ -73,6 +74,7 @@ module Hive
         # stale branch. Mirrors open_pr's open_pr_already_merged recovery; fixes
         # the recurring "merged PR stranded in 8-finalize" failure.
         if pr_already_merged?(pr_url, cfg)
+          Hive::TaskCapabilities::Gate.record_terminal!(task: task, disposition: "closed-out-of-band", reference: pr_url)
           Hive::Markers.set(task.state_file, :complete,
                             pr_url: pr_url, is_draft: "false", merged: "true")
           return { commit: "finalize_already_merged", status: :complete }
@@ -81,6 +83,8 @@ module Hive
         # Authenticate first so an auth-related push failure surfaces
         # as a clear "gh not authenticated" hard-fail (Plan R5)
         # instead of a generic git push error.
+        gate = capability_gate(task, cfg, worktree_path)
+        return gate if gate
         Hive::Gh.ensure_authenticated!(cfg)
         state_result = verify_state!(task, worktree_path, branch, cfg)
         return state_result if state_result
@@ -89,6 +93,8 @@ module Hive
         )
         return identity_result if identity_result
 
+        gate = capability_gate(task, cfg, worktree_path)
+        return gate if gate
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
         custody_manifest = Hive::ArtifactFirewall::Manifest.new(
@@ -121,6 +127,10 @@ module Hive
         validation = validate_complete_marker(task, marker, pr_url)
         return validation if validation
 
+        if Hive::TaskCapabilities::Store.new(task.folder).current
+          state_result = verify_state!(task, worktree_path, branch, cfg)
+          return state_result if state_result
+        end
         identity_result = refresh_pr_identity!(
           task, worktree_path, pr_url, cfg
         )
@@ -149,6 +159,8 @@ module Hive
           return { commit: "finalize_secret_blocked", status: :error }
         end
 
+        gate = capability_gate(task, cfg, worktree_path)
+        return gate if gate
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
         if (context = Hive::Attempts::Context.current)
@@ -168,6 +180,14 @@ module Hive
 
         write_summary(task, worktree_path, branch, pr_url, cfg)
         { commit: "pr_finalized", status: :complete }
+      end
+
+      def capability_gate(task, cfg, worktree_path)
+        Hive::TaskCapabilities::Gate.new(task: task, cfg: cfg, worktree_path: worktree_path).enforce!
+        nil
+      rescue Hive::TaskCapabilities::Gate::Blocked => error
+        Hive::Markers.set(task.state_file, :error, reason: "task_capability_blocked", detail: error.message[0, 500])
+        { commit: "finalize_capability_blocked", status: :error }
       end
 
       def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path,
@@ -305,9 +325,13 @@ module Hive
           end
         end
 
+        gate = capability_gate(task, cfg, worktree_path)
+        return gate if gate
         return nil if pushed?(worktree_path, branch, cfg: cfg)
 
-        push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg)
+        publication = capability_publication_options(task, worktree_path, branch, cfg)
+        return publication if publication[:status] == :error
+        push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, **publication)
         return nil if push_result.success? && pushed?(worktree_path, branch, cfg: cfg)
 
         # A remote-side auto-rebase (the PR branch rebased onto an advanced
@@ -331,7 +355,11 @@ module Hive
         # through to the error below, preserving that work for a human.
         forced = nil
         if head_supersedes_upstream?(worktree_path, branch)
-          forced = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, force: true)
+          gate = capability_gate(task, cfg, worktree_path)
+          return gate if gate
+          publication = capability_publication_options(task, worktree_path, branch, cfg)
+          return publication if publication[:status] == :error
+          forced = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, force: true, **publication)
           return nil if forced.success? && pushed?(worktree_path, branch, cfg: cfg)
         end
 
@@ -339,6 +367,22 @@ module Hive
                           reason: "unpushed_commits",
                           detail: ((forced&.stderr).to_s.strip.empty? ? push_result.stderr : forced.stderr).to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      def capability_publication_options(task, worktree_path, branch, cfg)
+        return {} unless Hive::TaskCapabilities::Store.new(task.folder).current
+        pr_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        parsed = Hive::Gh.parse_pull_request_url(pr_url)
+        remote = Hive::Gh.remote_branch_oid(worktree_path, branch, cfg: cfg)
+        metadata = Hive::Gh.pr_metadata(parsed.fetch("number"), cfg: cfg, chdir: worktree_path)
+        unless remote && remote == metadata.head_ref_oid && Hive::Gh.parse_pull_request_url(metadata.url) == parsed && metadata.number == parsed.fetch("number")
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_pr_head_mismatch")
+          return { commit: "finalize_pr_head_mismatch", status: :error }
+        end
+        { expected_remote_oid: remote }
+      rescue Hive::GhError, KeyError => error
+        Hive::Markers.set(task.state_file, :error, reason: "finalize_pr_identity_refresh_failed", detail: error.message[0, 200])
+        { commit: "finalize_pr_identity_refresh_failed", status: :error }
       end
 
       def refresh_pr_identity!(task, worktree_path, pr_url, cfg)

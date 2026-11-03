@@ -265,3 +265,8 @@ Most of the data IS in the `ACTIONS` hash, but `command` needs to compose multip
 - [[modules/plan_review]] — critique state and execution authority projected here
 - [[modules/task_workspace]] — read-only decision and sanitized action projection
 - [[decisions]] ADR-025 (required-and-nullable JSON envelopes) and ADR-027 (red-status diagnose-then-act)
+
+Adopted review/artifacts completion and finalize readiness also consult the
+shared capability gate. A blocked gate suppresses the ready/advance command;
+this bounded read model does not establish transition authority. Approve and
+Finalize evaluate accepted live state again at their mutation boundaries.

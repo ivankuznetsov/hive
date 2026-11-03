@@ -4,6 +4,7 @@ require "open3"
 require "hive/commands/drop"
 require "hive/git_ops"
 require "hive/worktree"
+require "hive/task_capabilities/resolver"
 
 class DropCommandTest < Minitest::Test
   include HiveTestHelper
@@ -65,6 +66,178 @@ class DropCommandTest < Minitest::Test
     with_replaced_singleton_method(
       Hive::Lock, :read_task_lock, ->(_folder) { payload }, &block
     )
+  end
+
+  def adopt_drop_task(folder, dir)
+    Hive::TaskMeta.rewrite(folder, workflow: "coding")
+    cfg = Hive::Config.load(dir)
+    cfg["review"]["ci"]["command"] = "ruby -e 'exit 1'"
+    resolution = Hive::TaskCapabilities::Resolver.new(
+      workflow: Hive::Workflows::Coding::DESCRIPTOR, cfg: cfg, project_root: dir
+    ).resolve(task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)))
+    plan = resolution.plan
+    Hive::TaskMeta.rewrite(folder, task_capabilities: plan.adoption)
+    store = Hive::TaskCapabilities::Store.new(folder)
+    store.activate(plan, expected_version: nil, approvals: resolution.approvals)
+    binding = plan.data.fetch("bindings").find { |entry| entry["id"] == "qa" }
+    check = binding.fetch("checks").first
+    identity = Hive::TaskCapabilities::Verification.check_identity(
+      plan: plan, binding: binding, check: check,
+      context: Struct.new(:attempt_id).new("previous-controller-attempt"),
+      sha: run!("git", "-C", dir, "rev-parse", "HEAD").strip,
+      environment: Hive::TaskCapabilities::Verification.environment(plan: plan)
+    )
+    result = Hive::TaskCapabilities::Result.new(identity.merge(
+      "state" => "blocked", "reason" => "verification runner was unavailable",
+      "evidence" => [], "findings" => [], "applicability" => {}
+    ))
+    digest = Hive::TaskCapabilities::ResultStore.new(folder).accept(result)
+    [ plan, digest ]
+  end
+
+  def test_drop_preserves_adopted_capability_history_as_cancelled_without_passing_checks
+    with_drop_project do |dir, ops, project|
+      slug = "cancel-capability-261103-abcd"
+      folder = create_task(dir, "6-review", slug)
+      plan, result_digest = adopt_drop_task(folder, dir)
+      worktree_root = File.join(File.dirname(dir), "#{File.basename(dir)}.worktrees")
+      worktree = Hive::Worktree.new(dir, slug, worktree_root: worktree_root)
+      worktree.create!(slug, default_branch: "master")
+      worktree.write_pointer!(folder, slug)
+      state_name = Hive::Task::STATE_FILES.fetch("review")
+      state = File.binread(File.join(folder, state_name))
+      commit_hive_state(ops, "6-review", slug)
+
+      out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+      payload = JSON.parse(out)
+      assert payload.fetch("ok")
+      assert payload.fetch("worktree_removed")
+      assert payload.fetch("branch_deleted")
+      refute File.exist?(worktree.path)
+      archive = File.join(dir, ".hive-state/stages/9-done", slug)
+      refute File.exist?(folder)
+      assert File.directory?(archive)
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(archive).current.digest
+      results = Hive::TaskCapabilities::ResultStore.new(archive)
+      assert_equal [ result_digest ], results.history.map(&:first)
+      assert_equal "blocked", results.history.first.last.state
+      assert_equal "cancelled", results.terminal_history.last.last.fetch("disposition")
+      assert_equal "Cancelled — gate not evaluated", results.terminal_history.last.last.fetch("label")
+      assert_equal state, File.binread(File.join(archive, state_name))
+      assert Hive::TaskMeta.read(archive)[:completed_at]
+      gate = Hive::TaskCapabilities::Gate.new(task: Hive::Task.new(archive), cfg: Hive::Config.load(dir)).evaluate
+      refute gate.fetch("allowed")
+      assert_equal "Cancelled — gate not evaluated", gate.fetch("terminal_dispositions").last.fetch("label")
+      assert_empty run!("git", "-C", File.join(dir, ".hive-state"), "status", "--porcelain", "--", "stages", "logs").strip
+    end
+  end
+
+  def test_drop_archive_collision_preserves_adopted_history_before_cleanup
+    with_drop_project do |dir, ops, project|
+      slug = "cancel-collision-261103-abcd"
+      folder = create_task(dir, "6-review", slug)
+      adopt_drop_task(folder, dir)
+      archive = create_task(dir, "9-done", slug, body: "existing archive\n")
+      chain = File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+      commit_hive_state(ops, "6-review", slug)
+      drop = Hive::Commands::Drop.new(slug, project: project, json: true)
+      drop.define_singleton_method(:close_draft_prs) { |_| raise "publication cleanup must not precede archive admission" }
+
+      out, _err, status = with_captured_exit { drop.call }
+      refute_equal 0, status
+      assert_includes JSON.parse(out).fetch("message"), "archive already exists"
+      assert_equal chain, File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+      assert_equal "existing archive\n", File.read(File.join(archive, Hive::Task::STATE_FILES.fetch("done")))
+    end
+  end
+
+  def test_drop_rejects_symlinked_archive_parent_before_changing_adopted_history
+    with_drop_project do |dir, ops, project|
+      slug = "cancel-symlink-261103-abcd"
+      folder = create_task(dir, "6-review", slug)
+      adopt_drop_task(folder, dir)
+      chain = File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+      terminal = File.join(dir, ".hive-state/stages/9-done")
+      FileUtils.rm_rf(terminal)
+      outside = File.join(dir, "outside-archive")
+      FileUtils.mkdir_p(outside)
+      File.symlink(outside, terminal)
+      commit_hive_state(ops, "6-review", slug)
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      refute_equal 0, status
+      assert_includes JSON.parse(out).fetch("message"), "archive"
+      assert_equal chain, File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+      assert_empty Dir.children(outside)
+    end
+  end
+
+  def test_drop_rejects_missing_archive_parent_target_without_changing_history
+    with_drop_project do |dir, ops, project|
+      slug = "cancel-dangling-261103-abcd"
+      folder = create_task(dir, "6-review", slug)
+      adopt_drop_task(folder, dir)
+      chain = File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+      terminal = File.join(dir, ".hive-state/stages/9-done")
+      FileUtils.rm_rf(terminal)
+      File.symlink(File.join(dir, "missing-archive"), terminal)
+      commit_hive_state(ops, "6-review", slug)
+
+      out, _err, status = with_captured_exit do
+        Hive::Commands::Drop.new(slug, project: project, json: true).call
+      end
+      refute_equal 0, status
+      assert_includes JSON.parse(out).fetch("message"), "archive parent is unavailable"
+      assert_equal chain, File.binread(File.join(folder, Hive::TaskCapabilities::Store::CHAIN))
+    end
+  end
+
+  def test_drop_rejects_duplicate_adopted_sources_before_recording_cancellation
+    with_drop_project do |dir, _ops, project|
+      slug = "cancel-duplicate-261103-abcd"
+      first = create_task(dir, "6-review", slug)
+      adopt_drop_task(first, dir)
+      second = File.join(dir, ".hive-state/stages/4-execute", slug)
+      FileUtils.cp_r(first, second)
+      context = Hive::Commands::Drop::TaskContext.new(
+        slug: slug, project_name: project, project_root: dir,
+        hive_state_path: File.join(dir, ".hive-state"),
+        folders: [ { folder: first }, { folder: second } ]
+      )
+      error = assert_raises(Hive::InvalidTaskPath) do
+        Hive::Commands::Drop.new(slug).send(:retained_capability_tasks, context)
+      end
+      assert_includes error.message, "multiple adopted task folders"
+      assert_empty Hive::TaskCapabilities::ResultStore.new(first).terminal_history
+      assert_empty Hive::TaskCapabilities::ResultStore.new(second).terminal_history
+    end
+  end
+
+  def test_drop_retention_collision_during_copy_preserves_source_and_existing_archive
+    with_drop_project do |dir, ops, project|
+      slug = "cancel-copy-race-261103-abcd"
+      folder = create_task(dir, "6-review", slug)
+      plan, _digest = adopt_drop_task(folder, dir)
+      commit_hive_state(ops, "6-review", slug)
+      move = Hive::TaskMeta.method(:relocate_across_devices!)
+      archive = File.join(dir, ".hive-state/stages/9-done", slug)
+      collision = lambda do |source, destination, observation|
+        Dir.mkdir(destination)
+        File.write(File.join(destination, "existing.txt"), "preserve this archive")
+        move.call(source, destination, observation)
+      end
+      out, _err, status = with_replaced_singleton_method(Hive::TaskMeta, :relocate_across_devices!, collision) do
+        with_captured_exit { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+      end
+      refute_equal 0, status
+      assert_includes JSON.parse(out).fetch("message"), "archive already exists"
+      assert_equal "preserve this archive", File.read(File.join(archive, "existing.txt"))
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(folder).current.digest
+      refute Hive::TaskMeta.read(folder)[:completed_at]
+      assert_equal "blocked", Hive::TaskCapabilities::ResultStore.new(folder).history.first.last.state
+    end
   end
 
   def test_drop_without_a_pr_reports_pr_cleanup_as_clean

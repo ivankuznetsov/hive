@@ -12,6 +12,7 @@ require "hive/task_projection/reader"
 require "hive/markers"
 require "hive/draft_pr_receipt"
 require "hive/terminal_outcome"
+require "hive/task_capabilities/gate"
 require "hive/plan_review/projection"
 require "hive/plan_review/planner_revision"
 require "hive/plan_review/decision_triage"
@@ -433,6 +434,13 @@ module Hive
       return override if override
       return patrol_fix_action if patrol_fix
 
+      if @task.respond_to?(:workflow) && @task.respond_to?(:id) && @task.respond_to?(:folder) && [ "review", "artifacts", "finalize" ].include?(@task.stage_name) &&
+          (@task.stage_name == "finalize" || %i[complete review_complete].include?(marker.name))
+        gate = Hive::TaskCapabilities::Gate.new(task: @task, cfg: @config).read_state
+        unless gate.fetch("allowed")
+          return ACTIONS.fetch(:blocked).merge(label: "Verification required: #{gate['reason'] || gate['state']}", command: nil)
+        end
+      end
       kind_action
     end
 

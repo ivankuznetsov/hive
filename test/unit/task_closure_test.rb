@@ -1,3 +1,4 @@
+require "hive/task_capabilities/resolver"
 require "test_helper"
 require "hive/task_closure"
 require "hive/commands/run"
@@ -1565,6 +1566,38 @@ class TaskClosureTest < Minitest::Test
           expected_head: "b" * 40,
           expected_merge_oid: "a" * 40
         )
+      end
+    end
+  end
+
+  def test_adopted_operator_and_daemon_closure_preserve_gate_history_and_link_receipt
+    [ "operator", "daemon" ].each do |mode|
+      with_closure_project do |original, project|
+        cfg = Hive::Config.load(original.project_root)
+        resolution = Hive::TaskCapabilities::Resolver.new(workflow: original.workflow, cfg: cfg, project_root: original.project_root).resolve(
+          task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(original.folder)))
+        Hive::TaskMeta.rewrite(original.folder, task_capabilities: resolution.plan.adoption)
+        Hive::TaskCapabilities::Store.new(original.folder).activate(resolution.plan, expected_version: nil)
+        task = Hive::Task.new(original.folder)
+        File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\npr_number: 42\nhead_oid: #{'b' * 40}\n---\n")
+        service = service_for
+        receipt = if mode == "daemon"
+          service.reconcile_remote_merge!(task: task, project: project, pr_url: "https://github.com/acme/app/pull/42", expected_head: "b" * 40, expected_merge_oid: "a" * 40)
+        else
+          input = { "reason" => "already_delivered", "evidence" => [ "https://github.com/acme/app/pull/42" ] }
+          preview = service.preview(task: task, project: project, input: input)
+          service.confirm!(task: task, project: project, input: input, preview_digest: preview.preview_digest, operator: "tester", channel: "cli", authorized: true)
+        end
+        archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+        results = Hive::TaskCapabilities::ResultStore.new(archived.folder)
+        assert_empty results.history
+        terminal = results.terminal_history.last
+        assert_equal "closed-out-of-band", terminal.last.fetch("disposition")
+        assert_equal "closure:#{receipt.fetch('receipt_digest')}", terminal.last.fetch("reference")
+        projected = Hive::TaskClosure.projection(archived, project: project)
+        assert_equal terminal.first, projected.dig("capability_disposition", "result_digest")
+        assert_equal receipt, service.send(:persist_receipt!, archived, receipt)
+        assert_equal "Closed out-of-band — gate not evaluated", projected.dig("capability_disposition", "label")
       end
     end
   end

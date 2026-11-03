@@ -71,7 +71,7 @@ module Hive
     # Centralize the one default attempt-store construction here so callers
     # cannot grow alternate attempt composition roots merely to validate a
     # task-journal append.
-    def self.for_context(task, context:, attempt_store: nil,
+    def self.for_context(task, context:, attempt_store: nil, commit_generation: nil,
                          clock: -> { Time.now.utc })
       return nil unless context && !context.attempt_id.to_s.empty? &&
                         !context.task_generation.nil?
@@ -90,6 +90,7 @@ module Hive
         attempt_id: context.attempt_id,
         task_generation: context.task_generation,
         ownership_generation: context.ownership_generation,
+        commit_generation: commit_generation,
         attempt_store: attempt_store,
         clock: clock
       )

@@ -34,6 +34,8 @@ module Hive
       commit_observed
       push_observed
       pr_observed
+      capability_gate_observed
+      capability_terminal
       check_observed
       review_observed
       merge_observed

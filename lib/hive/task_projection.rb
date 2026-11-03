@@ -203,6 +203,14 @@ module Hive
       @data["gates"][rule.transition] = Hive::Conditions::GateEvaluator.new(
         projection: @data, rule: rule
       ).evaluate.to_h
+      capability_records = authoritative.select { |record| record["event_type"] == "activity_recorded" }
+      gate = capability_records.reverse.find do |record|
+        record.dig("payload", "activity_kind") == "capability_gate_observed" && record["task_generation"] == generation &&
+          record["commit_generation"] == commit_generation && record.dig("payload", "evaluated_sha") == head_sha
+      end
+      @data["capability_gate"] = gate.fetch("payload").reject { |key, _| %w[activity_kind operation_id correlation_id].include?(key) } if gate
+      terminal = capability_records.reverse.find { |record| record.dig("payload", "activity_kind") == "capability_terminal" }
+      @data["capability_terminal"] = terminal.fetch("payload").slice("result_digest", "disposition", "reference", "label") if terminal
       @data = self.class.canonical(@data)
       self
     end
@@ -220,6 +228,12 @@ module Hive
     def with_closure(closure)
       copy = to_h
       copy["closure"] = Hive::StringifyKeys.call(closure)
+      self.class.from_data(copy)
+    end
+
+    def with_capability_terminal(terminal)
+      copy = to_h
+      copy["capability_terminal"] = Hive::StringifyKeys.call(terminal)
       self.class.from_data(copy)
     end
 

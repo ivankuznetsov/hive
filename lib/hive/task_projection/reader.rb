@@ -66,19 +66,44 @@ module Hive
       end
 
       def read(marker: nil)
-        replay(Hive::TaskProjection.replay_journal(journal_snapshot), marker: marker)
+        capability_terminal_overlay(replay(Hive::TaskProjection.replay_journal(journal_snapshot), marker: marker))
       end
 
-      def read_routine(marker: nil) = bounded_replay(marker: marker, memoize: true)
+      def read_routine(marker: nil)
+        result = bounded_replay(marker: marker, memoize: true)
+        projection = capability_terminal_overlay(result.projection)
+        projection.equal?(result.projection) ? result : result.with(projection: projection)
+      end
 
       def read_bounded(marker: nil, limits: Hive::TaskWorkspace::Limits.new,
                        journal_suffix_max_bytes: nil, journal_event_limit: nil)
         byte_limit = journal_suffix_max_bytes || limits.fetch(:journal_suffix_bytes)
         event_limit = journal_event_limit || limits.fetch(:journal_events)
-        bounded_replay(marker: marker, byte_limit: byte_limit, event_limit: event_limit)
+        result = bounded_replay(marker: marker, byte_limit: byte_limit, event_limit: event_limit)
+        projection = capability_terminal_overlay(result.projection)
+        projection.equal?(result.projection) ? result : result.with(projection: projection)
       end
 
       private
+
+      # Terminal custody also exists before a first durable attempt. Revalidate
+      # its accepted bytes after cache lookup; it confers no gate authority.
+      def capability_terminal_overlay(projection)
+        return projection unless projection
+        anchors = %w[execution-plan-current.json capability-accepted.jsonl]
+        adopted = @expected_task&.instance_variable_get(:@meta)&.dig(:task_capabilities)
+        return projection unless adopted || anchors.any? { |name| File.exist?(File.join(task_folder, name)) || File.symlink?(File.join(task_folder, name)) }
+        require "hive/task_capabilities/result_store"
+        plan = Hive::TaskCapabilities::Store.new(task_folder).current
+        if @expected_task&.respond_to?(:id) && plan && plan.data.dig("task", "id") != @expected_task.id&.to_s
+          raise Hive::TaskCapabilities::Store::InvalidState, "task identity changed before terminal projection"
+        end
+        terminal = Hive::TaskCapabilities::ResultStore.new(task_folder).terminal_history.last
+        return projection unless terminal
+        projection.with_capability_terminal(terminal.last.slice("disposition", "label", "reference").merge("result_digest" => terminal.first))
+      rescue Hive::Error, SystemCallError => error
+        projection.with_capability_terminal("state" => "invalid", "reason" => "capability terminal history unavailable: #{error.message}"[0, 500])
+      end
 
       def bounded_replay(marker:, byte_limit: nil, event_limit: nil, memoize: false)
         cached, cache_key, bytes = if memoize

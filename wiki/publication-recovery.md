@@ -28,6 +28,15 @@ head, reruns secret scanning, and changes only the local publication record.
 It does not push, edit GitHub, clear a failure marker, or approve code. Normal
 workflow retry and validation remain responsible for subsequent advancement.
 
+## Adopted coding verification
+
+The pre-stage rebase publisher checks the capability gate for adopted finalize
+tasks before its exact leased push. A complete patch-identical SHA rewrite may
+retain proof only with unchanged base tree, check/actor/scope and environment,
+and records an accepted equivalence receipt. Base/code-byte changes require
+review to rerun. A blocked rewrite remains local with a publication warning;
+unrelated implementation/review publication keeps its existing behavior.
+
 ## Patrol Fix
 
 Independent review uses the same disposable exact-HEAD materialization as
@@ -55,3 +64,11 @@ Never use a blanket rule or directory exception for a fixture finding.
 Operational status preserves a receipt-bound controller failure and its owner
 ahead of the generic no-progress scheduler brake. A controller's lack of a text
 marker is not evidence that its agent failed to produce one.
+
+The stored base context includes the observed target ref/tree as well as the
+incorporated merge base. Target tree changes stale checks even while task HEAD
+is unchanged. Authoritative gate enforcement refreshes the existing origin base
+through the controller's ordinary fetch path; a failed refresh blocks. Therefore
+`--no-rebase` suppresses rewriting, not base freshness. Review reruns checks at
+the final task SHA and records the new observed base context; this introduces no
+merge-testing scheduler. Reader projections make no network requests.

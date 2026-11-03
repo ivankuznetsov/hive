@@ -292,8 +292,15 @@ output bound and environment match the pinned check. Skipped CI cannot do so.
 Adopted browser checks use their own pinned actor through the generic adapter;
 legacy browser warnings and passed JSON alone never establish adopted QA proof.
 Legacy tasks keep the existing complete shortcut and browser soft-warning path.
-The aggregate is evidence state for a separate finalization consumer; adoption
-remains disabled until publication gates and operator controls are complete.
+The dedicated capability gate now checks exit independently of completion
+markers. Failed verifier findings enter `reviews/capabilities-NN.md` before
+ordinary triage, then use the existing pass/time bounds and fix machinery.
+Checks rerun after code commits. Unavailable checks leave a recoverable
+`REVIEW_WAITING phase=verification reason=task_capability_blocked`; an already
+complete adopted retry can reopen bounded rework when a current check fails.
+Early local/hosted CI failures retain their controller blocker and independently
+run selected verification rather than inventing a command failure receipt.
+Adoption remains disabled until operator controls are complete.
 
 ## Tests
 

@@ -148,7 +148,7 @@ module Hive
         raise InvalidState, "capability store directory must not be a symlink" if File.symlink?(directory)
         path = File.join(directory, "#{digest}.json")
         value = parse_file(path)
-        unless ::Digest::SHA256.file(path).hexdigest == digest && canonical(value) == File.binread(path)
+        unless ::Digest::SHA256.file(path).hexdigest == digest && canonical(value).b == File.binread(path)
           raise InvalidState, "capability blob digest mismatch"
         end
         value

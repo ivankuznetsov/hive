@@ -1,3 +1,4 @@
+require "pathname"
 require "fileutils"
 require "json"
 require "yaml"
@@ -13,12 +14,13 @@ require "hive/stages"
 require "hive/workflows"
 require "hive/workflows/project"
 require "hive/worktree"
+require "hive/task_capabilities/gate"
 
 module Hive
   module Commands
-    # `hive drop TARGET` — hard-delete an active task from Hive state and
-    # the associated project worktree/branch. This is intentionally not
-    # an archive: no dropped bucket, no undo, no reason prompt.
+    # Cancel an active task and clean up its worktree/branch. Adopted tasks
+    # retain their execution-plan/result history in the terminal stage;
+    # legacy task folders keep their existing deletion behavior.
     class Drop
       include Hive::Schemas::EnvelopeEmitter
 
@@ -297,6 +299,12 @@ module Hive
 
       def cleanup_context(context, killed:)
         folders = context.folders
+        @retained_capability_tasks = retained_capability_tasks(context)
+        @retained_capability_tasks.each do |entry|
+          Hive::TaskCapabilities::Gate.record_terminal!(
+            task: entry.fetch(:task), disposition: "cancelled", reference: "hive drop"
+          )
+        end
         pr_closed = close_draft_prs(folders)
         worktree_removed = remove_worktrees(context, folders)
         branch_deleted = delete_branch(context)
@@ -309,6 +317,36 @@ module Hive
           worktree_removed: worktree_removed,
           branch_deleted: branch_deleted
         }
+      end
+
+      def retained_capability_tasks(context)
+        retained = context.folders.filter_map do |entry|
+          folder = entry.fetch(:folder)
+          next unless Hive::TaskCapabilities::Store.new(folder).current
+          Hive::TaskCapabilities::ResultStore.new(folder).history
+          task = Hive::Task.new(folder)
+          destination = File.join(context.hive_state_path, "stages", task.workflow.stages.last.dir, task.slug)
+          validate_capability_archive!(destination)
+          { source: folder, destination: destination, task: task }
+        end
+        if retained.map { |entry| entry.fetch(:destination) }.uniq.size != retained.size
+          raise Hive::InvalidTaskPath, "multiple adopted task folders would share the cancelled task archive; reconcile the duplicate folders first"
+        end
+        retained
+      end
+
+      def validate_capability_archive!(destination)
+        parent = File.dirname(destination)
+        stages = File.dirname(parent)
+        unless File.realpath(stages) == stages && File.directory?(stages) &&
+            (!File.exist?(parent) && !File.symlink?(parent) || File.realpath(parent) == parent && File.directory?(parent))
+          raise Hive::InvalidTaskPath, "cancelled task archive parent must be a regular directory inside Hive state"
+        end
+        if File.exist?(destination) || File.symlink?(destination)
+          raise Hive::InvalidTaskPath, "cancelled task archive already exists: #{destination}; preserve that archive and reconcile the collision before retrying"
+        end
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP
+        raise Hive::InvalidTaskPath, "cancelled task archive parent is unavailable; restore its regular Hive state directory before retrying"
       end
 
       def with_task_leases(folders, &block)
@@ -551,8 +589,27 @@ module Hive
         # copies are already excluded by the resolver), so this is a no-op for
         # the same coding rows as before.
         context.from_stages.each do |stage|
-          FileUtils.rm_rf(File.join(context.hive_state_path, "stages", stage, context.slug))
+          source = File.join(context.hive_state_path, "stages", stage, context.slug)
+          retained = Array(@retained_capability_tasks).find { |entry| entry[:source] == source }
+          if retained
+            retain_cancelled_task!(source, retained.fetch(:destination))
+          else
+            FileUtils.rm_rf(source)
+          end
         end
+      end
+
+      def retain_cancelled_task!(source, destination)
+        validate_capability_archive!(destination)
+        FileUtils.mkdir_p(File.dirname(destination))
+        Hive::TaskMeta.with_observation(source) do |observation|
+          # Exclusive destination creation and custody-fenced copying also
+          # preserve an archive created after the admission check.
+          Hive::TaskMeta.relocate_across_devices!(source, destination, observation)
+          Hive::TaskMeta.write_completed_at_once(destination, Time.now.utc, observation: observation)
+        end
+      rescue Errno::EEXIST
+        raise Hive::InvalidTaskPath, "cancelled task archive already exists: #{destination}; preserve that archive and reconcile the collision before retrying"
       end
 
       # Active stage dirs across EVERY registered workflow (coding + generic),
@@ -575,6 +632,9 @@ module Hive
       def record_drop_commit!(context)
         rel_paths = context.from_stages.map { |stage| File.join("stages", stage, context.slug) }
         rel_paths << File.join("logs", context.slug)
+        Array(@retained_capability_tasks).each do |entry|
+          rel_paths << Pathname.new(entry.fetch(:destination)).relative_path_from(Pathname.new(context.hive_state_path)).to_s
+        end
         body = "Dropped task #{context.slug} from stages: #{context.from_stages.join(', ')}"
         # `allow_empty: true` collapses the result to the single
         # "committed" symbol — drop always writes a commit so the

@@ -381,3 +381,83 @@ this clean verification boundary; the separate gate/rework consumer must explain
 those pending independent checks using the terminal CI evidence.
 The finalization consumer must validate the aggregate independently and preserve
 blocked/unrun checks when recording separate terminal closure dispositions.
+
+## Finalization gates and terminal custody
+
+`TaskCapabilities::Gate` is separate from forceable execute conditions. It reads
+strict current adoption/plan/result state, the clean local SHA and pinned check
+environment; missing, replaced, corrupt or unaccepted state cannot authorize a
+transition. QA needs at least one passing behavior check. An operator QA Off
+exception remains `waived`; hard-required QA cannot waive. Other configured
+verification capabilities use the same evaluator.
+
+Review checks the gate at exit. Capability findings retain check/finding/result
+identities in `reviews/capabilities-NN.md` and enter the existing triage/fix loop.
+A fix changes the SHA and reruns checks; exhausted pass/time limits stay blocked.
+Scope expansion and risk disposition require an operator. Review shares one
+verification session and wall-clock deadline across its passes; no aggregate
+monetary attempt budget is invented. Approved actor caps remain per spawn.
+
+Forward admission beyond review checks the gate before force handling and again
+under the task lease. Finalize checks before its agent, pushes and readiness,
+including summary retries and code committed by its clean-exit backstop. The
+pre-stage rebase publication hook also checks adopted finalize tasks. Local and
+hosted PR heads are compared exactly; capability equivalence never relaxes an
+exact remote push lease.
+
+Verification stores the complete ordered patch IDs, binary task-delta digest,
+base commit/tree and relevant base blobs. A SHA-only rewrite may reuse passing
+proof only when the complete delta, base tree, check/actor/scope and environment
+are identical. Accepted equivalence receipts retain old/new SHAs and both
+identities. Any base byte change is conservatively relevant because arbitrary
+checks have no declared narrower input set; rerun review after such changes.
+
+Unavailable approved security routes are rechecked even with historic passing
+results. Initial unavailable-route plans preserve the exact approved actor tuple
+instead of inventing billing metadata. Restoration must match provider,
+profile/model/effort, account and launch binding, plus the runtime fingerprint, installed executable path/bytes
+and accepted approval envelope. Observed route/billing metadata is retained with
+the correlated result. Initially available routes retain full equality. The
+initial unavailable blocker is historical context; restoring the exact route
+and producing admissible checks can clear the gate without changing the plan.
+
+`ResultStore` validates explicit `terminal`, `equivalence` and
+`finding-disposition` records separately from check observations. Finding-scoped
+risk acceptance projects a scoped `waived` disposition with finding references
+and can cover actual current failed security findings only; it
+cannot cover unrun/unavailable checks or bypass current route availability.
+Check history preserves the original failed observation.
+
+Already-merged Finalize, operator closure and merge-watcher reconciliation record
+`Closed out-of-band — gate not evaluated`, linked to the PR or exact closure
+receipt. Cancellation records `Cancelled — gate not evaluated`. Neither changes
+blocked/unrun checks into passed or waived. A validated closure receipt may
+retire directly into the terminal archive through the guarded archive protocol;
+its receipt digest is revalidated under the move lease. Terminal reporting may
+finish with that exact accepted closure link, while active-stage admission stays
+enforced. Missing worktrees never hide the retained terminal annotation.
+
+`capability_gate_observed` journal activities carry bounded state, check-result
+digests and plan/SHA identity; projection selects only the current task and
+commit generation. `capability_terminal` activities retain terminal custody.
+Full command output and evidence remain task detail data, outside fleet facts.
+Adoption remains disabled until operator recovery controls are complete.
+
+`Gate#read_state` is explicitly a read model: it uses the plan's pinned execution
+environment, so a Rails viewer cannot reinterpret results using its own
+`RAILS_ENV`, `NODE_ENV` or bundle paths. `Gate#evaluate` and `#enforce!` use the
+actual controller environment; the latter never accepts a viewer environment as
+authority. Capture-time web versus daemon environment parity still needs its
+cross-surface proof before adoption is enabled (see [[gaps]]).
+
+The stored base context includes the observed target ref/tree as well as the
+incorporated merge base. Target tree changes stale checks even while task HEAD
+is unchanged. Authoritative gate enforcement refreshes the existing origin base
+through the controller's ordinary fetch path; a failed refresh blocks. Therefore
+`--no-rebase` suppresses rewriting, not base freshness. Review reruns checks at
+the final task SHA and records the new observed base context; this introduces no
+merge-testing scheduler. Reader projections make no network requests.
+The retained task dependency base takes precedence over the configured default
+branch; otherwise the controller uses the existing origin default. Git reads
+and refreshes use the exact branch ref, so an ambiguous tag cannot supply base
+identity. Local repositories without origin retain their exact local base ref.

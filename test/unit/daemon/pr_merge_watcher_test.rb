@@ -1,3 +1,5 @@
+require "hive/task_capabilities/resolver"
+require "hive/one_shot/schedule_state"
 require "test_helper"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/status_consumer"
@@ -152,6 +154,12 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
     with_merge_project(stages: [ "6-review" ]) do |tasks, _|
       task = tasks.first
       prepare_test_runtime_project(task.project_root, state_home: Hive::Paths.state_home)
+      cfg = Hive::Config.load(task.project_root)
+      resolution = Hive::TaskCapabilities::Resolver.new(workflow: task.workflow, cfg: cfg, project_root: task.project_root).resolve(
+        task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(task.folder)))
+      Hive::TaskMeta.rewrite(task.folder, task_capabilities: resolution.plan.adoption)
+      Hive::TaskCapabilities::Store.new(task.folder).activate(resolution.plan, expected_version: nil)
+      task = Hive::Task.new(task.folder)
       gh = FakeGh.new(state: "MERGED")
       crashing = Object.new
       crashing.define_singleton_method(:reconcile_remote_merge!) do |**kwargs|
@@ -169,11 +177,17 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
       restarted = build_watcher(gh: gh, task_closure: Hive::TaskClosure)
       restarted.observe([ row_for(task) ], now: T0 + 1)
-      assert_equal :archived, restarted.tick(now: T0 + 1).first[:status]
+      restarted_result = restarted.tick(now: T0 + 1).first
+      assert_equal :archived, restarted_result[:status], restarted_result.inspect
       archived = Hive::TaskResolver.new(task.slug, project_filter: "app").resolve
       assert_equal "9-done", stage_dir(archived)
       assert_equal original.receipt.fetch("receipt_digest"),
                    Hive::TaskClosure.read(archived, project: "app").receipt.fetch("receipt_digest")
+      results = Hive::TaskCapabilities::ResultStore.new(archived.folder)
+      assert_empty results.history
+      assert_equal "closed-out-of-band", results.terminal_history.last.last.fetch("disposition")
+      projection = Hive::TaskClosure.projection(archived, project: "app")
+      assert_equal "Closed out-of-band — gate not evaluated", projection.dig("capability_disposition", "label")
     end
   end
 

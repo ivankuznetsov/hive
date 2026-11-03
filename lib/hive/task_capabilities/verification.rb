@@ -78,7 +78,7 @@ module Hive
           actor["effort"] = effort if effort
           Definition.actor(actor, label: "browser verification")
           actor_binding = { "id" => binding.fetch("id"), "stage" => binding.fetch("stage"),
-            "actor" => actor, "actor_fingerprint" => Hive::WorkflowPackage::Configuration.profile_fingerprint(profile),
+            "actor" => actor, "actor_binary" => ActorRunner.runtime_identity(profile), "actor_fingerprint" => Hive::WorkflowPackage::Configuration.profile_fingerprint(profile),
             "actor_route" => Hive::ProviderRouting::Configuration.capability_route(cfg: cfg, actor: actor),
             "permissions" => options["permissions"] || "read-only",
             "targets" => [ "capability-source-#{binding.fetch('id')}-#{check.fetch('id')}" ],
@@ -114,15 +114,17 @@ module Hive
         environment = self.class.environment(plan: @plan)
         sha = git!(:head_oid).strip
         dirty = !git!(:status).empty?
+        target_branch = (@task.respond_to?(:base_branch) && @task.base_branch) || @cfg["default_branch"]
+        task_delta = Result.task_delta(@worktree, sha: sha, target_branch: target_branch)
         @plan.data.fetch("bindings").select { |binding| binding["kind"] == "verification" && binding["stage"] == "review" }.each do |binding|
           completed = {}
           ordered_checks(binding.fetch("checks")).each do |check|
-            current = @results.current(binding: binding, check: check, plan: @plan, sha: sha, environment: environment)
+            current = @results.current(binding: binding, check: check, plan: @plan, sha: sha, environment: environment, task_delta: task_delta)
             if !dirty && %w[passed not-applicable].include?(current["state"])
               completed[check.fetch("id")] = current.fetch("state")
               next
             end
-            identity = self.class.check_identity(plan: @plan, binding: binding, check: check, context: @context, sha: sha, environment: environment)
+            identity = self.class.check_identity(plan: @plan, binding: binding, check: check, context: @context, sha: sha, environment: environment).merge("task_delta" => task_delta)
             runner = check["runner"] || {}
             reason = if dirty
               "verification requires a clean implementation worktree; commit or restore changes before retrying"
@@ -141,7 +143,8 @@ module Hive
             completed[check.fetch("id")] = result.state
           end
         end
-        @results.aggregate(plan: @plan, sha: git!(:head_oid).strip, environment: self.class.environment(plan: @plan))
+        final_sha = git!(:head_oid).strip
+        @results.aggregate(plan: @plan, sha: final_sha, environment: self.class.environment(plan: @plan), task_delta: Result.task_delta(@worktree, sha: final_sha, target_branch: target_branch))
       ensure
         @session&.close if @owned_session
         @session = nil if @owned_session
@@ -226,7 +229,7 @@ module Hive
           "Identity: #{Hive::WorkflowPackage::CanonicalJSON.generate(identity.slice(*Result::IDENTITY_KEYS))}. " \
           "Planned check: #{Hive::WorkflowPackage::CanonicalJSON.generate(check.reject { |key, _| key == 'runner' })}"
         raw = ActorRunner.new(task: @task, cfg: @cfg, session: @session, context: @context).run(actor_binding, prompt: prompt)
-        identity = identity.merge("spawn_id" => raw.fetch(:capability_spawn_id))
+        identity = identity.merge("spawn_id" => raw.fetch(:capability_spawn_id), "observed_route" => raw.fetch(:capability_route))
         unless raw[:status] == :ok
           return record(identity, "blocked", reason: "selected verification actor unavailable: #{raw[:error_reason] || raw[:error_message] || raw[:status]}")
         end
@@ -248,7 +251,7 @@ module Hive
             raise Result::Invalid, "existing check evidence belongs to another revision, configuration, environment or attempt"
           end
           raise Result::Invalid, "existing check observation is incomplete" unless %w[passed failed blocked not-applicable].include?(proposal.state)
-          return proposal
+          return Result.new(proposal.data.merge("task_delta" => identity["task_delta"]))
         end
         unless proposal.is_a?(Hash) && (proposal.keys - PROPOSAL_KEYS).empty? && Result::IDENTITY_KEYS.all? { |key| proposal[key] == identity.fetch(key) }
           raise Result::Invalid, "verification proposal identity or schema does not match the planned check"

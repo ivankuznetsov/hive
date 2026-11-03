@@ -208,3 +208,15 @@ and holds invalid dependency state. Agent callers use `approve` for:
 - [[commands/run]]
 - [[commands/status]]
 - [[stages/index]]
+
+## Adopted capability admission
+
+Any forward destination beyond coding review requires the dedicated capability
+gate, including skipped stages and `--force`. It is evaluated at preflight and
+again under the task lease. Backward recovery stays available. Projected
+conditions and completion markers never establish capability authority.
+
+The internal guarded archive protocol may carry an exact validated closure
+receipt digest into a terminal-only move. The receipt is checked again under
+the lease; this records external closure/cancellation rather than authorizing
+finalization or converting failed checks into success.

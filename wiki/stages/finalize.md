@@ -103,3 +103,17 @@ not repeat accepted work.
 
 - [[stages/open-pr]] · [[stages/review]] · [[stages/done]]
 - [[state-model]] · [[commands/stage_action]]
+
+## Adopted execution-plan gates
+
+Adopted tasks recheck `TaskCapabilities::Gate` before finalizer work, branch
+publication and `gh pr ready`. A pre-existing summary cannot bypass it.
+Clean-exit commits after the finalizer stale prior verification before any ready
+call. Exact local/PR head comparison and exact remote-OID publication leases
+remain mandatory even with a proven SHA-only evidence equivalence.
+
+Already-merged shortcuts retain an accepted `closed-out-of-band` disposition,
+labelled `Closed out-of-band — gate not evaluated`. TaskClosure and the merge
+watcher preserve the same annotation with the exact closure-receipt link;
+blocked/unrun checks remain visible. A validated receipt authorizes terminal
+archive custody only. See [[modules/task_capabilities]].

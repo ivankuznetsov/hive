@@ -555,6 +555,125 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
+  def test_bot_startup_environment_file_adds_only_unset_resolution_keys_on_both_platforms
+    [ :linux, :macos ].each do |platform|
+      with_tmp_dir do |home|
+        definitions = definitions_for(home, platform, names: [ "bot" ])
+        startup_file = File.join(home, "bot-config/.env")
+        settings = { "PATH" => "/service/bin", "HIVE_HOME" => File.dirname(startup_file),
+                     "XDG_CONFIG_HOME" => File.join(home, "ignored-config") }
+        write_service_settings(definitions.fetch("bot"), settings)
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        write(startup_file, <<~ENVFILE)
+          # Bot startup uses first assignment and strips outer quotes.
+          HIVE_HOME=#{home}/do-not-load
+          XDG_CONFIG_HOME=#{home}/also-do-not-load
+          CODEX_BIN='#{home}/file codex'
+          CODEX_BIN=/ignored/duplicate
+          PATH=/ignored/file-path
+          SECRET=#{secret}
+        ENVFILE
+        write(File.join(home, "do-not-load/.env"), "CODEX_BIN=/wrong/recursive-codex\n")
+        result = reader(home, definitions: definitions).call.first
+        assert result.complete?, result.reasons.inspect
+        assert_equal "#{home}/file codex", result.environment.fetch("CODEX_BIN")
+        assert_equal "/service/bin", result.environment.fetch("PATH")
+        assert_equal %w[CODEX_BIN HOME PATH], result.environment.keys.sort
+        assert result.sources.any? { |source| source[:path] == startup_file }
+        refute_includes result.inspect, secret
+        assert result.probe_allowed?
+      end
+    end
+  end
+
+  def test_bot_startup_file_uses_service_home_and_xdg_config_with_existing_override_precedence
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux, names: [ "bot" ])
+      other_home = File.join(home, "service-home")
+      xdg = File.join(home, "service-config")
+      settings = { "HOME" => other_home, "PATH" => "/bin", "CODEX_BIN" => "" }
+      files = [ [ {}, File.join(other_home, ".config/hive/.env") ],
+                [ { "XDG_CONFIG_HOME" => xdg, "HIVE_HOME" => "" }, File.join(xdg, "hive/.env") ] ]
+      files.each do |configuration, startup_file|
+        write_service_settings(definitions.fetch("bot"), settings.merge(configuration))
+        write(startup_file, "CODEX_BIN=/ignored/file-codex\nUNRELATED=value\n")
+        with_env("HIVE_HOME" => "/shell-only", "XDG_CONFIG_HOME" => "/shell-only") do
+          result = reader(home, definitions: definitions).call.first
+          assert result.complete?, result.reasons.inspect
+          assert_equal "", result.environment.fetch("CODEX_BIN")
+          assert result.sources.any? { |source| source[:path] == startup_file }
+          refute result.environment.key?("UNRELATED")
+        end
+      end
+    end
+  end
+
+  def test_bot_startup_file_changes_make_running_evidence_stale_on_both_platforms
+    [ :linux, :macos ].each do |platform|
+      with_tmp_dir do |home|
+        definitions = definitions_for(home, platform, names: [ "bot" ])
+        definition = definitions.fetch("bot")
+        write_service_settings(definition, { "PATH" => "/bin" })
+        startup_file = File.join(home, ".config/hive/.env")
+        write(startup_file, "CODEX_BIN=/bot/codex\n")
+        started = Time.now - 120
+        File.utime(started - 60, started - 60, definition.target_path)
+        File.utime(started + 60, started + 60, startup_file)
+        result = reader(home, definitions: definitions, status_reader: ->(service) {
+          status(service, running: true, main_pid: 123, process_start: started.iso8601(6))
+        }).call.first
+        assert result.complete?, result.reasons.inspect
+        assert_equal :stale, result.running_currency
+        refute result.probe_allowed?
+      end
+    end
+  end
+
+  def test_bot_startup_file_locators_expand_only_the_reconstructed_service_home
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux, names: [ "bot" ])
+      [ "~", "~/bot-config" ].each do |locator|
+        write_service_settings(definitions.fetch("bot"), { "PATH" => "/bin", "HIVE_HOME" => locator })
+        startup_file = File.join(home, locator.delete_prefix("~"), ".env")
+        write(startup_file, "CODEX_BIN=/bot/codex\n")
+        result = reader(home, definitions: definitions).call.first
+        assert result.complete?, result.reasons.inspect
+        assert_equal "/bot/codex", result.environment.fetch("CODEX_BIN")
+        assert result.sources.any? { |source| source[:path] == startup_file }
+      end
+      [ "~another-user/bot", "bad\0path" ].each do |locator|
+        write_service_settings(definitions.fetch("bot"), { "PATH" => "/bin" })
+        result = reader(home, definitions: definitions, manager_environment: { "HIVE_HOME" => locator }).call.first
+        assert_includes codes(result), :bot_environment_file_location_unresolved
+        refute result.complete?
+        refute result.probe_allowed?
+      end
+    end
+  end
+
+  def test_bot_startup_override_is_checked_before_running_a_manager_helper_with_agent_identity
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux, names: [ "bot" ])
+      helper = File.join(home, "systemctl")
+      agent = File.join(home, "codex")
+      write(helper, "#!/bin/sh\nexit 0\n")
+      File.chmod(0o755, helper)
+      File.link(helper, agent)
+      write_service_settings(definitions.fetch("bot"), { "PATH" => home })
+      write(File.join(home, ".config/hive/.env"), "CODEX_BIN=#{agent}\n")
+      profile = Struct.new(:env_bin_override_keys) do
+        def bin(env:) = env.fetch("CODEX_BIN", "unconfigured-agent")
+      end.new([ "CODEX_BIN" ])
+      with_env("PATH" => home) do
+        result = reader(home, definitions: definitions, profiles: [ profile ], status_reader: nil,
+          manager_runner: ->(*) { flunk "manager helper has the bot's agent executable identity" }).call.first
+        assert_includes codes(result), :manager_agent_identity_collision
+        assert_equal agent, result.environment.fetch("CODEX_BIN")
+        refute result.probe_allowed?
+      end
+    end
+  end
+
   def test_unsupported_platform_and_broken_status_are_indeterminate
     with_tmp_dir do |home|
       definition = Hive::UserService::Definition.new(platform: :unsupported, service_name: "hive-daemon", target_path: nil, content: nil)
@@ -842,5 +961,16 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
   def write(path, content)
     FileUtils.mkdir_p(File.dirname(path))
     File.write(path, content)
+  end
+
+  def write_service_settings(definition, settings)
+    if definition.platform == :linux
+      assignments = settings.map { |name, value| Shellwords.escape("#{name}=#{value}") }.join(" ")
+      write(definition.target_path, "[Service]\nEnvironment=#{assignments}\nExecStart=/fixture/hive bot start --foreground\n")
+    else
+      require "cgi"
+      entries = settings.map { |name, value| "<key>#{name}</key><string>#{CGI.escapeHTML(value)}</string>" }.join
+      write(definition.target_path, plist("<key>EnvironmentVariables</key><dict>#{entries}</dict><key>Program</key><string>/fixture/hive</string>"))
+    end
   end
 end

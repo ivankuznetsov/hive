@@ -6,6 +6,7 @@ require "hive/user_service/definition"
 require "hive/user_service/status"
 require "hive/secret_patterns"
 require "hive/agent_cli_identity"
+require "hive/env_file"
 
 module Hive
   class UserService
@@ -57,6 +58,7 @@ module Hive
           runtime = profile.respond_to?(:runtime_profile) ? profile.runtime_profile : profile
           Array(runtime.env_bin_override_keys)
         end).map(&:to_s).uniq.freeze
+        @evidence_keys = (@keys + %w[HIVE_HOME XDG_CONFIG_HOME]).uniq.freeze
         @definitions = definitions
         @status_reader = status_reader
         @manager_runner = manager_runner
@@ -70,8 +72,10 @@ module Hive
 
       def call
         @manager_deadline = @monotonic.call + MANAGER_PASS_SECONDS
+        @inherited_environment = nil
         @excluded_identities = profile_executable_identities
         @inherited_environment = inherited_environment
+        @excluded_identities |= profile_executable_identities
         definitions.map { |label, definition| read_context(label, definition) }.freeze
       end
 
@@ -117,6 +121,7 @@ module Hive
         else
           read_launchd(content, path, state)
         end
+        read_bot_startup_environment(definition, state)
         reason(state, :path_unresolved, path: path) if state[:environment]["PATH"].to_s.empty?
         currency = running_currency(status, state, definition)
         context(label, state, :installed, currency)
@@ -128,7 +133,7 @@ module Hive
       def context(label, state, installation, currency)
         Context.new(
           label: redact(label).freeze,
-          environment: state[:environment].to_h { |key, value| [ key.freeze, value.dup.freeze ] }.freeze,
+          environment: state[:environment].slice(*@keys).to_h { |key, value| [ key.freeze, value.dup.freeze ] }.freeze,
           cwd: state[:cwd].dup.freeze, cwd_provenance: state[:cwd_provenance],
           installation: installation, reasons: state[:reasons].uniq.freeze,
           sources: state[:sources].uniq.freeze, running_currency: currency
@@ -180,7 +185,7 @@ module Hive
             else
               words(value, state, source, line).each do |assignment|
                 name, separator, setting = assignment.partition("=")
-                next unless @keys.include?(name)
+                next unless @evidence_keys.include?(name)
                 if separator.empty?
                   reason(state, :invalid_environment_assignment, path: source, line: line)
                 else
@@ -208,7 +213,7 @@ module Hive
             end
           when "PassEnvironment"
             passed = words(value, state, source, line)
-            if !(passed & @keys).empty?
+            if !(passed & @evidence_keys).empty?
               reason(state, :inherited_environment_unresolved, path: source, line: line)
             end
           when "UnsetEnvironment"
@@ -291,7 +296,7 @@ module Hive
           content, = read_source(candidate, state, optional: optional)
           next unless content
           environment_assignments(content, state, candidate).each do |name, value|
-            state[:environment][name] = value if @keys.include?(name)
+            state[:environment][name] = value if @evidence_keys.include?(name)
           end
         end
       end
@@ -306,7 +311,7 @@ module Hive
           index += 1
           next if raw.empty? || raw.start_with?("#", ";")
           name, separator, value = raw.partition("=")
-          next if separator.empty? || !@keys.include?(name.strip)
+          next if separator.empty? || !@evidence_keys.include?(name.strip)
           value = value.lstrip
           quote = value.start_with?("'", '"') ? value[0] : nil
           complete = -> { quote ? value.match?(quote == "'" ? /\A'[^']*'\s*\z/m : /\A"(?:\\.|[^"\\])*"\s*\z/m) : !value.end_with?("\\") }
@@ -341,7 +346,7 @@ module Hive
             return
           end
           plist_dictionary(environment).each do |name, value|
-            next unless @keys.include?(name)
+            next unless @evidence_keys.include?(name)
             if value.name == "string"
               state[:environment][name] = value.text.to_s
             else
@@ -383,6 +388,39 @@ module Hive
           raise ArgumentError, "invalid plist key" unless key.name == "key"
           [ key.text.to_s, value ]
         end
+      end
+
+      def read_bot_startup_environment(definition, state)
+        return unless definition.service_name == "hive-bot"
+        environment = state[:environment]
+        root = environment["HIVE_HOME"].to_s
+        if root.empty?
+          base = environment["XDG_CONFIG_HOME"].to_s
+          base = File.join(environment.fetch("HOME"), ".config") if base.empty?
+          root = File.join(base, "hive")
+        end
+        if root.start_with?("~")
+          unless root == "~" || root.start_with?("~/")
+            reason(state, :bot_environment_file_location_unresolved, path: definition.target_path)
+            return
+          end
+          root = environment.fetch("HOME") + root.delete_prefix("~")
+        end
+        path = File.join(File.expand_path(root, state[:cwd]), ".env")
+        content, = read_source(path, state, optional: true)
+        return unless content
+
+        # EnvFile::DEFAULT_PATH is chosen before loading. Locator assignments in
+        # this file never cause recursive loading of another startup file.
+        content.each_line do |line|
+          next if line.strip.empty? || line.lstrip.start_with?("#")
+          name, value = line.chomp.split("=", 2)
+          next unless value && @keys.include?(name.strip)
+          name = name.strip
+          environment[name] = Hive::EnvFile.strip_outer_quotes(value) unless environment.key?(name)
+        end
+      rescue ArgumentError
+        reason(state, :bot_environment_file_location_unresolved, path: definition.target_path)
       end
 
       def inspect_launcher(args, state, path, line)
@@ -467,7 +505,7 @@ module Hive
         # a profile's override may itself name systemctl or launchctl.
         definitions.each_value do |definition|
           next if definition.platform == :unsupported
-          state = { environment: { "HOME" => @home }, cwd: @project_root,
+          state = { environment: { "HOME" => @home }.merge(@inherited_environment.to_h.fetch(:environment, {})), cwd: @project_root,
                     cwd_provenance: :inherited, reasons: [], sources: [] }
           path = offline_fragment(definition)
           content, = read_source(path, state)
@@ -477,6 +515,7 @@ module Hive
           else
             read_launchd(content, path, state)
           end
+          read_bot_startup_environment(definition, state)
           environments << state[:environment]
         end
         paths = @excluded_executables + environments.flat_map do |environment|
@@ -499,7 +538,7 @@ module Hive
       def inherited_environment
         return { environment: {} } unless %i[linux macos].include?(@platform)
         explicit = @explicit_manager_environment
-        return { environment: explicit.slice(*@keys) } if explicit
+        return { environment: explicit.slice(*@evidence_keys) } if explicit
         return { environment: {} } if @status_reader
         argv = @platform == :linux ? %w[systemctl --user show-environment] :
           [ "launchctl", "print", "gui/#{Process.uid}" ]
@@ -507,7 +546,7 @@ module Hive
         return { environment: {}, reasons: [ result[:failure] || :manager_environment_unavailable ] } unless result[:ok]
         if @platform == :linux
           environment = result[:output].to_s.each_line.each_with_object({}) do |line, found|
-            next unless @keys.include?(line.split("=", 2).first)
+            next unless @evidence_keys.include?(line.split("=", 2).first)
             assignments = Shellwords.split(line)
             raise ArgumentError unless assignments.length == 1
             key, value = assignments.first.split("=", 2)
@@ -518,7 +557,7 @@ module Hive
           return { environment: {}, reasons: [ :manager_environment_unresolved ] } unless block
           environment = block.each_line.each_with_object({}) do |line, found|
             key, separator, value = line.strip.partition(" => ")
-            next unless @keys.include?(key)
+            next unless @evidence_keys.include?(key)
             raise ArgumentError if separator.empty? || value.start_with?('"', "'")
             found[key] = value
           end

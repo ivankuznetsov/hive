@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-24
+updated: 2026-11-03
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -184,7 +184,14 @@ facade with at most 30 seconds including cleanup. Doctor shares a monotonic
 120-second minimum-version enforcement and APIs are unchanged. Compilation
 remains pure. Hive observes the final selected executable at the spawn boundary
 and retains that immutable evidence on the run, including host binding versus
-in-sandbox executable for managed launches.
+in-sandbox executable for managed launches. This observation neither rewrites
+compiled argv nor replaces launch-time minimum-version enforcement. Default
+doctor resolves filesystem identity without launching an agent;
+`--probe-agent-versions` explicitly permits the selected version command under
+eligible reconstructed contexts, including opaque shims and shared writable
+installations. These bounds do not establish executable trust. See
+[[commands/doctor]] and [[modules/agent_profile]] for the observation cache,
+service provenance, probe budgets and private task-log diagnosis.
 
 The `agent-runtime probe [PROVIDER|--all] [--json]` executable checks only
 locally observable executable installation, version output, authentication

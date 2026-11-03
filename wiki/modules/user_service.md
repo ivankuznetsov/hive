@@ -3,7 +3,7 @@ title: UserService
 type: module
 source: lib/hive/user_service.rb, lib/hive/user_service/, lib/hive/commands/service_installer/, examples/systemd/
 created: 2026-07-26
-updated: 2026-08-30
+updated: 2026-11-03
 tags: [module, services, systemd, launchd, recovery, offline, boundaries]
 ---
 
@@ -14,22 +14,56 @@ its installed file, and the corresponding systemd-user or launchd lifecycle.
 Daemon, babysitter, bot, web, setup, init, migration cutover, status, and
 uninstall remain thin command adapters around this boundary.
 
-## Linux user-unit invariant
+## CLI execution environment inspection
 
-`UserService::ExecutionEnvironment` reads installed daemon and babysitter
-definitions for local CLI diagnosis, including stopped and unloaded services.
+`UserService::ExecutionEnvironment` reads installed daemon, babysitter, bot and
+web definitions for local CLI diagnosis on Linux and macOS, including stopped,
+disabled and unloaded services. Only conclusively absent installations are
+omitted by doctor; unreadable or malformed definitions remain warning evidence.
+`ServiceInstaller::Base.execution_definitions` constructs path-only definitions
+in the command adapter; callers pass that map into the reader. UserService does
+not import command installers or render current templates for inspection.
 It reconstructs only PATH, HOME and profile binary override keys from manager
 evidence, unit/drop-in/EnvironmentFile precedence or the named launchd
 environment dictionary. Absent WorkingDirectory is modelled with the invoking
-project root and labelled inherited. It never sources shell code or changes
-service lifecycle. Metadata subprocesses share a ten-second deadline, with
-at most five seconds per call including process-group cleanup.
+project root and labelled inherited (`cwd_inherited` in doctor), rather than
+claiming an observed running cwd. The reader never merges the doctor's full
+environment into a service context. Known home identity and declared
+manager/service evidence supply resolution keys; missing PATH or opaque
+activation stays unknown.
+
+Bot startup also loads Hive's `.env`. The reader reproduces its absent-key and
+quote-stripping rules for resolution keys and records that file as freshness
+evidence. `HIVE_HOME` and `XDG_CONFIG_HOME` are private location inputs; the
+public environment retains only PATH, HOME and profile override keys. An
+unresolvable location warns and prevents a complete-context probe. The file
+cannot recursively redirect inspection to another startup file.
+
+Linux parsing supports generated `Environment=` quoting, `%h`, resets and
+overrides, ordered drop-ins, and required/optional EnvironmentFile sources.
+Unsupported specifiers, inherited values and wrappers retain typed reasons
+with file/line provenance. Launchd reads the named `EnvironmentVariables`
+dictionary and `WorkingDirectory`; unrelated plist arrays are not environment
+evidence. Hive's positional `/bin/sh` precheck wrapper is recognized without
+evaluating it. Neither service reader sources startup files, executes unit
+shell snippets or changes service lifecycle. Metadata subprocesses share a
+ten-second deadline, with at most five seconds per call including process-group
+cleanup.
 
 Declared reconstruction completeness and running-definition currency are
-separate verdicts. Missing manager/process-start evidence is unknown; modified
-sources or a pending systemd reload are stale. Advisory probes require a
+separate verdicts. A readable installed file remains declared evidence even
+when its manager is unavailable. Missing manager/process-start comparison
+evidence is unknown. Linux checks the loaded fragment, pending reload state
+and source mtimes against process start; launchd checks plist mtime against
+process start. Modified sources or a pending systemd reload are stale, and a
+stale row advises configuration reload/restart followed by another doctor run.
+Stopped installations retain their declared context. Advisory probes require a
 complete context whose currency is current or stopped. Raw immutable selection
-inputs remain private to resolution; diagnostic serialization redacts secrets.
+inputs remain private to resolution; diagnostic serialization redacts secrets
+and does not expose unrelated environment values or raw directives. See
+[[commands/doctor]] for `--probe-agent-versions`, its bounds and side effects.
+
+## Linux user-unit invariant
 
 Every shipped `examples/systemd/*.service` file is a user-manager unit. The
 whole glob, including future templates, must:

@@ -1,9 +1,9 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_cli_identity.rb, lib/hive/model_unsupported.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-25
+updated: 2026-11-03
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -431,6 +431,25 @@ the attempt evidence channel.
 
 ## Executable identity observation
 
+Project configuration can pin an executable and enforce an execution minimum:
+
+```yaml
+agents:
+  codex:
+    bin: /opt/agent-clis/codex
+    min_version: "0.156.1"
+    env_override: PROJECT_CODEX_BIN
+```
+
+`AgentProfiles.lookup(name, cfg:)` applies these overrides. The first nonempty
+value wins in this order: the named project `env_override`, retained
+package/profile binary override keys, then `bin` or the profile default. A
+relative `bin` is resolved against the execution cwd. `bin` does not override
+an already-set binary environment key; clear that key in the relevant shell or
+service environment when pinning an absolute path. `min_version` remains an
+execution requirement enforced by `check_version!`, independently of doctor's
+advisory observations.
+
 `Hive::AgentCliIdentity` observes a profile under an explicit environment and
 working directory. Plain PATH selection, the existing isolated trampoline
 selector, and prepared managed bindings remain distinct authorities. The
@@ -442,14 +461,64 @@ it bounds capture, terminates the probe process group, and accepts a deadline
 of at most 30 seconds including cleanup. Doctor can share a monotonic
 60-second `AgentCliIdentity::ProbeBudget` across observations.
 
+Doctor defaults to filesystem-only version evidence and leaves unsupported
+layouts explicitly unknown. `hive doctor --probe-agent-versions` opts into the
+resolved launcher's version command, including relative paths, shared writable
+installations and opaque shims. Ownership and file/parent modes do not cause
+refusal or a low-trust classification. A version command can run launcher code
+and have side effects; bounded time/output and process-group cleanup do not
+establish trust. Incomplete or stale reconstructed service contexts remain
+ineligible for probing. See [[commands/doctor]] for the service matrix and
+full diagnostic subprocess budgets.
+
+At the actual spawn boundary Hive observes the final executable, effective
+child environment and cwd without changing compiled argv. Plain spawns retain
+the first child-PATH executable, isolated spawns retain their existing
+trampoline-skipping selection, and prepared managed spawns identify the bound
+host CLI separately from their sandbox launcher and in-sandbox path.
+The result and private spawn log retain the same immutable identity after the
+process exits. A bounded, thread-safe observation cache keys successful version
+observations by executable/target identity, mtime and relevant environment/cwd;
+it coalesces concurrent probes and invalidates changed files or symlink targets.
+Transient failures are not retained, and opaque target-dependent launchers are
+not cached by shim mtime alone. The older `check_version!` cache does not supply
+this identity evidence.
+
+Configured-profile execution reaches these observation boundaries:
+
+| Callers | Spawn identity boundary |
+|---|---|
+| Stages, generic reviewers, plan review and babysitter | `Stages::Base.spawn_agent` → `Agent#spawn_and_wait` |
+| Patrol, refactor patrol and semantic decisions | `Agent#spawn_and_wait` |
+| OpenCode execution | `AgentSupport::OpenCode::Execution#write_spawn_log` after launch preparation |
+| Native Codex review | `Reviewers::Runtime.capture` |
+| Task diagnosis, including bot diagnosis refresh | `DiagnosisAgent#spawn_profile` |
+| Daily digest document generation | `DailyDigest::DocumentGenerator#capture` |
+| Display names, including web idea creation | `DisplayName::Generator#run_isolated_agent` |
+
+The bot's diagnosis child and web's `hive generate-name` child inherit their
+service environment. Those routes put bot and web in doctor's service matrix.
+Fixed authentication/login helpers do not execute a configured stage profile.
+
+For unsupported-model failures, Hive records the full original CLI identity,
+version or explicit unknown, supported-model remedy and
+`agents.<name>.bin` / `agents.<name>.min_version` keys in the private correlated
+attempt log. `hive task TARGET --log` retrieves the current receipt-verified
+bounded tail; markers/status retain a compact attempt reference and that
+command. Local paths remain complete after secret redaction, while published
+attempt evidence continues to scrub paths. Classification remains
+`model_unsupported`, operator-required, with no hourly retry and babysitter
+give-up. See [[commands/task]] and [[commands/doctor]].
+
 Grok package evidence is restricted to `@xai-official/grok`, as declared in
 the [provider package](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/npm/grok/package.json).
 Its linked `.grok/bin/grok-<version>` installation also requires the matching
 canonical symlink and `[cli] installer = "npm"` metadata written by the
 [provider installer](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/npm/grok/bin/postinstall.js).
 The Node bootstrap can choose a separately updated native CLI, so its effective
-target and version remain unknown without an explicit probe. An unrelated
-third-party Grok package never supplies the registered provider's version.
+target remains unknown; an explicit probe can establish its reported version.
+An unrelated third-party Grok package never supplies the registered provider's
+version.
 
 ## Tests
 

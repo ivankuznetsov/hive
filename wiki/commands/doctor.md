@@ -1,14 +1,15 @@
 ---
 title: hive doctor
 type: command
-source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
+source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/commands/doctor/agent_cli_check.rb, lib/hive/agent_cli_identity.rb, lib/hive/user_service/execution_environment.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb, schemas/hive-doctor.v2.json
 created: 2026-05-07
 updated: 2026-11-03
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
-**TLDR**: `hive doctor` is the read-only renderer for Hive's managed-skill
-inspector. It always checks Hive's own operating skill for supported Claude,
+**TLDR**: `hive doctor` diagnoses managed skills and compares configured agent
+CLIs between the invoking shell and installed daemon, babysitter, bot and web
+services. It always checks Hive's own operating skill for supported Claude,
 Codex, and Pi agents, adds capabilities derived from project configuration,
 and reads OpenClaw's durable ClawHub provenance without changing it. Durable
 filesystem evidence is joined with the real runtime resolver and exact
@@ -31,14 +32,22 @@ Run from a Hive-initialized project. Doctor reads installed-package registries,
 config, cache paths, canonical manifests, and ClawHub origin/lock metadata. It
 does not launch agent CLIs by default; invoke install/update commands;
 write aliases or skills; or call a model. An absent agent binary is an
-`unavailable`, non-blocking row. Legacy dependency checks remain bounded and
+`unavailable`, non-blocking managed-skill row; CLI identity gaps are advisory
+warnings. Legacy dependency checks remain bounded and
 separate from managed-agent inventory.
 
 ## Shell and installed-service CLI identities
 
 Doctor compares every registered profile, including project `agents` overrides,
-in the invoking process environment and each installed daemon and babysitter
-service. Stopped, disabled and unloaded installations remain visible. Only a
+in the invoking process environment and each installed daemon, babysitter, bot
+and web service. The bot's diagnostic refresh can launch a configured diagnosis
+profile through `hive status --diagnose`. Creating an idea in web can launch
+`hive generate-name` through the new-task flow, selecting the configured execute
+profile for display-name generation. Both inherit their spawning service's
+environment.
+The fixed commands in web's agent-authentication PTY do not run configured
+profiles and remain outside profile execution.
+Stopped, disabled and unloaded installations remain visible. Only a
 proven absent service is omitted. Shell resolution uses the current process's
 PATH and environment, without interactive aliases, functions or a login shell.
 
@@ -60,15 +69,30 @@ Doctor never fills missing service activation variables from the shell or
 evaluates unit shell snippets. With no declared WorkingDirectory it models the
 invoking project root and labels that cwd inherited. Opaque wrappers and shim
 activation that cannot be established from filesystem evidence stay unknown.
+For the bot, it also reads Hive's startup `.env` from the reconstructed
+configuration location. Existing service values win, including empty values;
+only unset resolution keys are added. Location inputs stay private, and the
+startup file participates in source freshness checks.
 Changed sources or pending reloads warn that a running service may be stale:
 reload changed systemd configuration and restart the affected service, then
 rerun doctor. Missing process-start evidence remains unknown.
 
-Default version inspection uses a linked, provider-matching npm manifest,
-recognized Claude native version target, or supported provider Homebrew
-receipt with executable linkage. Node/Ruby version directories, arbitrary
-nearby manifests and copied standalone binaries do not establish an agent
-version. Install methods outside those recognized layouts render
+Default version inspection requires provider ownership and a link to the
+selected executable:
+
+| Profile | Recognized filesystem evidence |
+|---|---|
+| Claude | Linked `@anthropic-ai/claude-code` npm manifest, concrete native version target, or matching Homebrew receipt. |
+| Codex | Linked `@openai/codex` npm manifest or matching Homebrew receipt. |
+| Pi | Linked registered Pi npm package manifest. |
+| Grok | Linked `@xai-official/grok` npm manifest or matching `.grok/bin/grok-<version>` installation metadata and canonical symlink. A dynamic bootstrap's effective target remains unknown. |
+| OpenCode | Linked `opencode-ai` npm manifest or matching Homebrew receipt. |
+
+Node/Ruby version directories, sandbox paths, arbitrary nearby manifests and
+copied standalone binaries do not establish an agent version. Custom profiles
+and install methods outside the recognized layouts retain typed reasons such
+as `unrecognized_install_layout` or `provider_metadata_mismatch`. When the only
+gap is an underivable filesystem version, rows render
 `version-uninspected` with a `--probe-agent-versions` hint. Advisory missing,
 unknown and divergent identities are warning rows in `hive-doctor.v2` checks;
 they do not add exit failures. Managed health failures still exit 65 and
@@ -83,8 +107,8 @@ capture and process-group bounds do not establish executable trust; no
 ownership/mode refusal or low-trust classification is added. Incomplete or
 stale service contexts are not probed as current complete environments.
 Managed skill inventory stays filesystem-only and this flag does not enable
-MCP discovery; use the existing `hive mcp import` discovery workflow
-for personal MCP inventory.
+MCP discovery; use `hive mcp import --dry-run` for explicit personal MCP
+inventory discovery.
 
 Each version probe has at most 30 seconds including cleanup. All agent probes
 share a monotonic 60-second budget including cleanup; remaining work gets the
@@ -103,11 +127,42 @@ agents:
     min_version: "0.156.1"
 ```
 
-An optional `agents.codex.env_override` names a project-specific binary
-environment key. Its nonempty value wins first; package override keys remain
-fallbacks before `bin`. Clear unintended override values in the relevant
-shell/service environment when pinning a CLI. Doctor reports advisory evidence;
-the existing launch-time minimum-version check remains authoritative.
+`agents.codex.env_override: PROJECT_CODEX_BIN` optionally names a
+project-specific binary environment key. Its nonempty value wins first, then
+the profile's retained package override keys, then the configured `bin` (or
+profile default when no `bin` is configured). Clear unintended override values
+in the relevant shell/service environment when pinning a CLI. Doctor reports
+advisory evidence; the existing launch-time minimum-version check remains
+authoritative. Updating this project configuration does not itself reload or
+restart a service.
+
+## Identity on an attempted run
+
+Doctor models selection without preparing or launching an agent. Actual runs
+capture immutable CLI identity after command and child-environment preparation,
+including the selection regime, full selected launch path, effective target
+when known, and version/evidence or a typed unknown reason. Managed launches
+identify the bound host CLI separately from the sandbox launcher and path.
+
+An unsupported-model failure adds the full identity and the
+`agents.<name>.bin` / `agents.<name>.min_version` remedy to the existing private,
+receipt-correlated attempt log. It also advises selecting a supported model
+and checking for a stale CLI. The terminal diagnosis is retained near the end
+of the log so the bounded diagnostic tail can show it after lengthy output.
+Markers and status carry a compact diagnostic reference and log command:
+
+```bash
+hive task TARGET --log
+hive task TARGET --project PROJECT --log
+```
+
+Use the affected task's ID or slug for `TARGET`. Hive resolves the current
+attempt receipt and verifies the log's integrity before rendering its bounded
+tail; see [[commands/task]]. Local doctor output and private task logs retain
+full non-secret absolute paths. Secret patterns are redacted, and published
+attempt evidence continues to replace local paths with `[REDACTED:path]`.
+Unsupported-model failures remain operator-required; this diagnosis adds no
+hourly retry or provider cooldown, and babysitter still gives up.
 
 ## Runtime control-plane diagnosis
 
@@ -222,14 +277,14 @@ MCP rows (`Hive::Mcp::DoctorCheck`, stage `mcp`; see [[modules/mcp]]):
 | `mcp/login` | warning | an OAuth server is granted to an agent with no saved login; names `hive mcp login` |
 | `mcp/env` | warning | a granted server references an env var unset in doctor's environment (name only) |
 | `mcp/codex-config` | present | `config.toml` settings Hive carries over on every Codex launch |
-| `mcp/personal` | warning | personal servers not in the catalog; names `hive mcp import` |
-| `mcp/drift` | warning | a catalog entry changed or disappeared at its source |
+| `mcp/personal` | warning | personal drift is uninspected by default; names `hive mcp import --dry-run` |
+| `mcp/drift` | warning | a catalog entry changed or disappeared at its source when a Ruby caller explicitly supplies discovery evidence |
 
-The last two compare personal configs through `Hive::Mcp::Discovery`, which runs
-`codex mcp list --json` and `opencode debug config`; in-process tests skip that
-comparison (`mcp_discover: nil`).
-These appear under `checks`, not
-`managed_skills`.
+Ordinary doctor leaves personal discovery disabled in production and tests.
+`Hive::Mcp::Discovery` can launch agent commands, so operators use
+`hive mcp import --dry-run` to request that separate discovery workflow.
+`--probe-agent-versions` does not enable it. All MCP rows appear under `checks`,
+not `managed_skills`.
 
 | Code | Meaning |
 |---:|---|
@@ -264,13 +319,24 @@ These appear under `checks`, not
 command emits v2. The v2 split prevents managed skill evidence from changing
 the meaning of old stage/reviewer check rows.
 
+CLI comparison entries remain in `checks` with `stage: "agent_cli"`,
+`label: "agent_cli/<profile>"`, the profile in `agent`, the configured executable
+selection in `configured_skill`, and the environment label in `skill`. A complete
+match has `kind: "dependency"` / `status: "present"`; drift and incomplete or
+uninspected evidence have `kind: "warning"` / `status: "warning"`. Optional
+`regime`, `identity`, `comparison` and `execution_context` fields retain the
+selection authority, launch/target/version comparisons, configuration sources,
+cwd provenance, completeness, and separate running currency. Human messages
+also show the full paths, evidence and scoped remedy.
+
 Both the v2 success document and the compact configuration-error document call
 `JSON.generate` directly. A serialization failure is not converted into a
 text response or fallback JSON document; it propagates as a failed invocation.
 
 ## Init integration
 
-After project creation, `hive init` runs this inspector. Interactive init with
+After project creation, `hive init` runs the managed-skill inspector with native
+commands disabled, in production and tests. Interactive init with
 actionable available rows offers to delegate to [[commands/setup-agents]]. A
 decline, non-TTY run, or JSON run only prints remediation. Unavailable-only
 rows do not prompt, and optional setup failure never rolls back the initialized
@@ -296,6 +362,11 @@ project.
   global npm-root probe.
 - `test/integration/init_doctor_preflight_test.rb` covers init delegation and non-mutating flows.
 - `test/integration/doctor_config_validation_test.rb` covers shared root-key failures, exit 78, reviewer migration guidance, and the fail-before-probes boundary.
+- `test/unit/agent_cli_identity_test.rb`,
+  `test/unit/user_service/execution_environment_test.rb`, and the doctor tests
+  cover provider-linked filesystem fixtures, platform-independent service
+  reconstruction, whole-command no-agent-launch behavior, explicit probe
+  contexts/deadlines, comparison advisories and schema-valid v2 output.
 
 ## Backlinks
 

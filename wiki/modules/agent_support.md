@@ -3,7 +3,7 @@ title: Hive::AgentSupport
 type: module
 source: lib/hive/agent_support.rb, lib/hive/agent_support/
 created: 2026-08-25
-updated: 2026-08-25
+updated: 2026-11-03
 tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude]
 ---
 
@@ -22,6 +22,11 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
 - `Runtime` compiles provider-specific managed policy while the generic runtime
   remains the process and cleanup owner.
 - `Skills` owns provider discovery, package inventory, and diagnostics.
+- Claude and Grok expose lazy `CliIdentity` facets for their native installation
+  evidence and opaque provider launchers. `AgentCliIdentity` owns shared
+  executable selection, npm/Homebrew metadata, observation caching and bounded
+  probes; the provider facets keep their filesystem recognition inside this
+  boundary without launching commands.
 - `SetupAdapter` is a Skillpack-owned subclass of the public lazy
   `Hive::AgentSkills::Adapter` and stays physically beside its provider facets.
 - The Pi root owns its message protocol, native model rules, credential

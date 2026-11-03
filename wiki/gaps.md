@@ -3,14 +3,17 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-03
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
 ## Agent CLI identity validation (2026-11-03)
 
-Installed systemd and launchd environment parsing, freshness, manager budgets
-and error branches have host-independent fixtures. This execution environment
+Installed daemon, babysitter, bot and web systemd/launchd environment parsing,
+freshness, manager budgets and error branches have host-independent fixtures.
+Bot startup `.env` selection is covered through filesystem fixtures; an
+already-running service's actual inherited environment is not observed.
+This execution environment
 has no macOS manager and the live Linux user-manager integration skips without
 an explicitly provisioned session. Real manager smoke evidence is therefore
 unavailable. Filesystem version coverage is installation-layout-dependent;

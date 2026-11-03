@@ -1,15 +1,6 @@
 # frozen_string_literal: true
 
-require "test_helper"
-require "fileutils"
-
-# The bench harness is packaged (templates/builtins/bench/runtime/harness) and
-# linted/lint-excluded there, but its planner/executor Pipeline is scored logic:
-# these tests load it from its packaged home and pin the cell statuses it emits.
-module BenchHarness
-  HARNESS_ROOT = File.expand_path("../../../templates/builtins/bench/runtime/harness", __dir__)
-end
-$LOAD_PATH.unshift(BenchHarness::HARNESS_ROOT) unless $LOAD_PATH.include?(BenchHarness::HARNESS_ROOT)
+require "support/bench_harness"
 require "lib/pipeline"
 
 class BenchHarnessPipelineTest < Minitest::Test

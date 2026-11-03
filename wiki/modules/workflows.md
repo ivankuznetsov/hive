@@ -426,3 +426,11 @@ There is no publish stage or executable outcome action.
 - [[modules/stages]] — the canonical stage list this module references
 - [[modules/task]] — task stage validation and state-file lookup derived from the descriptor-backed constants
 - [[modules/workflow_package]] — reviewed Honeycomb trust, storage, policy, and publication boundary
+
+## Benchmark result admission
+
+The harness scorer writes schema version 2. `judged` and `gated` contain only
+current-generation evidence bound to artifacts and evaluation context, with
+execution status `generated` or `empty_diff`. Attempts and diagnostics retain
+failed-status scores, costs and unknown statuses. Coverage separates attempted
+cells, eligible executions and available ranked evaluations.

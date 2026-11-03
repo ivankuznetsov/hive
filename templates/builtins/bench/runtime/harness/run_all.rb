@@ -69,7 +69,7 @@ module HiveBench
       end
 
       results = @scorer.results(records: records, corpus_version: corpus_version,
-                                generated_at: @clock.call.iso8601)
+                                generated_at: @clock.call.iso8601, pending: pending, failed: failed)
       results["pending"] = pending
       results["failed"] = failed
       Outcome.new(results: results, pending: pending, failed: failed)
@@ -87,30 +87,32 @@ module HiveBench
       cell = @runner.call(entry: entry, profile: profile, out_dir: out_dir)
 
       if cell.status == "limit_hit"
-        pending << park(entry, profile, cell.reason)
+        pending << park(entry, profile, cell.reason, cell)
         return
       end
 
       scored = score_cell(entry, profile, cell, out_dir)
       records << scored.record
-      park_judge_failure(scored.judge_failure, entry, profile, pending, failed) if scored.judge_failure
+      park_judge_failure(scored.judge_failure, entry, profile, pending, failed, cell) if scored.judge_failure
     rescue StandardError => e
       reason = "#{e.class}: #{e.message}"
       warn "hive-bench: parked failed — #{profile.id} #{entry["task_id"]}: #{redact(reason)}"
-      failed << park(entry, profile, reason)
+      failed << park(entry, profile, reason, cell)
     end
 
-    def park(entry, profile, reason)
-      { "task_id" => entry["task_id"], "agent_id" => profile.id, "reason" => redact(reason) }
+    def park(entry, profile, reason, cell = nil)
+      { "task_id" => entry["task_id"], "agent_id" => profile.id, "reason" => redact(reason),
+        "generation_id" => cell.respond_to?(:generation_id) ? cell.generation_id : nil,
+        "run_status" => cell&.status, "mode" => cell&.mode, "efficiency" => cell&.telemetry || {} }
     end
 
     # The diff generated fine but no judge could score it. A provider limit
     # (drained balance, 429) is transient; anything else is a hard judge failure.
     # In both cases the generated record is already preserved for rejudge.
-    def park_judge_failure(error, entry, profile, pending, failed)
+    def park_judge_failure(error, entry, profile, pending, failed, cell)
       bucket, label = error.limit ? [pending, "pending (judge limit)"] : [failed, "failed (all judges)"]
       warn "hive-bench: #{label} — #{profile.id} #{entry["task_id"]}: #{redact(error.message)}"
-      bucket << park(entry, profile, error.message)
+      bucket << park(entry, profile, error.message, cell)
     end
 
     # Strip provider-secret shapes from any text persisted into results.json —

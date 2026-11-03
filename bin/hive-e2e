@@ -345,6 +345,7 @@ module Hive
         exit_with_error(message, error_kind: "run_failed", exit_code: BinaryExit::FAILURE, stderr_detail: detail)
       end
 
+      # Accept either a pre-built message String or an Exception whose message is used verbatim.
       def exit_with_error(error, error_kind:, exit_code:, stderr_detail: nil)
         message = error.respond_to?(:message) ? error.message : error.to_s
         if options[:json]

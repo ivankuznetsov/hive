@@ -4,6 +4,7 @@ require "json"
 require "open3"
 require "psych"
 require "rbconfig"
+require "securerandom"
 require "json_schemer"
 require_relative "paths"
 
@@ -61,7 +62,7 @@ class E2EBinaryTest < Minitest::Test
   end
 
   def with_unexpected_run_failure(kind)
-    name = "binary_unexpected_#{Process.pid}"
+    name = "binary_unexpected_#{Process.pid}_#{SecureRandom.hex(6)}"
     with_temp_scenario(name, <<~YAML) do
       name: #{name}
       steps:
@@ -83,8 +84,6 @@ class E2EBinaryTest < Minitest::Test
           assert File.file?(runs_dir)
           assert_equal "unchanged blocker", File.read(runs_dir)
           assert_equal [ "runs" ], Dir.children(scratch), "no partial run or crashed report may be created"
-        else
-          refute File.exist?(runs_dir), "catalog parsing must fail before Runner construction"
         end
       end
     end
@@ -108,22 +107,30 @@ class E2EBinaryTest < Minitest::Test
 
   def assert_run_failure_debug(err, message, kind:, human:)
     lines = err.lines.map(&:chomp)
+    assert_equal 1, lines.count("hive-e2e debug: #{message}"), "one debug block must be emitted per attempt"
     assert_equal "hive-e2e: #{message}", lines.shift if human
     assert_equal "hive-e2e debug: #{message}", lines.shift
     refute_empty lines, "debug block must contain the rescued exception's backtrace"
     assert lines.all? { |line| line.match?(/\A  .+:\d+:in /) }, err
-    assert_equal lines.uniq, lines, "each frame must appear once"
-    refute_match(/cause|write_report|write_json|atomic_file\.rb/i, err)
+    writer_path = Regexp.escape(File.join(__dir__, "runner.rb"))
+    atomic_path = Regexp.escape(File.join(Hive::E2E::Paths.lib_dir, "hive", "atomic_file.rb"))
+    lines.each do |line|
+      refute_match(/\A  #{writer_path}:\d+:in .*\b(?:write_report|write_json)\b/, line)
+      refute_match(/\A  #{atomic_path}:\d+:in /, line)
+    end
 
     file, method, operation = if kind == :blocked_runs
                                [ "runner.rb", "run_all", 'FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))' ]
     else
                                [ "scenario_parser.rb", "parse", "File.read(@path)" ]
     end
-    frame = lines.find { |line| line.match?(/#{file}:\d+:in .*#{method}/) }
+    source_path = Regexp.escape(File.join(__dir__, file))
+    frame = lines.find { |line| line.match?(/\A  #{source_path}:\d+:in .*\b#{method}\b/) }
     refute_nil frame, "expected the original failure operation in #{err}"
-    line_number = frame.match(/#{file}:(\d+):/)[1].to_i
-    assert_includes File.readlines(File.join(__dir__, file))[line_number - 1], operation
+    line_number = frame.match(/#{source_path}:(\d+):/)[1].to_i
+    source_line = File.readlines(File.join(__dir__, file))[line_number - 1]
+    refute_nil source_line, "backtrace line #{line_number} must exist in #{file}"
+    assert_includes source_line, operation
   end
 
   def assert_compatible_error(args, kind:, code:, command:, message:, env: {})
@@ -138,8 +145,9 @@ class E2EBinaryTest < Minitest::Test
         assert_empty err
       else
         assert_empty out
-        actual = err.delete_prefix("hive-e2e: ").chomp
+        actual = err.lines.first.delete_prefix("hive-e2e: ").chomp
         assert_equal "hive-e2e: #{actual}\n", err
+        refute_match(/\.rb:\d+:in /, err)
       end
       if message.is_a?(Regexp)
         assert_match message, actual
@@ -176,6 +184,7 @@ class E2EBinaryTest < Minitest::Test
             assert_equal(json ? "" : "hive-e2e: #{message}\n", err)
           end
         end
+        refute File.exist?(runs_dir), "catalog parsing must fail before Runner construction" if kind == :missing_scenario
         assert_equal 1, messages.uniq.size, "human and JSON modes must share one canonical message"
       end
     end
@@ -200,6 +209,79 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_unexpected_run_debug_emits_only_outer_backtrace_with_existing_cause_and_repeated_frames
+    with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
+      Dir.mktmpdir("e2e-exception-cause") do |scratch|
+        fixture = File.join(scratch, "failure.rb")
+        evidence_path = File.join(scratch, "exception.json")
+        # Override the Runner boundary only in the child process; the real
+        # binary still owns dispatch, rescue, formatting, and process exit.
+        File.write(fixture, <<~RUBY)
+          require #{File.join(__dir__, "runner").inspect}
+          module CausedRunFailure
+            def run_all(**)
+              fail_run(3)
+            rescue RuntimeError => error
+              File.write(#{evidence_path.inspect}, JSON.generate(
+                "backtrace" => error.backtrace,
+                "cause_backtrace" => error.cause.backtrace,
+                "cause_class" => error.cause.class.name,
+                "cause_message" => error.cause.message
+              ))
+              raise
+            end
+
+            def fail_run(depth)
+              return fail_run(depth - 1) if depth.positive?
+
+              begin
+                fail_cause
+              rescue ArgumentError
+                raise "outer run failure"
+              end
+            end
+
+            def fail_cause
+              raise ArgumentError, "distinct inner failure"
+            end
+          end
+          Hive::E2E::Runner.prepend(CausedRunFailure)
+        RUBY
+
+        [ nil, "1" ].product([ false, true ]).each do |debug, json|
+          out, err, status = Open3.capture3(
+            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
+            RbConfig.ruby, "-r", fixture, hive_e2e, "run", name, *([ "--json" ] if json)
+          )
+          assert_equal 1, status.exitstatus, "#{out}#{err}"
+          message = "RuntimeError: outer run failure"
+          if json
+            assert_equal message, assert_error_document(out, kind: "run_failed", code: 1, command: "run").fetch("message")
+          else
+            assert_empty out
+          end
+
+          evidence = JSON.parse(File.read(evidence_path))
+          backtrace = evidence.fetch("backtrace")
+          assert_operator backtrace.size, :>, backtrace.uniq.size, "fixture must have legitimate repeated frames"
+          assert_equal "ArgumentError", evidence.fetch("cause_class")
+          assert_equal "distinct inner failure", evidence.fetch("cause_message")
+          cause_only_frames = evidence.fetch("cause_backtrace") - backtrace
+          refute_empty cause_only_frames, "fixture must have distinct cause frames"
+
+          expected_lines = json ? [] : [ "hive-e2e: #{message}" ]
+          if debug == "1"
+            expected_lines << "hive-e2e debug: #{message}"
+            expected_lines.concat(backtrace.map { |frame| "  #{frame}" })
+          end
+          assert_equal expected_lines.map { |line| "#{line}\n" }.join, err
+          refute_includes err, evidence.fetch("cause_message")
+          cause_only_frames.each { |frame| refute_includes err, frame }
+        end
+      end
+    end
+  end
+
   def test_repeated_unexpected_run_failure_keeps_diagnostics_complete_and_fixture_unchanged
     with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
       messages = 2.times.map do
@@ -213,7 +295,7 @@ class E2EBinaryTest < Minitest::Test
         assert_run_failure_debug(err, message, kind: :blocked_runs, human: false)
         assert File.file?(runs_dir)
         assert_equal "unchanged blocker", File.read(runs_dir)
-        assert_empty Dir.glob(File.join(runs_dir, "**", "*"))
+        assert_equal [ "runs" ], Dir.children(File.dirname(runs_dir)), "no partial run or crashed report may be created"
         message
       end
       assert_equal messages.first, messages.last
@@ -233,10 +315,12 @@ class E2EBinaryTest < Minitest::Test
   end
 
   def test_debug_preserves_outer_thor_usage_error
-    assert_compatible_error(
-      [ "clean", "--retain-days" ], kind: "usage", code: 64, command: nil,
-      message: "No value provided for option '--retain-days'"
-    )
+    Dir.mktmpdir("e2e-clean-usage") do |runs_dir|
+      assert_compatible_error(
+        [ "clean", "--retain-days" ], kind: "usage", code: 64, command: nil,
+        message: "No value provided for option '--retain-days'", env: { "HIVE_E2E_RUNS_DIR" => runs_dir }
+      )
+    end
   end
 
   def test_debug_preserves_outer_generic_error_without_run_failure_formatting

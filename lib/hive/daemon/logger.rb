@@ -30,6 +30,7 @@ module Hive
         status_warning
         admission_check_failed
         operational_snapshot_publish_failed
+        runtime_checkpoint_maintenance
         dispatched
         completed
         skipped

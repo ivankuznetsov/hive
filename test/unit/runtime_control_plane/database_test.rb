@@ -83,6 +83,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
           journal_mode: pragma.call("journal_mode").to_s.downcase,
           foreign_keys: pragma.call("foreign_keys"),
           synchronous: pragma.call("synchronous"),
+          wal_autocheckpoint: pragma.call("wal_autocheckpoint"),
           trusted_schema: pragma.call("trusted_schema"),
           busy_timeout_ms: pragma.call("busy_timeout")
         }
@@ -91,11 +92,117 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       assert_equal "wal", settings.fetch(:journal_mode)
       assert_equal 1, settings.fetch(:foreign_keys)
       assert_equal 2, settings.fetch(:synchronous)
+      assert_equal 4096, settings.fetch(:wal_autocheckpoint)
       assert_equal 0, settings.fetch(:trusted_schema)
       assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
                    settings.fetch(:busy_timeout_ms)
       assert_raises(Sequel::DatabaseError) do
         database.read { |connection| connection.get(Sequel.lit('"not_a_column"')) }
+      end
+    end
+  end
+
+  def test_checkpoint_role_applies_to_cached_reopened_and_forked_connections
+    with_database do |database, path|
+      %i[daemon_backed manual].each do |role|
+        expected = role == :daemon_backed ? 0 : 4096
+        database.configure_checkpoint_role!(role)
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+        database.disconnect
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+        database.read(&:disconnect)
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) },
+                     "a replacement physical connection in the pool must inherit its role"
+        reader, writer = IO.pipe
+        pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
+          reader.close
+          writer.write(database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) })
+          writer.close
+          database.disconnect
+          exit! 0
+        end
+        writer.close
+        assert_equal expected.to_s, reader.read
+        reader.close
+        Process.wait(pid)
+        assert_predicate $?, :success?
+      end
+      assert_raises(ArgumentError) { database.configure_checkpoint_role!(:controller) }
+      Hive::RuntimeControlPlane.disconnect
+      cached = Hive::RuntimeControlPlane.database(path: path)
+      assert_same cached, Hive::RuntimeControlPlane.database(path: path, checkpoint_role: :daemon_backed)
+      assert_equal :daemon_backed, cached.checkpoint_role
+      assert_equal 0, cached.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+    end
+  end
+
+  def test_daemon_writes_cross_the_old_checkpoint_threshold_without_checkpointing
+    with_database do |database, path|
+      database.configure_checkpoint_role!(:daemon_backed)
+      database.checkpoint!
+      original_bytes = File.size(path)
+      publish_large_snapshot(database, 5 * 1024 * 1024)
+
+      assert_operator database.wal_bytes, :>, 1000 * 4096
+      assert_equal original_bytes, File.size(path), "daemon commits must leave checkpoint work to maintenance"
+      result = database.passive_checkpoint!
+      assert result.fetch(:complete)
+      assert_operator result.fetch(:checkpointed_frames), :>, 1000
+      assert_operator File.size(path), :>, original_bytes
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |sql| sql.fetch("PRAGMA busy_timeout").get(:timeout) }
+    end
+  end
+
+  def test_manual_only_writes_automatically_checkpoint_at_the_raised_threshold
+    with_database do |database, path|
+      database.checkpoint!
+      original_bytes = File.size(path)
+      3.times { |index| publish_large_snapshot(database, 5 * 1024 * 1024, index) }
+      assert_equal original_bytes, File.size(path), "the raised threshold must exceed the old 1000-page policy"
+      publish_large_snapshot(database, 5 * 1024 * 1024, 3)
+
+      assert_operator File.size(path), :>, original_bytes,
+                      "manual-only writes must make automatic progress without a daemon or command hook"
+      assert_equal 4096, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+    end
+  end
+
+  def test_passive_checkpoint_defers_a_pinned_reader_then_drains_without_blocking_writes
+    with_database do |database, path|
+      database.configure_checkpoint_role!(:daemon_backed)
+      publish_large_snapshot(database, 100)
+      database.checkpoint!
+      reader = SQLite3::Database.new(path)
+      reader.execute("BEGIN")
+      reader.execute("SELECT observation_json FROM daemon_runtime")
+      publish_large_snapshot(database, 2 * 1024 * 1024)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      deferred = database.passive_checkpoint!
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1
+      refute deferred.fetch(:complete)
+      assert_operator deferred.fetch(:remaining_frames), :>, 0
+      assert_equal 0, deferred.fetch(:busy), "PASSIVE can report incomplete progress without SQLITE_BUSY"
+      publish_large_snapshot(database, 2 * 1024 * 1024, 1)
+      reader.execute("ROLLBACK")
+      assert database.passive_checkpoint!.fetch(:complete)
+    ensure
+      reader&.close
+    end
+  end
+
+  def test_passive_checkpoint_cannot_overlap_transactions_or_closed_lifecycle_without_authority
+    with_database do |database|
+      database.transaction do
+        assert_raises(ArgumentError) { database.passive_checkpoint! }
+      end
+      database.transaction { |sql| sql[:runtime_lifecycle].update(phase: "quiescing") }
+      assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) { database.passive_checkpoint! }
+      database.with_exclusive_writer(role: :controller) do |authority|
+        assert database.passive_checkpoint!(authority: authority).fetch(:complete)
+      end
+      database.with_exclusive_writer(role: :migrator) do
+        assert_raises(Hive::ConcurrentRunError) { database.passive_checkpoint!(timeout_sec: 0.01) }
       end
     end
   end
@@ -1241,6 +1348,12 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
   end
 
   private
+
+  def publish_large_snapshot(database, bytes, sequence = 0)
+    Hive::RuntimeControlPlane::OperationalRepository.new(database: database).publish(
+      { "padding" => ("a".ord + sequence).chr * bytes, "sequence" => sequence }
+    )
+  end
 
   def database_with_mountinfo(path, mountinfo:, platform: "linux")
     proc_root = File.join(File.dirname(path), ".proc")

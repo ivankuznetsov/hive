@@ -1,0 +1,570 @@
+{
+  "manifest": {
+    "rows": 251,
+    "row_padding_bytes": 1024,
+    "snapshot_bytes": 269531,
+    "publications": 72,
+    "pinned_reader": true,
+    "maintenance_clock": "injected monotonic, publication index / 5Hz",
+    "writer_count": 1,
+    "comparison_run": false
+  },
+  "roles": {
+    "daemon_backed": 0,
+    "manual_default": 4096
+  },
+  "peak_wal_bytes": 20175672,
+  "writes": [
+    {
+      "duration_sec": 0.01973494599951664,
+      "wal_bytes": 321392,
+      "maintenance": {
+        "complete": false,
+        "busy": 0,
+        "log_frames": 69,
+        "checkpointed_frames": 0,
+        "remaining_frames": 69,
+        "page_size": 4096,
+        "wal_bytes": 321392,
+        "duration_sec": 0.00006943100015632808,
+        "checkpoint_role": "daemon_backed",
+        "cadence_sec": 30.0,
+        "observed_wal_bytes": 321392,
+        "high_water_bytes": 16777216,
+        "high_water_frames": 4073,
+        "high_water": false,
+        "deferred": true
+      }
+    },
+    {
+      "duration_sec": 0.02060975399945164,
+      "wal_bytes": 564472,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.030017586002941243,
+      "wal_bytes": 844632,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02035064299707301,
+      "wal_bytes": 1124792,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019904346998373512,
+      "wal_bytes": 1404952,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01984340199851431,
+      "wal_bytes": 1685112,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02141050100181019,
+      "wal_bytes": 1965272,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020264378996216692,
+      "wal_bytes": 2245432,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019430127998930402,
+      "wal_bytes": 2525592,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02399173400044674,
+      "wal_bytes": 2805752,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02395590599917341,
+      "wal_bytes": 3085912,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020920762995956466,
+      "wal_bytes": 3366072,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020105087001866195,
+      "wal_bytes": 3646232,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02065880699956324,
+      "wal_bytes": 3926392,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02149258700228529,
+      "wal_bytes": 4206552,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01928563399997074,
+      "wal_bytes": 4486712,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018121417000656947,
+      "wal_bytes": 4766872,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019048363996262196,
+      "wal_bytes": 5047032,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019985931998235174,
+      "wal_bytes": 5327192,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01819130000512814,
+      "wal_bytes": 5607352,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018366652002441697,
+      "wal_bytes": 5887512,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018879173003369942,
+      "wal_bytes": 6167672,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019852568999340292,
+      "wal_bytes": 6447832,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018247917003463954,
+      "wal_bytes": 6727992,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018344380005146377,
+      "wal_bytes": 7008152,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019119869997666683,
+      "wal_bytes": 7288312,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02166454299731413,
+      "wal_bytes": 7568472,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01999202300066827,
+      "wal_bytes": 7848632,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01996080399840139,
+      "wal_bytes": 8128792,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019967155996710062,
+      "wal_bytes": 8408952,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.021518916997592896,
+      "wal_bytes": 8689112,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019449374995019753,
+      "wal_bytes": 8969272,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019676816002174746,
+      "wal_bytes": 9249432,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019198087997210678,
+      "wal_bytes": 9529592,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.021366377994127106,
+      "wal_bytes": 9809752,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019481745999655686,
+      "wal_bytes": 10089912,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019517141998221632,
+      "wal_bytes": 10370072,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.017996982001932338,
+      "wal_bytes": 10650232,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.021178331997361965,
+      "wal_bytes": 10930392,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01948953000101028,
+      "wal_bytes": 11210552,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019613354998000432,
+      "wal_bytes": 11490712,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019255275998148136,
+      "wal_bytes": 11770872,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020116127998335287,
+      "wal_bytes": 12051032,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019200982998881955,
+      "wal_bytes": 12331192,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01962216199899558,
+      "wal_bytes": 12611352,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019053745003475342,
+      "wal_bytes": 12891512,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.021780873998068273,
+      "wal_bytes": 13171672,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01999476800119737,
+      "wal_bytes": 13451832,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.021286306000547484,
+      "wal_bytes": 13731992,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019692886002303567,
+      "wal_bytes": 14012152,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02148886999930255,
+      "wal_bytes": 14292312,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.0200075220054714,
+      "wal_bytes": 14572472,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018639469999470748,
+      "wal_bytes": 14852632,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01817994799785083,
+      "wal_bytes": 15132792,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020216569006151985,
+      "wal_bytes": 15412952,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018456413003150374,
+      "wal_bytes": 15693112,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.01867079899966484,
+      "wal_bytes": 15973272,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018321866999031045,
+      "wal_bytes": 16253432,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02051913199829869,
+      "wal_bytes": 16533592,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019189822000043932,
+      "wal_bytes": 16813752,
+      "maintenance": {
+        "complete": false,
+        "busy": 0,
+        "log_frames": 4081,
+        "checkpointed_frames": 0,
+        "remaining_frames": 4081,
+        "page_size": 4096,
+        "wal_bytes": 16813752,
+        "duration_sec": 0.00008555199747206643,
+        "checkpoint_role": "daemon_backed",
+        "cadence_sec": 1.0,
+        "observed_wal_bytes": 16813752,
+        "high_water_bytes": 16777216,
+        "high_water_frames": 4073,
+        "high_water": true,
+        "deferred": true
+      }
+    },
+    {
+      "duration_sec": 0.018861599994124845,
+      "wal_bytes": 17093912,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019309518997033592,
+      "wal_bytes": 17374072,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02057342500484083,
+      "wal_bytes": 17654232,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019048664995352738,
+      "wal_bytes": 17934392,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.019164644996635616,
+      "wal_bytes": 18214552,
+      "maintenance": {
+        "complete": false,
+        "busy": 0,
+        "log_frames": 4421,
+        "checkpointed_frames": 0,
+        "remaining_frames": 4421,
+        "page_size": 4096,
+        "wal_bytes": 18214552,
+        "duration_sec": 0.00007667500176467001,
+        "checkpoint_role": "daemon_backed",
+        "cadence_sec": 1.0,
+        "observed_wal_bytes": 18214552,
+        "high_water_bytes": 16777216,
+        "high_water_frames": 4073,
+        "high_water": true,
+        "deferred": true
+      }
+    },
+    {
+      "duration_sec": 0.019805048003036063,
+      "wal_bytes": 18494712,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.020960319001460448,
+      "wal_bytes": 18774872,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018825861996447202,
+      "wal_bytes": 19055032,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.018379576002189424,
+      "wal_bytes": 19335192,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.022197703998244833,
+      "wal_bytes": 19615352,
+      "maintenance": {
+        "complete": false,
+        "busy": 0,
+        "log_frames": 4761,
+        "checkpointed_frames": 0,
+        "remaining_frames": 4761,
+        "page_size": 4096,
+        "wal_bytes": 19615352,
+        "duration_sec": 0.00008661399624543265,
+        "checkpoint_role": "daemon_backed",
+        "cadence_sec": 1.0,
+        "observed_wal_bytes": 19615352,
+        "high_water_bytes": 16777216,
+        "high_water_frames": 4073,
+        "high_water": true,
+        "deferred": true
+      }
+    },
+    {
+      "duration_sec": 0.025751208995643537,
+      "wal_bytes": 19895512,
+      "maintenance": null
+    },
+    {
+      "duration_sec": 0.02335506800591247,
+      "wal_bytes": 20175672,
+      "maintenance": null
+    }
+  ],
+  "maintenance_reports": [
+    {
+      "complete": false,
+      "busy": 0,
+      "log_frames": 69,
+      "checkpointed_frames": 0,
+      "remaining_frames": 69,
+      "page_size": 4096,
+      "wal_bytes": 321392,
+      "duration_sec": 0.00006943100015632808,
+      "checkpoint_role": "daemon_backed",
+      "cadence_sec": 30.0,
+      "observed_wal_bytes": 321392,
+      "high_water_bytes": 16777216,
+      "high_water_frames": 4073,
+      "high_water": false,
+      "deferred": true
+    },
+    {
+      "complete": false,
+      "busy": 0,
+      "log_frames": 4081,
+      "checkpointed_frames": 0,
+      "remaining_frames": 4081,
+      "page_size": 4096,
+      "wal_bytes": 16813752,
+      "duration_sec": 0.00008555199747206643,
+      "checkpoint_role": "daemon_backed",
+      "cadence_sec": 1.0,
+      "observed_wal_bytes": 16813752,
+      "high_water_bytes": 16777216,
+      "high_water_frames": 4073,
+      "high_water": true,
+      "deferred": true
+    },
+    {
+      "complete": false,
+      "busy": 0,
+      "log_frames": 4421,
+      "checkpointed_frames": 0,
+      "remaining_frames": 4421,
+      "page_size": 4096,
+      "wal_bytes": 18214552,
+      "duration_sec": 0.00007667500176467001,
+      "checkpoint_role": "daemon_backed",
+      "cadence_sec": 1.0,
+      "observed_wal_bytes": 18214552,
+      "high_water_bytes": 16777216,
+      "high_water_frames": 4073,
+      "high_water": true,
+      "deferred": true
+    },
+    {
+      "complete": false,
+      "busy": 0,
+      "log_frames": 4761,
+      "checkpointed_frames": 0,
+      "remaining_frames": 4761,
+      "page_size": 4096,
+      "wal_bytes": 19615352,
+      "duration_sec": 0.00008661399624543265,
+      "checkpoint_role": "daemon_backed",
+      "cadence_sec": 1.0,
+      "observed_wal_bytes": 19615352,
+      "high_water_bytes": 16777216,
+      "high_water_frames": 4073,
+      "high_water": true,
+      "deferred": true
+    },
+    {
+      "complete": true,
+      "busy": 0,
+      "log_frames": 4897,
+      "checkpointed_frames": 4897,
+      "remaining_frames": 0,
+      "page_size": 4096,
+      "wal_bytes": 20175672,
+      "duration_sec": 0.0003645210017566569,
+      "checkpoint_role": "daemon_backed",
+      "cadence_sec": 1.0,
+      "observed_wal_bytes": 20175672,
+      "high_water_bytes": 16777216,
+      "high_water_frames": 4073,
+      "high_water": true,
+      "deferred": false
+    }
+  ],
+  "released_reader_drain": {
+    "complete": true,
+    "busy": 0,
+    "log_frames": 4897,
+    "checkpointed_frames": 4897,
+    "remaining_frames": 0,
+    "page_size": 4096,
+    "wal_bytes": 20175672,
+    "duration_sec": 0.0003645210017566569,
+    "checkpoint_role": "daemon_backed",
+    "cadence_sec": 1.0,
+    "observed_wal_bytes": 20175672,
+    "high_water_bytes": 16777216,
+    "high_water_frames": 4073,
+    "high_water": true,
+    "deferred": false
+  },
+  "quiescence_duration_sec": 0.020462904998566955,
+  "quiescence_budget_sec": 600.0,
+  "lifecycle_full_duration_sec": 0.00011233300028834492,
+  "lifecycle_checkpoint": {
+    "complete": true,
+    "busy": 0,
+    "log_frames": 1,
+    "checkpointed_frames": 1,
+    "passive_drain": {
+      "complete": true,
+      "busy": 0,
+      "log_frames": 2,
+      "checkpointed_frames": 2,
+      "remaining_frames": 0,
+      "page_size": 4096,
+      "wal_bytes": 20175672,
+      "duration_sec": 0.00008255600550910458
+    }
+  },
+  "upgrade_truncate_duration_sec": 0.002776271998300217,
+  "upgrade_sqlite_timeout_sec": 15.0,
+  "upgrade_truncate_complete": true,
+  "after_truncate_wal_bytes": 0
+}

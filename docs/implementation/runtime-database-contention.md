@@ -35,3 +35,47 @@ long-hold reduction or historical incident resolution has been established.
 The actual removed work is canonical encoding of the paired snapshot and
 projection under the lock. Further reductions require attribution rather than
 a larger synthetic snapshot.
+
+## Checkpoint policy and pinned-reader qualification
+
+Checkpoint-policy changes were exercised on the implementation tree after
+`8105e313a0`. Standalone/manual connections now use `wal_autocheckpoint=4096`;
+explicit daemon-owned connections use zero. Tests observe the pragmas on the
+cached connection, wrapper reconnect, physical pool replacement and fork.
+Daemon commits crossed the former 1000-page threshold without growing the
+main database; a subsequent PASSIVE pass copied the frames. Manual-only writes
+made automatic progress at the raised threshold without a daemon or lifecycle
+hook. Manual commits can therefore still perform checkpoint work. Durability
+remains `synchronous=FULL` and busy timeout remains 15000 ms.
+
+Reproduce the storage-policy capture with
+`bundle exec ruby -Ilib test/support/runtime_checkpoint_workload.rb`.
+`runtime-database-contention/checkpoints.json` records 72 publications of the
+same fixed 251-row, 1024-byte-padding, 269531-byte snapshot used by the writer
+comparison. Padding content changes while its size remains fixed. This
+single-writer storage test deliberately uses more publications than the
+ten-publication comparison, with a pinned reader and an injected maintenance
+clock advancing at five publications per second. It establishes checkpoint
+policy and lifecycle feasibility; it supplies no writer timing comparison or
+long-hold reduction claim.
+
+The reader held checkpoint progress at zero while the WAL grew to **20175672
+bytes / 4897 frames**, exceeding the 16 MiB escalation threshold (4073 frames
+at 4096-byte page size including WAL headers). Maintenance reported deferred
+progress and selected the one-second cadence above high water. After reader
+release, one PASSIVE pass copied all 4897 frames in 0.365 ms. Whole quiescence,
+including its pre-pause PASSIVE drain and checked FULL, completed in 20.46 ms
+within its unchanged 600-second budget. The pre-pause pass copied 2/2 current
+frames in 0.083 ms; FULL copied 1/1 in 0.112 ms. The existing upgrade-source
+TRUNCATE completed in 2.78 ms and reduced WAL bytes to zero, within its unchanged
+15-second SQLite timeout. These operations ran with the retained 20.18 MB WAL
+allocation after reader release; repeated overwrites meant the live database
+was much smaller than cumulative WAL frames.
+
+The pinned-reader peak demonstrates that high water is an escalation threshold,
+not a hard storage bound. A long-running daemon/four-supervisor steady-state
+maximum and lifecycle behavior at that maximum remain qualification work for
+the combined implementation. Deterministic tests separately cover cadence,
+process and overlap guards, deferred errors, lifecycle operation/writer fences,
+closed admission, transaction rejection and pre-pause error/deadline exhaustion.
+The broad local checkpoint has not been run for this unit.

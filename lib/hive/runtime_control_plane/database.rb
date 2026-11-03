@@ -20,7 +20,8 @@ module Hive
       STORAGE_ACTION = "Use a writable, accessible state root (HIVE_HOME).".freeze
       UNPAIRED_STORAGE_ACTION = "Use a writable state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove the stray sidecar after verifying no committed data will be lost.".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
-      attr_reader :path, :owner_pid
+      CHECKPOINT_PAGES = { manual: 4096, daemon_backed: 0 }.freeze
+      attr_reader :path, :owner_pid, :checkpoint_role
 
       WriterAuthority = Data.define(:database_id, :owner_pid, :role) do
         def valid_for?(database, permitted_roles)
@@ -33,7 +34,8 @@ module Hive
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
                      feature_probe: nil, clock: -> { Time.now.utc },
                      uuid_generator: -> { SecureRandom.uuid }, proc_root: "/proc",
-                     platform: RUBY_PLATFORM, transaction_observer: nil)
+                     platform: RUBY_PLATFORM, transaction_observer: nil,
+                     checkpoint_role: :manual)
         @path = File.expand_path(path)
         @migrations_dir = File.expand_path(migrations_dir)
         @busy_timeout_ms = Integer(busy_timeout_ms)
@@ -48,6 +50,21 @@ module Hive
         @validated = false
         @active_writer_authorities = {}
         @transaction_observer = transaction_observer
+        configure_checkpoint_role!(checkpoint_role)
+      end
+
+      # A daemon may adopt the process's already-open command registration
+      # connection. Policy selection grants no writer/lifecycle authority.
+      def configure_checkpoint_role!(role)
+        role = role.to_sym
+        raise ArgumentError, "unknown checkpoint role: #{role}" unless CHECKPOINT_PAGES.key?(role)
+
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          @checkpoint_role = role
+          @connection&.run("PRAGMA wal_autocheckpoint = #{CHECKPOINT_PAGES.fetch(role)}")
+        end
+        self
       end
 
       def open!(revalidate: true, timeout_sec: nil)
@@ -298,6 +315,44 @@ module Hive
         ensure
           @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
         end
+      end
+
+      # PASSIVE never waits for readers or forces WAL reclamation. The shared
+      # writer fence excludes pause/upgrade finalization; the controller can
+      # perform its pre-pause drain under its existing exclusive authority.
+      def passive_checkpoint!(timeout_sec: 0.25, authority: nil)
+        reject_operational_mutation!
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ Float(timeout_sec), 0.0 ].max
+        ProcessGuard.checkout { ensure_open!(timeout_sec: remaining_timeout(deadline)) }
+        with_writer_fence(authority: authority, timeout_sec: remaining_timeout(deadline)) do
+          ProcessGuard.checkout do
+            raise ArgumentError, "checkpoint cannot run inside a transaction" if @connection.in_transaction?
+            phase = @connection[:runtime_lifecycle].get(:phase)
+            raise AdmissionClosed unless phase == "running" || valid_authority?(authority)
+
+            prior = integer_pragma(@connection, "busy_timeout")
+            @connection.run("PRAGMA busy_timeout = 0")
+            started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            values = @connection.fetch("PRAGMA wal_checkpoint(PASSIVE)").first.values.map { |value| Integer(value) }
+            busy, log_frames, checkpointed_frames = values
+            {
+              complete: busy.zero? && checkpointed_frames >= log_frames,
+              busy: busy, log_frames: log_frames, checkpointed_frames: checkpointed_frames,
+              remaining_frames: [ log_frames - checkpointed_frames, 0 ].max,
+              page_size: integer_pragma(@connection, "page_size"),
+              wal_bytes: wal_bytes,
+              duration_sec: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+            }
+          ensure
+            @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+          end
+        end
+      end
+
+      def wal_bytes
+        File.size("#{path}-wal")
+      rescue Errno::ENOENT
+        0
       end
 
       def quiescence_upgrade_source
@@ -602,8 +657,11 @@ module Hive
         validate_database_custody!
         timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
           [ (Float(timeout_sec) * 1000).floor, 0 ].max
-        @connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1,
-                                     timeout: timeout_ms, disable_dqs: true)
+        @connection = Sequel.connect(
+          adapter: "sqlite", database: path, max_connections: 1,
+          timeout: timeout_ms, disable_dqs: true,
+          after_connect: ->(raw) { raw.execute("PRAGMA wal_autocheckpoint = #{CHECKPOINT_PAGES.fetch(checkpoint_role)}") }
+        )
         ProcessGuard.register(self)
         journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
         unless journal_mode == "wal"

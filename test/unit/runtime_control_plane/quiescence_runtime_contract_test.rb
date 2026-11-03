@@ -355,7 +355,7 @@ class RuntimeControlPlaneQuiescenceRuntimeContractTest < Minitest::Test
     end
     database = Object.new
     database.define_singleton_method(:path) { "/tmp/runtime.sqlite3" }
-    database.define_singleton_method(:transaction) { |&block| block.call(connection) }
+    database.define_singleton_method(:transaction) { |**_options, &block| block.call(connection) }
     identity = Object.new
     identity.define_singleton_method(:capture) do |pid|
       Hive::Attempts::ProcessSnapshot.new(

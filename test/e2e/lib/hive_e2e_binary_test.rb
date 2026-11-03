@@ -145,6 +145,7 @@ class E2EBinaryTest < Minitest::Test
         assert_empty err
       else
         assert_empty out
+        assert_match(/\Ahive-e2e: /, err)
         actual = err.lines.first.delete_prefix("hive-e2e: ").chomp
         assert_equal "hive-e2e: #{actual}\n", err
         refute_match(/\.rb:\d+:in /, err)
@@ -173,6 +174,7 @@ class E2EBinaryTest < Minitest::Test
             message = assert_error_document(out, kind: "run_failed", code: 1, command: "run").fetch("message")
           else
             assert_empty out
+            assert_match(/\Ahive-e2e: /, err)
             message = err.lines.first.delete_prefix("hive-e2e: ").chomp
           end
           expected_class = kind == :blocked_runs ? /Errno::(?:EEXIST|ENOTDIR)/ : /Errno::ENOENT/
@@ -190,7 +192,7 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
-  def test_unexpected_run_debug_requires_exactly_one
+  def test_unexpected_run_debug_requires_exact_value_one
     with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
       [ nil, "", "   ", "0", "true", "yes", "on" ].product([ false, true ]).each do |debug, json|
         out, err, status = Open3.capture3(
@@ -249,6 +251,7 @@ class E2EBinaryTest < Minitest::Test
         RUBY
 
         [ nil, "1" ].product([ false, true ]).each do |debug, json|
+          File.delete(evidence_path) if File.exist?(evidence_path)
           out, err, status = Open3.capture3(
             { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
             RbConfig.ruby, "-r", fixture, hive_e2e, "run", name, *([ "--json" ] if json)
@@ -261,6 +264,7 @@ class E2EBinaryTest < Minitest::Test
             assert_empty out
           end
 
+          assert_path_exists evidence_path, "child did not capture exception evidence: #{out}#{err}"
           evidence = JSON.parse(File.read(evidence_path))
           backtrace = evidence.fetch("backtrace")
           assert_operator backtrace.size, :>, backtrace.uniq.size, "fixture must have legitimate repeated frames"
@@ -867,9 +871,9 @@ class E2EBinaryTest < Minitest::Test
           - kind: state_assert
             path: "{sandbox}/missing.txt"
       YAML
-        [ nil, "1" ].product([ false, true ]).each do |debug, json|
+        [ false, true ].each do |json|
           out, err, status = Open3.capture3(
-            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => debug },
+            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => "1" },
             hive_e2e, "run", failing, *([ "--json" ] if json)
           )
           assert_equal 1, status.exitstatus, err

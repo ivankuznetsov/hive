@@ -10,9 +10,29 @@ class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
   def test_orchestrator_owned_lists_canonical_state_and_identity_files
-    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl],
+    assert_equal %w[plan.md worktree.yml handoff.yml task.md task-journal.jsonl execution-plan-current.json capability-accepted.jsonl],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
+  end
+
+  def test_capability_anchors_are_protected_when_absent_before_spawn
+    require "hive/artifact_firewall"
+    with_tmp_dir do |dir|
+      manifest = Hive::ArtifactFirewall::Manifest.new(root: dir,
+        protected_anchors: Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
+        permitted_writable_roots: [ dir ], required_outputs: {})
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      %w[execution-plan-current.json capability-accepted.jsonl].each do |name|
+        File.write(File.join(dir, name), "forged authority")
+      end
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+      assert report.tampered?
+      assert report.restored?
+      assert_includes report.tampered_labels, "execution-plan-current.json"
+      assert_includes report.tampered_labels, "capability-accepted.jsonl"
+      refute File.exist?(File.join(dir, "execution-plan-current.json"))
+      refute File.exist?(File.join(dir, "capability-accepted.jsonl"))
+    end
   end
 
   def test_snapshot_returns_hash_keyed_by_name_with_sha256_hex
@@ -22,6 +42,8 @@ class ProtectedFilesTest < Minitest::Test
       File.write(File.join(dir, "handoff.yml"), "phase: worktree_created\n")
       File.write(File.join(dir, "task.md"), "## task\n")
       File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
+      File.write(File.join(dir, "execution-plan-current.json"), "{}\n")
+      File.write(File.join(dir, "capability-accepted.jsonl"), "{}\n")
 
       snap = Hive::ProtectedFiles.snapshot(dir)
       assert_kind_of Hash, snap

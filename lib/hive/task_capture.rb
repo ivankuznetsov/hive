@@ -10,6 +10,7 @@ require "hive/workflows"
 require "hive/workflow_package/managed_store"
 require "hive/config"
 require "hive/daily_digest/task_creation_receipt"
+require "hive/task_capabilities/store"
 
 module Hive
   # Lower-level deterministic task capture shared by CLI task creation and
@@ -160,8 +161,10 @@ module Hive
           value: @idempotency_key
         )
       end
-      return matches.first if
-        matches.first.dig(:meta, :input_fingerprint) == @input_fingerprint
+      if matches.first.dig(:meta, :input_fingerprint) == @input_fingerprint
+        Hive::TaskCapabilities::Store.new(matches.first.fetch(:folder)).current
+        return matches.first
+      end
 
       raise IdempotencyConflict.new(
         "idempotency key #{@idempotency_key.inspect} was already used for different input or workflow",
@@ -193,6 +196,7 @@ module Hive
       @candidate_writer&.call(task_dir)
       validate_stable_authored_workflow!
       metadata = write_task_meta!(task_dir, stable_selection: stable_selection)
+      Hive::TaskCapabilities::Store.new(task_dir).activate(@initial_execution_plan, expected_version: nil) if @initial_execution_plan
       Hive::DailyDigest::TaskCreationReceipt.write!(
         task_folder: task_dir,
         project: project_identity!,
@@ -235,20 +239,35 @@ module Hive
     def write_task_meta!(task_dir, stable_selection:)
       managed = @workflow_info.fetch(:managed)
       validate_stable_selection!(stable_selection)
+      task_id = @task_id_provider.call
+      cfg = @workflow_info.fetch(:managed_cfg, {})
+      if Hive::Workflows.coding_id?(@workflow.id) && cfg.dig("task_capabilities", "enabled") == true
+        catalog = Hive::TaskCapabilities::Catalog.new(workflow: @workflow,
+          definitions: cfg.dig("task_capabilities", "catalog") || [], source: File.join(@hive_state, "config.yml"))
+        @initial_execution_plan = Hive::TaskCapabilities::Plan.minimal(
+          task_identity: { id: task_id&.to_s, slug: @slug, workflow: @workflow.id.to_s },
+          catalog: catalog, policy: cfg.dig("task_capabilities", "policy") || {},
+          configuration_digest: managed&.fetch("configuration_digest"),
+          source: { "workflow" => @workflow.id.to_s, "commit" => managed&.fetch("source_commit"),
+                    "manifest_digest" => managed&.fetch("manifest_digest"),
+                    "configuration_digest" => managed&.fetch("configuration_digest") }
+        )
+      end
       Hive::TaskMeta.write(
         task_dir,
-        id: @task_id_provider.call,
+        id: task_id,
         slug: @slug,
         display_name: nil,
         depends_on: @depends_on,
         base_branch: @base_branch,
-        workflow: @workflow_info.fetch(:pin) ? @workflow.id.to_s : nil,
+        workflow: @workflow_info.fetch(:pin) || @initial_execution_plan ? @workflow.id.to_s : nil,
         workflow_commit: managed&.fetch("source_commit"),
         workflow_manifest_digest: managed&.fetch("manifest_digest"),
         workflow_configuration_digest: managed&.fetch("configuration_digest"),
         idempotency_key: @idempotency_key,
         input_fingerprint: @input_fingerprint,
-        plan_review_required: Hive::Workflows.coding_id?(@workflow.id) ? true : nil
+        plan_review_required: Hive::Workflows.coding_id?(@workflow.id) ? true : nil,
+        task_capabilities: @initial_execution_plan&.adoption
       )
     end
 

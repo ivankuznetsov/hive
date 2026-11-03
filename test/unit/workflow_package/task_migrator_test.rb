@@ -19,6 +19,115 @@ class WorkflowPackageTaskMigratorTest < Minitest::Test
     end
   end
 
+  def adopt_capability(folder, descriptor)
+    catalog = Hive::TaskCapabilities::Catalog.new(workflow: descriptor)
+    plan = Hive::TaskCapabilities::Plan.minimal(
+      task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)), catalog: catalog,
+      source: { "workflow" => "demo", "commit" => old_pin.fetch(:workflow_commit), "manifest_digest" => old_pin.fetch(:workflow_manifest_digest),
+                "configuration_digest" => old_pin.fetch(:workflow_configuration_digest) }, policy: {}
+    )
+    plan = Hive::TaskCapabilities::Plan.new(plan.to_h.merge("bindings" => [ { "id" => "local" } ]))
+    Hive::TaskMeta.rewrite(folder, task_capabilities: plan.adoption)
+    Hive::TaskCapabilities::Store.new(folder).activate(plan, expected_version: nil)
+    plan
+  end
+
+  def with_capability(descriptor, model: "pinned-model", explicit_actor: true)
+    data = { "id" => "local", "kind" => "verification", "stages" => [ "review" ] }
+    data["actor"] = { "profile" => "claude", "provider" => "anthropic", "model" => model } if explicit_actor
+    definition = Hive::TaskCapabilities::Definition.new(data, stages: descriptor.stages, source: "descriptor")
+    descriptor.with(task_capabilities: [ definition ])
+  end
+
+  def test_capability_noop_repin_preserves_plan_history_and_chain_bytes
+    with_tmp_dir do |dir|
+      old = with_capability(workflow("review" => 4, "done" => 5))
+      current = with_capability(workflow("review" => 4, "done" => 5))
+      store = store_for(old:, current:)
+      folder = task_folder(dir, "4-review", old_pin)
+      plan = adopt_capability(folder, old)
+      before = %w[execution-plan-current.json capability-accepted.jsonl].to_h { |path| [ path, File.binread(File.join(folder, path)) ] }
+      migrator(dir, store).call
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(folder).current.digest
+      assert_equal before, before.keys.to_h { |path| [ path, File.binread(File.join(folder, path)) ] }
+    end
+  end
+
+  def test_incompatible_update_lists_every_active_task_and_requires_finish_archive_or_cancel
+    with_tmp_dir do |dir|
+      old = with_capability(workflow("review" => 4, "done" => 5))
+      current = with_capability(workflow("review" => 4, "done" => 5), model: "expanded-model")
+      store = store_for(old:, current:)
+      folders = %w[first-task second-task].map do |slug|
+        folder = task_folder(dir, "4-review", old_pin, slug: slug)
+        adopt_capability(folder, old)
+        folder
+      end
+      error = assert_raises(Hive::ConfigError) { migrator(dir, store).prepare }
+      assert_includes error.message, "first-task"
+      assert_includes error.message, "second-task"
+      assert_includes error.message, "Finish, archive or cancel"
+      folders.each { |folder| assert_equal old_pin, Hive::TaskMeta.read(folder).slice(*old_pin.keys) }
+      Hive::TaskMeta.write_completed_at_once(folders.first)
+      error = assert_raises(Hive::ConfigError) { migrator(dir, store).prepare }
+      refute_includes error.message, "first-task"
+      assert_includes error.message, "second-task"
+      Hive::TaskMeta.write_completed_at_once(folders.last)
+      before = folders.to_h { |folder| [ folder, Hive::TaskCapabilities::Store.new(folder).current.digest ] }
+      migrator(dir, store).call
+      folders.each { |folder| assert_equal before[folder], Hive::TaskCapabilities::Store.new(folder).current.digest }
+    end
+  end
+
+  def test_inherited_stage_model_changes_block_but_explicit_capability_actor_does_not_inherit_it
+    with_tmp_dir do |dir|
+      base = workflow("review" => 4, "done" => 5)
+      changed = base.with(stages: base.stages.map { |stage| stage.name == "review" ? stage.with(agent: "claude", model: "changed-model") : stage })
+      old = with_capability(base, explicit_actor: false)
+      current = with_capability(changed, explicit_actor: false)
+      folder = task_folder(dir, "4-review", old_pin)
+      adopt_capability(folder, old)
+      assert_raises(Hive::ConfigError) { migrator(dir, store_for(old:, current:)).prepare }
+      explicit_old = with_capability(base)
+      explicit_current = with_capability(changed)
+      assert_empty Hive::TaskCapabilities::Plan.new(Hive::TaskCapabilities::Store.new(folder).current.to_h.merge(
+        "definitions" => explicit_old.task_capabilities.map(&:to_h)
+      )).incompatible_bindings(Hive::TaskCapabilities::Catalog.new(workflow: explicit_current), previous_workflow: explicit_old)
+    end
+  end
+
+  def test_terminal_archived_task_preserves_history_without_blocking_update
+    with_tmp_dir do |dir|
+      base = workflow("review" => 4, "done" => 5)
+      base = base.with(stages: base.stages.map { |stage| stage.name == "done" ? stage.with(kind: :inert) : stage })
+      old = with_capability(base)
+      current = with_capability(base, model: "expanded-model")
+      folder = task_folder(dir, "5-done", old_pin)
+      plan = adopt_capability(folder, old)
+      assert_equal 1, migrator(dir, store_for(old:, current:)).call.task_count
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(folder).current.digest
+    end
+  end
+
+  def test_plan_revision_racing_migration_preparation_is_rejected_under_task_lease
+    with_tmp_dir do |dir|
+      old = with_capability(workflow("review" => 4, "done" => 5))
+      folder = task_folder(dir, "4-review", old_pin)
+      plan = adopt_capability(folder, old)
+      migration = migrator(dir, store_for(old: old, current: old))
+      acquire = migration.method(:acquire_locks!)
+      with_replaced_singleton_method(migration, :acquire_locks!, lambda { |operations|
+        revised = Hive::TaskCapabilities::Plan.new(plan.to_h.merge("version" => 2))
+        Hive::TaskCapabilities::Store.new(folder).activate(revised, expected_version: 1)
+        acquire.call(operations)
+      }) do
+        error = assert_raises(Hive::ConcurrentRunError) { migration.prepare }
+        assert_includes error.message, "execution plan changed"
+      end
+      assert_equal old_pin, Hive::TaskMeta.read(folder).slice(*old_pin.keys)
+    end
+  end
+
   def test_moves_tasks_by_stable_semantic_stage_and_repins_the_current_generation
     with_tmp_dir do |dir|
       old = workflow("review" => 4, "architecture" => 5)

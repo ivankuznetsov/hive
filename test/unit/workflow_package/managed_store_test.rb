@@ -151,6 +151,38 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_cleanup_retains_generations_and_configurations_from_execution_plan_history
+    with_tmp_dir do |dir|
+      prepare_test_runtime_project(dir)
+      hive_state = File.join(dir, ".hive-state")
+      package = File.join(dir, "package")
+      old = write_package(package, "a" * 40)
+      store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+      store.place_generation(package, old)
+      store.activate(old)
+      old_selection = store.selected("demo")
+      descriptor = store.workflow("demo", old.source_commit, old.manifest_digest)
+      folder = File.join(hive_state, "stages", "2-done", "history-task")
+      Hive::TaskMeta.write(folder, id: 99, slug: "history-task", display_name: nil, workflow: "demo")
+      plan = Hive::TaskCapabilities::Plan.minimal(task_identity: Hive::TaskMeta.stable_identity(Hive::TaskMeta.read(folder)),
+        catalog: Hive::TaskCapabilities::Catalog.new(workflow: descriptor), policy: {}, source: {
+          "workflow" => "demo", "commit" => old.source_commit, "manifest_digest" => old.manifest_digest,
+          "configuration_digest" => old_selection.fetch("configuration_digest")
+        })
+      Hive::TaskMeta.rewrite(folder, task_capabilities: plan.adoption)
+      Hive::TaskCapabilities::Store.new(folder).activate(plan, expected_version: nil)
+      current = write_package(package, "b" * 40)
+      store.place_generation(package, current)
+      store.activate(current)
+      Hive::TaskMeta.rewrite(folder, workflow_commit: current.source_commit, workflow_manifest_digest: current.manifest_digest,
+        workflow_configuration_digest: store.selected("demo").fetch("configuration_digest"))
+      assert_includes store.cleanup_unreferenced("demo"), old.source_commit
+      assert File.directory?(store.generation_path("demo", old.source_commit))
+      assert store.configuration("demo", old_selection.fetch("configuration_digest"))
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(folder).current.digest
+    end
+  end
+
   def test_loader_discovers_selection_but_runtime_rejects_a_task_after_removal
     with_tmp_dir do |dir|
       hive_state = File.join(dir, ".hive-state")

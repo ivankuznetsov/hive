@@ -14,7 +14,7 @@ module Hive
     WRITABLE_FIELDS = %i[
       id slug display_name depends_on workflow workflow_commit
       workflow_manifest_digest workflow_configuration_digest base_branch
-      idempotency_key input_fingerprint completed_at plan_review_required
+      idempotency_key input_fingerprint completed_at plan_review_required task_capabilities
     ].freeze
 
     class InvalidMetadata < StandardError; end
@@ -273,6 +273,7 @@ module Hive
           fetch(raw, "plan_review_required"), label: path(task_folder)
         )
       end
+      data[:task_capabilities] = normalize_task_capabilities(fetch(raw, "task_capabilities")) if key?(raw, "task_capabilities")
       data
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -297,7 +298,7 @@ module Hive
     def read_for_admission(task_folder)
       source = File.read(path(task_folder))
       %w[
-        depends_on base_branch idempotency_key input_fingerprint plan_review_required
+        depends_on base_branch idempotency_key input_fingerprint plan_review_required task_capabilities
       ].each do |field|
         if Hive::Dependencies.duplicate_top_level_key?(source, field)
           return AdmissionRead.new(
@@ -319,6 +320,11 @@ module Hive
       end
 
       raw ||= {}
+      begin
+        normalize_task_capabilities(fetch(raw, "task_capabilities")) if key?(raw, "task_capabilities")
+      rescue InvalidMetadata => error
+        return AdmissionRead.new(status: :invalid, data: empty, error: error.message, reason: :metadata_invalid)
+      end
       if key?(raw, "plan_review_required") && fetch(raw, "plan_review_required") != true
         return AdmissionRead.new(
           status: :invalid,
@@ -364,7 +370,7 @@ module Hive
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil, base_branch: nil,
               workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil,
               idempotency_key: nil, input_fingerprint: nil, completed_at: nil,
-              plan_review_required: nil, create: true, observation: nil)
+              plan_review_required: nil, task_capabilities: nil, create: true, observation: nil)
       if create
         FileUtils.mkdir_p(task_folder)
       else
@@ -406,6 +412,7 @@ module Hive
       data["input_fingerprint"] = normalized_input_fingerprint if normalized_input_fingerprint
       data["completed_at"] = normalized_completed_at if normalized_completed_at
       data["plan_review_required"] = true if normalized_plan_review_required
+      data["task_capabilities"] = normalize_task_capabilities(task_capabilities) unless task_capabilities.nil?
       validate_observation!(task_folder, observation) unless create
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
@@ -581,7 +588,17 @@ module Hive
       if key?(raw, "completed_at")
         data[:completed_at] = normalize_completed_at(fetch(raw, "completed_at"), label: "completed_at")
       end
+      data[:task_capabilities] = normalize_task_capabilities(fetch(raw, "task_capabilities")) if key?(raw, "task_capabilities")
       data
+    end
+
+    def normalize_task_capabilities(value)
+      unless value.is_a?(Hash) && value.keys.sort_by(&:to_s) == %w[adopted initial_plan_digest initial_plan_version schema_version] &&
+          value["schema_version"] == 1 && value["adopted"] == true && value["initial_plan_version"] == 1 &&
+          value["initial_plan_digest"].is_a?(String) && value["initial_plan_digest"].match?(/\A[0-9a-f]{64}\z/)
+        raise InvalidMetadata, "task_capabilities requires complete schema-1 adoption and initial execution-plan identity"
+      end
+      value.dup
     end
 
     def key?(hash, key)

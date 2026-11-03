@@ -8,6 +8,7 @@ require "hive/workflows/registry"
 require "hive/worktree"
 require "hive/workflow_package/managed_store"
 require "hive/warnings"
+require "hive/task_capabilities/store"
 
 module Hive
   class Task
@@ -82,6 +83,7 @@ module Hive
     def managed_workflow? = !workflow_commit.nil? && !workflow_manifest_digest.nil?
 
     def managed_runtime_context(slot_id)
+      Hive::TaskCapabilities::Store.new(@folder).current
       return nil unless managed_workflow?
 
       store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)

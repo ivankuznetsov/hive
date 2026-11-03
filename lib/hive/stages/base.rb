@@ -969,6 +969,7 @@ module Hive
                       isolate_environment: false, launch_environment: nil,
                       terminate_on_parent_signal: true,
                       receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+        agent_custody ||= capability_anchor_custody(task)
         mcp_launch = nil
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
@@ -1338,6 +1339,26 @@ module Hive
         raise ArgumentError, "agent_custody must respond to call" unless agent_custody.respond_to?(:call)
 
         agent_custody.call { yield }
+      end
+
+      # Planning agents own their stage document, but never the execution pin.
+      def capability_anchor_custody(task)
+        require "hive/task_capabilities/store"
+        return nil unless Hive::TaskCapabilities::Store.new(task.folder).current
+
+        require "hive/artifact_firewall"
+        custody = Hive::ArtifactFirewall::AgentCustody.new(
+          Hive::ArtifactFirewall::Manifest.new(
+            root: task.folder,
+            protected_anchors: %w[meta.yml execution-plan-current.json capability-accepted.jsonl],
+            permitted_writable_roots: [ task.folder ], required_outputs: {}
+          )
+        )
+        lambda do |&spawn|
+          result = custody.call(&spawn)
+          raise Hive::StageError, "agent modified protected capability state" if custody.report.tampered?
+          result
+        end
       end
 
       def agent_custody_safe_after?(agent_custody)

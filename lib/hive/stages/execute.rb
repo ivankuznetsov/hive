@@ -45,6 +45,7 @@ module Hive
       # reviewed plan and worktree pointer.
       PROTECTED_FILES = %w[
         task.md plan.md worktree.yml task-journal.jsonl
+        execution-plan-current.json capability-accepted.jsonl
       ].freeze
       CONTROLLER_RECEIPT_DIRECTORIES = %w[context-receipts activity-operations].freeze
       COMPLETION_TRAILER = "Hive-Execute-Complete".freeze

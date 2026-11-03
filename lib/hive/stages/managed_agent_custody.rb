@@ -15,6 +15,9 @@ module Hive
       module_function
 
       def manifest(root:, worktree_path:, protected_task_paths:, required_outputs:)
+        %w[execution-plan-current.json capability-accepted.jsonl].each do |name|
+          protected_task_paths = protected_task_paths.merge(name => File.join(root, name))
+        end
         Hive::ArtifactFirewall::Manifest.new(
           root: root,
           protected_anchors: protected_task_paths.merge(git_control_paths!(worktree_path)),

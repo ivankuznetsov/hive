@@ -155,6 +155,70 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_feature_enabled_capture_pins_automatic_version_one_and_replay_retains_it
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      first = build_capture(root, cfg: cfg).call
+      plan = Hive::TaskCapabilities::Store.new(first.folder).current
+      assert_equal 1, plan.version
+      assert plan.to_h.fetch("inputs").values.all? { |value| value == "automatic" }
+      assert_equal "coding", Hive::TaskMeta.read(first.folder).fetch(:workflow)
+      assert_nil Hive::Task.new(first.folder).managed_runtime_context("stages.plan")
+      before = Dir.glob(File.join(first.folder, "**", "*"), File::FNM_DOTMATCH).select { |path| File.file?(path) }.to_h { |path| [ path, File.binread(path) ] }
+      replay = build_capture(root, cfg: {}).call
+      refute replay.created
+      assert_equal plan.digest, Hive::TaskCapabilities::Store.new(replay.folder).current.digest
+      assert_equal before, before.keys.to_h { |path| [ path, File.binread(path) ] }
+      project_cfg = Hive::Config.load(root).merge("default_workflow" => "content")
+      with_replaced_singleton_method(Hive::Config, :load, ->(_root) { project_cfg }) do
+        assert_equal :coding, Hive::Task.new(first.folder).workflow.id
+      end
+    end
+  end
+
+  def test_disabled_and_noncoding_capture_remain_legacy
+    with_initialized_project do |root|
+      first = build_capture(root).call
+      assert_nil Hive::TaskCapabilities::Store.new(first.folder).current
+      refute Hive::TaskMeta.read(first.folder).key?(:task_capabilities)
+      refute File.exist?(File.join(first.folder, "execution-plan-current.json"))
+      options = capture_options(root)
+      options[:workflow_info] = options.fetch(:workflow_info).merge(
+        descriptor: Hive::Workflows::Registry.fetch(:content), managed_cfg: { "task_capabilities" => { "enabled" => true } }
+      )
+      options[:slug] = "content-capability-task"
+      options[:idempotency_key] = "other-task"
+      result = Hive::TaskCapture.new(**options).call
+      assert_nil Hive::TaskCapabilities::Store.new(result.folder).current
+      refute Hive::TaskMeta.read(result.folder).key?(:task_capabilities)
+    end
+  end
+
+  def test_feature_enabled_capture_commit_failure_removes_all_substrate
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      capture = build_capture(root, cfg: cfg)
+      with_replaced_singleton_method(capture.instance_variable_get(:@git_ops), :hive_commit, ->(**_args) { raise "commit failure" }) do
+        assert_raises(RuntimeError) { capture.call }
+      end
+      refute File.exist?(File.join(root, ".hive-state/stages/1-inbox/patrol-fix-task"))
+    end
+  end
+
+  def test_initial_pointer_publication_failure_rolls_back_the_entire_capture
+    with_initialized_project do |root|
+      cfg = { "task_capabilities" => { "enabled" => true } }
+      original = Hive::AtomicFile.method(:write)
+      with_replaced_singleton_method(Hive::AtomicFile, :write, lambda { |path, *args, **kwargs|
+        raise "pointer publication failed" if File.basename(path) == "execution-plan-current.json"
+        original.call(path, *args, **kwargs)
+      }) do
+        assert_raises(RuntimeError) { build_capture(root, cfg: cfg).call }
+      end
+      refute File.exist?(File.join(root, ".hive-state/stages/1-inbox/patrol-fix-task"))
+    end
+  end
+
   private
 
   def capture_options(project_root)
@@ -184,7 +248,7 @@ class TaskCaptureTest < Minitest::Test
   end
 
   def build_capture(project_root, fingerprint: "a" * 64, slug: "patrol-fix-task",
-                    candidate_validator: nil, candidate_writer: nil)
+                    candidate_validator: nil, candidate_writer: nil, cfg: {})
     descriptor = Hive::Workflows::Registry.default
     Hive::TaskCapture.new(
       project_root: project_root,
@@ -193,7 +257,7 @@ class TaskCaptureTest < Minitest::Test
         descriptor: descriptor,
         pin: false,
         managed: nil,
-        managed_cfg: {},
+        managed_cfg: cfg,
         authored_digest: nil
       },
       slug: slug,

@@ -277,7 +277,7 @@ module Hive
       def cleanup_unreferenced(name)
         MutationLock.with_lock(workflows_dir) do
           reconcile_unlocked!
-          references = task_references_unlocked(name)
+          references = task_references_unlocked(name) + capability_history_references(name)
           retained = references.map { |entry| entry.fetch(:commit) }.uniq
           retained_configurations = references.filter_map { |entry| entry[:configuration_digest] }.uniq
           selection = selected_unlocked(name)
@@ -317,6 +317,19 @@ module Hive
       end
 
       private
+
+      def capability_history_references(name)
+        require "hive/task_capabilities/store"
+        pattern = File.join(hive_state_path, "stages", "*", "*", Hive::TaskMeta::FILENAME)
+        Dir.glob(pattern).flat_map do |path|
+          Hive::TaskCapabilities::Store.new(File.dirname(path)).history.filter_map do |plan|
+            source = plan.data.fetch("source")
+            next unless source["workflow"] == name && source["commit"] && source["manifest_digest"]
+            { name: name, commit: source.fetch("commit"), digest: source.fetch("manifest_digest"),
+              configuration_digest: source["configuration_digest"] }
+          end
+        end
+      end
 
       def same_selection?(current, expected)
         current && current.fetch("source_commit") == expected.fetch("source_commit") &&

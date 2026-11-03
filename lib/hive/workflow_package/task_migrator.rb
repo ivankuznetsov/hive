@@ -3,6 +3,7 @@ require "pathname"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/lock"
 require "hive/task_meta"
+require "hive/task_capabilities/store"
 
 module Hive
   module WorkflowPackage
@@ -109,6 +110,8 @@ module Hive
         selections = {}
         workflows = {}
         operations = []
+        capability_blockers = []
+        @capability_plan_digests = {}
         task_folders.each do |folder|
           read = Hive::TaskMeta.read_for_admission(folder)
           unless read.status == :ok
@@ -147,6 +150,19 @@ module Hive
           current_workflow = load_workflow(workflows, meta[:workflow], to_pin)
           stage_dir = File.basename(File.dirname(folder))
           old_stage = old_workflow.stage_for_dir(stage_dir)
+          if meta[:task_capabilities]
+            plan = Hive::TaskCapabilities::Store.new(folder).current
+            @capability_plan_digests[folder] = plan.digest
+            if old_workflow.active_stage_dirs.include?(stage_dir) && !meta[:completed_at]
+              definitions = current_workflow.id == :coding ? @cfg.dig("task_capabilities", "catalog") || [] : []
+              catalog = Hive::TaskCapabilities::Catalog.new(workflow: current_workflow, definitions: definitions)
+              incompatible = plan.incompatible_bindings(catalog, previous_workflow: old_workflow)
+              unless incompatible.empty?
+                capability_blockers << "#{File.basename(folder)} (#{incompatible.join(', ')})"
+                next
+              end
+            end
+          end
           unless old_stage
             raise Hive::ConfigError,
                   "managed task #{File.basename(folder)} is at #{stage_dir.inspect}, which is not " \
@@ -178,6 +194,10 @@ module Hive
             to_state_file: current_stage.state_file,
             observation: observation
           )
+        end
+        unless capability_blockers.empty?
+          raise Hive::ConfigError, "managed workflow update changes pinned capability bindings for tasks: " \
+            "#{capability_blockers.join('; ')}. Finish, archive or cancel each blocking task before the workflow update can activate; then prepare the update again."
         end
         operations
       rescue Errno::EMFILE, Errno::ENFILE => error
@@ -269,6 +289,12 @@ module Hive
             raise Hive::ConcurrentRunError.new(
               "managed task #{operation.slug} changed while its migration was being prepared"
             )
+          end
+          if meta.data[:task_capabilities]
+            plan = Hive::TaskCapabilities::Store.new(operation.source).current
+            unless plan.digest == @capability_plan_digests.to_h[operation.source]
+              raise Hive::ConcurrentRunError, "task #{operation.slug} execution plan changed during workflow migration"
+            end
           end
         end
       end

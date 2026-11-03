@@ -15,6 +15,13 @@ post-run custody, returns a bounded typed report, and safely restores only
 reconstructable anchors. It is same-user detection and recovery, not an OS
 sandbox or a filesystem transaction.
 
+The shared controller-owned anchor set includes `execution-plan-current.json`
+and `capability-accepted.jsonl`, including their absence before a spawn. Plan,
+result and approval blob directories are not treated as recursive anchors;
+their referenced bytes are verified by the protected acceptance chain on reads.
+Adopted generic stage spawns receive these two anchors when no stage-specific
+custody manifest exists. See [[modules/task_capabilities]].
+
 ## Supported API
 
 ```ruby

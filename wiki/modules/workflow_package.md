@@ -164,6 +164,17 @@ Capability actors contribute to conservative package permission disclosure.
 Snapshots predating this optional field retain their existing shape and remain
 readable. See [[modules/task_capabilities]].
 
+Tasks carrying capability adoption also retain their immutable execution plans
+across an ordinary managed repin. Before activation, migration checks selected
+capability definitions and any inherited stage actor, model, skill, instruction
+content, scope and limits. Incompatible active tasks block the complete update;
+the error names every task and directs the operator to finish, archive or cancel
+each one before preparing the update again. Completed/terminal archived tasks
+retain their plan history without remaining active migration blockers. Cleanup
+retains package generations and configuration snapshots referenced by accepted
+plan history, even after task metadata has moved to the new generation. Runtime
+execution still requires the currently selected generation.
+
 Honeycomb v2 permission summaries are disclosure data, not executable policy.
 Owner-trusted actors declare `permissions: yolo`. They run directly with the
 ordinary agent environment plus explicit package input bindings, without a

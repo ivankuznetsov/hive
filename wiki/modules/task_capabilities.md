@@ -1,7 +1,7 @@
 ---
 title: Task capability contracts
 type: module
-source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb
+source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb
 created: 2026-11-03
 updated: 2026-11-03
 tags: [module, workflow, capabilities, policy]
@@ -12,10 +12,12 @@ already exist. They are separate from `Workflow::Result.capabilities` (result
 presentation facilities) and AgentProfile's runtime tool vocabulary. Coding
 keeps its nine stages.
 
-`task_capabilities.enabled` defaults to `false`. This configuration substrate
-does not adopt tasks, launch capability actors, waive QA, or authorize security
-work. Capture, results, gates, and recovery must be integrated before adoption
-is enabled.
+`task_capabilities.enabled` defaults to `false`. When explicitly enabled for
+the lower-level shared capture service, new coding captures atomically install
+an all-Automatic initial execution plan. Existing tasks and other workflows
+retain their previous behavior. Selection, actors, gates, and recovery must be
+integrated before adoption is enabled by default; this persistence substrate
+does not authorize security work or waive QA.
 
 ## Definition and catalog
 
@@ -100,3 +102,56 @@ application. Existing snapshots with no capability key remain readable. Package
 permission disclosure includes capability actors conservatively; a bounded
 Bash capability discloses broad risk rather than claiming the coarse registry
 summary enforces its commands.
+
+## Immutable execution plans and controller custody
+
+`TaskMeta` strictly validates the optional `task_capabilities` adoption map:
+schema version 1, `adopted: true`, initial plan version 1 and its SHA-256 digest.
+Malformed or partial adoption is an error. Absence on an existing task never
+creates a plan or enables new defaults. Adopted captures explicitly pin the
+coding workflow even when it was the project default at creation.
+
+The executable plan is separate from human `plan.md`. Canonical JSON versions
+live under `execution-plans/<digest>.json`; result and approval blobs use
+`capability-results/` and `capability-approvals/`. Plans record task identity,
+source/configuration/catalog digests, definitions, explicit inputs, choices,
+bindings, policy, approvals, waivers, recommendations and blockers. Referenced
+instruction content is embedded with its digest, so history is readable after
+the source file disappears. Operator text is redacted before immutable writes;
+executable targets must remain validated non-secret task-relative references.
+
+Only `execution-plan-current.json` selects the active version.
+`capability-accepted.jsonl` records controller acceptance in a digest-linked,
+logically append-only chain. Both fixed names are protected anchors even when
+absent before a spawn. Content-addressed directory entries do not establish
+authority: every accepted plan, result and approval is rehashed on every read,
+and every referenced approval must be chained. Missing, altered or unaccepted
+state blocks; it cannot fall back to legacy behavior. Reading a plan must also
+preserve its exact accepted canonical digest, including after redactor changes.
+
+`Store#activate` acquires the existing task lease and fences the directory
+observation, stable task identity and expected current version. It writes blobs
+and accepts their digests before atomically changing the pointer. A crash before
+pointer publication leaves the prior version active and permits an exact retry.
+The initial approval batch is accepted together with the initial plan before
+pointer publication. Approval content binds task identity and its envelope
+independently of the final plan digest, avoiding a circular digest reference;
+result content binds both task identity and execution-plan digest.
+
+Legacy reads make no writes. Capture commit failures remove the complete
+candidate, including its adoption metadata and execution-plan files. Agent
+proposal files outside the anchors remain proposals until controller validation
+and acceptance. Generic stage spawns without an existing custody manifest gain
+capability-anchor and metadata custody for adopted tasks while retaining ownership of their
+ordinary stage document.
+Missing or non-directory task roots cannot be read as legacy tasks, and fixed
+controller anchors without adoption metadata are rejected.
+
+Managed updates preserve existing plan versions. A selected capability's
+definition or inherited stage actor/model/instruction/scope change blocks an
+active retained task before repinning. Every blocking task is named with the
+required recovery: finish, archive or cancel it before the update can activate,
+then prepare the update again. Completed and terminal archived tasks retain
+history without blocking a fresh update. Package cleanup retains generations
+and configuration snapshots referenced by any accepted plan history. These
+historical assets do not authorize execution of an unselected managed generation.

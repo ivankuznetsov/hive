@@ -97,7 +97,15 @@ module HiveBench
     rescue StandardError => e
       reason = "#{e.class}: #{e.message}"
       warn "hive-bench: parked failed — #{profile.id} #{entry["task_id"]}: #{redact(reason)}"
-      failed << park(entry, profile, reason, cell)
+      if cell && records.none? { |record| record["task_id"] == cell.task_id && record["agent_id"] == cell.agent_id }
+        error_gate = Gate::Result.new(status: :error, subset: "gated", reason: redact(reason), details: {})
+        records << cell_record(cell, error_gate, {}, entry)
+      end
+      parked = park(entry, profile, reason, cell)
+      if !cell && (manifest = GenerationProvenance.load(out_dir))
+        parked.merge!(manifest.slice("generation_id", "run_status", "efficiency"))
+      end
+      failed << parked
     end
 
     def park(entry, profile, reason, cell = nil)
@@ -124,6 +132,10 @@ module HiveBench
     end
 
     def score_cell(entry, _profile, cell, out_dir)
+      manifest = GenerationProvenance.load(out_dir)
+      if manifest && cell.respond_to?(:generation_id) && cell.generation_id
+        GenerationProvenance.verify!(out_dir, entry: entry, agent_id: cell.agent_id) if cell.diff_path
+      end
       gate_spec = load_gate(entry)
       candidate_patch = cell.diff_path ? File.read(cell.diff_path) : ""
 
@@ -136,17 +148,23 @@ module HiveBench
         end
 
       judges_res = judge_cell(entry, candidate_patch, withhold_reference: @withhold_reference || cell.mode == "reused")
-      ScoredCell.new(record: cell_record(cell, gate_res, judges_res), judge_failure: nil)
+      ScoredCell.new(record: cell_record(cell, gate_res, judges_res, entry), judge_failure: nil)
     rescue JudgesExhausted => e
       # Generation and gating already succeeded. Persist that paid artifact even
       # when every judge is unavailable so rejudge can backfill it later.
-      ScoredCell.new(record: cell_record(cell, gate_res, {}), judge_failure: e)
+      ScoredCell.new(record: cell_record(cell, gate_res, {}, entry), judge_failure: e)
     end
 
-    def cell_record(cell, gate_res, judges_res)
+    def cell_record(cell, gate_res, judges_res, entry)
+      withheld = @withhold_reference || cell.mode == "reused"
+      context = GenerationProvenance.context(plan: read_entry_file(entry, entry.dig("spec", "plan")),
+                                             reference: read_entry_file(entry, "reference.patch"), withheld: withheld)
       @scorer.cell_record(
         cell: { task_id: cell.task_id, agent_id: cell.agent_id, mode: cell.mode,
-                model_version: cell.model_version, run_status: cell.status, telemetry: cell.telemetry },
+                model_version: cell.model_version, run_status: cell.status, telemetry: cell.telemetry,
+                generation_id: cell.respond_to?(:generation_id) ? cell.generation_id : nil,
+                artifact_binding: cell.respond_to?(:artifact_binding) ? cell.artifact_binding : nil,
+                evaluation_context: context },
         gate: gate_res, judges: judges_res
       )
     end

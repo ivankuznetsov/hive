@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "lib/generation_provenance"
 require "json"
 require "time"
 require "lib/git_restore"
@@ -30,7 +31,11 @@ module HiveBench
   #                    allowlisted by the CI firewall layer; see Dockerfile.runner)
   #   reuse_resolver: ->(entry, profile) => { diff:, model_version:, telemetry: }|nil
   class Run
-    Cell = Data.define(:task_id, :agent_id, :mode, :model_version, :status, :diff_path, :telemetry, :reason)
+    Cell = Data.define(:task_id, :agent_id, :mode, :model_version, :status,  :diff_path, :telemetry, :reason, :generation_id, :artifact_binding) do
+      def initialize(generation_id: nil, artifact_binding: nil, **attributes)
+        super(**attributes, generation_id: generation_id, artifact_binding: artifact_binding)
+      end
+    end
 
     def initialize(restorer: GitRestore.new, spawn: nil, reuse_resolver: ->(_e, _p) {},
                    clock: -> { Time.now.utc })
@@ -45,6 +50,12 @@ module HiveBench
     # profile: a HiveBench::Profile.
     # out_dir: where to persist this cell's artifacts.
     def call(entry:, profile:, out_dir:)
+      manifest = GenerationProvenance.start!(out_dir: out_dir, entry: entry, agent_id: profile.id)
+      produced = produce(entry: entry, profile: profile, out_dir: out_dir)
+      GenerationProvenance.finalize_cell!(produced, out_dir: out_dir, manifest: GenerationProvenance.load(out_dir) || manifest, plan: GenerationProvenance.read_plan(entry))
+    end
+
+    def produce(entry:, profile:, out_dir:)
       task_id = entry.fetch("task_id")
       FileUtils.mkdir_p(out_dir)
 
@@ -60,6 +71,10 @@ module HiveBench
     def persist_reused(task_id, profile, reused, out_dir)
       diff_path = File.join(out_dir, "candidate.patch")
       File.write(diff_path, reused.fetch(:diff))
+      if reused[:producer_provenance]
+        manifest = GenerationProvenance.load(out_dir)
+        GenerationProvenance.persist(out_dir, manifest.merge("producer_provenance" => reused[:producer_provenance]))
+      end
       telemetry = { "wall_clock_sec" => nil }.merge(reused[:telemetry] || {})
       cell(task_id, profile, mode: "reused", status: "generated",
                              model_version: reused[:model_version] || profile.model,
@@ -86,7 +101,7 @@ module HiveBench
       if AgentLimit.limit_hit?(stream)
         return cell(task_id, profile, mode: "fresh", status: "limit_hit",
                                       model_version: result[:model] || profile.model, diff_path: nil,
-                                      telemetry: {}, reason: "provider usage/credit limit — re-run after cooldown")
+                                      telemetry: fresh_telemetry(result, started, ended), reason: "provider usage/credit limit — re-run after cooldown")
       end
 
       # Persist the diff BEFORE any scoring (generation/evaluation split).

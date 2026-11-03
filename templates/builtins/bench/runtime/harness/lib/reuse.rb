@@ -38,7 +38,8 @@ module HiveBench
         diff = differ.range_diff(repo: repo, base: base, head: head)
         next nil if diff.strip.empty?
 
-        { diff: diff, model_version: producer, telemetry: {} }
+        { diff: diff, model_version: producer, telemetry: {},
+          producer_provenance: { "base_commit" => base, "execute_base_head" => head, "model_version" => producer } }
       end
     end
 

@@ -52,6 +52,7 @@ class BenchHarnessPipelineTest < Minitest::Test
           .call(entry: @entry, planner: @planner, executor: @executor,
                 pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
     assert_equal "planner timed out", cell.reason
@@ -62,6 +63,7 @@ class BenchHarnessPipelineTest < Minitest::Test
     cell = pipeline(plan_status: :error).call(entry: @entry, planner: @planner, executor: @executor,
                                               pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
     assert_equal "planner exited non-zero", cell.reason
@@ -72,6 +74,7 @@ class BenchHarnessPipelineTest < Minitest::Test
           .call(entry: @entry, planner: @planner, executor: @executor,
                 pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
   end

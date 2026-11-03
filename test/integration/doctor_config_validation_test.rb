@@ -48,9 +48,19 @@ class DoctorConfigValidationIntegrationTest < Minitest::Test
     end
   end
 
+  def test_version_flag_runs_only_explicit_agent_version_commands_outside_minitest
+    with_doctor_project({}, separate_qmd: true, probe_agent_versions: true) do |out, err, status, probe_marker, _config_path|
+      assert_includes [ 0, 65 ], status.exitstatus, err
+      assert File.exist?(probe_marker), "explicit version probing must reach the resolved agent executable"
+      assert_equal [ "--version" ], File.readlines(probe_marker, chomp: true).uniq
+      assert_includes out, "probe_version_unparseable"
+      assert_includes out, "personal MCP drift is uninspected"
+    end
+  end
+
   private
 
-  def with_doctor_project(config, separate_qmd: false)
+  def with_doctor_project(config, separate_qmd: false, probe_agent_versions: false)
     with_tmp_global_config do |home|
       with_tmp_dir do |project_root|
         state_dir = File.join(project_root, ".hive-state")
@@ -63,7 +73,7 @@ class DoctorConfigValidationIntegrationTest < Minitest::Test
         probe_bin = File.join(home, "doctor-probe")
         File.write(probe_bin, <<~SH)
           #!/bin/sh
-          : > "$HIVE_DOCTOR_PROBE_MARKER"
+          printf '%s\\n' "$*" >> "$HIVE_DOCTOR_PROBE_MARKER"
           echo "probe should not run"
         SH
         FileUtils.chmod(0o755, probe_bin)
@@ -86,9 +96,11 @@ class DoctorConfigValidationIntegrationTest < Minitest::Test
           "HIVE_DOCTOR_PROBE_MARKER" => probe_marker
         }
 
+        arguments = [ "doctor" ]
+        arguments << "--probe-agent-versions" if probe_agent_versions
         out, err, status = Open3.capture3(
           env,
-          RbConfig.ruby, "-I", HIVE_LIB, HIVE_BIN, "doctor",
+          RbConfig.ruby, "-I", HIVE_LIB, HIVE_BIN, *arguments,
           chdir: project_root
         )
         yield out, err, status, probe_marker, config_path

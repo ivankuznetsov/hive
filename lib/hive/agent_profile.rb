@@ -200,9 +200,112 @@ module Hive
       end
     end
 
-    def bin
-      @runtime_profile.bin(env: ENV)
+    def bin(env: ENV)
+      @runtime_profile.bin(env: env)
     end
+
+    # Advisory observation never calls check_version!: that gate has different
+    # policy, context, caching and a longer timeout. Keep this facade in Hive.
+    def observe_version(executable:, environment:, cwd:, timeout: 30, runner: nil)
+      result = if runner
+        runner.call(executable: executable, arguments: [ version_flag ],
+                    environment: environment, cwd: cwd, timeout: [ timeout, 30 ].min)
+      else
+        AdvisoryCapture.call(executable, version_flag, environment: environment,
+                             cwd: cwd, timeout: [ timeout, 30 ].min)
+      end
+      return { version: nil, reason: result } if result.is_a?(String)
+
+      out, err, status = result
+      ok = status.respond_to?(:success?) ? status.success? : status
+      return { version: nil, reason: "probe_failed" } unless ok
+
+      tokens = "#{out}\n#{err}".scan(/(?<![\w.])\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?![\w.])/)
+      return { version: nil, reason: "probe_version_unparseable" } if tokens.empty?
+      return { version: nil, reason: "probe_version_ambiguous" } unless tokens.length == 1
+
+      { version: tokens.first, reason: nil }
+    rescue StandardError
+      { version: nil, reason: "probe_failed" }
+    end
+
+    class AdvisoryCapture
+      MAX_BYTES = 64 * 1024
+
+      def self.call(*argv, environment:, cwd:, timeout:)
+        reader, writer = IO.pipe
+        pid = nil
+        reaped = false
+        output = +""
+        deadline = monotonic + timeout
+        cleanup_reserve = [ 0.25, timeout / 4 ].min
+        pid = Process.spawn(environment, *argv, chdir: cwd, unsetenv_others: true,
+                            in: File::NULL, out: writer, err: writer, pgroup: true)
+        writer.close
+        loop do
+          16.times do
+            chunk = reader.read_nonblock(4096, exception: false)
+            break if chunk.nil? || chunk == :wait_readable
+
+            output << chunk
+            return "probe_output_limit" if output.bytesize > MAX_BYTES
+          end
+          waited = Process.wait2(pid, Process::WNOHANG)
+          if waited
+            reaped = true
+            loop do
+              chunk = reader.read_nonblock(4096, exception: false)
+              break if chunk.nil? || chunk == :wait_readable
+
+              output << chunk
+              return "probe_output_limit" if output.bytesize > MAX_BYTES
+            end
+            return [ output, "", waited.last ]
+          end
+          return "probe_timeout" if monotonic >= deadline - cleanup_reserve
+
+          IO.select([ reader ], nil, nil, 0.01)
+        end
+      ensure
+        if pid
+          signal(pid, "TERM")
+          while monotonic < deadline - 0.02
+            unless reaped
+              reaped = !!Process.wait2(pid, Process::WNOHANG)
+            end
+            break unless alive?(pid)
+
+            sleep 0.005
+          end
+          signal(pid, "KILL") if alive?(pid)
+          until reaped || monotonic >= deadline
+            reaped = !!Process.wait2(pid, Process::WNOHANG)
+            sleep 0.001 unless reaped
+          end
+          Process.detach(pid) unless reaped
+        end
+        reader&.close unless reader&.closed?
+        writer&.close unless writer&.closed?
+      end
+
+      def self.monotonic
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def self.signal(pid, signal)
+        Process.kill(signal, -pid)
+      rescue Errno::ESRCH
+        nil
+      end
+
+      def self.alive?(pid)
+        Process.kill(0, -pid)
+        true
+      rescue Errno::ESRCH
+        false
+      end
+    end
+    private_constant :AdvisoryCapture
 
     def permission_flags(permission_mode = nil)
       @runtime_profile.permission_flags(permission_mode)

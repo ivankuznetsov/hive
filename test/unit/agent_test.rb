@@ -289,7 +289,7 @@ class AgentTest < Minitest::Test
 
       link = File.join(dir, "launcher-link")
       File.symlink(launcher, link)
-      refute agent.send(:tool_manager_launcher?, link)
+      refute Hive::AgentCliIdentity.tool_manager_launcher?(link)
     end
   end
 

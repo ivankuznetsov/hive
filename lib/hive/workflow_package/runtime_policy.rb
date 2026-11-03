@@ -483,8 +483,8 @@ module Hive
         }
       end
 
-      def self.resolve_profile_executable(profile)
-        find_executable(profile.bin) ||
+      def self.resolve_profile_executable(profile, environment: ENV, cwd: Dir.pwd)
+        find_executable(profile.bin(env: environment), environment: environment, cwd: cwd) ||
           raise(Hive::ConfigError, "runner #{profile.name.inspect} executable is unavailable")
       end
 
@@ -529,14 +529,15 @@ module Hive
         nil
       end
 
-      def self.find_executable(name)
-        return File.realpath(name) if name.include?(File::SEPARATOR) &&
-                                      File.file?(name) && File.executable?(name)
+      def self.find_executable(name, environment: ENV, cwd: Dir.pwd)
+        explicit = File.expand_path(name, cwd)
+        return File.realpath(explicit) if name.include?(File::SEPARATOR) &&
+                                      File.file?(explicit) && File.executable?(explicit)
 
-        ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
+        environment.fetch("PATH", "").split(File::PATH_SEPARATOR).each do |directory|
           next if directory.empty?
 
-          candidate = File.join(directory, name)
+          candidate = File.expand_path(File.join(directory, name), cwd)
           return File.realpath(candidate) if File.file?(candidate) && File.executable?(candidate)
         rescue Errno::ENOENT, Errno::EACCES
           next

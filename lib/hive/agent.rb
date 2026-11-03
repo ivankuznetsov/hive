@@ -624,38 +624,8 @@ module Hive
     # child receives the concrete path, never opaque tool-manager session
     # blobs that could encode project environment values.
     def isolated_executable(value)
-      name = value.to_s
-      return name if name.include?(File::SEPARATOR)
-
-      candidates = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map do |directory|
-        candidate = File.join(directory, name)
-        candidate if File.file?(candidate) && File.executable?(candidate)
-      end
-      first = candidates.first
-      return name unless first
-      return first unless tool_manager_launcher?(first)
-
-      first_identity = File.realpath(first)
-      alternatives = candidates.select do |candidate|
-        File.realpath(candidate) != first_identity && !tool_manager_launcher?(candidate)
-      rescue SystemCallError
-        false
-      end
-      managed_segment = [ "mise", "installs", name ].join(File::SEPARATOR)
-      alternatives.find { |candidate| candidate.include?(managed_segment) } ||
-        alternatives.first || first
-    rescue SystemCallError
-      name
-    end
-
-    def tool_manager_launcher?(path)
-      source = File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
-        file.read(4096)
-      end
-      source.start_with?("#!") &&
-        source.match?(/\b(?:mise|asdf|rbenv)\b/)
-    rescue SystemCallError
-      false
+      require "hive/agent_cli_identity"
+      Hive::AgentCliIdentity.isolated_executable(value, environment: ENV, cwd: Dir.pwd)
     end
 
     def prompt_stdin_file

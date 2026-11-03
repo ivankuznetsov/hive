@@ -1395,7 +1395,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
                    Hive::AgentSupport.for(:codex)::Runtime.runtime_root(executable)
 
       profile = Object.new
-      profile.define_singleton_method(:bin) { "missing-grok-executable" }
+      profile.define_singleton_method(:bin) { |env:| "missing-grok-executable" }
       profile.define_singleton_method(:name) { :grok }
       error = assert_raises(Hive::ConfigError) do
         Hive::WorkflowPackage::RuntimePolicy.resolve_profile_executable(profile)

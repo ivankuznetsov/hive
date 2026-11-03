@@ -430,6 +430,17 @@ the attempt evidence channel.
 
 ## Tests
 
+`Hive::AgentCliIdentity` observes a profile under an explicit environment and
+working directory. Plain PATH selection, the existing isolated trampoline
+selector, and prepared managed bindings remain distinct authorities. The
+immutable evidence retains launcher and effective target separately. Default
+version evidence comes from linked provider package metadata or recognized
+provider installs; other layouts have a typed unknown reason.
+`AgentProfile#observe_version` is advisory and separate from `check_version!`:
+it bounds capture, terminates the probe process group, and accepts a deadline
+of at most 30 seconds including cleanup. Doctor can share a monotonic
+60-second `AgentCliIdentity::ProbeBudget` across observations.
+
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
   contracts, exact five-provider prompt transport, fail-closed unsupported
   capabilities, bounded redacted failures, and observation/usage

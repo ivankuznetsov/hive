@@ -2358,10 +2358,10 @@ module Hive
       end
       validate_plan_review_level!(review.dig("coding", "minimum_level"),
                                   "plan_review.coding.minimum_level", source_path)
-      unless %w[standard mandatory].include?(review["adversarial_min_level"])
+      unless %w[standard mandatory off].include?(review["adversarial_min_level"])
         raise ConfigError,
               "plan_review.adversarial_min_level in #{describe_source(source_path)} must be " \
-              "\"standard\" or \"mandatory\"; got #{review['adversarial_min_level'].inspect}"
+              "\"standard\", \"mandatory\" or \"off\"; got #{review['adversarial_min_level'].inspect}"
       end
       %w[standard mandatory].each do |level|
         validate_bounded_integer!(review.dig("max_revision_rounds", level),

@@ -218,7 +218,7 @@ review under a valid current identity; ordinary provider retries remain active.
 
 ## Convergence defaults (2026-11-03)
 
-- **Adversarial lens is level-gated.** `plan_review.adversarial_min_level` (default `mandatory`, or `standard`) decides whether a new review requests adversarial coverage and runs the adversarial leg. Below that level the review needs only whole-document coverage. `Orchestrator#initial_roles` derives the legs from the record's own coverage, so a review created before this change keeps the adversarial leg it requested.
+- **Adversarial lens is level-gated.** `plan_review.adversarial_min_level` (default `mandatory`, or `standard`, or `off` to disable it at every level) decides whether a new review requests adversarial coverage and runs the adversarial leg. Below that level the review needs only whole-document coverage. `Orchestrator#initial_roles` derives the legs from the record's own coverage, so a review created before this change keeps the adversarial leg it requested.
 - **Revision rounds per level.** `plan_review.max_revision_rounds` (default `standard: 1`, `mandatory: 3`) replaces the fixed `MAX_VERIFICATION_REVISION_ROUNDS` budget for the record's effective level; operator decisions still earn one extra round.
 - **Evidence gates stay out of requirements.** The planner prompt now places CI signoff, exact-commit checks and acceptance re-runs in a `## Definition of Done` section rather than `## Requirements Trace`, because as requirements every fix commit re-triggers them in code review.
 - Neither key is part of `Policy.configuration_fingerprint`, so changing them does not invalidate in-flight reviews.

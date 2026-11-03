@@ -99,7 +99,7 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
         "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i,
-        "plan_review:\n  adversarial_min_level: skip\n" => /adversarial_min_level.*"standard" or "mandatory"/i,
+        "plan_review:\n  adversarial_min_level: skip\n" => /adversarial_min_level.*"standard", "mandatory" or "off"/i,
         "plan_review:\n  max_revision_rounds:\n    standard: 0\n" => /max_revision_rounds\.standard.*at least 1/i,
         "plan_review:\n  max_revision_rounds:\n    other: 1\n" => /max_revision_rounds/i,
         "review:\n  severity_gate_from_pass: 0\n" => /severity_gate_from_pass.*positive integer/i

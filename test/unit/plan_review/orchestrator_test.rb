@@ -165,6 +165,17 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_adversarial_min_level_off_skips_the_adversarial_leg_even_when_mandatory
+    revised = mandatory_plan.sub("# Plan", "# Revised plan")
+    with_task(mandatory_plan, shipped_defaults: true) do |task, cfg|
+      cfg["plan_review"]["adversarial_min_level"] = "off"
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      refute_includes adapter.calls.map(&:kind), "adversarial"
+    end
+  end
+
   def test_adversarial_min_level_standard_restores_the_adversarial_leg
     revised = standard_plan.sub("# Plan", "# Revised plan")
     with_task(standard_plan, shipped_defaults: true) do |task, cfg|

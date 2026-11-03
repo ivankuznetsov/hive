@@ -214,7 +214,7 @@ the strict JSONL run boundary becomes a typed `malformed_output` failure.
 
 ## `spawn_and_wait` (the long part)
 
-1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append only bounded launch metadata (`cwd`, profile, executable basename, argv count); never serialize argv because positional profiles carry the complete prompt there. Event messages pass through the same shared secret redactor before persistence.
+1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append launch metadata (`cwd`, profile, executable path, argv count) and immutable CLI identity selected after preparation; never serialize argv because positional profiles carry the complete prompt there. Identity records distinguish the launcher, effective target, selection regime, known version or typed unknown, and managed host binding versus sandbox path. Event messages pass through the shared secret redactor before persistence. Full local executable paths belong to this private diagnosis; publication continues to scrub paths.
 2. `IO.pipe` for child stdout/stderr.
 3. `Process.spawn(*cmd, chdir: cwd, pgroup: true, out: w, err: w)` — `pgroup: true` puts the child in its own process group so we can kill the entire group on signal/timeout.
 4. Capture `pgid` (with `Errno::ESRCH` fallback to pid).

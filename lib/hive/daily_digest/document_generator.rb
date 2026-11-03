@@ -13,6 +13,7 @@ module Hive
     # PRDigest owns the prompt; the host's configured agent supplies prose.
     class DocumentGenerator
       OUTPUT_LIMIT = 8 * 1024 * 1024
+      attr_reader :cli_identity, :spawn_log_path
 
       def initialize(config_loader: -> { Config.load(Paths.state_home).merge("daily_digest" => Config.load_global_daily_digest) }, timeout_sec: 300)
         @config_loader, @timeout_sec = config_loader, timeout_sec
@@ -72,6 +73,16 @@ module Hive
         FileUtils.mkdir_p(Paths.state_home, mode: 0o700)
         environment = profile.subscription_environment.merge(Hive::Agent::SCRUBBED_CHILD_ENV)
         environment = @mcp_launch.environment_for(environment) if @mcp_launch
+        @cli_identity = Hive::AgentCliIdentity.observe_spawn(
+          profile: profile, argv: invocation.argv,
+          environment: ENV.to_h.merge(environment).reject { |_key, value| value.nil? },
+          cwd: Paths.state_home, configured: invocation.argv.first
+        )
+        @spawn_log_path = File.join(Paths.state_home, "logs", "daily-digest-agent-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
+        Hive::AgentCliIdentity.write_spawn_log(
+          path: @spawn_log_path, identity: @cli_identity, cwd: Paths.state_home,
+          label: "daily_digest", argc: invocation.argv.length
+        )
         pid = Process.spawn(environment, *invocation.argv, chdir: Paths.state_home,
                             in: input, out: output, err: errors, pgroup: true)
         deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_sec

@@ -90,6 +90,11 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       ) { agent.run! }
 
       assert_equal :ok, result.fetch(:status)
+      identity = result.fetch(:cli_identity)
+      assert_equal fixture.fetch(:bin), identity.launch_path
+      assert_same identity, agent.cli_identity
+      assert_equal "plain", identity.regime
+      assert_includes File.read(result.fetch(:log_file)), "cli_identity="
       assert_equal :completed, result.fetch(:normalized_outcome_kind)
       assert_equal "Done.", result.fetch(:final_message)
       assert_equal ROUTE, result.fetch(:requested_route)

@@ -171,6 +171,20 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_procfs_process_disappearing_during_environment_read_is_skipped
+    with_tmp_dir do |dir|
+      pid = Process.pid + 10_000
+      write_proc_entry(dir, pid, environ: custody_environ(TOKEN))
+      original = File.method(:binread)
+      reader = ->(path, *args) do
+        path == File.join(dir, pid.to_s, "environ") ? raise(Errno::ESRCH) : original.call(path, *args)
+      end
+      with_replaced_singleton_method(File, :binread, reader) do
+        assert_empty build_custody(dir).send(:procfs_matches)
+      end
+    end
+  end
+
   def test_cleanup_falls_back_to_the_ps_inventory_without_procfs
     skip "exact process-custody integration requires Linux procfs" unless
       RUBY_PLATFORM.include?("linux") && File.directory?("/proc")

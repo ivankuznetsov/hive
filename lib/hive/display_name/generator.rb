@@ -3,6 +3,7 @@ require "fileutils"
 require "tempfile"
 require "time"
 require "hive/agent_runtime"
+require "hive/agent_cli_identity"
 require "hive/agent/message_extractor"
 require "hive/agent_support"
 require "hive/config"
@@ -18,6 +19,7 @@ module Hive
     class Generator
       TAIL_BYTES = 64 * 1024
       DEFAULT_TIMEOUT_SEC = 60
+      attr_reader :cli_identity
 
       def initialize(task, cfg: nil, commit: true)
         @task = task
@@ -100,7 +102,17 @@ module Hive
         stdin_file = prompt_stdin_file(invocation)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
-        pid = Process.spawn(launch.environment_for(profile.subscription_environment), *cmd, **spawn_opts)
+        environment = launch.environment_for(profile.subscription_environment)
+        @cli_identity = Hive::AgentCliIdentity.observe_spawn(
+          profile: profile, argv: cmd,
+          environment: ENV.to_h.merge(environment).reject { |_key, value| value.nil? },
+          cwd: @task.project_root, configured: cmd.first
+        )
+        Hive::AgentCliIdentity.write_spawn_log(
+          path: log_path, identity: @cli_identity, cwd: @task.project_root,
+          label: "display_name/#{@task.slug}", argc: cmd.length
+        )
+        pid = Process.spawn(environment, *cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(
@@ -128,6 +140,7 @@ module Hive
 
         {
           exit_code: exit_code(status),
+          cli_identity: @cli_identity,
           final_message: messages.value,
           final_message_truncated: messages.truncated?
         }

@@ -9,6 +9,21 @@ require "hive/task"
 class DisplayNameGeneratorTest < Minitest::Test
   include HiveTestHelper
 
+  def test_spawn_result_and_private_log_preserve_the_actual_identity
+    script = "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; else echo 'Readable name'; fi\n"
+    with_generator(script: script) do |generator, task|
+      profile = Hive::AgentProfiles.lookup(:claude, cfg: generator.instance_variable_get(:@cfg))
+      result = generator.send(:run_agent, profile)
+      identity = result.fetch(:cli_identity)
+      assert_equal File.join(task.project_root, "fake-display-agent"), identity.launch_path
+      assert_equal "1.2.3", identity.version
+      assert_same identity, generator.cli_identity
+      log = File.read(Dir.glob(File.join(task.log_dir, "display-name-*.log")).fetch(0))
+      assert_includes log, identity.launch_path
+      assert_includes log, "cli_identity="
+    end
+  end
+
   def test_timeout_sec_reads_config_and_falls_back_on_bad_value
     with_generator(display_name_timeout_sec: 5) do |gen|
       assert_equal 5, gen.send(:timeout_sec)

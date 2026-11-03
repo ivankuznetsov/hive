@@ -4,6 +4,7 @@ require "open3"
 require "tempfile"
 require "time"
 require "hive/agent_runtime"
+require "hive/agent_cli_identity"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
@@ -56,7 +57,7 @@ module Hive
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
-                :runtime_policy, :observable_result
+                :runtime_policy, :observable_result, :cli_identity
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
@@ -290,6 +291,8 @@ module Hive
       end
 
       cmd = build_cmd
+      capture_cli_identity(cmd, effective_child_environment,
+                           configured: compiled_invocation.argv[(@runtime_policy&.command_prefix || []).length])
       log_file = log_path
       structured_output_protocol = support ||
         Hive::AgentSupport.for_protocol(@profile.structured_output_protocol)
@@ -324,8 +327,9 @@ module Hive
         # which runner launched.
         log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                 "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
-                 "#{launch_identity_log_fields}"
+                 "profile=#{Hive::SecretPatterns.redact(@profile.name.to_s)} " \
+                 "executable=#{@cli_identity.launch_path} argc=#{cmd.length}" \
+                 "#{launch_identity_log_fields}#{Hive::AgentCliIdentity.log_fields(@cli_identity)}"
         write_mcp_log(log)
       end
       r, w = IO.pipe
@@ -562,6 +566,7 @@ module Hive
         exit_code: exit_code,
         timed_out: timed_out,
         log_file: log_file,
+        cli_identity: @cli_identity,
         final_message: message,
         final_message_source: messages.source,
         final_message_truncated: messages.truncated?,
@@ -615,6 +620,21 @@ module Hive
       command = compiled_invocation.argv.dup
       command[0] = isolated_executable(command.fetch(0)) if @isolate_environment
       command
+    end
+
+    def effective_child_environment(environment = child_environment)
+      inherited = @runtime_policy || @isolate_environment ? {} : ENV.to_h
+      inherited.merge(environment).reject { |_key, value| value.nil? }
+    end
+
+    def capture_cli_identity(command, environment, configured: nil)
+      prefix = @runtime_policy&.command_prefix || []
+      @cli_identity = Hive::AgentCliIdentity.observe_spawn(
+        profile: @profile, argv: command, environment: environment,
+        cwd: @cwd, regime: @runtime_policy ? :managed : (@isolate_environment ? :isolated : :plain),
+        command_prefix: prefix,
+        configured: configured || command[prefix.length]
+      )
     end
 
     # Resolve a bare agent command before `unsetenv_others` removes the shell

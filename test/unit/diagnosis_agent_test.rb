@@ -62,6 +62,23 @@ class DiagnosisAgentTest < Minitest::Test
     end
   end
 
+  def test_direct_spawn_records_the_actual_cli_identity_without_the_prompt
+    executable = File.join(@tmp, "diagnosis-agent")
+    File.write(executable, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; else echo verdict; fi\n")
+    File.chmod(0o755, executable)
+    profile = Hive::AgentProfiles.lookup(:claude).with_overrides("bin" => executable)
+    agent = Hive::DiagnosisAgent.new(task: @task)
+    result = agent.send(:spawn_profile, profile: profile, prompt: "private prompt",
+      cwd: @project_root, add_dirs: [], timeout_sec: 5, max_budget_usd: nil)
+    assert_equal "verdict\n", result
+    assert_equal executable, agent.cli_identity.launch_path
+    assert_equal "1.2.3", agent.cli_identity.version
+    log = File.read(agent.spawn_log_path)
+    assert_includes log, executable
+    assert_includes log, "cli_identity="
+    refute_includes log, "private prompt"
+  end
+
   def test_does_not_write_markers_or_claim_task_lock
     capture = []
     Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn(capture_to: capture)).run!

@@ -37,6 +37,65 @@ class AgentTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  def test_spawn_identity_uses_effective_child_path_and_remains_on_the_result
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      path = File.join(dir, "child-cli")
+      FileUtils.mkdir_p(path)
+      executable = File.join(path, "claude")
+      File.write(executable, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '0.156.1'; exit; fi\necho done\n")
+      File.chmod(0o755, executable)
+      with_env("HIVE_CLAUDE_BIN" => "claude") do
+        agent = Hive::Agent.new(task: task, prompt: "private prompt", max_budget_usd: nil,
+          timeout_sec: 5, status_mode: :exit_code_only,
+          launch_environment: { "PATH" => path })
+        result = agent.run!
+        identity = result.fetch(:cli_identity)
+        assert_same identity, agent.cli_identity
+        assert_equal executable, identity.launch_path
+        assert_equal "0.156.1", identity.version
+        assert_equal "plain", identity.regime
+        assert_predicate identity, :frozen?
+        assert_includes File.read(result.fetch(:log_file)), 'cli_identity={"profile":"claude"'
+        assert_includes File.read(result.fetch(:log_file)), executable
+        refute_includes File.read(result.fetch(:log_file)), "private prompt"
+      end
+    end
+  end
+
+  def test_managed_spawn_records_bound_host_cli_without_rewriting_sandbox_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      host = File.join(dir, ".local/share/claude/versions/2.1.118")
+      wrapper = File.join(dir, "sandbox-launcher")
+      FileUtils.mkdir_p(File.dirname(host))
+      File.write(host, "#!/bin/sh\necho done\n")
+      File.write(wrapper, "#!/bin/sh\nhost=\"$2\"\nshift 4\nexec \"$host\" \"$@\"\n")
+      File.chmod(0o755, host, wrapper)
+      policy = Hive::WorkflowPackage::RuntimePolicy.compile(
+        { "tools" => %w[Read], "deny" => [ "Write" ], "directories" => [],
+          "commands" => [], "domains" => [], "credentials" => [] },
+        task_folder: task.folder, profile: Hive::AgentProfiles.lookup(:claude),
+        policy_dir: File.join(dir, "policy")
+      ).with(command_prefix: [ wrapper, "--ro-bind", host, "/agent/claude" ],
+             executable: "/agent/claude", mcp_isolated: true)
+      agent = Hive::Agent.new(task: task, prompt: "private prompt", max_budget_usd: nil,
+        timeout_sec: 5, runtime_policy: policy, status_mode: :exit_code_only)
+      command = agent.send(:build_cmd)
+      result = agent.run!
+      assert_equal :ok, result[:status]
+      identity = result.fetch(:cli_identity)
+      assert_equal host, identity.launch_path
+      assert_equal "2.1.118", identity.version
+      assert_equal "/agent/claude", identity.sandbox_executable
+      assert_equal [ wrapper ], identity.command_prefix
+      assert_equal "managed", identity.regime
+      assert_equal command, agent.send(:build_cmd)
+      assert_equal wrapper, command.first
+      assert_includes File.read(result.fetch(:log_file)), host
+    end
+  end
+
   def test_runtime_policy_and_raw_permission_arguments_are_mutually_exclusive
     Dir.mktmpdir("hive-agent-permission-contract") do |dir|
       error = assert_raises(ArgumentError) do

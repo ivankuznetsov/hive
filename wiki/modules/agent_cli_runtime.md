@@ -178,6 +178,14 @@ bounded-reader cleanup path on timeout. Grok environment authentication ignores
 unused file-path overrides, while file-backed authentication still validates
 absolute paths.
 
+Hive's `AgentProfile#observe_version` adds a separate advisory observation
+facade with at most 30 seconds including cleanup. Doctor shares a monotonic
+60-second probe-pass budget. These are Hive-side diagnostics; the component's
+120-second minimum-version enforcement and APIs are unchanged. Compilation
+remains pure. Hive observes the final selected executable at the spawn boundary
+and retains that immutable evidence on the run, including host binding versus
+in-sandbox executable for managed launches.
+
 The `agent-runtime probe [PROVIDER|--all] [--json]` executable checks only
 locally observable executable installation, version output, authentication
 configuration presence, and declared capabilities. Its JSON envelope has

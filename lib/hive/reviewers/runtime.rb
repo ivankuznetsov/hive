@@ -1,13 +1,26 @@
+require "hive/agent_cli_identity"
+
 module Hive::Reviewers::Runtime
   MAX_OUTPUT_BYTES = 4 * 1024 * 1024
 
-  Result = Struct.new(:stdout, :exit_code, :error) do
+  Result = Struct.new(:stdout, :exit_code, :error, :cli_identity, :log_file) do
     def success? = error.nil? && exit_code&.zero? || false
   end
 
   module_function
 
-  def capture(environment:, argv:, chdir:, timeout_sec:, timeout_message:)
+  def capture(environment:, argv:, chdir:, timeout_sec:, timeout_message:,
+              profile: nil, log_path: nil, label: "reviewer")
+    if profile
+      identity = Hive::AgentCliIdentity.observe_spawn(
+        profile: profile, argv: argv,
+        environment: ENV.to_h.merge(environment).reject { |_key, value| value.nil? },
+        cwd: chdir, configured: argv.first
+      )
+      Hive::AgentCliIdentity.write_spawn_log(
+        path: log_path, identity: identity, cwd: chdir, label: label, argc: argv.length
+      ) if log_path
+    end
     pipe_r, pipe_w = IO.pipe
     # stdin is /dev/null: `codex exec` otherwise waits on an inherited
     # stdin for "additional input" before it starts the review.
@@ -30,14 +43,14 @@ module Hive::Reviewers::Runtime
       reader.join(2)
       reader.kill if reader.alive?
       pipe_r.close unless pipe_r.closed?
-      return Result.new(nil, nil, timeout_message)
+      return Result.new(nil, nil, timeout_message, identity, log_path)
     end
 
     output = reader.value.to_s
     pipe_r.close unless pipe_r.closed?
     output = output.dup.force_encoding(Encoding::UTF_8)
     output.scrub!("?")
-    Result.new(output, status.exitstatus, nil)
+    Result.new(output, status.exitstatus, nil, identity, log_path)
   end
 
   def write(path, content) = File.write(path, content)

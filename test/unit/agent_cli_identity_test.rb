@@ -3,6 +3,7 @@ require "hive/agent_profiles"
 require "hive/agent_cli_identity"
 
 class AgentCliIdentityTest < Minitest::Test
+  include HiveTestHelper
   def setup
     @root = Dir.mktmpdir("cli-identity")
     @profile = Hive::AgentProfiles.lookup(:codex)
@@ -90,6 +91,15 @@ class AgentCliIdentityTest < Minitest::Test
     assert_equal "prepared_runtime_binding", managed.authority
   end
 
+  def test_isolated_configured_selection_uses_controller_override_before_child_scrub
+    target = executable("custom/codex")
+    profile = @profile.with_overrides("env_override" => "MY_CODEX")
+    identity = observe(profile, environment: { "PATH" => "/missing" },
+                       selector_environment: { "MY_CODEX" => target }, regime: :isolated)
+    assert_equal target, identity.configured
+    assert_equal target, identity.launch_path
+  end
+
   def test_missing_directories_nonexecutables_and_symlink_loops_are_unavailable
     target = executable("bin/codex")
     File.chmod(0o600, target)
@@ -109,6 +119,13 @@ class AgentCliIdentityTest < Minitest::Test
     assert_equal "2.1.118", observe(profile).version
     copied = executable("node/22.1.0/claude")
     assert_equal "unrecognized_install_layout", observe(profile.with_overrides("bin" => copied)).version_reason
+  end
+
+  def test_combined_prerelease_and_build_suffixes_survive_both_observation_sources
+    npm("codex", "@openai/codex", "0.156.1-rc.10+build.2")
+    assert_equal "0.156.1-rc.10+build.2", observe.version
+    assert_equal "0.156.1-rc.10+build.2",
+                 observe(probe: true, runner: ->(**) { [ "codex 0.156.1-rc.10+build.2", "", true ] }).version
   end
 
   def test_homebrew_receipts_require_provider_and_exact_linked_install
@@ -169,5 +186,27 @@ class AgentCliIdentityTest < Minitest::Test
     result = observe(probe: true, budget: Hive::AgentCliIdentity::ProbeBudget.new(seconds: 0.4))
     assert_equal "probe_timeout", result.version_reason
     assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1.5
+    descendant = File.read(File.join(@root, "descendant")).strip
+    stat = "/proc/#{descendant}/stat"
+    assert_equal "Z", File.read(stat).split[2] if File.exist?(stat)
+  end
+
+  def test_real_probe_captures_small_output_and_bounds_excessive_output
+    executable("bin/codex", "#!/bin/sh\nprintf 'codex-cli 0.156.1\\n'\n")
+    assert_equal "0.156.1", observe(probe: true).version
+    executable("bin/codex", "#!#{RbConfig.ruby}\nSTDOUT.write('x' * 100_000)\nsleep 1\n")
+    assert_equal "probe_output_limit", observe(probe: true).version_reason
+    assert_equal "probe_failed", observe(probe: true, runner: ->(**) { raise IOError, "secret output" }).version_reason
+  end
+
+  def test_malformed_metadata_and_resolution_errors_are_typed_without_raw_errors
+    npm("codex", "@openai/codex")
+    File.write(File.join(@root, "packages/codex/package.json"), "{malformed")
+    assert_equal "provider_metadata_mismatch", observe.version_reason
+    with_replaced_singleton_method(File, :realpath, ->(*) { raise Errno::EIO }) do
+      assert_equal "resolution_failed", observe.reason
+    end
+    assert_equal({ nested: [ "[REDACTED:openai_api_key]" ] },
+                 Hive::AgentCliIdentity.freeze_diagnostic({ nested: [ "sk-#{'a' * 25}" ] }))
   end
 end

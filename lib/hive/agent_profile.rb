@@ -220,7 +220,7 @@ module Hive
       ok = status.respond_to?(:success?) ? status.success? : status
       return { version: nil, reason: "probe_failed" } unless ok
 
-      tokens = "#{out}\n#{err}".scan(/(?<![\w.])\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?![\w.])/)
+      tokens = "#{out}\n#{err}".scan(/(?<![\w.])\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?(?![\w.+-])/)
       return { version: nil, reason: "probe_version_unparseable" } if tokens.empty?
       return { version: nil, reason: "probe_version_ambiguous" } unless tokens.length == 1
 
@@ -243,23 +243,11 @@ module Hive
                             in: File::NULL, out: writer, err: writer, pgroup: true)
         writer.close
         loop do
-          16.times do
-            chunk = reader.read_nonblock(4096, exception: false)
-            break if chunk.nil? || chunk == :wait_readable
-
-            output << chunk
-            return "probe_output_limit" if output.bytesize > MAX_BYTES
-          end
+          return "probe_output_limit" unless drain(reader, output)
           waited = Process.wait2(pid, Process::WNOHANG)
           if waited
             reaped = true
-            loop do
-              chunk = reader.read_nonblock(4096, exception: false)
-              break if chunk.nil? || chunk == :wait_readable
-
-              output << chunk
-              return "probe_output_limit" if output.bytesize > MAX_BYTES
-            end
+            return "probe_output_limit" unless drain(reader, output)
             return [ output, "", waited.last ]
           end
           return "probe_timeout" if monotonic >= deadline - cleanup_reserve
@@ -286,6 +274,17 @@ module Hive
         end
         reader&.close unless reader&.closed?
         writer&.close unless writer&.closed?
+      end
+
+      def self.drain(reader, output)
+        16.times do
+          chunk = reader.read_nonblock(4096, exception: false)
+          break if chunk.nil? || chunk == :wait_readable
+
+          output << chunk
+          return false if output.bytesize > MAX_BYTES
+        end
+        true
       end
 
       def self.monotonic

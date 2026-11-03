@@ -20,13 +20,15 @@ module Hive
           launch = prepare_native_invocation
           validate_native_skills!(launch)
           command = launch.invocation.argv
+          environment = effective_native_environment(launch.environment).merge(
+            process_custody.environment
+          )
+          capture_cli_identity(command, environment.reject { |_key, value| value.nil? })
           log_file = log_path
           write_spawn_log(log_file, launch, command)
           run = capture_process(
             argv: command,
-            environment: effective_native_environment(launch.environment).merge(
-              process_custody.environment
-            ),
+            environment: environment,
             stdin_data: launch.invocation.stdin_data,
             stdout_limit: RUN_CAPTURE_BYTES,
             stderr_limit: self.class::FINAL_MESSAGE_TAIL_BYTES,
@@ -54,11 +56,13 @@ module Hive
             run, outcome, inspection_diagnostic, log_file, provider_error
           )
           result[:process_cleanup_completed] = true
+          result[:cli_identity] = @cli_identity
           result
         rescue Hive::InvocationProcessCustody::CleanupError => error
           result ||= { status: nil }
           result[:process_cleanup_completed] = false
           result[:process_cleanup_error] = AgentCliRuntime::Redactor.diagnostic(error)
+          result[:cli_identity] = @cli_identity
           result
         ensure
           if process_custody && !process_cleanup_finished
@@ -318,8 +322,9 @@ module Hive
           open_private_log(log_file) do |log|
             log.puts "[hive] #{Time.now.utc.iso8601} spawn " \
                      "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
-                     "profile=opencode executable=#{File.basename(launch.executable)} " \
-                     "argc=#{command.length}#{launch_identity_log_fields}"
+                     "profile=opencode executable=#{@cli_identity.launch_path} " \
+                     "argc=#{command.length}#{launch_identity_log_fields}" \
+                     "#{Hive::AgentCliIdentity.log_fields(@cli_identity)}"
             write_mcp_log(log)
           end
         end

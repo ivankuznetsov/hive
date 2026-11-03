@@ -1,4 +1,7 @@
 require "json"
+require "digest"
+require "fileutils"
+require "time"
 require "hive/secret_patterns"
 
 module Hive
@@ -22,7 +25,7 @@ module Hive
     }.freeze
     BREW_NAMES = { "claude" => %w[claude-code], "codex" => %w[codex],
                    "opencode" => %w[opencode] }.freeze
-    VERSION = /\A\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z/
+    VERSION = /\A\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z/
 
     class ProbeBudget
       def initialize(seconds: 60, clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
@@ -34,6 +37,49 @@ module Hive
         [ @deadline - @clock.call, 0 ].max
       end
     end
+
+    # Only successful observations of concrete executables survive a call.
+    # In-flight observations are shared even when a launcher has no stable target.
+    class ObservationCache
+      def initialize(limit: 128)
+        @limit = limit
+        @mutex = Mutex.new
+        @entries = {}
+        @inflight = {}
+      end
+
+      def fetch(key, retain:)
+        owner = false
+        @mutex.synchronize do
+          return @entries.fetch(key) if @entries.key?(key)
+
+          if (flight = @inflight[key])
+            flight[:condition].wait(@mutex) until flight[:done]
+            return flight[:value]
+          end
+          @inflight[key] = { condition: ConditionVariable.new, done: false }
+          owner = true
+        end
+        value = yield
+        value
+      ensure
+        if owner
+          @mutex.synchronize do
+            flight = @inflight.delete(key)
+            value ||= { version: nil, reason: "observation_failed" }
+            if retain && value[:version]
+              @entries.shift while @entries.size >= @limit
+              @entries[key] = value.freeze
+            end
+            flight[:value] = value
+            flight[:done] = true
+            flight[:condition].broadcast
+          end
+        end
+      end
+    end
+
+    SPAWN_OBSERVATIONS = ObservationCache.new
 
     module_function
 
@@ -49,8 +95,10 @@ module Hive
     def observe(profile:, environment:, cwd:, regime: :plain, executable: nil,
                 selector_environment: environment, selector_cwd: cwd,
                 sandbox_executable: nil, command_prefix: [], probe: false,
-                probe_allowed: true, budget: nil, runner: nil)
-      configured = profile.runtime_profile.bin(env: environment)
+                probe_allowed: true, budget: nil, runner: nil, configured: nil)
+      configured ||= profile.runtime_profile.bin(
+        env: regime.to_sym == :isolated ? selector_environment : environment
+      )
       authority = { plain: "child_path", isolated: "isolated_selector_path",
                     managed: "prepared_runtime_binding" }.fetch(regime.to_sym)
       selected = if regime.to_sym == :isolated
@@ -86,7 +134,7 @@ module Hive
       Value.new(profile: profile.name, regime: regime, authority: authority,
                 configured: configured, launch_path: path, effective_target: target,
                 version: version, version_source: source, reason: reason,
-                version_reason: version ? nil : version_reason,
+                version_reason: version_reason,
                 sandbox_executable: sandbox_executable, command_prefix: command_prefix)
     rescue SystemCallError, ArgumentError
       Value.new(profile: profile.name, regime: regime, authority: authority,
@@ -94,6 +142,79 @@ module Hive
                 version: nil, version_source: nil, reason: "resolution_failed",
                 version_reason: "version_unknown", sandbox_executable: sandbox_executable,
                 command_prefix: command_prefix)
+    end
+
+    # Observe only after argv and the child environment are final. The command
+    # remains untouched; prepared sandbox bindings identify its host CLI.
+    def observe_spawn(profile:, argv:, environment:, cwd:, regime: :plain,
+                      command_prefix: [], configured: nil, runner: nil)
+      selected = argv.fetch(command_prefix.length)
+      sandbox = command_prefix.empty? ? nil : selected
+      host = sandbox ? bound_host_executable(selected, command_prefix) : selected
+      raw_path = host && resolve(host, environment: environment, cwd: cwd)
+      identity = observe(profile: profile, environment: environment, cwd: cwd,
+                         regime: regime, executable: host, configured: configured,
+                         sandbox_executable: sandbox,
+                         command_prefix: command_prefix.first(1))
+      return identity if identity.version || !raw_path || sandbox
+
+      key = observation_key(profile, raw_path, environment, cwd)
+      result = SPAWN_OBSERVATIONS.fetch(key, retain: !identity.effective_target.nil?) do
+        begin
+          profile.observe_version(executable: raw_path,
+                                  environment: environment, cwd: cwd,
+                                  timeout: 30, runner: runner)
+        rescue StandardError
+          { version: nil, reason: "observation_failed" }
+        end
+      end
+      Value.new(**identity.to_h.merge(version: result[:version],
+        version_source: result[:version] ? "live_probe" : nil,
+        version_reason: result[:version] ? nil : result[:reason]))
+    rescue StandardError
+      Value.new(profile: profile.respond_to?(:name) ? profile.name : "unknown",
+        regime: regime, authority: "final_spawn_command", configured: configured,
+        launch_path: nil, effective_target: nil, version: nil, version_source: nil,
+        reason: "observation_failed", version_reason: "version_unknown",
+        sandbox_executable: nil, command_prefix: [])
+    end
+
+    def observation_key(profile, path, environment, cwd)
+      target = File.realpath(path)
+      stat = File.stat(target)
+      link = File.lstat(path)
+      [ profile.name.to_s, path, target, stat.dev, stat.ino, stat.size,
+        stat.mtime.to_r, stat.ctime.to_r, link.mtime.to_r,
+        Digest::SHA256.hexdigest(JSON.generate([ cwd.to_s, environment.sort ])) ]
+    end
+
+    def bound_host_executable(executable, prefix)
+      bindings = prefix.each_index.filter_map do |index|
+        next unless %w[--ro-bind --ro-bind-try --bind --bind-try].include?(prefix[index])
+
+        source, destination = prefix[index + 1, 2]
+        next unless source && destination
+        next unless executable == destination || executable.start_with?(destination + File::SEPARATOR)
+
+        [ destination.length, source + executable.delete_prefix(destination) ]
+      end
+      bindings.max_by(&:first)&.last
+    end
+
+    def log_fields(identity)
+      " cli_identity=#{JSON.generate(identity.to_h)}"
+    end
+
+    def write_spawn_log(path:, identity:, cwd:, label:, argc:)
+      FileUtils.mkdir_p(File.dirname(path))
+      flags = File::WRONLY | File::CREAT | File::APPEND | File::NOFOLLOW
+      File.open(path, flags, 0o600) do |log|
+        log.chmod(0o600)
+        log.puts Hive::SecretPatterns.redact(
+          "[hive] #{Time.now.utc.iso8601} spawn cwd=#{cwd} label=#{label} " \
+          "profile=#{identity.profile} argc=#{argc}#{log_fields(identity)}"
+        )
+      end
     end
 
     def resolve(name, environment:, cwd:)

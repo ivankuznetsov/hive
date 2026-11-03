@@ -141,6 +141,8 @@ module Hive::AgentSupport::Codex
     # Medium, everything lower (P3+) is Nit.
     NATIVE_SEVERITY = { 0 => "High", 1 => "High", 2 => "Medium" }.freeze
 
+    attr_reader :cli_identity, :spawn_log_path
+
     def initialize(spec, ctx, cfg: nil, stage_host: Hive::Stages::Base,
                    runtime: Hive::Reviewers::Runtime)
       super(spec, ctx)
@@ -530,11 +532,15 @@ module Hive::AgentSupport::Codex
         prompt
       ]
 
-      @runtime.capture(
+      @spawn_log_path = File.join(ctx.task_folder, "logs", "#{name}-#{ctx.pass}-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
+      run = @runtime.capture(
         environment: mcp_launch.environment_for(profile.subscription_environment),
         argv:, chdir: ctx.worktree_path,
-        timeout_sec:, timeout_message: "codex review timed out after #{timeout_sec}s"
+        timeout_sec:, timeout_message: "codex review timed out after #{timeout_sec}s",
+        profile: profile, log_path: @spawn_log_path, label: "review/#{name}/#{ctx.pass}"
       )
+      @cli_identity = run.cli_identity
+      run
     end
 
     # Short, deterministic title for the review summary. codex truncates

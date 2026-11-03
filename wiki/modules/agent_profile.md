@@ -163,7 +163,8 @@ constructs a package profile from them. Every profile freezes after init.
 
 | Method | Behavior |
 |--------|----------|
-| `bin` | Resolved binary path; env override > `bin_default`. |
+| `bin(env: ENV)` | Configured selection under an explicit environment; nonempty project `env_override`, then retained package override keys, then project `bin`/`bin_default`. PATH resolution belongs to the spawn regime. |
+| `observe_version(executable:, environment:, cwd:, timeout: 30)` | Advisory version evidence with bounded capture and process-group cleanup; returns version or typed unknown without enforcing the minimum. |
 | `check_version!` | Delegates the bounded 120-second process-group version probe to the package and caches its result per `(bin, min_version)` pair. The deadline tolerates cold CLI startup on a heavily loaded parallel runner while remaining finite. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. |
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
 | `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
@@ -428,7 +429,7 @@ also rejected. The safe result contains only class, explicit scope,
 provenance, and a bounded reset hint; raw message fields are discarded before
 the attempt evidence channel.
 
-## Tests
+## Executable identity observation
 
 `Hive::AgentCliIdentity` observes a profile under an explicit environment and
 working directory. Plain PATH selection, the existing isolated trampoline
@@ -440,6 +441,8 @@ provider installs; other layouts have a typed unknown reason.
 it bounds capture, terminates the probe process group, and accepts a deadline
 of at most 30 seconds including cleanup. Doctor can share a monotonic
 60-second `AgentCliIdentity::ProbeBudget` across observations.
+
+## Tests
 
 - `test/unit/agent_runtime_test.rb` — immutable request/invocation/evidence
   contracts, exact five-provider prompt transport, fail-closed unsupported

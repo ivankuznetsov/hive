@@ -49,6 +49,23 @@ class ReviewersCodexReviewTest < Minitest::Test
 
   # --- argv construction -------------------------------------------------
 
+  def test_native_reviewer_retains_actual_identity_and_private_spawn_log
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      result = reviewer.run!
+      assert result.ok?, result.error_message
+      identity = reviewer.cli_identity
+      assert_equal FAKE_BIN, identity.launch_path
+      assert_equal "plain", identity.regime
+      assert_equal "0.139.0", identity.version
+      assert_predicate identity, :frozen?
+      log = File.read(reviewer.spawn_log_path)
+      assert_includes log, FAKE_BIN
+      assert_includes log, "cli_identity="
+      refute_includes log, "git diff main...HEAD"
+    end
+  end
+
   def test_builds_codex_exec_review_argv_with_title_and_prompt
     with_tmp_dir do |dir|
       log = File.join(dir, "argv.log")

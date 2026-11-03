@@ -6,6 +6,7 @@ require "tempfile"
 require "time"
 require "hive"
 require "hive/agent_runtime"
+require "hive/agent_cli_identity"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/markers"
@@ -36,6 +37,7 @@ module Hive
   #     spawn (this is the load-bearing security invariant; see
   #     prompt_for / write_artifact)
   class DiagnosisAgent
+    attr_reader :cli_identity, :spawn_log_path
     DEFAULT_TIMEOUT_SECONDS = 600
     DEFAULT_BUDGET_USD = 5
     POLL_INTERVAL = 0.05
@@ -384,9 +386,20 @@ module Hive
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
       Hive::Mcp.with_launch(profile: profile, cfg: @cfg, scope: "diagnose", cwd: cwd) do |mcp_launch|
         invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch)
+        environment = mcp_launch.environment_for(profile.subscription_environment)
+        @cli_identity = Hive::AgentCliIdentity.observe_spawn(
+          profile: profile, argv: invocation.argv,
+          environment: ENV.to_h.merge(environment).reject { |_key, value| value.nil? },
+          cwd: cwd, configured: invocation.argv.first
+        )
+        @spawn_log_path = File.join(@task.folder, "logs", "diagnose-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
+        Hive::AgentCliIdentity.write_spawn_log(
+          path: @spawn_log_path, identity: @cli_identity, cwd: cwd,
+          label: "diagnose/#{@task.slug}", argc: invocation.argv.length
+        )
         run_with_timeout(
           invocation.argv, cwd, invocation.stdin_data, timeout_sec,
-          mcp_launch.environment_for(profile.subscription_environment)
+          environment
         )
       end
     end

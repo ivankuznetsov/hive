@@ -4,6 +4,25 @@ require "hive/daily_digest/document_generator"
 class DailyDigestDocumentGeneratorTest < Minitest::Test
   include HiveTestHelper
 
+  def test_capture_records_the_actual_cli_identity_in_a_private_log
+    with_tmp_global_config do
+      executable = File.join(Hive::Paths.state_home, "digest-agent")
+      FileUtils.mkdir_p(File.dirname(executable))
+      File.write(executable, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; else echo document; fi\n")
+      File.chmod(0o755, executable)
+      profile = Hive::AgentProfiles.lookup(:claude).with_overrides("bin" => executable)
+      invocation = Struct.new(:argv, :stdin_data).new([ executable, "private prompt" ], "")
+      generator = Hive::DailyDigest::DocumentGenerator.new
+      assert_equal "document\n", generator.send(:capture, invocation, profile)
+      assert_equal executable, generator.cli_identity.launch_path
+      assert_equal "1.2.3", generator.cli_identity.version
+      log = File.read(generator.spawn_log_path)
+      assert_includes log, executable
+      assert_includes log, "cli_identity="
+      refute_includes log, "private prompt"
+    end
+  end
+
   def test_global_digest_route_reaches_the_compiled_invocation
     with_tmp_global_config do
       Hive::Config.update_global_config! do |data|

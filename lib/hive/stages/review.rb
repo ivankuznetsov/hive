@@ -481,7 +481,7 @@ module Hive
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :reviewers, reason: Hive::ModelUnsupported::REASON, pass: pass,
                                 model: Hive::ModelUnsupported.model_name(reviewer_unsupported_texts.first),
-                                message: model_unsupported_summary(reviewer_unsupported_texts.first, :reviewers))
+                                message: model_unsupported_summary(reviewer_unsupported_texts.first, :reviewers, task: task))
               return { commit: "reviewers_#{Hive::ModelUnsupported::REASON}_pass_#{format('%02d', pass)}",
                        status: :review_error }
             end
@@ -1100,7 +1100,7 @@ module Hive
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: Hive::ModelUnsupported::REASON, pass: pass,
                             model: Hive::ModelUnsupported.model_name(error_message.to_s),
-                            message: model_unsupported_summary(error_message, phase))
+                            message: model_unsupported_summary(error_message, phase, task: task))
           false
         elsif limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
@@ -1119,8 +1119,8 @@ module Hive
         end
       end
 
-      def model_unsupported_summary(error_message, phase)
-        Hive::ModelUnsupported.marker_message(error_message)
+      def model_unsupported_summary(error_message, phase, task: nil)
+        Hive::ModelUnsupported.marker_message(error_message, task: task)
       end
 
       def limit_failure?(limit_text:, error_message:)

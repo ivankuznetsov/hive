@@ -3176,8 +3176,11 @@ class RunReviewTest < Minitest::Test
         assert_equal "model_unsupported", marker.attrs["reason"]
         assert_equal "gpt-6-sol", marker.attrs["model"]
         assert_nil marker.attrs["retry_after"]
-        assert_equal "triage: model unsupported: 'gpt-6-sol' is not available to this account; " \
-                     "#{Hive::ModelUnsupported::CONFIG_HINT}", marker.attrs["message"]
+        assert_match(/\Amodel unsupported: 'gpt-6-sol' is not available/, marker.attrs["message"])
+        assert_includes marker.attrs["message"], "choose supported model"
+        assert_includes marker.attrs["message"], "diagnostic=task-log"
+        assert_match(/hive task (?:\d+|#{Regexp.escape(File.basename(folder))}) --log/, marker.attrs["message"])
+        assert_operator Hive::Markers.format_attr(marker.attrs["message"]).bytesize, :<=, 200
         refute File.exist?(File.join(folder, "reviews", "reviewer-reuse-01.json")),
                "only a limit-parked triage records reviewer reuse"
       end
@@ -3189,7 +3192,8 @@ class RunReviewTest < Minitest::Test
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
         formatted = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
-                    "#{Hive::ModelUnsupported::CONFIG_HINT}"
+                    "#{Hive::ModelUnsupported::CONFIG_HINT}; CLI path=/#{'long 空間/' * 50}codex; " \
+                    "diagnostic=attempt:original; hive task 43359 --log"
         reviewer_stub = lambda do |_cfg, _ctx, _task, unsupported_texts:, **_kwargs|
           unsupported_texts << "reviewer codex failed\n#{formatted}"
           :all_failed_model_unsupported
@@ -3204,7 +3208,12 @@ class RunReviewTest < Minitest::Test
         assert_equal "reviewers", marker.attrs["phase"]
         assert_equal "model_unsupported", marker.attrs["reason"]
         assert_equal "gpt-6.1-sol", marker.attrs["model"]
-        assert_equal "reviewers: #{formatted}", marker.attrs["message"]
+        assert_match(/\Amodel unsupported: 'gpt-6.1-sol' is not available/, marker.attrs["message"])
+        assert_includes marker.attrs["message"], "diagnostic=attempt:original"
+        assert_includes marker.attrs["message"], "hive task 43359 --log"
+        assert_includes marker.attrs["message"], "choose supported model"
+        refute_includes marker.attrs["message"], "/long 空間/"
+        assert_operator Hive::Markers.format_attr(marker.attrs["message"]).bytesize, :<=, 200
         assert_nil marker.attrs["retry_after"]
       end
     end

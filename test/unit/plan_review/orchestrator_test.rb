@@ -153,6 +153,50 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_shipped_defaults_skip_the_adversarial_leg_at_standard_level
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      projection = orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal %w[primary verification], adapter.calls.map(&:kind)
+      refute(projection.record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" })
+    end
+  end
+
+  def test_adversarial_min_level_standard_restores_the_adversarial_leg
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      cfg["plan_review"]["adversarial_min_level"] = "standard"
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+    end
+  end
+
+  def test_shipped_defaults_allow_one_standard_revision_round
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ?
+          [ finding("safe_auto", "Clarify tests") ] : [])
+        if request.kind == "verification"
+          verification_calls += 1
+          result = successful_result(request, findings: [ finding("safe_auto", "Another edge", line: verification_calls + 1) ])
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      record = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+
+      assert_equal "blocked", record.state
+      assert_equal 1, revision.calls.size
+      assert_equal [ { "owner" => "planner", "reason" => "revision_round_limit" } ], record["blockers"]
+    end
+  end
+
   def test_planner_revision_failures_are_durable_and_retry_within_the_shared_bound
     revised = standard_plan.sub("# Plan", "# Revised plan")
     with_task(standard_plan) do |task, cfg|
@@ -2116,7 +2160,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
     )
   end
 
-  def with_task(plan, meta_depends_on: nil)
+  def with_task(plan, meta_depends_on: nil, shipped_defaults: false)
     Dir.mktmpdir("hive-plan-orchestrator") do |project|
       folder = File.join(project, ".hive-state", "stages", "3-plan", "demo-task")
       FileUtils.mkdir_p(folder)
@@ -2131,6 +2175,11 @@ class PlanReviewOrchestratorTest < Minitest::Test
       )
       cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
       cfg["project_root"] = project
+      # These scenarios exercise the adversarial leg and the three-round
+      # revision budget at standard level; the shipped defaults gate both
+      # (see the convergence-default tests below).
+      cfg["plan_review"]["adversarial_min_level"] = "standard" unless shipped_defaults
+      cfg["plan_review"]["max_revision_rounds"] = { "standard" => 3, "mandatory" => 3 } unless shipped_defaults
       yield task, cfg
     end
   end

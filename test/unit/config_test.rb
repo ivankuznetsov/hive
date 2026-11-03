@@ -98,7 +98,11 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
-        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i
+        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i,
+        "plan_review:\n  adversarial_min_level: skip\n" => /adversarial_min_level.*"standard" or "mandatory"/i,
+        "plan_review:\n  max_revision_rounds:\n    standard: 0\n" => /max_revision_rounds\.standard.*at least 1/i,
+        "plan_review:\n  max_revision_rounds:\n    other: 1\n" => /max_revision_rounds/i,
+        "review:\n  severity_gate_from_pass: 0\n" => /severity_gate_from_pass.*positive integer/i
       }
       invalid_documents.each do |document, pattern|
         File.write(config_path, document)
@@ -2802,7 +2806,7 @@ class ConfigTest < Minitest::Test
       assert_equal "ci_fix_prompt.md.erb", cfg.dig("review", "ci", "prompt_template")
       # Other sibling blocks at review.* must also stay intact.
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
-      assert_equal 3,            cfg.dig("review", "max_passes")
+      assert_equal 2,            cfg.dig("review", "max_passes")
     end
   end
 
@@ -3724,7 +3728,10 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("review", "ci", "agent")
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
-      assert_equal 3,         cfg.dig("review", "max_passes")
+      assert_equal 2,         cfg.dig("review", "max_passes")
+      assert_equal 2,         cfg.dig("review", "severity_gate_from_pass")
+      assert_equal "mandatory", cfg.dig("plan_review", "adversarial_min_level")
+      assert_equal({ "standard" => 1, "mandatory" => 3 }, cfg.dig("plan_review", "max_revision_rounds"))
       assert_equal 28_800,    cfg.dig("review", "max_wall_clock_sec")
       assert_equal "claude",  cfg.dig("agents", "claude", "bin")
       assert_equal "codex",   cfg.dig("agents", "codex", "bin")

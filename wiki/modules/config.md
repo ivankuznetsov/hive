@@ -375,6 +375,8 @@ reference.
    "attempts" => {"max_transient" => 2, "timeout_sec" => 1800},
    "coverage" =>
     {"required" => ["whole_document", "adversarial"], "optional" => []},
+   "adversarial_min_level" => "mandatory",
+   "max_revision_rounds" => {"standard" => 1, "mandatory" => 3},
    "adapter" => "ce_doc_review",
    "reviewers" =>
     {"primary" => "plan_review",
@@ -573,7 +575,8 @@ reference.
      "max_attempts" => 2},
    "github_publish" => {"enabled" => true, "max_attempts" => 2},
    "github_checks" => {"enabled" => true},
-   "max_passes" => 3,
+   "max_passes" => 2,
+   "severity_gate_from_pass" => 2,
    "max_wall_clock_sec" => 28800},
  "daemon" =>
   {"enabled" => false,

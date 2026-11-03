@@ -1162,7 +1162,7 @@ review:                 # 6-review stage config (U2)
         allowed_paths: [...] # default source/test/docs/wiki/manifests allowlist
         denied_paths: [...]  # default bin/config/CI/env/lockfile denylist
   browser_test: { enabled: false, agent: claude, prompt_template: browser_test_prompt.md.erb, max_attempts: 2 }
-  max_passes: 3
+  max_passes: 2
   max_wall_clock_sec: 5400
   reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
 rebase:                 # auto-rebase pre-step for `hive run` (plan 2026-05-14-001)

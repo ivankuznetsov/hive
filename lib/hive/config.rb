@@ -153,6 +153,13 @@ module Hive
         # runaway agent, not to bound how long legitimate review may take.
         "attempts" => { "max_transient" => 2, "timeout_sec" => 1800 },
         "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        # The adversarial plan lens runs only at or above this effective
+        # level (standard|mandatory). At lower levels the review needs only
+        # whole-document coverage; adversarial plan findings mostly grew
+        # plans without changing code-review outcomes.
+        "adversarial_min_level" => "mandatory",
+        # Planner revision rounds after verification, per effective level.
+        "max_revision_rounds" => { "standard" => 1, "mandatory" => 3 },
         "adapter" => "ce_doc_review",
         "reviewers" => {
           "primary" => "plan_review",
@@ -417,7 +424,14 @@ module Hive
         "github_checks" => {
           "enabled" => true
         },
-        "max_passes" => 3,
+        # Two fix passes plus one verify-only pass. Later passes mostly
+        # surfaced new adjacent edge cases rather than real defects, and
+        # each fix commit became fresh review surface.
+        "max_passes" => 2,
+        # From this pass on, only High-severity findings with concrete
+        # evidence are fixed; Medium/Low/Nit findings are DEFERRED (see
+        # Hive::Stages::Review::Convergence). nil disables the gate.
+        "severity_gate_from_pass" => 2,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
         # fit a couple of Claude reviewers each running up to their
         # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
@@ -2299,13 +2313,15 @@ module Hive
 
     PLAN_REVIEW_KEYS = %w[
       enabled classifier_version minimum_level coding skip protected_paths attempts
-      coverage adapter reviewers routes approval_policies mcp
+      coverage adapter reviewers routes approval_policies mcp adversarial_min_level
+      max_revision_rounds
     ].freeze
     PLAN_REVIEW_NESTED_KEYS = {
       "coding" => %w[minimum_level],
       "skip" => %w[max_files max_bytes],
       "attempts" => %w[max_transient timeout_sec],
       "coverage" => %w[required optional],
+      "max_revision_rounds" => %w[standard mandatory],
       "reviewers" => %w[primary adversarial verification],
       "routes" => %w[
         primary adversarial verification fallbacks planner_revision_fallback
@@ -2342,6 +2358,15 @@ module Hive
       end
       validate_plan_review_level!(review.dig("coding", "minimum_level"),
                                   "plan_review.coding.minimum_level", source_path)
+      unless %w[standard mandatory].include?(review["adversarial_min_level"])
+        raise ConfigError,
+              "plan_review.adversarial_min_level in #{describe_source(source_path)} must be " \
+              "\"standard\" or \"mandatory\"; got #{review['adversarial_min_level'].inspect}"
+      end
+      %w[standard mandatory].each do |level|
+        validate_bounded_integer!(review.dig("max_revision_rounds", level),
+                                  "plan_review.max_revision_rounds.#{level}", 1, 10, source_path)
+      end
       validate_bounded_integer!(review.dig("skip", "max_files"),
                                 "plan_review.skip.max_files", 1, 100, source_path)
       validate_bounded_integer!(review.dig("skip", "max_bytes"),
@@ -2975,6 +3000,7 @@ module Hive
       [ %w[review triage max_attempts], "review.triage.max_attempts" ],
       [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
       [ %w[review max_passes], "review.max_passes" ],
+      [ %w[review severity_gate_from_pass], "review.severity_gate_from_pass" ],
       [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]
     ].freeze
 

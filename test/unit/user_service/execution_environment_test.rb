@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/user_service/execution_environment"
+require "hive/commands/service_installer/base"
 
 class UserServiceExecutionEnvironmentTest < Minitest::Test
   include HiveTestHelper
@@ -467,14 +468,15 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
-  def test_default_service_paths_reuse_installers_and_never_render_or_install
+  def test_explicit_installer_definitions_read_absence_without_creating_service_paths
     [ :linux, :macos ].each do |platform|
       with_tmp_dir do |home|
-        result = with_replaced_singleton_method(Hive::Config, :load_global_web,
-          -> { flunk "path-only service inspection loaded web runtime configuration" }) do
-          Hive::UserService::ExecutionEnvironment.new(project_root: home, home: home,
-            profiles: [], platform: platform, status_reader: ->(definition) { status(definition) }).call
-        end
+        definitions = Hive::Commands::ServiceInstaller::Base.execution_definitions(
+          home: home, host_os: platform == :linux ? "linux" : "darwin"
+        )
+        result = Hive::UserService::ExecutionEnvironment.new(project_root: home, home: home,
+          profiles: [], platform: platform, definitions: definitions,
+          status_reader: ->(definition) { status(definition) }).call
         assert_equal %w[daemon babysitter bot web], result.map(&:label)
         assert result.all?(&:absent?)
         refute Dir.exist?(File.join(home, ".config"))

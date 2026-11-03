@@ -1,6 +1,7 @@
 require "hive/agent"
 require "hive/agent_cli_identity"
 require "hive/user_service/execution_environment"
+require "hive/commands/service_installer/base"
 
 module Hive
   module Commands
@@ -79,6 +80,7 @@ module Hive
         def services
           @service_contexts ||= Hive::UserService::ExecutionEnvironment.new(
             project_root: @root, profiles: @profiles,
+            definitions: Hive::Commands::ServiceInstaller::Base.execution_definitions,
             excluded_executables: @profiles.flat_map do |profile|
               configured = profile.runtime_profile.bin(env: @environment)
               [ configured, Hive::AgentCliIdentity.isolated_executable(

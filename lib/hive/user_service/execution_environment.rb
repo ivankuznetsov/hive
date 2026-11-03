@@ -40,11 +40,11 @@ module Hive
         def inspect = "#<#{self.class} #{to_h.inspect}>"
       end
 
-      # definitions is an optional label => UserService::Definition map. status_reader
+      # definitions is a caller-owned label => UserService::Definition map. status_reader
       # receives a definition and returns UserService::Status. manager_runner receives
       # read-only argv and timeout: (cleanup included), returning ok/output/failure.
-      def initialize(project_root:, profiles:, platform: nil, home: Dir.home,
-                     definitions: nil, status_reader: nil, manager_runner: nil,
+      def initialize(project_root:, profiles:, definitions:, platform: nil, home: Dir.home,
+                     status_reader: nil, manager_runner: nil,
                      manager_environment: nil, excluded_executables: [],
                      systemd_roots: nil, monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      wall_clock: -> { Time.now })
@@ -76,30 +76,10 @@ module Hive
         @excluded_identities = profile_executable_identities
         @inherited_environment = inherited_environment
         @excluded_identities |= profile_executable_identities
-        definitions.map { |label, definition| read_context(label, definition) }.freeze
+        @definitions.map { |label, definition| read_context(label, definition) }.freeze
       end
 
       private
-
-      def definitions
-        @definitions ||= begin
-          require "hive/commands/daemon/service_installer"
-          require "hive/commands/babysit/service_installer"
-          require "hive/commands/bot/service_installer"
-          require "hive/commands/web/service_installer"
-          host_os = @platform == :macos ? "darwin" : @platform.to_s
-          {
-            "daemon" => Hive::Commands::Daemon::ServiceInstaller,
-            "babysitter" => Hive::Commands::Babysit::ServiceInstaller,
-            "bot" => Hive::Commands::Bot::ServiceInstaller,
-            "web" => Hive::Commands::Web::ServiceInstaller
-          }.transform_values do |klass|
-            options = { home: @home, host_os: host_os, environment: {} }
-            options[:config] = {} if klass == Hive::Commands::Web::ServiceInstaller
-            klass.new(**options).service_definition(include_content: false)
-          end
-        end
-      end
 
       def read_context(label, definition)
         state = { environment: { "HOME" => @home }.merge(@inherited_environment.fetch(:environment)), cwd: @project_root,
@@ -503,7 +483,7 @@ module Hive
         environments = [ ENV.to_h ]
         # Inspect installed selection inputs before any manager helper can launch:
         # a profile's override may itself name systemctl or launchctl.
-        definitions.each_value do |definition|
+        @definitions.each_value do |definition|
           next if definition.platform == :unsupported
           state = { environment: { "HOME" => @home }.merge(@inherited_environment.to_h.fetch(:environment, {})), cwd: @project_root,
                     cwd_provenance: :inherited, reasons: [], sources: [] }

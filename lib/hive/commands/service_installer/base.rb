@@ -24,6 +24,25 @@ module Hive
 
         attr_reader :messages
 
+        # Command adapters own the installed services that may launch profiles.
+        # Only their path contracts enter read-only execution-environment checks.
+        def self.execution_definitions(home: Dir.home, host_os: RbConfig::CONFIG["host_os"])
+          require "hive/commands/daemon/service_installer"
+          require "hive/commands/babysit/service_installer"
+          require "hive/commands/bot/service_installer"
+          require "hive/commands/web/service_installer"
+          {
+            "daemon" => Hive::Commands::Daemon::ServiceInstaller,
+            "babysitter" => Hive::Commands::Babysit::ServiceInstaller,
+            "bot" => Hive::Commands::Bot::ServiceInstaller,
+            "web" => Hive::Commands::Web::ServiceInstaller
+          }.transform_values do |klass|
+            options = { home: home, host_os: host_os, environment: {} }
+            options[:config] = {} if klass == Hive::Commands::Web::ServiceInstaller
+            klass.new(**options).service_definition(include_content: false)
+          end.freeze
+        end
+
         def initialize(host_os: RbConfig::CONFIG["host_os"], home: nil, binary_path: nil, runner: nil,
                        systemctl_available: nil, launchctl_available: nil, status_reader: nil,
                        environment: ENV, legacy_takeover: nil, removal_takeover: nil)

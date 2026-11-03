@@ -37,6 +37,31 @@ class ServiceInstallerBaseTest < Minitest::Test
                       systemctl_available: false, **opts)
   end
 
+  def test_execution_definitions_are_path_only_without_rendering_or_runtime_configuration
+    { "linux" => :linux, "darwin" => :macos, "freebsd" => :unsupported }.each do |host_os, platform|
+      with_tmp_dir do |home|
+        definitions = with_replaced_singleton_method(Hive::Config, :load_global_web,
+          -> { flunk "path-only definition construction loaded web runtime configuration" }) do
+          Hive::Commands::ServiceInstaller::Base.execution_definitions(home: home, host_os: host_os)
+        end
+        assert_equal %w[daemon babysitter bot web], definitions.keys
+        assert definitions.frozen?
+        definitions.each do |label, definition|
+          assert_equal platform, definition.platform
+          assert_equal "hive-#{label}", definition.service_name
+          assert_equal "local.hive-#{label}", definition.launchd_label
+          assert_nil definition.content
+          expected_path = case platform
+          when :linux then File.join(home, ".config/systemd/user/hive-#{label}.service")
+          when :macos then File.join(home, "Library/LaunchAgents/local.hive-#{label}.plist")
+          end
+          expected_path ? assert_equal(expected_path, definition.target_path) : assert_nil(definition.target_path)
+        end
+        assert_empty Dir.children(home)
+      end
+    end
+  end
+
   # ── ruby_shim_dir ──────────────────────────────────────────────────
 
   def installer_with_ruby_at(dir, ruby_relative)

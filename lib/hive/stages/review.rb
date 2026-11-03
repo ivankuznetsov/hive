@@ -26,6 +26,7 @@ require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/remote_ci"
 require "hive/stages/review/triage"
+require "hive/stages/review/convergence"
 require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
@@ -857,6 +858,9 @@ module Hive
           fix_retry_pass = nil
           pass += 1
         end
+
+        deferred = Hive::Stages::Review::Convergence.write_deferred_summary!(ctx.task_folder)
+        warn "[hive.review] deferred #{deferred} finding(s) for at most one follow-up" if deferred.positive?
 
         # --- Phase 5: browser test ---
         @current_phase = :browser
@@ -1891,7 +1895,7 @@ module Hive
 
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED|DEFERRED)\b/i
 
         true
       end

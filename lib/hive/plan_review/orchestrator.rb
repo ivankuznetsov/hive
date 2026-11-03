@@ -165,7 +165,7 @@ module Hive
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
 
-        %w[primary adversarial].each do |role|
+        initial_roles(record).each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
           return Projection.new(record) if pending
         end
@@ -377,7 +377,8 @@ module Hive
             "kind" => "projection", "version" => version,
             "candidate_plan_digest" => nil, "state" => "uninitialized", "outcome" => nil,
             "attempt_ids" => [], "current_attempt_id" => nil,
-            "coverage" => requested_coverage(review_id, policy.policy_fingerprint),
+            "coverage" => requested_coverage(review_id, policy.policy_fingerprint,
+                                             level: policy.effective_level),
             "findings" => [], "decisions" => [],
             "routes" => [ planner_route(@planner_identity) ],
             "artifacts" => { "policy" => policy_ref }, "blockers" => [],
@@ -407,7 +408,7 @@ module Hive
       # unsupported initial leg independently, then evaluate any remaining
       # non-capability blockers after that reviewer returns.
       def unsupported_initial_routes(record)
-        %w[primary adversarial].filter_map do |role|
+        initial_roles(record).filter_map do |role|
           route = latest_route(record, role)
           route if route && route["outcome"] == "unsupported"
         end
@@ -438,7 +439,7 @@ module Hive
       # every missing capability is present, the normal attempt path resumes.
       def refresh_capability_probes(record)
         routes = record["routes"].dup
-        entries = %w[primary adversarial].filter_map do |role|
+        entries = initial_roles(record).filter_map do |role|
           index = routes.rindex { |route| route["role"] == role }
           route = routes.fetch(index) if index
           [ role, index, route ] if route && route["capability_probe_fingerprint"]
@@ -459,7 +460,7 @@ module Hive
           end
         end
 
-        probes = %w[primary adversarial].filter_map do |role|
+        probes = initial_roles(record).filter_map do |role|
           route = routes.reverse.find { |entry| entry["role"] == role }
           route if route && route["capability_probe_fingerprint"]
         end
@@ -868,9 +869,13 @@ module Hive
         )
       end
 
-      def requested_coverage(review_id, policy_fingerprint)
+      def requested_coverage(review_id, policy_fingerprint, level: nil)
         required = Array(@cfg.dig("plan_review", "coverage", "required"))
         optional = Array(@cfg.dig("plan_review", "coverage", "optional"))
+        unless level.nil? || adversarial_lens?(level)
+          required -= [ "adversarial" ]
+          optional -= [ "adversarial" ]
+        end
         (required.map { |name| [ name, true ] } + optional.map { |name| [ name, false ] })
           .uniq { |name, _required| name }
           .map do |name, required_value|
@@ -1093,10 +1098,34 @@ module Hive
 
       def revision_round_limit_reached?(record, accepted)
         rounds = verification_revision_rounds(record)
-        return false if rounds < MAX_VERIFICATION_REVISION_ROUNDS
-        return true if rounds >= MAX_VERIFICATION_REVISION_ROUNDS + OPERATOR_DECISION_ROUNDS
+        limit = max_revision_rounds(record)
+        return false if rounds < limit
+        return true if rounds >= limit + OPERATOR_DECISION_ROUNDS
 
         accepted.none? { |finding| operator_decision?(finding) }
+      end
+
+      # Planner revision rounds allowed for the record's effective level. A
+      # review whose level has no configured value keeps the historical cap.
+      def max_revision_rounds(record)
+        value = @cfg.dig("plan_review", "max_revision_rounds", record["effective_level"].to_s)
+        value.is_a?(Integer) && value.positive? ? value : MAX_VERIFICATION_REVISION_ROUNDS
+      end
+
+      # Initial review legs. The adversarial leg runs only when the record
+      # requested adversarial coverage, so a review created before the
+      # adversarial lens became level-gated keeps the coverage it asked for.
+      def initial_roles(record)
+        if record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" }
+          %w[primary adversarial]
+        else
+          %w[primary]
+        end
+      end
+
+      def adversarial_lens?(level)
+        minimum = @cfg.dig("plan_review", "adversarial_min_level") || "mandatory"
+        Hive::PlanReview.higher_level(level, minimum) == level
       end
 
       def operator_decision?(finding)
@@ -1236,7 +1265,7 @@ module Hive
       end
 
       def latest_initial_outcomes(record)
-        %w[primary adversarial].map { |role| latest_route(record, role)&.fetch("outcome") }
+        initial_roles(record).map { |role| latest_route(record, role)&.fetch("outcome") }
       end
 
       def latest_route(record, role)

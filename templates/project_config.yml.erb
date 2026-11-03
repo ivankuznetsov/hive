@@ -336,7 +336,11 @@ review:
   adhoc:
     reviewers: null
     fix: <%= adhoc_auto_fix ? "true" : "false" %>
-  max_passes: 3
+  # Two fix passes, then one verify-only pass. From
+  # severity_gate_from_pass on, only High findings with concrete evidence are
+  # fixed; Medium/Low/Nit findings are DEFERRED to reviews/deferred-findings.md.
+  max_passes: 2
+  severity_gate_from_pass: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
   # 6-review folder. 28800s = 8h — generous headroom so the cap is not hit
   # on a normal multi-pass review (a couple of 1-2h reviewers + retries).

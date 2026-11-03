@@ -48,7 +48,7 @@ module Hive
         additional_read_roots: [], additional_write_roots: [],
         edit_patterns: [], bash_patterns: [],
         resource_guards: nil, agent_custody: nil,
-        model: nil, effort: nil, mcp_scope: nil
+        model: nil, effort: nil, mcp_scope: nil, capability_session: nil
       }
     end
 

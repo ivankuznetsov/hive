@@ -95,8 +95,41 @@ class TaskCapabilityGuidanceTest < Minitest::Test
       { "profile" => "claude", "provider" => "anthropic", "model" => "approved", "effort" => "low" } ].each do |actor|
       with_guidance(actor: actor, instruction: true) do |task, cfg|
         error = assert_raises(Hive::TaskCapabilities::Admission::Error) { guidance(task, cfg) }
-        assert_match(/specialist/, error.message)
+        assert_match(/specialist|route unavailable/, error.message)
       end
+    end
+  end
+
+  def test_specialist_contribution_is_bounded_in_the_existing_plan_prompt_and_keeps_primary_identity
+    actor = { "profile" => "claude", "provider" => "anthropic", "model" => "specialist", "effort" => "high" }
+    with_guidance(actor: actor, instruction: true) do |task, cfg, plan|
+      context = Hive::Attempts::Context.send(:new, attempt_id: "parent", task_generation: 0)
+      calls = []
+      specialist = Object.new
+      specialist.define_singleton_method(:run) do |binding, prompt:|
+        calls << [ binding, prompt ]
+        { status: :ok, final_message: "Label the controls. " * 1_000 }
+      end
+      captured = []
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::TaskCapabilities::ActorRunner, :new, ->(**) { specialist }) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(_task, **kwargs) { captured << kwargs; { status: :ok } }) do
+            Hive::Stages::Plan.run_with_source!(task, cfg, nil, observation: nil)
+          end
+        end
+      end
+      assert_equal 1, calls.size
+      assert_equal actor, calls.first.first.fetch("actor")
+      assert_includes calls.first.last, "Preserve keyboard navigation."
+      assert_equal 1, captured.size
+      primary = captured.first
+      assert_includes primary.fetch(:prompt), "specialist contribution"
+      assert_includes primary.fetch(:prompt), plan.digest
+      assert_operator primary.fetch(:prompt).scan("Label the controls.").size, :<=, 432
+      assert_equal [ "--model", "approved", "--effort", "high" ], primary.fetch(:identity_arguments)
+      assert_instance_of Hive::TaskCapabilities::ActorRunner::Session, primary.fetch(:capability_session)
+    ensure
+      context&.close
     end
   end
 
@@ -171,14 +204,17 @@ class TaskCapabilityGuidanceTest < Minitest::Test
   def test_outer_account_route_cannot_be_borrowed_by_an_attachment
     with_guidance do |task, cfg|
       profile = Hive::Stages::Base.stage_profile(cfg, "plan")
-      context = Struct.new(:explicit_routing?).new(true)
+      context = Hive::Attempts::Context.send(:new, attempt_id: "unadmitted-parent", task_generation: 0,
+        routing: { "mode" => "explicit", "route" => { "adapter" => "claude", "model" => "approved", "effort" => "high" } })
       with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
         error = assert_raises(Hive::TaskCapabilities::Admission::Error) do
           Hive::Stages::Base.task_capability_guidance(task, cfg, stage: "plan", profile: profile,
             launch_arguments: { model: "approved", effort: "high" })
         end
-        assert_match(/provider account/, error.message)
+        assert_match(/parent attempt/, error.message)
       end
+    ensure
+      context&.close
     end
   end
 
@@ -225,6 +261,78 @@ class TaskCapabilityGuidanceTest < Minitest::Test
     with_guidance do |task, _cfg|
       task.define_singleton_method(:workflow) { workflow }
       assert_raises(Hive::TaskCapabilities::Admission::Error) { Hive::TaskCapabilities::Admission.enforce!(task) }
+    end
+  end
+end
+
+class TaskCapabilityGuidanceTest
+  def test_specialist_rejects_a_changed_pinned_instruction_before_launch
+    actor = { "profile" => "claude", "provider" => "anthropic", "model" => "specialist" }
+    with_guidance(actor: actor, instruction: true) do |task, cfg, plan|
+      bindings = Marshal.load(Marshal.dump(plan.data.fetch("bindings")))
+      bindings.first["instruction_content"] = "Unaccepted specialist instructions."
+      revised = Hive::TaskCapabilities::Plan.new(plan.to_h.merge("version" => 2, "bindings" => bindings))
+      Hive::TaskCapabilities::Store.new(task.folder).activate(revised, expected_version: 1)
+      context = Hive::Attempts::Context.send(:new, attempt_id: "parent", task_generation: 0)
+      specialist = Object.new
+      test = self
+      specialist.define_singleton_method(:run) { |*| test.flunk "changed instruction reached launcher" }
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::TaskCapabilities::ActorRunner, :new, ->(**) { specialist }) do
+          error = assert_raises(Hive::TaskCapabilities::Admission::Error) { guidance(task, cfg) }
+          assert_includes error.message, "instruction identity changed"
+        end
+      end
+    ensure
+      context&.close
+    end
+  end
+
+  def test_specialist_skill_body_is_hashed_after_read_before_it_enters_the_prompt
+    actor = { "profile" => "claude", "provider" => "anthropic", "model" => "specialist" }
+    with_guidance(actor: actor) do |task, cfg, _plan, skill|
+      context = Hive::Attempts::Context.send(:new, attempt_id: "parent", task_generation: 0)
+      original = File.method(:binread)
+      changed_read = ->(path, *args) { path == skill ? "Changed after verification" : original.call(path, *args) }
+      specialist = Object.new
+      test = self
+      specialist.define_singleton_method(:run) { |*| test.flunk "changed skill body reached launcher" }
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::TaskCapabilities::ActorRunner, :new, ->(**) { specialist }) do
+          with_replaced_singleton_method(File, :binread, changed_read) do
+            error = assert_raises(Hive::TaskCapabilities::Admission::Error) { guidance(task, cfg) }
+            assert_equal "task_capability_missing_skill", error.reason
+          end
+        end
+      end
+    ensure
+      context&.close
+    end
+  end
+end
+
+class TaskCapabilityGuidanceTest
+  def test_verified_specialist_skill_and_failure_are_consumed_without_changing_primary_model
+    actor = { "profile" => "claude", "provider" => "anthropic", "model" => "specialist" }
+    with_guidance(actor: actor) do |task, cfg|
+      context = Hive::Attempts::Context.send(:new, attempt_id: "parent", task_generation: 0)
+      prompts = []
+      result = { status: :ok, final_message: "Use native labelled controls." }
+      specialist = Object.new
+      specialist.define_singleton_method(:run) { |_binding, prompt:| prompts << prompt; result }
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::TaskCapabilities::ActorRunner, :new, ->(**) { specialist }) do
+          text, arguments = guidance(task, cfg)
+          assert_includes prompts.first, "# Pinned UI guidance"
+          assert_includes text, "Use native labelled controls."
+          assert_equal [ "--model", "approved", "--effort", "high" ], arguments.fetch(:identity_arguments)
+          result.replace(status: :error, error_reason: "provider_route_preflight_failed")
+          error = assert_raises(Hive::TaskCapabilities::Admission::Error) { guidance(task, cfg) }
+          assert_includes error.message, "did not produce verified guidance"
+        end
+      end
+    ensure
+      context&.close
     end
   end
 end

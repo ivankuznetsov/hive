@@ -243,10 +243,11 @@ module Hive
           raise Attempts::RepositoryError, "provider capacity observation is unavailable"
         end
 
-        reserved = db[:attempts].where(
-          provider_account_id: decision.route.account,
-          state: %w[launching running]
-        ).count
+        require "hive/attempts/capacity_snapshot"
+        live = db[:attempts].where(state: %w[launching running]).all.map { |row| Attempts::Record.from_row(row) }
+        capacity = Attempts::CapacitySnapshot.provider_account_capacity(accounts: decision.request.policy.account_policy,
+          records: live, reserved_attempt_ids: live.map(&:attempt_id))
+        reserved = capacity.fetch(decision.route.account).fetch("observed")
         return if reserved < candidate.max_concurrency
 
         raise Attempts::CapacityExceeded, "provider account capacity exhausted"

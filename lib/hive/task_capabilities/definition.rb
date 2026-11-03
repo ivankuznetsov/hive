@@ -12,7 +12,7 @@ module Hive
     class Definition
       ID = /\A[a-z0-9][a-z0-9-]*\z/
       KEYS = %w[id kind stages skill instruction instruction_digest actor permissions targets budget_usd timeout_sec checks depends_on conflicts before after].freeze
-      ACTOR_KEYS = %w[profile provider model effort].freeze
+      ACTOR_KEYS = %w[profile provider model effort provider_account launch_binding].freeze
       CHECK_KEYS = %w[id kind claim command provider depends_on].freeze
       CHECK_KINDS = %w[behavior source_review dependency_review].freeze
 
@@ -119,6 +119,13 @@ module Hive
           raise Hive::ConfigError, "#{label} actor profile cannot pin the requested identity"
         end
         text(result["effort"], label: "#{label} actor effort") if result.key?("effort")
+        %w[provider_account launch_binding].each do |key|
+          next unless result.key?(key)
+          text(result[key], label: "#{label} actor #{key}")
+          unless result[key].match?(/\A[a-z][a-z0-9_-]{0,63}\z/)
+            raise Hive::ConfigError, "#{label} actor #{key} must be an exact lowercase account/binding reference"
+          end
+        end
         result
       end
 

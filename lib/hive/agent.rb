@@ -70,7 +70,7 @@ module Hive
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
                    completion_probe: nil, isolate_environment: false,
-                   terminate_on_parent_signal: true, mcp_launch: nil)
+                   terminate_on_parent_signal: true, mcp_launch: nil, spawn_control: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -102,6 +102,7 @@ module Hive
       end.freeze
       @isolate_environment = isolate_environment == true
       @terminate_on_parent_signal = terminate_on_parent_signal == true
+      @spawn_control = spawn_control
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -272,7 +273,15 @@ module Hive
                           started: Time.now.utc.iso8601)
       end
       result = spawn_and_wait
+      if @spawn_control&.observed_cost
+        result[:usage] = (result[:usage] || {}).merge(provider_reported_cost: @spawn_control.observed_cost)
+      end
       handle_exit(result)
+      if @spawn_control&.stop_reason
+        result[:status] = :error
+        result[:error_reason] = @spawn_control.stop_reason
+        result[:timed_out] = true if @spawn_control.stop_reason == "timeout"
+      end
       @observable_result = Hive::AgentRuntime.observe(@profile, result)
       result
     ensure
@@ -332,6 +341,7 @@ module Hive
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
+      @timeout_sec = @spawn_control.launch_timeout! if @spawn_control
       pid = Process.spawn(child_environment, *cmd, **spawn_opts)
       w.close
       pgid = begin
@@ -341,9 +351,12 @@ module Hive
       end
 
       child_start_time = record_spawned_agent(pid)
+      @spawn_control&.attach(pid)
 
-      old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
-      old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
+      unless @spawn_control
+        old_int = install_chained_signal_trap("INT") { kill_group(pgid) if @terminate_on_parent_signal }
+        old_term = install_chained_signal_trap("TERM") { kill_group(pgid) if @terminate_on_parent_signal }
+      end
 
       reader = Thread.new do
         open_private_log(log_file) do |log|
@@ -421,6 +434,8 @@ module Hive
             write_tool_in_current_turn = true if stream&.write_tool_event?(json)
 
             usage = json && Hive::AgentRuntime.extract_usage(@profile, json)
+            @spawn_control&.observe_cost!(usage[:cost] || usage[:provider_reported_cost]) if usage
+            @spawn_control&.observe_cost!(stream.cost_usd(json)) if stream&.respond_to?(:cost_usd)
             if usage
               last_usage = usage
               observed_tokens = token_meter.observe(json, usage)
@@ -511,8 +526,8 @@ module Hive
           sleep [ remaining, 0.2 ].min
         end
       ensure
-        trap("INT", old_int || "DEFAULT")
-        trap("TERM", old_term || "DEFAULT")
+        trap("INT", old_int || "DEFAULT") unless @spawn_control
+        trap("TERM", old_term || "DEFAULT") unless @spawn_control
       end
 
       if timed_out
@@ -680,6 +695,7 @@ module Hive
     end
 
     def record_spawned_agent(pid)
+      return if @spawn_control
       return unless Hive::Lock.task_lock_held?(@task.folder)
 
       child_start_time = Hive::Lock.process_start_time(pid)

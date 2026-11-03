@@ -7,6 +7,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/task_capabilities/admission"
+require "hive/task_capabilities/actor_runner"
 require "hive/events"
 require "base64"
 require "json"
@@ -161,27 +162,30 @@ module Hive
 
         Hive::TaskCapabilities::Admission.enforce!(task)
         context = Hive::Attempts::Context.current
-        if context&.explicit_routing?
-          raise Hive::TaskCapabilities::Admission::Error.new("selected guidance requires its pinned specialist executor; the outer attempt's provider account is not an accepted capability route")
-        end
         routing = launch_arguments[:routing_arguments]
         legacy = legacy_model_routing_values(cfg, profile)
-        model = identity&.model || routing&.model || launch_arguments[:model] || legacy[:model]
+        model = context&.explicit_routing? ? context.model : identity&.model || routing&.model || launch_arguments[:model] || legacy[:model]
         if model.nil? || %w[default inherit].include?(model)
           model = profile.concrete_default_model(cfg: cfg, project_root: task.project_root)
         end
-        effort = identity ? identity.requested_effort : routing&.effort || launch_arguments[:effort] || legacy[:effort]
+        effort = context&.explicit_routing? ? context.effort : identity ? identity.requested_effort : routing&.effort || launch_arguments[:effort] || legacy[:effort]
         arguments = profile.identity_arguments(model: model, effort: effort)
         provider, actual_model = execution_identity(profile, arguments.model)
         actor = { "profile" => profile.name.to_s, "provider" => provider, "model" => actual_model }
         actor["effort"] = arguments.requested_effort if arguments.requested_effort
+        session = nil
         text = bindings.map do |binding|
           fingerprint = Hive::WorkflowPackage::Configuration.profile_fingerprint(profile)
           if binding.dig("actor", "profile") == profile.name.to_s && binding["actor_fingerprint"] != fingerprint
             raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} runtime identity changed; restore the pinned runtime or accept a revised execution plan")
           end
-          unless binding["actor"] == actor && capability_stage_envelope_within?(binding, task, cfg, stage, profile)
-            raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} guidance requires its pinned bounded specialist executor; the #{stage} executor or scope does not match")
+          unless !context&.explicit_routing? && binding["actor"] == actor && capability_stage_envelope_within?(binding, task, cfg, stage, profile)
+            resource = stage == "execute" ? "execute_implementation" : stage
+            session ||= Hive::TaskCapabilities::ActorRunner::Session.new(
+              budget_usd: stage_budget_usd(cfg, resource, profile), timeout_sec: cfg.dig("timeout_sec", resource), parent: context)
+            runner = Hive::TaskCapabilities::ActorRunner.new(task: task, cfg: cfg, session: session, context: context)
+            contribution = capability_specialist_contribution(task, cfg, binding, runner)
+            next "### #{binding.fetch('id')} specialist contribution\n\n#{contribution}"
           end
           body = if binding["skill"]
             Hive::TaskCapabilities::Admission.verify_skill_binding!(binding, project_root: task.project_root, cfg: cfg)
@@ -197,10 +201,42 @@ module Hive
         end.join("\n\n")
         # Pin any provider-native default used for the comparison so launch
         # cannot resolve a different model after the guidance was admitted.
-        pinned = routing ? launch_arguments : { identity_arguments: arguments.native_arguments }
+        pinned = routing ? launch_arguments : launch_arguments.merge(identity_arguments: arguments.native_arguments)
+        pinned = pinned.merge(capability_session: session) if session
         [ "Execution plan #{plan.version} (#{plan.digest})\n\n#{text}", pinned ]
       rescue Hive::ImplementationIdentity::Error => error
         raise Hive::TaskCapabilities::Admission::Error.new("selected guidance requires an exact matching stage or specialist executor: #{error.message}")
+      end
+
+      def capability_specialist_contribution(task, cfg, binding, runner)
+        body = if binding["skill"]
+          Hive::TaskCapabilities::Admission.verify_skill_binding!(binding, project_root: task.project_root, cfg: cfg)
+          content = File.binread(binding.fetch("skill_identity").fetch("path"))
+          unless Digest::SHA256.hexdigest(content) == binding.fetch("skill_identity").fetch("digest")
+            raise Hive::TaskCapabilities::Admission::Error.new("selected capability specialist skill content changed; restore the pinned skill or revise the execution plan", reason: "task_capability_missing_skill")
+          end
+          content
+        else
+          content = binding.fetch("instruction_content")
+          unless Digest::SHA256.hexdigest(content) == binding.fetch("instruction_digest")
+            raise Hive::TaskCapabilities::Admission::Error, "capability specialist instruction identity changed"
+          end
+          content
+        end
+        reader = Hive::TaskWorkspace::BoundedReader.new(root: task.folder)
+        inputs = %w[task.md brainstorm.md plan.md].filter_map do |name|
+          path = File.join(task.folder, name)
+          "#{name}:\n#{reader.read(name, max_bytes: 16_384).content}" if File.file?(path)
+        end.join("\n\n")
+        prompt = render("capability_guidance_prompt.md.erb", TemplateBindings.new(
+          capability: binding.fetch("id"), stage: binding.fetch("stage"), instruction: body, inputs: inputs))
+        result = runner.run(binding, prompt: prompt)
+        unless result[:status] == :ok && !result[:final_message].to_s.strip.empty?
+          raise Hive::TaskCapabilities::Admission::Error.new("selected #{binding.fetch('id')} specialist did not produce verified guidance (#{result[:error_reason] || result[:status]}); restore its pinned route or revise the execution plan")
+        end
+        tag = user_supplied_tag
+        text = result.fetch(:final_message).byteslice(0, 8_192).to_s.scrub
+        "<#{tag}>\n#{text}\n</#{tag}>"
       end
 
       def capability_stage_envelope_within?(binding, task, cfg, stage, profile)
@@ -1039,7 +1075,9 @@ module Hive
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
                       terminate_on_parent_signal: true,
-                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil,
+                      spawn_control: nil, capability_invocation: nil,
+                      capability_session: nil)
         Hive::TaskCapabilities::Admission.enforce!(task)
         agent_custody ||= capability_anchor_custody(task)
         mcp_launch = nil
@@ -1049,22 +1087,35 @@ module Hive
           raise ArgumentError, "controller launch environment is invalid"
         end
         context = Hive::Attempts::Context.current
+        if capability_invocation && (!capability_invocation.is_a?(Hive::TaskCapabilities::ActorRunner::Invocation) ||
+            capability_invocation.parent_attempt_id != context&.attempt_id || capability_invocation.spawn_id != spawn_control&.id)
+          raise ArgumentError, "capability invocation does not belong to this parent attempt and spawn"
+        end
+        if capability_session
+          max_budget_usd, timeout_sec = capability_session.primary_limits(budget_usd: max_budget_usd, timeout_sec: timeout_sec)
+        end
+        route_context = capability_invocation || context
         launch_environment[Hive::Attempts::Context::OPERATOR_DENIAL_ENV] = context.attempt_id if context
         launch_binding = nil
         provider_route = nil
-        if context&.explicit_routing?
-          profile = Hive::AgentProfiles.lookup(context.adapter, cfg: cfg)
+        if route_context&.explicit_routing?
+          profile = Hive::AgentProfiles.lookup(route_context.adapter, cfg: cfg)
           launch_binding = Hive::AgentProfiles::LaunchBindings.resolve(
-            adapter: context.adapter,
-            binding_id: context.launch_binding_id
+            adapter: route_context.adapter,
+            binding_id: route_context.launch_binding_id
           )
-          routing_arguments = admitted_routing_arguments(context, profile)
+          routing_arguments = if capability_invocation
+            profile.routing_arguments(Hive::ModelRouting.capability_resolution({ "id" => "actor", "stage" => task.stage_name,
+              "actor" => { "profile" => profile.name.to_s, "model" => route_context.model, "effort" => route_context.effort } }))
+          else
+            admitted_routing_arguments(context, profile)
+          end
           routing_resolution = nil
           identity_arguments = nil
           model = nil
           effort = nil
           cli_flags = []
-          provider_route = context.admitted_route
+          provider_route = route_context.admitted_route if route_context.provider_account_id
         end
         profile ||= Hive::AgentProfiles.lookup(:claude)
         prompt = Hive::ContextProvenance.decorate_prompt(
@@ -1083,12 +1134,15 @@ module Hive
         # `reason="runner_exception"`.
         begin
           probe = Hive::AgentRuntime.prepare!(profile, launch_binding: launch_binding)
+          if capability_invocation && (!probe&.version || !Gem::Version.correct?(probe.version) || Gem::Version.new(probe.version) < Gem::Version.new("2.1.285"))
+            raise Hive::AgentError, "capability runtime requires Claude 2.1.285 or newer for isolated policy settings"
+          end
         rescue Hive::AgentError => e
-          if context&.explicit_routing?
+          if route_context&.explicit_routing?
             return {
               status: :error,
               error_reason: "provider_route_preflight_failed",
-              error_message: "preflight failed for admitted provider account #{context.provider_account_id}"
+              error_message: "preflight failed for admitted provider account #{route_context.provider_account_id}"
             }
           end
           return { status: :error, preflight_failed: true,
@@ -1169,21 +1223,22 @@ module Hive
         # `observed_*` name what a caller already put in cli_flags (the
         # Claude launcher's claude.* resolution); they feed the receipt only.
         requested_identity = requested_model(
-          context, routing_arguments, launch_arguments, model || receipt_model
+          route_context, routing_arguments, launch_arguments, model || receipt_model
         )
         requested_provider, requested_model_identity = execution_identity(
           profile, requested_identity
         )
         billing_route, billing_evidence_source = billing_launch_evidence(
-          context, profile
+          route_context, profile
         )
         observation = session_observation(
           task: task, context: context, profile: profile,
+          session_id: capability_invocation&.spawn_id || SecureRandom.uuid,
           role: log_label || task.stage_name,
           requested_provider: requested_provider,
           requested_model: requested_model_identity,
           requested_effort: requested_effort(
-            context, routing_arguments, launch_arguments, effort || receipt_effort
+            route_context, routing_arguments, launch_arguments, effort || receipt_effort
           ),
           billing_route: billing_route,
           billing_evidence_source: billing_evidence_source,
@@ -1227,6 +1282,7 @@ module Hive
               isolate_environment: isolate_environment,
               completion_probe: completion_probe,
               terminate_on_parent_signal: terminate_on_parent_signal,
+              spawn_control: spawn_control,
               mcp_launch: mcp_launch
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
@@ -1251,14 +1307,14 @@ module Hive
           end
           record_usage(
             task, profile, result, started_at,
-            context: context, session_id: observation.session_id
+            context: context, session_id: observation.session_id, billing_context: route_context
           )
           if context && agent_custody_safe_after?(agent_custody)
             Hive::ContextProvenance.promote_agent_receipt(
               task: task, context: context
             )
           end
-          if result[:provider_signal]
+          if result[:provider_signal] && !capability_invocation
             unless context.publish_provider_signal(result.fetch(:provider_signal))
               raise Hive::ProviderRouteFailed, "admitted provider route failed without durable evidence delivery"
             end
@@ -1514,9 +1570,9 @@ module Hive
       def session_observation(task:, context:, profile:, role:, requested_model:,
                               requested_effort:, timeout_sec:, guards:,
                               requested_provider: nil, billing_route: "unknown",
-                              billing_evidence_source: "unavailable")
+                              billing_evidence_source: "unavailable", session_id: SecureRandom.uuid)
         Hive::AgentObservation.new(
-          task: task, context: context, session_id: SecureRandom.uuid,
+          task: task, context: context, session_id: session_id,
           role: role, provider: profile.name.to_s,
           requested_provider: requested_provider,
           requested_model: requested_model, requested_effort: requested_effort,
@@ -1613,11 +1669,11 @@ module Hive
         ]
       end
 
-      def record_usage(task, profile, result, started_at, context: nil, session_id: nil)
+      def record_usage(task, profile, result, started_at, context: nil, session_id: nil, billing_context: context)
         usage = result && result[:usage]
         return unless usage
 
-        billing_route, billing_evidence_source = billing_launch_evidence(context, profile)
+        billing_route, billing_evidence_source = billing_launch_evidence(billing_context, profile)
         Hive::UsageDb.record!(
           agent: profile.name.to_s,
           harness: profile.name.to_s,

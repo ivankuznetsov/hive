@@ -79,7 +79,7 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
 
   def test_legacy_attempts_count_against_the_only_default_account_for_their_adapter
     account = Struct.new(:max_concurrent, :launch_binding, :adapter).new(2, "default", "codex")
-    record = Struct.new(:attempt_id, :provider, :routing) do
+    record = Struct.new(:attempt_id, :provider, :routing, :diagnostics) do
       def [](key) = public_send(key)
     end.new("attempt-1", "codex", { "mode" => "legacy" })
 

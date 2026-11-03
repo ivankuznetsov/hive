@@ -18,14 +18,16 @@ module Hive
       ].freeze
 
       class SandboxError < Hive::Error; end
+      attr_reader :runtime_root
 
       def initialize(source_root:, environment: ENV, sandbox_binary: nil,
                      share_network: false, extra_environment: {},
-                     runtime_overlay_root: nil)
+                     runtime_overlay_root: nil, strict: false)
         @source_root = File.realpath(source_root)
         @environment = environment.to_h
         @sandbox_binary = sandbox_binary || Hive::InvokedBinary.which("bwrap")
         @share_network = share_network == true
+        @strict = strict == true
         @extra_environment = extra_environment.to_h.transform_keys(&:to_s)
         @runtime_overlay_root = runtime_overlay_root && File.realpath(runtime_overlay_root)
         validate_extra_environment!
@@ -94,6 +96,7 @@ module Hive
           @sandbox_binary,
           "--die-with-parent", "--new-session", "--unshare-all"
         ]
+        argv << "--clearenv" if @strict
         argv << "--share-net" if @share_network
         argv.concat([
           "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
@@ -118,6 +121,7 @@ module Hive
       end
 
       def writable_source_dirs
+        return [] if @strict
         WRITABLE_SOURCE_DIRS.filter_map do |relative|
           path = File.join(@source_root, relative)
           next unless File.directory?(path) && !File.symlink?(path)
@@ -200,6 +204,7 @@ module Hive
       end
 
       def runtime_mounts
+        return [] if @strict
         @runtime_mounts ||= begin
           paths = Gem.path.select { |path| File.directory?(path) }
           prefix = RbConfig::CONFIG["prefix"].to_s

@@ -26,6 +26,37 @@ module Hive
       attr_reader :accounts, :policy, :source
 
       class << self
+        # Capability slots have one exact route. They never inherit the outer
+        # stage pool, rotate to another account, or resolve model defaults.
+        def capability_route(cfg:, actor:)
+          profile = Hive::AgentProfiles.lookup(actor.fetch("profile"), cfg: cfg)
+          support = Hive::AgentSupport.for(profile)
+          provider, model = support.execution_identity(actor.fetch("model")) if support&.respond_to?(:execution_identity)
+          unless provider == actor.fetch("provider") && model == actor.fetch("model") && !%w[default inherit].include?(model)
+            raise ConfigError, "capability actor does not pin its runtime's concrete provider and model"
+          end
+          accounts = cfg.fetch(PROVIDER_ACCOUNTS_KEY, {})
+          accounts = normalize_accounts(accounts, source: "global providers") unless accounts.values.all? { |entry| entry.is_a?(Account) }
+          selected = if actor["provider_account"]
+            accounts[actor["provider_account"]] || raise(ConfigError, "approved capability provider account is unavailable")
+          else
+            defaults = accounts.values.select { |account| account.adapter == profile.name.to_s && account.launch_binding == "default" }
+            raise ConfigError, "capability actor requires an exact provider_account" if defaults.size > 1 || (defaults.empty? && accounts.values.any? { |account| account.adapter == profile.name.to_s })
+            defaults.first
+          end
+          if selected && (selected.adapter != profile.name.to_s || !selected.models.include?(model))
+            raise ConfigError, "approved capability account does not support its pinned profile and model"
+          end
+          if actor["launch_binding"] && actor["launch_binding"] != (selected&.launch_binding || "default")
+            raise ConfigError, "approved capability launch binding changed or is unavailable"
+          end
+          billing, evidence = selected ? [ selected.billing_route, selected.billing_evidence_source ] : Hive::BillingEvidence.for_profile(profile)
+          route = { "provider_account_id" => selected&.id, "adapter" => profile.name.to_s,
+            "launch_binding_id" => selected&.launch_binding || "default", "model" => model,
+            "effort" => actor["effort"], "billing_route" => billing, "billing_evidence_source" => evidence }
+          route.merge("route_id" => "capability-#{Digest::SHA256.hexdigest(Hive::CanonicalJSON.generate(route))}")
+        end
+
         def from(cfg:, stage_name:, routing: nil, source: nil)
           cfg ||= {}
           stage = stage_name.to_s

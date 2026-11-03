@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-03
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -18,6 +18,14 @@ The project daily dispatch cap remains the emergency brake.
 `attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.
 Retries use deterministic dispatch-request identity, not an attempt graph.
+
+Task capability actors are child spawns of an existing running attempt. They
+retain one task/fleet reservation and the parent's task lease. Distinct spawn
+IDs and exact live routes live in parent diagnostics; account capacity counts
+those routes, and both child and outer admission recheck them transactionally.
+Adding or releasing child occupancy does not increment the lifecycle lease
+version. Cancellation and final cleanup remain with the parent context;
+children do not own independent attempt usage or cancellation receipts.
 
 ## Boundary
 

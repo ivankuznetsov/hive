@@ -3,7 +3,7 @@ title: Hive::ProviderRouting
 type: module
 source: lib/hive/provider_routing.rb, lib/hive/provider_routing/*.rb
 created: 2026-08-10
-updated: 2026-09-04
+updated: 2026-11-03
 tags: [config, provider-accounts, routing, stateless]
 ---
 
@@ -12,6 +12,15 @@ provider accounts and the current stage configuration define the ordered route
 pool. Current live attempts provide capacity. A provider-class retry carries
 only the failed route ID, starts after that route, and wraps once. Hive stores
 no provider policy, circuit, audit, probe, cooldown, or health state.
+
+Capability actors use `Configuration.capability_route` to pin one concrete
+semantic provider/model plus adapter, optional provider-account ID and symbolic
+launch binding. This path does not inherit or rotate through the outer stage's
+pool. Accepted bindings revalidate that route on every launch. Security approval
+envelopes for configured accounts must name the exact account and launch binding;
+an inferred default cannot establish that authority. Live child routes count
+against account concurrency in their parent's attempt diagnostics and in the
+atomic SQL admission check. They do not consume another task/fleet reservation.
 
 ## Configuration
 

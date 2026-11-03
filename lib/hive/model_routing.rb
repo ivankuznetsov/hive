@@ -105,6 +105,13 @@ module Hive
 
     module_function
 
+    def capability_resolution(binding)
+      actor = binding.fetch("actor")
+      Resolution.new(stage: "capabilities.#{binding.fetch('id')}.#{binding.fetch('stage')}",
+        provider: actor.fetch("profile"), model: actor.fetch("model"), effort: actor["effort"],
+        provenance: FIELDS.to_h { |field| [ field, Provenance.new(kind: actor[field.to_s] ? :exact : :absent, key: "accepted capability actor") ] })
+    end
+
     def entries
       REGISTRY
     end
@@ -115,6 +122,7 @@ module Hive
 
     def fetch(stage)
       key = stage.to_s
+      return RegistryEntry.new(key: key) if key.match?(/\Acapabilities\.[a-z0-9][a-z0-9-]*\.[a-z0-9][a-z0-9_-]*\z/)
       REGISTRY_BY_KEY.fetch(key) do
         raise Hive::ConfigError,
               "unknown model-routing stage #{stage.inspect}; known stages: #{keys.inspect}"

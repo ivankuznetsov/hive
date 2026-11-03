@@ -2,6 +2,7 @@ require "hive/task_capabilities/approval"
 require "hive/task_capabilities/admission"
 require "hive/config"
 require "hive/workflow_package/configuration"
+require "hive/provider_routing/configuration"
 
 module Hive
   module TaskCapabilities
@@ -14,13 +15,16 @@ module Hive
 
       def initialize(workflow:, cfg:, project_root: nil, source: {}, configuration_digest: nil)
         @workflow = workflow
-        @cfg = Hive::WorkflowPackage::CanonicalJSON.normalize(cfg)
+        accounts = cfg.fetch(Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY, {})
+        @cfg = Hive::WorkflowPackage::CanonicalJSON.normalize(cfg.except(Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY))
+        @cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = accounts
         @project_root = project_root
         @source = source
         settings = @cfg.fetch("task_capabilities", {})
         @catalog = Catalog.new(workflow: workflow, definitions: settings.fetch("catalog", []))
         @policy = Policy.new(settings.fetch("policy", {}), catalog: catalog, approvals: settings.fetch("approvals", {}))
-        @configuration_digest = configuration_digest || digest(@cfg)
+        serialized_accounts = accounts.transform_values { |account| account.is_a?(Hive::ProviderRouting::Account) ? account.to_h : account }
+        @configuration_digest = configuration_digest || digest(@cfg.merge(Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY => serialized_accounts))
       end
 
       def preview(selections: [], qa_waiver_reason: nil, qa_waiver_checks: [], approval_references: [], task_text: "", task_labels: [], repository_paths: [], changed_paths: [])
@@ -73,7 +77,7 @@ module Hive
         result = Plan.redact({ "configuration_digest" => configuration_digest, "catalog_digest" => catalog.digest,
           "inputs" => inputs, "choices" => choices, "bindings" => bindings, "waivers" => waivers,
           "recommendations" => recommendations, "blockers" => blockers,
-          "approval_references" => references, "policy" => policy.to_h,
+          "approval_references" => references, "policy" => policy.to_h.merge("catalog_bindings" => catalog_guidance_bindings),
           "input_digest" => digest({ "selections" => selections, "qa_waiver_reason" => qa_waiver_reason,
             "qa_waiver_checks" => qa_waiver_checks, "approval_references" => approval_references,
             "task_text" => task_text, "task_labels" => task_labels,
@@ -97,7 +101,7 @@ module Hive
           Approval.new(reference: reference, envelope: policy.approvals.fetch(reference)).blob(task_identity: task_identity)
         end
         data = Plan.minimal(task_identity: task_identity, catalog: catalog, source: @source.merge("selection_input_digest" => preview.fetch("input_digest")), policy: policy.to_h, configuration_digest: configuration_digest).to_h.merge(
-          preview.slice("inputs", "choices", "bindings", "waivers", "recommendations", "blockers"),
+          preview.slice("inputs", "choices", "bindings", "waivers", "recommendations", "blockers", "policy"),
           "approvals" => approvals.map { |value| { "digest" => digest(value) } }
         )
         Resolution.new(plan: Plan.new(data), approvals: approvals, preview: preview)
@@ -194,8 +198,29 @@ module Hive
         if result["actor"]
           result["actor_fingerprint"] = Hive::WorkflowPackage::Configuration.profile_fingerprint(
             Hive::AgentProfiles.lookup(result.fetch("actor").fetch("profile"), cfg: @cfg))
+          begin
+            result["actor_route"] = Hive::ProviderRouting::Configuration.capability_route(cfg: @cfg, actor: result.fetch("actor"))
+            if result["approval_reference"] && result.dig("actor_route", "provider_account_id") && !result.dig("actor", "provider_account")
+              block(blockers, definition.id, "approval_scope", "approved capability actor must name its exact provider_account and launch_binding; an inferred default account cannot reuse this approval")
+            end
+          rescue Hive::ConfigError => error
+            block(blockers, definition.id, "route_unavailable", "#{definition.id} approved route unavailable: #{error.message}; restore the approved route#{definition.id == 'security' ? ' or archive/cancel the task without finalization' : ' or revise the execution plan'}", phase: definition.id == "security" ? "finalization" : "dispatch")
+          end
         end
         result
+      end
+
+      # Retain the initial authority for later routine UI proposals even when
+      # UI is currently off. Missing skills/routes remain an unavailable
+      # proposal template, never a blocker on an unselected recommendation.
+      def catalog_guidance_bindings
+        catalog.definitions.select { |definition| definition.kind == "guidance" }.flat_map do |definition|
+          definition.stages.map do |stage|
+            blockers = []
+            snapshot = binding(definition, stage, {}, blockers, automatic: true)
+            snapshot.merge("available" => blockers.empty?, "blockers" => blockers)
+          end
+        end
       end
 
       def pin_guidance(definition, result, blockers, automatic:)

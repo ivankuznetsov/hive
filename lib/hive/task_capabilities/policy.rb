@@ -76,6 +76,10 @@ module Hive
           definition = @catalog.fetch(approval["capability"])
           raise Hive::ConfigError, "#{label} must name a verification capability" unless definition.kind == "verification"
           approval["actor"] = Definition.actor(approval["actor"], label: label)
+          if approval["actor"]["provider_account"] && !approval["actor"]["launch_binding"]
+            raise Hive::ConfigError, "#{label} requires its exact launch_binding alongside provider_account"
+          end
+          approval["actor"]["launch_binding"] ||= "default"
           permissions = approval["permissions"]
           unless permissions.is_a?(Hash) && !permissions.key?("preset")
             raise Hive::ConfigError, "#{label} requires an enforceable tools/commands/domains permission envelope"

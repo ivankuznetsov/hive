@@ -88,3 +88,11 @@ class TaskCapabilitiesDefinitionTest < Minitest::Test
     assert_raises(Hive::ConfigError) { definition("kind" => "guidance", "checks" => [ check ]) }
   end
 end
+
+class TaskCapabilitiesDefinitionTest
+  def test_actor_account_and_binding_use_the_existing_provider_reference_vocabulary
+    actor = { "profile" => "claude", "provider" => "anthropic", "model" => "approved", "provider_account" => "claude_primary", "launch_binding" => "approved_1" }
+    assert_equal actor, Hive::TaskCapabilities::Definition.actor(actor, label: "fixture")
+    assert_raises(Hive::ConfigError) { Hive::TaskCapabilities::Definition.actor(actor.merge("provider_account" => "../outside"), label: "fixture") }
+  end
+end

@@ -61,6 +61,12 @@ module Hive::AgentSupport::Claude::Stream
 
   module_function
 
+  def cost_usd(event)
+    return unless event.is_a?(Hash) && event["type"] == "result"
+    value = finite_number(event["total_cost_usd"])
+    value if value && value >= 0
+  end
+
   def failure(event)
     return unless event.is_a?(Hash) && event["type"] == "result" &&
       event["subtype"] == "error_max_budget_usd"

@@ -3,7 +3,7 @@ title: Hive::ModelRouting
 type: module
 source: lib/hive/model_routing.rb
 created: 2026-07-25
-updated: 2026-08-12
+updated: 2026-11-03
 tags: [config, models, routing, validation]
 ---
 
@@ -12,6 +12,11 @@ closed built-in model/effort vocabulary. It owns registry enumeration,
 project ownership, structural parsing, independent field
 precedence, provenance, and reachability filtering. It never selects a
 provider or renders provider CLI arguments.
+
+Accepted capability bindings use internal `capabilities.<id>.<stage>` slots
+through `capability_resolution`. Their model and effort have exact provenance
+from the accepted actor, without stage/default inheritance. These internal slots
+do not expand the public `models:` configuration vocabulary.
 
 Explicit provider-account pools reuse this field-wise resolver independently
 for every candidate through `resolve_candidate`. That stricter seam validates

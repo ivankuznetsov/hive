@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-03
 tags: [agent, claude, subprocess]
 ---
 
@@ -299,3 +299,10 @@ The final result and usage projection carry that main identity while retaining
 aggregate token totals. A single-model terminal usage map remains a fallback;
 a multi-model map alone leaves identity unknown. Provider-emitted main assistant
 or message-start identity supersedes the initial model announcement.
+
+Controlled capability spawns use one parent signal boundary and identity-fenced
+process-tree teardown instead of independent chained traps per child. Their
+watchdog enforces the clamped timeout and observed native spending cap while
+the existing launcher retains normal wait and usage handling. The controlled
+Claude path also retains terminal `total_cost_usd` as provider-reported usage,
+allowing the shared stage envelope to settle an unused reservation once.

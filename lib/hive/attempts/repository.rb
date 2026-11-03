@@ -322,6 +322,47 @@ module Hive
         translate_store_error(error, "active attempt query failed")
       end
 
+      # Route occupancy belongs to the running parent row. It neither changes
+      # the task reservation nor advances the parent's lifecycle lease version.
+      # The same immediate transaction as outer admission fences account races.
+      def with_capability_spawn(attempt_id:, spawn_id:, route:, accounts:, task_id: nil, task_slug: nil, stage: nil)
+        database.transaction do |db|
+          row = db[:attempts].where(attempt_id: attempt_id, state: "running").first
+          raise RepositoryError, "capability actor requires its live running parent attempt" unless row
+          parent = record_from(row)
+          if (task_id && parent["task_id"].to_s != task_id.to_s) ||
+              (task_slug && parent["task_slug"] != task_slug) ||
+              (stage && parent["intended_stage"].sub(/\A\d+-/, "") != stage)
+            raise RepositoryError, "capability actor task or stage differs from its parent attempt"
+          end
+          if (account = route["provider_account_id"])
+            require "hive/attempts/capacity_snapshot"
+            live = db[:attempts].where(state: %w[launching running]).all.map { |entry| record_from(entry) }
+            capacity = CapacitySnapshot.provider_account_capacity(accounts: accounts, records: live, reserved_attempt_ids: live.map(&:attempt_id))
+            observed = capacity.fetch(account)
+            raise CapacityExceeded, "approved capability provider account capacity is exhausted" if observed.fetch("observed") >= observed.fetch("max")
+          end
+          details = RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+          spawns = (details.fetch("diagnostics")["capability_spawns"] ||= {})
+          raise RepositoryError, "capability spawn correlation already exists" if spawns.key?(spawn_id)
+          spawns[spawn_id] = route
+          db[:attempts].where(attempt_id: attempt_id).update(details_json: RuntimeControlPlane::Codec.dump_json(details))
+        end
+        registered = true
+        yield
+      ensure
+        if registered
+          database.transaction do |db|
+            row = db[:attempts].where(attempt_id: attempt_id).first
+            if row
+              details = RuntimeControlPlane::Codec.load_json(row.fetch(:details_json))
+              details.fetch("diagnostics").fetch("capability_spawns").delete(spawn_id)
+              db[:attempts].where(attempt_id: attempt_id).update(details_json: RuntimeControlPlane::Codec.dump_json(details))
+            end
+          end
+        end
+      end
+
       def live_attempt_for(task_id:)
         id = safe_id(task_id, error: "unsafe task id")
         row = database.read do |db|

@@ -1869,3 +1869,21 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+## Capability actors and live Claude sandbox nesting (2026-11-03)
+
+The exact compiled Claude hook and strict Bubblewrap command wrapper have
+offline kernel proofs for approved local fixture execution, outside-file
+denial, host-socket denial and environment isolation. A live provider session
+with Claude's native sandbox surrounding that wrapper has not been exercised.
+Native sandbox startup/nesting errors must remain visible failures with no
+unsandboxed retry. The supported specialist surface currently requires system
+executables under `/usr`, one task-owned target directory and no command
+network domains. Other adapters, external targets and runtime dependencies
+outside that namespace remain unsupported rather than implicitly widened.
+
+Direct stage invocation can lack a durable parent context. A distinct capability
+actor then gives `--durable` recovery; legacy direct execution and matching
+same-executor guidance retain their existing behavior. Review verification
+consumers must carry one shared parent session across checks and retain the
+same real parent correlation rather than minting independent attempts.

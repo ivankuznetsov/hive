@@ -124,7 +124,7 @@ class TaskCapabilitiesResolverTest
     blocker = approved.preview.fetch("blockers").find { |entry| entry["reason"] == "task_capability_route_unavailable" }
     assert_equal "finalization", blocker.fetch("phase")
     assert_includes blocker.fetch("message"), "restore the approved route"
-    assert_equal security_envelope.fetch("actor"), approved.plan.data.fetch("bindings").find { |entry| entry["id"] == "security" }.fetch("actor")
+    assert_equal security_envelope.fetch("actor").merge("launch_binding" => "default"), approved.plan.data.fetch("bindings").find { |entry| entry["id"] == "security" }.fetch("actor")
     assert_equal 1, approved.approvals.length
     assert_equal Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(approved.approvals.first)), approved.plan.data.fetch("approvals").first.fetch("digest")
     cfg["agents"]["claude"]["bin"] = "ruby"
@@ -278,6 +278,44 @@ class TaskCapabilitiesResolverTest
         conflicts = preview.fetch("blockers").select { |entry| entry["capability"] == "ui" && entry["reason"] == "task_capability_policy_conflict" }
         assert_equal admitted, conflicts.empty?, "requested #{requested.inspect} beneath #{inherited.inspect}"
       end
+    end
+  end
+end
+
+class TaskCapabilitiesResolverTest
+  def test_configured_default_accounts_cannot_reuse_an_approval_that_omits_the_account
+    cfg = config
+    cfg["review"]["ci"]["command"] = "ruby check.rb"
+    cfg["agents"]["claude"]["bin"] = "ruby"
+    cfg["task_capabilities"]["catalog"] = [ security_definition ]
+    cfg["task_capabilities"]["approvals"] = { "local" => security_envelope }
+    %w[account-a account-b].each do |id|
+      account = Hive::ProviderRouting::Account.new(id: id, adapter: "claude", launch_binding: "default", models: [ "approved" ], max_concurrent: 2, cooldown_sec: {})
+      cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = { id => account }
+      preview = resolver(cfg).preview(selections: [ "security=on" ], approval_references: [ "security=local" ])
+      assert preview.fetch("blockers").any? { |blocker| blocker["reason"] == "task_capability_approval_scope" && blocker["message"].include?("provider_account") }
+    end
+    cfg["task_capabilities"]["approvals"]["local"]["actor"].merge!("provider_account" => "account-b", "launch_binding" => "default")
+    assert_empty resolver(cfg).preview(selections: [ "security=on" ], approval_references: [ "security=local" ]).fetch("blockers")
+    cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = {}
+    unavailable = resolver(cfg).preview(selections: [ "security=on" ], approval_references: [ "security=local" ])
+    assert unavailable.fetch("blockers").any? { |blocker| blocker["reason"] == "task_capability_route_unavailable" && blocker["phase"] == "finalization" }
+  end
+
+  def test_unselected_guidance_keeps_immutable_catalog_authority_without_blocking_capture
+    with_tmp_dir do |root|
+      cfg = config
+      cfg["review"]["ci"]["command"] = "ruby check.rb"
+      cfg["task_capabilities"]["catalog"] = [ { "id" => "ui", "kind" => "guidance", "stages" => %w[plan execute], "skill" => "uninstalled",
+        "actor" => { "profile" => "claude", "provider" => "anthropic", "model" => "approved" }, "permissions" => "read-only", "budget_usd" => 1, "timeout_sec" => 5 } ]
+      result = resolver(cfg, project_root: root).resolve(task_identity: { "id" => "1", "slug" => "task", "workflow" => "coding" })
+      assert_empty result.plan.data.fetch("blockers")
+      snapshot = result.plan.data.fetch("policy").fetch("catalog_bindings").first
+      refute snapshot.fetch("available")
+      assert_equal 1, snapshot.fetch("budget_usd")
+      assert_equal "default", snapshot.dig("actor_route", "launch_binding_id")
+      cfg["budget_usd"]["plan"] = 100
+      assert_equal snapshot, result.plan.data.fetch("policy").fetch("catalog_bindings").first
     end
   end
 end

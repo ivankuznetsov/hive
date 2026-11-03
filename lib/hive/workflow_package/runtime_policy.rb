@@ -232,8 +232,8 @@ module Hive
         end
       end
 
-      def self.compile(permissions, task_folder:, profile:, policy_dir:)
-        new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile
+      def self.compile(permissions, task_folder:, profile:, policy_dir:, isolated_commands: false)
+        new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile(isolated_commands: isolated_commands)
       end
 
       # Configuration admission shares the compiler's exact validators without
@@ -632,11 +632,15 @@ module Hive
         raise Hive::ConfigError, "managed runtime task folder is unavailable (#{e.class.name.split('::').last})"
       end
 
-      def compile
+      def compile(isolated_commands: false)
         validate_profile!
         tools, denied, commands, domains = validate_envelope!
         directories = resolve_directories
         executables = resolve_executables(commands)
+        if isolated_commands && (domains.any? || tools.include?("WebFetch") ||
+            directories != [ @task_folder ] || executables.values.any? { |path| !path.start_with?("/usr/") })
+          raise Hive::ConfigError, "isolated capability commands require one exact local target, no network, and system executables under /usr"
+        end
         environment = sanitized_environment(executables)
         disallowed = ((SUPPORTED_TOOLS - tools) + ALWAYS_DENIED_TOOLS + denied).uniq.sort
 
@@ -644,13 +648,19 @@ module Hive
         policy_path = File.join(@policy_dir, "policy.json")
         settings_path = File.join(@policy_dir, "settings.json")
         mcp_path = File.join(@policy_dir, "mcp.json")
-        write_json(policy_path, {
+        policy_data = {
           "allowed_tools" => tools,
           "directories" => directories,
           "commands" => commands,
           "domains" => domains,
           "executables" => executables
-        })
+        }
+        if isolated_commands && tools.include?("Bash")
+          require "hive/artifacts/project_command_sandbox"
+          sandbox = Hive::Artifacts::ProjectCommandSandbox.new(source_root: @task_folder, strict: true)
+          policy_data["command_prefix"] = sandbox.command_argv([])
+        end
+        write_json(policy_path, policy_data)
         hook_file = File.expand_path("../scripts/workflow_policy_hook.rb", __dir__)
         hook_command = Shellwords.join(
           [ RbConfig.ruby, "-r#{hook_file}", "-e", "Hive::Scripts::WorkflowPolicyHook.run(ARGV.fetch(0))", policy_path ]
@@ -676,6 +686,10 @@ module Hive
             "filesystem" => { "allowWrite" => directories },
             "network" => { "allowedDomains" => domains, "deniedDomains" => [] }
           }
+          if isolated_commands
+            settings["sandbox"]["filesystem"].merge!("denyRead" => [ "/home", "/root", "/tmp", "/var", "/mnt", "/media", "/run" ], "allowRead" => directories)
+            settings["sandbox"]["network"]["strictAllowlist"] = true
+          end
         end
         write_json(settings_path, settings)
         write_json(mcp_path, { "mcpServers" => {} })
@@ -700,9 +714,12 @@ module Hive
           executable: nil,
           task_root: @task_folder.freeze,
           output_paths: {}.freeze,
-          cleanup_paths: [].freeze,
+          cleanup_paths: Array(sandbox&.runtime_root).freeze,
           mcp_isolated: true
         ).freeze
+      rescue StandardError
+        sandbox&.close
+        raise
       end
 
       private

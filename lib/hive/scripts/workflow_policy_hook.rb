@@ -16,13 +16,26 @@ module Hive
         event = JSON.parse(input.read)
         decision, reason = evaluate(policy, event)
 
-        output.puts JSON.generate(
-          "hookSpecificOutput" => {
+        response = {
             "hookEventName" => "PreToolUse",
             "permissionDecision" => decision,
             "permissionDecisionReason" => reason
-          }
-        )
+        }
+        if decision == "allow" && event["tool_name"] == "Bash" && policy["command_prefix"]
+          # Validate the original argv before replacement. The model process
+          # retains transport access; only its approved tool command enters
+          # the existing read-only, no-network command namespace.
+          command = event.fetch("tool_input").fetch("command")
+          response["updatedInput"] = event.fetch("tool_input").merge(
+            "command" => Shellwords.join(policy.fetch("command_prefix") + [ "/usr/bin/sh", "-c", command ])
+          )
+        end
+        output.puts JSON.generate("hookSpecificOutput" => response)
+      rescue StandardError => error
+        # Hook failures must stop execution, including unreadable/malformed
+        # policy, rather than falling through to the CLI's ordinary allow rule.
+        warn "managed workflow policy hook failed: #{error.class}"
+        exit 2
       end
 
       def evaluate(policy, event)

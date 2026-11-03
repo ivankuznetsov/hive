@@ -98,6 +98,8 @@ module Hive
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
+          at_exit { current&.close }
+          @installed
         rescue Hive::Error, SystemCallError, IOError => e
           raise RepositoryError, "durable attempt context rejected: #{e.message}"
         ensure
@@ -273,10 +275,37 @@ module Hive
       end
 
       def close
+        return true if @capability_closed
+        @capability_closed = true
+        @capability_cancelled = true
+        Array(@capability_sessions).each(&:close)
+        @capability_signal_handlers&.each { |signal, previous| trap(signal, previous) }
+        @capability_signal_handlers = nil
         @evidence_writer&.close
         @diagnostic_writer&.close
         true
       end
+
+      # One signal boundary covers every concurrent in-attempt spawn. Signal
+      # handlers only set a flag: Mutex and process waits are unsafe in traps.
+      def register_capability_session(session)
+        raise RepositoryError, "parent attempt context is closed" if @capability_closed
+        unless @capability_signal_handlers
+          @capability_signal_handlers = %w[INT TERM].to_h do |signal|
+            previous = nil
+            previous = trap(signal) do |number|
+              @capability_cancelled = true
+              if previous.respond_to?(:call)
+                previous.arity.zero? ? previous.call : previous.call(number)
+              end
+            end
+            [ signal, previous ]
+          end
+        end
+        (@capability_sessions ||= []) << session
+      end
+
+      def capability_cancelled? = @capability_cancelled == true
 
       # Revalidate the admitted generation at the command's locked mutation
       # boundary. A dependency or task artifact may change after dispatch but

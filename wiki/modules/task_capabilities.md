@@ -1,7 +1,7 @@
 ---
 title: Task capability contracts
 type: module
-source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb
+source: lib/hive/task_capabilities/definition.rb, lib/hive/task_capabilities/catalog.rb, lib/hive/task_capabilities/policy.rb, lib/hive/task_capabilities/plan.rb, lib/hive/task_capabilities/store.rb, lib/hive/task_capabilities/resolver.rb, lib/hive/task_capabilities/approval.rb, lib/hive/task_capabilities/admission.rb, lib/hive/task_capabilities/actor_runner.rb
 created: 2026-11-03
 updated: 2026-11-03
 tags: [module, workflow, capabilities, policy]
@@ -97,6 +97,14 @@ preset with `bash: true` is an unbounded shell and cannot serve as a bounded
 approval. External scanning domains and automatic credential injection reject.
 Only isolated local targets are admitted.
 
+An actor's `provider` is its runtime's semantic provider (for example,
+`anthropic` for Claude). `provider_account` names a configured account and
+`launch_binding` pins its symbolic session binding. Approvals for configured
+accounts require both fields; an inferred default account cannot reuse an
+approval which omitted that account. Native legacy approvals explicitly
+normalize the binding to `default`. Changing an approved account's adapter,
+model availability or launch binding blocks its route.
+
 ## Guidance at plan and execute
 
 The plan and execute prompts include ordered selected guidance from the accepted
@@ -117,10 +125,53 @@ Unbounded stage budgets, unsupported native budget enforcement, narrower
 task-target scopes and distinct actors require a bounded specialist invocation;
 putting a restriction in the prompt does not establish enforcement.
 
-An outer attempt's explicit provider-account route is not automatically a
-capability route. Until a separately pinned specialist route can prove that
-account and launch binding, this case remains an explicit blocker. Guidance
-does not authorize a fallback or widen the primary stage's authority.
+Distinct actors and narrower envelopes run through `ActorRunner` within the
+existing durable attempt. Direct runs without that parent receive a visible
+`--durable` recovery. Each launch rechecks the current accepted binding,
+profile fingerprint, skill identity, exact route and accepted approval where
+required. The child retains its own provider, model, effort, account and
+launch binding even when the outer attempt has explicit routing. A successful
+process without matching observed provider/model identity cannot pass.
+
+The specialist contributes at most 8,192 bytes to the existing plan or execute
+prompt. The primary executor keeps its identity. The shared session reserves
+each child cap from a supplied finite stage budget and deadline and clamps the
+primary launch to what remains. Settled provider spending releases only the
+unused reservation, once. Missing spending after a real launch consumes the
+full cap; a proven prelaunch denial releases its reservation. This is the
+caller's stage envelope, not a new monetary field on the durable attempt.
+Every child still needs native budget enforcement when the parent is uncapped.
+
+The parent retains task/fleet reservations, usage and cancellation. A separate
+spawn ID correlates the child result and its single parent-bound usage session.
+Live child account occupancy sits in the parent's diagnostics and participates
+in the same SQL account-capacity check as outer admission. It creates no new
+attempt or task lease and does not advance the parent's lifecycle lease version.
+Parent signals reach all live children; process identity checks fence teardown,
+and parent context cleanup waits for launchers to finish and children to be reaped.
+
+The current specialist policy supports Claude with the required policy settings
+(version 2.1.285 or newer), read-only file access, and one existing task-owned
+target directory. An omitted target uses the task directory. A broad guidance
+`yolo` envelope is narrowed to read-only specialist access. Unsupported scoped
+presets, multiple targets, outside/symlink targets and unenforceable adapters
+block visibly.
+
+Bounded Bash uses a non-preset permissions map compiled by `RuntimePolicy`.
+Its actual Claude hook validates the original command before returning an
+`updatedInput` command wrapped in the existing `ProjectCommandSandbox`.
+That strict wrapper clears inherited environment, mounts the target read-only,
+exposes system runtime files under `/usr`, and has no network. Commands needing
+other runtime installations or declared network domains are unsupported. The
+model's API transport stays outside this command namespace. The native Claude
+sandbox remains required with unsandboxed retries disabled; nesting failures
+remain failures. Ordinary managed-policy compilation retains its prior behavior.
+
+Accepted `policy.catalog_bindings` retains nonsecret guidance templates,
+including inherited scope/resources, route, runtime and available skill identity,
+even when guidance is off. Later routine proposals must compare against those
+immutable templates. Missing skills or routes make an unselected template
+unavailable without blocking its recommendation or unrelated capture.
 
 Admission checks the compiler's real permission validators without creating
 files or requiring an installed command or live provider. Configuration alone

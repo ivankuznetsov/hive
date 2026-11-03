@@ -66,6 +66,10 @@ module Hive
             defaults[record["provider"]].first
           end
           counts[id]["observed"] += 1 if counts.key?(id)
+          record["diagnostics"].to_h.fetch("capability_spawns", {}).each_value do |spawn_route|
+            account_id = spawn_route.fetch("provider_account_id")
+            counts[account_id]["observed"] += 1 if counts.key?(account_id)
+          end
         end
         counts.transform_values!(&:freeze).freeze
       end

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -173,6 +173,11 @@ Rails/Capybara and the web integration upload tests use
 `nokogiri` 1.19.7, `loofah` 2.25.3, and `rails-html-sanitizer` 1.7.2: the
 2026-11 advisory refresh requires those patch levels for the active
 `bundler-audit` database.
+
+The web lock pins Loofah 2.25.3, Nokogiri 1.19.7 across all eight existing
+platform variants, and rails-html-sanitizer 1.7.2. These compatible patch
+updates clear the November 2026 HTML parsing and sanitization advisories
+reported by the web lockfile's `bundler-audit` CI check.
 
 Rails 8.1.3.1 is the minimum locked web release for the
 CVE-2026-66066 Active Storage/libvips security fix. Production images install

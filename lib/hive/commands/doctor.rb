@@ -22,10 +22,9 @@ module Hive
       MANAGED_HEALTH_PRECEDENCE =
         %w[conflicting incompatible unavailable stale missing healthy].freeze
 
-      # Exposes the row set after `#call` has run. Lets in-process
-      # callers (e.g., `Hive::Commands::Init`'s preflight) read the
-      # probe results directly without re-running the renderer or the
-      # JSON encoder. Returns `nil` before `#call` has populated it.
+      # Exposes the row set after `#call` has run. Lets in-process callers
+      # read the probe results directly without re-running the renderer or
+      # the JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
       # `mcp_discover` compares personal agent MCP configs with Hive's catalog
@@ -169,7 +168,9 @@ module Hive
         end
 
         begin
-          out, err, status = Timeout.timeout(15) { Open3.capture3(qmd, "--version") }
+          out, err, status = Timeout.timeout(15) do
+            Open3.capture3(@environment.to_h, qmd, "--version", unsetenv_others: true)
+          end
         rescue Timeout::Error, SystemCallError => e
           return [ warning_row(
             stage: "wiki",
@@ -212,20 +213,22 @@ module Hive
       end
 
       def find_qmd
-        env_qmd = ENV["HIVE_QMD_BIN"].to_s
+        env_qmd = @environment["HIVE_QMD_BIN"].to_s
         return env_qmd if !env_qmd.empty? && File.executable?(env_qmd)
 
         path_qmd = which("qmd")
         return path_qmd if path_qmd
 
-        data_home = ENV["XDG_DATA_HOME"].to_s.empty? ? File.expand_path("~/.local/share") : ENV["XDG_DATA_HOME"]
-        candidates = [
-          File.join(data_home, "hive", "qmd", "bin", "qmd"),
-          File.expand_path("~/.local/share/hive/qmd/bin/qmd")
-        ]
+        home = @environment["HOME"].to_s
+        home_data = File.join(home, ".local", "share") unless home.empty?
+        data_home = @environment["XDG_DATA_HOME"].to_s
+        data_home = home_data if data_home.empty?
+        candidates = []
+        candidates << File.join(data_home, "hive", "qmd", "bin", "qmd") if data_home
+        candidates << File.join(home_data, "hive", "qmd", "bin", "qmd") if home_data
 
-        prefix_file = File.join(data_home, "hive", "install-prefix")
-        if File.readable?(prefix_file)
+        prefix_file = File.join(data_home, "hive", "install-prefix") if data_home
+        if prefix_file && File.readable?(prefix_file)
           prefix = File.read(prefix_file).lines.first.to_s.strip
           candidates << File.join(prefix, "hive", "qmd", "bin", "qmd") unless prefix.empty?
         end
@@ -234,7 +237,7 @@ module Hive
       end
 
       def which(name)
-        Hive::InvokedBinary.which(name)
+        Hive::InvokedBinary.which(name, env: @environment)
       end
 
       def first_diagnostic_line(*parts)

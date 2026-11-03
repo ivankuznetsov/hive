@@ -100,6 +100,58 @@ class AgentCliIdentityTest < Minitest::Test
     assert_equal target, identity.launch_path
   end
 
+  def test_isolated_selector_skips_an_alternative_removed_during_resolution
+    shim = executable("shims/codex", "#!/bin/sh\nexec mise exec -- codex\n")
+    concrete = executable("native/codex")
+    environment = { "PATH" => [ File.dirname(shim), File.dirname(concrete) ].join(":") }
+    original = File.method(:realpath)
+    resolver = lambda do |path, *arguments|
+      File.unlink(concrete) if path == concrete && File.exist?(concrete)
+      original.call(path, *arguments)
+    end
+
+    with_replaced_singleton_method(File, :realpath, resolver) do
+      identity = observe(environment: environment, regime: :isolated)
+      assert_equal shim, identity.launch_path
+      assert_equal "opaque_launcher", identity.reason
+    end
+    refute File.exist?(concrete)
+  end
+
+  def test_isolated_selector_falls_back_when_its_first_shim_disappears
+    shim = executable("shims/codex", "#!/bin/sh\nexec mise exec -- codex\n")
+    original = File.method(:realpath)
+    resolver = lambda do |path, *arguments|
+      File.unlink(shim) if path == shim && File.exist?(shim)
+      original.call(path, *arguments)
+    end
+
+    with_replaced_singleton_method(File, :realpath, resolver) do
+      assert_equal "codex", Hive::AgentCliIdentity.isolated_executable(
+        "codex", environment: { "PATH" => File.dirname(shim) }, cwd: @root
+      )
+    end
+    refute File.exist?(shim)
+  end
+
+  def test_custom_profile_never_claims_another_providers_package_or_native_version
+    target = npm("codex", "@openai/codex")
+    profile = Hive::AgentProfile.new(
+      name: :custom, bin_default: target, headless_flag: "-p",
+      version_flag: "--version", skill_syntax_format: "%s"
+    )
+    identity = observe(profile)
+    assert_equal target, identity.effective_target
+    assert_nil identity.version
+    assert_equal "provider_metadata_mismatch", identity.version_reason
+
+    native = executable("home/.local/share/claude/versions/2.1.118")
+    identity = observe(profile.with_overrides("bin" => native))
+    assert_equal native, identity.effective_target
+    assert_nil identity.version
+    assert_equal "unrecognized_install_layout", identity.version_reason
+  end
+
   def test_missing_directories_nonexecutables_and_symlink_loops_are_unavailable
     target = executable("bin/codex")
     File.chmod(0o600, target)

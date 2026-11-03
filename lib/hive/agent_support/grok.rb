@@ -6,6 +6,7 @@ module Hive::AgentSupport::Grok
   STRUCTURED_OUTPUT_FIELD = /"structuredOutput"\s*:/.freeze
   SERVED_MODEL_NAMES = { "grok-4.6-build" => "grok-4.6" }.freeze
 
+  autoload :CliIdentity, "hive/agent_support/grok/cli_identity"
   autoload :Mcp, "hive/agent_support/grok/mcp"
   autoload :Runtime, "hive/agent_support/grok/runtime"
   autoload :Skills, "hive/agent_support/grok/skills"

@@ -3,6 +3,7 @@ require "digest"
 require "fileutils"
 require "time"
 require "hive/secret_patterns"
+require "hive/agent_support"
 
 module Hive
   # Advisory evidence only: launch policy and minimum-version enforcement stay
@@ -263,29 +264,22 @@ module Hive
     end
 
     def dynamic_provider_launcher?(profile, target)
-      return false unless profile.to_s == "grok"
+      provider_identity(profile)&.dynamic_launcher?(target) || false
+    end
 
-      source = File.open(target, File::RDONLY | File::NOFOLLOW) { |file| file.read(4096) }
-      source.start_with?("#!") && source.include?("grok-bootstrap.js")
-    rescue SystemCallError
-      true
+    def provider_identity(profile)
+      support = Hive::AgentSupport.for(profile)
+      support.const_get(:CliIdentity, false) if support&.const_defined?(:CliIdentity, false)
     end
 
     def filesystem_version(profile, target)
       return [ nil, nil, "effective_target_unknown" ] unless target
 
+      provider = provider_identity(profile)
+      native = provider&.native_version(target, version_pattern: VERSION)
+      return native if native && provider.native_version_first?
+
       directory = File.dirname(target)
-      if profile == "grok" && (match = target.match(%r{/\.grok/bin/grok-([^/]+)\z})) && VERSION.match?(match[1])
-        metadata = File.join(File.dirname(directory), "config.toml")
-        launcher = File.join(directory, "grok")
-        if File.file?(metadata) && File.symlink?(launcher) && File.realpath(launcher) == target
-          content = File.read(metadata, 128 * 1024)
-          cli = content[/^\[cli\][ \t]*(?:#[^\n]*)?\n(.*?)(?=^\[|\z)/m, 1]
-          if cli && cli.match?(/^installer[ \t]*=[ \t]*["']npm["'][ \t]*(?:#[^\n]*)?$/)
-            return [ match[1], "grok_native_install", nil ]
-          end
-        end
-      end
       7.times do
         cask_receipt = File.join(directory, ".metadata", "INSTALL_RECEIPT.json")
         if File.file?(cask_receipt)
@@ -334,10 +328,7 @@ module Hive
 
         directory = parent
       end
-      if profile == "claude" && (match = target.match(%r{/\.local/share/claude/versions/([^/]+)\z})) && VERSION.match?(match[1])
-        return [ match[1], "claude_native_install", nil ]
-      end
-      [ nil, nil, "unrecognized_install_layout" ]
+      native || [ nil, nil, "unrecognized_install_layout" ]
     rescue JSON::ParserError, TypeError, SystemCallError
       [ nil, nil, "provider_metadata_mismatch" ]
     end

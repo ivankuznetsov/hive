@@ -1,6 +1,7 @@
 require "hive/agent_support"
 
 module Hive::AgentSupport::Claude
+  autoload :CliIdentity, "hive/agent_support/claude/cli_identity"
   autoload :Launch, "hive/agent_support/claude/launch"
   autoload :Mcp, "hive/agent_support/claude/mcp"
   autoload :Runtime, "hive/agent_support/claude/runtime"

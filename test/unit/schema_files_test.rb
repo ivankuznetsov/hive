@@ -37,6 +37,12 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_dispatch_recovery_variants_include_failed_edits
+    schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request")))
+    assert_equal %w[marker admission_failure markerless_failure failed_edit],
+      schema.dig("$defs", "RecoveryTransition", "properties", "variant", "enum")
+  end
+
   def test_one_shot_schema_is_registered_closed_and_accepts_all_report_arms
     path = Hive::Schemas.schema_path("hive-one-shot")
     document = JSON.parse(File.read(path))

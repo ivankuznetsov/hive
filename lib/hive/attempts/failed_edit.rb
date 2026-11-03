@@ -83,6 +83,10 @@ module Hive
             "status_code" => receipt["exit_status"].to_s
           }
           next unless valid_source?(record, evidence)
+          next if bound.any? do |other|
+            other.state == "terminal" && other.attempt_id != record.attempt_id &&
+              other.receipt.dig("final_checkpoint", "edit_resume_source_binding") == evidence["source_binding"]
+          end
           # Only a proven successor defeats this source. Lease counters of
           # independent attempts have no ordering relationship.
           next if bound.any? do |other|

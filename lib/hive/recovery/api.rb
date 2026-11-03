@@ -19,8 +19,12 @@ module Hive
       Observation = Data.define(
         :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
         :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
-        :task_generation, :suggested_command
-      )
+        :task_generation, :suggested_command, :recovery
+      ) do
+        def initialize(recovery: nil, **rest)
+          super(recovery: recovery, **rest)
+        end
+      end
 
       def recover!(row:, project: nil, requestor: "operator", chat_id: nil,
                    update_id: nil, request_id: nil, observation_token: nil,
@@ -31,7 +35,11 @@ module Hive
         observation_token ||= coordinator.observation_token_for(observation)
         activity = activity_for(observation, now: now)
         operation = begin_recovery_operation(activity, observation, now: now)
-        result = coordinator.request(
+        result = if observation.recovery.is_a?(Hash) && observation.recovery["variant"] == "failed_edit"
+          recover_failed_edit!(row: observation, requestor: requestor,
+            observation_token: observation_token, coordinator: coordinator, now: now)
+        else
+          coordinator.request(
           row: observation,
           requestor: requestor,
           request_id: request_id,
@@ -39,10 +47,18 @@ module Hive
           chat_id: chat_id,
           update_id: update_id,
           now: now
-        )
+          )
+        end
         complete_recovery_operation(operation, result, now: now)
         record_recovery_observation(activity, observation, result, now: now)
         result
+      end
+
+      def recover_failed_edit!(row:, requestor:, observation_token:, coordinator: nil,
+                               state_home: Hive::Paths.state_home, now: Time.now.utc)
+        coordinator ||= Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
+        coordinator.request_failed_edit(row: row, requestor: requestor,
+          observation_token: observation_token, now: now)
       end
 
       def activity_for(observation, now:)
@@ -151,6 +167,7 @@ module Hive
           attempt_id: row_value(row, :attempt_id) || row_value(row, :current_attempt),
           task_generation: row_value(row, :task_generation) ||
             row_value(row, :condition_task_generation),
+          recovery: row_value(row, :recovery),
           suggested_command: row_value(row, :suggested_command)
         )
       end

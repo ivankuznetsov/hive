@@ -328,19 +328,47 @@ module Hive
         end
       end
 
-      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil, **)
+      def find_failed_edit_recovery(project:, slug:, task_binding:, **)
+        matching_recoveries(project, slug).reverse.find do |request|
+          request.recovery["variant"] == "failed_edit" &&
+            request.recovery["task_binding"] == task_binding
+        end
+      end
+
+      # Replace queued input identity atomically. A payload update alone would
+      # leave the SQL generation fence bound to the previous answer bytes.
+      def replace_failed_edit!(request, recovery:, task_generation:, now:)
+        replacement_id = "failed-edit-" + Digest::SHA256.hexdigest(Codec.dump_json(
+          [request.project, request.slug, recovery["source_binding"], recovery["input_binding"]]
+        ))[0, 48]
+        database.transaction do |db|
+          current = db[:dispatch_requests].where(request_id: request.request_id,
+            revision: request.revision, state: "queued").first
+          raise IntegrityError.new("recovery changed before rebind", code: :dispatch_request_conflict) unless current
+          db[:dispatch_requests].where(request_id: request.request_id).delete
+          write_request!(project: request.project, slug: request.slug, argv: request.argv,
+            requestor: request.requestor, trigger: request.trigger, request_id: replacement_id,
+            task_id: request.task_id, expected_stage: request.expected_stage,
+            task_generation: task_generation, recovery: recovery, now: now)
+        end
+        fetch(replacement_id)
+      end
+
+      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil, variant: nil, **)
         matching_recoveries(project, slug).filter_map do |request|
           next if expected_stage && request.expected_stage.to_s != expected_stage.to_s
           next if runtime_digest && request.recovery["runtime_digest"] != runtime_digest
+          next if variant && request.recovery.fetch("variant", "marker") != variant
 
           request.recovery["retry_count"]
         end.max.to_i
       end
 
-      def latest_terminal_recovery(project:, slug:, expected_stage:, **)
+      def latest_terminal_recovery(project:, slug:, expected_stage:, variant: nil, **)
         matching_recoveries(project, slug).select do |request|
           request.expected_stage.to_s == expected_stage.to_s &&
-            request.recovery["phase"] == "terminal"
+            request.recovery["phase"] == "terminal" &&
+            (!variant || request.recovery.fetch("variant", "marker") == variant)
         end.max_by { |request| [ request.created_at, request.request_id ] }
       end
 
@@ -362,11 +390,12 @@ module Hive
         update_recovery(request_id, expected_phase, changes, state: "queued")
       end
 
-      def remove_terminal_recoveries(project:, slug:, expected_stage:, except_request_id: nil, **)
+      def remove_terminal_recoveries(project:, slug:, expected_stage:, except_request_id: nil, variant: nil, **)
         remove_matching(project, slug) do |request|
           request.request_id != except_request_id.to_s &&
             request.expected_stage.to_s == expected_stage.to_s &&
-            request.recovery["phase"] == "terminal"
+            request.recovery["phase"] == "terminal" &&
+            (!variant || request.recovery.fetch("variant", "marker") == variant)
         end
       end
 

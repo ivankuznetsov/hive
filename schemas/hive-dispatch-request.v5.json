@@ -60,6 +60,7 @@
       "enum": ["error", "review_error", "review_stale", "review_ci_stale", null]
     },
     "expected_marker_id": { "type": ["string", "null"] },
+    "remaining_argvs": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
     "inherited_outputs": {
       "type": "array",
       "items": { "$ref": "#/$defs/OutputReference" }
@@ -242,6 +243,31 @@
         }
       ]
     },
+    "TaskBinding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "project": { "type": "string" }, "task_id": { "type": "string", "minLength": 1 },
+        "intended_stage": { "type": "string" }, "task_locator": { "type": "string" }
+      }
+    },
+    "InputBinding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "task_input_epoch": { "type": "integer", "minimum": 0 },
+        "progress_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "SourceBinding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "project": { "type": "string" }, "task_id": { "type": "string", "minLength": 1 },
+        "intended_stage": { "type": "string" }, "task_locator": { "type": "string" },
+        "request_id": { "type": ["string", "null"] }, "attempt_id": { "type": "string" },
+        "task_generation": { "type": "string" }, "ownership_generation": { "type": "string" },
+        "task_input_epoch": { "type": "integer", "minimum": 0 },
+        "progress_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "RecoveryTransition": {
       "type": "object",
       "additionalProperties": false,
@@ -253,9 +279,19 @@
         "admission_observation"
       ],
       "properties": {
+        "task_binding": { "$ref": "#/$defs/TaskBinding" },
+        "source_binding": { "$ref": "#/$defs/SourceBinding" },
+        "input_binding": { "$ref": "#/$defs/InputBinding" },
+        "source_receipt_version": { "type": "integer", "minimum": 1 },
+        "source_terminal_lease_version": { "type": "integer", "minimum": 1 },
+        "failed_at": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string" },
+        "provider": { "type": "string" },
+        "status_code": { "type": "string" },
+        "message": { "type": "string" },
         "variant": {
           "type": "string",
-          "enum": ["marker", "admission_failure", "markerless_failure"]
+          "enum": ["marker", "admission_failure", "markerless_failure", "failed_edit"]
         },
         "phase": {
           "type": "string",
@@ -323,6 +359,15 @@
       },
       "allOf": [
         {
+          "if": { "properties": { "variant": { "const": "failed_edit" } } },
+          "then": { "properties": {
+            "observed_marker_generation": { "type": "null" },
+            "policy_digest": { "type": "null" },
+            "source_receipt": { "type": "null" },
+            "admission_observation": { "type": "null" }
+          } }
+        },
+        {
           "if": { "properties": { "variant": { "const": "marker" } } },
           "then": {
             "properties": {
@@ -346,13 +391,14 @@
               }
             },
             "else": {
-              "properties": {
+              "if": { "properties": { "variant": { "const": "markerless_failure" } } },
+              "then": { "properties": {
                 "observed_marker_generation": { "type": "null" },
                 "expected_marker_attrs": { "maxProperties": 0 },
                 "policy_digest": { "type": "null" },
                 "source_receipt": { "type": "null" },
                 "admission_observation": { "type": "null" }
-              }
+              } }
             }
           }
         },

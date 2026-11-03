@@ -6,6 +6,8 @@ require "hive/agent_limit"
 require "hive/model_unsupported"
 require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
+require "hive/attempts/failed_edit"
+require "hive/daemon/recovery_coordinator/failed_edits"
 require "hive/attempts/command_progress"
 require "hive/attempts/repository"
 require "hive/daemon/auto_retry_safety"
@@ -28,6 +30,7 @@ module Hive
     # applies the shared cooldown and safety policy, then persists one
     # restartable v5 request before any marker mutation.
     class RecoveryCoordinator
+      include FailedEdits
       LIFECYCLE_STATES = %w[
         queued cooldown running blocked terminal unavailable
       ].freeze
@@ -36,16 +39,21 @@ module Hive
         :status, :request_id, :attempt_id, :phase, :failure_origin,
         :next_eligible_at, :owner, :reason, :remediation, :retry_count,
         :provider_hint, :terminal_outcome, :terminal_at,
-        :failure_fingerprint, :identical_failure_count, :escalation_tier
+        :failure_fingerprint, :identical_failure_count, :escalation_tier,
+        :variant, :task_binding, :source_binding, :input_binding,
+        :source_receipt_version, :source_terminal_lease_version
       ) do
         def initialize(terminal_outcome: nil, terminal_at: nil,
                        failure_fingerprint: nil, identical_failure_count: nil,
-                       escalation_tier: nil, **rest)
+                       escalation_tier: nil, variant: nil, task_binding: nil, source_binding: nil,
+                       input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil, **rest)
           super(
             terminal_outcome: terminal_outcome, terminal_at: terminal_at,
             failure_fingerprint: failure_fingerprint,
             identical_failure_count: identical_failure_count,
-            escalation_tier: escalation_tier, **rest
+            escalation_tier: escalation_tier, variant: variant, task_binding: task_binding,
+            source_binding: source_binding, input_binding: input_binding,
+            source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version, **rest
           )
         end
 
@@ -875,11 +883,17 @@ module Hive
             )
           end
 
+          if failed_edit_recovery?(recovery) && !failed_edit_source_current?(current_request, locked_task)
+            return block_request(current_request, "generation_conflict", owner: "operator")
+          end
           generation = generation_for_current(
             locked_task, current_request, admission_context: admission_context
           )
           if recovery["phase"] == "admitted"
-            if admission_failure_recovery?(recovery)
+            if failed_edit_recovery?(recovery)
+              return block_request(current_request, "generation_conflict", owner: "operator") unless
+                generation_matches?(generation, recovery) && failed_edit_source_current?(current_request, locked_task)
+            elsif admission_failure_recovery?(recovery)
               return block_request(
                 current_request, "generation_conflict",
                 owner: "operator"
@@ -1032,7 +1046,7 @@ module Hive
         recovery = current.recovery || {}
         return false unless recovery["phase"] == "terminal"
         return false unless RETRYABLE_TERMINAL_OUTCOMES.include?(recovery["terminal_outcome"])
-        return false if markerless_failure_recovery?(recovery)
+        return false if markerless_failure_recovery?(recovery) || failed_edit_recovery?(recovery)
 
         task = @task_resolver.call(
           project: current.project,
@@ -1133,6 +1147,10 @@ module Hive
           terminal_at: recovery["terminal_at"],
           failure_fingerprint: recovery["failure_fingerprint"],
           identical_failure_count: recovery["identical_failure_count"],
+          variant: recovery.fetch("variant", "marker"), task_binding: recovery["task_binding"],
+          source_binding: recovery["source_binding"], input_binding: recovery["input_binding"],
+          source_receipt_version: recovery["source_receipt_version"],
+          source_terminal_lease_version: recovery["source_terminal_lease_version"],
           escalation_tier: escalation_tier_for(recovery)
         )
       end
@@ -1146,7 +1164,11 @@ module Hive
       end
 
       def observation_token_for(row)
-        self.class.observation_token(row)
+        base = self.class.observation_token(row)
+        recovery = value(row, :recovery)
+        return base unless recovery.is_a?(Hash) && recovery["variant"] == "failed_edit"
+
+        failed_edit_token(base, recovery)
       end
 
       private
@@ -1165,10 +1187,10 @@ module Hive
         )
       end
 
-      def durable_retry_count_for(project:, slug:, expected_stage:, runtime_scoped: true)
+      def durable_retry_count_for(project:, slug:, expected_stage:, runtime_scoped: true, variant: nil)
         request_queue.recovery_retry_count(
           project: project, slug: slug, expected_stage: expected_stage,
-          runtime_digest: runtime_scoped ? @runtime_digest : nil, state_home: @state_home
+          runtime_digest: runtime_scoped ? @runtime_digest : nil, variant: variant, state_home: @state_home
         )
       end
 
@@ -1183,13 +1205,14 @@ module Hive
         !TASK_OWNED_FAILURE_MARKERS.include?(value(row, :marker).to_s)
       end
 
-      def retry_count_for_failure(row, attrs)
-        durable = durable_retry_count(row)
+      def retry_count_for_failure(row, attrs, variant: nil)
+        durable = variant ? durable_retry_count_for(project: value(row, :project), slug: value(row, :slug),
+          expected_stage: value(row, :stage), variant: variant) : durable_retry_count(row)
         return durable unless @request_queue
 
         previous = request_queue.latest_terminal_recovery(
           project: value(row, :project), slug: value(row, :slug),
-          expected_stage: value(row, :stage), state_home: @state_home
+          expected_stage: value(row, :stage), variant: variant, state_home: @state_home
         )
         previous_fingerprint = previous&.recovery&.fetch("failure_fingerprint", nil).to_s
         return durable if previous_fingerprint.empty?
@@ -1198,11 +1221,11 @@ module Hive
         0
       end
 
-      def failure_evidence_for(row, retry_count:, marker_attrs:)
+      def failure_evidence_for(row, retry_count:, marker_attrs:, variant: nil)
         fingerprint = failure_fingerprint(row, marker_attrs)
         previous = request_queue.latest_terminal_recovery(
           project: value(row, :project), slug: value(row, :slug),
-          expected_stage: value(row, :stage), state_home: @state_home
+          expected_stage: value(row, :stage), variant: variant, state_home: @state_home
         )
         previous_recovery = previous&.recovery || {}
         same_runtime = !runtime_scoped_failure?(row) ||
@@ -1411,7 +1434,8 @@ module Hive
                   reason: nil, remediation: nil, retry_count: nil,
                   provider_hint: nil, terminal_outcome: nil, terminal_at: nil,
                   failure_fingerprint: nil, identical_failure_count: nil,
-                  escalation_tier: nil)
+                  escalation_tier: nil, variant: nil, task_binding: nil, source_binding: nil,
+                  input_binding: nil, source_receipt_version: nil, source_terminal_lease_version: nil)
         raise ArgumentError, "unknown recovery lifecycle #{status}" unless LIFECYCLE_STATES.include?(status)
 
         Receipt.new(
@@ -1422,7 +1446,9 @@ module Hive
           provider_hint: provider_hint, terminal_outcome: terminal_outcome,
           terminal_at: terminal_at, failure_fingerprint: failure_fingerprint,
           identical_failure_count: identical_failure_count,
-          escalation_tier: escalation_tier
+          escalation_tier: escalation_tier, variant: variant, task_binding: task_binding,
+          source_binding: source_binding, input_binding: input_binding,
+          source_receipt_version: source_receipt_version, source_terminal_lease_version: source_terminal_lease_version
         )
       end
 
@@ -1548,7 +1574,7 @@ module Hive
       def recovery_safety_marker(request, marker)
         recovery = request.recovery || {}
         return marker if admission_failure_recovery?(recovery) ||
-                         markerless_failure_recovery?(recovery)
+                         markerless_failure_recovery?(recovery) || failed_edit_recovery?(recovery)
         return marker unless marker.none?
         return marker unless %w[admitted cleared].include?(recovery["phase"].to_s)
 
@@ -1632,7 +1658,9 @@ module Hive
       end
 
       def cleared_marker_state_valid?(marker, recovery)
-        if admission_failure_recovery?(recovery)
+        if failed_edit_recovery?(recovery)
+          true
+        elsif admission_failure_recovery?(recovery)
           !recoverable_marker?(marker)
         else
           marker.none?

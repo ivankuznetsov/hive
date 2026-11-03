@@ -1123,8 +1123,12 @@ module Hive
         end
       end
 
+      # "off" disables the adversarial leg at every level for projects whose
+      # plans are always mandatory but do not want the extra lens.
       def adversarial_lens?(level)
         minimum = @cfg.dig("plan_review", "adversarial_min_level") || "mandatory"
+        return false if minimum == "off"
+
         Hive::PlanReview.higher_level(level, minimum) == level
       end
 

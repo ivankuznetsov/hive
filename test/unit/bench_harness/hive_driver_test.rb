@@ -87,7 +87,7 @@ class BenchHarnessHiveDriverTest < Minitest::Test
     usage = '[stream] 2026-01-01T00:00:00Z {"message":{"usage":{"input_tokens":1000,' \
             '"output_tokens":2000,"cache_read_input_tokens":1000000,"cache_creation_input_tokens":500}}}'
     reported = '[stream] 2026-01-01T00:00:01Z {"type":"result","total_cost_usd":9.99}'
-    cell = driver(log_lines: [usage, reported]).call(entry: entry, candidate: candidate, out_dir: @out)
+    cell = driver(log_lines: [ usage, reported ]).call(entry: entry, candidate: candidate, out_dir: @out)
 
     assert_equal "generated", cell.status
     assert_equal 1000, cell.telemetry["input_tokens"]
@@ -253,8 +253,8 @@ class BenchHarnessHiveDriverTest < Minitest::Test
     assert_equal "generated", cell.status
     refute_equal previous_id, cell.generation_id
     assert cell.telemetry["execute_resumed"]
-    assert_includes seen.each_cons(2).to_a, ["-e", "HB_RESUME_EXECUTE=1"]
-    assert_includes seen.each_cons(2).to_a, ["-e", "HB_RESUME_MARKER_ID=abc123"]
+    assert_includes seen.each_cons(2).to_a, [ "-e", "HB_RESUME_EXECUTE=1" ]
+    assert_includes seen.each_cons(2).to_a, [ "-e", "HB_RESUME_MARKER_ID=abc123" ]
   end
 
   def test_timeout_is_timed_out_not_plan_failed
@@ -284,6 +284,4 @@ class BenchHarnessHiveDriverTest < Minitest::Test
 
     assert_equal "limit_hit", status
   end
-
-
 end

@@ -28,7 +28,7 @@ module HiveBench
 
     def valid_context?(context)
       context.is_a?(Hash) && digest?(context["plan_sha256"]) &&
-        (%w[withheld unavailable].include?(context["reference_mode"]) ||
+        (context["reference_mode"] == "withheld" ||
           (context["reference_mode"] == "provided" && digest?(context["reference_sha256"])))
     end
 
@@ -115,10 +115,7 @@ module HiveBench
     end
 
     def deduplicate_buckets(records)
-      records.group_by do |r|
-        identity = r["generation_id"].to_s.empty? ? snapshot_digest(r) : r["generation_id"]
-        [r["agent_id"], r["task_id"], identity]
-      end.values.map do |group|
+      records.group_by { |r| r.values_at("agent_id", "task_id", "generation_id") }.values.map do |group|
         group.reduce do |prev, cur|
           prev.merge(cur.reject { |_, value| value.nil? }).merge(
             "efficiency" => (prev["efficiency"] || {}).merge((cur["efficiency"] || {}).compact)

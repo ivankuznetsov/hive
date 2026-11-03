@@ -1934,20 +1934,20 @@ class WorkflowsBenchTest < Minitest::Test
       task = File.join(root, ".hive-state", "stages", "5-publish", "fixture")
       runtime = File.join(root, ".hive-state", "bench-runtime")
       run = File.join(root, "runs", "publication")
-      FileUtils.mkdir_p([task, run])
+      FileUtils.mkdir_p([ task, run ])
       FileUtils.cp_r(Hive::Workflows::Bench::RUNTIME_DIR, runtime)
       File.write(File.join(task, "campaign.yml"), { "campaign_id" => "publication", "corpus_version" => "v" }.to_yaml)
       cell = { "task_id" => "t", "agent_id" => "A", "mode" => "hive", "run_status" => "generated", "subset" => "gated",
                "gate" => { "status" => "pass" }, "judges" => { "X" => { "mean" => 2.0 } }, "efficiency" => { "cost_usd" => 3.0 } }
-      bound_bench_fixture_json("cells" => [cell])
+      bound_bench_fixture_json("cells" => [ cell ])
       cell["gate"]["evidence_binding"] = cell.slice("generation_id", "artifact_binding", "evaluation_context")
       failed = Marshal.load(Marshal.dump(cell))
       failed.merge!("task_id" => "failed", "run_status" => "timed_out", "generation_id" => "failed-attempt")
       failed["artifact_binding"]["task_id"] = "failed"
       failed["judges"]["X"]["mean"] = 9.0
-      bound_bench_fixture_json("cells" => [failed])
+      bound_bench_fixture_json("cells" => [ failed ])
       failed["gate"]["evidence_binding"] = failed.slice("generation_id", "artifact_binding", "evaluation_context")
-      [[cell, failed], [failed]].each do |cells|
+      [ [ cell, failed ], [ failed ] ].each do |cells|
         path = File.join(run, "results.json")
         File.write(path, JSON.generate("cells" => cells, "agents" => { "stale" => { "judged" => { "mean_quality" => { "X" => 10 } } } }))
         first = nil
@@ -1978,7 +1978,7 @@ class WorkflowsBenchTest < Minitest::Test
       task = File.join(root, ".hive-state", "stages", "4-judge", "fixture")
       runtime = File.join(root, ".hive-state", "bench-runtime")
       run = File.join(root, "runs", "strict-judging")
-      FileUtils.mkdir_p([task, run])
+      FileUtils.mkdir_p([ task, run ])
       FileUtils.cp_r(Hive::Workflows::Bench::RUNTIME_DIR, runtime)
       # The runtime capability probe loads rejudge without invoking it. A fake
       # adapter leaves a durable trace only if judging actually gets called.
@@ -1994,11 +1994,11 @@ class WorkflowsBenchTest < Minitest::Test
         end
       RUBY
       campaign = { "campaign_id" => "strict-judging", "source" => root, "seeds" => 1,
-                   "require_successful_execution" => true, "tasks" => ["t"], "candidates" => ["A"],
+                   "require_successful_execution" => true, "tasks" => [ "t" ], "candidates" => [ "A" ],
                    "judges" => { "claude" => { "model" => "claude-fable-5" },
                                  "codex" => { "model" => "gpt-5.6-sol", "reasoning_effort" => "ultra" } } }
       File.write(File.join(task, "campaign.yml"), campaign.to_yaml)
-      File.write(File.join(run, "results.json"), JSON.generate("cells" => [{ "task_id" => "t", "agent_id" => "A", "run_status" => "execute_failed" }]))
+      File.write(File.join(run, "results.json"), JSON.generate("cells" => [ { "task_id" => "t", "agent_id" => "A", "run_status" => "execute_failed" } ]))
       out, err, status = Open3.capture3({ "RUBYOPT" => "-r#{adapter}" }, "bash", "-c", script, chdir: task)
       assert status.success?, out + err
       summary = File.read(File.join(task, "judge.md"))
@@ -2007,5 +2007,4 @@ class WorkflowsBenchTest < Minitest::Test
       refute_path_exists calls
     end
   end
-
 end

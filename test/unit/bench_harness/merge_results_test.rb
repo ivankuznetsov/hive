@@ -23,9 +23,9 @@ class BenchHarnessMergeResultsTest < Minitest::Test
   def test_replacement_uses_last_explicit_snapshot_even_with_identical_patch_bytes
     a = generation("a", "X", 2.0)
     b = generation("b", "Y", 9.0)
-    [ [a, b, "Y"], [b, a, "X"] ].each do |first, last, judge|
-      out = combine([first], [last])
-      assert_equal [judge], out.fetch("cells").first.fetch("judges").keys
+    [ [ a, b, "Y" ], [ b, a, "X" ] ].each do |first, last, judge|
+      out = combine([ first ], [ last ])
+      assert_equal [ judge ], out.fetch("cells").first.fetch("judges").keys
       assert_equal last["efficiency"], out.fetch("cells").first.fetch("efficiency")
       assert_equal last["generation_id"], out.fetch("cells").first.fetch("generation_id")
       assert_equal 1, out.fetch("generation_history").size
@@ -35,7 +35,7 @@ class BenchHarnessMergeResultsTest < Minitest::Test
   def test_same_generation_backfill_is_order_independent_and_retains_gate_and_cost
     a = generation("a", "X", 2.0)
     overlay = generation("a", "Y", 9.0, kind: "judge_only").merge("efficiency" => {}, "gate" => {}, "subset" => "judged")
-    outputs = [[a, overlay], [overlay, a]].map { |records| combine(records) }
+    outputs = [ [ a, overlay ], [ overlay, a ] ].map { |records| combine(records) }
     assert_equal outputs[0].fetch("cells"), outputs[1].fetch("cells")
     cell = outputs[0].fetch("cells").first
     assert_equal %w[X Y], cell.fetch("judges").keys.sort
@@ -48,9 +48,9 @@ class BenchHarnessMergeResultsTest < Minitest::Test
     a = generation("a", "X", 2.0)
     b = generation("b", "Y", 9.0)
     overlay = generation("a", "Z", 8.0, kind: "judge_only")
-    outputs = [[overlay, a, b], [a, overlay, b], [a, b, overlay]].map { |records| combine(records) }
+    outputs = [ [ overlay, a, b ], [ a, overlay, b ], [ a, b, overlay ] ].map { |records| combine(records) }
     outputs.each do |out|
-      assert_equal ["Y"], out.fetch("cells").first.fetch("judges").keys
+      assert_equal [ "Y" ], out.fetch("cells").first.fetch("judges").keys
       assert_equal 2, out.fetch("generation_history").size
     end
   end
@@ -58,18 +58,18 @@ class BenchHarnessMergeResultsTest < Minitest::Test
   def test_timeout_replacement_and_legacy_never_inherit_ranked_evidence
     a = generation("a", "X", 2.0)
     b = generation("b", "Y", 9.0).merge("run_status" => "timed_out", "judges" => {}, "gate" => {}, "efficiency" => {})
-    out = combine([a], [b])
+    out = combine([ a ], [ b ])
     assert_empty out.fetch("cells").first.fetch("judges")
     assert_nil out.dig("agents", "A", "gated", "pass_rate")
     legacy = a.reject { |key, _| %w[generation_id artifact_binding record_kind].include?(key) }
-    assert_equal 0, combine([legacy], [legacy]).dig("agents", "A", "judged", "scored_cells")
+    assert_equal 0, combine([ legacy ], [ legacy ]).dig("agents", "A", "judged", "scored_cells")
   end
 
   def test_same_id_with_inconsistent_artifacts_is_a_provenance_conflict
     a = generation("a", "X", 2.0)
     forged = generation("a", "Y", 9.0)
     forged["artifact_binding"] = forged["artifact_binding"].merge("patch_sha256" => "c" * 64)
-    out = combine([a], [forged])
+    out = combine([ a ], [ forged ])
     assert_equal 0, out.dig("agents", "A", "judged", "scored_cells")
     assert out.fetch("rejudging_needed").any? { |r| r.fetch("reasons").any? { |reason| reason.include?("conflict") } }
   end
@@ -77,8 +77,8 @@ class BenchHarnessMergeResultsTest < Minitest::Test
   def test_repeated_merge_deduplicates_history_buckets_and_costs
     a = generation("a", "X", 2.0)
     b = generation("b", "Y", 9.0)
-    first = combine({ "cells" => [a], "pending" => [a] }, [b])
-    second = combine(first, first, { "cells" => [a.merge("record_kind" => "judge_only")] })
+    first = combine({ "cells" => [ a ], "pending" => [ a ] }, [ b ])
+    second = combine(first, first, { "cells" => [ a.merge("record_kind" => "judge_only") ] })
     third = combine(second, second)
     assert_equal second.fetch("generation_history"), third.fetch("generation_history")
     assert_equal 1, third.fetch("pending").size
@@ -88,7 +88,7 @@ class BenchHarnessMergeResultsTest < Minitest::Test
     active = generation("a", "X", 2.0)
     overlay = generation("a", "Y", 9.0, kind: "judge_only")
     overlay["artifact_binding"] = overlay["artifact_binding"].merge("patch_sha256" => "c" * 64)
-    out = combine([active, overlay])
+    out = combine([ active, overlay ])
     assert_equal 0, out.dig("agents", "A", "judged", "scored_cells")
     assert out.fetch("cells").first["provenance_conflict"]
   end
@@ -97,12 +97,12 @@ class BenchHarnessMergeResultsTest < Minitest::Test
     Dir.mktmpdir("bench-merge-cli") do |dir|
       paths = %w[a b].map.with_index do |id, index|
         path = File.join(dir, "#{id}.json")
-        File.write(path, JSON.generate("cells" => [generation(id, id.upcase, index + 2.0)]))
+        File.write(path, JSON.generate("cells" => [ generation(id, id.upcase, index + 2.0) ]))
         path
       end
       output = File.join(dir, "out.json")
       executable = File.join($LOAD_PATH.find { |path| File.file?(File.join(path, "merge_results.rb")) }, "merge_results.rb")
-      [paths, paths.reverse].each do |inputs|
+      [ paths, paths.reverse ].each do |inputs|
         _out, err, status = Open3.capture3(RbConfig.ruby, executable, "--out", output, *inputs)
         assert status.success?, err
         first = JSON.parse(File.read(output))
@@ -115,5 +115,14 @@ class BenchHarnessMergeResultsTest < Minitest::Test
       end
     end
   end
-
+  def test_parked_bucket_deduplication_retains_available_legacy_telemetry
+    first = { "agent_id" => "A", "task_id" => "t", "efficiency" => { "cost_usd" => 3.0 } }
+    second = first.merge("run_status" => "limit_hit", "reason" => "quota",
+                         "efficiency" => { "cost_usd" => nil, "wall_clock_sec" => 2.0 })
+    out = combine({ "pending" => [ first ] }, { "pending" => [ second ] })
+    assert_equal 1, out.fetch("pending").size
+    assert_equal 3.0, out.dig("agents", "A", "efficiency", "total_cost_usd")
+    assert_equal "limit_hit", out.fetch("pending").first["run_status"]
+    assert_equal 2.0, out.fetch("pending").first.dig("efficiency", "wall_clock_sec")
+  end
 end

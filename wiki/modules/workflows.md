@@ -434,3 +434,23 @@ current-generation evidence bound to artifacts and evaluation context, with
 execution status `generated` or `empty_diff`. Attempts and diagnostics retain
 failed-status scores, costs and unknown statuses. Coverage separates attempted
 cells, eligible executions and available ranked evaluations.
+
+## Benchmark ranked evidence
+
+The packaged benchmark runtime emits result schema version 2. Only `generated`
+and successful `empty_diff` statuses are eligible; current-bound judge and gate
+evidence alone enters the retained `judged`/`gated` aggregates. Partial scores,
+unknown statuses, parked telemetry and discarded generations remain diagnostic.
+Coverage separates attempted cells, eligible executions and valid judged/gated
+evidence; zero eligible cells stay preliminary and unranked. Missing scores
+render unavailable. The rc=124 outer-timeout classification exception remains.
+
+Every generation attempt has an identity outside its candidate checkout.
+Replacement clears prior judges, gates and telemetry even for identical bytes;
+verified unchanged backfill retains them. Campaign handoff preserves the root,
+skips retired snapshots and orders explicit replacements before judge-only
+overlays. Rejudge verifies one artifact bundle, preserves document metadata and
+operational buckets, and supports legacy judging without generation. Unbound
+legacy gates require fresh gating. Deliberation keys include generation and
+evaluated context. See `docs/bench-result-contract.md` and
+`docs/bench-runtime-inventory.md` for populations, merge order and delivery.

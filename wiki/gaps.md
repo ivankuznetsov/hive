@@ -3125,3 +3125,20 @@ See [[publication-recovery]] (Base merge under an active review grant).
 - `UsageExtractors::AGY` records `output_includes_reasoning: true` when
   `thinking_tokens` is present; `input_includes_cache_read` and USD pricing
   stay unknown (`nil`).
+## Benchmark external ranking consumers (2026-11-03)
+
+The canonical hive-bench checkout and Hive's packaged runtime now share
+generation/evaluation admission semantics and deterministic local regressions.
+The external hivecli.sh/bench site's source and unknown downstream readers were
+outside the accessible checkouts. Retained `judged`/`gated` keys narrow their
+populations under writer schema version 2; external readers ignoring version
+metadata are not protected by the version bump. No installed campaigns or
+historical results were deployed or rewritten. Canonical's configured
+cross-project main wiki path was unavailable during this delivery.
+
+The broader local checkpoint is not green: unchanged process-custody tests hit
+a host procfs ESRCH on an existing PID, which also reproduces in isolated
+OpenCode integration tests. A repository-read-only guard failure during
+concurrent workspace activity passes in isolation. Benchmark-focused tests,
+canonical tests, installed-runtime lifecycle and canonical workflow smoke pass;
+see `docs/bench-runtime-inventory.md` for exact evidence and counts.

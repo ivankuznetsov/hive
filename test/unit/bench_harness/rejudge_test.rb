@@ -25,14 +25,14 @@ class BenchHarnessRejudgeTest < Minitest::Test
     @calls = []
     @judge = lambda do |**kwargs|
       @calls << kwargs
-      HiveBench::Judge::Result.new(mean: 9.0, stddev: 0.0, scores: [9.0], interval: [9.0, 9.0], reference_withheld: true)
+      HiveBench::Judge::Result.new(mean: 9.0, stddev: 0.0, scores: [ 9.0 ], interval: [ 9.0, 9.0 ], reference_withheld: true)
     end
   end
 
   def teardown = FileUtils.remove_entry(@root)
 
-  def backfill(old = @old, dirs: [@runs], document: nil, judges: { "X" => @judge })
-    HiveBench::Rejudge.run(document: document || { "cells" => [old] }, search_dirs: dirs, source: "unused",
+  def backfill(old = @old, dirs: [ @runs ], document: nil, judges: { "X" => @judge })
+    HiveBench::Rejudge.run(document: document || { "cells" => [ old ] }, search_dirs: dirs, source: "unused",
                            corpus_root: @corpus, judges: judges, withhold_reference: true, only_missing_judges: true)
   end
 
@@ -85,7 +85,7 @@ class BenchHarnessRejudgeTest < Minitest::Test
     other = File.join(@root, "other")
     FileUtils.mkdir_p(File.join(other, "t"))
     FileUtils.cp_r(@bundle, File.join(other, "t", "A"))
-    ambiguous = backfill(dirs: [@runs, other])
+    ambiguous = backfill(dirs: [ @runs, other ])
     assert_empty @calls
     assert ambiguous.fetch("rejudging_needed").first.fetch("reasons").any? { |r| r.include?("ambiguous") }
   end
@@ -109,7 +109,7 @@ class BenchHarnessRejudgeTest < Minitest::Test
 
   def test_rejudge_preserves_document_metadata_history_and_buckets_idempotently
     document = { "schema" => "old", "schema_version" => 1, "custom" => { "keep" => true },
-                 "cells" => [@old], "pending" => [@old], "failed" => [], "generation_history" => [] }
+                 "cells" => [ @old ], "pending" => [ @old ], "failed" => [], "generation_history" => [] }
     first = backfill(document: document)
     assert_equal 3.0, first.dig("agents", "A", "efficiency", "total_cost_usd")
     second = backfill(document: first)

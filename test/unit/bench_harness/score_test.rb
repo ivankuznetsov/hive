@@ -13,7 +13,7 @@ class BenchHarnessScoreTest < Minitest::Test
       "record_kind" => "generation", "generation_id" => task, "artifact_binding" => binding,
       "evaluation_context" => context, "subset" => "gated",
       "gate" => { "status" => "pass", "evidence_binding" => evidence },
-      "judges" => { "X" => { "mean" => 9.0, "scores" => [9.0], "evidence_binding" => evidence } },
+      "judges" => { "X" => { "mean" => 9.0, "scores" => [ 9.0 ], "evidence_binding" => evidence } },
       "efficiency" => { "cost_usd" => 2.0, "wall_clock_sec" => 4.0 } }
   end
 
@@ -22,7 +22,7 @@ class BenchHarnessScoreTest < Minitest::Test
   end
 
   def test_only_successful_bound_evidence_ranks_and_failures_keep_costs
-    statuses = ["generated", "timed_out", "agent_failed", "plan_failed", "execute_failed", nil, "future_status"]
+    statuses = [ "generated", "timed_out", "agent_failed", "plan_failed", "execute_failed", nil, "future_status" ]
     out = results(statuses.map.with_index { |status, i| record(status, task: i.to_s) })
     agent = out.fetch("agents").fetch("A")
     assert_equal 2, out.fetch("schema_version")
@@ -49,7 +49,7 @@ class BenchHarnessScoreTest < Minitest::Test
     legacy = record(task: "legacy").reject { |key, _| %w[generation_id artifact_binding record_kind evaluation_context].include?(key) }
     forged = record(task: "forged")
     forged["gate"]["evidence_binding"]["generation_id"] = "other"
-    out = results([record, legacy, forged])
+    out = results([ record, legacy, forged ])
     assert_equal 1, out.dig("agents", "A", "judged", "scored_cells")
     assert_equal 1, out.dig("agents", "A", "gated", "total")
     assert out.fetch("rejudging_needed").any? { |item| item["task_id"] == "legacy" }
@@ -58,7 +58,7 @@ class BenchHarnessScoreTest < Minitest::Test
   def test_empty_diff_is_eligible_without_invented_quality
     empty = record("empty_diff")
     empty["judges"] = {}
-    agent = results([empty]).dig("agents", "A")
+    agent = results([ empty ]).dig("agents", "A")
     assert_equal 1, agent.dig("coverage", "eligible_executions")
     assert_equal 0, agent.dig("judged", "scored_cells")
     assert_equal 1, agent.dig("gated", "total")
@@ -75,19 +75,19 @@ class BenchHarnessScoreTest < Minitest::Test
   def test_parked_attempts_count_and_overlap_is_not_charged_twice
     active = record
     parked = record("limit_hit", task: "limit")
-    out = results([active], pending: [active, parked], failed: [active])
+    out = results([ active ], pending: [ active, parked ], failed: [ active ])
     agent = out.dig("agents", "A")
     assert_equal 2, agent.dig("coverage", "attempted_cells")
     assert_equal 4.0, agent.dig("efficiency", "total_cost_usd")
     assert_equal 1, agent.dig("generation", "limit_hit")
-    only_parked = results([], pending: [parked]).dig("agents", "A")
+    only_parked = results([], pending: [ parked ]).dig("agents", "A")
     assert only_parked.fetch("preliminary")
     assert_equal 2.0, only_parked.dig("efficiency", "total_cost_usd")
   end
   def test_retired_parked_attempts_cannot_inflate_current_eligible_coverage
     current = record("timed_out")
     retired = record.merge("generation_id" => "retired")
-    agent = results([current], pending: [retired]).dig("agents", "A")
+    agent = results([ current ], pending: [ retired ]).dig("agents", "A")
     assert_equal 1, agent.dig("coverage", "attempted_cells")
     assert_equal 0, agent.dig("coverage", "eligible_executions")
     assert_equal 0.0, agent.dig("coverage", "eligible_fraction")
@@ -95,4 +95,11 @@ class BenchHarnessScoreTest < Minitest::Test
     assert_equal 4.0, agent.dig("efficiency", "total_cost_usd")
   end
 
+  def test_missing_reference_requires_an_explicit_withheld_context
+    value = record
+    value["evaluation_context"]["reference_mode"] = "unavailable"
+    agent = results([ value ]).dig("agents", "A")
+    assert_equal 0, agent.dig("judged", "scored_cells")
+    assert_equal 0, agent.dig("gated", "total")
+  end
 end

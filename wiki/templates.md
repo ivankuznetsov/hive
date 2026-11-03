@@ -227,3 +227,15 @@ defects; evidence-tooling limitations use its existing `blocked` verdict, which
 the artifacts stage completes best-effort without accepted evidence. Actual
 product requirements, source integrity, and implementation failures remain
 blocking.
+
+## Built-in benchmark runtime
+
+`templates/builtins/bench/{generate,judge,publish}.md` hand off one campaign-root
+result snapshot with explicit generation replacements and bound judge-only
+backfill. Publish recomputes schema-v2 `judged`/`gated` populations, shows
+attempted/eligible/evaluated coverage and preliminary labels, and keeps
+diagnostics separate. Strict campaigns reject partial execution before judging;
+permissive partial scores remain diagnostic. The corresponding self-contained
+harness, including generation and evidence helpers, installs from
+`templates/builtins/bench/runtime/`; existing installed campaigns are snapshots
+and are not deployed by editing these source templates.

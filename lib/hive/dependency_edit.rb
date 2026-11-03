@@ -39,7 +39,7 @@ module Hive
         raise ArgumentError, "YAML must contain a mapping" unless @mapping.is_a?(Psych::Nodes::Mapping)
 
         validate_nodes!(@mapping)
-        @data = YAML.safe_load(source, permitted_classes: [Time, Date], aliases: false) || {}
+        @data = YAML.safe_load(source, permitted_classes: [ Time, Date ], aliases: false) || {}
         @pair = @mapping.children.each_slice(2).find { |key, _| key.value == "depends_on" }
         @present = !@pair.nil?
         @value = @present ? Dependencies.normalize_declaration(@data.fetch("depends_on")) : nil

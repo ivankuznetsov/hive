@@ -266,7 +266,7 @@ module Hive
       snapshot = admission_task(task.project_root, task.folder, Hive::Config.load(task.project_root), project_name: name)
       proposed = snapshot.with(stage: stage, depends_on: depends_on, plan_dependency: plan_dependency,
         metadata_status: :ok, metadata_error: nil, plan_status: :ok, plan_error: nil)
-      targeted_admission_context(entries, targets: {name => [task.slug]}, overlays: {name => [proposed]})
+      targeted_admission_context(entries, targets: { name => [ task.slug ] }, overlays: { name => [ proposed ] })
         .verdict(project: name, slug: task.slug)
     end
 

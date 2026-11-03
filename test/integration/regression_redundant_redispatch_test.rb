@@ -6,6 +6,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/bot/dispatch_request_writer"
+require "hive/task_meta"
 
 # Regression test for the 2026-05-28 redundant-redispatch bug.
 #
@@ -93,11 +94,14 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
 
   def setup
     @state_home = Dir.mktmpdir("hive-regression-state")
+    @previous_hive_home = ENV["HIVE_HOME"]
+    ENV["HIVE_HOME"] = @state_home
     @project = "hive"
     @slug = "explore-the-simplest-way-to-260528-2503"
-    @hive_state_path = File.join(@state_home, "project_state")
+    @hive_state_path = File.join(@state_home, ".hive-state")
     @stage_dir = File.join(@hive_state_path, "stages", "2-brainstorm", @slug)
     FileUtils.mkdir_p(@stage_dir)
+    Hive::TaskMeta.write(@stage_dir, id: 2503, slug: @slug, display_name: nil, workflow: "coding")
     @brainstorm_path = File.join(@stage_dir, "brainstorm.md")
     File.write(@brainstorm_path, "## Round 1\n\n<!-- WAITING -->\n")
     prepare_runtime_project(
@@ -138,6 +142,7 @@ class HiveRegressionRedundantRedispatchTest < Minitest::Test
 
   def teardown
     FileUtils.remove_entry(@state_home) if @state_home && File.exist?(@state_home)
+    @previous_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = @previous_hive_home
     Hive::Config.define_singleton_method(:find_project, @original_find_project) if @original_find_project
     if @original_registered_projects
       Hive::Config.define_singleton_method(

@@ -2727,7 +2727,7 @@ module Hive
 
       def failed_edit_input_hold(row, now:)
         answers = brainstorm_answer_state(row)
-        coding_brainstorm = row.workflow.to_s == "coding" && row.stage.to_s == "2-brainstorm"
+        coding_brainstorm = Hive::Workflows.coding_id?(row.workflow) && row.stage == BRAINSTORM_STAGE_DIR
         return "wait_for_answers" if answers.fetch(:pending) ||
           (coding_brainstorm && !answers.fetch(:complete))
         return "wait_for_debounce" if row.state_file_mtime.nil? ||

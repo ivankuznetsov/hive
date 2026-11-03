@@ -1032,7 +1032,11 @@ an enrolled daemon may replace immediately when it dispatches that stage.
 task creation. Generated task slugs use a 16-bit random suffix, so the helper
 retries rare `SlugCollisionError` cases and identifies the created folder by
 comparing inbox children before/after the command instead of relying on mtime
-ordering. Playwright examples share a process but not project state:
+ordering. It also removes only its newly created candidate and retries when
+the same slug already exists in another stage: task creation checks inbox
+collisions, while task routes reject ambiguous slugs across stages. Deterministic
+helper regressions force both inbox and moved-task collisions and verify the
+original task survives. Playwright examples share a process but not project state:
 `ApplicationSystemTestCase` stops the subscriber-owned feed, deregisters every
 throwaway project through the ordinary Hive registry API so its SQL identity is
 retired, clears only the sandbox's canonical `repos/` tree, and resets workflow

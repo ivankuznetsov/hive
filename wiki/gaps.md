@@ -7,6 +7,15 @@ updated: 2026-11-03
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Rails finalize CI 404 attribution (2026-11-03)
+
+The captured finalize integration failure contains only the HTTP 404 assertion,
+without its typed error response. The original seed passes locally. A forced
+cross-stage slug collision reproduces `Hive::AmbiguousSlug`, which Rails maps
+to 404; the fixture helper now retries that collision. This verifies the
+mechanism and fix, but the exact random slug from the failing CI example is
+unavailable, so attribution of that particular failure remains inferred.
+
 ## E2E binary fixture concurrency (2026-11-03)
 
 Binary tests temporarily edit the shared coverage catalog and scenario tree.

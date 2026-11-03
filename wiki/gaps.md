@@ -142,6 +142,29 @@ No canonical task identifier, fix, tested commit, or passing external result is
 known from this execution. None is a completion condition for Hive's cleanup.
 The inspected revision is evidence from planning, not a new external test run.
 
+## Accepted Hive persisted-bin limitations (2026-11-03)
+
+Hive's non-sealed controller cleanup deliberately retains the three-name
+legacy-wrapper set (`codex`, `pi`, `grok`) enumerated in historical commit
+`b1fd4b1862`. See [[modules/workflows]] for the driver executable-selection
+table and [[testing]] for current full-caller cleanup evidence. Two residual
+exposures remain outside this repair's scope and do not gate its completion:
+
+- **Stale Claude wrapper:** the driver does not pin `HIVE_CLAUDE_BIN`, so a
+  stale `claude` in reused `/work/.hb/bin` can still shadow the PATH-resolved
+  executable. The allowlist describes known older wrappers, rather than every
+  PATH-resolved agent. OpenCode is excluded with its launcher explicitly
+  pinned by `HIVE_OPENCODE_BIN`.
+- **Stale gh window:** an existing `/work/.hb/bin/gh` remains first on PATH
+  through plan and execute. The existing `HB_REVIEW` block later rewrites and
+  chmods it; `HB_REVIEW=0` never rewrites it. Cleanup leaves `gh` untouched.
+  Tests observe its preservation immediately after cleanup, before review
+  setup can replace it; they do not bless stale plan/execute behavior.
+
+These accepted Hive scope limitations are separate from the unresolved
+canonical Pi self-resolution follow-up above. Hive's cleanup does not claim
+cross-repository behavioral parity.
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

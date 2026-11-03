@@ -81,12 +81,18 @@ module Hive
         @definitions ||= begin
           require "hive/commands/daemon/service_installer"
           require "hive/commands/babysit/service_installer"
+          require "hive/commands/bot/service_installer"
+          require "hive/commands/web/service_installer"
           host_os = @platform == :macos ? "darwin" : @platform.to_s
           {
             "daemon" => Hive::Commands::Daemon::ServiceInstaller,
-            "babysitter" => Hive::Commands::Babysit::ServiceInstaller
+            "babysitter" => Hive::Commands::Babysit::ServiceInstaller,
+            "bot" => Hive::Commands::Bot::ServiceInstaller,
+            "web" => Hive::Commands::Web::ServiceInstaller
           }.transform_values do |klass|
-            klass.new(home: @home, host_os: host_os, environment: {}).service_definition(include_content: false)
+            options = { home: @home, host_os: host_os, environment: {} }
+            options[:config] = {} if klass == Hive::Commands::Web::ServiceInstaller
+            klass.new(**options).service_definition(include_content: false)
           end
         end
       end
@@ -351,11 +357,18 @@ module Hive
             reason(state, :working_directory_unresolved, path: path)
           end
         end
+        program = fields["Program"]
+        if program && program.name != "string"
+          reason(state, :service_launcher_unresolved, path: path)
+          return
+        end
         args = fields["ProgramArguments"]
         if args&.name == "array" && args.elements.to_a.all? { |element| element.name == "string" }
-          inspect_launcher(args.elements.to_a.map { |element| element.text.to_s }, state, path, nil)
-        elsif fields["Program"]&.name == "string"
-          inspect_launcher([ fields["Program"].text.to_s ], state, path, nil)
+          arguments = args.elements.to_a.map { |element| element.text.to_s }
+          arguments[0] = program.text.to_s if program
+          inspect_launcher(arguments, state, path, nil)
+        elsif program
+          inspect_launcher([ program.text.to_s ], state, path, nil)
         else
           reason(state, :service_launcher_unresolved, path: path)
         end
@@ -532,7 +545,7 @@ module Hive
           fragment = properties["FragmentPath"]
           fragment = nil if fragment.to_s.empty?
           running = properties["ActiveState"] == "active"
-          status = build_status(definition, running: running, fragment_path: fragment,
+          status = build_status(definition, running: running, active_state: properties["ActiveState"], fragment_path: fragment,
             load_state: properties["LoadState"], need_daemon_reload: boolean(properties["NeedDaemonReload"]),
             main_pid: properties["MainPID"], process_start: properties["ExecMainStartTimestampMonotonic"])
           { fragment_path: fragment, dropins: Shellwords.split(properties["DropInPaths"].to_s), status: status }

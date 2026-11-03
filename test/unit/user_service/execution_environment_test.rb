@@ -155,6 +155,47 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
+  def test_launchd_program_selects_the_executable_instead_of_the_argument_zero_alias
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :macos)
+      write(definitions.fetch("daemon").target_path, plist(<<~XML))
+        <key>EnvironmentVariables</key><dict><key>PATH</key><string>/declared</string></dict>
+        <key>Program</key><string>/bin/sh</string>
+        <key>ProgramArguments</key><array><string>/fixture/hive</string><string>-c</string><string>opaque activation</string></array>
+      XML
+      result = reader(home, definitions: definitions).call.first
+      assert result.installed?
+      assert_includes codes(result), :opaque_service_wrapper
+      refute result.complete?
+      refute result.probe_allowed?
+    end
+  end
+
+  def test_changed_dropins_and_environment_files_make_running_linux_evidence_stale
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux)
+      daemon = definitions.fetch("daemon")
+      envfile = File.join(home, "service.env")
+      dropin = daemon.target_path + ".d/10-environment.conf"
+      write(daemon.target_path, "[Service]\nEnvironment=PATH=/bin\nExecStart=/fixture/hive\n")
+      write(dropin, "[Service]\nEnvironmentFile=%h/service.env\n")
+      write(envfile, "CODEX_BIN=/service/codex\n")
+      started = Time.now - 120
+      sources = [ daemon.target_path, dropin, envfile ]
+      status_reader = ->(definition) {
+        status(definition, running: true, main_pid: 123, process_start: started.iso8601(6))
+      }
+      [ dropin, envfile ].each do |changed|
+        sources.each { |source| File.utime(started - 60, started - 60, source) }
+        File.utime(started + 60, started + 60, changed)
+        result = reader(home, definitions: definitions, status_reader: status_reader).call.first
+        assert result.complete?, result.reasons.inspect
+        assert_equal :stale, result.running_currency, changed
+        refute result.probe_allowed?
+      end
+    end
+  end
+
   def test_modified_sources_warn_for_both_platforms_and_stopped_units_are_declared
     [ :linux, :macos ].each do |platform|
       with_tmp_dir do |home|
@@ -235,6 +276,23 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
     end
   end
 
+  def test_transitional_systemd_units_are_not_mistaken_for_stopped_services
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux)
+      write(definitions.fetch("daemon").target_path, "[Service]\nEnvironment=PATH=/bin\nExecStart=/fixture/hive\n")
+      %w[activating deactivating reloading].each do |active_state|
+        runner = ->(argv, timeout:) do
+          next { ok: true, output: "" } if argv.include?("show-environment")
+          { ok: true, output: "LoadState=loaded\nNeedDaemonReload=no\nActiveState=#{active_state}\nMainPID=0\n" }
+        end
+        result = reader(home, definitions: definitions, status_reader: nil, manager_runner: runner).call.first
+        assert result.complete?, result.reasons.inspect
+        assert_equal :unknown, result.running_currency, active_state
+        refute result.probe_allowed?, active_state
+      end
+    end
+  end
+
   def test_manager_budget_is_shared_by_services
     with_tmp_dir do |home|
       definitions = definitions_for(home, :linux)
@@ -275,6 +333,26 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
       refute result.complete?
       assert_includes codes(result), :opaque_service_wrapper
       refute result.probe_allowed?
+    end
+  end
+
+  def test_packaged_launcher_exports_leave_declared_resolution_environment_complete
+    with_tmp_dir do |home|
+      definitions = definitions_for(home, :linux)
+      launcher = File.join(home, "hive-wrapper")
+      write(launcher, <<~SH)
+        #!/bin/sh
+        export GEM_HOME=/packaged/gems
+        export GEM_PATH=/packaged/gems
+        export HIVE_INVOKED_BIN=/packaged/hive
+        exec "/fixture/hive" "$@"
+      SH
+      write(definitions.fetch("daemon").target_path, "[Service]\nEnvironment=PATH=/declared\nExecStart=#{launcher} daemon start\n")
+      result = reader(home, definitions: definitions).call.first
+      assert result.complete?, result.reasons.inspect
+      assert_equal "/declared", result.environment.fetch("PATH")
+      refute result.environment.key?("GEM_HOME")
+      assert result.probe_allowed?
     end
   end
 
@@ -392,12 +470,87 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
   def test_default_service_paths_reuse_installers_and_never_render_or_install
     [ :linux, :macos ].each do |platform|
       with_tmp_dir do |home|
-        result = Hive::UserService::ExecutionEnvironment.new(project_root: home, home: home,
-          profiles: [], platform: platform, status_reader: ->(definition) { status(definition) }).call
-        assert_equal %w[daemon babysitter], result.map(&:label)
+        result = with_replaced_singleton_method(Hive::Config, :load_global_web,
+          -> { flunk "path-only service inspection loaded web runtime configuration" }) do
+          Hive::UserService::ExecutionEnvironment.new(project_root: home, home: home,
+            profiles: [], platform: platform, status_reader: ->(definition) { status(definition) }).call
+        end
+        assert_equal %w[daemon babysitter bot web], result.map(&:label)
         assert result.all?(&:absent?)
         refute Dir.exist?(File.join(home, ".config"))
         refute Dir.exist?(File.join(home, "Library"))
+      end
+    end
+  end
+
+  def test_installer_generated_service_definitions_reconstruct_on_both_platforms
+    require "hive/commands/daemon/service_installer"
+    require "hive/commands/babysit/service_installer"
+    require "hive/commands/bot/service_installer"
+    require "hive/commands/web/service_installer"
+    [ :linux, :macos ].each do |platform|
+      with_tmp_dir do |root|
+        home = File.join(root, "service home")
+        FileUtils.mkdir_p(home)
+        definitions = {
+          "daemon" => Hive::Commands::Daemon::ServiceInstaller,
+          "babysitter" => Hive::Commands::Babysit::ServiceInstaller,
+          "bot" => Hive::Commands::Bot::ServiceInstaller,
+          "web" => Hive::Commands::Web::ServiceInstaller
+        }.transform_values do |installer_class|
+          options = { home: home, host_os: platform == :linux ? "linux" : "darwin",
+                      binary_path: File.join(home, "bin/hive"), environment: {} }
+          options[:config] = { "bind" => "127.0.0.1", "port" => 3000 } if installer_class == Hive::Commands::Web::ServiceInstaller
+          installer = installer_class.new(**options)
+          installer.define_singleton_method(:ruby_shim_dir) { "%h/.local/share/mise/shims" }
+          definition = installer.service_definition
+          write(definition.target_path, definition.content)
+          definition
+        end
+        contexts = reader(home, definitions: definitions).call
+        assert contexts.all?(&:complete?), contexts.map(&:reasons).inspect
+        assert contexts.all?(&:probe_allowed?)
+        contexts.each do |context|
+          assert_equal home, context.cwd
+          expected_provenance = platform == :macos && context.label == "web" ? :declared : :inherited
+          assert_equal expected_provenance, context.cwd_provenance
+        end
+        expected_path = platform == :linux ? "#{home}/.local/bin:#{home}/.local/share/mise/shims:/usr/local/bin:/usr/bin:/bin" :
+          "#{home}/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        expected_paths = [ expected_path ] * 4
+        expected_paths[-1] = "#{home}/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" if platform == :macos
+        assert_equal expected_paths, contexts.map { |context| context.environment.fetch("PATH") }
+      end
+    end
+  end
+
+  def test_stopped_bot_and_web_services_use_their_declared_environments_on_both_platforms
+    [ :linux, :macos ].each do |platform|
+      with_tmp_dir do |home|
+        definitions = definitions_for(home, platform, names: %w[bot web])
+        definitions.each do |label, definition|
+          content = if platform == :linux
+            "[Service]\nEnvironment=PATH=%h/#{label} CODEX_BIN=%h/#{label}/codex\nExecStart=/fixture/hive #{label}\n"
+          else
+            plist(<<~XML)
+              <key>EnvironmentVariables</key><dict><key>PATH</key><string>#{home}/#{label}</string><key>CODEX_BIN</key><string>#{home}/#{label}/codex</string></dict>
+              <key>Program</key><string>/fixture/hive</string>
+            XML
+          end
+          write(definition.target_path, content)
+        end
+        with_env("PATH" => "/shell", "CODEX_BIN" => "/shell/codex") do
+          results = reader(home, definitions: definitions).call
+          assert_equal %w[bot web], results.map(&:label)
+          results.each do |result|
+            assert result.installed?
+            assert result.complete?, result.reasons.inspect
+            assert_equal :stopped, result.running_currency
+            assert result.probe_allowed?
+            assert_equal "#{home}/#{result.label}", result.environment.fetch("PATH")
+            assert_equal "#{home}/#{result.label}/codex", result.environment.fetch("CODEX_BIN")
+          end
+        end
       end
     end
   end
@@ -482,6 +635,7 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
         '<key>EnvironmentVariables</key><array/>' => :malformed_plist_environment,
         '<key>EnvironmentVariables</key><dict><key>PATH</key><integer>12</integer></dict>' => :malformed_plist_environment,
         '<key>WorkingDirectory</key><integer>12</integer>' => :working_directory_unresolved,
+        '<key>Program</key><integer>12</integer><key>ProgramArguments</key><array><string>/fixture/hive</string></array>' => :service_launcher_unresolved,
         '<key>ProgramArguments</key><array><integer>12</integer></array>' => :service_launcher_unresolved,
         '<key>OnlyKey</key>' => :malformed_plist,
         '<string>WrongKey</string><string>value</string>' => :malformed_plist
@@ -653,8 +807,8 @@ class UserServiceExecutionEnvironmentTest < Minitest::Test
 
   private
 
-  def definitions_for(home, platform)
-    %w[daemon babysitter].to_h do |name|
+  def definitions_for(home, platform, names: %w[daemon babysitter])
+    names.to_h do |name|
       path = if platform == :linux
         File.join(home, ".config/systemd/user/hive-#{name}.service")
       else

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -860,6 +860,7 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 | `llm_wiki_post_commit_refresh_test.rb` | Transactional wiki refresh plus the scheduled compatibility wrapper — shared-runner preference, bounded-systemd commit dispatch with headless bus recovery and durable marker retention on signal failure, compiled-log-only no-op filtering, machine-wide fallback admission, project-local fallback, configured-provider-only production dispatch with a disposable test-copy seam, exact `--project <root> --drain` delegation, committed/template/generated copy parity, source-ref transaction chunking for large queues, reconstruction of interrupted queue writes, fast-forward publication to `llm-wiki/refresh`, freshly fetched remote-default reconciliation, crash-safe receipt revalidation after remote deletion, mixed retained/new and no-diff publication without duplicate agent runs, durable merge-conflict blocking, and dirty primary-checkout preservation. Each fixture uses a private `XDG_RUNTIME_DIR`, so a real operator refresh cannot consume its stub-agent work; explicit lock tests override that directory to retain machine-wide serialization coverage. |
 | `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. Legacy-upgrade coverage pins one-commit archive/runtime/config rebinding, same-process descriptor cache reset, tracked instruction archives, safe retry after a rejected commit, Ctrl-C cleanup at archive and both runtime-move boundaries, preservation after a post-commit interrupt, symlink-root and raced-target refusal, descriptor/child-name/parent-directory replacement rejection at classification, quarantine, and post-staging boundaries, dirty-config isolation, staged-index preflight, and previous-runtime retention when rollback deletion fails. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image, the opt-in same-judge Codex/OpenRouter route with secret-free argv, explicit provider provenance, child-local executable-directory PATH resolution for pinned npm runtimes, a private Codex home for OpenRouter, and an empty ephemeral/config-free/rules-free workspace for both OpenRouter and ChatGPT while ChatGPT retains its subscription auth home. It also executes the packaged Ox Alpha `max` route contract with plan review disabled, proves that sealed root-controller commands restore the target to the host UID/GID on exit, proves that redacted OpenCode logs recover token buckets from Hive's cell-local usage database, verifies that candidate Git history contains only the depth-one historical base and not a descendant gold object, and pins the provider-only network/proxy arguments plus their generation-identity receipt. The judge-stage invariant rejects a null round-two final while the incomplete cell remains eligible for retry. |
 | `workflows/bench_test.rb` (judge adapter) | Pins stderr quota classification, Claude CLI's exact standalone stdout reset and usage-credits banners and structured 429 failed-result envelope, plus rejection of model-authored quota prose. |
+| `workflows/bench_agent_shims_test.rb` | Executes the full packaged stage caller with root-only path adaptation: first/reused Codex, Pi, and Grok reachability; regular, executable-symlink, and dangling legacy entries; setup and unlink failures; execute/review resume; repeated review cleanup; unrelated-state and symlink-target preservation. Real unlink denial runs under an unprivileged effective UID, including privilege drop when the runner is root, followed by permission repair and retry. No permission row skips silently. |
 | `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — bundled Hive projection plus native package argv/JSON, fresh convergence and second-run no-op, unattended refusal with a per-invocation tripwire proving zero native discovery calls and byte-for-byte home stability, unavailable skips, independent offline failure, cache/resolution/provenance verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and conflict byte preservation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `brainstorm_answering_skill_contract_test.rb` | Guided/YOLO answer orchestration over the real literal command — read-only status inventory and preview, deterministic task traversal despite reordered refreshes, degraded project isolation and stale aggregate counts, Guided approval/replacement/pause/resume/idempotency/stale behavior, YOLO zero-write and mixed-write scans with one-at-a-time escalation, same-number cross-round targeting, relocation/ambiguity/move/generation/conflict gates, final-slot no-dispatch plus normal daemon completion eligibility, sanitized 2026-07-25 regression data, and byte-identical policy/scenario payloads across OpenClaw, Claude, Codex, and Pi. |
@@ -1308,8 +1309,10 @@ its style ownership to hive-bench. Its profile probe, Codex judge, and sqlite
 extractor findings are explicitly ignored because all three call
 `Open3.capture3` with discrete argv elements; no interpolated value is passed
 through a shell. The install-smoke ShellCheck job also scans the packaged shell
-scripts, so shell fixes must be applied to both hive-bench and Hive's runtime
-snapshot.
+scripts. Both hive-bench and Hive's runtime snapshot participate in shell
+linting; behavioral changes follow each repository's ownership and require
+independent validation. This shared lint surface does not require replacing a
+divergent snapshot or porting Hive's legacy-entry cleanup to canonical.
 
 The Hive web task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then
@@ -1324,6 +1327,63 @@ Commit `c4e2cab5` adds the current `hive bench submit` Brakeman ignore for
 is interpolated only into PR title/body text. The paired source change splits
 the extractor's `ruby -I` flag and harness path into separate argv elements.
 See [[commands/bench-submit]] for the command surface.
+
+## Persisted benchmark agent shims
+
+Hive verification at
+[`2b76f330c79d6395064dcc64d54772a3ae31150d`](https://github.com/ivankuznetsov/hive/commit/2b76f330c79d6395064dcc64d54772a3ae31150d)
+on 2026-11-03 uses the actual packaged `hive_stages.sh` and execute-resume
+helper in deterministic subprocess fixtures. Only the fixed filesystem roots
+(`/work`, `/opt/hb`, `/home/asterio`, `/opt/compound-engineering`, and
+`/hive_resume_execute.sh`) are mechanically rebased; a zero-residual guard
+checks all copied scripts before subprocesses and before privilege-fixture
+chown/chmod. No cleanup, PATH, branch, or exit logic is replaced. Stub Hive
+stage actions create valid plan/worktree/capture artifacts and call recording
+agent executables under a 20-second caller timeout. Pi uses the copied
+packaged launcher, preserving its extension and caller arguments.
+
+Run the focused acceptance files with:
+
+```bash
+bin/test test/unit/workflows/bench_test.rb test/unit/workflows/bench_agent_shims_test.rb
+bash -n templates/builtins/bench/runtime/harness/lib/hive_stages.sh
+shellcheck templates/builtins/bench/runtime/harness/lib/hive_stages.sh
+```
+
+The focused run passed 63 tests with no failures, errors, or skips, including
+the existing Pi launcher argv test. Regular and dangling unlink-denial rows
+ran as Linux UID 1000: an independent absolute-rm probe proved permission
+denial, the caller exited 4 without agent calls, and a retry in the same work
+directory succeeded after permission repair. Root runners use `setpriv` to
+drop to UID/GID 65534; unavailable privilege-drop support fails the test.
+Direct removal-status handling and the absence of an entry re-probe also have
+a supplementary source assertion. That assertion supplements executable
+denial evidence. Shell syntax and ShellCheck 0.11.0 passed using the unchanged
+install-smoke lint configuration. Ruby style checking passed for the new test.
+
+The new file remains in `HIVE_DEFAULT_TEST_FILES` and exactly one coverage
+shard; its measured 14.2161-second sample is in
+`test/support/shard_timings.json`. `bin/test --changed --list` reports a shared
+runtime change and falls back to offline suites; this leaf fix uses the
+explicit focused files above. Runtime installation and snapshot layout are
+unchanged, so the existing install integration contract is retained. No full
+suite, coverage run, provider call, or container demonstration is claimed.
+
+Ownership across the divergent scripts is explicit. Canonical revision
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326` was inspected during planning on
+2026-11-01; it was not fixed or tested by this Hive execution.
+
+| Behavior / fix | Canonical evidence and ownership | Hive evidence and ownership |
+| --- | --- | --- |
+| Pi self-resolution on first/reused directories | Unresolved canonical defect; separate follow-up and future full-caller repeatability proof in [[gaps]] | Existing explicit launcher preserved; caller matrix reaches the real-agent sentinel |
+| Pi extension and caller argv | Separate repair must preserve both; no passing canonical result claimed | Existing packaged launcher argv test plus caller Pi sentinel assertions |
+| Legacy-entry cleanup | No canonical port in this task | Packaged runtime change; first/reuse/preflight/resume/review caller matrix |
+| Removal/setup status and unrelated-file preservation | No claim of canonical cleanup parity | Exit 4, distinct diagnostics, actual permission denial, repair/retry, and filesystem assertions |
+
+See [[modules/workflows]] for driver pins and the three-name allowlist's
+historical derivation. [[gaps]] separates the canonical defect from accepted
+Hive stale-`claude` and stale-`gh` limitations. Historical checks are not current
+acceptance evidence.
 
 ## Hive web Golden-Path E2E
 

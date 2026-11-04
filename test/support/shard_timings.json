@@ -808,6 +808,7 @@
     "test/unit/workflow_package/validator_test.rb": 0.0297,
     "test/unit/workflow_selection_test.rb": 0.0084,
     "test/unit/workflow_test.rb": 0.0056,
+    "test/unit/workflows/bench_agent_shims_test.rb": 14.2161,
     "test/unit/workflows/bench_test.rb": 9.3615,
     "test/unit/workflows/coding_test.rb": 0.0009,
     "test/unit/workflows/content_test.rb": 0.0007,

@@ -79,6 +79,8 @@ module Hive
         attempt_terminal
         attempt_lost
         attempt_duplicate
+        launch_reservations_released
+        launch_reservation_release_failed
         attempt_terminal_replay
         attempt_transient_retry
         attempt_patrol_retry_deferred

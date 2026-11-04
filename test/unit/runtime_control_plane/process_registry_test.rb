@@ -337,7 +337,152 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  class UnverifiableOwnerIdentity < SimpleDelegator
+    def status(_expected) = :unverifiable
+  end
+
+  def test_reservations_of_gone_owners_are_released_and_live_owners_are_kept
+    with_registry do |database, registry, _root|
+      live = registry.reserve!(origin: "direct_cli", role: "status")
+      dead = registry.reserve!(origin: "direct_cli", role: "status")
+      reused = registry.reserve!(origin: "direct_cli", role: "revise")
+      unrecorded = registry.reserve!(origin: "direct_cli", role: "status")
+      [ live, dead, reused, unrecorded ].each(&:release_fence!)
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction do |db|
+        db[:launch_reservations].where(reservation_id: dead.id).update(owner_pid: gone_pid)
+        db[:launch_reservations].where(reservation_id: reused.id)
+          .update(owner_start_fingerprint: "not-this-process")
+        db[:launch_reservations].where(reservation_id: unrecorded.id)
+          .update(owner_pid: nil, owner_start_fingerprint: nil)
+      end
+
+      released = registry.release_abandoned_reservations!
+      assert_equal [ dead.id, reused.id ].sort, released.map { |r| r["reservation_id"] }.sort
+      assert_equal [ "owner_gone" ], released.map { |r| r["reason"] }.uniq
+      states = database.read { |db| db[:launch_reservations].to_hash(:reservation_id, :state) }
+      assert_equal "reserved", states.fetch(live.id)
+      assert_equal "reserved", states.fetch(unrecorded.id)
+      assert_equal "released", states.fetch(dead.id)
+      assert_equal "released", states.fetch(reused.id)
+      assert_empty registry.release_abandoned_reservations!
+
+      assert_raises(Hive::RuntimeControlPlane::StaleLifecycle) do
+        registry.register!(dead.id, pid: Process.pid)
+      end
+    end
+  end
+
+  def test_an_unverifiable_owner_keeps_its_reservation
+    identity = UnverifiableOwnerIdentity.new(Hive::Attempts::ProcessIdentity.new)
+    with_registry(process_identity: identity) do |database, registry, _root|
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      reservation.release_fence!
+      database.transaction do |db|
+        db[:launch_reservations].update(owner_start_fingerprint: "not-this-process")
+      end
+      assert_empty registry.release_abandoned_reservations!
+      assert_equal "reserved", database.read { |db| db[:launch_reservations].get(:state) }
+    end
+  end
+
+  def test_reservation_of_a_settled_attempt_is_released_as_attempt_settled
+    with_registry do |database, registry, _root|
+      insert_attempt(database, "attempt-lost", state: "lost")
+      reservation = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-lost")
+      reservation.release_fence!
+
+      assert_equal [ { "reservation_id" => reservation.id, "reason" => "attempt_settled" } ],
+                   registry.release_abandoned_reservations!
+      assert_equal "released", database.read { |db| db[:launch_reservations].get(:state) }
+    end
+  end
+
+  def test_reservation_of_a_live_attempt_is_kept_even_when_its_launcher_died
+    with_registry do |database, registry, _root|
+      insert_attempt(database, "attempt-launching", state: "launching")
+      insert_attempt(database, "attempt-running", state: "running")
+      reservations = %w[attempt-launching attempt-running].map do |attempt_id|
+        registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: attempt_id)
+      end
+      reservations.each(&:release_fence!)
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:launch_reservations].update(owner_pid: gone_pid) }
+
+      assert_empty registry.release_abandoned_reservations!
+      assert_equal %w[reserved reserved], database.read { |db| db[:launch_reservations].select_map(:state) }
+    end
+  end
+
+  def test_reservation_without_an_attempt_row_falls_through_to_the_owner_check
+    with_registry do |database, registry, _root|
+      live = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-unknown-live")
+      dead = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-unknown-dead")
+      [ live, dead ].each(&:release_fence!)
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction do |db|
+        db[:launch_reservations].where(reservation_id: dead.id).update(owner_pid: gone_pid)
+      end
+
+      assert_equal [ { "reservation_id" => dead.id, "reason" => "owner_gone" } ],
+                   registry.release_abandoned_reservations!
+      states = database.read { |db| db[:launch_reservations].to_hash(:reservation_id, :state) }
+      assert_equal "reserved", states.fetch(live.id)
+    end
+  end
+
+  def test_capability_becomes_eligible_once_abandoned_reservations_are_released
+    with_registry do |database, registry, root|
+      capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root,
+        legacy_inventory: -> { [] }, custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:launch_reservations].update(owner_pid: gone_pid) }
+      refusal = capability.call
+      refute refusal.eligible?
+      assert_equal "unresolved_launch_reservation", refusal.reason
+
+      registry.release_abandoned_reservations!
+      assert capability.call.eligible?
+    end
+  end
+
   private
+
+  def insert_attempt(database, attempt_id, state:)
+    now = "2026-11-04T00:00:00.000000Z"
+    identity = database.read { |db| db[:runtime_lifecycle].get(:installation_id) }
+    database.transaction do |db|
+      unless db[:projects].where(project_id: "project-1").first
+        db[:projects].insert(
+          project_id: "project-1", installation_id: identity, registration_id: "registration-1",
+          name: "demo", observed_path: "/tmp/demo", state_root_path: "/tmp/demo/.hive-state",
+          active: 1, registered_at: now
+        )
+      end
+      task_id = "task-#{attempt_id}"
+      db[:task_subjects].insert(
+        task_id: task_id, project_id: "project-1", workflow_id: "coding",
+        task_slug: task_id, observed_path: "/tmp/demo/#{task_id}", source_fingerprint: "source",
+        generation: 1, created_at: now, last_observed_at: now
+      )
+      db[:attempts].insert(
+        attempt_id: attempt_id, project_id: "project-1", task_id: task_id,
+        subject_kind: "task_stage", subject_key: "4-execute", subject_json: "{}",
+        task_generation: "generation-#{attempt_id}", ownership_generation: "owner-1", state: state,
+        lease_version: 0, retry_charge: 0, refunded: 0, source_fingerprint: "source",
+        details_json: "{}", project_name: "demo", task_slug: task_id,
+        accepted_date: "2026-11-04", created_at: now, accepted_at: now
+      )
+    end
+  end
 
   def with_registry(process_identity: Hive::Attempts::ProcessIdentity.new)
     with_tmp_dir do |root|

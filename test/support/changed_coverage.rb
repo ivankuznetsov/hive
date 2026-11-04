@@ -15,6 +15,7 @@ module HiveChangedCoverage
     test/integration/tui_reactivity_perf_test.rb
     test/integration/setup_agents_test.rb
     test/unit/babysitter/dry_run_security_matrix_test.rb
+    test/unit/bench_harness/isolation_proof_test.rb
   ].freeze
   MappingError = Class.new(StandardError)
 
@@ -178,7 +179,7 @@ module HiveChangedCoverage
         all.call("#{path}: shared or unclassified change; running offline suites")
       end
     end
-    selected[:root] = selected[:root].uniq.sort
+    selected[:root] = (selected[:root] - CI_GATE_FILES).uniq.sort
     selected[:web] = selected[:web].uniq.sort
     selected[:components].transform_values! { |files| files.uniq.sort }
     selected

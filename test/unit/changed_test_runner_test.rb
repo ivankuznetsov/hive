@@ -60,6 +60,18 @@ class ChangedTestRunnerTest < Minitest::Test
     end
   end
 
+  def test_benchmark_isolation_proof_requires_its_dedicated_gate
+    in_repository do
+      proof = "test/unit/bench_harness/isolation_proof_test.rb"
+      write(proof)
+      shared = HiveChangedCoverage.selection(paths: [ "Gemfile" ])
+      direct = HiveChangedCoverage.selection(paths: [ proof ])
+
+      refute_includes shared[:root], proof
+      assert_empty direct[:root]
+    end
+  end
+
   def test_test_only_component_and_web_changes_dispatch_in_separate_processes
     in_repository do
       paths = %w[test/unit/new_test.rb components/example/test/new_test.rb web/test/models/new_test.rb web/test/system/new_test.rb]

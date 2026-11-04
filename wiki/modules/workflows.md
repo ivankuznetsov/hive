@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-09-09
+updated: 2026-11-02
 tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
@@ -184,7 +184,31 @@ The runner entrypoint (`templates/builtins/bench/runtime/hb-entrypoint.sh`,
 COPYed into the image) dispatches Docker's appended container argv: a single
 argument runs as a login-shell command string (the gen/gate harness protocol),
 while two or more arguments exec as a verbatim argv array — isolation.sh's
-`hb_isolated <mode> <work> <cmd...>` forwards `$@`, so multi-argument commands
+`hb_isolated <mode> <work> <cmd...>` forwards `$@`. For direct v1
+`ruby harness/run_all.rb` and `harness/pipeline_run.rb` through `IsolationExec`,
+`HB_API_KEYS` must be exactly `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY` or
+`OPENAI_API_KEY`, with neither OAuth control populated, or explicitly empty
+with exactly one regular `HB_CLAUDE_AUTH`/`HB_CODEX_AUTH` file. Unset and invalid
+values refuse before Docker with exit 70. Gate ignores these controls and
+forwards no provider credentials. The packaged `generate.md` →
+`harness/hive_run.rb` → `HiveDriver` v2 path, its `env_args`/`auth_mounts`
+forwarding and `hive_stages.sh` in-container `auth.json` materialization remain
+byte-for-byte unaffected. See the packaged `harness/CREDENTIAL_ISOLATION.md`
+for the contract, default bare-label refusals and exact existing-project
+`hive init . --workflow bench` refresh plus isolated `hive/state` commit revert.
+Upgrading Hive alone does not refresh an installed runtime.
+
+The separate `bundle exec rake test:bench_isolation_proof` gate executes the
+same decoy refusal/success matrix under current Bash and actual Bash 3.2.
+`HB_TEST_BASH_32` supplies a local interpreter; Linux without it reports a 3.2
+skip, while the required `macos-15` lane must prove `/bin/bash` is 3.2. The real
+container matrix pins stock Alpine 3.22.2 at
+`sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412`
+and sends separate `sh`, `-c`, probe argv. Docker daemon availability and image
+setup failure are recorded separately. See [[testing]] and the delivery
+fragment for versions, runtime-byte comparisons and local proof outcomes.
+
+Multi-argument commands
 must not be truncated by a bare `bash -lc` entrypoint. The image installs the
 entrypoint into root-owned `/usr/local/bin` before `USER runner`; the
 unprivileged runner user cannot chmod the root-owned copy, so COPY/chmod after

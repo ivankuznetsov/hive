@@ -33,7 +33,8 @@ class CiTestPartitionTest < Minitest::Test
         "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
         "test:status_read_only" => "test/integration/status_read_only_test.rb",
         "test:babysitter_dry_run_security_matrix" =>
-          "test/unit/babysitter/dry_run_security_matrix_test.rb"
+          "test/unit/babysitter/dry_run_security_matrix_test.rb",
+        "test:bench_isolation_proof" => "test/unit/bench_harness/isolation_proof_test.rb"
       }, gate_tests)
       gate_files.each { |file| assert_path_exists File.join(ROOT, file) }
       assert_empty default_files & gate_files
@@ -133,7 +134,12 @@ class CiTestPartitionTest < Minitest::Test
         }
       ], matrix
       assert_equal "${{ matrix.name }}", gate_job.fetch("name")
-      assert_equal Object.const_get(:HIVE_CI_GATE_TESTS).keys, matrix.map { |entry| entry.fetch("task") }
+      proof_job = workflow.fetch("jobs").fetch("bench-isolation-proof")
+      assert_equal %w[ubuntu-24.04 macos-15], proof_job.dig("strategy", "matrix", "os")
+      assert_equal "${{ matrix.os }}", proof_job.fetch("runs-on")
+      assert proof_job.fetch("steps").any? { |step| step["run"] == "bundle exec rake test:bench_isolation_proof" }
+      assert_equal Object.const_get(:HIVE_CI_GATE_TESTS).keys,
+                   matrix.map { |entry| entry.fetch("task") } + [ "test:bench_isolation_proof" ]
 
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
@@ -242,7 +248,7 @@ class CiTestPartitionTest < Minitest::Test
     jobs = workflow.fetch("jobs")
 
     refute jobs.key?("changes"), "required CI must not classify broad path groups as proof-free"
-    %w[coverage-shards expensive-test-gates systemd-user-gate e2e web-tests].each do |job_name|
+    %w[coverage-shards expensive-test-gates bench-isolation-proof systemd-user-gate e2e web-tests].each do |job_name|
       job = jobs.fetch(job_name)
       refute_equal "changes", job["needs"]
       refute_includes job.fetch("if", ""), "needs.changes"
@@ -257,7 +263,7 @@ class CiTestPartitionTest < Minitest::Test
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")
 
-    %w[coverage-shards expensive-test-gates systemd-user-gate tui-reactivity-latency e2e launchd-macos].each do |job_name|
+    %w[coverage-shards expensive-test-gates bench-isolation-proof systemd-user-gate tui-reactivity-latency e2e launchd-macos].each do |job_name|
       upload = jobs.fetch(job_name).fetch("steps").find do |step|
         step["uses"] == UPLOAD_ARTIFACT_ACTION &&
           step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")

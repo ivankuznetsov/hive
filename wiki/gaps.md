@@ -3,9 +3,52 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-02
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Direct benchmark isolation delivery (2026-11-02)
+
+The canonical hive-bench baseline is `432e730ea7812246496726fcc9153e98be58eb30`;
+Hive's execution baseline is `966211001e76d53da50879a582668b5b2e381607`.
+The two isolation files agreed before this fix and agree byte-for-byte after it.
+Outside that boundary, the baselines already differ in 37 harness files,
+including `hive_driver.rb`, `hive_stages.sh`, campaign/judge code and Slate
+comments. Those differences are retained; this is not a wholesale runtime sync.
+The original canonical checkout contains unrelated uncommitted changes and is
+untouched. The credential changes from the original local branch, including
+the CPU proof follow-up, are now published as canonical commit
+[`c1e5696944f590ea58985e174b8aff3409191f24`](https://github.com/ivankuznetsov/hive-bench/commit/c1e5696944f590ea58985e174b8aff3409191f24)
+in [hive-bench PR #16](https://github.com/ivankuznetsov/hive-bench/pull/16), on
+`fix/profile-credential-isolation-delivery`. The branch starts at upstream
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326`, excluding unrelated unpublished
+benchmark-results commits from the original clone. Both delivered isolation
+files still match Hive's packaged copies byte-for-byte. Publication is complete;
+the canonical PR remains open, with its own hosted proof pending in
+[CI run 41463576434](https://github.com/ivankuznetsov/hive-bench/actions/runs/41463576434).
+
+Actual GNU Bash 3.2.57 and 5.3.20 passed locally, together with real Docker
+credential probes. Both hosted `bench credential isolation` lanes passed on
+`ubuntu-24.04` and `macos-15` in
+[CI run 41454797098](https://github.com/ivankuznetsov/hive/actions/runs/41454797098)
+at `715cbeeeb72ce15e51278a155e40a4c43f6b51d8`. Only wiki documents changed
+between that tested commit and the reviewed HEAD. The macOS lane requires
+`/bin/bash` 3.2 and fails absent/wrong interpreters.
+`minimax-3` and `qwen-2.6-coder` remain
+unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
+`failed` and exit 2 until their routes are verified and configured.
+
+The first hosted Ubuntu credential proof failed before probe execution because
+the shared fixture requested eight CPUs on a four-CPU daemon. The real Docker
+matrix now requests one CPU; the successful hosted run above confirms that
+correction.
+Canonical follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies the same
+override in `tmp/bench-credential-canonical`. Both local proof gates passed
+under a four-CPU rejection shim with actual Bash 3.2.57/5.3.20 and real Docker,
+with zero skips (canonical 3 tests/40 assertions; Hive 3/55). That simulation
+is separate from the hosted evidence above. The correction is included in the
+published canonical commit and PR linked above; canonical hosted proof and
+merge remain pending.
 
 ## Task observation boundary (2026-10-02)
 

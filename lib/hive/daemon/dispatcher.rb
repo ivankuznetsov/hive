@@ -20,6 +20,7 @@ require "hive/daemon/recovery_coordinator"
 require "hive/model_unsupported"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/runtime_control_plane/boot_identity"
+require "hive/runtime_control_plane/process_registry"
 require "hive/command_dispatch_lifecycle"
 
 require "hive/daemon/logger"
@@ -4285,6 +4286,7 @@ module Hive
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
+        release_abandoned_launch_reservations
         true
       rescue StandardError => e
         @logger.event(
@@ -4293,6 +4295,26 @@ module Hive
           keeping_previous: true
         )
         false
+      end
+
+      # Launch reservations whose attempt settled or whose owner died before
+      # registering would otherwise stay reserved forever and keep
+      # quiescence capability ineligible. Failures leave them reserved.
+      def release_abandoned_launch_reservations
+        store = @attempt_reconciler.respond_to?(:store) ? @attempt_reconciler.store : nil
+        database = store.respond_to?(:database) ? store.database : nil
+        return unless database
+
+        @launch_reservation_registry ||= Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: database, state_home: File.dirname(database.path),
+          custody: Hive::Attempts::ProcessCustody.unsupported("launch reservation reconciliation")
+        )
+        released = @launch_reservation_registry.release_abandoned_reservations!
+        return if released.empty?
+
+        @logger.event(:launch_reservations_released, count: released.size, reservations: released)
+      rescue StandardError => e
+        @logger.event(:launch_reservation_release_failed, error: "#{e.class}: #{e.message}")
       end
 
       def refresh_attempt_storage_snapshot

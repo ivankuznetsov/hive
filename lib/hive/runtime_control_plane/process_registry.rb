@@ -233,6 +233,42 @@ module Hive
         cancelled
       end
 
+      LIVE_ATTEMPT_STATES = %w[launching running].freeze
+
+      # Releases reserved launch rows that can never be registered, so a dead
+      # launcher does not hold quiescence capability ineligible forever:
+      #
+      # * attempt-linked rows whose attempt is no longer launching/running
+      #   (the wrapper never registered and the attempt has settled);
+      # * other rows whose reserving owner (pid + start fingerprint) is proven
+      #   gone. A spawned bin/hive child waits on its launch gate and exits
+      #   before any work unless the parent registered it first, so a row
+      #   still reserved after its owner died has no live holder.
+      #
+      # A live, unverifiable or unrecorded owner keeps the row unresolved, as
+      # does an attempt-linked row whose attempt is still live or unknown.
+      # Returns [{ "reservation_id", "reason" }] for the rows released.
+      def release_abandoned_reservations!(authority: nil, timeout_sec: nil)
+        candidates = @database.read do |db|
+          db[:launch_reservations].where(state: "reserved").all.filter_map do |row|
+            reason = abandoned_reason(db, row)
+            [ row.fetch(:reservation_id), reason ] if reason
+          end
+        end
+        return [] if candidates.empty?
+
+        released = []
+        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+          timestamp = now
+          candidates.each do |reservation_id, reason|
+            changed = db[:launch_reservations].where(reservation_id: reservation_id, state: "reserved")
+              .update(state: "released", reason: reason, updated_at: timestamp)
+            released << { "reservation_id" => reservation_id, "reason" => reason } if changed == 1
+          end
+        end
+        released
+      end
+
       def active_rows
         @database.read do |db|
           db[:owned_processes].exclude(state: "stopped").all
@@ -251,6 +287,22 @@ module Hive
       end
 
       private
+
+      def abandoned_reason(db, row)
+        attempt_id = row[:attempt_id].to_s
+        unless attempt_id.empty?
+          attempt = db[:attempts].where(attempt_id: attempt_id).first
+          if attempt
+            return nil if LIVE_ATTEMPT_STATES.include?(attempt.fetch(:state))
+
+            return "attempt_settled"
+          end
+        end
+        return nil if row[:owner_pid].nil? || row[:owner_start_fingerprint].to_s.empty?
+
+        owner = { "pid" => row[:owner_pid], "start_fingerprint" => row[:owner_start_fingerprint] }
+        %i[missing mismatched].include?(@process_identity.status(owner)) ? "owner_gone" : nil
+      end
 
       def now = Codec.dump_time(@clock.call)
 

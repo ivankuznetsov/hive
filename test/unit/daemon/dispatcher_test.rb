@@ -3192,6 +3192,51 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_abandoned_launch_reservations_are_released_and_logged
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).migrate!
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(database: database, state_home: root)
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:launch_reservations].update(owner_pid: gone_pid) }
+      store = Struct.new(:database).new(database)
+      reconciler = Struct.new(:store).new(store)
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [], attempt_reconciler: reconciler
+      )
+
+      dispatcher.send(:release_abandoned_launch_reservations)
+      dispatcher.send(:release_abandoned_launch_reservations)
+
+      released = logger.events.select { |name, _attrs| name == :launch_reservations_released }
+      assert_equal 1, released.size
+      assert_equal [ { "reservation_id" => reservation.id, "reason" => "owner_gone" } ],
+                   released.first.last.fetch(:reservations)
+      assert_equal "released", database.read { |db| db[:launch_reservations].get(:state) }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_launch_reservation_release_needs_a_store_database_and_logs_failures
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [], attempt_reconciler: Object.new)
+    dispatcher.send(:release_abandoned_launch_reservations)
+    assert_empty logger.events.select { |name, _attrs| name.to_s.start_with?("launch_reservation") }
+
+    database = Object.new
+    database.define_singleton_method(:path) { "/nonexistent/runtime.sqlite3" }
+    database.define_singleton_method(:read) { |*| raise Sequel::DatabaseError, "locked" }
+    reconciler = Struct.new(:store).new(Struct.new(:database).new(database))
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [], attempt_reconciler: reconciler)
+    dispatcher.send(:release_abandoned_launch_reservations)
+    failure = logger.events.find { |name, _attrs| name == :launch_reservation_release_failed }
+    assert_includes failure.last.fetch(:error), "locked"
+  end
+
   def test_attempt_storage_snapshot_failure_is_advisory
     reconciler = Object.new
     reconciler.define_singleton_method(:operational_storage_status) do |_snapshot|

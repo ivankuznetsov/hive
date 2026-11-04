@@ -582,7 +582,115 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_busy_disposition_retains_capacity_and_reports_deferred_bookkeeping
+    with_store do |store|
+      running_attempt(store, stale_sec: 30)
+      store.define_singleton_method(:mark_lost) do |*, **|
+        raise Hive::RuntimeControlPlane::FileFence::Busy.new("busy", lock_path: "/fence")
+      end
+      snapshot = reconciler(store, :missing).reconcile(now: NOW + 2)
+      assert_equal :suspect, snapshot.attempts.first.classification
+      assert_equal "deferred", snapshot.attempts.first.evidence.fetch("bookkeeping")
+      assert_equal 1, snapshot.capacity.global_count
+      assert_empty snapshot.newly_lost_attempts
+    end
+  end
+
+  def test_completion_replays_before_loss_or_controller_interruption
+    [ :loss, :interruption ].each do |operation|
+      with_store do |store|
+        running = running_attempt(store, stale_sec: 30)
+        receipt = prepare_pending_completion(store, running)
+        service = Hive::Attempts::Reconciler.new(
+          store: store, process_identity: InterruptionIdentity.new(:missing, :absent)
+        )
+        result = if operation == :loss
+          service.reconcile(now: NOW + 3).attempts.first
+        else
+          service.finalize_interruption(running, pause_generation: 2, now: NOW + 3)
+        end
+        assert_equal :terminal, result.classification
+        assert_equal receipt, result.attempt.receipt
+        assert_equal "replayed", result.evidence.fetch("pending_bookkeeping")
+        assert_nil result.attempt["loss"]
+      end
+    end
+  end
+
+  def test_corrupt_completion_reference_is_diagnostic_and_falls_back_to_loss
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      receipt = prepare_pending_completion(store, running)
+      File.write(File.join(store.root, receipt.fetch("log_reference").fetch("path")), "corrupted")
+      result = reconciler(store, :missing).reconcile(now: NOW + 3).attempts.first
+      assert_equal :lost, result.classification
+      assert_equal "invalid", result.evidence.fetch("pending_bookkeeping")
+      assert_match(/reference/, result.evidence.fetch("pending_bookkeeping_diagnostic"))
+      assert store.pending_bookkeeping.present?(result.attempt)
+    end
+  end
+
+  def test_nonterminal_pending_reason_is_preserved_when_owner_is_gone
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      store.pending_bookkeeping.record_busy(running, operation: "heartbeat")
+      result = reconciler(store, :missing).reconcile(now: NOW + 3).attempts.first
+      assert_equal :lost, result.classification
+      assert_equal "runtime_bookkeeping_busy", result.attempt["loss"].fetch("reason")
+    end
+  end
+
+  def test_completion_disposition_rechecks_the_exact_row_and_wrapper_custody
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 30, now: NOW)
+      service = reconciler(store, :matching)
+      options = { reason: "owner_gone", now: NOW + 3, owner_status: :missing }
+      retained = service.send(:completion_first_disposition, claimed, **options)
+      assert_equal :suspect, retained.classification
+      assert_equal "owner_retained", retained.evidence.fetch("custody")
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 1)
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        service.send(:completion_first_disposition, claimed, **options)
+      end
+      assert_equal "running", store.fetch(running.attempt_id).state
+    end
+  end
+
+  def test_orphan_worker_custody_blocks_loss_until_absence_or_termination
+    [ :unverifiable, :absent, :matching ].each do |worker_status|
+      with_store do |store|
+        running = running_attempt(store, stale_sec: 30)
+        worker = OWNER.merge("pid" => 456, "start_fingerprint" => "worker", "process_group_id" => 456)
+        store.checkpoint(running, checkpoint: running.checkpoint, worker: worker, now: NOW + 2)
+        identity = InterruptionIdentity.new(:missing, worker_status)
+        terminated = []
+        identity.define_singleton_method(:terminate_orphan_group) do |wrapper:, worker:|
+          terminated << worker
+          :terminated
+        end
+        result = Hive::Attempts::Reconciler.new(store: store, process_identity: identity)
+          .reconcile(now: NOW + 3).attempts.first
+        assert_equal worker_status == :unverifiable ? :suspect : :lost, result.classification
+        assert_equal worker_status == :matching ? [ worker ] : [], terminated
+      end
+    end
+  end
+
   private
+
+  def prepare_pending_completion(store, running)
+    writer = store.log_archive.open_writer(running.attempt_id)
+    writer.append(:stdout, "finished\n")
+    writer.close
+    receipt = store.prepare_terminal_receipt(
+      running, outcome: "succeeded", exit_status: 0, final_checkpoint: running.checkpoint,
+      output_references: [], log_reference: Hive::OutputReference.build(writer.path, root: store.root),
+      now: NOW + 2
+    )
+    store.pending_bookkeeping.prepare_completion(running, receipt: receipt)
+    receipt
+  end
 
   def with_store
     with_tmp_dir do |root|

@@ -1872,3 +1872,16 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+- Runtime contention qualification has not reproduced the historical long
+  publisher hold. Initial measurements include one residual manual writer
+  hold over one second; checkpoint and recovery qualification remain pending.
+
+- The bounded bookkeeping interface has deterministic full-envelope tests and
+  a real held-lock claim test. Crash/restart pending-operation persistence,
+  end-to-end transient attribution and the combined daemon/four-supervisor
+  workload still require their planned recovery and qualification evidence.
+
+- The November 3 runtime CI repair is locally reproduced and checked against
+  the failed test files and both dependency audits. Hosted checks for the new
+  commit remain pending; this does not close the workload qualification gaps.

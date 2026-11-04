@@ -3,9 +3,31 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-10-02
+updated: 2026-11-03
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
+
+Runtime writer connections have an explicit checkpoint role: daemon-owned
+setup selects `daemon_backed` (`wal_autocheckpoint=0`), including an already
+cached command-registration connection. Standalone/manual writers default to
+4096 pages and retain automatic checkpoint progress. Each replacement physical
+connection reapplies its selected policy; FULL synchronous durability remains.
+`CheckpointMaintenance` owns a separate daemon connection and runs one PASSIVE
+pass per 30 seconds on available full/fast poll ticks. At 16 MiB of WAL it may
+run once per second; this threshold cannot cap growth behind pinned readers.
+Its process/mutex guard, nonblocking lifecycle operation lock, shared writer
+fence and running-phase check prevent overlap with pause/upgrade work. The
+`runtime_checkpoint_maintenance` log event reports bytes, page/frame progress,
+duration and deferred errors. Quiescence performs a bounded PASSIVE drain
+while still quiescing under controller authority, then preserves the checked
+FULL checkpoint and proof boundary. Upgrade source TRUNCATE checks remain.
+The quiesce v1 schema accepts the nested `checkpoint.passive_drain` metrics.
+Explicit zero-timeout writer transactions retain nonblocking SQL semantics so
+an expired proof-publication deadline can roll its paused candidate back to
+quiescing under the held controller fence. Exhausted positive write budgets
+still refuse SQL acquisition; cleanup never receives an extra busy wait.
+Measured storage-policy evidence is in
+`docs/implementation/runtime-database-contention.md`.
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,

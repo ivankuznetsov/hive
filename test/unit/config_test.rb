@@ -454,6 +454,7 @@ class ConfigTest < Minitest::Test
       assert_equal 30, cfg["attempt_stale_sec"]
       assert_equal 30, cfg["attempt_launch_timeout_sec"]
       assert_equal 30, cfg["attempt_first_heartbeat_timeout_sec"]
+      assert_equal 30, cfg["attempt_bookkeeping_timeout_sec"]
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_nil cfg.dig("open_pr", "agent")
@@ -925,6 +926,37 @@ class ConfigTest < Minitest::Test
         error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
         assert_includes error.message, key
         assert_includes error.message, "positive integer"
+      end
+    end
+  end
+
+  def test_bookkeeping_budget_is_independent_of_shorter_lifecycle_windows
+    [ 30, 2.5, 60 ].each do |budget|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), {
+          "attempt_bookkeeping_timeout_sec" => budget,
+          "attempt_launch_timeout_sec" => 1,
+          "attempt_first_heartbeat_timeout_sec" => 1
+        }.to_yaml)
+        cfg = Hive::Config.load(dir)
+        assert_equal budget, cfg["attempt_bookkeeping_timeout_sec"]
+        assert_equal 1, cfg["attempt_launch_timeout_sec"]
+        assert_equal 1, cfg["attempt_first_heartbeat_timeout_sec"]
+      end
+    end
+  end
+
+  def test_bookkeeping_budget_rejects_nonpositive_and_nonfinite_values
+    [ 0, -1, Float::INFINITY, -Float::INFINITY, Float::NAN, "30", nil ].each do |budget|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), {
+          "attempt_bookkeeping_timeout_sec" => budget
+        }.to_yaml)
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes error.message, "attempt_bookkeeping_timeout_sec"
+        assert_includes error.message, "positive finite number"
       end
     end
   end

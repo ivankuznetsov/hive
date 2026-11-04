@@ -79,6 +79,14 @@ run in separate processes with their own loaders; Rails uses its own bundle.
 This is focused feedback, not proof of complete transitive dependency coverage.
 The full CI gate remains mandatory.
 
+Attempt bookkeeping regression tests live in `test/unit/attempts/` and
+`test/unit/runtime_control_plane/`. They cover invalid pending evidence,
+completion replay before loss or interruption, safe evidence retirement,
+concurrent admission and ambiguous worker registration, and error preservation
+when bounded SQL timeout cleanup fails. Supervisor race tests control worker
+exit and registration observation explicitly so those paths do not depend on
+scheduler timing.
+
 ```bash
 bin/test --changed --list                    # inspect files, commands, fallback reasons
 bin/test --changed --base origin/main        # run selected tests

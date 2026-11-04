@@ -38,7 +38,7 @@ class AttemptsClientTest < Minitest::Test
   end
 
   def test_lost_unknown_and_interrupted_attachments_are_typed
-    lost = Struct.new(:state).new("lost")
+    lost = Struct.new(:state, :bookkeeping_reason).new("lost")
     result = Hive::Attempts::Client.new(store: contract_store(lost)).attach("lost")
     assert_equal :lost, result.status
     assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_status
@@ -47,17 +47,17 @@ class AttemptsClientTest < Minitest::Test
       Hive::Attempts::Client.new(store: contract_store(nil)).attach("missing")
     end
 
-    interrupted_store = contract_store(Struct.new(:state).new("running"))
+    interrupted_store = contract_store(Struct.new(:state, :bookkeeping_reason).new("running"))
     interrupted_store.define_singleton_method(:fetch) { |_id| raise Interrupt }
     detached = Hive::Attempts::Client.new(store: interrupted_store).attach("running")
     assert_equal :detached, detached.status
   end
 
   def test_running_attachment_polls_before_terminal
-    terminal = Struct.new(:state, :receipt).new(
+    terminal = Struct.new(:state, :receipt, :bookkeeping_reason).new(
       "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
     )
-    records = [ Struct.new(:state).new("running"), terminal ]
+    records = [ Struct.new(:state, :bookkeeping_reason).new("running"), terminal ]
     result = Hive::Attempts::Client.new(
       store: contract_store(nil, fetch: ->(_id) { records.shift }), poll_interval: 0
     ).attach("attempt")
@@ -71,7 +71,7 @@ class AttemptsClientTest < Minitest::Test
       attempt_id = "attempt-tail"
       writer = store.log_archive.open_writer(attempt_id)
       writer.append("stdout", "before-")
-      terminal = Struct.new(:state, :receipt).new(
+      terminal = Struct.new(:state, :receipt, :bookkeeping_reason).new(
         "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
       )
       store.define_singleton_method(:fetch) do |_id|
@@ -120,7 +120,7 @@ class AttemptsClientTest < Minitest::Test
       writer = store.log_archive.open_writer(attempt_id)
       writer.append("stdout", "before-")
       writer.append("stderr", "warning-")
-      lost = Struct.new(:state).new("lost")
+      lost = Struct.new(:state, :bookkeeping_reason).new("lost")
       store.define_singleton_method(:fetch) do |_id|
         writer.append("stdout", "lost")
         writer.append("stderr", "tail")
@@ -155,7 +155,7 @@ class AttemptsClientTest < Minitest::Test
       )
     ]
     store = contract_store(
-      Struct.new(:state, :receipt).new(
+      Struct.new(:state, :receipt, :bookkeeping_reason).new(
         "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
       ),
       read_log_result: lambda { |after_sequence:|
@@ -203,7 +203,7 @@ class AttemptsClientTest < Minitest::Test
       File.open(writer.path, "ab") { |file| file.write('{"sequence":2') }
       recovered_sequence = writer.append(:stderr, "after")
       writer.close
-      terminal = Struct.new(:state, :receipt).new(
+      terminal = Struct.new(:state, :receipt, :bookkeeping_reason).new(
         "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
       )
       store.define_singleton_method(:fetch) { |_id| terminal }

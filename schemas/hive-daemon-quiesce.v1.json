@@ -101,7 +101,25 @@
         "complete": { "type": "boolean" },
         "busy": { "type": "integer", "minimum": 0 },
         "log_frames": { "type": "integer", "minimum": 0 },
-        "checkpointed_frames": { "type": "integer", "minimum": 0 }
+        "checkpointed_frames": { "type": "integer", "minimum": 0 },
+        "passive_drain": { "$ref": "#/$defs/PassiveCheckpoint" }
+      }
+    },
+    "PassiveCheckpoint": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "complete", "busy", "log_frames", "checkpointed_frames",
+        "remaining_frames", "page_size", "wal_bytes", "duration_sec"
+      ],
+      "properties": {
+        "complete": { "type": "boolean" },
+        "busy": { "type": "integer", "minimum": 0 },
+        "log_frames": { "type": "integer", "minimum": 0 },
+        "checkpointed_frames": { "type": "integer", "minimum": 0 },
+        "remaining_frames": { "type": "integer", "minimum": 0 },
+        "page_size": { "type": "integer", "minimum": 1 },
+        "wal_bytes": { "type": "integer", "minimum": 0 },
+        "duration_sec": { "type": "number", "minimum": 0 }
       }
     },
     "Capability": {

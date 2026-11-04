@@ -25,6 +25,23 @@ module Hive
           end
 
           current = @lifecycle.current
+          begin
+            # One nonblocking drain under the existing controller fence, while
+            # still quiescing. FULL below remains the completion authority.
+            passive = @database.passive_checkpoint!(
+              authority: authority, timeout_sec: remaining(@budget.deadline)
+            )
+          rescue StandardError => error
+            result = nonpaused(
+              "checkpoint_error", lifecycle: current,
+              details: { "error" => "#{error.class}: #{error.message}" }
+            )
+            next
+          end
+          if expired?(@budget.deadline)
+            result = nonpaused("deadline_exhausted", lifecycle: current, checkpoint: passive)
+            next
+          end
           candidate = @lifecycle.mark_paused!(
             generation: current.generation, expected_revision: current.revision,
             interrupted_attempt_ids: interrupted, authority: authority, now: @clock.call,
@@ -35,6 +52,7 @@ module Hive
             result = checkpoint
             next
           end
+          checkpoint = checkpoint.merge(passive_drain: passive)
           identity = installation_id
           @database.disconnect
           @successful_disconnect = true

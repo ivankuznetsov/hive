@@ -97,6 +97,7 @@ module Hive
         end
 
         @store.finish_publication(record.attempt_id)
+        @store.pending_bookkeeping.retire(record)
         true
       end
 

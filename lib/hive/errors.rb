@@ -282,15 +282,31 @@ module Hive
     end
 
     def self.sqlite_busy?(error)
-      seen = 0
-      while error && seen < 5
-        return true if error.class.name == "SQLite3::BusyException"
-        return true if error.message.to_s.include?("database is locked")
+      exception_chain(error).any? do |entry|
+        next false unless defined?(SQLite3::Exception) && entry.is_a?(SQLite3::Exception)
 
-        error = error.cause
-        seen += 1
+        entry.is_a?(SQLite3::BusyException) ||
+          (entry.respond_to?(:code) && entry.code.is_a?(Integer) && (entry.code & 0xff) == 5)
       end
-      false
+    end
+
+    # Sequel can retain the driver exception separately from Ruby's cause.
+    # Bound both traversal and identity tracking: malformed cause graphs must
+    # not turn error handling into an unbounded walk.
+    def self.exception_chain(error)
+      pending = [ error ]
+      seen = {}
+      chain = []
+      until pending.empty? || chain.length >= 16
+        entry = pending.shift
+        next unless entry.is_a?(Exception) && !seen[entry.object_id]
+
+        seen[entry.object_id] = true
+        chain << entry
+        pending << entry.cause
+        pending << entry.wrapped_exception if entry.respond_to?(:wrapped_exception)
+      end
+      chain
     end
   end
 

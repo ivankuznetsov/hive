@@ -131,6 +131,7 @@ module Hive
                      patrol_discovery_async: false,
                      persistent_admission: nil,
                      quiescence_lifecycle: nil,
+                     checkpoint_maintenance: nil,
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      boot_id_reader: nil,
                      monotonic_clock: nil,
@@ -144,6 +145,7 @@ module Hive
         @logger = logger
         @persistent_admission = persistent_admission
         @quiescence_lifecycle = quiescence_lifecycle
+        @checkpoint_maintenance = checkpoint_maintenance
         @monotonic = monotonic
         @boot_id_reader = boot_id_reader || Hive::RuntimeControlPlane::BootIdentity.method(:current)
         @merge_watcher = merge_watcher
@@ -315,6 +317,7 @@ module Hive
         tick_started = false
         tick_clock_started_at = nil
         return unless admission_open?
+        @checkpoint_maintenance&.sweep
         @one_shot_failure = nil if scoped_execution?
 
         tick_clock_started_at = full_tick_clock_time
@@ -751,6 +754,7 @@ module Hive
           if full_tick
             tick(now: now)
           else
+            @checkpoint_maintenance&.sweep if admission_open?
             probe = cheap_probe(now: now)
             unless @shutdown || @reload
               if probe.full_tick

@@ -31,6 +31,39 @@ class AttemptsRepositoryTest < Minitest::Test
   NOW = Time.utc(2026, 7, 16, 12)
   CLAIM_CAPABILITY = "c" * 64
 
+  def test_expired_claim_requires_the_exact_live_wrapper_capability_and_cas
+    with_tmp_dir do |root|
+      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+      launching = repository.create_launching(**identity, launch_timeout_sec: 1, now: NOW)
+      live_owner = Hive::Attempts::ProcessIdentity.new.capture(Process.pid).to_h
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.claim(
+          launching, owner: live_owner.merge("start_fingerprint" => "reused"),
+          claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 30, now: NOW + 2
+        )
+      end
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.claim(
+          launching, owner: live_owner, claim_capability: "bad",
+          first_heartbeat_timeout_sec: 30, now: NOW + 2
+        )
+      end
+      claimed = repository.claim(
+        launching, owner: live_owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 2
+      )
+      assert_equal live_owner, claimed.wrapper
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.claim(
+          launching, owner: live_owner, claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 30, now: NOW + 2
+        )
+      end
+      assert_equal claimed.to_h, repository.fetch(claimed.attempt_id).to_h
+    end
+  end
+
   def test_public_record_lifecycle_and_terminal_publication_survive_restart
     with_tmp_dir do |root|
       repository = Hive::Attempts::Repository.new(root: root, migrate: true)

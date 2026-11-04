@@ -8,6 +8,8 @@ module Hive
     # shared launcher ownership is visible across processes. Descriptors are
     # close-on-exec and must never be handed to a launched child.
     class FileFence
+      class Busy < Hive::ConcurrentRunError; end
+
       attr_reader :path, :mode
 
       def initialize(path:, timeout_sec:, monotonic_clock: nil, sleeper: nil,
@@ -67,7 +69,7 @@ module Hive
         deadline = @monotonic_clock.call + @timeout_sec
         until handle.flock(operation | File::LOCK_NB)
           if @monotonic_clock.call >= deadline
-            raise Hive::ConcurrentRunError.new(
+            raise Busy.new(
               "#{@label} remained busy for #{@timeout_sec}s", lock_path: path
             )
           end

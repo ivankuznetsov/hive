@@ -18,13 +18,18 @@ module Hive
 
       def initialize(store:, heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
-                     kill_grace_sec: 1, ready_timeout_sec: 5,
+                     kill_grace_sec: 1, ready_timeout_sec: nil,
                      capability: -> { self.class.supported? },
                      systemd_scope: -> { self.class.systemd_scope_available? },
                      systemd_run: "systemd-run",
-                     process_registry: nil,
+                     process_registry: nil, bookkeeping_timeout_sec: BookkeepingRetry::PRESTART_BUDGET_SEC,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     clock: -> { Time.now.utc },
                      hive_executable: File.expand_path("../../../bin/hive", __dir__))
         @store = store
+        @bookkeeping_timeout_sec = BookkeepingRetry.prestart_budget(bookkeeping_timeout_sec)
+        @monotonic = monotonic
+        @clock = clock
         @heartbeat_sec = heartbeat_sec
         @stale_sec = stale_sec
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
@@ -68,11 +73,22 @@ module Hive
 
       def launch(record, claim_capability:)
         preflight!
-        reservation = process_registry&.reserve!(
-          origin: "attempt", role: "attempt_wrapper", attempt_id: record.attempt_id,
-          task_id: record.respond_to?(:[]) ? record["task_id"] : nil,
-          timeout_sec: @ready_timeout_sec
+        launch_deadline = BookkeepingRetry.launch_deadline || @monotonic.call + @bookkeeping_timeout_sec
+        reservation_retry = BookkeepingRetry.new(
+          operation: "reserve_wrapper", attempt_id: record.attempt_id,
+          budget_sec: @bookkeeping_timeout_sec, deadline: launch_deadline, monotonic: @monotonic
         )
+        reservation_retry.cap_lifecycle!(expires_at: record.active_deadline, now: @clock.call) if record.respond_to?(:active_deadline)
+        launch_deadline = reservation_retry.deadline
+        reservation = if process_registry
+          reservation_retry.run do |timeout|
+            process_registry.reserve!(
+              origin: "attempt", role: "attempt_wrapper", attempt_id: record.attempt_id,
+              task_id: record.respond_to?(:[]) ? record["task_id"] : nil,
+              timeout_sec: timeout
+            )
+          end
+        end
         use_systemd_scope = @systemd_scope.call == true
         reader, writer = IO.pipe
         launcher_pid = fork do
@@ -81,7 +97,7 @@ module Hive
             Process.setsid
             fork_wrapper(
               record, claim_capability, writer, use_systemd_scope:,
-              reservation_id: reservation&.id
+              reservation_id: reservation&.id, launch_deadline: launch_deadline
             )
           rescue StandardError => e
             writer.write(JSON.generate(
@@ -96,7 +112,9 @@ module Hive
         writer.close
         Process.wait(launcher_pid)
 
-        ready = IO.select([ reader ], nil, nil, @ready_timeout_sec)
+        ready_wait = [ launch_deadline - @monotonic.call, 0.0 ].max
+        ready_wait = [ @ready_timeout_sec, ready_wait ].min if @ready_timeout_sec
+        ready = IO.select([ reader ], nil, nil, ready_wait)
         return { "claimed" => false, "attempt_id" => record.attempt_id, "state" => "launching" } unless ready
 
         line = reader.gets
@@ -118,7 +136,7 @@ module Hive
       end
 
       def fork_wrapper(record, claim_capability, writer, use_systemd_scope: false,
-                       reservation_id: nil)
+                       reservation_id: nil, launch_deadline: nil)
         claim_reader, claim_writer = IO.pipe
         claim_writer.write(claim_capability)
         claim_writer.close
@@ -140,6 +158,8 @@ module Hive
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
             "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s,
             "HIVE_ATTEMPT_RESERVATION_ID" => reservation_id,
+            "HIVE_ATTEMPT_BOOKKEEPING_DEADLINE" => launch_deadline&.to_s,
+            "HIVE_ATTEMPT_BOOKKEEPING_TIMEOUT_SEC" => @bookkeeping_timeout_sec.to_s,
             # The wrapper re-enters Hive itself. It must not inherit the
             # caller's Bundler loader, which can point at a different checkout
             # or an ephemeral test HOME before the supervisor reports ready.

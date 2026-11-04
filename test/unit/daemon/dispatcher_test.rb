@@ -109,6 +109,22 @@ class HiveDaemonDispatcherTest < Minitest::Test
     Q.reset!
   end
 
+  def test_checkpoint_maintenance_runs_only_on_admitted_daemon_ticks
+    passes = []
+    maintenance = Object.new
+    maintenance.define_singleton_method(:sweep) { passes << :pass }
+    admitted = true
+    dispatcher, = make_dispatcher(
+      rows: [], checkpoint_maintenance: maintenance,
+      persistent_admission: -> { admitted }
+    )
+    dispatcher.tick(now: T0)
+    assert_equal [ :pass ], passes
+    admitted = false
+    dispatcher.tick(now: T0 + 30)
+    assert_equal [ :pass ], passes
+  end
+
   # ── fakes ─────────────────────────────────────────────────────────────
 
   class FakeStatusConsumer
@@ -624,7 +640,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       monotonic_clock: nil, one_shot_drain_timeout_sec: nil,
                       dispatch_repository: nil, command_dispatch_lifecycle: nil,
                       patrol_discovery_async: false,
-                      persistent_admission: nil, quiescence_lifecycle: nil,
+                      persistent_admission: nil, quiescence_lifecycle: nil, checkpoint_maintenance: nil,
                       monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                       boot_id_reader: nil)
     # Register the helper-owned dir for teardown; it used to leak one tmpdir
@@ -705,6 +721,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       patrol_discovery_async: patrol_discovery_async,
       persistent_admission: persistent_admission,
       quiescence_lifecycle: quiescence_lifecycle,
+      checkpoint_maintenance: checkpoint_maintenance,
       monotonic: monotonic,
       boot_id_reader: boot_id_reader
     )

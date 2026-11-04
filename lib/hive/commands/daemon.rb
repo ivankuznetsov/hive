@@ -36,6 +36,7 @@ require "hive/attempts/process_identity"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/finalization_maintenance"
+require "hive/daemon/checkpoint_maintenance"
 require "hive/conditions/attempt_observer"
 require "hive/modules/event_publisher"
 require "hive/modules/daemon_runtime"
@@ -386,6 +387,10 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        Hive::RuntimeControlPlane.database(
+          path: Hive::Paths.runtime_control_plane_path(@hive_home),
+          checkpoint_role: :daemon_backed
+        )
         attempt_store = Hive::Attempts::Repository.open_default(state_home: @hive_home)
         Hive::Config.ensure_project_identities!
         module_event_publisher = Hive::Modules::EventPublisher.new
@@ -480,6 +485,9 @@ module Hive
         lifecycle_repository = Hive::RuntimeControlPlane::LifecycleRepository.new(
           database: attempt_store.database
         )
+        checkpoint_maintenance = Hive::Daemon::CheckpointMaintenance.new(
+          path: attempt_store.database.path, logger: logger
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -505,6 +513,7 @@ module Hive
           runtime_ready_callback: -> { activation_lock.release! },
           persistent_admission: -> { lifecycle_repository.current.admission_open? },
           quiescence_lifecycle: lifecycle_repository,
+          checkpoint_maintenance: checkpoint_maintenance,
           clock: -> { Time.now.utc },
           patrol_discovery_async: true
         )
@@ -531,6 +540,7 @@ module Hive
 
         reexec_with_fresh_code!
       ensure
+        checkpoint_maintenance&.close
         activation_lock&.release!
         if defined?(runtime_hive_bin_was_set)
           if runtime_hive_bin_was_set

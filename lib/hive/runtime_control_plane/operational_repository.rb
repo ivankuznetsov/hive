@@ -10,11 +10,12 @@ module Hive
       def publish(snapshot, status_projection: nil)
         validate_projection!(snapshot, status_projection) if status_projection
         document = { "snapshot" => snapshot, "status_projection" => status_projection }
-        @database.transaction do |db|
+        encoded = Codec.dump_json(document)
+        @database.transaction(operation: "operational.publish") do |db|
           installation_id = db[:installations].get(:installation_id) ||
             raise(IntegrityError.new("runtime installation identity is missing", code: :identity_missing))
           values = {
-            installation_id: installation_id, observation_json: Codec.dump_json(document)
+            installation_id: installation_id, observation_json: encoded
           }
           db[:daemon_runtime].insert_conflict(
             target: :installation_id, update: values

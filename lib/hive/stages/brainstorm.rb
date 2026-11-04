@@ -3,6 +3,8 @@ require "hive/config"
 require "hive/claude_launcher"
 require "hive/markers"
 require "hive/brainstorm_parser"
+require "digest"
+require "hive/attempts/context"
 
 module Hive
   module Stages
@@ -97,6 +99,7 @@ module Hive
         if valid_artifact &&
            (%i[waiting complete terminal_replay].include?(spawn_status) ||
             (artifact_changed && spawn_status == :error))
+          publish_result(task, accepted: true)
           return { commit: action_for(marker.name), status: marker.name }
         end
 
@@ -104,6 +107,7 @@ module Hive
         # carries the current attempt projection and is stronger evidence than
         # a synthesized Brainstorm fallback.
         if marker.name == :error
+          publish_result(task, accepted: false)
           return { commit: action_for(marker.name), status: marker.name }
         end
 
@@ -120,7 +124,15 @@ module Hive
         end
 
         marker = Hive::Markers.current(task.state_file)
+        publish_result(task, accepted: false)
         { commit: action_for(marker.name), status: marker.name }
+      end
+
+      def publish_result(task, accepted:)
+        publisher = Hive::Attempts::Context.current || Hive::Attempts::DiagnosticChannel
+        method = Hive::Attempts::Context.current ? :publish_stage_result : :publish_supervised_stage_result
+        publisher.public_send(method, accepted: accepted,
+          output_digest: Digest::SHA256.hexdigest(artifact_snapshot(task.state_file).to_s))
       end
 
       # A Brainstorm success is a durable artifact, not merely a process exit

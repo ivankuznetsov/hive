@@ -1,4 +1,6 @@
 require "test_helper"
+require "json_schemer"
+require "hive/attempts/failed_edit"
 require "digest"
 require "fileutils"
 require "tmpdir"
@@ -85,6 +87,157 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
   FakeGeneration = Data.define(:progress_token, :task_generation)
+
+  def test_failed_edit_retains_waiting_and_deadline_across_restart_and_input_rebinding
+    with_failed_edit_fixture do |coordinator, row, state_home, store, task|
+      original = File.binread(row.state_file)
+      first = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      assert_equal "cooldown", first.status
+      assert_equal original, File.binread(row.state_file)
+      again = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW + 10)
+      assert_equal first.request_id, again.request_id
+      assert_equal first.next_eligible_at, again.next_eligible_at
+      request = Q.fetch(first.request_id, state_home: state_home)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
+      payload = Q.repository(state_home).database.read { |db| JSON.parse(db[:dispatch_requests].where(request_id: request.request_id).get(:payload_json)) }
+      assert_empty schema.validate(payload).to_a
+      source = request.recovery.fetch("source_binding")
+      File.write(row.state_file, original + "latest operator answer\n")
+      refreshed = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW + 20)
+      rebound = Q.fetch(refreshed.request_id, state_home: state_home)
+      refute_equal request.request_id, rebound.request_id
+      assert_equal source, rebound.recovery.fetch("source_binding")
+      assert_equal first.next_eligible_at, refreshed.next_eligible_at
+      assert_equal 1, Q.pending(state_home: state_home).size
+      due = Time.iso8601(first.next_eligible_at)
+      receipt = coordinator.resume(request: rebound, row: row, now: due)
+      assert_equal "cleared", receipt.phase
+      assert_equal :waiting, Hive::Markers.current(row.state_file).name
+    end
+  end
+
+  def test_failed_edit_repeated_failures_park_and_edits_require_explicit_fresh_retry
+    with_failed_edit_fixture do |coordinator, row, dir, store, task|
+      6.times do |index|
+        observed = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW + index * 4000)
+        request = Q.fetch(observed.request_id, state_home: dir)
+        if index == 5
+          assert_equal "blocked", observed.status
+          assert_equal "parked", observed.escalation_tier
+          assert_equal "edits do not release this park; use the current workflow.retry action", observed.remediation
+          File.write(row.state_file, File.binread(row.state_file) + "updated answer\n")
+          edited_row = row.with(state_file_mtime: File.mtime(row.state_file))
+          still = coordinator.dup.request_failed_edit(row: edited_row, requestor: "healer", now: NOW + 25_000)
+          assert_equal "parked", still.escalation_tier
+          assert_equal observed.next_eligible_at, still.next_eligible_at
+          token_row = edited_row.to_h.merge(recovery: still.to_h)
+          stale = coordinator.request_failed_edit(row: token_row, requestor: "action", observation_token: "old", now: NOW + 25_001)
+          assert_equal "stale_observation", stale.reason
+          token = coordinator.observation_token_for(token_row)
+          released = coordinator.request_failed_edit(row: token_row, requestor: "action", observation_token: token, now: NOW + 25_001)
+          explicit_request = Q.fetch(released.request_id, state_home: dir)
+          assert_equal "action", explicit_request.requestor
+          assert_equal "recovery", explicit_request.trigger
+          assert_equal "queued", released.status
+          assert_equal 1, released.retry_count
+          break
+        end
+        due = Time.iso8601(observed.next_eligible_at)
+        coordinator.resume(request: request, row: row, now: due)
+        request = Q.fetch(request.request_id, state_home: dir)
+        source = store.fetch(request.recovery.dig("source_binding", "attempt_id"))
+        successor_id = "failed-edit-#{index + 2}"
+        coordinator.mark_dispatched(request, attempt_id: successor_id, terminal: true, outcome: "failed", now: due + 1)
+        checkpoint = source.checkpoint.merge("edit_resume_source_binding" => request.recovery["source_binding"])
+        receipt = source.receipt.merge("attempt_id" => successor_id, "ended_at" => (due + 1).iso8601(6), "final_checkpoint" => checkpoint)
+        store.put(source.with("attempt_id" => successor_id, "request_id" => request.request_id,
+          "ended_at" => (due + 1).iso8601(6), "checkpoint" => checkpoint, "receipt" => receipt))
+      end
+    end
+  end
+
+  def test_preexisting_markerless_request_still_validates_against_dispatch_schema
+    with_markerless_fixture do |coordinator, row, state_home, _original|
+      result = coordinator.request_markerless_failure(row: row, requestor: "healer", reason: "agent_exited_without_terminal_marker", now: NOW)
+      payload = Q.repository(state_home).database.read { |db| JSON.parse(db[:dispatch_requests].where(request_id: result.request_id).get(:payload_json)) }
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_failed_edit_does_not_inherit_or_prune_other_recovery_variants
+    with_failed_edit_fixture do |coordinator, row, dir, _store, _task|
+      write_terminal_recovery_history(row: row, state_home: dir, retry_count: 9)
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      assert_equal 1, result.retry_count
+      refute_nil Q.fetch("previous-terminal", state_home: dir)
+      assert_equal 1, Q.recovery_retry_count(project: row.project, slug: row.slug,
+        expected_stage: row.stage, variant: "failed_edit", state_home: dir)
+      assert_equal 9, Q.recovery_retry_count(project: row.project, slug: row.slug,
+        expected_stage: row.stage, variant: "marker", state_home: dir)
+    end
+  end
+
+  def test_failed_edit_missing_task_id_is_blocked
+    with_failed_edit_fixture(task_id: nil) do |coordinator, row, _dir, _store, _task|
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      assert_equal "blocked", result.status
+      assert_equal "missing_task_id", result.reason
+      assert_equal "hive", result.owner
+    end
+  end
+
+  def test_failed_edit_rejects_changed_identity_invalid_history_and_unavailable_storage
+    with_failed_edit_fixture do |coordinator, row, _dir, _store, _task|
+      result = coordinator.request_failed_edit(row: row.with(slug: "replacement"), requestor: "healer", now: NOW)
+      assert_equal "task_identity_conflict", result.reason
+      result = coordinator.request_failed_edit(row: row.with(task_history_invalid: true), requestor: "healer", now: NOW)
+      assert_equal Hive::TaskProjection::INVALID_HISTORY_REASON, result.reason
+      coordinator.define_singleton_method(:resolve_task_for) { |_row| raise IOError, "storage unavailable" }
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      assert_equal "unavailable", result.status
+      assert_equal "recovery_unavailable", result.reason
+    end
+  end
+
+  def test_failed_edit_source_acceptance_blocks_resume_and_retires_the_pending_request
+    with_failed_edit_fixture do |coordinator, row, dir, store, _task|
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      request = Q.fetch(result.request_id, state_home: dir)
+      source = store.fetch(request.recovery.dig("source_binding", "attempt_id"))
+      store.put(source.with("outcome" => "succeeded", "receipt" => source.receipt.merge("outcome" => "succeeded", "exit_status" => 0)))
+      blocked = coordinator.resume(request: request, row: row, now: NOW + 4000)
+      assert_equal "generation_conflict", blocked.reason
+      assert_nil coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW + 4001)
+      assert_nil Q.fetch(request.request_id, state_home: dir)
+    end
+  end
+
+  def test_explicit_failed_edit_retry_rechecks_safety_before_expedition
+    with_failed_edit_fixture do |coordinator, row, dir, _store, _task|
+      result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+      coordinator.instance_variable_set(:@safety, ->(_row) { [ false, "ownership changed" ] })
+      observed = row.to_h.merge(recovery: result.to_h)
+      token = coordinator.observation_token_for(observed)
+      blocked = coordinator.request_failed_edit(row: observed, requestor: "action", observation_token: token, now: NOW + 1)
+      assert_equal "safety_blocked", blocked.reason
+      assert_equal result.next_eligible_at, Q.fetch(result.request_id, state_home: dir).recovery["next_eligible_at"]
+    end
+  end
+
+  def test_failed_edit_recovery_yields_to_an_existing_task_lock
+    with_failed_edit_fixture do |coordinator, row, dir, _store, _task|
+      lock = Hive::Lock.acquire_task_lock(row.folder, "attempt_id" => "active-owner")
+      begin
+        result = coordinator.request_failed_edit(row: row, requestor: "healer", now: NOW)
+        assert_equal "running", result.status
+        assert_equal "existing_live", result.reason
+        assert_empty Q.pending(state_home: dir)
+      ensure
+        Hive::Lock.release_task_lock(row.folder, lock_id: lock.fetch("lock_id"))
+      end
+    end
+  end
 
   def test_request_reports_missing_observation_when_assessment_has_no_retry_time
     with_tmp_dir do |state_home|
@@ -2545,6 +2698,40 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         )
       end
     )
+  end
+
+  def with_failed_edit_fixture(task_id: 817)
+    store = Object.new
+    records = {}
+    store.define_singleton_method(:fetch) { |id| records[id] }
+    store.define_singleton_method(:put) { |record| records[record.attempt_id] = record }
+    store.define_singleton_method(:task_stage_records) { |**| records.values }
+    resolver = lambda do |task, project:, intended_stage:, state_file_content:|
+      Hive::Attempts::Generation.resolve(task: task, project: project, intended_stage: intended_stage,
+        task_input_epoch: 0, progress_token: Hive::Attempts::Generation.artifact_token(task, state_file_content: state_file_content))
+    end
+    with_fixture(marker_name: "WAITING", marker_attrs: {}, task_id: task_id,
+                 attempt_store: store, generation_resolver: resolver) do |coordinator, row, dir|
+      task = coordinator.send(:resolve_task_for, row)
+      generation = resolver.call(task, project: row.project, intended_stage: row.stage, state_file_content: File.binread(row.state_file))
+      record = Hive::Attempts::Record.launching(
+        attempt_id: "failed-edit-1", request_id: "edit-request", task_id: (task_id || 817).to_s,
+        project: row.project, task_slug: task.slug, intended_stage: row.stage,
+        task_generation: generation.task_generation, ownership_generation: generation.ownership_generation,
+        task_input_epoch: 0, progress_token: generation.progress_token, provider: "codex",
+        worker_argv: [ "hive", "run", task.slug ], claim_capability_digest: "a" * 64,
+        starting_revision: "b" * 40, retry_charge: 0, inherited_outputs: [], now: NOW - 5, launch_timeout_sec: 30
+      )
+      receipt = { "receipt_version" => 2, "terminal_lease_version" => 1,
+        "attempt_id" => record.attempt_id, "task_generation" => record.task_generation,
+        "ownership_generation" => record.ownership_generation, "task_input_epoch" => 0,
+        "outcome" => "failed", "exit_status" => 1, "started_at" => (NOW - 4).iso8601(6),
+        "ended_at" => NOW.iso8601(6), "final_checkpoint" => record.checkpoint,
+        "output_references" => [], "log_reference" => { "path" => "logs/edit.frames", "size" => 0, "sha256" => "0" * 64 }, "provider_evidence" => nil, "pause_generation" => nil }
+      records[record.attempt_id] = record.with("state" => "terminal", "outcome" => "failed",
+        "lease_version" => 1, "ended_at" => NOW.iso8601(6), "receipt" => receipt)
+      yield coordinator, row, dir, store, task
+    end
   end
 
   def with_markerless_fixture(task_id: 817, safety: nil,

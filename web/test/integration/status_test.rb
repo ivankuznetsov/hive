@@ -141,6 +141,70 @@ class StatusTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "board and grid share failed edit recovery reasons input precedence and unknown times" do
+    sign_in!
+    name = create_hive_project!("failed-edit-status")
+    project = Project.find!(name).attributes
+    rows = %w[cooldown queued running parked missing missing-parked unavailable unknown-time consumed].each_with_index.map do |slug, index|
+      binding = { "project" => name, "task_id" => (index + 1).to_s,
+        "intended_stage" => "2-brainstorm", "task_locator" => "id:#{index + 1}" }
+      recovery = {
+        "variant" => "failed_edit", "status" => "cooldown", "owner" => "scheduler",
+        "reason" => "spawn failed", "scheduler_status" => "current",
+        "next_eligible_at" => "2026-11-03T12:05:00Z", "task_binding" => binding,
+        "source_binding" => binding.merge("request_id" => "source-#{index}", "attempt_id" => "failed-#{index}"),
+        "input_binding" => { "task_input_epoch" => 1, "progress_token" => "a" * 64 }
+      }
+      recovery["status"] = slug if %w[queued running].include?(slug)
+      if slug.include?("parked")
+        recovery.merge!("status" => "blocked", "owner" => "operator", "reason" => "deterministic_failure",
+          "escalation_tier" => "parked", "remediation" => "edits do not release this park; use the current workflow.retry action")
+      end
+      recovery["scheduler_status"] = "unavailable" if slug == "unavailable"
+      recovery["next_eligible_at"] = nil if slug == "unknown-time"
+      {
+        "id" => index + 1, "slug" => slug, "workflow" => "coding", "stage" => "2-brainstorm",
+        "marker" => "waiting", "action" => "needs_input", "action_label" => "Answer questions",
+        "answers_complete" => !slug.start_with?("missing"),
+        "unanswered_questions" => slug.start_with?("missing") ? 1 : 0,
+        "recovery" => slug == "consumed" ? nil : recovery
+      }
+    end
+    with_status_snapshot("projects" => [ project.merge("tasks" => rows) ]) do
+      [ board_path, grid_path ].each do |path|
+        get path, params: { project: name }
+        assert_response :success
+        expected = {
+          "cooldown" => [ "Needs recovery", /2026-11-03T12:05:00Z.*spawn failed/ ],
+          "queued" => [ "Needs recovery", /queued retry at 2026-11-03T12:05:00Z/ ],
+          "running" => [ "Running", nil ],
+          "parked" => [ "Needs execution repair", /edits do not release this park/ ],
+          "missing" => [ "Answer questions", /spawn failed/ ],
+          "missing-parked" => [ "Needs execution repair", /edits do not release this park/ ],
+          "unavailable" => [ "Status unavailable", /stored recovery cooldown.*spawn failed/ ],
+          "unknown-time" => [ "Needs recovery", /retry time unavailable/ ],
+          "consumed" => [ "Waiting", /Answers complete/ ]
+        }
+        expected.each do |slug, (label, detail)|
+          selector = path == board_path ? ".kanban-card[data-task-slug='#{slug}']" : ".task-row:has(a[href='#{task_path(name, slug)}'])"
+          assert_select selector do |cards|
+            assert_select path == board_path ? ".kanban-card-meta" : ".task-meta", text: /#{Regexp.escape(label)}/
+            assert_select ".task-state-detail", text: detail if detail
+            refute_match(/retry at/i, cards.first.css(".task-state-detail").map(&:text).join) if slug == "unavailable"
+            if path == board_path && %w[parked cooldown queued].include?(slug)
+              assert_select "form[action$='/recover'] button:not([disabled])", text: "Retry stage"
+              assert_select "form[action$='/recover'] input[name=observation_token]" do |fields|
+                assert_match(/\A[0-9a-f]{64}\z/, fields.first["value"])
+              end
+            elsif path == board_path && slug == "consumed"
+              assert_select "form[action$='/recover']", 0
+            end
+          end
+        end
+      end
+    end
+  end
+
   test "a supervised daemon does not render service repair guidance" do
     sign_in!
     daemon_status = {

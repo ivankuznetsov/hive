@@ -3,6 +3,7 @@ require "json_schemer"
 require "hive/operational_status"
 
 class OperationalStatusTest < Minitest::Test
+  include HiveTestHelper
   STATES = %w[
     unknown running needs_repair waiting_on_you
     waiting_on_provider_or_scheduler completion_ready idle
@@ -10,6 +11,152 @@ class OperationalStatusTest < Minitest::Test
 
   def setup
     Hive::RuntimeControlPlane.database.migrate!
+  end
+
+  def test_failed_edit_recovery_preserves_binding_and_obeys_input_and_park_precedence
+    row = task(action: "needs_input", slug: "answered", stage: "2-brainstorm").merge(
+      "id" => 81, "answers_complete" => true)
+    binding = { "project" => "demo", "task_id" => "81", "intended_stage" => "2-brainstorm", "task_locator" => "id:81" }
+    source = binding.merge("attempt_id" => "failed-source", "request_id" => "source-request",
+      "task_generation" => "a" * 64, "ownership_generation" => "a" * 64,
+      "task_input_epoch" => 1, "progress_token" => "b" * 64)
+    recovery = {
+      "status" => "cooldown", "variant" => "failed_edit", "phase" => "admitted",
+      "request_id" => "recovery-81", "attempt_id" => nil, "owner" => "scheduler",
+      "failure_origin" => "agent_launch_failed", "reason" => nil,
+      "next_eligible_at" => "2026-07-20T11:00:00Z", "task_binding" => binding,
+      "source_binding" => source, "input_binding" => source.slice("task_input_epoch", "progress_token"),
+      "source_receipt_version" => 2, "source_terminal_lease_version" => 3,
+      "source_dispatch_revision" => nil
+    }
+    snapshot = scheduler_snapshot_for(row, decision: "recovery_cooldown", reason: "recovery owns task")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = recovery
+    options = { project_context: { "demo" => { "daemon_enabled" => true } }, scheduler_snapshot: snapshot }
+    projected = project(status_payload(row), **options).fetch("tasks").first
+    assert_equal "waiting_on_provider_or_scheduler", projected["state"]
+    assert_equal "failed_edit", projected.dig("recovery", "variant")
+    assert_equal source, projected.dig("recovery", "source_binding")
+    assert_nil projected.dig("recovery", "attempt_id")
+    assert_equal "current", projected.dig("recovery", "scheduler_status")
+    assert_equal "workflow.retry", projected.dig("action", "action_id")
+    assert_includes projected["reason"], recovery["next_eligible_at"]
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert_empty schema.validate(project(status_payload(row), **options)).to_a
+
+    missing = row.merge("answers_complete" => false, "unanswered_questions" => 1)
+    snapshot = scheduler_snapshot_for(missing, decision: "recovery_cooldown", reason: "recovery owns task")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = recovery
+    options[:scheduler_snapshot] = snapshot
+    projected = project(status_payload(missing), **options).fetch("tasks").first
+    assert_equal "waiting_on_you", projected["state"]
+    assert_equal "cooldown", projected.dig("recovery", "status")
+    recovery.merge!("status" => "blocked", "reason" => "deterministic_failure", "owner" => "operator", "escalation_tier" => "parked")
+    projected = project(status_payload(missing), **options).fetch("tasks").first
+    assert_equal "needs_repair", projected["state"]
+  end
+
+  def test_restart_status_preserves_durable_failed_edit_intent_without_writing_or_claiming_a_retry_time
+    row = task(action: "needs_input", slug: "durable-edit", stage: "2-brainstorm").merge(
+      "id" => 82, "answers_complete" => true)
+    database = Hive::RuntimeControlPlane.database
+    database.transaction do |db|
+      db[:projects].insert(project_id: "durable-demo", installation_id: db[:installations].first[:installation_id],
+        registration_id: "durable-demo", name: "demo", observed_path: "/tmp/demo",
+        state_root_path: "/tmp/demo/.hive-state", active: 1,
+        registered_at: "2026-07-20T10:00:00Z", last_observed_at: "2026-07-20T10:00:00Z")
+    end
+    binding = { "project" => "demo", "task_id" => "82", "intended_stage" => "2-brainstorm", "task_locator" => "id:82" }
+    repository = Hive::RuntimeControlPlane::DispatchRepository.new(database: database)
+    repository.write_request!(project: "demo", slug: row["slug"], argv: %w[hive brainstorm durable-edit],
+      task_id: "82", expected_stage: row["stage"], recovery: {
+        "variant" => "failed_edit", "phase" => "admitted", "task_binding" => binding,
+        "source_binding" => binding.merge("attempt_id" => "failed-before-stage", "request_id" => "source"),
+        "input_binding" => { "task_input_epoch" => 0, "progress_token" => "c" * 64 },
+        "failure_origin" => "agent_launch_failed", "owner" => "scheduler",
+        "next_eligible_at" => "2026-07-20T11:00:00Z"
+      })
+    before = database.operational_read { |db| db[:dispatch_requests].all }
+    unavailable = nil
+    stale = scheduler_snapshot_for(row, decision: "recovery_cooldown", reason: "stored recovery").merge("status" => "stale")
+    changed_graph = scheduler_snapshot_for(row.merge("mtime" => "old"), decision: "recovery_cooldown", reason: "old graph")
+    [ unavailable, stale, changed_graph ].each do |snapshot|
+      result = project(status_payload(row), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } })
+      actual = result.fetch("tasks").first
+      assert_equal "unknown", actual["state"]
+      assert_equal "cooldown", actual.dig("recovery", "status")
+      assert_equal "agent_launch_failed", actual.dig("recovery", "failure_origin")
+      assert_includes actual["reason"], "stored recovery cooldown"
+      refute_includes actual["reason"], "retry at"
+      assert_nil actual["action"]
+    end
+    replaced = row.merge("id" => 83)
+    actual = project(status_payload(replaced), project_context: { "demo" => { "daemon_enabled" => true } }).fetch("tasks").first
+    assert_nil actual["recovery"]
+    disabled = project(status_payload(row)).fetch("tasks").first
+    assert_includes disabled["reason"], "daemon dispatch is disabled"
+    refute_includes disabled["reason"], "retry at"
+    assert_equal before, database.operational_read { |db| db[:dispatch_requests].all }
+  end
+
+  def test_complete_answers_without_failure_evidence_follow_observed_freshness_and_never_advertise_retry
+    row = task(action: "needs_input", slug: "consumed-answer", stage: "2-brainstorm").merge("answers_complete" => true)
+    options = { project_context: { "demo" => { "daemon_enabled" => true } } }
+    snapshot = scheduler_snapshot_for(row, decision: "skip", reason: "successful edit already consumed")
+    current = project(status_payload(row), **options, scheduler_snapshot: snapshot).fetch("tasks").first
+    assert_equal "waiting_on_provider_or_scheduler", current["state"]
+    assert_nil current["recovery"]
+    assert_nil current["action"]
+    unavailable = project(status_payload(row), **options).fetch("tasks").first
+    assert_equal "unknown", unavailable["state"]
+    assert_nil unavailable["recovery"]
+    assert_nil unavailable["action"]
+    status = Hive::OperationalStatus.new(status_payload: status_payload(row), **options)
+    entry = status.recovery_rows.first
+    assert_nil entry["recovery"]
+    assert_equal "unavailable", entry["scheduler_status"]
+  end
+
+  def test_scheduler_identity_and_capacity_hold_preserve_the_recovery_reason
+    row = task(action: "needs_input", slug: "held-edit", stage: "2-brainstorm").merge("id" => 83, "answers_complete" => true)
+    snapshot = scheduler_snapshot_for(row, decision: "global_cap", reason: "capacity is full")
+    snapshot["tasks"][0]["identity"]["id"] = row["id"]
+    snapshot["tasks"][0]["disposition"]["recovery"] = {
+      "variant" => "failed_edit", "status" => "queued", "request_id" => "held-retry", "owner" => "scheduler" }
+    result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } }, scheduler_snapshot: snapshot)
+    projected = result["tasks"].first
+    assert_equal "current", projected.dig("freshness", "scheduler_status")
+    assert_equal "capacity is full", projected.dig("recovery", "scheduler_hold")
+    assert_includes projected["reason"], "capacity is full"
+    snapshot["tasks"][0]["identity"]["id"] = 84
+    result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } }, scheduler_snapshot: snapshot)
+    refute_equal "current", result["tasks"].first.dig("freshness", "scheduler_status")
+  end
+
+  def test_unavailable_durable_recovery_storage_does_not_break_status
+    row = task(action: "needs_input", slug: "offline-edit", stage: "2-brainstorm").merge("id" => 84, "answers_complete" => true)
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::DispatchRepository, :new, ->(**) {
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    }) do
+      result = project(status_payload(row), project_context: { "demo" => { "daemon_enabled" => true } })
+      assert_equal "unknown", result["tasks"].first["state"]
+      assert_nil result["tasks"].first["recovery"]
+    end
+  end
+
+  def test_canonical_missing_task_id_block_displays_repair_without_a_retry_action
+    row = task(action: "needs_input", slug: "legacy-answered", stage: "2-brainstorm").merge("answers_complete" => true)
+    snapshot = scheduler_snapshot_for(row, decision: "recovery_blocked", reason: "missing_task_id")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+      "status" => "blocked", "reason" => "missing_task_id", "owner" => "hive",
+      "remediation" => "follow the manual task-ID migration guide"
+    }
+    actual = project(status_payload(row), scheduler_snapshot: snapshot,
+      project_context: { "demo" => { "daemon_enabled" => true } }).fetch("tasks").first
+    assert_equal "needs_repair", actual["state"]
+    assert_equal "hive", actual["blocker_owner"]
+    assert_includes actual["reason"], "manual task-ID migration"
+    assert_nil actual["action"]
   end
 
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts

@@ -3470,6 +3470,43 @@ class HiveTuiBubbleModelTest < Minitest::Test
 
   # ---- RecoverError → shared recovery coordinator ----
 
+  def test_failed_edit_retry_key_submits_freshness_bound_explicit_action
+    row = make_task_row(suggested_command: nil).with(
+      answers_complete: true,
+      recovery: {
+        "variant" => "failed_edit", "status" => "blocked", "escalation_tier" => "parked",
+        "scheduler_status" => "current", "reason" => "deterministic_failure",
+        "source_attempt_id" => "failed-attempt", "source_request_id" => "failed-request"
+      }
+    )
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: @model.hive_model.with(snapshot: snapshot_with([ row ]), cursor: [ 0, 0 ]),
+      dispatch: @dispatch, recovery_writer: @recovery_writer
+    )
+    token_row = nil
+    token_project = nil
+    with_replaced_singleton_method(Hive::OperationalAction, :token, ->(project:, row:) {
+      token_row = row
+      token_project = project
+      "observed-failed-edit-token"
+    }) do
+      2.times do
+        @model.update(key_message(0, runes: [ "r".ord ]))
+        @model.wait_for_background_threads
+      end
+    end
+
+    assert_equal 2, @recovery_writer.calls.length, @model.hive_model.flash.to_s
+    call = @recovery_writer.calls.fetch(0)
+    assert_equal "demo", token_project
+    assert_same row, call.fetch(:row)
+    assert_equal "action", call.fetch(:requestor)
+    assert_equal "observed-failed-edit-token", call.fetch(:observation_token)
+    assert_equal "needs_input", token_row.fetch("action")
+    assert_equal "failed-attempt", token_row.dig("recovery", "source_attempt_id")
+    assert_equal "Recovery queued — request tui-test", last_async_flash_text
+  end
+
   def test_recover_error_submits_observed_row_and_renders_canonical_receipt
     folder = "/tmp/hive/error-me"
     row = make_task_row(

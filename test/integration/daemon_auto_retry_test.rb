@@ -1,5 +1,9 @@
 require "test_helper"
 require "hive/agent_limit"
+require "json_schemer"
+require "hive/attempts/dispatcher"
+require "hive/attempts/reconciler"
+require "hive/daemon/dispatch_baselines"
 require "hive/commands/init"
 require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
@@ -15,6 +19,8 @@ class DaemonAutoRetryTest < Minitest::Test
 
   class FakeStatusConsumer
     attr_accessor :result
+
+    def fetch_tasks(_) = fetch
 
     def fetch
       result || Hive::Daemon::StatusConsumer::Result.new(
@@ -330,5 +336,365 @@ class DaemonAutoRetryTest < Minitest::Test
     end
 
     assert_equal 1, @logger.events.count { |name, _attrs| name == :recovery_requested }
+  end
+end
+
+class DaemonFailedEditRetryTest < Minitest::Test
+  include HiveTestHelper
+
+  NOW = Time.utc(2030, 7, 16, 12, 0, 0)
+  CAPABILITY = "c" * 64
+
+  class Launcher
+    attr_reader :launched
+    def initialize = @launched = []
+    def preflight! = true
+    def launch(record, claim_capability:)
+      @launched << [ record, claim_capability ]
+      { "claimed" => true }
+    end
+  end
+
+  def with_failed_edit(stage: "2-brainstorm", outcome: "failed", exit_status: 1, before_finish: nil, supervised: false, accepted_result: false)
+    with_tmp_global_config do
+      with_tmp_git_repo do |root|
+        capture_io { Hive::Commands::Init.new(root).call }
+        @project = File.basename(root)
+        @now = NOW
+        @stage = stage
+        @supervised = supervised
+        folder = File.join(root, ".hive-state", "stages", stage, "answered-task")
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(folder, id: 812, slug: "answered-task", display_name: nil, workflow: "coding")
+        @task = Hive::Task.new(folder)
+        File.write(@task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\nLatest answer\n<!-- WAITING -->\n")
+        File.utime(NOW - 60, NOW - 60, @task.state_file)
+        @store = Hive::Attempts::Repository.open_default
+        @queue = Hive::RuntimeControlPlane::DispatchRepository.new(database: @store.database, clock: -> { @now })
+        @launcher = Launcher.new
+        @attempt_dispatcher = Hive::Attempts::Dispatcher.new(
+          store: @store, launcher: @launcher, clock: -> { @now },
+          capability_generator: -> { CAPABILITY }, task_resolver: ->(_) { @task }
+        )
+        @baseline = File.join(Hive::Paths.state_home, "edit-baselines.json")
+        @status = DaemonAutoRetryTest::FakeStatusConsumer.new
+        update_row
+        @daemon = new_daemon
+        @controller.observe_state_file_mtime(project: @project, slug: @task.slug, mtime: NOW - 600)
+        @daemon.tick(now: @now)
+        launches = supervised ? @supervisor.spawned.length : @launcher.launched.length
+        assert_equal 1, launches, @logger.events.inspect
+        before_finish&.call(@task)
+        update_row
+        if supervised
+          child = @supervisor.instance_variable_get(:@unreaped).last
+          child.exit_code = exit_status
+          if accepted_result
+            child.stage_result = { "schema" => "hive-stage-result", "handled" => true,
+              "accepted" => true, "output_digest" => Digest::SHA256.file(@task.state_file).hexdigest }
+          end
+        else
+          checkpoint = @launcher.launched.last.first.checkpoint
+          if accepted_result
+            checkpoint = checkpoint.merge("stage_result" => {
+              "handled" => true, "accepted" => true,
+              "output_digest" => Digest::SHA256.file(@task.state_file).hexdigest
+            })
+          end
+          @source = finish_latest(outcome: outcome, exit_status: exit_status, checkpoint: checkpoint)
+        end
+        yield
+      ensure
+        @store&.database&.disconnect
+      end
+    end
+  end
+
+  def update_row
+    marker = Hive::Markers.current(@task.state_file)
+    @row = Hive::Daemon::StatusConsumer::Row.new(
+      id: @task.id, project: @project, slug: @task.slug, stage: @stage,
+      workflow: "coding", marker: marker.name.to_s, marker_attrs: marker.attrs,
+      action: "needs_input", folder: @task.folder, state_file: @task.state_file,
+      state_file_mtime: File.mtime(@task.state_file),
+      suggested_command: "hive #{@stage == '2-brainstorm' ? 'brainstorm' : 'review'} #{@task.slug} --project #{@project} --from #{@stage}"
+    )
+    @status.result = Hive::Daemon::StatusConsumer::Result.new(ok: true,
+      rows: [ @row ], projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(name: @project, legacy_stage_dirs: []) ])
+  end
+
+  def new_daemon
+    @controller = Hive::Daemon::ConcurrencyController.new(
+      max_concurrent_runs: 3, max_concurrent_per_project: 3,
+      max_runs_per_day_per_project: 50,
+      dispatch_state: Hive::Daemon::DispatchBaselines.new(path: @baseline)
+    )
+    Hive::Daemon::Dispatcher.new(
+      config: { "daemon" => { "edit_debounce_sec" => 30, "poll_interval_sec" => 30 } },
+      controller: @controller, supervisor: (@supervisor = DaemonAutoRetryTest::FakeSupervisor.new),
+      logger: (@logger = DaemonAutoRetryTest::FakeLogger.new), status_consumer: @status,
+      attempt_dispatcher: @supervised ? nil : @attempt_dispatcher,
+      attempt_reconciler: @supervised ? nil : Hive::Attempts::Reconciler.new(store: @store),
+      recovery_coordinator: Hive::Daemon::RecoveryCoordinator.new(
+        attempt_store: @store, dispatch_repository: @queue,
+        task_resolver: ->(**) { @task }
+      ), dispatch_repository: @queue, clock: -> { @now }
+    )
+  end
+
+  def finish_latest(outcome:, exit_status:, checkpoint: nil)
+    launched, capability = @launcher.launched.last
+    owner = { "pid" => Process.pid, "start_fingerprint" => "start",
+      "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp }
+    claimed = @store.claim(launched, owner: owner, claim_capability: capability,
+      first_heartbeat_timeout_sec: 30, now: @now)
+    running = @store.first_heartbeat(claimed, stale_sec: 30, now: @now)
+    @store.terminalize(running, outcome: outcome, exit_status: exit_status,
+      final_checkpoint: checkpoint || running.checkpoint, output_references: [],
+      log_reference: { "path" => "logs/#{launched.attempt_id}.frames", "size" => 0, "sha256" => "0" * 64 }, now: @now)
+  end
+
+  def tick(at)
+    @now = at
+    @daemon.tick(now: at)
+  end
+
+  def recovery
+    @queue.pending.find { |request| request.recovery&.fetch("variant", nil) == "failed_edit" }
+  end
+
+  def test_failed_launch_retries_once_after_restart_when_only_time_advances
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      @daemon = new_daemon
+      tick(deadline - 1)
+      assert_equal 1, @launcher.launched.length
+      tick(deadline)
+      assert_equal 2, @launcher.launched.length
+      launched = @launcher.launched.last.first
+      assert_equal @source.attempt_id, launched.checkpoint.dig("edit_resume_source_binding", "attempt_id")
+      assert_equal :waiting, Hive::Markers.current(@task.state_file).name
+      tick(deadline + 1)
+      assert_equal 2, @launcher.launched.length
+    end
+  end
+
+  def test_successful_consumed_answers_are_not_replayed_after_restart
+    with_failed_edit(outcome: "succeeded", exit_status: 0) do
+      tick(NOW + 1)
+      @daemon = new_daemon
+      tick(NOW + 3600)
+      assert_equal 1, @launcher.launched.length
+      assert_nil recovery
+    end
+  end
+
+  def test_edits_during_backoff_rebind_without_resetting_deadline_and_refill_is_debounced
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      File.write(@task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+      File.utime(deadline - 5, deadline - 5, @task.state_file)
+      update_row
+      tick(deadline)
+      assert_equal 1, @launcher.launched.length
+      assert_equal deadline, Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      File.write(@task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\nRevised latest answer\n<!-- WAITING -->\n")
+      File.utime(deadline + 1, deadline + 1, @task.state_file)
+      update_row
+      tick(deadline + 1)
+      assert_equal 1, @launcher.launched.length
+      assert_equal 1, @queue.pending.count { |request| request.recovery&.fetch("variant", nil) == "failed_edit" }
+      tick(deadline + 31)
+      assert_equal 2, @launcher.launched.length
+      launched = @launcher.launched.last.first
+      assert_equal Hive::Attempts::Generation.artifact_token(@task), launched["progress_token"]
+      assert_includes File.read(@task.state_file), "Revised latest answer"
+    end
+  end
+
+  def test_non_brainstorm_edit_uses_terminal_failure_for_recovery
+    with_failed_edit(stage: "6-review") do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      tick(deadline)
+      assert_equal 2, @launcher.launched.length
+    end
+  end
+  def test_edit_before_failed_completion_is_preserved_and_bound_to_the_retry
+    edit = lambda do |task|
+      File.write(task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\nEdited while child was running\n<!-- WAITING -->\n")
+      File.utime(NOW - 1, NOW - 1, task.state_file)
+    end
+    with_failed_edit(before_finish: edit) do
+      original_launch_input = @source["progress_token"]
+      tick(NOW + 1)
+      request = recovery
+      refute_nil request
+      assert_equal original_launch_input, request.recovery.dig("source_binding", "progress_token")
+      refute_equal original_launch_input, request.recovery.dig("input_binding", "progress_token")
+      assert_equal NOW - 60, @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @task.slug),
+        "failed completion must not consume the concurrent edit"
+      deadline = Time.iso8601(request.recovery.fetch("next_eligible_at"))
+      tick([ deadline, NOW + 29 ].max)
+      assert_equal 2, @launcher.launched.length, @logger.events.inspect
+      assert_equal Hive::Attempts::Generation.artifact_token(@task), @launcher.launched.last.first["progress_token"]
+      assert_includes File.read(@task.state_file), "Edited while child was running"
+    end
+  end
+
+  def test_ordinary_queued_resume_and_row_scan_cannot_bypass_recovery_deadline
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      @queue.write_request!(project: @project, slug: @task.slug,
+        argv: [ "hive", "brainstorm", @task.slug, "--project", @project, "--from", @stage ],
+        requestor: "web", request_id: "ordinary-resume", now: NOW + 2)
+      tick(deadline - 1)
+      assert_equal 1, @launcher.launched.length
+      tick(deadline)
+      assert_equal 2, @launcher.launched.length
+      tick(deadline + 1)
+      assert_equal 2, @launcher.launched.length
+    end
+  end
+
+  def test_dependency_and_capacity_holds_preserve_the_eligible_recovery
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      @row.blocked = true
+      tick(deadline)
+      assert_equal 1, @launcher.launched.length
+      assert_equal deadline, Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      @row.blocked = false
+      with_replaced_singleton_method(@controller, :can_dispatch?, ->(**) { :global_cap }) do
+        tick(deadline + 1)
+      end
+      assert_equal 1, @launcher.launched.length
+      assert_equal deadline, Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      tick(deadline + 2)
+      assert_equal 2, @launcher.launched.length
+    end
+  end
+
+  def test_one_shot_readiness_suspends_missing_input_and_waits_for_refill_debounce
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      File.write(@task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\n\n<!-- WAITING -->\n")
+      File.utime(deadline, deadline, @task.state_file)
+      update_row
+      tick(deadline)
+      items = @daemon.send(:one_shot_readiness, project: @project, now: deadline)
+      recovery_item = items.find { |item| item["id"].start_with?("dispatch:request:") }
+      assert_equal "waiting_operator", recovery_item["bucket"]
+      assert_equal "wait_for_answers", recovery_item["reason"]
+      refute items.any? { |item| item["bucket"] == "runnable_now" }
+      File.write(@task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\nRefilled\n<!-- WAITING -->\n")
+      File.utime(deadline + 1, deadline + 1, @task.state_file)
+      update_row
+      items = @daemon.send(:one_shot_readiness, project: @project, now: deadline + 1)
+      recovery_item = items.find { |item| item["id"].start_with?("dispatch:request:") }
+      assert_equal "edit_debounce", recovery_item["reason"]
+      assert_equal deadline + 31, recovery_item["next_check_at"]
+    end
+  end
+
+  def test_supervised_failed_launch_has_restart_safe_custody_and_retries_without_an_edit
+    with_failed_edit(supervised: true) do
+      tick(NOW + 1)
+      request = recovery
+      refute_nil request
+      assert_match(/\Asupervised-/, request.recovery.dig("source_binding", "attempt_id"))
+      assert_operator request.recovery["source_dispatch_revision"], :>, 0
+      refute request.recovery.key?("source_terminal_lease_version")
+      source_id = request.recovery.dig("source_binding", "request_id")
+      payload = @queue.database.read do |db|
+        JSON.parse(db[:dispatch_requests].where(request_id: source_id).get(:payload_json))
+      end
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-request"))))
+      assert_empty schema.validate(payload).to_a
+      deadline = Time.iso8601(request.recovery.fetch("next_eligible_at"))
+      @daemon = new_daemon
+      tick(deadline - 1)
+      assert_empty @supervisor.spawned
+      tick(deadline)
+      assert_equal 1, @supervisor.spawned.length, @logger.events.inspect
+      assert_equal :waiting, Hive::Markers.current(@task.state_file).name
+      tick(deadline + 1)
+      tick(deadline + 300)
+      assert_equal 1, @supervisor.spawned.length
+    end
+  end
+
+  def test_stage_accepted_new_questions_win_over_a_nonzero_exit
+    new_questions = lambda do |task|
+      File.write(task.state_file, "## Round 2\n### Q1.\nNext question?\n### A1.\n\n<!-- WAITING -->\n")
+      File.utime(NOW - 1, NOW - 1, task.state_file)
+    end
+    with_failed_edit(before_finish: new_questions, accepted_result: true) do
+      tick(NOW + 1)
+      assert_nil recovery
+      assert_equal NOW - 1, @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @task.slug)
+      tick(NOW + 3600)
+      assert_equal 1, @launcher.launched.length
+    end
+  end
+
+  def test_two_dispatchers_share_one_eligible_recovery_attempt
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      first = @daemon
+      peer = new_daemon
+      @now = deadline
+      first.tick(now: deadline)
+      peer.tick(now: deadline)
+      assert_equal 2, @launcher.launched.length
+      assert_equal 1, @store.task_stage_records(task_id: @task.id, intended_stage: @stage).count(&:live?)
+    end
+  end
+
+  def test_supervised_accepted_questions_survive_nonzero_command_completion
+    new_questions = lambda do |task|
+      File.write(task.state_file, "## Round 2\n### Q1.\nNew question?\n### A1.\n\n<!-- WAITING -->\n")
+      File.utime(NOW, NOW, task.state_file)
+    end
+    with_failed_edit(supervised: true, accepted_result: true, before_finish: new_questions) do
+      tick(NOW + 1)
+      assert_nil recovery
+      assert_equal NOW, @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @task.slug)
+      tick(NOW + 3600)
+      assert_equal 1, @supervisor.spawned.length
+    end
+  end
+
+  def test_supervised_operator_edit_without_stage_acceptance_remains_failure_evidence
+    edit = lambda do |task|
+      File.write(task.state_file, "## Round 1\n### Q1.\nWhat?\n### A1.\nOperator changed the answer\n<!-- WAITING -->\n")
+      File.utime(NOW, NOW, task.state_file)
+    end
+    with_failed_edit(supervised: true, before_finish: edit) do
+      tick(NOW + 1)
+      refute_nil recovery
+      assert_equal NOW - 60, @controller.last_dispatched_state_file_mtime_for(project: @project, slug: @task.slug)
+      tick(NOW + 30)
+      assert_equal 2, @supervisor.spawned.length
+    end
+  end
+
+  def test_fast_probe_and_incremental_tick_retry_at_the_deadline_without_a_file_event
+    with_failed_edit do
+      tick(NOW + 1)
+      deadline = Time.iso8601(recovery.recovery.fetch("next_eligible_at"))
+      assert_empty @daemon.send(:cheap_probe, now: deadline - 1).task_keys
+      due = @daemon.send(:cheap_probe, now: deadline)
+      assert_equal [ [ @project, @task.slug ] ], due.task_keys
+      @now = deadline
+      @daemon.tick_changed(task_keys: due.task_keys, now: deadline)
+      assert_equal 2, @launcher.launched.length
+    end
   end
 end

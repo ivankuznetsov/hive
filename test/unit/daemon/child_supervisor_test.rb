@@ -48,6 +48,39 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_supervised_child_carries_accepted_stage_result_even_when_later_command_work_fails
+    with_tmp_dir do |dir|
+      fake = File.join(dir, "hive-stage-result")
+      document = { "schema" => "hive-stage-result", "handled" => true,
+        "accepted" => true, "output_digest" => "a" * 64 }
+      File.write(fake, <<~RUBY)
+        #!/usr/bin/env ruby
+        descriptor = ENV.delete("HIVE_SUPERVISED_STAGE_RESULT_FD")
+        writer = IO.for_fd(Integer(descriptor), "w", autoclose: true)
+        writer.close_on_exec = true
+        writer.write(#{(JSON.generate(document) + "\n").inspect})
+        writer.close
+        exit 1
+      RUBY
+      FileUtils.chmod(0o755, fake)
+      supervisor = Hive::Daemon::ChildSupervisor.new(hive_bin: fake,
+        log_dir_for_task: ->(*) { File.join(dir, "child.log") })
+      supervisor.spawn(command_string: "hive run answered-task", project: "p1",
+        slug: "answered-task", stage: "2-brainstorm")
+      completed = wait_for_completion(supervisor).first
+      assert_equal 1, completed.exit_code
+      assert_equal document, completed.stage_result
+    end
+  end
+
+  def test_closed_stage_result_reader_does_not_prevent_reaping
+    reader, writer = IO.pipe
+    reader.close
+    assert_nil make.send(:read_stage_result, reader)
+  ensure
+    writer&.close
+  end
+
   def test_spawn_with_log_state_replaces_log_outside_project_git_state
     with_tmp_dir do |dir|
       state_home = File.join(dir, "state-home")

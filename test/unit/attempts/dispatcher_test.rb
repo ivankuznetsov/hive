@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/context"
 require "hive/attempts/dispatcher"
+require "hive/attempts/failed_edit"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
@@ -38,6 +39,132 @@ class AttemptsDispatcherTest < Minitest::Test
       raise @error if @error
 
       @result
+    end
+  end
+
+  def test_failed_edit_evidence_survives_terminal_receipt_round_trip
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      terminal = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ store.fetch(terminal.attempt_id) ])
+
+      assert_equal terminal.attempt_id, evidence.fetch("source_binding").fetch("attempt_id")
+      assert_equal "id:42", evidence.fetch("task_binding").fetch("task_locator")
+      assert_equal terminal.receipt.fetch("terminal_lease_version"), evidence.fetch("source_terminal_lease_version")
+      assert_equal generation.progress_token, evidence.fetch("input_binding").fetch("progress_token")
+      File.utime(NOW + 6, NOW + 6, task.state_file)
+      assert_equal evidence, Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ terminal ])
+      File.write(task.state_file, "operator changed answers\n<!-- WAITING -->\n")
+      edited = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: edited, records: [ terminal ])
+    end
+  end
+
+  def test_failed_edit_provider_evidence_preserves_quota_and_bounded_failure_details
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "quota-edit")
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      failure = { "failure_class" => "account_quota", "provider" => "codex", "status_code" => 429,
+        "message" => "q" * 600 }
+      failed = Hive::Attempts::FailedEdit::SupervisedRecord.new(
+        launch: { "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+          "source_binding" => Hive::Attempts::FailedEdit.source_binding(failed),
+          "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation) },
+        receipt: failed.receipt.merge("failure" => failure, "dispatch_revision" => 3), state: "terminal")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ failed ])
+      assert_equal "limits_reached", evidence["reason"]
+      assert_equal "codex", evidence["provider"]
+      assert_equal "429", evidence["status_code"]
+      assert_equal "q" * 512, evidence["message"]
+    end
+  end
+
+  def test_failed_edit_request_rejects_changed_input_before_launch
+    with_dispatcher do |dispatcher, launcher, task, _store|
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      request = FakeRequest.new(slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "stale-edit", recovery: { "variant" => "failed_edit",
+          "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+          "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation) })
+      File.write(task.state_file, "changed input\n<!-- WAITING -->\n")
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      assert_raises(Hive::Attempts::StaleTaskSource) { dispatcher.dispatch_request(request) }
+      assert_empty launcher.launched
+    end
+  end
+
+  def test_failed_edit_evidence_rejects_success_missing_receipt_and_stage_errors
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "consumed-edit")
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ result.attempt ])
+      terminal = terminalize_attempt(store, launcher, result, outcome: "succeeded", exit_status: 0, now: NOW + 5)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ terminal ])
+      Hive::Markers.set(task.state_file, :error, reason: "agent_failed")
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ terminal ])
+    end
+  end
+
+  def test_failed_edit_excludes_handled_stage_results_and_foreign_bindings
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      terminal = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ terminal ])
+      assert Hive::Attempts::FailedEdit.valid_source?(terminal, evidence)
+      handled_receipt = terminal.receipt.merge("final_checkpoint" => terminal.checkpoint.merge(
+        "stage_result" => { "handled" => true, "accepted" => false }
+      ))
+      handled = terminal.with("receipt" => handled_receipt)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ handled ])
+      task.id = 43
+      replacement = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute", task_input_epoch: 0)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: replacement, records: [ terminal ])
+      wrong_stage = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "6-review", task_input_epoch: 0)
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: wrong_stage, records: [ terminal ])
+      assert_equal [ terminal.attempt_id ], store.task_stage_records(task_id: "42", intended_stage: "4-execute").map(&:attempt_id)
+    end
+  end
+
+  def test_failed_edit_accepted_source_version_and_proven_successor_beat_failure_without_time_ordering
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatch(dispatcher, task, request_id: "failed-edit")
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ failed ])
+      accepted = failed.with("outcome" => "succeeded", "lease_version" => failed.lease_version + 1,
+        "created_at" => (NOW - 100).iso8601(6),
+        "receipt" => failed.receipt.merge("outcome" => "succeeded", "exit_status" => 0,
+          "terminal_lease_version" => failed.lease_version + 1))
+      refute Hive::Attempts::FailedEdit.valid_source?(accepted, evidence)
+      assert_equal failed.receipt["receipt_version"], accepted.receipt["receipt_version"]
+
+      independent = accepted.with("attempt_id" => "independent", "request_id" => "other",
+        "receipt" => accepted.receipt.merge("attempt_id" => "independent"))
+      assert_equal evidence, Hive::Attempts::FailedEdit.observe(task: task, generation: generation,
+        records: [ failed, independent ]), "same input alone does not prove successor ancestry"
+      successor = independent.with("receipt" => independent.receipt.merge(
+        "final_checkpoint" => independent.checkpoint.merge("edit_resume_source_binding" => evidence["source_binding"])))
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ failed, successor ])
+    end
+  end
+
+  def test_failed_edit_launch_intent_allows_new_input_but_legacy_evidence_does_not
+    with_dispatcher do |dispatcher, launcher, task, store|
+      result = dispatcher.dispatch(task: task, project: "demo", intended_stage: "4-execute",
+        argv: [ "hive", "run", task.slug ], request_id: "edit-intent", provider: "codex", edit_resume: true)
+      assert_equal result.attempt.checkpoint, launcher.launched.first.first.checkpoint,
+        "launch input and edit intent are durable before child handoff"
+      failed = terminalize_attempt(store, launcher, result, outcome: "failed", exit_status: 1, now: NOW + 5)
+      File.write(task.state_file, "latest operator answers\n<!-- WAITING -->\n")
+      generation = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
+      evidence = Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ failed ])
+      assert_equal generation.progress_token, evidence.dig("input_binding", "progress_token")
+      assert_equal failed["progress_token"], evidence.dig("source_binding", "progress_token")
+      legacy = failed.with("checkpoint" => failed.checkpoint.except("edit_resume_task_binding"))
+      assert_nil Hive::Attempts::FailedEdit.observe(task: task, generation: generation, records: [ legacy ])
     end
   end
 
@@ -1546,10 +1673,7 @@ class AttemptsDispatcherTest < Minitest::Test
       running,
       outcome: outcome,
       exit_status: exit_status,
-      final_checkpoint: {
-        "revision" => "b" * 40,
-        "progress_token" => result.attempt["progress_token"]
-      },
+      final_checkpoint: result.attempt.checkpoint.merge("revision" => "b" * 40),
       output_references: output_references,
       log_reference: log_reference,
       now: now

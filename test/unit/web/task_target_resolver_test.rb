@@ -60,7 +60,7 @@ class WebTaskTargetResolverTest < Minitest::Test
         result = resolver.call
         assert_equal "2-brainstorm", result.attributes.fetch("stage")
         assert_equal moved, result.attributes.fetch("folder")
-        refute result.attributes.key?("recovery")
+        assert_nil result.attributes["recovery"]
 
         FileUtils.rm_rf(moved)
         assert_raises(Hive::InvalidTaskPath) { resolver.call }
@@ -101,6 +101,35 @@ class WebTaskTargetResolverTest < Minitest::Test
       assert_equal "targeted", result.source
       assert_equal "4-execute", result.attributes.fetch("stage")
       assert_same recovery, result.attributes.fetch("recovery")
+    end
+  end
+
+  def test_targeted_durable_recovery_is_authoritative_over_cached_failed_edits
+    Dir.mktmpdir("task-target") do |root|
+      folder = File.join(root, ".hive-state", "stages", "2-brainstorm", "ship-it")
+      FileUtils.mkdir_p(folder)
+      native = NativeTask.new(slug: "ship-it", project_root: root, folder: folder,
+        stage_index: 2, stage_name: "brainstorm")
+      binding = { "project" => "demo", "task_id" => "42", "intended_stage" => "2-brainstorm",
+        "task_locator" => "id:42" }
+      current = { "variant" => "failed_edit", "status" => "cooldown", "scheduler_status" => "unavailable",
+        "task_binding" => binding, "request_id" => "current-recovery" }
+      attributes = { "id" => 42, "slug" => "ship-it", "folder" => folder, "stage" => "2-brainstorm",
+        "recovery" => current }
+      status = Object.new
+      status.define_singleton_method(:task_target_payload) { |*, **| { "tasks" => [ attributes.dup ] } }
+      cached = { "projects" => [ { "name" => "demo", "tasks" => [ attributes.merge(
+        "recovery" => current.merge("status" => "queued", "request_id" => "stale-recovery")) ] } ] }
+      resolver = Hive::Web::TaskTargetResolver.new(project: { "name" => "demo", "path" => root },
+        slug: "ship-it", cached_payload: cached, status_command: status, task_resolver: -> { native })
+
+      assert_same current, resolver.call.attributes.fetch("recovery")
+
+      attributes.delete("recovery")
+      refute resolver.call.attributes.key?("recovery"),
+        "a cached failed edit cannot replace an authoritative absence of durable failure evidence"
+      cached["projects"].first["tasks"].first["recovery"]["task_binding"] = binding.merge("task_id" => "old-task")
+      refute resolver.call.attributes.key?("recovery"), "replacement tasks cannot inherit cached failed edits"
     end
   end
 

@@ -336,6 +336,20 @@ module Hive
         ).recovery_rows
       end
 
+      def with_operational_recoveries(payload, projects: payload.fetch("projects"),
+                                     scheduler_snapshot: AUTO_SCHEDULER_SNAPSHOT)
+        observations = operational_recoveries(projects, scheduler_snapshot: scheduler_snapshot,
+          status_payload: payload).to_h do |entry|
+          [ [ entry.dig("identity", "project"), entry.dig("identity", "slug") ], entry ]
+        end
+        payload.merge("projects" => payload.fetch("projects").map do |project|
+          project.merge("tasks" => Array(project["tasks"]).map do |task|
+            observed = observations[[ project["name"], task["slug"] ]]
+            observed ? task.merge(observed.slice("recovery", "scheduler_status")) : task
+          end)
+        end)
+      end
+
       def render_operational(payload)
         render_runtime_identity(payload["runtime"])
         summary = payload.fetch("summary")
@@ -1038,6 +1052,9 @@ module Hive
           # SCHEMA_VERSIONS policy in lib/hive.rb — no version bump (mirrors
           # `live_task_lock`).
           "unanswered_questions" => unanswered_question_count(row),
+          "answers_complete" => brainstorm_answers_complete(row),
+          "recovery" => row[:recovery],
+          "scheduler_status" => row[:scheduler_status],
           "action" => versioned_action_key(row[:action_key]),
           "action_label" => row[:action_label],
           "suggested_command" => row[:suggested_command],
@@ -1073,6 +1090,16 @@ module Hive
         Hive::BrainstormParser.unanswered_questions(Hive::BrainstormParser.parse(path)).size
       rescue StandardError
         0
+      end
+
+      def brainstorm_answers_complete(row)
+        return nil unless row[:action_key] == Hive::Schemas::TaskActionKind::NEEDS_INPUT &&
+          Hive::Workflows.coding_id?(row[:workflow]) && row[:stage] == BRAINSTORM_STAGE_DIR
+
+        questions = Hive::BrainstormParser.parse(row[:state_file])
+        questions.any? && Hive::BrainstormParser.unanswered_questions(questions).empty?
+      rescue StandardError
+        false
       end
 
       def versioned_action_key(action_key)

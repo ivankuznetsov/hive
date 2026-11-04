@@ -3,6 +3,15 @@ require "json_schemer"
 require "hive/commands/status"
 
 class CommandsStatusOperationalTest < Minitest::Test
+  def test_unreadable_brainstorm_is_incomplete_instead_of_raising
+    command = Hive::Commands::Status.new
+    row = { action_key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+      workflow: "coding", stage: "2-brainstorm", state_file: "/missing/brainstorm.md" }
+    with_replaced_singleton_method(Hive::BrainstormParser, :parse, ->(*) { raise Errno::EACCES }) do
+      assert_equal false, command.send(:brainstorm_answers_complete, row)
+    end
+  end
+
   include HiveTestHelper
 
   def teardown

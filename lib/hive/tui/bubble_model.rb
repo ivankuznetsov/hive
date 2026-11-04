@@ -16,6 +16,7 @@ require "hive/commands/new"
 require "hive/markers"
 require "hive/daemon/plan_approval"
 require "hive/recovery/api"
+require "hive/operational_action"
 require "hive/stages"
 require "hive/task"
 require "hive/usage_db"
@@ -883,6 +884,15 @@ module Hive
       end
 
       def request_recovery(row)
+        if failed_edit_recovery?(row)
+          token_row = row.to_h.transform_keys(&:to_s)
+          token_row["action"] = token_row.delete("action_key")
+          return @recovery_writer.recover!(
+            row: row, project: row.project_name, requestor: "action",
+            observation_token: Hive::OperationalAction.token(project: row.project_name, row: token_row)
+          )
+        end
+
         @recovery_writer.recover!(
           row: row,
           project: row.project_name,
@@ -964,7 +974,7 @@ module Hive
         if row.folder.to_s.strip.empty?
           return [ flashed("error recovery unavailable: task folder missing"), nil ]
         end
-        unless row.action_key.to_s == "error"
+        unless row.action_key.to_s == "error" || failed_edit_recovery?(row)
           return [ flashed("error recovery unavailable: action=#{row.action_key}"), nil ]
         end
 
@@ -975,6 +985,10 @@ module Hive
         detail = error_recovery_detail(row)
         spawn_error_recovery_thread(row)
         [ flashed("Checking recovery — #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
+      end
+
+      def failed_edit_recovery?(row)
+        row.recovery.is_a?(Hash) && row.recovery["variant"] == "failed_edit"
       end
 
       def register_error_recovery_attempt(folder)
@@ -1031,7 +1045,7 @@ module Hive
       end
 
       def evict_recovery_attempt(row)
-        if row.marker.to_s.downcase == "error"
+        if row.marker.to_s.downcase == "error" || failed_edit_recovery?(row)
           evict_error_recovery_attempt(row.folder)
         else
           evict_review_recovery_attempt(row.folder)
@@ -1050,6 +1064,8 @@ module Hive
       end
 
       def error_recovery_detail(row)
+        return "failed edit #{row.recovery['reason']}" if failed_edit_recovery?(row)
+
         attrs = Hive::Markers.display_attrs(row.attrs)
         keys = ERROR_RECOVERY_DETAIL_ATTRS.select { |key| attrs.key?(key) }
         keys += (attrs.keys.map(&:to_s) - keys).sort

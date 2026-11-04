@@ -37,14 +37,14 @@ module Hive
         :chat_id, :update_id, :trigger, :task_generation,
         :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
-        :recovery, :schema_version, :state, :revision
+        :recovery, :schema_version, :state, :revision, :edit_resume
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
                        inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
-                       state: "queued", revision: 0)
+                       state: "queued", revision: 0, edit_resume: nil)
           super(
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
@@ -52,7 +52,7 @@ module Hive
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
-            schema_version: schema_version, state: state, revision: revision
+            schema_version: schema_version, state: state, revision: revision, edit_resume: edit_resume
           )
         end
       end
@@ -141,6 +141,18 @@ module Hive
 
       def pending(**)
         rows_for_state("queued").reject { |request| request.recovery&.fetch("phase", nil) == "terminal" }
+      end
+
+      # Reuse the queue's existing due column for bounded deadline wakeups.
+      def due_failed_edit_requests(now:, limit: 64, **)
+        database.read do |db|
+          db[:dispatch_requests].where(state: "queued", recovery_request: 1)
+            .where { due_at <= now.utc.iso8601(6) }
+            .where(Sequel.lit("json_extract(payload_json, '$.recovery.variant') = 'failed_edit'"))
+            .where(Sequel.lit("json_extract(payload_json, '$.recovery.phase') IN ('admitted', 'cleared')"))
+            .where(Sequel.lit("json_extract(payload_json, '$.recovery.blocked_reason') IS NULL"))
+            .order(:due_at, :request_id).limit(limit).map { |row| request_from(row) }
+        end
       end
 
       def claimed(**)
@@ -240,7 +252,8 @@ module Hive
           row = db[:dispatch_requests].where(request_id: request_id.to_s).first
           next false unless row
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
-          if row[:result_state]
+          payload = Codec.load_json(row.fetch(:payload_json))
+          if row[:result_state] || payload.dig("edit_resume", "terminal_receipt")
             dataset.update(
               cleared_claim_columns(state: "completed").merge(
                 updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
@@ -328,24 +341,76 @@ module Hive
         end
       end
 
-      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil, **)
+      def find_failed_edit_recovery(project:, slug:, task_binding:, **)
+        matching_recoveries(project, slug).reverse.find do |request|
+          request.recovery["variant"] == "failed_edit" &&
+            request.recovery["task_binding"] == task_binding
+        end
+      end
+
+      # Status readers retain durable intent when the daemon observation is
+      # absent or stale. This lookup never opens a writer connection and never
+      # adopts a failure: only coordinator-owned, incarnation-bound rows qualify.
+      def observed_recovery(project:, slug:, stage:, task_id:)
+        return nil if task_id.to_s.empty?
+
+        binding = { "project" => project.to_s, "task_id" => task_id.to_s,
+          "intended_stage" => stage.to_s, "task_locator" => "id:#{task_id}" }
+        database.operational_read do |db|
+          project_id = db[:projects].where(name: project.to_s).get(:project_id)
+          db[:dispatch_requests].where(project_id: project_id, task_slug: slug.to_s,
+            intended_stage: stage.to_s, recovery_request: 1)
+            .reverse_order(:updated_at, :request_id).each do |row|
+            request = request_from(row)
+            next unless request.task_id.to_s == task_id.to_s &&
+              request.recovery&.fetch("task_binding", nil) == binding
+
+            return request
+          end
+          nil
+        end
+      end
+
+      # Replace queued input identity atomically. A payload update alone would
+      # leave the SQL generation fence bound to the previous answer bytes.
+      def replace_failed_edit!(request, recovery:, task_generation:, now:)
+        replacement_id = "failed-edit-" + Digest::SHA256.hexdigest(Codec.dump_json(
+          [ request.project, request.slug, recovery["source_binding"], recovery["input_binding"] ]
+        ))[0, 48]
+        database.transaction do |db|
+          current = db[:dispatch_requests].where(request_id: request.request_id,
+            revision: request.revision, state: "queued").first
+          raise IntegrityError.new("recovery changed before rebind", code: :dispatch_request_conflict) unless current
+          db[:dispatch_requests].where(request_id: request.request_id).delete
+          write_request!(project: request.project, slug: request.slug, argv: request.argv,
+            requestor: request.requestor, trigger: request.trigger, request_id: replacement_id,
+            task_id: request.task_id, expected_stage: request.expected_stage,
+            task_generation: task_generation, recovery: recovery, now: now)
+        end
+        fetch(replacement_id)
+      end
+
+      def recovery_retry_count(project:, slug:, expected_stage: nil, runtime_digest: nil, variant: nil, **)
         matching_recoveries(project, slug).filter_map do |request|
           next if expected_stage && request.expected_stage.to_s != expected_stage.to_s
           next if runtime_digest && request.recovery["runtime_digest"] != runtime_digest
+          next if variant && request.recovery.fetch("variant", "marker") != variant
 
           request.recovery["retry_count"]
         end.max.to_i
       end
 
-      def latest_terminal_recovery(project:, slug:, expected_stage:, **)
+      def latest_terminal_recovery(project:, slug:, expected_stage:, variant: nil, **)
         matching_recoveries(project, slug).select do |request|
           request.expected_stage.to_s == expected_stage.to_s &&
-            request.recovery["phase"] == "terminal"
+            request.recovery["phase"] == "terminal" &&
+            (!variant || request.recovery.fetch("variant", "marker") == variant)
         end.max_by { |request| [ request.created_at, request.request_id ] }
       end
 
-      def update_recovery!(request_id, expected_phase:, changes:, **)
-        update_recovery(request_id, expected_phase, changes, state: nil)
+      def update_recovery!(request_id, expected_phase:, changes:, requestor: nil, trigger: nil, **)
+        update_recovery(request_id, expected_phase, changes, state: nil,
+          requestor: requestor, trigger: trigger)
       end
 
       def complete_delivery(request_id, now: @clock.call, **)
@@ -362,11 +427,12 @@ module Hive
         update_recovery(request_id, expected_phase, changes, state: "queued")
       end
 
-      def remove_terminal_recoveries(project:, slug:, expected_stage:, except_request_id: nil, **)
+      def remove_terminal_recoveries(project:, slug:, expected_stage:, except_request_id: nil, variant: nil, **)
         remove_matching(project, slug) do |request|
           request.request_id != except_request_id.to_s &&
             request.expected_stage.to_s == expected_stage.to_s &&
-            request.recovery["phase"] == "terminal"
+            request.recovery["phase"] == "terminal" &&
+            (!variant || request.recovery.fetch("variant", "marker") == variant)
         end
       end
 
@@ -421,6 +487,70 @@ module Hive
 
       def valid_argv?(argv)
         self.class.valid_argv?(argv)
+      end
+
+      # Persist the supervising owner's exact launch observation before spawn.
+      # Existing request revisions fence this optional JSON extension.
+      def bind_supervised_edit!(request_id, launch:, task_id:, intended_stage:, task_generation:, **)
+        database.transaction do |db|
+          row = db[:dispatch_requests].where(request_id: request_id.to_s).first
+          raise IntegrityError.new("supervised dispatch request is missing", code: :supervised_dispatch_conflict) unless row
+          payload = Codec.load_json(row.fetch(:payload_json))
+          if payload["edit_resume"]
+            raise IntegrityError.new("supervised launch binding changed", code: :supervised_dispatch_conflict) unless payload["edit_resume"] == launch
+            next request_from(row)
+          end
+          payload.merge!("edit_resume" => launch, "task_id" => task_id,
+            "expected_stage" => intended_stage, "task_generation" => task_generation)
+          changed = db[:dispatch_requests].where(request_id: request_id.to_s,
+            revision: row.fetch(:revision), state: %w[queued claimed]).update(
+              task_id: registered_task_id(db, task_id), intended_stage: intended_stage,
+              task_generation: task_generation, payload_json: Codec.dump_json(payload),
+              revision: Sequel[:revision] + 1)
+          raise IntegrityError.new("supervised dispatch binding raced", code: :supervised_dispatch_conflict) unless changed == 1
+          request_from(db[:dispatch_requests].where(request_id: request_id.to_s).first)
+        end
+      end
+
+      def record_supervised_edit_terminal!(request_id, receipt:, expected_revision:, **)
+        database.transaction do |db|
+          row = db[:dispatch_requests].where(request_id: request_id.to_s).first
+          next unless row
+          payload = Codec.load_json(row.fetch(:payload_json))
+          next unless payload["edit_resume"]
+          previous = payload["edit_resume"]["terminal_receipt"]
+          if previous
+            raise IntegrityError.new("supervised terminal receipt changed", code: :supervised_dispatch_conflict) unless previous.except("dispatch_revision") == receipt
+            next previous
+          end
+          unless row.fetch(:revision) == expected_revision && %w[claimed admitted].include?(row.fetch(:state))
+            raise IntegrityError.new("supervised completion ownership changed", code: :supervised_dispatch_conflict)
+          end
+          receipt = receipt.merge("dispatch_revision" => row.fetch(:revision) + 1)
+          payload["edit_resume"]["terminal_receipt"] = receipt
+          changed = db[:dispatch_requests].where(request_id: request_id.to_s,
+            revision: row.fetch(:revision)).update(payload_json: Codec.dump_json(payload),
+              revision: Sequel[:revision] + 1)
+          raise IntegrityError.new("supervised completion raced", code: :supervised_dispatch_conflict) unless changed == 1
+          receipt
+        end
+      end
+
+      def supervised_edit_records(project:, slug:, task_id:, intended_stage:)
+        require "hive/attempts/failed_edit"
+        database.read do |db|
+          project_id = db[:projects].where(name: project.to_s).get(:project_id)
+          db[:dispatch_requests].where(project_id: project_id, task_slug: slug.to_s,
+            intended_stage: intended_stage.to_s)
+            .order(Sequel.desc(:created_at)).limit(64).filter_map do |row|
+            launch = Codec.load_json(row.fetch(:payload_json))["edit_resume"]
+            next unless launch.is_a?(Hash) && launch.dig("task_binding", "task_id") == task_id.to_s
+            terminal = launch["terminal_receipt"]
+            next unless terminal || %w[claimed admitted].include?(row.fetch(:state))
+            Hive::Attempts::FailedEdit::SupervisedRecord.new(launch: launch,
+              receipt: terminal, state: terminal ? "terminal" : "launching")
+          end
+        end
       end
 
       def expired?(request, now: @clock.call, expiry_sec: EXPIRY_SEC)
@@ -526,12 +656,14 @@ module Hive
           # every series, so a slow deterministic loop never parked (hivedev
           # F2). Drop only the result payload; the row then ages out under
           # TERMINAL_RECOVERY_RETENTION_SEC like any terminal recovery.
-          kept = expired.where(recovery_request: 1).update(
+          retained = Sequel.|({ recovery_request: 1 },
+            Sequel.lit("json_extract(payload_json, '$.edit_resume') IS NOT NULL"))
+          kept = expired.where(retained).update(
             result_state: nil, result_json: nil, result_digest: nil,
             result_available_at: nil, result_delivered_at: nil, retain_until: nil,
             updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
           )
-          kept + expired.exclude(recovery_request: 1).delete
+          kept + expired.exclude(retained).delete
         end
       end
 
@@ -706,7 +838,8 @@ module Hive
           intended_stage: stage.to_s.empty? ? intended_stage(argv) : stage.to_s,
           state: "queued", priority: 0, idempotency_key: request_id,
           source_fingerprint: source_fingerprint(payload), payload_json: Codec.dump_json(payload),
-          created_at: timestamp, updated_at: timestamp, due_at: timestamp, revision: 0,
+          created_at: timestamp, updated_at: timestamp,
+          due_at: payload.dig("recovery", "next_eligible_at") || timestamp, revision: 0,
           recovery_request: payload["recovery"] ? 1 : 0
         )
         request_id
@@ -744,7 +877,7 @@ module Hive
           expected_marker_name: payload["expected_marker_name"],
           expected_marker_id: payload["expected_marker_id"], recovery: payload["recovery"],
           schema_version: payload.fetch("schema_version"), state: row.fetch(:state),
-          revision: row.fetch(:revision)
+          revision: row.fetch(:revision), edit_resume: payload["edit_resume"]
         )
       rescue KeyError, ArgumentError, TypeError, CodecError => error
         raise IntegrityError.new(
@@ -846,13 +979,17 @@ module Hive
         result.nil? ? true : result
       end
 
-      def update_recovery(request_id, expected_phase, changes, state:)
+      def update_recovery(request_id, expected_phase, changes, state:, requestor: nil, trigger: nil)
+        raise ArgumentError, "requestor is invalid" if requestor && !REQUESTORS.include?(requestor.to_s)
         mutate_payload(request_id) do |payload, row_changes|
           recovery = payload["recovery"]
           next false unless recovery.is_a?(Hash) && recovery["phase"] == expected_phase
           recovery.merge!(changes.to_h.transform_keys(&:to_s))
           recovery["phase"] = changes[:phase] if changes.key?(:phase)
           validate_recovery!(recovery)
+          payload["requestor"] = requestor.to_s if requestor
+          payload["trigger"] = trigger.to_s if trigger
+          row_changes[:due_at] = recovery["next_eligible_at"] if recovery["next_eligible_at"]
           if state
             row_changes.merge!(cleared_claim_columns(state: state))
           end

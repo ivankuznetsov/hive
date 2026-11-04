@@ -2,12 +2,50 @@ require "test_helper"
 require "timeout"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/supervisor"
+require "hive/attempts/failed_edit"
 require "hive/patrol_fix/attempt_diagnostic"
 require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/task_resolver"
 require_relative "../../support/stream_log_test_support"
 
 class AttemptsSupervisorTest < Minitest::Test
+  def test_stage_acceptance_survives_a_trailing_worker_failure
+    document = { "schema" => "hive-stage-result", "handled" => true,
+      "accepted" => true, "output_digest" => "a" * 64 }
+    worker = [ RbConfig.ruby, "-e", <<~RUBY ]
+      writer = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_DIAGNOSTIC_FD")), "w")
+      writer.write(#{(JSON.generate(document) + "\n").inspect})
+      writer.close
+      exit 7
+    RUBY
+    with_attempt(worker_argv: %w[hive run durable-task]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1)
+      supervisor.define_singleton_method(:resolved_worker_argv) { |_record| worker }
+      assert_equal 7, supervisor.run
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      assert_equal document, terminal.receipt.dig("final_checkpoint", "stage_result")
+      assert Hive::Attempts::FailedEdit.accepted?(terminal)
+    end
+  end
+
+  def test_supervised_stage_channel_rejects_invalid_documents_and_contains_closed_pipe_errors
+    channel = Hive::Attempts::DiagnosticChannel
+    document = { "schema" => "hive-stage-result", "handled" => true,
+      "accepted" => true, "output_digest" => "a" * 64 }
+    assert_equal "malformed", channel.read(StringIO.new(JSON.generate(document.merge("accepted" => "yes")) + "\n")).status
+    reader, writer = IO.pipe
+    channel.install_supervised_from_env!(channel::SUPERVISED_ENV => writer.fileno.to_s)
+    writer.autoclose = false
+    reader.close
+    refute channel.publish_supervised_stage_result(accepted: true, output_digest: "a" * 64)
+    refute channel.publish_supervised_stage_result(accepted: true, output_digest: "a" * 64)
+  ensure
+    reader&.close unless reader&.closed?
+  end
+
   include HiveTestHelper
   include StreamLogTestSupport
 

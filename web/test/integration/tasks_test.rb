@@ -1034,6 +1034,49 @@ class TasksTest < ActionDispatch::IntegrationTest
                  "the web surface must not recreate marker-clear authority"
   end
 
+  test "failed edit Retry posts its observation token and refuses it after durable input changes" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), stage_dir(@project, "2-brainstorm").join(@slug))
+    folder = stage_dir(@project, "2-brainstorm").join(@slug)
+    folder.join("brainstorm.md").write("## Round 1\n### Q1. Scope?\n### A1.\nLatest answer\n<!-- WAITING -->\n")
+    native = Hive::Task.new(folder.to_s)
+    Hive::TaskProjection::Reader.new(task_folder: folder.to_s).read(marker: Hive::Markers.current(native.state_file))
+    binding = { "project" => @project, "task_id" => native.id.to_s,
+      "intended_stage" => "2-brainstorm", "task_locator" => "id:#{native.id}" }
+    request_id = runtime_dispatch_repository.write_request!(project: @project, slug: @slug,
+      task_id: native.id.to_s, argv: [ "hive", "brainstorm", @slug ], expected_stage: "2-brainstorm", recovery: {
+        "variant" => "failed_edit", "phase" => "admitted", "task_binding" => binding,
+        "source_binding" => binding.merge("attempt_id" => "failed-source", "request_id" => "source-request"),
+        "input_binding" => { "task_input_epoch" => 0, "progress_token" => "a" * 64 },
+        "owner" => "operator", "blocked_reason" => "deterministic_failure", "next_eligible_at" => Time.now.utc.iso8601(6)
+      })
+    descriptor = Hive::OperationalAction.descriptor_for_task(native, project: @project)
+    token = descriptor.fetch("observation_token")
+    calls = []
+    receipt = Struct.new(:status, :human_summary).new("queued", "Recovery queued")
+    writer = ->(**kwargs) { calls << kwargs; receipt }
+
+    with_replaced_singleton_method(Hive::Recovery::API, :recover!, writer) do
+      post task_recover_path(@project, @slug), params: { observation_token: token }
+      assert_response :redirect, css_select(".auth-card p").map(&:text).join
+      assert_redirected_to task_path(@project, @slug)
+      assert_equal "Recovery queued", flash[:notice]
+      assert_equal 1, calls.length
+      assert_equal "action", calls.first.fetch(:requestor)
+      assert_equal token, calls.first.fetch(:observation_token)
+      assert_equal "failed-source", calls.first.fetch(:row).dig("recovery", "source_binding", "attempt_id")
+
+      runtime_dispatch_repository.update_recovery!(request_id, expected_phase: "admitted", changes: {
+        "input_binding" => { "task_input_epoch" => 0, "progress_token" => "b" * 64 }
+      })
+      post task_recover_path(@project, @slug), params: { observation_token: token }
+      assert_response :unprocessable_entity
+      assert_match(/fresh operational snapshot/, response.body)
+      post task_recover_path(@project, @slug)
+      assert_response :unprocessable_entity
+      assert_equal 1, calls.length, "stale and missing tokens must not reach the recovery writer"
+    end
+  end
+
   test "recovery lifecycle renders an accessible status and disables duplicate actions" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
@@ -1391,7 +1434,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
-  test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
+  test "all-answered brainstorm retains push refreshes without inferring a resume from missing scheduler evidence" do
     post "/tasks/#{@project}/#{@slug}/approve", params: { from: "1-inbox", force: "1" }
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")
@@ -1405,8 +1448,9 @@ class TasksTest < ActionDispatch::IntegrationTest
                   "the refresh owner must wrap task mutations so a pushed refresh cannot beat their redirect"
     assert_select "meta[name='turbo-refresh-method'][content='morph']", 1,
                   "refreshes must morph so permanent forms survive"
-    assert_select ".state-banner", text: /waiting for the daemon|agent is working/i,
-                  count: 1
+    assert_select "#workspace-summary h2", text: "Status unavailable"
+    assert_select "#workspace-summary", text: /Scheduler observation unavailable/
+    assert_select "#workspace-summary", { text: /Answer questions|retry at|Retry queued/i, count: 0 }
     assert_select ".qa-item", 0, "no open questions → no answer form"
   end
 

@@ -101,6 +101,15 @@
         "terminal_at"
       ],
       "properties": {
+        "variant": {"type": ["string", "null"], "enum": ["marker", "admission_failure", "markerless_failure", "failed_edit", null]},
+        "task_binding": {"type": ["object", "null"], "additionalProperties": false, "properties": {"project": {"type": "string"}, "task_id": {"type": "string", "minLength": 1}, "intended_stage": {"type": "string"}, "task_locator": {"type": "string"}}},
+        "source_binding": {"type": ["object", "null"], "additionalProperties": false, "properties": {"project": {"type": "string"}, "task_id": {"type": "string", "minLength": 1}, "intended_stage": {"type": "string"}, "task_locator": {"type": "string"}, "request_id": {"type": ["string", "null"]}, "attempt_id": {"type": "string"}, "task_generation": {"type": "string"}, "ownership_generation": {"type": "string"}, "task_input_epoch": {"type": "integer", "minimum": 0}, "progress_token": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "input_binding": {"type": ["object", "null"], "additionalProperties": false, "properties": {"task_input_epoch": {"type": "integer", "minimum": 0}, "progress_token": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+        "source_receipt_version": {"type": ["integer", "null"], "minimum": 1},
+        "source_terminal_lease_version": {"type": ["integer", "null"], "minimum": 0},
+        "source_dispatch_revision": {"type": ["integer", "null"], "minimum": 0},
+        "scheduler_hold": { "type": ["string", "null"] },
+        "scheduler_status": {"type": ["string", "null"], "enum": ["not_applicable", "unavailable", "current", "stale", "invalid", null]},
         "status": {
           "type": "string",
           "enum": [

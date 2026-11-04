@@ -6,6 +6,21 @@ require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_resolver"
 
 class AttemptsContextTest < Minitest::Test
+  def test_stage_result_uses_the_bounded_diagnostic_writer
+    context = Hive::Attempts::Context.send(:new, attempt_id: "stage-result", task_generation: 1)
+    refute context.publish_stage_result(accepted: true, output_digest: "a" * 64)
+    reader, writer = IO.pipe
+    context = Hive::Attempts::Context.send(:new, attempt_id: "stage-result", task_generation: 1,
+      diagnostic_writer: Hive::Attempts::DiagnosticChannel::Writer.new(writer))
+    assert context.publish_stage_result(accepted: true, output_digest: "a" * 64)
+    frame = Hive::Attempts::DiagnosticChannel.read(reader)
+    assert_equal "valid", frame.status
+    assert_equal true, frame.document["accepted"]
+    assert_equal "a" * 64, frame.document["output_digest"]
+  ensure
+    [ reader, writer ].compact.each { |io| io.close unless io.closed? }
+  end
+
   include HiveTestHelper
 
   CLAIM_CAPABILITY = "c" * 64

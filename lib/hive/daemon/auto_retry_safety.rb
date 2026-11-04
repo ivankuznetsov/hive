@@ -103,6 +103,10 @@ module Hive
       end
 
       def brainstorm_safe?(row)
+        # Failed-edit recovery retains WAITING and all current answers. The
+        # ownership veto below protects destructive error-marker recovery.
+        return [ true, "brainstorm WAITING input is retained" ] if row.marker.to_s == "waiting"
+
         path = File.join(row.folder.to_s, "brainstorm.md")
         questions = Hive::BrainstormParser.parse(path)
         answered = questions.select(&:answered?)

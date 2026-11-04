@@ -3,9 +3,20 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-03
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Edit-resume incident cause (2026-11-03)
+
+Failed edit-resume recovery now has durable attribution, coordinator pacing,
+restart, concurrent-input, and operator-surface regression coverage. The
+suspected SQLite startup/contention failure from the original incident remains
+unconfirmed; this change neither diagnoses nor repairs it. Failure recovery
+does not require that particular trigger. Historical stranded tasks without a
+trustworthy current terminal receipt remain nonautomatic: complete answers,
+mtimes, and logs cannot supply missing failure attribution. See
+[[modules/daemon]] and [[stages/brainstorm]].
 
 ## Task observation boundary (2026-10-02)
 

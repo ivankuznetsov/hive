@@ -7,6 +7,55 @@ require "hive/task"
 class BrainstormRuntimeTest < Minitest::Test
   include HiveTestHelper
 
+  def test_stage_acceptance_is_published_on_the_supervisor_channel
+    with_brainstorm_task do |task|
+      before = "## Round 1\n### Q1. Question?\n### A1. answer\n<!-- WAITING -->\n"
+      File.write(task.state_file, before + "## Round 2\n### Q1. Next?\n### A1.\n")
+      reader, writer = IO.pipe
+      channel = Hive::Attempts::DiagnosticChannel::Writer.new(writer)
+      context = Object.new
+      context.define_singleton_method(:publish_stage_result) do |accepted:, output_digest:|
+        channel.write("schema" => "hive-stage-result", "handled" => true,
+                      "accepted" => accepted, "output_digest" => output_digest)
+      end
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        result = Hive::Stages::Brainstorm.result_for_spawn(task, { status: :error }, before)
+        assert_equal :waiting, result[:status]
+      end
+      frame = Hive::Attempts::DiagnosticChannel.read(reader)
+      assert_equal "valid", frame.status
+      assert_equal true, frame.document["accepted"]
+      assert_equal Digest::SHA256.hexdigest(File.binread(task.state_file)), frame.document["output_digest"]
+    end
+  end
+
+  def test_supervised_stage_acceptance_is_published_without_attempt_context_and_scrubs_the_descriptor
+    with_brainstorm_task do |task|
+      before = "## Round 1\n### Q1. Question?\n### A1. answer\n<!-- WAITING -->\n"
+      File.write(task.state_file, "## Requirements\nAccepted output\n<!-- COMPLETE -->\n")
+      reader, writer = IO.pipe
+      descriptor = writer.fileno
+      writer.autoclose = false
+      writer = nil # ownership transfers to the installed channel writer
+      environment = { Hive::Attempts::DiagnosticChannel::SUPERVISED_ENV => descriptor.to_s }
+      Hive::Attempts::DiagnosticChannel.install_supervised_from_env!(environment)
+      assert_empty environment
+      assert IO.for_fd(descriptor, autoclose: false).close_on_exec?,
+        "providers must not inherit the stage-result descriptor"
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { nil }) do
+        result = Hive::Stages::Brainstorm.result_for_spawn(task, { status: :error }, before)
+        assert_equal :complete, result[:status]
+      end
+      frame = Hive::Attempts::DiagnosticChannel.read(reader)
+      assert_equal "valid", frame.status
+      assert_equal true, frame.document["accepted"]
+      assert_equal Digest::SHA256.file(task.state_file).hexdigest, frame.document["output_digest"]
+    ensure
+      reader&.close unless reader&.closed?
+      Hive::Attempts::DiagnosticChannel.instance_variable_get(:@supervised_writer)&.close
+    end
+  end
+
   def test_run_routes_default_claude_brainstorm_through_headless_claude_launch
     with_brainstorm_task do |task|
       captured = nil

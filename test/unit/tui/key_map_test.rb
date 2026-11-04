@@ -31,6 +31,73 @@ class TuiKeyMapMessageForTest < Minitest::Test
 
   # -------- DispatchCommand caches verb at construction --------
 
+  def failed_edit_row(status:, answers_complete: true, **recovery)
+    make_row(action_key: "needs_input", stage: "2-brainstorm").with(
+      answers_complete: answers_complete,
+      recovery: { "variant" => "failed_edit", "status" => status,
+                  "reason" => "exit_code", "scheduler_status" => "current" }.merge(recovery.transform_keys(&:to_s))
+    )
+  end
+
+  def test_enter_and_verb_keys_respect_failed_edit_disposition
+    %w[cooldown queued].each do |status|
+      row = failed_edit_row(status: status)
+      [ :key_enter, "b", "p", "d" ].each do |key|
+        msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: key, row: row)
+        assert_kind_of Hive::Tui::Messages::Flash, msg
+        assert_match(/recover|retry/i, msg.text)
+      end
+      retry_msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
+      assert_kind_of Hive::Tui::Messages::RecoverError, retry_msg
+    end
+  end
+
+  def test_failed_edit_park_requires_explicit_retry
+    row = failed_edit_row(status: "blocked", escalation_tier: "parked", reason: "deterministic_failure")
+    assert_kind_of Hive::Tui::Messages::RecoverError,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::RecoverError,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
+    assert_kind_of Hive::Tui::Messages::Flash,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: "b", row: row)
+  end
+
+  def test_failed_edit_missing_answers_open_editor_and_running_opens_log
+    row = failed_edit_row(status: "cooldown", answers_complete: false)
+    assert_kind_of Hive::Tui::Messages::OpenInputEditor,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    row = failed_edit_row(status: "running")
+    assert_kind_of Hive::Tui::Messages::OpenLogTail,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: :key_enter, row: row)
+    assert_kind_of Hive::Tui::Messages::Flash,
+      Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
+  end
+
+  def test_unavailable_failed_edit_and_complete_no_evidence_never_open_editor_or_dispatch
+    unavailable = failed_edit_row(status: "cooldown", scheduler_status: "unavailable")
+    unavailable_park = failed_edit_row(status: "blocked", scheduler_status: "stale", escalation_tier: "parked")
+    complete = make_row(action_key: "needs_input", stage: "2-brainstorm").with(answers_complete: true)
+    [ unavailable, unavailable_park, complete ].each do |row|
+      [ :key_enter, "b", "r" ].each do |key|
+        assert_kind_of Hive::Tui::Messages::Flash,
+          Hive::Tui::KeyMap.message_for(mode: :grid, key: key, row: row)
+      end
+    end
+  end
+
+  def test_unavailable_answer_state_without_failure_evidence_blocks_editor_and_dispatch
+    [ true, false ].each do |complete|
+      row = make_row(action_key: "needs_input", stage: "2-brainstorm").with(
+        answers_complete: complete, scheduler_status: "unavailable"
+      )
+      [ :key_enter, "b", "r" ].each do |key|
+        msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: key, row: row)
+        assert_kind_of Hive::Tui::Messages::Flash, msg
+        assert_includes msg.text, "Status unavailable"
+      end
+    end
+  end
+
   def test_dispatch_command_caches_verb_from_argv
     # The plan calls out that DispatchCommand.verb is cached so
     # SubprocessExited can flash by verb name without re-parsing.

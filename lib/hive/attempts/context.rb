@@ -251,6 +251,15 @@ module Hive
         @evidence_writer.write(signal)
       end
 
+      def publish_stage_result(accepted:, output_digest:)
+        return false unless @diagnostic_writer
+
+        @diagnostic_writer.write(
+          "schema" => "hive-stage-result", "handled" => true,
+          "accepted" => accepted, "output_digest" => output_digest
+        )
+      end
+
       def publish_attempt_diagnostic(document)
         return false unless @diagnostic_writer
 

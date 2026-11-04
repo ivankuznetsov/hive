@@ -162,6 +162,19 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
     end
   end
 
+  def test_retained_waiting_answers_are_safe_but_marker_clearing_and_marker_loss_keep_the_ownership_veto
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "brainstorm.md"), "## Round 1\n### Q1.\nWhat?\n### A1.\nHandwritten answer\n")
+      waiting = row(folder: dir, stage: "2-brainstorm", marker: "waiting")
+      assert_equal [ true, "brainstorm WAITING input is retained" ], Hive::Daemon::AutoRetrySafety.safe_to_retry?(waiting)
+      %w[error none].each do |marker|
+        safe, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "2-brainstorm", marker: marker))
+        refute safe
+        assert_includes reason, "unbound brainstorm answers present"
+      end
+    end
+  end
+
   def test_brainstorm_controller_bound_answers_are_safe
     with_tmp_dir do |dir|
       File.write(File.join(dir, "brainstorm.md"), <<~MD)

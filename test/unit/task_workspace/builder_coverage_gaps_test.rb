@@ -162,13 +162,15 @@ class TaskWorkspaceBuilderCoverageGapsTest < Minitest::Test
 
       task.values["action"] = "ready_execute"
       decision = subject.send(
-        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true,
+        :decision_payload, attempts: {}, resources: {}, status: { "state" => "current", "freshness" => "fresh" },
+        action_evidence_current: true,
         answerable_questions: []
       )
       assert_equal "wait", decision.fetch("posture")
 
       archived = builder(task, native, archive: true).send(
-        :decision_payload, attempts: {}, resources: {}, action_evidence_current: true,
+        :decision_payload, attempts: {}, resources: {}, status: { "state" => "current", "freshness" => "fresh" },
+        action_evidence_current: true,
         answerable_questions: []
       )
       assert_equal "investigate", archived.fetch("posture")

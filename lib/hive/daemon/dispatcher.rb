@@ -699,6 +699,7 @@ module Hive
         @priority_capacity_fences = dispatch_rows_in_priority_order(
           dispatch_rows, now: now, capacity_fences: @priority_capacity_fences
         )
+        process_changed_failed_edit_requests(result.rows, now: now)
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  action: "incremental",
                                  in_flight: @controller.in_flight_count,
@@ -902,8 +903,11 @@ module Hive
         active = active_attempts_for(project)
         active_slugs = active.to_h { |attempt| [ attempt["task_slug"].to_s, true ] }
         items.concat(active.map { |attempt| active_attempt_pending_item(attempt) })
+        recovering_slugs = queue.filter_map do |request|
+          request.slug.to_s if request.recovery&.fetch("variant", nil) == "failed_edit"
+        end.to_h { |slug| [ slug, true ] }
         result.rows.each do |row|
-          next if active_slugs.key?(row.slug.to_s)
+          next if active_slugs.key?(row.slug.to_s) || recovering_slugs.key?(row.slug.to_s)
 
           item = row_pending_item(row, now: now)
           items << item if item
@@ -1017,6 +1021,19 @@ module Hive
       end
 
       def recovery_lifecycle_pending_item(request, row:, now:, id:)
+        if request.recovery["variant"] == "failed_edit" && %w[admitted cleared].include?(request.recovery["phase"])
+          current = refreshed_edit_row(row)
+          hold = failed_edit_input_hold(current, now: now)
+          if hold == "wait_for_answers"
+            return pending_item("waiting_operator", id, hold, condition: operator_condition(current))
+          elsif hold == "wait_for_debounce"
+            due = current.state_file_mtime + @edit_debounce_sec
+            eligibility = request.recovery["next_eligible_at"]
+            due = [ due, Time.iso8601(eligibility) ].max if eligibility
+            return pending_item("waiting_external", id, "edit_debounce",
+              next_check_at: due, condition: time_condition(due))
+          end
+        end
         receipt = @recovery_coordinator.receipt_for_request(request, now: now)
         return nil if receipt.status == "queued" && %w[admitted cleared].include?(receipt.phase)
 
@@ -1440,6 +1457,17 @@ module Hive
         end
         changed = matched_entries.dup
         changed.concat(tracked_state_file_changes)
+        if @has_failed_edit_recoveries
+          dispatch_repository.due_failed_edit_requests(now: now,
+            state_home: dispatch_request_state_home).each do |request|
+            key = [ request.project.to_s, request.slug.to_s ]
+            row = @known_rows_by_key[key]
+            next unless row && scoped_project?(request.project)
+            next if failed_edit_input_hold(row, now: now)
+
+            changed << key
+          end
+        end
         FastProbe.new(
           task_keys: changed.uniq,
           full_tick: entries.length != matched_entries.length
@@ -1463,7 +1491,7 @@ module Hive
             run["outcome"] = entry.exit_code.zero? ? "completed" : "failed" if run
           end
           @controller.record_completion(
-            pid: entry.pid, exit_code: entry.exit_code, completed_at: now
+            pid: entry.pid, exit_code: controller_completion_exit_code(entry), completed_at: now
           )
           # Refresh the recorded state-file mtime to its POST-completion
           # value. The agent likely wrote a fresh terminal/WAITING marker
@@ -1493,6 +1521,8 @@ module Hive
               entry.request_id, state_home: dispatch_request_state_home
             )
             meta = request&.to_h
+            record_supervised_edit_completion(entry.request_id, exit_code: entry.exit_code,
+              now: entry.finished_at || now, envelope: entry.json_envelope, stage_result: entry.stage_result)
             terminal_recovery = request&.recovery.is_a?(Hash)
             if terminal_recovery
               @recovery_coordinator.mark_dispatched(
@@ -1576,6 +1606,18 @@ module Hive
           complete_digest_scheduler_for(entry, now: now)
         end
         entries.any?
+      end
+
+      def controller_completion_exit_code(entry)
+        code = entry.exit_code
+        return code if code.nil? || [ Hive::ExitCodes::SUCCESS, Hive::ExitCodes::TASK_IN_ERROR,
+          Hive::ExitCodes::WRONG_STAGE, Hive::ExitCodes::CONFIG, Hive::ExitCodes::TEMPFAIL ].include?(code)
+        return code unless entry.request_id
+
+        request = dispatch_repository.fetch(entry.request_id, state_home: dispatch_request_state_home)
+        # Durable failed-edit custody delegates pacing and parking to recovery;
+        # the generic child transient ladder must not charge the same exit too.
+        request&.edit_resume ? Hive::ExitCodes::TASK_IN_ERROR : code
       end
 
       # An ordinary Patrol worker can exit while its occurrence still owns a
@@ -2092,8 +2134,14 @@ module Hive
       # tracking still reflects the agent's most recent write at the
       # task's CURRENT location.
       def refresh_post_completion_mtime(child_entry)
+        accepted = child_entry.stage_result&.fetch("accepted", false)
+        return unless child_entry.exit_code == Hive::ExitCodes::SUCCESS || accepted
+
         path = resolve_post_completion_path(child_entry)
         return unless path && File.exist?(path)
+
+        accepted_digest = child_entry.stage_result&.fetch("output_digest", nil)
+        return if accepted_digest && Digest::SHA256.file(path).hexdigest != accepted_digest
 
         state_file_mtime = File.mtime(path)
         return if child_entry.finished_at && state_file_mtime > child_entry.finished_at
@@ -2118,6 +2166,9 @@ module Hive
       # same edit-resume baseline before finalization; otherwise an agent's
       # own terminal/WAITING write looks like operator input on the next tick.
       def refresh_post_attempt_completion_mtime(attempt)
+        outcome = attempt.respond_to?(:outcome) ? attempt.outcome : attempt["outcome"]
+        return if outcome && !Hive::Attempts::FailedEdit.accepted?(attempt)
+
         project = attempt["project"].to_s
         slug = attempt["task_slug"].to_s
         return if project.empty? || slug.empty?
@@ -2128,6 +2179,10 @@ module Hive
         path = find_post_advance_state_file(project_entry["hive_state_path"], slug)
         return unless path && File.exist?(path)
 
+        if attempt.respond_to?(:receipt)
+          accepted_digest = attempt.receipt.dig("final_checkpoint", "stage_result", "output_digest")
+          return if accepted_digest && Digest::SHA256.file(path).hexdigest != accepted_digest
+        end
         state_file_mtime = File.mtime(path)
         attempt_ended_at = Time.iso8601(attempt["ended_at"].to_s)
         return if state_file_mtime > attempt_ended_at
@@ -2284,6 +2339,30 @@ module Hive
           return
         end
 
+        if (recovery = observe_failed_edit_recovery(row, now: now))
+          if recovery.status == "queued"
+            if row.blocked == true
+              observe_operational_disposition(row,
+                **Policy.operational_disposition(:blocked_on_dependency), recovery: recovery.to_h)
+              return :recovery_owned
+            end
+            gate = capacity_fence || @controller.can_dispatch?(
+              project: row.project, slug: row.slug, now: now, mutate: false,
+              external_global_count: @external_active_agent_total,
+              external_project_count: external_active_agent_count_for(row.project))
+            unless gate == :ok
+              observe_dispatch_outcome(row, gate, recovery: recovery.to_h)
+              return :recovery_owned
+            end
+          end
+          observe_operational_disposition(
+            row, decision: "recovery_#{recovery.status}", owner: recovery.owner || "hive",
+            reason: recovery.reason || "edit-resume recovery owns this task",
+            recovery: recovery.to_h
+          )
+          return :recovery_owned
+        end
+
         brainstorm_answers = brainstorm_answer_state(row)
         baseline_mtime = @controller.last_dispatched_state_file_mtime_for(
           project: row.project, slug: row.slug
@@ -2294,11 +2373,9 @@ module Hive
         restored_generic_run = row.action == "ready_to_run" &&
                                row.state_file_mtime && baseline_mtime &&
                                row.state_file_mtime < baseline_mtime
-        if restored_baseline &&
-           (brainstorm_answers.fetch(:complete) || restored_generic_run)
-          # A baseline loaded from disk may describe an older daemon's
-          # first-sight observation or a replaced workflow state file. Treat
-          # only that uncorroborated baseline as first sight exactly once.
+        if restored_baseline && restored_generic_run
+          # Generic-run state files can be replaced by their workflow. Treat
+          # that restored observation as first sight exactly once.
           # Same-process observations clear restored provenance, so a newer
           # sibling artifact can never re-arm an unchanged markerless run.
           baseline_mtime = nil
@@ -2583,11 +2660,16 @@ module Hive
           state_file_path: row.state_file,
           now: now,
           trigger: trigger,
+          edit_resume: Policy.edit_resume?(row.action),
           replay_semantic_terminal: trigger == "advance" &&
             row.marker.to_s == "none" && Policy.advance?(row.action)
         )
         remember_routing_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
+        if dispatch_result.is_a?(Hive::Attempts::DispatchResult) &&
+           dispatch_result.status == :terminal_replay && Policy.edit_resume?(row.action)
+          observe_failed_edit_recovery(row, now: now)
+        end
         if failed_automatic_advance_replay?(row, trigger, dispatch_result)
           return record_markerless_stall(row, attempt: dispatch_result.attempt)
         end
@@ -2614,6 +2696,62 @@ module Hive
           reason: "task_source_changed", error: e.message
         )
         :task_source_changed
+      end
+
+      # This precedes the edit baseline brake. Durable evidence, rather than
+      # another filesystem event, enrolls a consumed failed dispatch.
+      def observe_failed_edit_recovery(row, now:)
+        return unless Policy.edit_resume?(row.action)
+        return unless @recovery_coordinator.respond_to?(:request_failed_edit)
+
+        receipt = @recovery_coordinator.request_failed_edit(row: row, requestor: "daemon", now: now)
+        return unless receipt
+        @has_failed_edit_recoveries = true if receipt.request_id && %w[admitted cleared].include?(receipt.phase)
+        receipt
+      end
+
+      def process_changed_failed_edit_requests(rows, now:)
+        indexed = rows.to_h { |row| [ [ row.project.to_s, row.slug.to_s ], row ] }
+        dispatch_repository.pending(state_home: dispatch_request_state_home).each do |request|
+          next unless request.recovery&.fetch("variant", nil) == "failed_edit"
+          next unless indexed.key?([ request.project.to_s, request.slug.to_s ])
+
+          process_dispatch_request_iteration(request, now: now, rows: rows, row_index: indexed)
+        end
+      end
+
+      def refreshed_edit_row(row)
+        return row unless row && Policy.edit_resume?(row.action) && row.state_file && File.file?(row.state_file)
+
+        current = row.dup
+        marker = Hive::Markers.current(row.state_file)
+        current.marker = marker.name.to_s
+        current.marker_attrs = marker.attrs
+        current.state_file_mtime = File.mtime(row.state_file)
+        current
+      end
+
+      def failed_edit_input_hold(row, now:)
+        answers = brainstorm_answer_state(row)
+        coding_brainstorm = Hive::Workflows.coding_id?(row.workflow) && row.stage == BRAINSTORM_STAGE_DIR
+        return "wait_for_answers" if answers.fetch(:pending) ||
+          (coding_brainstorm && !answers.fetch(:complete))
+        return "wait_for_debounce" if row.state_file_mtime.nil? ||
+          now < row.state_file_mtime + @edit_debounce_sec
+
+        nil
+      end
+
+      def failed_edit_dispatch_ready?(request, row, now:)
+        return true unless request.recovery&.fetch("variant", nil) == "failed_edit"
+
+        reason = failed_edit_input_hold(row, now: now)
+        return true unless reason
+
+        log_dispatch_request_once(:dispatch_request_blocked,
+          request_id: request.request_id, project: request.project, slug: request.slug,
+          reason: reason)
+        false
       end
 
       def failed_automatic_advance_replay?(row, trigger, result)
@@ -2665,7 +2803,7 @@ module Hive
         observe_operational_disposition(row, **disposition)
       end
 
-      def observe_dispatch_outcome(row, outcome)
+      def observe_dispatch_outcome(row, outcome, recovery: nil)
         owner, reason = case outcome.to_sym
         when :dispatched
           [ "scheduler", "child dispatch was accepted" ]
@@ -2711,6 +2849,7 @@ module Hive
           [ "unknown", "dispatch outcome is not recognized" ]
         end
         details = {}
+        details[:recovery] = recovery if recovery
         routing = @routing_observations.delete([ row.project.to_s, row.slug.to_s ])
         details[:routing] = routing if routing
         observe_operational_disposition(
@@ -3364,6 +3503,7 @@ module Hive
         pending = dispatch_repository.pending(state_home: dispatch_request_state_home)
         pending = pending.select { |request| scoped_project?(request.project) }
         pending = prepare_dispatch_requests(pending, now: now)
+        @has_failed_edit_recoveries = pending.any? { |request| request.recovery&.fetch("variant", nil) == "failed_edit" }
         current_request_ids = pending.to_h { |request| [ request.request_id.to_s, true ] }
         @dispatch_request_log_signatures.delete_if do |(request_id, _event), _signature|
           !current_request_ids.key?(request_id)
@@ -3560,7 +3700,8 @@ module Hive
       end
 
       def log_dispatch_request_failure(request, error, now:)
-        recovery_receipt = defer_recovery_after_dispatch_failure(request, now: now)
+        recovery_receipt = defer_recovery_after_dispatch_failure(request, now: now) unless
+          error.is_a?(Hive::Attempts::StaleTaskSource)
         @logger.event(
           :dispatch_request_rejected,
           request_id: request.request_id, project: request.project,
@@ -3714,6 +3855,20 @@ module Hive
           )
           return
         end
+        row = refreshed_edit_row(row)
+        if req.recovery.nil? && row && observe_failed_edit_recovery(row, now: now)
+          log_dispatch_request_once(:dispatch_request_blocked,
+            request_id: req.request_id, project: req.project, slug: req.slug,
+            reason: "recovery_owns_edit_resume")
+          return
+        end
+        if req.recovery&.fetch("variant", nil) == "failed_edit"
+          observed = observe_failed_edit_recovery(row, now: now) if row
+          return unless observed&.request_id
+
+          req = dispatch_repository.fetch(observed.request_id, state_home: dispatch_request_state_home)
+          return unless req && failed_edit_dispatch_ready?(req, row, now: now)
+        end
         if req.recovery.is_a?(Hash)
           unless row
             log_dispatch_request_once(
@@ -3802,7 +3957,11 @@ module Hive
           return gate
         end
 
-        dispatch_request!(req, now: now)
+        if row && Policy.edit_resume?(row.action)
+          dispatch_request!(req, now: now, edit_resume: true)
+        else
+          dispatch_request!(req, now: now)
+        end
       end
 
       # Marker repair is deliberately exempt: clearing a corrupt/stale marker
@@ -3880,7 +4039,7 @@ module Hive
       # same transaction that creates the attempt and its reservations. Direct
       # maintenance requests still claim before process spawn, then bind the
       # child identity immediately afterward.
-      def dispatch_request!(req, now:)
+      def dispatch_request!(req, now:, edit_resume: false)
         return :shutdown unless admission_open?
 
         now = current_dispatch_time(now)
@@ -3905,11 +4064,20 @@ module Hive
           return :shutdown
         end
         if durable_admission
+          req = req.with(edit_resume: { "intent" => true }) if edit_resume
           result = dispatch_repository.dispatch(
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
             admission_view: @attempt_snapshot&.admission_view
           )
           log_attempt_admission(result)
+          if result.status == :deferred && result.reason == "capacity" &&
+             req.recovery&.fetch("variant", nil) == "failed_edit"
+            dispatch_repository.release_claim(req.request_id, state_home: dispatch_request_state_home)
+            log_dispatch_request_once(:dispatch_request_blocked,
+              request_id: req.request_id, project: req.project, slug: req.slug,
+              reason: "capacity", next_eligible_at: req.recovery["next_eligible_at"])
+            return result
+          end
           if result.status == :deferred && result.reason == "capacity_saturated"
             recovery_receipt = if req.recovery.is_a?(Hash)
               @recovery_coordinator.observe_admission_result(
@@ -4023,7 +4191,7 @@ module Hive
           state_file_path: state_file_path,
           now: now,
           trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
-          request_id: req.request_id
+          request_id: req.request_id, edit_resume: edit_resume
         )
         if pid == :shutdown
           dispatch_repository.release_claim(
@@ -4657,20 +4825,24 @@ module Hive
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
                            request_id: nil, kind: :task, dispatch_token: nil,
-                           replay_semantic_terminal: false)
+                           replay_semantic_terminal: false, edit_resume: false)
         return :shutdown unless admission_open?
 
         if kind == :task && @attempt_dispatcher && !@dry_run
           return dispatch_durable_command(
             command, project: project, slug: slug, stage: stage,
             now: now, trigger: trigger, request_id: request_id,
-            replay_semantic_terminal: replay_semantic_terminal
+            replay_semantic_terminal: replay_semantic_terminal, edit_resume: edit_resume
           )
         end
 
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
+        end
+        if edit_resume && !@dry_run
+          request_id = prepare_supervised_edit(command, project: project, slug: slug,
+            stage: stage, request_id: request_id, now: now) || request_id
         end
         spawn_args = {
           command_string: command,
@@ -4683,7 +4855,20 @@ module Hive
         spawn_args[:dispatch_token] = dispatch_token if dispatch_token
         return :shutdown unless admission_open?
 
-        pid = @supervisor.spawn(**spawn_args)
+        begin
+          pid = @supervisor.spawn(**spawn_args)
+        rescue StandardError
+          if request_id && edit_resume
+            record_supervised_edit_completion(request_id, exit_code: Hive::ExitCodes::SOFTWARE, now: now)
+            dispatch_repository.remove(request_id, state_home: dispatch_request_state_home)
+          end
+          raise
+        end
+        if request_id && edit_resume && !@dry_run
+          start_time = Hive::Lock.process_start_time(pid) if pid.is_a?(Integer) && pid.positive?
+          dispatch_repository.update_claim(request_id, pid: pid, process_start_time: start_time,
+            now: now, state_home: dispatch_request_state_home)
+        end
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
           command: command, started_at: now, state_file_mtime: state_file_mtime,
@@ -4700,8 +4885,78 @@ module Hive
         pid
       end
 
+      def prepare_supervised_edit(command, project:, slug:, stage:, request_id:, now:)
+        task = Hive::TaskResolver.new(slug, project_filter: project).resolve
+        intended = stage || "#{task.stage_index}-#{task.stage_name}"
+        generation = Hive::Attempts::Generation.resolve(task: task, project: project, intended_stage: intended)
+        return if task.id.to_s.empty?
+
+        id = request_id || dispatch_repository.generate_request_id
+        source = Hive::Attempts::FailedEdit.task_binding(generation).merge(
+          "request_id" => id, "attempt_id" => "supervised-#{id}",
+          "task_generation" => generation.task_generation,
+          "ownership_generation" => generation.ownership_generation
+        ).merge(Hive::Attempts::FailedEdit.input_binding(generation))
+        request = request_id && dispatch_repository.fetch(id, state_home: dispatch_request_state_home)
+        unless request
+          dispatch_repository.write_request!(project: project, slug: slug,
+            argv: Shellwords.split(command), requestor: "daemon", request_id: id,
+            task_id: task.id, expected_stage: intended, task_generation: generation.task_generation,
+            state_home: dispatch_request_state_home, now: now)
+        end
+        if request&.recovery&.fetch("variant", nil) == "failed_edit"
+          unless request.recovery["task_binding"] == Hive::Attempts::FailedEdit.task_binding(generation) &&
+                 request.recovery["input_binding"] == Hive::Attempts::FailedEdit.input_binding(generation)
+            raise Hive::Attempts::StaleTaskSource, "failed-edit input changed before supervised admission"
+          end
+        end
+        launch = {
+          "task_binding" => Hive::Attempts::FailedEdit.task_binding(generation),
+          "source_binding" => source,
+          "input_binding" => Hive::Attempts::FailedEdit.input_binding(generation)
+        }
+        if request&.recovery&.fetch("variant", nil) == "failed_edit"
+          launch["recovery_source_binding"] = request.recovery["source_binding"]
+        end
+        dispatch_repository.bind_supervised_edit!(id, launch: launch, task_id: task.id,
+          intended_stage: intended, task_generation: generation.task_generation,
+          state_home: dispatch_request_state_home)
+        preclaim_dispatch_request(dispatch_repository.fetch(id, state_home: dispatch_request_state_home), now: now) unless request
+        id
+      rescue Hive::InvalidTaskPath
+        # No canonical task identity means no durable failed-edit attribution.
+        nil
+      end
+
+      def record_supervised_edit_completion(request_id, exit_code:, now:, envelope: nil, stage_result: nil)
+        request = dispatch_repository.fetch(request_id, state_home: dispatch_request_state_home)
+        return unless request&.edit_resume
+
+        launch = request.edit_resume
+        source = launch.fetch("source_binding")
+        checkpoint = { "edit_resume_input_binding" => launch.fetch("input_binding") }
+        checkpoint["stage_result"] = stage_result if stage_result
+        checkpoint["edit_resume_source_binding"] = launch["recovery_source_binding"] if launch["recovery_source_binding"]
+        receipt = {
+          "receipt_version" => Hive::Attempts::Record::RECEIPT_VERSION,
+          "attempt_id" => source.fetch("attempt_id"),
+          "outcome" => exit_code == 0 ? "succeeded" : "failed",
+          "exit_status" => exit_code,
+          "ended_at" => now.utc.iso8601(6), "final_checkpoint" => checkpoint
+        }
+        if envelope.is_a?(Hash)
+          failure = envelope["error"].is_a?(Hash) ? envelope["error"] : envelope
+          receipt["failure"] = %w[reason provider status_code message].filter_map do |key|
+            value = failure[key]
+            [ key, value.to_s[0, 512] ] if value && !value.to_s.empty?
+          end.to_h
+        end
+        dispatch_repository.record_supervised_edit_terminal!(request_id, receipt: receipt,
+          expected_revision: request.revision, state_home: dispatch_request_state_home)
+      end
+
       def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:,
-                                   replay_semantic_terminal: false)
+                                   replay_semantic_terminal: false, edit_resume: false)
         return :shutdown unless admission_open?
 
         # A full daemon tick can take longer than the attempt launch window
@@ -4725,7 +4980,8 @@ module Hive
           trigger: trigger,
           task_generation: nil,
           inherited_outputs: [],
-          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION
+          schema_version: Hive::RuntimeControlPlane::DispatchRepository::SCHEMA_VERSION,
+          edit_resume: edit_resume ? { "intent" => true } : nil
         )
         return :shutdown unless admission_open?
 

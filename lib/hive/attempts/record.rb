@@ -115,7 +115,8 @@ module Hive
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
                          launch_timeout_sec:, ownership_generation: nil,
-                         task_input_epoch: 0, subject: nil, routing: { "mode" => "legacy" })
+                         task_input_epoch: 0, subject: nil, routing: { "mode" => "legacy" },
+                         edit_resume_source_binding: nil, edit_resume: false)
         timestamp = iso8601(now)
         subject ||= task_stage_subject(
           task_id: task_id, task_slug: task_slug, intended_stage: intended_stage
@@ -154,7 +155,18 @@ module Hive
           "started_at" => nil,
           "ended_at" => nil,
           "latest_revision" => starting_revision,
-          "checkpoint" => { "revision" => starting_revision, "progress_token" => progress_token },
+          "checkpoint" => { "revision" => starting_revision, "progress_token" => progress_token }.tap { |checkpoint|
+            if edit_resume || edit_resume_source_binding
+              checkpoint["edit_resume_input_binding"] = {
+                "task_input_epoch" => task_input_epoch, "progress_token" => progress_token
+              }
+              checkpoint["edit_resume_task_binding"] = {
+                "project" => project, "task_id" => task_id.to_s,
+                "intended_stage" => intended_stage, "task_locator" => "id:#{task_id}"
+              }
+            end
+            checkpoint["edit_resume_source_binding"] = Hive::StringifyKeys.call(edit_resume_source_binding) if edit_resume_source_binding
+          },
           "log_reference" => nil,
           "inherited_outputs" => Hive::StringifyKeys.call(inherited_outputs),
           "current_outputs" => [],

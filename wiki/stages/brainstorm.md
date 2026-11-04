@@ -3,7 +3,7 @@ title: 2-brainstorm stage
 type: stage
 source: lib/hive/stages/brainstorm.rb, lib/hive/claude_launcher.rb, lib/hive/attempts/dispatcher.rb, templates/brainstorm_prompt.md.erb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-03
 tags: [stage, brainstorm, qa]
 ---
 
@@ -28,12 +28,54 @@ tags: [stage, brainstorm, qa]
   stamped `ERROR reason=brainstorm_artifact_invalid` or
   `brainstorm_agent_failed`; an already-specific launcher/agent `ERROR`,
   including `budget_exhausted`, is retained.
+- **Durable acceptance**: the stage publishes handled/accepted disposition and
+  the accepted output digest through the bounded diagnostic channel used by
+  detached attempts and supervised commands. A later command-reporting failure
+  cannot turn accepted new questions or Requirements into a failed-edit retry.
+  A touch with unchanged bytes or an operator edit without stage acceptance is
+  not accepted output.
 - **Attempt replay repair**: the durable dispatcher does not treat a successful
   `2-brainstorm` receipt as replayable unless `brainstorm.md` currently passes
   the same structural validation. One legacy successful receipt without its
   artifact admits one repair attempt for that task generation, regardless of
   which request ID observes it. Once that repair terminalizes, its newest
   receipt is replayed instead of admitting an unbounded repair loop.
+
+## Recovery after a failed answer resume
+
+A failed dispatch before stage result handling can leave a fully answered
+WAITING document whose mtime baseline was already consumed. The daemon now
+observes attributable durable failure evidence before that baseline brake and
+admits `failed_edit` recovery through the existing coordinator. WAITING and the
+latest answers remain intact. A rejected spawn that this stage already handled
+and stamped ERROR continues through marker recovery, without a duplicate
+failed-edit admission.
+
+The failure source stays bound to its task ID, stage, request, attempt, and
+dispatch input. Later answer edits refresh the successor input binding under
+lock while preserving retry count, fingerprint history, next eligibility, and
+parking. Clearing an answer holds dispatch; refilling it still respects the
+existing deadline and debounce. Recovery queue deadlines trigger another
+observation without requiring a new edit. Restored baselines plus completed
+answers alone never replay an unchanged successful result. Legacy failures are
+adopted only when surviving terminal receipts prove current unchanged input;
+missing attribution requires operator inspection. See [[modules/daemon]] for
+binding, custody, and restart details.
+
+The existing recovery backoff and deterministic parking policy apply. Failed
+edit parks say “edits do not release this park; use the current workflow.retry
+action”. The explicit Retry affordance uses a fresh observation token and
+rechecks safety; ordinary answer edits do not release the park or reset its
+deadline. Other recovery variants retain their existing remediation text.
+
+CLI, TUI, and web show complete-answer cooldown/queue as Needs recovery, active
+retry as running, and parking as Needs execution repair. Known retry time is
+shown; absent time is explicitly unavailable. Genuine missing answers retain
+the input editor with recovery detail underneath, unless a repair/parking or
+dependency block takes precedence. Stale/unavailable status preserves durable
+recovery detail beneath its freshness label without promising an imminent retry.
+Complete answers without failure evidence do not fabricate a recovery action
+or an answer prompt.
 
 ## Agent behaviour (per `templates/brainstorm_prompt.md.erb`)
 
@@ -66,7 +108,10 @@ The runner returns `{commit: action, status: marker.name}` so `Commands::Run` wr
 
 - `test/integration/run_brainstorm_test.rb` exercises the prompt shape and marker transitions using the fake-claude fixture.
 - `test/unit/stages/brainstorm_runtime_test.rb` pins Claude/non-Claude routing, failure reconciliation, structural artifact validation, changed-artifact precedence, and stale-artifact rejection.
-- `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent.
+- `test/unit/attempts/dispatcher_test.rb` pins one repair admission for a successful Brainstorm receipt whose required artifact is absent, failed-edit terminal attribution, and accepted-result precedence.
+- `test/unit/daemon/recovery_coordinator_test.rb` and `test/unit/daemon/dispatcher_test.rb` cover retained WAITING, latest edits, completeness/debounce, retry pacing, parking, and token-guarded operator retry.
+- `test/integration/daemon_auto_retry_test.rb` covers failed launch, restart, time-only retry, edits during failure/backoff, and successful-work negatives with fake children.
+- Shared status/action/TUI tests plus Rails consumers and `web/test/system/edit_resume_recovery_test.rb` cover recovery display and actual Retry controls.
 
 ## Backlinks
 

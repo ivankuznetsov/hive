@@ -7,9 +7,36 @@ require "hive/workflow_package/registry_manifest_builder"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/source_snapshot"
 require "hive/workflow_package/validator"
+require_relative "../../support/canonical_manifest_helpers"
 
 class WorkflowPackageRegistryManifestTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_pinned_v1_fixtures_retain_both_digest_identities
+    {
+      "canonical" => %w[66c9e4e7c2808a490c35743f437be7244498e8ba340477c9245eaae8f6db6b2c 375698cd54a6452955ee63d8ccfd8a7c0d363ec188d4e3f5d3d6c9818703167a],
+      "canonical_with_recommendations" => %w[f06b92e3bb7a9ede930032bccee3ab20964805e45e44822c17afd20a8b0dc5ca 136993f905b5e4d157839e8c77d2702cb214ed90367cc16563926940b941540e],
+      "legacy_order" => %w[7a54bb56bb6f6943df04aaa2d359526cffdce7aef634e8327bfefc0ea299cc4e 87411610118de6ef758ed367c9f8f44d44711e9c08b09ddfbb75b9f39caed259],
+      "legacy_recommendations" => %w[727164bfdc2e8d086920520e679288e7b9b8b6947854db389931c84330740812 5d2466380fb9bf468f871bcc872beb774f9eb251843227500e12d29121434f9e]
+    }.each do |name, (release, package)|
+      bytes = manifest_fixture(name)
+      manifest = Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes)
+      assert_equal bytes, manifest.bytes
+      assert_equal release, manifest.digest
+      assert_equal package, Digest::SHA256.hexdigest(manifest.bytes)
+    end
+  end
+
+  def test_rich_builder_retains_prechange_bytes
+    with_tmp_dir do |root|
+      build = canonical_builder(File.join(root, "package"))
+      assert_equal manifest_fixture("canonical"), build.bytes
+      assert_equal "66c9e4e7c2808a490c35743f437be7244498e8ba340477c9245eaae8f6db6b2c", build.release_digest
+      assert_equal "375698cd54a6452955ee63d8ccfd8a7c0d363ec188d4e3f5d3d6c9818703167a", build.package_digest
+    end
+  end
+
 
   def test_validator_accepts_canonical_registry_manifest_and_release_digest
     with_registry_package do |root, document|
@@ -284,6 +311,93 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
       )
 
       assert_raises(Hive::ConfigError) { validator.send(:manifest_descriptor_hash) }
+    end
+  end
+
+  def test_admission_preserves_new_hand_authored_extension_orders_and_mixed_orders
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    document = YAML.safe_load(manifest_fixture("legacy_order"))
+    identities = [ document, document.merge("x-meta" => { "a" => [ { "a" => 1, "z" => 2 } ], "author" => { "custom" => "must-survive" }, "z" => document.dig("x-meta", "z") }) ].map do |data|
+      # Generic dumping retains insertion order, as the historical extension writer did.
+      unsigned = yaml.dump(data.reject { |key, _| key == "release_sha256" })
+      data = data.merge("release_sha256" => Digest::SHA256.hexdigest(unsigned))
+      bytes = yaml.dump(data)
+      manifest = Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes)
+      assert_equal bytes, manifest.bytes
+      assert_equal data, manifest.data
+      assert_equal unsigned, yaml.legacy_v1_release_input(data, bytes)
+      refute_equal bytes, yaml.dump_manifest(data)
+      [ manifest.digest, Digest::SHA256.hexdigest(manifest.bytes) ]
+    end
+    refute_equal identities[0][0], identities[1][0]
+    refute_equal identities[0][1], identities[1][1]
+  end
+
+  def test_new_canonical_bytes_overlap_legacy_with_the_same_unsigned_digest
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    %w[canonical canonical_with_recommendations legacy_order legacy_recommendations].each do |name|
+      data = YAML.safe_load(manifest_fixture(name))
+      unsigned = yaml.dump_manifest(data, include_release: false)
+      data["release_sha256"] = Digest::SHA256.hexdigest(unsigned)
+      bytes = yaml.dump_manifest(data)
+      assert_equal unsigned, yaml.legacy_v1_release_input(YAML.safe_load(bytes), bytes)
+      assert_equal bytes, Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes).bytes
+    end
+  end
+
+  def test_canonicalization_errors_at_full_and_unsigned_calls_have_typed_diagnostics
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    data = YAML.safe_load(manifest_fixture("canonical"))
+    [ { 1 => "bad", "a" => 1 }, Float::INFINITY, Float::NAN ].each do |value|
+      assert_package_rule("manifest.non_canonical") do
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(YAML.dump(data.merge("x-meta" => value)))
+      end
+    end
+    original = yaml.method(:dump_manifest)
+    failing_unsigned = lambda do |document, include_release: true|
+      raise ArgumentError, "unsigned failure" unless include_release
+      original.call(document)
+    end
+    with_replaced_singleton_method(yaml, :dump_manifest, failing_unsigned) do
+      assert_package_rule("manifest.non_canonical") do
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(manifest_fixture("canonical"))
+      end
+    end
+    unrelated = ->(*) { raise ArgumentError, "outside canonicalization" }
+    with_replaced_singleton_method(Hive::WorkflowPackage::RegistryManifest, :secure_equal?, unrelated) do
+      error = assert_raises(ArgumentError) do
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(manifest_fixture("canonical"))
+      end
+      assert_equal "outside canonicalization", error.message
+    end
+  end
+
+  def test_preserves_shape_yaml_and_encoding_failure_ownership
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    data = YAML.safe_load(manifest_fixture("canonical"))
+    [ [ "manifest.invalid_shape", data.merge("future" => true) ],
+      [ "manifest.invalid_shape", data.merge(1 => "bad") ],
+      [ "manifest.invalid_author", data.merge("author" => data.fetch("author").merge("custom" => "keep")) ] ].each do |rule, document|
+      bytes = document.keys.all? { |key| key.is_a?(String) } ? yaml.dump_manifest(document) : YAML.dump(document)
+      assert_package_rule(rule) { Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes) }
+    end
+    [ "schema: [\n", "--- !ruby/object:Object {}\n", "\xFF".b ].each do |bytes|
+      assert_package_rule("manifest.invalid_yaml") { Hive::WorkflowPackage::RegistryManifest.load_bytes(bytes) }
+    end
+    with_replaced_singleton_method(Psych, :safe_load, ->(*) { raise EncodingError }) do
+      assert_package_rule("manifest.invalid_yaml") do
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(manifest_fixture("canonical"))
+      end
+    end
+  end
+
+  def test_legacy_bytes_must_match_their_own_release_identity
+    data = YAML.safe_load(manifest_fixture("legacy_order"))
+    data["release_sha256"] = Digest::SHA256.hexdigest(
+      Hive::WorkflowPackage::CanonicalYAML.dump_manifest(data, include_release: false)
+    )
+    assert_package_rule("manifest.release_digest_mismatch") do
+      Hive::WorkflowPackage::RegistryManifest.load_bytes(Hive::WorkflowPackage::CanonicalYAML.dump(data))
     end
   end
 

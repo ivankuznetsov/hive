@@ -1,4 +1,5 @@
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/managed_store"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/canonical_yaml"
@@ -8,6 +9,29 @@ require "hive/workflows/loader"
 
 class WorkflowPackageManagedStoreTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_places_and_reads_canonical_and_historical_generations_without_rewriting
+    %w[canonical legacy_order legacy_recommendations].each do |name|
+      with_tmp_dir do |root|
+        package = fixture_package(File.join(root, "package"), name)
+        document = YAML.safe_load(manifest_fixture(name))
+        resolution = Hive::WorkflowPackage::RegistryClient::Resolution.new(
+          name: "demo", version: "1.0.0", source_commit: "a" * 40, catalog_commit: "a" * 40,
+          source_revision: document.dig("source", "revision"), manifest_digest: package.release_digest,
+          hive_min_version: "0.4.3", summary: "Demo", permissions: document.fetch("permissions")
+        )
+        store = Hive::WorkflowPackage::ManagedStore.new(File.join(root, ".hive-state"))
+        generation = store.place_generation(package.root, resolution)
+        stored = store.manifest("demo", resolution.source_commit, package.release_digest)
+        assert_equal manifest_fixture(name), stored.bytes
+        assert_equal package.release_digest, stored.digest
+        assert_equal package.package_digest, Digest::SHA256.file(File.join(generation, "manifest.yml")).hexdigest
+        assert store.verify_generation("demo", resolution.source_commit, package.release_digest).valid?
+      end
+    end
+  end
+
 
   def test_installed_workflow_reads_check_integrity_without_launching_secret_scans
     with_tmp_dir do |dir|

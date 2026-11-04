@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-03
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -399,6 +399,38 @@ Then run `bundle exec rake test:hive`: this executes the exact
 `HIVE_DEFAULT_TEST_FILES` manifest without the component prerequisite. A
 different signature, a red or missing direct Hive run, or a relevant component
 change invalidates the exception.
+
+### Honeycomb manifest byte contracts
+
+`workflow_package/canonical_yaml_test.rb` covers exact structural roles plus
+lexical remainders, reserved-name collisions at arbitrary extension depths,
+sequence positions, non-mutation, idempotency, root-only release omission, and
+uniform string-key/scalar failures. `registry_manifest_test.rb` pins exact
+canonical and legacy bytes, both SHA-256 identities, overlap with equal unsigned
+inputs, newly admitted hand-authored and mixed extension orders, shape ownership,
+and the full/unsigned dump-call error conversions. YAML/encoding errors and
+unrelated `ArgumentError`s keep their existing boundaries.
+
+The four `test/fixtures/workflow_package/*honeycomb_manifest*v1.yml` files were
+captured before the serializer change. They lock a real builder with non-empty
+tools, prompt assets, optional-input slots and external skills, plus selected
+`[slot, effort]` and historical `[effort, slot]` recommendations and unordered
+extension descendants. `canonical_module_manifest_v1.yml` fences generic dump
+bytes and the module release digest. Fixture bytes must not be regenerated to
+accommodate serializer changes.
+
+Publisher tests pin literal pre-change release/package digests and adopt a real
+retained receipt and bundle with authored inputs still available, exercising
+the rebuild comparisons. Publication-store, managed-store, gateway, client,
+and submission tests retain exact fixture bytes and identities; newly submitted
+hand-authored and canonical extension-order variants keep distinct identities.
+The publish CLI binds its reported digests to actual package bytes. Honeycomb
+lifecycle tests install both legacy fixtures, read their retained bytes through
+catalog-bound task identity, and update to canonical packages. Contextual
+`x-hive` rejection remains with the workflow validator after byte admission.
+Run these focused suites with `bin/test`, and use `rake coverage:changed` for
+exact per-file coverage of the serializer and reader, including the legacy
+fallback and rejection paths.
 
 ### Bounded attempt-storage gate
 

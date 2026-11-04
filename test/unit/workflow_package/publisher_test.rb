@@ -1,8 +1,34 @@
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/publisher"
 
 class WorkflowPackagePublisherTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_publication_and_builder_converge_for_permuted_authored_maps
+    with_tmp_dir do |root|
+      first = canonical_builder(File.join(root, "first"))
+      second = canonical_builder(File.join(root, "second"), reverse: true)
+      assert_equal first.bytes, second.bytes
+      assert_equal first.release_digest, second.release_digest
+      assert_equal first.package_digest, second.package_digest
+    end
+    with_authored_workflow do |project, authored|
+      original = publisher(project).package(destination: File.join(project, "first"))
+      metadata_path = File.join(authored, "honeycomb.yml")
+      data = YAML.safe_load(File.read(metadata_path))
+      %w[author source].each { |key| data[key] = data.fetch(key).to_a.reverse.to_h }
+      File.write(metadata_path, YAML.dump(data.to_a.reverse.to_h))
+      permuted = publisher(project).package(destination: File.join(project, "second"))
+      assert_equal original.release_digest, permuted.release_digest
+      assert_equal original.package_digest, permuted.package_digest
+      bytes = File.binread(File.join(original.root, "manifest.yml"))
+      assert_equal bytes, File.binread(File.join(permuted.root, "manifest.yml"))
+      assert_equal bytes, Hive::WorkflowPackage::CanonicalYAML.dump_manifest(YAML.safe_load(bytes))
+    end
+  end
+
 
   Package = Hive::WorkflowPackage::Publisher::Package
   RetainedReceipt = Data.define(
@@ -239,6 +265,34 @@ class WorkflowPackagePublisherTest < Minitest::Test
         raise Hive::ConfigError, "invalid metadata"
       end
       assert invalid.send(:authored_inputs_available?)
+    end
+  end
+
+  def test_prepare_adopts_a_receipt_with_pinned_prechange_identities_and_available_inputs
+    with_authored_workflow do |project, authored|
+      metadata = File.join(authored, "honeycomb.yml")
+      File.write(metadata, File.read(metadata).sub("hive_min_version: #{Hive::VERSION}", "hive_min_version: 0.4.3"))
+      with_retained_package(project) do |root, _receipt|
+        package = publisher(project).package(destination: File.join(project, "build"))
+        store = Hive::WorkflowPackage::PublishStore.new(root: File.join(project, "publish"))
+        receipt = store.create_or_load(package, registry: "ivankuznetsov/honeycomb")
+        assert_equal "6bd434aeb7a3c316ff6a109d0f479a60273378141ad7f60f8c002d67cc931759", receipt.release_digest
+        assert_equal "501f81c5f56fdeb2234b33ffc43f3d2ea27abcb73eed4e1b464005b650ad5d46", receipt.package_digest
+        retained = store.verify_bundle(receipt)
+        receipt_path = store.receipt_path("ivankuznetsov/honeycomb", "demo", "1.2.3")
+        receipt_bytes = File.binread(receipt_path)
+        bundle_bytes = File.binread(File.join(retained, "manifest.yml"))
+        assert_equal File.binread(File.join(root, "manifest.yml")), bundle_bytes
+
+        adopted = recovery_publisher(project, store).prepare(destination: File.join(project, "rebuild"))
+
+        assert_equal retained, adopted.root
+        assert_equal receipt.release_digest, adopted.release_digest
+        assert_equal receipt.package_digest, adopted.package_digest
+        assert_equal receipt_bytes, File.binread(receipt_path)
+        assert_equal bundle_bytes, File.binread(File.join(retained, "manifest.yml"))
+        assert File.file?(File.join(authored, "work.md"))
+      end
     end
   end
 

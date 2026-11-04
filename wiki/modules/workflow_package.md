@@ -3,7 +3,7 @@ title: Hive::WorkflowPackage
 type: module
 source: lib/hive/workflow_package/
 created: 2026-08-13
-updated: 2026-10-14
+updated: 2026-11-03
 tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, managed-store]
 ---
 
@@ -227,6 +227,64 @@ preset actor compilation is in-memory and does not create empty policy state.
 `gh` and `qmd` remain baseline Hive dependencies. New publication is v2-only:
 it does not detect, convert, resubmit, or bulk-migrate legacy registry layouts,
 and it exposes no separate public status or Hive web mutation route.
+
+## Manifest bytes and v1 compatibility
+
+`CanonicalYAML.dump_manifest` is a lossless, non-mutating Honeycomb writer.
+It selects field order by the complete structural path, including an explicit
+sequence-item step. A local key named `author`, `source`, or `permissions` inside
+extension data never acquires a core schema role.
+
+| Manifest role | Known field order |
+| --- | --- |
+| Root | `schema`, `name`, `version`, `description`, `author`, `license`, `hive_min_version`, `source`, `permissions`, `files`, `release_sha256` |
+| Root `author` / `source` | `name`, `url` / `url`, `revision` |
+| Root `permissions` | `risk`, `capabilities`, `network_hosts`, `filesystem_read`, `filesystem_write`, `secrets` |
+| Root `files` | Lexical file paths |
+| Root `x-hive` | `tools`, `prompt_assets`, `optional_inputs`, `external_skills`, `mapping_recommendations` |
+| `x-hive.tools[]` / `x-hive.prompt_assets[]` | `path` |
+| `x-hive.optional_inputs[]` | `name`, `authorized_slots` |
+| `x-hive.mapping_recommendations[]` | `slot`, `effort` |
+
+Each recognized mapping emits present known fields followed by every remaining
+key in lexical order. Unrecognized or ambiguous mappings sort all keys
+lexically and recurse through every descendant. Sequences keep their element
+order, including scalars and empty containers, while contained maps are
+normalized. `include_release: false` omits only the root `release_sha256`.
+The generic `CanonicalYAML.dump` emitter, scalar encoding, and `hive-module/v1`
+bytes are unchanged.
+
+Serialization preserves fields before validation. `RegistryManifest` validates
+root/core shape before matching bytes; `WorkflowPackage::Validator` owns
+contextual `x-hive` semantics after lossless admission. Unlisted core fields
+therefore reach their existing shape diagnostic, and malformed owned extension
+data reaches its contextual diagnostic. Direct manifest dumping rejects every
+non-string mapping key before sorting with `ArgumentError: canonical YAML keys
+must be strings`; non-finite numbers and unsupported scalar classes retain
+their serializer failures. `RegistryManifest.load_bytes` converts
+`ArgumentError` only around its full and unsigned `dump_manifest` calls to
+`PackageError` / `manifest.non_canonical`. It does not attempt legacy acceptance
+after that error. Unrelated `ArgumentError`s propagate, and the existing
+`Psych::Exception` / `EncodingError` YAML diagnostics remain unchanged.
+
+Hive's builder and publication path emit one path-aware form with stable
+unsigned release and final package digests. Byte admission remains as
+permissive as before for valid `honeycomb-manifest/v1` documents, including new
+third-party or hand-authored submissions with insertion-ordered extension maps.
+The reader first matches the new form, then uses the reader-only legacy-v1
+helper to match exact historical bytes. It computes the unsigned release input
+with the same selected strategy and retains accepted bytes and digest identities
+unchanged. The legacy accepted byte set contains the new canonical form; on
+that overlap both unsigned strategies agree. Mixed extension orders are accepted
+when the legacy writer reproduces the bytes and their matching digest verifies.
+Bytes reproduced by neither strategy and mismatched release digests still fail.
+No retained/installed-only flag or stored-package rewrite is involved.
+
+Single-form admission requires a future schema version and an explicit migration
+contract. The conservative operational rollback window ends at the first
+new-form publication: after that, recover by re-landing the compatible reader
+or shipping a forward-compatible reader. This boundary does not imply an
+admission-set change; the previous reader also accepts new canonical bytes.
 
 ## Publishing and recovery internals
 

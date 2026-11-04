@@ -1,10 +1,34 @@
 require "digest"
 require "test_helper"
+require_relative "../../support/canonical_manifest_helpers"
 require "hive/workflow_package/publisher"
 require "hive/workflow_package/registry_submission"
 
 class WorkflowPackageRegistrySubmissionTest < Minitest::Test
   include HiveTestHelper
+  include CanonicalManifestHelpers
+
+  def test_new_submissions_keep_distinct_hand_authored_and_canonical_extension_identities
+    identities = [ false, true ].map do |canonicalize|
+      with_tmp_dir do |root|
+        package = fixture_package(File.join(root, "package"), "legacy_order", canonicalize: canonicalize)
+        bytes = File.binread(File.join(package.root, "manifest.yml"))
+        assert_equal "must-survive", YAML.safe_load(bytes).dig("x-meta", "author", "custom")
+        gateway = FakeGateway.new(package, direct: true)
+        state = File.join(root, "publish")
+        result = submission_for(state, gateway).submit(package)
+        assert_equal "pr_verified", result.receipt.last_completed_step
+        assert_equal package.release_digest, result.receipt.release_digest
+        assert_equal package.package_digest, result.receipt.package_digest
+        retained = Hive::WorkflowPackage::PublishStore.new(root: state).verify_bundle(result.receipt)
+        assert_equal bytes, File.binread(File.join(retained, "manifest.yml"))
+        [ result.receipt.release_digest, result.receipt.package_digest ]
+      end
+    end
+    refute_equal identities[0][0], identities[1][0]
+    refute_equal identities[0][1], identities[1][1]
+  end
+
 
   PullRequest = Hive::WorkflowPackage::RegistryGateway::PullRequest
 

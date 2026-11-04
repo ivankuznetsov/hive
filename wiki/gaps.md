@@ -3,9 +3,35 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-03
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Local broad-suite process custody failure (2026-11-03)
+
+The canonical-YAML execution's `bin/test --all` checkpoint is red outside its
+allowed AgentCliRuntime baseline exception. The Hive partitions reported four
+failures and twenty-three errors; the standalone component passed.
+`OpenCodeAgentLifecycleTest#test_success_uses_native_state_for_run_and_export`
+reproduces on both untouched commit `966211001e` and the implementation with
+`Errno::ESRCH` reading `/proc/<pid>/environ` at
+`lib/hive/invocation_process_custody.rb:112` (`environment_matches?`). That file,
+OpenCode execution, and the failing test are unchanged by the YAML fix.
+
+This comparison establishes that specific pre-existing failure, not every broad
+failure. The remaining failures have not all been independently baselined.
+The YAML, registry, module, publisher, store, gateway, client, submission,
+publication/install lifecycle, Wiki, style, and exact changed-source coverage
+checks pass. Repairing process custody is outside that execution's scope, so
+its broad verification contract remains unmet.
+
+## Historical Honeycomb manifest inventory (2026-11-03)
+
+The lossless YAML change proves compatibility with pre-change fixtures and the
+preserved legacy-v1 algorithm; it does not inventory a live registry corpus.
+A future version that requires single-form byte admission needs an explicit
+migration contract and an inventory of retained manifest identities first.
+See [[modules/workflow_package]] and [[testing]].
 
 ## Task observation boundary (2026-10-02)
 

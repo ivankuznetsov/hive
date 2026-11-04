@@ -19,6 +19,9 @@ class WikiWorkflowPackageOwnershipTest < Minitest::Test
     refute_match(/^source: .*lib\/hive\/workflow_package\//, workflows)
     assert_includes package, OWNERSHIP_MARKER
     assert_includes package, "## Managed Honeycomb boundary"
+    assert_includes package, "## Manifest bytes and v1 compatibility"
+    assert_includes package, "CanonicalYAML.dump_manifest"
+    assert_includes package, "manifest.non_canonical"
     assert_includes package, "## Publishing and recovery internals"
     refute_includes package, "TaskAction::READY_COMMANDS"
     assert_includes task_action, "TaskAction::READY_COMMANDS"

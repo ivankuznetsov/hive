@@ -154,7 +154,7 @@ workflow identity and expected version tag before dependency installation.
 The explicit `fiddle` runtime gem compiles against libffi headers, so hosts
 building it need the libffi development package.
 
-Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3.1),
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.4.1),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
 jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
 image_processing, and `hive-cli` from the parent checkout. Redcarpet
@@ -174,8 +174,12 @@ Rails/Capybara and the web integration upload tests use
 2026-11 advisory refresh requires those patch levels for the active
 `bundler-audit` database.
 
-Rails 8.1.3.1 is the minimum locked web release for the
-CVE-2026-66066 Active Storage/libvips security fix. Production images install
+Rails 8.1.4.1 is the minimum locked web release. 8.1.3.1 carried the
+CVE-2026-66066 Active Storage/libvips security fix. 8.1.4.1 adds the
+2026-11-04 Active Support fixes: MessagePack serializer XSS
+(GHSA-2w9f-fxwj-w2qf) and `safe_constantize` DoS (GHSA-8474-xrp6-wh69).
+The root lock's transitive `activesupport`, pulled in by the RuboCop Rails
+plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
 

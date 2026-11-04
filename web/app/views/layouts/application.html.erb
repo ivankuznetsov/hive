@@ -70,12 +70,14 @@
       </div>
     </header>
     <main>
-      <% if notice %>
-        <div class="flash flash-notice" role="status"><%= notice %></div>
-      <% end %>
-      <% if alert %>
-        <div class="flash flash-alert" role="alert"><%= alert %></div>
-      <% end %>
+      <div id="flash-messages">
+        <% if notice %>
+          <div class="flash flash-notice" role="status"><%= notice %></div>
+        <% end %>
+        <% if alert %>
+          <div class="flash flash-alert" role="alert"><%= alert %></div>
+        <% end %>
+      </div>
       <%= yield %>
     </main>
   </body>

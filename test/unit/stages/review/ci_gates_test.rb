@@ -144,11 +144,12 @@ class ReviewCiGatesTest < Minitest::Test
     with_fixture do |_repo, task, ctx, _cfg|
       errored = Hive::Stages::Review.ci_terminal_result(
         task, result(:error, error: "CI command timed out after 3600s", output: "==> Workspace smoke\nbuilding image"),
-        gate: "local", pass: 1, ctx: ctx
+        gate: "github", pass: 1, ctx: ctx
       )
 
       assert_equal :review_error, errored.fetch(:status)
       body = File.read(File.join(task.folder, "reviews", "ci-error-01.md"))
+      assert_includes body, "# GitHub CI error (pass 01)"
       assert_includes body, "CI command timed out after 3600s"
       assert_includes body, "==> Workspace smoke\nbuilding image"
       attrs = Hive::Markers.current(task.state_file).attrs

@@ -1,13 +1,126 @@
 require "test_helper"
 require "open3"
+require "json"
 require "pty"
 require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
+require "hive/babysitter/git_policy"
 require_relative "../../../bin/hive-babysitter-skip-log"
 
 class BabysitterDryRunEnvTest < Minitest::Test
   include HiveTestHelper
+
+  GIT_OPTION_SPELLINGS = JSON.parse(File.read(
+    File.expand_path("../../fixtures/babysitter/git_option_spellings.v1.json", __dir__)
+  )).freeze
+
+  def test_git_option_fixture_requires_an_exact_recorded_version_and_case
+    %w[2.45.4 2.55.0].each do |version|
+      assert_equal "smudge", recorded_git_option_outcome("git version #{version}", "cat-filters").fetch("helper")
+    end
+    error = assert_raises(KeyError) { recorded_git_option_outcome("git version unrecorded", "cat-filters") }
+    assert_includes error.message, "characterize git version unrecorded"
+    error = assert_raises(KeyError) { recorded_git_option_outcome("git version 2.55.0", "missing-case") }
+    assert_includes error.message, "characterize git version 2.55.0 case missing-case"
+  end
+
+  def test_git_option_spellings_match_recorded_real_git_outcomes_and_passthrough
+    with_git_option_repo do |dir, binary, version, marker|
+      recording_git, real_log = recording_git_delegate(dir, binary)
+      skip_log = File.join(dir, "skipped.log")
+      env = git_option_environment.merge(
+        "HIVE_BABYSITTER_REAL_GIT" => recording_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log
+      )
+      GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+        args = entry.fetch("argv")
+        expected = recorded_git_option_outcome(version, entry.fetch("id"))
+        FileUtils.rm_f(marker)
+        out, err, status = raw_option_git(binary, dir, *args)
+        assert_git_option_outcome expected, out, err, status, marker, "#{version} #{args.inspect}"
+
+        next unless entry.fetch("hive_policy") == "allow"
+
+        FileUtils.rm_f(marker)
+        FileUtils.rm_f(real_log)
+        FileUtils.rm_f(skip_log)
+        out, err, status = Open3.capture3(env, stub_path("git"), *args, chdir: dir, unsetenv_others: true)
+        assert_git_option_outcome expected, out, err, status, marker, "passthrough #{version} #{args.inspect}"
+        refute_includes err, "[dry-run]"
+        refute_path_exists skip_log, "allowed command wrote a skip record: #{args.inspect}"
+        calls = File.readlines(real_log).map { |line| JSON.parse(line) }
+        decision = Hive::Babysitter::GitPolicy.classify(args, environment: env)
+        assert_equal [ Hive::Babysitter::GitPolicy.hardened_passthrough_argv(args, decision.rest) ], calls
+        if entry.fetch("id") == "cat-object-filter-glued" && expected.fetch("exit_status").zero?
+          assert out.lines.any? { |line| line.include?(" commit ") }, out
+          assert out.lines.any? { |line| line.include?(" tree ") }, out
+          refute_match(/ blob /, out)
+        end
+      end
+    end
+  end
+
+  def test_cat_file_filter_tokens_stop_before_real_git_through_stub_and_overlay
+    with_git_option_repo do |dir, binary, version, marker|
+      # Only exact --filters establishes that this repository can execute smudge.
+      out, err, status = raw_option_git(binary, dir, "cat-file", "--filters", "HEAD:README.md")
+      assert_git_option_outcome recorded_git_option_outcome(version, "cat-filters"), out, err, status, marker, version
+      assert_equal "smudged\ntest\n", out
+      assert_equal "smudge", File.read(marker)
+      FileUtils.rm_f(marker)
+
+      recording_git, real_log = recording_git_delegate(dir, binary)
+      skip_log = File.join(dir, "skipped.log")
+      env = git_option_environment.merge(
+        "HIVE_BABYSITTER_REAL_GIT" => recording_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log
+      )
+      overlay = Hive::Babysitter::DryRunEnv.prepare_overlay(
+        dir, real_git: recording_git, real_gh: "/unused/gh", skip_log: skip_log
+      )
+      [ stub_path("git"), File.join(overlay, "git") ].each do |launcher|
+        FileUtils.rm_f(skip_log)
+        out, err, status = Open3.capture3(env, launcher, "cat-file", "-p", "HEAD:README.md",
+                                        chdir: dir, unsetenv_others: true)
+        assert status.success?, err
+        assert_equal "test\n", out
+        assert_path_exists real_log, "#{launcher} must record an allowed read before the deny checks"
+        calls = File.readlines(real_log).map { |line| JSON.parse(line) }
+        assert_equal %w[cat-file -p HEAD:README.md], calls.fetch(0).last(3)
+        refute_path_exists marker
+        refute_path_exists skip_log, "#{launcher} must not audit an allowed read as skipped"
+        FileUtils.rm_f(real_log)
+
+        GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+          next unless entry.fetch("hive_policy") == "deny"
+
+          args = entry.fetch("argv")
+          out, err, status = Open3.capture3(env, launcher, *args, chdir: dir, unsetenv_others: true)
+          assert status.success?, err
+          assert_empty out
+          assert_includes err, "[dry-run] git #{args.join(' ')} skipped"
+          assert_includes File.read(skip_log), "git #{args.join(' ')} skipped"
+          refute_path_exists marker
+          refute_path_exists real_log, "denied command reached real Git: #{args.inspect}"
+        end
+      end
+
+      FileUtils.rm_f(skip_log)
+      2.times do
+        out, err, status = Open3.capture3(env, File.join(overlay, "git"), "cat-file", "--fi", "HEAD:README.md",
+                                       chdir: dir, unsetenv_others: true)
+        assert status.success?, err
+        assert_empty out
+        assert_includes err, "git cat-file --fi HEAD:README.md skipped"
+      end
+      lines = File.readlines(skip_log)
+      assert_equal 2, lines.size
+      lines.each { |line| assert_match(/git cat-file --fi HEAD:README.md skipped\n\z/, line) }
+      refute_path_exists marker
+      refute_path_exists real_log
+    end
+  end
 
   def test_with_env_intercepts_mutating_git_and_gh_calls
     with_tmp_dir do |dir|
@@ -835,6 +948,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HIVE_BABYSITTER_REAL_GIT" => real_git,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
       }
+
+      GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+        if entry.fetch("hive_policy") == "deny"
+          assert_stubbed env, "git", *entry.fetch("argv")
+        else
+          assert_passes env, "git", *entry.fetch("argv")
+        end
+      end
 
       assert_stubbed env, "gh", "-R", "owner/repo", "pr", "ready", "42"
       assert_stubbed env, "gh", "--repo=owner/repo", "pr", "close", "42"
@@ -2193,6 +2314,100 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   private
 
+  def recorded_git_option_outcome(version, id)
+    GIT_OPTION_SPELLINGS.fetch("observations").fetch(version) do
+      raise KeyError, "characterize #{version} in git_option_spellings.v1.json before claiming compatibility"
+    end.fetch("cases").fetch(id) do
+      raise KeyError, "characterize #{version} case #{id} in git_option_spellings.v1.json"
+    end
+  end
+
+  def git_option_environment
+    {
+      "PATH" => ENV.fetch("PATH"), "HOME" => File::NULL, "XDG_CONFIG_HOME" => File::NULL,
+      "GIT_CONFIG_NOSYSTEM" => "1", "LC_ALL" => "C", "GIT_TERMINAL_PROMPT" => "0"
+    }
+  end
+
+  def raw_option_git(binary, dir, *args)
+    Open3.capture3(git_option_environment, binary, "-C", dir, *args, unsetenv_others: true)
+  end
+
+  def with_git_option_repo
+    binary = real_git_binary
+    version, err, status = Open3.capture3(git_option_environment, binary, "--version", unsetenv_others: true)
+    assert status.success?, err
+    version = version.strip
+    recorded_git_option_outcome(version, "cat-filters")
+    with_tmp_dir do |dir|
+      setup = lambda do |*args|
+        _out, error, result = raw_option_git(binary, dir, *args)
+        assert result.success?, "#{binary} (#{version}): #{error}"
+      end
+      setup.call("init", "--template=", "-q", "-b", "master")
+      {
+        "user.name" => "Test", "user.email" => "test@example.com", "commit.gpgsign" => "false",
+        "gc.auto" => "0", "maintenance.auto" => "false"
+      }.each { |key, value| setup.call("config", key, value) }
+      File.write(File.join(dir, "README.md"), "old\n")
+      File.write(File.join(dir, ".gitattributes"), "README.md filter=hivepwn\n")
+      setup.call("add", "README.md", ".gitattributes")
+      setup.call("commit", "-qm", "initial")
+      File.write(File.join(dir, "README.md"), "test\n")
+      setup.call("add", "README.md")
+      setup.call("commit", "-qm", "update")
+      marker = File.join(dir, "helper-ran")
+      { "smudge" => "filter.hivepwn.smudge", "external_diff" => "diff.external" }.each do |name, config|
+        helper = File.join(dir, name)
+        File.write(helper, <<~RUBY)
+          #!#{RbConfig.ruby}
+          File.write(#{marker.dump}, #{name.dump})
+          puts #{name == "smudge" ? '"smudged"' : '"external diff"'}
+          print STDIN.read if #{name == "smudge"}
+        RUBY
+        FileUtils.chmod("+x", helper)
+        setup.call("config", config, helper)
+      end
+      yield dir, binary, version, marker
+    end
+  end
+
+  def recording_git_delegate(dir, binary)
+    log_path = File.join(dir, "real-git.jsonl")
+    path = File.join(dir, "recording-git")
+    File.write(path, <<~RUBY)
+      #!#{RbConfig.ruby}
+      require "json"
+      unless ARGV == ["--no-lazy-fetch", "--version"]
+        File.open(#{log_path.dump}, "a") { |file| file.puts(JSON.generate(ARGV)) }
+      end
+      exec #{binary.dump}, *ARGV
+    RUBY
+    FileUtils.chmod("+x", path)
+    [ path, log_path ]
+  end
+
+  def assert_git_option_outcome(expected, out, err, status, marker, message)
+    helper = File.exist?(marker) ? File.read(marker) : nil
+    category = if err.include?("ambiguous")
+      "ambiguous"
+    elsif err.include?("invalid filter-spec")
+      "invalid_filter_spec"
+    elsif !status.success?
+      "invalid_option"
+    elsif helper
+      "helper_execution"
+    else
+      "ordinary_read"
+    end
+    actual = {
+      "exit_status" => status.exitstatus, "category" => category,
+      "helper" => helper, "stdout" => out.empty? ? "empty" : "nonempty",
+      "diagnostic" => err.lines.first.to_s.strip
+    }
+    assert_equal expected, actual, "#{message}: #{err}"
+  end
+
   STUB_HANG_TIMEOUT_SEC = 10
 
   def capture_stub_with_timeout(env, binary, *args)
@@ -2212,8 +2427,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
   end
 
   def assert_stubbed(env, binary, *args)
-    _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+    out, err, status = Open3.capture3(env, stub_path(binary), *args)
     assert status.success?, err
+    assert_empty out
     assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
     # Load-bearing: prove the command did not also fall through to the real binary. A
     # regression that logs the skip *and then* still exec's real git/gh would pass the

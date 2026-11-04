@@ -337,8 +337,6 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
-  private
-
   class UnverifiableOwnerIdentity < SimpleDelegator
     def status(_expected) = :unverifiable
   end
@@ -389,26 +387,50 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
-  def test_attempt_wrapper_reservations_follow_their_attempt
+  def test_reservation_of_a_settled_attempt_is_released_as_attempt_settled
     with_registry do |database, registry, _root|
-      insert_attempt(database, "attempt-live", state: "launching")
       insert_attempt(database, "attempt-lost", state: "lost")
-      live = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-live")
-      settled = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-lost")
-      unknown = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-unknown")
-      [ live, settled, unknown ].each(&:release_fence!)
+      reservation = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-lost")
+      reservation.release_fence!
+
+      assert_equal [ { "reservation_id" => reservation.id, "reason" => "attempt_settled" } ],
+                   registry.release_abandoned_reservations!
+      assert_equal "released", database.read { |db| db[:launch_reservations].get(:state) }
+    end
+  end
+
+  def test_reservation_of_a_live_attempt_is_kept_even_when_its_launcher_died
+    with_registry do |database, registry, _root|
+      insert_attempt(database, "attempt-launching", state: "launching")
+      insert_attempt(database, "attempt-running", state: "running")
+      reservations = %w[attempt-launching attempt-running].map do |attempt_id|
+        registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: attempt_id)
+      end
+      reservations.each(&:release_fence!)
       gone_pid = Process.spawn("true")
       Process.wait(gone_pid)
-      # The launcher died, but the live attempt's wrapper may still register.
+      database.transaction { |db| db[:launch_reservations].update(owner_pid: gone_pid) }
+
+      assert_empty registry.release_abandoned_reservations!
+      assert_equal %w[reserved reserved], database.read { |db| db[:launch_reservations].select_map(:state) }
+    end
+  end
+
+  def test_reservation_without_an_attempt_row_falls_through_to_the_owner_check
+    with_registry do |database, registry, _root|
+      live = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-unknown-live")
+      dead = registry.reserve!(origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-unknown-dead")
+      [ live, dead ].each(&:release_fence!)
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
       database.transaction do |db|
-        db[:launch_reservations].where(reservation_id: live.id).update(owner_pid: gone_pid)
+        db[:launch_reservations].where(reservation_id: dead.id).update(owner_pid: gone_pid)
       end
 
-      released = registry.release_abandoned_reservations!
-      assert_equal [ { "reservation_id" => settled.id, "reason" => "attempt_settled" } ], released
+      assert_equal [ { "reservation_id" => dead.id, "reason" => "owner_gone" } ],
+                   registry.release_abandoned_reservations!
       states = database.read { |db| db[:launch_reservations].to_hash(:reservation_id, :state) }
       assert_equal "reserved", states.fetch(live.id)
-      assert_equal "reserved", states.fetch(unknown.id), "an unknown attempt with a live owner stays"
     end
   end
 
@@ -431,6 +453,8 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
       assert capability.call.eligible?
     end
   end
+
+  private
 
   def insert_attempt(database, attempt_id, state:)
     now = "2026-11-04T00:00:00.000000Z"

@@ -135,11 +135,6 @@ OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
 `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
-The root bundle locks transitive Active Support at 8.1.4.1 or newer. The
-current advisory database flags 8.1.3 for MessagePack serializer XSS and
-`safe_constantize` denial-of-service vulnerabilities; the compatible patch
-update also resolves its transitive `i18n` dependency at 1.15.2.
-
 The root bundle locks transitive Rack at 3.2.8 or newer. The
 `bundler-audit` CI job runs against the current advisory database, which flags
 3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
@@ -179,8 +174,12 @@ Rails/Capybara and the web integration upload tests use
 2026-11 advisory refresh requires those patch levels for the active
 `bundler-audit` database.
 
-Rails 8.1.4.1 is the minimum locked web release for the 2026-11 Active Storage
-and Active Support security fixes. Production images install
+Rails 8.1.4.1 is the minimum locked web release. 8.1.3.1 carried the
+CVE-2026-66066 Active Storage/libvips security fix. 8.1.4.1 adds the
+2026-11-04 Active Support fixes: MessagePack serializer XSS
+(GHSA-2w9f-fxwj-w2qf) and `safe_constantize` DoS (GHSA-8474-xrp6-wh69).
+The root lock's transitive `activesupport`, pulled in by the RuboCop Rails
+plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
 

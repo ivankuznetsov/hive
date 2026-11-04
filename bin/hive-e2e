@@ -131,7 +131,7 @@ module Hive
       rescue PreflightError, CoverageCatalog::InvalidCatalog, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       rescue StandardError => e
-        exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
+        exit_with_run_failure(e)
       end
       map "run" => :run_scenarios
 
@@ -337,7 +337,16 @@ module Hive
         false
       end
 
-      def exit_with_error(error, error_kind:, exit_code:)
+      def exit_with_run_failure(error)
+        message = "#{error.class}: #{error.message}"
+        detail = if ENV["HIVE_E2E_DEBUG"] == "1"
+                   [ "hive-e2e debug: #{message}", *error.backtrace.map { |frame| "  #{frame}" } ].join("\n")
+        end
+        exit_with_error(message, error_kind: "run_failed", exit_code: BinaryExit::FAILURE, stderr_detail: detail)
+      end
+
+      # Accept either a pre-built message String or an Exception whose message is used verbatim.
+      def exit_with_error(error, error_kind:, exit_code:, stderr_detail: nil)
         message = error.respond_to?(:message) ? error.message : error.to_s
         if options[:json]
           puts JSON.pretty_generate(JsonError.payload(error_kind: error_kind, message: message,
@@ -345,6 +354,7 @@ module Hive
         else
           warn "hive-e2e: #{message}"
         end
+        warn stderr_detail if stderr_detail
         exit exit_code
       end
 

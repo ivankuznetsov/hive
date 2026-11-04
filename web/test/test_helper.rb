@@ -69,7 +69,17 @@ module ActiveSupport
         before = inbox.children.map { |child| child.basename.to_s }
         capture_io { Hive::Commands::New.new(project, text).call! }
         created = inbox.children.reject { |child| before.include?(child.basename.to_s) }
-        return created.max_by(&:mtime).basename.to_s unless created.empty?
+        unless created.empty?
+          folder = created.max_by(&:mtime)
+          slug = folder.basename.to_s
+          if inbox.parent.children.any? { |stage| stage != inbox && stage.join(slug).directory? }
+            FileUtils.rm_rf(folder)
+            raise Hive::Commands::New::SlugCollisionError.new(
+              "test task slug already exists in another stage", value: slug
+            )
+          end
+          return slug
+        end
       rescue Hive::Commands::New::SlugCollisionError
         attempts += 1
         retry if attempts < 5

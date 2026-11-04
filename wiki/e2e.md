@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-08-11
+updated: 2026-11-03
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -78,6 +78,40 @@ an exit `78` preflight failure.
 
 Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so prose callers get only `Hive::VERSION`; `version --json` emits the versioned `hive-e2e-version` envelope.
 Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json`, `clean --json`, and `version --json`, so wrapper callers can parse stdout directly.
+
+Unexpected `StandardError`s caught by `run`'s final rescue use the canonical
+`<ExceptionClass>: <original message>` diagnostic. Human mode writes
+`hive-e2e: <ExceptionClass>: <original message>` to stderr; JSON mode puts the
+same canonical message in the unchanged `hive-e2e-error.v1` envelope with
+`error_kind: "run_failed"`, `command: "run"`, and exit `1`. A failure before
+report emission leaves stdout empty in human mode or containing exactly one
+JSON error document in JSON mode. Normal mode emits no backtrace.
+
+`HIVE_E2E_DEBUG=1` adds one diagnostic block on stderr after the primary error
+output, containing only the rescued exception's own class, message, and
+backtrace. It never walks or renders `Exception#cause`, and adds no JSON
+properties or stdout diagnostics. Only the exact value `1` enables this;
+unset, empty, whitespace-only, `0`, `true`, `yes`, `on`, and every other value
+keep debug disabled. This differs from `HIVE_TUI_DEBUG`, which enables its
+diagnostics for any non-blank value.
+
+This formatting belongs only to unexpected `run_failed` errors. Expected
+no-scenarios, preflight, usage, list, coverage, replay, and retention failures
+keep their existing messages, exit codes, error kinds, and streams even with
+debug enabled. Ordinary scenario assertion and setup failures remain report
+rows. The executable's outer rescues also retain their existing formatting:
+an unexpected `list` error, for example, uses `error_kind: "error"` without a
+class prefix or debug block. A `StandardError` after report emission still
+appends a `run_failed` envelope to stdout; the one-document guarantee applies
+only to failures before emission (see [[gaps]]).
+
+Independently of debug mode or caller, `Runner#run_all` attempts its existing
+`status: "crashed"` report write before re-raising an unexpected run failure.
+A secondary `StandardError` from that write is swallowed so the original
+exception object, backtrace, and any existing cause reach the caller intact.
+Read-only, full, permission-denied, or otherwise unusable run storage may
+therefore leave no crashed-status `report.json`. There is no retry or fallback
+artifact; successful crashed-report writes and ordinary reports are unchanged.
 
 `bin/hive-e2e replay RUN_ID SCENARIO` validates safe run/scenario basenames,
 resolves the stored `scenarios/<scenario>/repro.sh` under the selected run

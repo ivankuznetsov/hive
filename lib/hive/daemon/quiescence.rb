@@ -307,10 +307,24 @@ module Hive
       end
 
       def installation_id = @database.installation_identity.fetch(:installation_id)
-      # Best effort: a failure leaves the rows reserved, and the capability
-      # check that follows still refuses on them.
+      # Best effort: a failure leaves the rows reserved (or the owned-process
+      # rows active), and the capability check that follows still refuses.
       def release_abandoned_reservations(authority: nil, timeout_sec: nil)
-        @registry.release_abandoned_reservations!(authority: authority, timeout_sec: timeout_sec)
+        released = begin
+          @registry.release_abandoned_reservations!(authority: authority, timeout_sec: timeout_sec)
+        rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+          []
+        end
+        reconcile_exited_processes(authority: authority, timeout_sec: timeout_sec)
+        released
+      end
+
+      # Best effort, like the reservation release: a failure leaves the
+      # owned-process rows active and the capability check still refuses.
+      def reconcile_exited_processes(authority:, timeout_sec:)
+        return [] unless @registry.respond_to?(:reconcile_exited_processes!)
+
+        @registry.reconcile_exited_processes!(authority: authority, timeout_sec: timeout_sec)
       rescue Hive::RuntimeControlPlane::Error, Sequel::Error
         []
       end

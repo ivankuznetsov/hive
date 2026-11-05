@@ -3237,6 +3237,47 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_includes failure.last.fetch(:error), "locked"
   end
 
+  def test_exited_owned_processes_are_reconciled_and_logged
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(root)
+      ).migrate!
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(database: database, state_home: root)
+      reservation = registry.reserve!(origin: "direct_cli", role: "digest")
+      registry.register!(reservation.id, pid: Process.pid)
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:owned_processes].update(pid: gone_pid) }
+      store = Struct.new(:database).new(database)
+      reconciler = Struct.new(:store).new(store)
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [], attempt_reconciler: reconciler
+      )
+
+      dispatcher.send(:reconcile_exited_owned_processes)
+      dispatcher.send(:reconcile_exited_owned_processes)
+
+      reconciled = logger.events.select { |name, _attrs| name == :owned_processes_reconciled }
+      assert_equal 1, reconciled.size
+      assert_equal({ "root_gone" => 1 }, reconciled.first.last.fetch(:evidence))
+      assert_equal "stopped", database.read { |db| db[:owned_processes].get(:state) }
+    ensure
+      database&.disconnect
+    end
+  end
+
+  def test_owned_process_reconcile_failures_are_logged
+    database = Object.new
+    database.define_singleton_method(:path) { "/nonexistent/runtime.sqlite3" }
+    database.define_singleton_method(:read) { |*| raise Sequel::DatabaseError, "locked" }
+    reconciler = Struct.new(:store).new(Struct.new(:database).new(database))
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [], attempt_reconciler: reconciler)
+    dispatcher.send(:reconcile_exited_owned_processes)
+    failure = logger.events.find { |name, _attrs| name == :owned_process_reconcile_failed }
+    assert_includes failure.last.fetch(:error), "locked"
+  end
+
   def test_attempt_storage_snapshot_failure_is_advisory
     reconciler = Object.new
     reconciler.define_singleton_method(:operational_storage_status) do |_snapshot|

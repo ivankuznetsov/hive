@@ -81,6 +81,8 @@ module Hive
         attempt_duplicate
         launch_reservations_released
         launch_reservation_release_failed
+        owned_processes_reconciled
+        owned_process_reconcile_failed
         attempt_terminal_replay
         attempt_transient_retry
         attempt_patrol_retry_deferred

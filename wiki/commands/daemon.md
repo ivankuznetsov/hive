@@ -95,6 +95,29 @@ capability still refuses. (The former Hivebox container supervisor and its
 `.hivebox-supervisor.pid` receipt were removed by ADR-055; legacy service
 discovery now covers only the daemon, bot, and babysitter pid files.)
 
+Registered owned-process rows can also outlive their processes: a direct
+CLI's `at_exit` cleanup write can lose to a busy runtime database (the
+`Sequel::Error` is swallowed in `bin/hive`), a wrapper can be killed, and an
+attempt wrapper without delegated cgroup custody deliberately leaves its row
+active with `descendant_absence_unverified`. Each such row kept quiescence
+ineligible forever (`agent_attempt_root` or `unproven_launch_surface`).
+`ProcessRegistry#reconcile_exited_processes!` closes only `unverified`-custody
+rows whose root (pid plus start fingerprint) is proven missing or replaced, as
+`stopped` with reason `owner_gone_custody_unverified`. An attempt-linked row
+also needs its attempt `terminal` or `lost` and a host-wide `/proc` read
+(`Hive::Attempts::ProcessTable`) showing no live process in its recorded
+session or process group; the detached launcher gives every attempt its own
+session. Any other row needs only the session or group it led (id equal to its
+pid) to be empty, the same bar its own `command_exited` cleanup applies.
+Delegated-custody rows, live or unverifiable roots, unsettled or unknown
+attempts, missing session ids and an unreadable process table keep the row
+active. The daemon runs it (500 rows per pass) next to the reservation release
+and logs `owned_processes_reconciled`; `hive daemon quiesce` runs it at the
+same two points. This does not relax the capability itself: with no delegated
+custody, any live attempt still refuses with `agent_attempt_root`, and any live
+direct CLI (for example `hive babysit` or `hive watch`) with
+`unproven_launch_surface`.
+
 For the narrow backup-safe result, the two observations are inseparable:
 
 1. `hive daemon quiesce --json` must return `paused: true`, generation `G`, and

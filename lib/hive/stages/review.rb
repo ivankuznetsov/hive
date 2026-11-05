@@ -2168,10 +2168,15 @@ module Hive
             return { commit: "ci_#{gate}_limits_reached", status: :review_error }
           end
 
+          message = truncate_marker_message(ci_result.error_message)
+          if ci_result.last_output && !ci_result.last_output.to_s.strip.empty?
+            artifact = write_ci_error(task, ci_result, gate: gate, pass: pass)
+            message = "#{message} (captured output: #{artifact})"
+          end
           Hive::Markers.set(
             task.state_file, :review_error,
             phase: :ci, gate: gate, reason: "ci_unrunnable", pass: pass,
-            message: truncate_marker_message(ci_result.error_message)
+            message: message
           )
           { commit: "ci_#{gate}_error", status: :review_error }
         when :guardrail
@@ -2218,6 +2223,32 @@ module Hive
           #{ci_result.last_output}
           ```
         MD
+      end
+
+      # The output a timed-out (wall-clock or idle) CI run printed before
+      # it was killed, written beside ci-blocked.md. Returns the path
+      # relative to the task folder for the marker message.
+      def write_ci_error(task, ci_result, gate:, pass:)
+        relative = File.join("reviews", "ci-error-#{format('%02d', pass.to_i)}.md")
+        path = File.join(task.folder, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, <<~MD)
+          # #{gate == "github" ? "GitHub" : "Local"} CI error (pass #{format('%02d', pass.to_i)})
+
+          #{ci_result.error_message}
+
+          The CI command did not finish, so no fix agent ran. The output it
+          printed before it was stopped is below; the last lines show where
+          it stalled. Fix the cause, then submit the task's current
+          `workflow.retry` action to retry.
+
+          ## Last captured CI output
+
+          ```
+          #{ci_result.last_output}
+          ```
+        MD
+        relative
       end
 
       def write_fix_guardrail_findings(ctx, matches)

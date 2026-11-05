@@ -521,6 +521,25 @@ class CiFixTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/timed out/, result.error_message)
+      assert_includes result.last_output, "started",
+                      "a timed-out run keeps what it printed before the kill"
+      refute_includes result.last_output, "never_printed"
+    end
+  end
+
+  def test_ci_timeout_output_is_tail_truncated_like_a_normal_run
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, %(for i in 1 2 3 4 5 6; do echo "line $i"; done; sleep 30))
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1, "tail_lines" => 2 } },
+                     "timeout_sec" => { "review_ci" => 2 })
+
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg, ctx: make_ctx(dir, task_folder))
+
+      assert_equal :error, result.status
+      assert_match(/4 earlier lines truncated/, result.last_output)
+      assert_includes result.last_output, "line 6"
+      refute_includes result.last_output, "line 1\n"
     end
   end
 
@@ -542,6 +561,7 @@ class CiFixTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/no output for 0.3s \(idle-output timeout\)/, result.error_message)
+      assert_includes result.last_output, "started"
       assert_operator elapsed, :<, 10,
                       "idle deadline must fire long before the 30s wall clock"
     end
@@ -704,6 +724,8 @@ class CiFixTest < Minitest::Test
 
       assert_instance_of Hive::Stages::Review::CiFix::CommandError, result
       assert_equal "CI command failed to launch: pipe exploded", result.reason
+      assert_nil result.output, "a command that never started has no output"
+      assert_nil result.to_result(attempts: 1).last_output
     end
   end
 

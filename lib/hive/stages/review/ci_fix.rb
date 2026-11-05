@@ -101,7 +101,16 @@ module Hive
                 idle_timeout_sec: idle_timeout_sec
               )
             end
-            return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
+            if run_result.is_a?(CommandError)
+              # A timed-out or idle-killed run keeps what it printed so the
+              # operator can see where it stalled.
+              if run_result.output && !run_result.output.empty?
+                run_result = CommandError.new(
+                  run_result.reason, clean_output(run_result.output, tail_lines)
+                )
+              end
+              return run_result.to_result(attempts: attempts)
+            end
 
             output = clean_output(run_result.combined, tail_lines)
             last_output = output
@@ -264,15 +273,21 @@ module Hive
           idle = idle_timeout_sec.to_f
           idle = nil unless idle.positive?
           pulse = idle ? Hive::OutputPulse.new : nil
-          combined = +""
           # Reader keeps draining the pipe so the producer doesn't block
           # or die with SIGPIPE, but appends only up to max_bytes into
           # the captured buffer. Once the cap is hit we read-and-drop
           # remaining bytes — bound memory, clean subprocess exit. The
           # downstream consumer tail-truncates by line count in
-          # clean_output.
+          # clean_output. The buffer is shared (under a mutex) so a
+          # timeout that kills the reader still has the output so far.
+          buf = +""
+          buf_lock = Mutex.new
+          captured = lambda do
+            text = buf_lock.synchronize { buf.dup }
+            text.force_encoding(Encoding::UTF_8)
+            text.scrub("?")
+          end
           reader = Thread.new do
-            buf = +""
             capped = false
             loop do
               chunk = pipe_r.read_nonblock(4096, exception: false)
@@ -288,15 +303,15 @@ module Hive
 
               next if capped
 
-              remaining = max_bytes - buf.bytesize
-              if remaining <= 0
-                capped = true
-                next
+              buf_lock.synchronize do
+                remaining = max_bytes - buf.bytesize
+                if remaining <= 0
+                  capped = true
+                else
+                  buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
+                end
               end
-
-              buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
             end
-            combined.replace(buf)
           rescue EOFError, IOError
             nil
           ensure
@@ -316,14 +331,15 @@ module Hive
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
-              return CommandError.new("CI command timed out after #{timeout_sec}s")
+              return CommandError.new("CI command timed out after #{timeout_sec}s", captured.call)
             end
             if pulse && pulse.idle_for >= idle
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
               return CommandError.new(
-                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)"
+                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)",
+                captured.call
               )
             end
             _, status = Process.wait2(pid, Process::WNOHANG)
@@ -334,10 +350,7 @@ module Hive
           reader.join(2)
           reader.kill if reader.alive?
 
-          combined.force_encoding(Encoding::UTF_8)
-          combined.scrub!("?") # replace invalid UTF-8 sequences
-
-          Run.new(combined, status.exitstatus)
+          Run.new(captured.call, status.exitstatus) # invalid UTF-8 scrubbed
         end
 
         # TERM the process group, give it 3s to drain, then KILL.
@@ -378,12 +391,14 @@ module Hive
         # Wrap a launch failure as a Result :error directly so the
         # caller doesn't have to distinguish "command exited non-zero"
         # from "command couldn't even start."
-        CommandError = Struct.new(:reason) do
+        # +output+ is what a killed run printed before its timeout (nil
+        # when the command never started).
+        CommandError = Struct.new(:reason, :output) do
           def to_result(attempts: 0)
             CiFix::Result.new(
               status: :error,
               attempts: attempts,
-              last_output: nil,
+              last_output: output,
               error_message: reason,
               limit_text: nil
             )

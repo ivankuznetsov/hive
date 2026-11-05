@@ -140,6 +140,24 @@ class ReviewCiGatesTest < Minitest::Test
     end
   end
 
+  def test_timed_out_ci_writes_its_captured_output_and_names_it_in_the_marker
+    with_fixture do |_repo, task, ctx, _cfg|
+      errored = Hive::Stages::Review.ci_terminal_result(
+        task, result(:error, error: "CI command timed out after 3600s", output: "==> Workspace smoke\nbuilding image"),
+        gate: "github", pass: 1, ctx: ctx
+      )
+
+      assert_equal :review_error, errored.fetch(:status)
+      body = File.read(File.join(task.folder, "reviews", "ci-error-01.md"))
+      assert_includes body, "# GitHub CI error (pass 01)"
+      assert_includes body, "CI command timed out after 3600s"
+      assert_includes body, "==> Workspace smoke\nbuilding image"
+      attrs = Hive::Markers.current(task.state_file).attrs
+      assert_equal "ci_unrunnable", attrs.fetch("reason")
+      assert_equal "CI command timed out after 3600s (captured output: reviews/ci-error-01.md)", attrs.fetch("message")
+    end
+  end
+
   def test_ci_terminal_result_maps_stale_limit_error_and_unknown_states
     with_fixture do |_repo, task, ctx, _cfg|
       stale = Hive::Stages::Review.ci_terminal_result(
@@ -162,6 +180,8 @@ class ReviewCiGatesTest < Minitest::Test
       )
       assert_equal "ci_unrunnable", Hive::Markers.current(task.state_file).attrs.fetch("reason")
       assert_equal :review_error, errored.fetch(:status)
+      refute File.exist?(File.join(task.folder, "reviews", "ci-error-03.md")),
+             "a launch failure has no output to write"
 
       unexpected = Hive::Stages::Review.ci_terminal_result(
         task, result(:mystery), gate: "local", pass: 4, ctx: ctx

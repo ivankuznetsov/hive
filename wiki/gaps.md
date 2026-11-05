@@ -1704,6 +1704,19 @@ admission open, so another submission can race that preparation. Do not close
 this gap by weakening the ownership predicate; it needs either a first-class
 idle-window coordinator or the separately verified custody increment.
 
+## Unverified-custody owned-process reconciliation trusts the session boundary (2026-11-05)
+
+`ProcessRegistry#reconcile_exited_processes!` closes an attempt-linked row
+without cgroup custody once its attempt has settled and no live process carries
+its recorded session or process group. A descendant that called `setsid` (or
+was handed to another service manager) has left that session and is invisible
+to this evidence, exactly as it is invisible to the attempt supervisor's own
+group termination. The root cause of most leaked direct-CLI rows is also still
+open: `bin/hive`'s `at_exit` `CommandRegistration#finish!` makes one write and
+swallows `Sequel::Error`, so a `database is locked` at exit leaves the row
+active until the daemon reconciles it. A bounded exit-time retry, or moving the
+release off the contended writer, is not yet designed.
+
 ## Increment-2 Linux custody is not qualified on the execution host (2026-09-25)
 
 The execution host uses unified cgroup v2, and a real transient

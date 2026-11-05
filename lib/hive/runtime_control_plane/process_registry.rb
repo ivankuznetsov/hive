@@ -3,6 +3,7 @@ require "securerandom"
 require "yaml"
 require "hive/attempts/process_custody"
 require "hive/attempts/process_identity"
+require "hive/attempts/process_table"
 require "hive/paths"
 require "hive/pid_file"
 require "hive/runtime_control_plane/codec"
@@ -48,13 +49,15 @@ module Hive
       def initialize(database:, state_home: File.dirname(database.path),
                      process_identity: Hive::Attempts::ProcessIdentity.new,
                      custody: Hive::Attempts::ProcessCustody.detect,
-                     id_generator: -> { SecureRandom.uuid }, clock: -> { Time.now.utc })
+                     id_generator: -> { SecureRandom.uuid }, clock: -> { Time.now.utc },
+                     process_table: -> { Hive::Attempts::ProcessTable.snapshot })
         @database = database
         @state_home = File.expand_path(state_home)
         @process_identity = process_identity
         @custody = custody
         @id_generator = id_generator
         @clock = clock
+        @process_table = process_table
       end
 
       def reserve!(origin:, role:, attempt_id: nil, task_id: nil, owner_pid: Process.pid,
@@ -269,6 +272,86 @@ module Hive
         released
       end
 
+      SETTLED_ATTEMPT_STATES = %w[terminal lost].freeze
+      OWNER_GONE_REASON = "owner_gone_custody_unverified"
+      DEFAULT_RECONCILE_LIMIT = 500
+
+      # Closes unverified-custody owned_processes rows whose process tree is
+      # provably gone but whose own cleanup never committed (a CLI's at_exit
+      # write lost to a busy database, a killed wrapper, or a wrapper whose
+      # require_descendant_absence release could not prove absence without
+      # cgroup custody). Without this, every such row keeps quiescence
+      # capability ineligible forever.
+      #
+      # Every row needs its registered root (pid + start fingerprint) proven
+      # missing or mismatched. Beyond that, with no cgroup to enumerate:
+      #
+      # * an attempt-linked row also needs its attempt terminal or lost and a
+      #   host-wide procfs read showing no live process in its recorded
+      #   session or process group. The detached launcher gives every attempt
+      #   its own session, so this covers every descendant that did not call
+      #   setsid itself;
+      # * any other row needs only the session or group it led (session or
+      #   group id equal to its pid) to be empty. That matches the bar the
+      #   command's own at_exit cleanup (command_exited) applies.
+      #
+      # Delegated-custody rows, live or unverifiable roots, attempts that are
+      # still launching, running or unknown, missing session/group ids and an
+      # unreadable process table all keep the row unresolved. Returns
+      # [{ "process_id", "reason", "evidence" }] for the rows closed.
+      def reconcile_exited_processes!(authority: nil, timeout_sec: nil, limit: DEFAULT_RECONCILE_LIMIT)
+        rows, attempt_states = @database.read do |db|
+          active = db[:owned_processes].exclude(state: "stopped")
+            .where(custody_mode: "unverified").order(:created_at).all
+          ids = active.filter_map { |row| row[:attempt_id] }.uniq
+          states = ids.each_slice(500).each_with_object({}) do |slice, result|
+            result.merge!(db[:attempts].where(attempt_id: slice).to_hash(:attempt_id, :state))
+          end
+          [ active, states ]
+        end
+        table = nil
+        table_read = false
+        process_table = lambda do
+          table = @process_table.call unless table_read
+          table_read = true
+          table
+        end
+        candidates = []
+        rows.each do |row|
+          break if candidates.size >= limit
+
+          evidence = exited_process_evidence(row, attempt_states, process_table)
+          candidates << [ row, evidence ] if evidence
+        end
+        return [] if candidates.empty?
+
+        closed = []
+        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+          timestamp = now
+          candidates.each do |row, evidence|
+            changed = db[:owned_processes].where(
+              process_id: row.fetch(:process_id), state: row.fetch(:state),
+              pid: row[:pid], start_fingerprint: row[:start_fingerprint]
+            ).update(
+              state: "stopped", unknown_reason: OWNER_GONE_REASON, stopped_at: timestamp,
+              updated_at: timestamp
+            )
+            next unless changed == 1
+
+            if row[:reservation_id]
+              db[:launch_reservations].where(
+                reservation_id: row.fetch(:reservation_id), state: "registered"
+              ).update(state: "released", reason: OWNER_GONE_REASON, updated_at: timestamp)
+            end
+            closed << {
+              "process_id" => row.fetch(:process_id), "reason" => OWNER_GONE_REASON,
+              "evidence" => evidence
+            }
+          end
+        end
+        closed
+      end
+
       def active_rows
         @database.read do |db|
           db[:owned_processes].exclude(state: "stopped").all
@@ -287,6 +370,37 @@ module Hive
       end
 
       private
+
+      def exited_process_evidence(row, attempt_states, process_table)
+        return nil if row[:pid].nil? || row[:start_fingerprint].to_s.empty?
+        return nil unless %i[missing mismatched].include?(@process_identity.status(identity_hash(row)))
+
+        attempt_id = row[:attempt_id].to_s
+        if attempt_id.empty?
+          led_session = row[:session_id] && row[:session_id] == row[:pid]
+          led_group = row[:process_group_id] && row[:process_group_id] == row[:pid]
+          return "root_gone" unless led_session || led_group
+
+          table = process_table.call
+          return nil unless table
+          return nil if led_session && table.session_alive?(row[:session_id])
+          return nil if led_group && table.process_group_alive?(row[:process_group_id])
+
+          "root_gone_led_group_empty"
+        else
+          return nil unless SETTLED_ATTEMPT_STATES.include?(attempt_states[attempt_id])
+          return nil if row[:session_id].nil? || row[:process_group_id].nil?
+
+          table = process_table.call
+          return nil unless table
+          return nil if table.session_alive?(row[:session_id])
+          return nil if table.process_group_alive?(row[:process_group_id])
+
+          "attempt_settled_session_empty"
+        end
+      rescue ArgumentError, TypeError
+        nil
+      end
 
       def abandoned_reason(db, row)
         attempt_id = row[:attempt_id].to_s

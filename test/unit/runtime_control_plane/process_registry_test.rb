@@ -454,7 +454,190 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  EMPTY_TABLE = Hive::Attempts::ProcessTableSnapshot.new(session_ids: Set.new, process_group_ids: Set.new)
+
+  def test_exited_direct_cli_rows_are_closed_and_live_ones_are_kept
+    with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+      live = register_process(registry, origin: "direct_cli", role: "status")
+      gone_pid = spawn_gone_pid
+      gone = register_process(registry, origin: "direct_cli", role: "brainstorm")
+      reused = register_process(registry, origin: "direct_cli", role: "review")
+      move_process(database, gone, pid: gone_pid, session_id: 7_001, process_group_id: 7_001)
+      database.transaction do |db|
+        db[:owned_processes].where(process_id: reused).update(start_fingerprint: "not-this-process")
+      end
+
+      closed = registry.reconcile_exited_processes!
+      assert_equal [ gone, reused ].sort, closed.map { |row| row["process_id"] }.sort
+      assert_equal [ "owner_gone_custody_unverified" ], closed.map { |row| row["reason"] }.uniq
+      assert_equal [ "root_gone" ], closed.map { |row| row["evidence"] }.uniq
+      rows = database.read { |db| db[:owned_processes].to_hash(:process_id) }
+      assert_equal "running", rows.fetch(live).fetch(:state)
+      assert_equal "stopped", rows.fetch(gone).fetch(:state)
+      assert_equal "owner_gone_custody_unverified", rows.fetch(gone).fetch(:unknown_reason)
+      reservation_states = database.read do |db|
+        db[:launch_reservations].to_hash(:reservation_id, :state)
+      end
+      assert_equal "released", reservation_states.fetch(rows.fetch(gone).fetch(:reservation_id))
+      assert_equal "registered", reservation_states.fetch(rows.fetch(live).fetch(:reservation_id))
+      assert_empty registry.reconcile_exited_processes!
+    end
+  end
+
+  def test_exited_direct_cli_rows_use_the_default_process_table_snapshot
+    with_registry(use_default_process_table: true) do |database, registry, _root|
+      process_id = register_process(registry, origin: "direct_cli", role: "status")
+      gone_pid = spawn_gone_pid
+      move_process(database, process_id, pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid)
+
+      assert_equal [ "root_gone_led_group_empty" ], registry.reconcile_exited_processes!.map { |row| row["evidence"] }
+    end
+  end
+
+  def test_exited_cli_that_led_a_still_live_group_or_session_is_kept
+    gone_pid = spawn_gone_pid
+    {
+      group: Hive::Attempts::ProcessTableSnapshot.new(session_ids: Set.new, process_group_ids: Set[gone_pid]),
+      session: Hive::Attempts::ProcessTableSnapshot.new(session_ids: Set[gone_pid], process_group_ids: Set.new),
+      unreadable: nil
+    }.each do |name, table|
+      with_registry(process_table: -> { table }) do |database, registry, _root|
+        leader = register_process(registry, origin: "direct_cli", role: "babysit")
+        move_process(database, leader, pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid)
+
+        assert_empty registry.reconcile_exited_processes!, name.to_s
+        assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }, name.to_s
+      end
+    end
+
+    gone_pid = spawn_gone_pid
+    with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+      leader = register_process(registry, origin: "direct_cli", role: "babysit")
+      move_process(database, leader, pid: gone_pid, session_id: 9_999, process_group_id: gone_pid)
+      assert_equal [ "root_gone_led_group_empty" ],
+                   registry.reconcile_exited_processes!.map { |row| row["evidence"] }
+    end
+  end
+
+  def test_exited_attempt_rows_need_a_settled_attempt_and_an_empty_session
+    session_alive = Hive::Attempts::ProcessTableSnapshot.new(
+      session_ids: Set[7_100], process_group_ids: Set.new
+    )
+    group_alive = Hive::Attempts::ProcessTableSnapshot.new(
+      session_ids: Set.new, process_group_ids: Set[7_100]
+    )
+    [
+      [ "running", EMPTY_TABLE, 7_100 ], [ "launching", EMPTY_TABLE, 7_100 ],
+      [ nil, EMPTY_TABLE, 7_100 ], [ "terminal", session_alive, 7_100 ],
+      [ "terminal", group_alive, 7_100 ], [ "lost", nil, 7_100 ], [ "terminal", EMPTY_TABLE, nil ]
+    ].each do |attempt_state, table, session_id|
+      with_registry(process_table: -> { table }) do |database, registry, _root|
+        insert_attempt(database, "attempt-1", state: attempt_state) if attempt_state
+        wrapper = register_process(registry, origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-1")
+        move_process(database, wrapper, pid: spawn_gone_pid, session_id: session_id, process_group_id: 7_100)
+
+        label = [ attempt_state, table&.session_ids&.to_a, session_id ].inspect
+        assert_empty registry.reconcile_exited_processes!, label
+        assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }, label
+      end
+    end
+
+    %w[terminal lost].each do |attempt_state|
+      with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+        insert_attempt(database, "attempt-1", state: attempt_state)
+        wrapper = register_process(registry, origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-1")
+        move_process(database, wrapper, pid: spawn_gone_pid, session_id: 7_100, process_group_id: 7_100)
+
+        assert_equal [ "attempt_settled_session_empty" ],
+                     registry.reconcile_exited_processes!.map { |row| row["evidence"] }
+        assert_equal "stopped", database.read { |db| db[:owned_processes].get(:state) }
+      end
+    end
+  end
+
+  def test_exited_process_reconciliation_leaves_delegated_and_unverifiable_rows_alone
+    with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+      delegated = register_process(registry, origin: "direct_cli", role: "status")
+      move_process(database, delegated, pid: spawn_gone_pid, session_id: 7_200, process_group_id: 7_200)
+      database.transaction do |db|
+        db[:owned_processes].update(custody_mode: "delegated_cgroup_v2", custody_path: "/hive/x")
+      end
+      assert_empty registry.reconcile_exited_processes!
+    end
+
+    identity = UnverifiableOwnerIdentity.new(Hive::Attempts::ProcessIdentity.new)
+    with_registry(process_identity: identity, process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+      register_process(registry, origin: "direct_cli", role: "status")
+      database.transaction { |db| db[:owned_processes].update(start_fingerprint: "not-this-process") }
+      assert_empty registry.reconcile_exited_processes!
+    end
+  end
+
+  def test_exited_process_reconciliation_keeps_rows_when_the_process_table_raises
+    with_registry(process_table: -> { raise ArgumentError, "unavailable" }) do |database, registry, _root|
+      process_id = register_process(registry, origin: "direct_cli", role: "status")
+      gone_pid = spawn_gone_pid
+      move_process(database, process_id, pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid)
+
+      assert_empty registry.reconcile_exited_processes!
+      assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }
+    end
+  end
+
+  def test_exited_process_reconciliation_is_bounded_per_call
+    with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, _root|
+      gone_pid = spawn_gone_pid
+      3.times do
+        id = register_process(registry, origin: "direct_cli", role: "digest")
+        move_process(database, id, pid: gone_pid, session_id: 7_300, process_group_id: 7_300)
+      end
+
+      assert_equal 2, registry.reconcile_exited_processes!(limit: 2).size
+      assert_equal 1, registry.reconcile_exited_processes!(limit: 2).size
+      assert_empty registry.reconcile_exited_processes!(limit: 2)
+    end
+  end
+
+  def test_capability_becomes_eligible_once_exited_attempt_rows_are_reconciled
+    with_registry(process_table: -> { EMPTY_TABLE }) do |database, registry, root|
+      capability = Hive::RuntimeControlPlane::QuiescenceCapability.new(
+        database: database, state_home: root,
+        legacy_inventory: -> { [] }, custody: Hive::Attempts::ProcessCustody.unsupported("test")
+      )
+      insert_attempt(database, "attempt-1", state: "lost")
+      wrapper = register_process(registry, origin: "attempt", role: "attempt_wrapper", attempt_id: "attempt-1")
+      move_process(database, wrapper, pid: spawn_gone_pid, session_id: 7_400, process_group_id: 7_400)
+      cli = register_process(registry, origin: "direct_cli", role: "brainstorm")
+      move_process(database, cli, pid: spawn_gone_pid, session_id: 7_400, process_group_id: 7_401)
+      assert_equal "agent_attempt_root", capability.call.reason
+
+      assert_equal 2, registry.reconcile_exited_processes!.size
+      assert capability.call.eligible?
+    end
+  end
+
   private
+
+  def spawn_gone_pid
+    pid = Process.spawn("true")
+    Process.wait(pid)
+    pid
+  end
+
+  def register_process(registry, origin:, role:, attempt_id: nil)
+    reservation = registry.reserve!(origin: origin, role: role, attempt_id: attempt_id)
+    registry.register!(reservation.id, pid: Process.pid).process_id
+  ensure
+    reservation&.release_fence!
+  end
+
+  def move_process(database, process_id, pid:, session_id:, process_group_id:)
+    database.transaction do |db|
+      db[:owned_processes].where(process_id: process_id).update(
+        pid: pid, session_id: session_id, process_group_id: process_group_id
+      )
+    end
+  end
 
   def insert_attempt(database, attempt_id, state:)
     now = "2026-11-04T00:00:00.000000Z"
@@ -477,6 +660,7 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
         attempt_id: attempt_id, project_id: "project-1", task_id: task_id,
         subject_kind: "task_stage", subject_key: "4-execute", subject_json: "{}",
         task_generation: "generation-#{attempt_id}", ownership_generation: "owner-1", state: state,
+        outcome: state == "terminal" ? "failed" : nil,
         lease_version: 0, retry_charge: 0, refunded: 0, source_fingerprint: "source",
         details_json: "{}", project_name: "demo", task_slug: task_id,
         accepted_date: "2026-11-04", created_at: now, accepted_at: now
@@ -484,14 +668,15 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
-  def with_registry(process_identity: Hive::Attempts::ProcessIdentity.new)
+  def with_registry(process_identity: Hive::Attempts::ProcessIdentity.new,
+                    process_table: -> { Hive::Attempts::ProcessTable.snapshot }, use_default_process_table: false)
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(
         path: Hive::Paths.runtime_control_plane_path(root)
       ).migrate!
-      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
-        database: database, state_home: root, process_identity: process_identity
-      )
+      options = { database: database, state_home: root, process_identity: process_identity }
+      options[:process_table] = process_table unless use_default_process_table
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(**options)
       yield database, registry, root
     ensure
       database&.disconnect

@@ -4287,6 +4287,7 @@ module Hive
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
         release_abandoned_launch_reservations
+        reconcile_exited_owned_processes
         true
       rescue StandardError => e
         @logger.event(
@@ -4301,6 +4302,36 @@ module Hive
       # registering would otherwise stay reserved forever and keep
       # quiescence capability ineligible. Failures leave them reserved.
       def release_abandoned_launch_reservations
+        registry = launch_reservation_registry
+        return unless registry
+
+        released = registry.release_abandoned_reservations!
+        return if released.empty?
+
+        @logger.event(:launch_reservations_released, count: released.size, reservations: released)
+      rescue StandardError => e
+        @logger.event(:launch_reservation_release_failed, error: "#{e.class}: #{e.message}")
+      end
+
+      # Owned-process rows whose process tree is provably gone but whose own
+      # cleanup never committed would otherwise keep quiescence capability
+      # ineligible forever. Failures leave the rows unresolved (fail-closed).
+      def reconcile_exited_owned_processes
+        registry = launch_reservation_registry
+        return unless registry
+
+        closed = registry.reconcile_exited_processes!
+        return if closed.empty?
+
+        @logger.event(
+          :owned_processes_reconciled, count: closed.size,
+          evidence: closed.map { |row| row.fetch("evidence") }.tally
+        )
+      rescue StandardError => e
+        @logger.event(:owned_process_reconcile_failed, error: "#{e.class}: #{e.message}")
+      end
+
+      def launch_reservation_registry
         store = @attempt_reconciler.respond_to?(:store) ? @attempt_reconciler.store : nil
         database = store.respond_to?(:database) ? store.database : nil
         return unless database
@@ -4309,12 +4340,6 @@ module Hive
           database: database, state_home: File.dirname(database.path),
           custody: Hive::Attempts::ProcessCustody.unsupported("launch reservation reconciliation")
         )
-        released = @launch_reservation_registry.release_abandoned_reservations!
-        return if released.empty?
-
-        @logger.event(:launch_reservations_released, count: released.size, reservations: released)
-      rescue StandardError => e
-        @logger.event(:launch_reservation_release_failed, error: "#{e.class}: #{e.message}")
       end
 
       def refresh_attempt_storage_snapshot

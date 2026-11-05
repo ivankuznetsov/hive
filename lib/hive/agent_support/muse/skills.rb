@@ -66,9 +66,24 @@ module Hive::AgentSupport::Muse::Skills
     File.absolute_path?(cache_path) ? cache_path : File.join(data_dir, cache_path)
   end
 
+  # Muse's plugin registry. The setup adapter declares it as the file its
+  # install/update/enable operations change.
+  def registry_path(environment: ENV)
+    File.join(
+      Hive::AgentSupport::Muse.data_directory(environment: environment),
+      "plugins", "installed.json"
+    )
+  end
+
+  # The `repository` a plugin manifest declares (string or `{url:}`).
+  def manifest_repository(manifest)
+    repository = manifest["repository"] if manifest.is_a?(Hash)
+    repository = repository["url"] if repository.is_a?(Hash)
+    repository if repository.is_a?(String) && !repository.empty?
+  end
+
   def plugin_records(environment:, parse_errors: [])
-    data_dir = Hive::AgentSupport::Muse.data_directory(environment: environment)
-    path = File.join(data_dir, "plugins", "installed.json")
+    path = registry_path(environment: environment)
     plugins = JSON.parse(File.binread(path))["plugins"]
     raise TypeError, "#{path} plugins must be an object" unless plugins.is_a?(Hash)
 
@@ -108,9 +123,7 @@ module Hive::AgentSupport::Muse::Skills
       .find { |path| File.file?(path) }
     return nil unless manifest
 
-    repository = JSON.parse(File.binread(manifest))["repository"]
-    repository = repository["url"] if repository.is_a?(Hash)
-    repository if repository.is_a?(String) && !repository.empty?
+    manifest_repository(JSON.parse(File.binread(manifest)))
   rescue JSON::ParserError, SystemCallError
     nil
   end
@@ -129,13 +142,17 @@ module Hive::AgentSupport::Muse::Skills
 
     entry = entries.find { |candidate| candidate.dig("plugin", "id") == native_spec.package }
     record = entry && entry["record"].is_a?(Hash) ? entry["record"] : {}
+    # Same relative-path resolution as filesystem_inventory.
+    install_path = installed_cache_path(
+      record, data_dir: Hive::AgentSupport::Muse.data_directory(environment: ENV)
+    )
     {
       "package" => entry && {
         "id" => native_spec.package,
         "version" => record["version"] || entry.dig("plugin", "version"),
         "enabled" => record["enabled"] != false,
-        "install_path" => record["cache_path"],
-        "source" => repository_source(record["cache_path"])
+        "install_path" => install_path,
+        "source" => repository_source(install_path)
       }.freeze,
       "marketplace" => nil
     }
@@ -143,10 +160,10 @@ module Hive::AgentSupport::Muse::Skills
 
   def filesystem_inventory(native_spec:, root: nil, read_json:, environment: ENV, **)
     data_dir = Hive::AgentSupport::Muse.data_directory(environment: environment)
-    registry_path = File.join(data_dir, "plugins", "installed.json")
-    registry = read_json.call(registry_path, { "plugins" => {} })
-    plugins = registry["plugins"] if registry.is_a?(Hash)
-    raise TypeError, "#{registry_path} plugins must be an object" unless plugins.is_a?(Hash)
+    registry = registry_path(environment: environment)
+    document = read_json.call(registry, { "plugins" => {} })
+    plugins = document["plugins"] if document.is_a?(Hash)
+    raise TypeError, "#{registry} plugins must be an object" unless plugins.is_a?(Hash)
 
     record = plugins[native_spec.package]
     return { "package" => nil, "marketplace" => nil }.freeze unless record.is_a?(Hash)
@@ -155,15 +172,13 @@ module Hive::AgentSupport::Muse::Skills
     manifest = read_json.call(
       File.join(install_path.to_s, ".claude-plugin", "plugin.json"), {}
     )
-    repository = manifest["repository"] if manifest.is_a?(Hash)
-    repository = repository["url"] if repository.is_a?(Hash)
     {
       "package" => {
         "id" => native_spec.package,
         "version" => record["version"],
         "enabled" => record["enabled"] != false,
         "install_path" => install_path,
-        "source" => repository.is_a?(String) && !repository.empty? ? repository : nil
+        "source" => manifest_repository(manifest)
       }.freeze,
       "marketplace" => nil
     }.freeze
@@ -178,5 +193,6 @@ module Hive::AgentSupport::Muse::Skills
 
   private_class_method :candidates, :plugin_candidates, :installed_cache_path,
     :plugin_records, :jailed, :canonical_path, :repository_source,
+    :manifest_repository,
     :install_hint
 end

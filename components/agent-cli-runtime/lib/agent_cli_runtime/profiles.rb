@@ -424,7 +424,11 @@ module AgentCliRuntime
       usage_extractor: UsageExtractors::MUSE,
       error_extractor: ErrorExtractors::MUSE,
       credential_environment_keys: %w[META_API_KEY],
-      configuration_environment_key: "XDG_CONFIG_HOME",
+      # No configuration_environment_key: Muse has no private config-dir
+      # variable, and XDG_CONFIG_HOME names a base shared by every XDG
+      # tool (gh, git, Hive), so a launch binding must not export it. The
+      # probe below resolves the directory; non-default bindings are
+      # unsupported until Muse grows its own override.
       default_configuration_directory: ".config/muse",
       configuration_directory_probe: lambda do |home:, env:|
         muse_configuration_directory(home: home, env: env)

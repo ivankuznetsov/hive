@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "hive/agent"
 require "hive/agent_runtime"
+require "hive/agent_support/muse"
 require "hive/config"
 require "hive/model_routing"
 require "hive/task"
@@ -301,5 +302,31 @@ class MuseAgentTest < Minitest::Test
       assert_equal :timeout, result[:status], result.inspect
       assert_operator elapsed, :<, 15
     end
+  end
+  def test_sensitive_payload_covers_parsed_events_and_raw_lines
+    muse = Hive::AgentSupport::Muse
+
+    muse::SENSITIVE_PAYLOAD_TYPES.each do |type|
+      assert muse.sensitive_payload?({ "payload_type" => type }), type
+      raw = %({"seq":1,"payload_type" : "#{type}","payload":{"text":"secret)
+      assert muse.sensitive_payload?(nil, raw_line: raw), "truncated raw #{type}"
+    end
+    %w[run.usage run.terminal.failed task.lifecycle.failed].each do |type|
+      refute muse.sensitive_payload?({ "payload_type" => type }), type
+      refute muse.sensitive_payload?(nil, raw_line: %({"payload_type":"#{type}"})), type
+    end
+    refute muse.sensitive_payload?(nil, raw_line: nil)
+    refute muse.sensitive_payload?(nil, raw_line: "plain \xFF stderr".b)
+  end
+
+  def test_extract_message_takes_only_non_blank_completed_terminal_text
+    muse = Hive::AgentSupport::Muse
+    completed = ->(payload) { { "payload_type" => "run.terminal.completed", "payload" => payload } }
+
+    assert_equal "done", muse.extract_message(completed.call({ "text" => "done" }))
+    assert_nil muse.extract_message(completed.call({ "text" => "  \n" }))
+    assert_nil muse.extract_message(completed.call({ "text" => 42 }))
+    assert_nil muse.extract_message(completed.call("done"))
+    assert_nil muse.extract_message({ "payload_type" => "run.output.delta", "payload" => { "text" => "x" } })
   end
 end

@@ -54,8 +54,7 @@ module Hive::AgentSupport::Muse
       bin = state.fetch("bin")
       installed = state["package"]
       root = staging_root(native_spec)
-      data_dir = Hive::AgentSupport::Muse.data_directory(environment: @environment)
-      registry = [ File.join(data_dir, "plugins", "installed.json") ]
+      registry = [ Skills.registry_path(environment: @environment) ]
 
       verb = if installed.nil?
         "plugin_install"

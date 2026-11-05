@@ -1875,7 +1875,7 @@ that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 
 ## Muse support boundaries (2026-11-04)
 
-Muse (`muse` 1.4.14) is a built-in agent profile, but three boundaries are
+Muse (`muse` 1.4.14) is a built-in agent profile, but these boundaries are
 deliberately open. (Compound Engineering provisioning is not one of them:
 Hive stages a dereferenced copy of the upstream bundle, whose symlinks Muse
 otherwise rejects, and installs it as a native plugin.)
@@ -1887,9 +1887,18 @@ otherwise rejects, and installs it as a native plugin.)
   are unaffected.
 - Prompt transport relies on the host materializing stdin as a regular
   file: Muse rejects `--prompt-file=/dev/stdin` when stdin is a pipe
-  (`not a regular file`). Hive always spawns agents with stdin redirected
-  from a tempfile, so this only affects direct `agent-cli-runtime`
-  consumers who pipe `stdin_data` themselves.
+  (`not a regular file`). Hive spawns stage agents (`Hive::Agent`) and
+  diagnosis agents (`Hive::DiagnosisAgent#popen_with_stdin_file`) with stdin
+  redirected from a 0600 tempfile, so this only affects direct
+  `agent-cli-runtime` consumers who pipe `stdin_data` themselves.
+- No Hive MCP isolation: there is no `Hive::AgentSupport::Muse::Mcp`
+  renderer, so `Hive::Mcp.prepare` launches Muse with `isolation: :none`
+  (the operator's own Muse MCP config, not the Hive-granted servers).
+  Provider routing therefore does not advertise the `mcp` tool for Muse.
+- Default launch binding only: Muse has no private config-dir variable and
+  `XDG_CONFIG_HOME` is shared by every XDG tool, so the Muse profile has no
+  `configuration_environment_key` and `LaunchBindings.resolve` refuses
+  named Muse bindings.
 - No USD pricing: the pricing catalog carries no Meta rate cards and Muse
   reports subscription allowance rather than cost, so Muse token counts are
   recorded with unknown cost. Muse's `read-only` mode also disables the

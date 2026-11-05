@@ -12,11 +12,9 @@ module Hive::AgentSupport::Muse
     turn.input.user run.lifecycle.started run.output.delta
     run.terminal.completed
   ].freeze
-  SENSITIVE_LINE = /
-    "payload_type"\s*:\s*"
-    (?:turn\.input\.user|run\.lifecycle\.started|run\.output\.delta|
-       run\.terminal\.completed)
-  /x.freeze
+  # Raw-line fallback for lines that are not valid JSON, derived from the
+  # list above so the two redaction rules cannot drift.
+  SENSITIVE_LINE = /"payload_type"\s*:\s*"#{Regexp.union(SENSITIVE_PAYLOAD_TYPES)}/
 
   autoload :PluginStaging, "hive/agent_support/muse/plugin_staging"
   autoload :Skills, "hive/agent_support/muse/skills"

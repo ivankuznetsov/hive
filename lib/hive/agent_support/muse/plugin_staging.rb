@@ -46,7 +46,7 @@ module Hive::AgentSupport::Muse::PluginStaging
     end
 
     package = package_dir(root)
-    copy_tree(clone, package)
+    copy_tree(clone, package, jail: File.realpath(clone))
     manifest = File.join(package, ".claude-plugin", "plugin.json")
     unless File.file?(manifest)
       raise Hive::Error, "staged plugin has no .claude-plugin/plugin.json"
@@ -63,7 +63,12 @@ module Hive::AgentSupport::Muse::PluginStaging
     raise Hive::Error, "could not stage muse plugin: #{e.message}"
   end
 
-  def copy_tree(source, destination, ancestry = [])
+  # `jail` is the clone's realpath. Every symlink must resolve inside it:
+  # dereferencing an absolute or `../` link would copy host files (or the
+  # whole filesystem) into the plugin bundle Muse installs. A dangling
+  # link has nothing to copy and is dropped, since Muse would refuse the
+  # link itself anyway.
+  def copy_tree(source, destination, ancestry = [], jail:)
     real = File.realpath(source)
     if ancestry.include?(real)
       raise Hive::Error, "symlink cycle in plugin source at #{source}"
@@ -76,18 +81,33 @@ module Hive::AgentSupport::Muse::PluginStaging
       from = File.join(source, name)
       to = File.join(destination, name)
       if File.symlink?(from)
-        target = File.realpath(from)
+        target = symlink_target(from, jail)
+        next unless target
+
         if File.directory?(target)
-          copy_tree(target, to, ancestry + [ real ])
+          copy_tree(target, to, ancestry + [ real ], jail: jail)
         else
           copy_file(target, to)
         end
       elsif File.directory?(from)
-        copy_tree(from, to, ancestry + [ real ])
+        copy_tree(from, to, ancestry + [ real ], jail: jail)
       else
         copy_file(from, to)
       end
     end
+  end
+
+  def symlink_target(link, jail)
+    target = File.realpath(link)
+    unless target == jail || target.start_with?(jail + File::SEPARATOR)
+      raise Hive::Error,
+            "plugin source symlink #{link.delete_prefix(jail + File::SEPARATOR)} " \
+            "points outside the cloned repository"
+    end
+
+    target
+  rescue Errno::ENOENT
+    nil
   end
 
   def copy_file(from, to)
@@ -95,5 +115,5 @@ module Hive::AgentSupport::Muse::PluginStaging
     FileUtils.chmod(File.stat(from).mode & 0o777, to)
   end
 
-  private_class_method :copy_tree, :copy_file
+  private_class_method :copy_tree, :symlink_target, :copy_file
 end

@@ -74,6 +74,24 @@ class AgentCliRuntimeMuseProfileTest < Minitest::Test
     end
   end
 
+  def test_version_check_still_rejects_distinct_numeric_cores
+    Dir.mktmpdir do |dir|
+      bin = File.join(dir, "muse")
+      profile = AgentCliRuntime::Profile.new(
+        name: :muse, bin_default: bin, headless_flag: "exec",
+        version_flag: "--version", min_version: "1.4.14"
+      )
+
+      write_executable(bin, "#!/bin/sh\necho 'Muse Code 1.4.14 (1.5.0-R1)'\n")
+      error = assert_raises(AgentCliRuntime::VersionError) { profile.check_version! }
+      assert_match(/ambiguous/, error.message)
+
+      write_executable(bin, "#!/bin/sh\necho 'Muse Code 1.3.0 (1.3.0-R1)'\n")
+      error = assert_raises(AgentCliRuntime::VersionError) { profile.check_version! }
+      assert_match(/below minimum|1\.3\.0/, error.message)
+    end
+  end
+
   def test_configuration_directory_honors_xdg_config_home
     assert_equal "/xdg/muse",
                  muse.configuration_directory(env: { "XDG_CONFIG_HOME" => "/xdg" })
@@ -142,6 +160,33 @@ class AgentCliRuntimeMuseProfileTest < Minitest::Test
     assert_nil AgentCliRuntime.extract_usage(
       :muse, { "payload_type" => "run.output.delta", "payload" => {} }
     )
+  end
+
+  def test_usage_extraction_edge_shapes
+    usage = AgentCliRuntime.extract_usage(
+      :muse,
+      {
+        "payload_type" => "run.usage",
+        "payload" => {
+          "models" => [
+            { "model" => "muse-a", "input_tokens" => 1, "output_tokens" => 2 },
+            { "model" => "muse-b", "input_tokens" => 3, "output_tokens" => 4 },
+            "not-a-hash"
+          ]
+        }
+      }
+    )
+    assert_equal 4, usage[:input]
+    assert_equal 6, usage[:output]
+    assert_nil usage[:cached], "absent breakdown keys stay unknown, not zero"
+    assert_nil usage[:reasoning]
+    assert_nil usage[:model], "several models have no single model name"
+
+    [ { "models" => {} }, { "models" => [] }, { "models" => [ 1 ] }, "payload" ].each do |payload|
+      assert_nil AgentCliRuntime.extract_usage(
+        :muse, { "payload_type" => "run.usage", "payload" => payload }
+      ), payload.inspect
+    end
   end
 
   def test_error_extraction_uses_only_run_terminal_failures

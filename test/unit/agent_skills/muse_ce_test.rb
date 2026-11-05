@@ -401,4 +401,123 @@ class AgentSkillsMuseCeTest < Minitest::Test
         .build_plan(agents: [ "muse" ], skills: [ "ce-brainstorm" ]).operations
     end
   end
+  class FailingCloneRunner < DispatchRunner
+    def call(argv, env: {}, timeout: 10, chdir: nil)
+      if argv[0] == "git" && argv[1] == "clone"
+        return Hive::AgentSkills::CommandResult.new(
+          stdout: "", stderr: "fatal: unable to access upstream\n",
+          exit_status: 128, error: nil, timed_out: false
+        )
+      end
+
+      super
+    end
+  end
+
+  def test_provisioner_reports_a_failed_stage_and_skips_the_install
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      Dir.mkdir(project, 0o700)
+      provisioner = Hive::AgentSkills::Provisioner.new(
+        config: config, project_root: project,
+        runner: FailingCloneRunner.new(fixture: nil),
+        environment: environment(home)
+      )
+
+      plan = provisioner.build_plan(agents: [ "muse" ], skills: [ "ce-brainstorm" ])
+      outcome = provisioner.execute(plan, consent_provenance: "test")
+
+      refute_equal 0, outcome.exit_code
+      by_kind = outcome.operation_results.to_h do |result|
+        [ plan.operations.find { |op| op.id == result.operation_id }.kind, result ]
+      end
+      assert_equal "failed", by_kind.fetch("plugin_stage").status
+      assert_match(/git clone .* failed: fatal: unable to access upstream/,
+                   by_kind.fetch("plugin_stage").message)
+      refute_equal "succeeded", by_kind["plugin_install"]&.status
+      refute File.exist?(File.join(environment(home).fetch("XDG_DATA_HOME"), "muse", "plugins", "installed.json"))
+    end
+  end
+
+  def write_registry(env, plugins)
+    registry = File.join(env.fetch("XDG_DATA_HOME"), "muse", "plugins", "installed.json")
+    FileUtils.mkdir_p(File.dirname(registry))
+    File.write(registry, plugins.is_a?(String) ? plugins : JSON.generate("plugins" => plugins))
+    registry
+  end
+
+  def test_skill_resolution_rejects_escaping_and_disabled_plugins_and_corrupt_registries
+    with_tmp_dir do |home|
+      env = environment(home)
+      outside = File.join(home, "outside")
+      FileUtils.mkdir_p(File.join(outside, "skills", "ce-plan"))
+      File.write(File.join(outside, "skills", "ce-plan", "SKILL.md"), "plan\n")
+      skills = Hive::AgentSupport::Muse::Skills
+
+      write_registry(env, "escaping" => { "enabled" => true, "cache_path" => outside })
+      result = skills.resolve("/ce-plan", environment: env)
+      assert_equal :missing, result.status
+      assert_match(/escapes/, result.parse_errors.join("\n"))
+
+      cache = File.join(env.fetch("XDG_DATA_HOME"), "muse", "plugins", "cache", "p", "package")
+      FileUtils.mkdir_p(File.join(cache, "skills", "ce-plan"))
+      File.write(File.join(cache, "skills", "ce-plan", "SKILL.md"), "plan\n")
+      write_registry(env, "p" => { "enabled" => false, "cache_path" => cache })
+      assert_equal :missing, skills.resolve("/ce-plan", environment: env).status
+
+      write_registry(env, "{not json")
+      result = skills.resolve("/ce-plan", environment: env)
+      assert_equal :missing, result.status
+      refute_empty result.parse_errors
+
+      write_registry(env, JSON.generate("plugins" => []))
+      assert_match(/plugins must be an object/,
+                   skills.resolve("/ce-plan", environment: env).parse_errors.join)
+    end
+  end
+
+  def test_live_inventory_reports_a_failed_plugin_listing
+    native = Hive::AgentSkills::Manifest.load
+      .package("compound-engineering").native_for("muse")
+    issues = []
+    failed = Hive::AgentSkills::CommandResult.new(
+      stdout: '{"plugins":[]}', stderr: "boom", exit_status: 2, error: nil, timed_out: false
+    )
+
+    inventory = Hive::AgentSupport::Muse::Skills.live_inventory(
+      bin: FAKE_BIN, native_spec: native, issues: issues,
+      run: ->(_argv, **) { failed }, failure: ->(result) { result.stderr }
+    )
+
+    assert_nil inventory.fetch("package")
+    assert_equal [ [ "incompatible", "muse plugin inventory failed: boom" ] ], issues
+
+    listing = Hive::AgentSkills::CommandResult.new(
+      stdout: '{"plugins":["x"]}', stderr: "", exit_status: 0, error: nil, timed_out: false
+    )
+    assert_raises(TypeError) do
+      Hive::AgentSupport::Muse::Skills.live_inventory(
+        bin: FAKE_BIN, native_spec: native, issues: [],
+        run: ->(_argv, **) { listing }, failure: ->(result) { result.stderr }
+      )
+    end
+  end
+
+  def test_relative_xdg_config_home_resolves_missing_with_the_reason
+    result = Hive::AgentSupport::Muse::Skills.resolve(
+      "/ce-plan", environment: { "HOME" => "/home/u", "XDG_CONFIG_HOME" => "relative" }
+    )
+
+    assert_equal :missing, result.status
+    assert_match(/muse: XDG_CONFIG_HOME must be absolute/, result.message)
+  end
+
+  def test_repository_source_ignores_a_malformed_manifest
+    with_tmp_dir do |cache|
+      FileUtils.mkdir_p(File.join(cache, ".claude-plugin"))
+      File.write(File.join(cache, ".claude-plugin", "plugin.json"), "{bad")
+
+      assert_nil Hive::AgentSupport::Muse::Skills.send(:repository_source, cache)
+    end
+  end
 end

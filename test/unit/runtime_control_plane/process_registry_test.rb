@@ -484,6 +484,16 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
     end
   end
 
+  def test_exited_direct_cli_rows_use_the_default_process_table_snapshot
+    with_registry(use_default_process_table: true) do |database, registry, _root|
+      process_id = register_process(registry, origin: "direct_cli", role: "status")
+      gone_pid = spawn_gone_pid
+      move_process(database, process_id, pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid)
+
+      assert_equal [ "root_gone_led_group_empty" ], registry.reconcile_exited_processes!.map { |row| row["evidence"] }
+    end
+  end
+
   def test_exited_cli_that_led_a_still_live_group_or_session_is_kept
     gone_pid = spawn_gone_pid
     {
@@ -560,6 +570,17 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
       register_process(registry, origin: "direct_cli", role: "status")
       database.transaction { |db| db[:owned_processes].update(start_fingerprint: "not-this-process") }
       assert_empty registry.reconcile_exited_processes!
+    end
+  end
+
+  def test_exited_process_reconciliation_keeps_rows_when_the_process_table_raises
+    with_registry(process_table: -> { raise ArgumentError, "unavailable" }) do |database, registry, _root|
+      process_id = register_process(registry, origin: "direct_cli", role: "status")
+      gone_pid = spawn_gone_pid
+      move_process(database, process_id, pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid)
+
+      assert_empty registry.reconcile_exited_processes!
+      assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }
     end
   end
 
@@ -648,15 +669,14 @@ class RuntimeControlPlaneProcessRegistryTest < Minitest::Test
   end
 
   def with_registry(process_identity: Hive::Attempts::ProcessIdentity.new,
-                    process_table: -> { Hive::Attempts::ProcessTable.snapshot })
+                    process_table: -> { Hive::Attempts::ProcessTable.snapshot }, use_default_process_table: false)
     with_tmp_dir do |root|
       database = Hive::RuntimeControlPlane::Database.new(
         path: Hive::Paths.runtime_control_plane_path(root)
       ).migrate!
-      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
-        database: database, state_home: root, process_identity: process_identity,
-        process_table: process_table
-      )
+      options = { database: database, state_home: root, process_identity: process_identity }
+      options[:process_table] = process_table unless use_default_process_table
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(**options)
       yield database, registry, root
     ensure
       database&.disconnect

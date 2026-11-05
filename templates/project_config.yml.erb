@@ -397,6 +397,16 @@ review:
       # budget_usd: 50  # suggested cap; uncomment to enforce
       timeout_sec: 7200
 <% end -%>
+<% if enabled_reviewers.include?("muse-ce-code-review") -%>
+    - name: muse-ce-code-review
+      kind: agent
+      agent: muse
+      skill: ce-code-review
+      output_basename: muse-ce-code-review
+      prompt_template: reviewer_muse_ce_code_review.md.erb
+      # budget_usd: 50  # suggested cap; uncomment to enforce
+      timeout_sec: 7200
+<% end -%>
 <% end -%>
 
 # Hive daemon (ADR-024): auto-advances tasks through the pipeline up to

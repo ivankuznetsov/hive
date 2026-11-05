@@ -226,6 +226,111 @@ class AgentSkillsMuseCeTest < Minitest::Test
     end
   end
 
+  def test_staging_reports_clone_and_manifest_failures
+    with_tmp_dir do |home|
+      failed_clone = Hive::AgentSkills::CommandResult.new(
+        stdout: "", stderr: "network unavailable\n", exit_status: 128, error: nil, timed_out: false
+      )
+      root = File.join(home, "stage")
+      error = assert_raises(Hive::Error) do
+        Hive::AgentSupport::Muse::PluginStaging.stage(
+          source: "https://example.invalid/plugin.git", root: root,
+          runner: FakeRunner.new(
+            [ "git", "clone", "--depth", "1", "--", "https://example.invalid/plugin.git", File.join(root, "clone") ] => failed_clone
+          ), env: {}
+        )
+      end
+      assert_match(/network unavailable/, error.message)
+
+      fixture = File.join(home, "fixture")
+      FileUtils.mkdir_p(fixture)
+      runner = DispatchRunner.new(fixture: fixture)
+      error = assert_raises(Hive::Error) do
+        Hive::AgentSupport::Muse::PluginStaging.stage(
+          source: fixture, root: File.join(home, "missing-manifest"), runner: runner, env: {}
+        )
+      end
+      assert_match(/plugin.json/, error.message)
+    end
+  end
+
+  def test_staging_reports_invalid_manifest_and_dereferences_file_symlinks
+    with_tmp_dir do |home|
+      fixture = File.join(home, "fixture")
+      FileUtils.mkdir_p(File.join(fixture, ".claude-plugin"))
+      File.write(File.join(fixture, ".claude-plugin", "plugin.json"), "not json")
+      File.write(File.join(fixture, "source.md"), "contents")
+      FileUtils.ln_s("source.md", File.join(fixture, "linked.md"))
+
+      error = assert_raises(Hive::Error) do
+        Hive::AgentSupport::Muse::PluginStaging.stage(
+          source: fixture, root: File.join(home, "invalid-manifest"),
+          runner: DispatchRunner.new(fixture: fixture), env: {}
+        )
+      end
+      assert_match(/could not stage/, error.message)
+      assert_equal "contents", File.read(File.join(home, "invalid-manifest", "package", "linked.md"))
+    end
+  end
+
+  def test_muse_skill_registry_reports_malformed_and_escaping_entries
+    with_tmp_dir do |home|
+      env = environment(home)
+      registry = File.join(env.fetch("XDG_DATA_HOME"), "muse", "plugins", "installed.json")
+      FileUtils.mkdir_p(File.dirname(registry))
+      File.write(registry, "not json")
+
+      resolution = Hive::AgentSupport::Muse::Skills.resolve("/ce-plan", environment: env)
+      assert_equal :missing, resolution.status
+      refute_empty resolution.parse_errors
+
+      outside = File.join(home, "outside")
+      FileUtils.mkdir_p(File.join(outside, "skills", "ce-plan"))
+      File.write(File.join(outside, "skills", "ce-plan", "SKILL.md"), "plan")
+      File.write(registry, JSON.generate("plugins" => {
+        "compound-engineering" => { "enabled" => true, "cache_path" => outside }
+      }))
+      resolution = Hive::AgentSupport::Muse::Skills.resolve("/ce-plan", environment: env)
+      assert_equal :missing, resolution.status
+      assert_includes resolution.parse_errors.join("\n"), "escapes"
+    end
+  end
+
+  def test_muse_live_inventory_records_command_failure_and_rejects_bad_entries
+    native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("muse")
+    issues = []
+    failed = Hive::AgentSkills::CommandResult.new(
+      stdout: '{"plugins":[]}', stderr: "offline", exit_status: 1, error: nil, timed_out: false
+    )
+    inventory = Hive::AgentSupport::Muse::Skills.live_inventory(
+      bin: FAKE_BIN, native_spec: native, issues: issues,
+      run: ->(*) { failed }, failure: ->(result) { result.stderr }
+    )
+    assert_nil inventory.fetch("package")
+    assert_match(/inventory failed/, issues.fetch(0).last)
+
+    malformed = Hive::AgentSkills::CommandResult.new(
+      stdout: '{"plugins":["not-an-object"]}', stderr: "", exit_status: 0, error: nil, timed_out: false
+    )
+    assert_raises(TypeError) do
+      Hive::AgentSupport::Muse::Skills.live_inventory(
+        bin: FAKE_BIN, native_spec: native, issues: [],
+        run: ->(*) { malformed }, failure: ->(*) { "" }
+      )
+    end
+  end
+
+  def test_stage_operation_returns_a_failed_outcome_when_staging_fails
+    with_tmp_dir do |home|
+      row = inspection(capability: "ce-brainstorm", health: "missing")
+      stage = adapter(home).plan([ row ]).operations.first
+      outcome = adapter(home, runner: FakeRunner.new).execute(stage)
+
+      assert_equal "failed", outcome.status
+      assert_match(/could not stage/, outcome.message)
+    end
+  end
+
   def test_live_and_filesystem_inventories_read_the_plugin_registry
     with_tmp_dir do |home|
       env = environment(home)

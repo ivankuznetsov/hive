@@ -214,6 +214,13 @@ class MuseAgentTest < Minitest::Test
     end
   end
 
+  def test_sensitive_payload_fallback_scrubs_malformed_event_lines
+    assert Hive::AgentSupport::Muse.sensitive_payload?(
+      nil, raw_line: '{"payload_type":"run.output.delta","payload":"secret"}'
+    )
+    refute Hive::AgentSupport::Muse.sensitive_payload?(nil, raw_line: "ordinary output")
+  end
+
   def test_spawn_records_terminal_message_usage_and_scrubbed_env
     with_tmp_dir do |dir|
       task = make_task(dir)

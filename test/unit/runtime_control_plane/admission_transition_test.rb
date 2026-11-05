@@ -227,7 +227,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     # Regression (2026-11-05): another `hive` process held the runtime write
     # lock past the busy timeout; the observation surfaced as a plain
     # RepositoryError and the daemon exited. It must be the retryable
-    # StoreBusy so the daemon can defer the task instead.
+    # RuntimeDatabaseBusy so the daemon can defer the task instead.
     with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
       state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
       folder = File.join(state_root, "stages", "4-execute", "task-1")
@@ -241,7 +241,7 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
       holder = SQLite3::Database.new(attempts.database.path)
       holder.execute("BEGIN IMMEDIATE")
 
-      error = assert_raises(Hive::Attempts::StoreBusy) do
+      error = assert_raises(Hive::Attempts::RuntimeDatabaseBusy) do
         attempts.observe_task_source(task: task, generation: generation, observed_at: NOW + 1)
       end
       assert_kind_of Hive::Attempts::RepositoryError, error

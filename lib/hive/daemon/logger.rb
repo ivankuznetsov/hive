@@ -26,6 +26,9 @@ module Hive
         dispatcher_stopping
         tick_begin
         tick_end
+        tick_deferred
+        startup_deferred
+        dispatch_deferred
         status_failure
         status_warning
         admission_check_failed

@@ -2908,8 +2908,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
     raise SQLite3::BusyException, "database is locked"
   rescue SQLite3::BusyException
     begin
-      raise Hive::Attempts::StoreBusy, "#{prefix}: SQLite3::BusyException: database is locked"
-    rescue Hive::Attempts::StoreBusy => error
+      raise Hive::Attempts::RuntimeDatabaseBusy, "#{prefix}: SQLite3::BusyException: database is locked"
+    rescue Hive::Attempts::RuntimeDatabaseBusy => error
       error
     end
   end
@@ -2962,7 +2962,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     deferred = logger.events.find { |name, _| name == :tick_deferred }
     refute_nil deferred
     assert_equal "runtime_database_busy", deferred.last[:reason]
-    assert_match(/StoreBusy: .*database is locked/, deferred.last[:error])
+    assert_match(/RuntimeDatabaseBusy: .*database is locked/, deferred.last[:error])
     assert(snapshot.calls.any? { |name, attrs| name == :fail && attrs[:reason] == "runtime_database_busy" })
     assert events_include?(logger, :dispatcher_stopping)
   end
@@ -2996,7 +2996,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal 3, recoveries
     assert_equal [ 2, 5 ], sleeps.first(2)
-    retried = logger.events.select { |name, _| name == :runtime_database_busy }
+    retried = logger.events.select { |name, _| name == :startup_deferred }
     assert_equal %w[recover_dispatch_claims recover_dispatch_claims], retried.map { |_, attrs| attrs[:phase] }
   end
 
@@ -3006,7 +3006,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     sleeps = []
     dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
     attempts = 0
-    error = assert_raises(Hive::Attempts::StoreBusy) do
+    error = assert_raises(Hive::Attempts::RuntimeDatabaseBusy) do
       dispatcher.send(:retry_runtime_database_busy, phase: "startup") do
         attempts += 1
         raise busy

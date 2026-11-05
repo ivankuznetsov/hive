@@ -850,8 +850,8 @@ module Hive
           raise unless Hive::InternalError.sqlite_busy?(error) && attempt < delays.length && !@shutdown
 
           @logger.event(
-            :runtime_database_busy, phase: phase, retry_in_sec: delays[attempt],
-            message: error.message.to_s[0, 300]
+            :startup_deferred, reason: "runtime_database_busy", phase: phase,
+            retry_in_sec: delays[attempt], message: error.message.to_s[0, 300]
           )
           interruptible_sleep(delays[attempt])
           attempt += 1
@@ -3013,7 +3013,7 @@ module Hive
             # propagates.
             log_attempt_admission_failure(row, error)
             next
-          rescue Hive::Attempts::StoreBusy => error
+          rescue Hive::Attempts::RuntimeDatabaseBusy => error
             # Another Hive process held the runtime database write lock past
             # the busy timeout. Nothing was written. Every later row would
             # wait out the same timeout, so defer the rest of this pass; the

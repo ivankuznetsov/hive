@@ -26,7 +26,7 @@ module Hive
     # another Hive process held the write lock. Nothing was written, and the
     # same operation can be retried later, so callers may defer instead of
     # failing. Corruption, schema, and storage errors never take this class.
-    class StoreBusy < RepositoryError
+    class RuntimeDatabaseBusy < RepositoryError
       def exit_code = Hive::ExitCodes::TEMPFAIL
     end
     class CapacityExceeded < RepositoryError; end
@@ -662,7 +662,7 @@ module Hive
         raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
           error.is_a?(RuntimeControlPlane::AdmissionClosed) || storage_unavailable?(error)
         raise InvalidAttemptRecord, "#{prefix}: #{error.message}" if error.is_a?(InvalidRecord)
-        raise StoreBusy, "#{prefix}: #{error.message}" if RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+        raise RuntimeDatabaseBusy, "#{prefix}: #{error.message}" if RuntimeControlPlane::SQLiteSupport.busy_error?(error)
 
         raise RepositoryError, "#{prefix}: #{error.message}"
       end

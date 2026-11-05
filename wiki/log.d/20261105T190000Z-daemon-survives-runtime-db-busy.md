@@ -11,13 +11,14 @@ error became a plain `RepositoryError`, escaped the row loop and
 `run_forever`, and `bin/hive` exited 1.
 
 - `Attempts::Repository#translate_store_error` raises
-  `Hive::Attempts::StoreBusy < RepositoryError` (exit 75) when the cause
+  `Hive::Attempts::RuntimeDatabaseBusy < RepositoryError` (exit 75) when the cause
   chain is a SQLite busy/lock-timeout error.
 - The daemon row loop logs `dispatch_deferred` (`reason:
   runtime_database_busy`) and ends that dispatch pass; the next tick retries.
 - `run_forever` survives any tick that raises a SQLite busy error (logs
   `tick_deferred`, publishes a failed operational snapshot).
-- Startup dispatch-claim recovery retries busy with 2/5/10 s backoff.
+- Startup dispatch-claim recovery retries busy with 2/5/10 s backoff
+  (`startup_deferred`). The three new events are in `Daemon::Logger::EVENTS`.
 - `examples/systemd/hive-daemon.service`: `StartLimitIntervalSec=0`, restart
   backoff `RestartSec=30s` → `RestartMaxDelaySec=10min` over
   `RestartSteps=5`. Existing installs need `hive daemon install --force`.

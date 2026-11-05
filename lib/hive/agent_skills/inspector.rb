@@ -271,6 +271,15 @@ module Hive
         }
       end
 
+      # True when the managed destination comes before the resolved path in
+      # the provider's own candidate order, so writing it would win.
+      def destination_outranks?(resolved, expected_path)
+        candidates = Array(resolved.candidates).map { |path| File.expand_path(path) }
+        expected = candidates.index(File.expand_path(expected_path))
+        winner = candidates.index(File.expand_path(resolved.path))
+        !expected.nil? && !winner.nil? && expected < winner
+      end
+
       def inspect_bundled_resolution(target, contract, destination)
         resolved = skill_module(target.agent).resolve(
           contract.invocation, project_root: @project_root,
@@ -279,7 +288,15 @@ module Hive
         expected_path = File.join(destination, "SKILL.md")
         issues = []
         if resolved.path && File.expand_path(resolved.path) != File.expand_path(expected_path)
-          issues << [ "conflicting", "unexpected higher-precedence skill #{resolved.path} wins #{target.invocation}" ]
+          issues << if destination_outranks?(resolved, expected_path)
+            # A lower-precedence skill (Muse also reads ~/.claude/skills)
+            # answers only because Hive's copy is not installed yet;
+            # publishing to the managed destination takes precedence.
+            [ "missing", "Hive operating skill is not installed at #{destination}; " \
+                         "#{resolved.path} answers #{target.invocation} until it is" ]
+          else
+            [ "conflicting", "unexpected higher-precedence skill #{resolved.path} wins #{target.invocation}" ]
+          end
         elsif resolved.status != :present && File.directory?(destination)
           issues << [ "missing", "installed Hive operating skill does not resolve for #{target.invocation}" ]
         end

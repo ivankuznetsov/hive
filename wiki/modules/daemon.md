@@ -531,6 +531,21 @@ attempt with it; only an independently selected attempt scope is affected and
 the normal lost-attempt recovery contract applies. Hosts without a usable
 systemd user bus retain the POSIX double-fork/session fallback.
 
+Runtime database lock contention is never fatal to the daemon. The runtime
+SQLite database is shared with every concurrent `hive` process; a write that
+loses its 15 s `busy_timeout` (`BEGIN IMMEDIATE` while another process holds
+the write lock) is translated by `Attempts::Repository#translate_store_error`
+to `Hive::Attempts::StoreBusy` (exit 75). The row loop logs
+`dispatch_deferred` (`reason: runtime_database_busy`) and stops that dispatch
+pass, so later rows do not each wait out the same lock; `run_forever` logs
+`tick_deferred` and publishes a failed operational snapshot for any tick that
+raises a SQLite busy error, then keeps ticking. Startup dispatch-claim
+recovery retries busy with bounded backoff (2 s, 5 s, 10 s) before failing.
+Non-busy repository, corruption, schema, and storage errors still propagate.
+The shipped systemd unit sets `StartLimitIntervalSec=0` with `RestartSec=30s`
+growing to `RestartMaxDelaySec=10min` over `RestartSteps=5`, so a crash loop
+backs off instead of landing in `start-limit-hit`.
+
 The answer and daily-digest schedulers dispatch before status fetch because
 they are global, not project-row driven. The dispatcher tracks each synthetic
 project/stage and capacity identity independently and advances only that

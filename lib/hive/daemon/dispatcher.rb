@@ -85,6 +85,9 @@ module Hive
       # How often a one-shot pass re-settles abandoned Architecture Patrol
       # discovery claims while it drains.
       ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC = 5
+      # Startup waits between retries when the runtime database stays locked
+      # past its busy timeout. Bounded: persistent contention still fails.
+      STARTUP_BUSY_RETRY_DELAYS_SEC = [ 2, 5, 10 ].freeze
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
         generation_conflict task_identity_conflict
@@ -489,8 +492,8 @@ module Hive
         # to advance the stage on the same tick that just learned the
         # agent died. The outer rescue protects the tick from a future
         # NoMethodError/TypeError in the healer: without it, a healer
-        # bug would crash the tick before per-row dispatch and hit
-        # StartLimitBurst=3 in the unit's restart-loop cap.
+        # bug would crash the tick before per-row dispatch and put the
+        # unit into a restart loop.
         begin
           @stale_agent_healer.heal(
             rows_eligible_for_error_recovery(result.rows),
@@ -720,7 +723,9 @@ module Hive
         # C3: clean up dispatch-request claims left by a prior process
         # before the first tick, so a crash-restart neither re-dispatches
         # an already-run request nor retains stale SQL claims for dead owners.
-        recover_dispatch_claims(now: Time.now)
+        retry_runtime_database_busy(phase: "recover_dispatch_claims") do
+          recover_dispatch_claims(now: Time.now)
+        end
         publish_runtime_readiness(now: Time.now)
         @runtime_ready_callback&.call
         @runtime_ready_callback = nil
@@ -750,15 +755,17 @@ module Hive
             reload_config!
             @reload = false
           end
-          if full_tick
-            tick(now: now)
-          else
-            probe = cheap_probe(now: now)
-            unless @shutdown || @reload
-              if probe.full_tick
-                tick(now: Time.now)
-              elsif !probe.task_keys.empty?
-                tick_changed(task_keys: probe.task_keys, now: Time.now)
+          survive_runtime_database_busy(now: now) do
+            if full_tick
+              tick(now: now)
+            else
+              probe = cheap_probe(now: now)
+              unless @shutdown || @reload
+                if probe.full_tick
+                  tick(now: Time.now)
+                elsif !probe.task_keys.empty?
+                  tick_changed(task_keys: probe.task_keys, now: Time.now)
+                end
               end
             end
           end
@@ -829,6 +836,48 @@ module Hive
       end
 
       private
+
+      # Bounded startup backoff for runtime database lock contention. The
+      # runtime database is shared with every concurrent `hive` process, so a
+      # write can lose the busy timeout to a long transaction elsewhere. Any
+      # other error, or contention that outlasts the backoff, still fails
+      # startup.
+      def retry_runtime_database_busy(phase:, delays: STARTUP_BUSY_RETRY_DELAYS_SEC)
+        attempt = 0
+        begin
+          yield
+        rescue StandardError => error
+          raise unless Hive::InternalError.sqlite_busy?(error) && attempt < delays.length && !@shutdown
+
+          @logger.event(
+            :runtime_database_busy, phase: phase, retry_in_sec: delays[attempt],
+            message: error.message.to_s[0, 300]
+          )
+          interruptible_sleep(delays[attempt])
+          attempt += 1
+          retry
+        end
+      end
+
+      # A tick that loses the runtime database busy timeout ends early and the
+      # next tick retries. Lock contention is normal when many `hive`
+      # processes share the database; it must never terminate the daemon.
+      # Corruption, schema, and storage failures are not busy errors and still
+      # propagate.
+      def survive_runtime_database_busy(now:)
+        yield
+      rescue StandardError => error
+        raise unless Hive::InternalError.sqlite_busy?(error)
+
+        @logger.event(
+          :tick_deferred, reason: "runtime_database_busy",
+          error: "#{error.class}: #{error.message.to_s[0, 300]}"
+        )
+        publish_operational_snapshot(
+          :fail, phase: "failed", reason: "runtime_database_busy", now: now
+        )
+        nil
+      end
 
       def live_attempt?(project)
         Array(@attempt_snapshot&.attempts).any? do |status|
@@ -2964,6 +3013,16 @@ module Hive
             # propagates.
             log_attempt_admission_failure(row, error)
             next
+          rescue Hive::Attempts::StoreBusy => error
+            # Another Hive process held the runtime database write lock past
+            # the busy timeout. Nothing was written. Every later row would
+            # wait out the same timeout, so defer the rest of this pass; the
+            # next tick re-evaluates all of them.
+            @logger.event(
+              :dispatch_deferred, project: row.project, slug: row.slug, stage: row.stage,
+              reason: "runtime_database_busy", message: error.message.to_s[0, 300]
+            )
+            break
           end
           if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))

@@ -123,4 +123,55 @@ class AgentSkillsMuseSkillTest < Minitest::Test
       refute File.exist?(File.join(home, "xdg", "muse", "skills"))
     end
   end
+  def test_lower_precedence_claude_skill_does_not_block_the_muse_projection
+    # Muse also reads ~/.claude/skills. An operator with Claude's /hive
+    # projection installed must still get the Muse-managed copy, which
+    # outranks it, instead of a "conflicting" refusal.
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      Dir.mkdir(project, 0o700)
+      claude_copy = File.join(home, ".claude", "skills", "hive", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(claude_copy))
+      File.write(claude_copy, "---\nname: hive\ndescription: claude projection\n---\n")
+      runner = Runner.new(
+        [ FAKE_BIN, "--version" ] =>
+          result(stdout: "Muse Code 1.4.14 (1.4.14-R7309.1)\n")
+      )
+      provisioner = Hive::AgentSkills::Provisioner.new(
+        config: config, project_root: project, runner: runner,
+        environment: environment(home)
+      )
+
+      plan = provisioner.build_plan(agents: [ "muse" ], skills: [ "hive" ])
+      assert_equal "missing", plan.inspections.fetch(0).health, plan.inspections.fetch(0).explanation
+      assert_equal %w[bundled_skill_publish], plan.operations.map(&:kind)
+
+      outcome = provisioner.execute(plan, consent_provenance: "test")
+      assert_equal 0, outcome.exit_code
+      assert_equal "healthy", outcome.final_health.fetch(0).health
+      assert_includes File.read(claude_copy), "claude projection", "Claude's copy is untouched"
+    end
+  end
+
+  def test_higher_precedence_project_skill_still_conflicts_for_muse
+    with_tmp_dir do |home|
+      project = File.join(home, "project")
+      Dir.mkdir(project, 0o700)
+      shadow = File.join(project, ".agents", "skills", "hive", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(shadow))
+      File.write(shadow, "---\nname: hive\ndescription: project shadow\n---\n")
+      runner = Runner.new(
+        [ FAKE_BIN, "--version" ] =>
+          result(stdout: "Muse Code 1.4.14 (1.4.14-R7309.1)\n")
+      )
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: config, project_root: project, runner: runner,
+        environment: environment(home)
+      ).inspect(agents: [ "muse" ], skills: [ "hive" ]).fetch(0)
+
+      assert_equal "conflicting", row.health
+      assert_match(/higher-precedence/, row.explanation)
+    end
+  end
 end

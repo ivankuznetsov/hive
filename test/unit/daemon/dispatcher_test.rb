@@ -2904,6 +2904,124 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def runtime_database_busy_error(prefix = "attempt task source could not be observed")
+    raise SQLite3::BusyException, "database is locked"
+  rescue SQLite3::BusyException
+    begin
+      raise Hive::Attempts::RuntimeDatabaseBusy, "#{prefix}: SQLite3::BusyException: database is locked"
+    rescue Hive::Attempts::RuntimeDatabaseBusy => error
+      error
+    end
+  end
+
+  def test_runtime_database_busy_defers_the_rest_of_the_dispatch_pass
+    # Regression (2026-11-05): a busy observation escaped the row loop and the
+    # daemon exited; systemd then hit its start limit and every project stalled.
+    first = row(project: "p1", slug: "first-task", id: 1)
+    second = row(project: "p1", slug: "second-task", id: 2)
+    dispatcher, = make_dispatcher(rows: [ first, second ])
+    logger = StubLogger.new
+    dispatcher.instance_variable_set(:@logger, logger)
+    handled = []
+    busy = runtime_database_busy_error
+    handler = lambda do |r, **|
+      handled << r.slug
+      raise busy
+    end
+
+    fences = with_replaced_singleton_method(dispatcher, :handle_row, handler) do
+      dispatcher.send(:dispatch_prioritized_rows, [ first, second ], now: T0)
+    end
+
+    assert_equal %w[first-task], handled, "later rows wait for the next tick instead of the same lock"
+    assert_equal({ global: nil, projects: {} }, fences)
+    deferred = logger.events.select { |name, _| name == :dispatch_deferred }
+    assert_equal 1, deferred.size
+    assert_equal "runtime_database_busy", deferred.first.last[:reason]
+    assert_equal "first-task", deferred.first.last[:slug]
+    assert_match(/database is locked/, deferred.first.last[:message])
+  end
+
+  def test_run_forever_survives_a_tick_that_loses_the_runtime_database_busy_timeout
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(operational_snapshot: snapshot)
+    busy = runtime_database_busy_error
+    ticks = 0
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    dispatcher.define_singleton_method(:tick) do |now: Time.now|
+      ticks += 1
+      raise busy if ticks == 1
+
+      request_shutdown!
+    end
+
+    dispatcher.run_forever
+
+    assert_equal 2, ticks, "the daemon keeps ticking after a busy tick"
+    deferred = logger.events.find { |name, _| name == :tick_deferred }
+    refute_nil deferred
+    assert_equal "runtime_database_busy", deferred.last[:reason]
+    assert_match(/RuntimeDatabaseBusy: .*database is locked/, deferred.last[:error])
+    assert(snapshot.calls.any? { |name, attrs| name == :fail && attrs[:reason] == "runtime_database_busy" })
+    assert events_include?(logger, :dispatcher_stopping)
+  end
+
+  def test_run_forever_still_fails_closed_on_non_busy_tick_errors
+    dispatcher, = make_dispatcher
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    corrupt = Hive::Attempts::RepositoryError.new(
+      "attempt task source could not be observed: SQLite3::CorruptException: database disk image is malformed"
+    )
+    dispatcher.define_singleton_method(:tick) { |now: Time.now| raise corrupt }
+
+    assert_raises(Hive::Attempts::RepositoryError) { dispatcher.run_forever }
+  end
+
+  def test_startup_claim_recovery_retries_runtime_database_busy_with_bounded_backoff
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    busy = runtime_database_busy_error("dispatch claims could not be recovered")
+    recoveries = 0
+    sleeps = []
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
+    dispatcher.define_singleton_method(:recover_dispatch_claims) do |now:|
+      recoveries += 1
+      raise busy if recoveries <= 2
+    end
+    dispatcher.define_singleton_method(:tick) { |now: Time.now| request_shutdown! }
+
+    dispatcher.run_forever
+
+    assert_equal 3, recoveries
+    assert_equal [ 2, 5 ], sleeps.first(2)
+    retried = logger.events.select { |name, _| name == :startup_deferred }
+    assert_equal %w[recover_dispatch_claims recover_dispatch_claims], retried.map { |_, attrs| attrs[:phase] }
+  end
+
+  def test_startup_claim_recovery_gives_up_after_the_bounded_busy_backoff
+    dispatcher, = make_dispatcher
+    busy = runtime_database_busy_error("dispatch claims could not be recovered")
+    sleeps = []
+    dispatcher.define_singleton_method(:interruptible_sleep) { |seconds| sleeps << seconds }
+    attempts = 0
+    error = assert_raises(Hive::Attempts::RuntimeDatabaseBusy) do
+      dispatcher.send(:retry_runtime_database_busy, phase: "startup") do
+        attempts += 1
+        raise busy
+      end
+    end
+
+    assert_same busy, error
+    assert_equal Hive::Daemon::Dispatcher::STARTUP_BUSY_RETRY_DELAYS_SEC, sleeps
+    assert_equal 4, attempts
+    other = assert_raises(ArgumentError) do
+      dispatcher.send(:retry_runtime_database_busy, phase: "startup") { raise ArgumentError, "bad" }
+    end
+    assert_equal "bad", other.message
+  end
+
   def make_existing_row_folder(project:, stage:, slug:)
     root = Dir.mktmpdir([ "hive-dispatcher-row", project, stage, slug ].join("-"))
     @row_dirs << root

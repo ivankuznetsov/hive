@@ -48,6 +48,26 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_linux_unit_never_stops_restarting_after_transient_failures
+    # 2026-11-05: StartLimitBurst=3 turned a few transient SQLite-busy exits
+    # into a permanent `start-limit-hit` and stalled every project for hours.
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: "/tmp/hive", systemctl_available: false
+      )
+
+      installer.install!(autostart: false)
+      unit = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+
+      assert_match(/^StartLimitIntervalSec=0$/, unit)
+      refute_match(/^StartLimitBurst=/, unit)
+      assert_match(/^Restart=on-failure$/, unit)
+      assert_match(/^RestartSec=30s$/, unit)
+      assert_match(/^RestartSteps=5$/, unit)
+      assert_match(/^RestartMaxDelaySec=10min$/, unit)
+    end
+  end
+
   def test_linux_autostart_invokes_enable_when_systemd_available
     with_tmp_dir do |dir|
       commands = []

@@ -223,6 +223,39 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
     end
   end
 
+  def test_task_source_observation_reports_a_locked_runtime_database_as_retryable_busy
+    # Regression (2026-11-05): another `hive` process held the runtime write
+    # lock past the busy timeout; the observation surfaced as a plain
+    # RepositoryError and the daemon exited. It must be the retryable
+    # RuntimeDatabaseBusy so the daemon can defer the task instead.
+    with_control_plane(task_ids: [ "task-1" ]) do |attempts, _dispatch, _health|
+      state_root = attempts.database.read { |db| db[:projects].first.fetch(:state_root_path) }
+      folder = File.join(state_root, "stages", "4-execute", "task-1")
+      FileUtils.mkdir_p(folder)
+      task = Struct.new(:folder, :workflow).new(folder, nil)
+      generation = Struct.new(
+        :task_id, :project, :task_slug, :progress_token, :task_input_epoch
+      ).new("task-1", "demo", "task-1", "source-2", 2)
+      attempts.database.disconnect
+      attempts.database.instance_variable_set(:@busy_timeout_ms, 50)
+      holder = SQLite3::Database.new(attempts.database.path)
+      holder.execute("BEGIN IMMEDIATE")
+
+      error = assert_raises(Hive::Attempts::RuntimeDatabaseBusy) do
+        attempts.observe_task_source(task: task, generation: generation, observed_at: NOW + 1)
+      end
+      assert_kind_of Hive::Attempts::RepositoryError, error
+      assert_match(/attempt task source could not be observed: .*database is locked/, error.message)
+      assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+
+      holder.execute("ROLLBACK")
+      assert attempts.observe_task_source(task: task, generation: generation, observed_at: NOW + 1),
+             "the same observation succeeds once the lock is released"
+    ensure
+      holder&.close
+    end
+  end
+
   def test_module_hook_binds_to_registered_project_without_fabricating_a_task
     with_control_plane(task_ids: []) do |attempts, _dispatch, _health|
       subject = {

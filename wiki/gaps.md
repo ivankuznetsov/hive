@@ -1929,3 +1929,18 @@ cannot be closed with `hive archive --reason` (the closure lease needs a stable
 id). Since the 2026-11-05 fix the daemon blocks it as `attempt_admission_failed`
 instead of exiting. Unresolved: whether patrol task creation should retry the
 counter lock or whether an id backfill command is needed.
+
+## Daemon restarts that exit 1 with no stderr (2026-11-05)
+
+During the 2026-11-05 SQLite-busy incident three of the six daemon restarts
+(18:28:09, 18:38:01, 18:38:48 UTC) exited with status 1 about 17 s after
+start, before `dispatcher_started` was logged, and wrote nothing to stderr or
+the daemon log. 17 s matches the 15 s runtime busy timeout plus boot time, so
+these were probably startup-path busy waits, but the silent exit path is
+unconfirmed. Also unresolved: an `opencode.exe` process (pid 3135344) stayed
+in the `hive-daemon.service` cgroup across restarts. `KillMode=process`
+leaves it there by design, but durable attempts are supposed to run in
+sibling `hive-attempt-*.scope` units, so which daemon-spawned path launched a
+provider inside the service cgroup is unknown. Existing installs keep the old
+`StartLimitBurst=3` unit until `hive daemon install --force` rewrites it.
+

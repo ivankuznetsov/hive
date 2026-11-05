@@ -359,7 +359,8 @@ module Hive
             profile: profile,
             bin: bin,
             native_spec: native_spec,
-            root: config_root_for(native_spec)
+            root: config_root_for(native_spec),
+            environment: @environment
           )
         end
 

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-04
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -1872,3 +1872,27 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+## Muse support boundaries (2026-11-04)
+
+Muse (`muse` 1.4.14) is a built-in agent profile, but three boundaries are
+deliberately open. (Compound Engineering provisioning is not one of them:
+Hive stages a dereferenced copy of the upstream bundle, whose symlinks Muse
+otherwise rejects, and installs it as a native plugin.)
+
+- Managed (Honeycomb/workflow-package) actors fail closed for Muse with
+  `cannot enforce managed workflow policy`: there is no
+  `Hive::AgentSupport::Muse::Runtime` facet yet, and Muse cannot enforce
+  Hive's portable tool/path rules natively. Ordinary coding-workflow stages
+  are unaffected.
+- Prompt transport relies on the host materializing stdin as a regular
+  file: Muse rejects `--prompt-file=/dev/stdin` when stdin is a pipe
+  (`not a regular file`). Hive always spawns agents with stdin redirected
+  from a tempfile, so this only affects direct `agent-cli-runtime`
+  consumers who pipe `stdin_data` themselves.
+- No USD pricing: the pricing catalog carries no Meta rate cards and Muse
+  reports subscription allowance rather than cost, so Muse token counts are
+  recorded with unknown cost. Muse's `read-only` mode also disables the
+  shell (`--disable-write --disable-shell`) because Muse has no read-only
+  filesystem sandbox; reviewers that need read-only shell commands cannot
+  use that mode yet.

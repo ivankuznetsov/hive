@@ -59,7 +59,7 @@ class AgentsAuthTest < Minitest::Test
       with_env("HOME" => home) do
         statuses = Hive::Web::AgentsAuth.new.statuses
 
-        assert_equal %w[claude codex gh grok opencode pi].sort,
+        assert_equal %w[claude codex gh grok muse opencode pi].sort,
                      statuses.keys.sort,
                      "statuses must cover every supported agent"
         statuses.each_value do |s|
@@ -86,6 +86,7 @@ class AgentsAuthTest < Minitest::Test
     assert auth.poll_login?("codex"), "codex --device-auth is operator-ward (code entered at provider, CLI polls)"
     assert auth.poll_login?("gh"), "gh device flow is operator-ward"
     assert auth.poll_login?("grok"), "grok device auth is operator-ward"
+    assert auth.poll_login?("muse"), "muse login is operator-ward (browser code approval, CLI polls)"
     refute auth.poll_login?("claude"), "claude setup-token is paste-back (code returned to the CLI)"
   end
 

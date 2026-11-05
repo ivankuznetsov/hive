@@ -34,6 +34,46 @@ module AgentCliRuntime
       usage_result(event, usage, model_from(event), provider: :grok) if usage
     end
 
+    # Muse reports one terminal `run.usage` event whose payload carries a
+    # per-model breakdown (`models: [{model:, input_tokens:, ...}]`) instead
+    # of a single usage hash. Sum the breakdown; cache and reasoning
+    # inclusion in the headline counts is not documented, so both stay
+    # unknown rather than inferred.
+    MUSE = lambda do |event|
+      next nil unless event.is_a?(Hash) && event["payload_type"] == "run.usage"
+
+      payload = event["payload"]
+      next nil unless payload.is_a?(Hash)
+
+      models = payload["models"]
+      next nil unless models.is_a?(Array)
+
+      entries = models.select { |entry| entry.is_a?(Hash) }
+      next nil if entries.empty?
+
+      names = entries.map { |entry| entry["model"].to_s }.reject(&:empty?).uniq
+      {
+        input: UsageExtractors.muse_total(entries, "input_tokens"),
+        output: UsageExtractors.muse_total(entries, "output_tokens"),
+        cached: UsageExtractors.muse_total(entries, "cached_tokens"),
+        cache_read: nil,
+        cache_write: nil,
+        reasoning: UsageExtractors.muse_total(entries, "reasoning_tokens"),
+        input_includes_cache_read: nil,
+        input_includes_cache_write: nil,
+        output_includes_reasoning: nil,
+        model: names.length == 1 ? names.first : nil,
+        provider_reported_cost: nil
+      }
+    end
+
+    def muse_total(entries, key)
+      present = entries.select { |entry| entry.key?(key) }
+      return nil if present.empty?
+
+      present.sum { |entry| entry[key].to_i }
+    end
+
     def usage_hash(event)
       candidates = [
         event["usage"],

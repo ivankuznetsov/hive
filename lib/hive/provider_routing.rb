@@ -65,6 +65,10 @@ module Hive
       "grok" => {
         "tools" => %w[filesystem shell web].freeze,
         "permissions" => PERMISSION_CAPABILITIES
+      },
+      "muse" => {
+        "tools" => %w[filesystem mcp shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
       }
     }.freeze
 

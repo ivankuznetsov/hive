@@ -92,6 +92,24 @@ module AgentCliRuntime
       message if message.is_a?(String) && !message.strip.empty?
     end
 
+    # Muse terminates every headless run with one `run.terminal.*` event.
+    # Only that run-level terminal is authoritative: `task.lifecycle.failed`
+    # also fires for internal reminder children on otherwise successful
+    # runs, so task-level failures must never become provider errors.
+    MUSE = lambda do |event|
+      next nil unless event.is_a?(Hash)
+      next nil unless event["payload_type"].to_s.start_with?("run.terminal.")
+
+      payload = event["payload"]
+      next nil unless payload.is_a?(Hash)
+
+      terminal = payload["terminal"].to_s
+      next nil if terminal.empty? || terminal == "completed"
+
+      reason = payload["reason"].to_s.strip
+      reason.empty? ? "muse run #{terminal}" : reason
+    end
+
     def message_from(event)
       return nil unless event.is_a?(Hash)
 

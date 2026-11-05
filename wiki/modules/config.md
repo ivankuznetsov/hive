@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-04
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
@@ -439,7 +439,11 @@ reference.
      "env_override" => "HIVE_OPENCODE_BIN",
      "min_version" => "1.18.16",
      "credential_env" => [],
-     "plugins" => []}},
+     "plugins" => []},
+   "muse" =>
+    {"bin" => "muse",
+     "env_override" => "HIVE_MUSE_BIN",
+     "min_version" => "1.4.14"}},
  "review" =>
   {"ci" =>
     {"command" => nil,

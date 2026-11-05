@@ -51,7 +51,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     end
 
     assert status.success?, err
-    assert_equal "claude,codex,pi,grok,opencode\n", out
+    assert_equal "claude,codex,pi,grok,opencode,muse\n", out
   end
 
   def test_non_default_builtin_compile_transport_matches_hive_boundary
@@ -337,7 +337,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))
                .include?('require "agent_cli_runtime"')
-    %i[claude codex pi grok opencode].each do |provider|
+    %i[claude codex pi grok opencode muse].each do |provider|
       assert_same AgentCliRuntime::Profiles.fetch(provider),
                   Hive::AgentProfiles.lookup(provider).runtime_profile
     end

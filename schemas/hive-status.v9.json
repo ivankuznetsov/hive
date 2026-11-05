@@ -677,7 +677,7 @@
         "source": { "type": "string", "enum": ["marker", "artifact"] },
         "source_path": { "type": ["string", "null"] },
         "artifact_paths": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
-        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok", "opencode"] },
+        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok", "opencode", "muse"] },
         "marker_signature": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "suggested_next_action": {
           "oneOf": [

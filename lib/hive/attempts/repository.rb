@@ -17,6 +17,10 @@ module Hive
   module Attempts
     class RepositoryError < Hive::Error; end
     class CompareAndSwapFailed < RepositoryError; end
+    # The attempt record built for one task failed its own validation (for
+    # example a task without an id). That is a per-task data problem, not a
+    # storage failure, so callers may block just that task.
+    class InvalidAttemptRecord < RepositoryError; end
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 
@@ -649,6 +653,8 @@ module Hive
       def translate_store_error(error, prefix)
         raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
           error.is_a?(RuntimeControlPlane::AdmissionClosed) || storage_unavailable?(error)
+        raise InvalidAttemptRecord, "#{prefix}: #{error.message}" if error.is_a?(InvalidRecord)
+
         raise RepositoryError, "#{prefix}: #{error.message}"
       end
 

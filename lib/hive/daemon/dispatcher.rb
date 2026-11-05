@@ -44,6 +44,7 @@ require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
 require "hive/attempts/generation"
+require "hive/attempts/repository"
 require "hive/dependency_snapshot"
 require "hive/task_projection"
 require "hive/terminal_outcome"
@@ -2954,6 +2955,15 @@ module Hive
               reason: error.code, message: error.message
             )
             next
+          rescue Hive::Attempts::InvalidAttemptRecord => error
+            # One task's attempt record failed its own validation (for
+            # example a task without an id fails identity validation). That
+            # blocks this task only; it must never end the daemon tick and
+            # take every project's automation down with it. Every other
+            # attempt repository error, including storage failures, still
+            # propagates.
+            log_attempt_admission_failure(row, error)
+            next
           end
           if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))
@@ -2967,6 +2977,23 @@ module Hive
         end
 
         { global: global_fence, projects: project_fences }
+      end
+
+      # Logged once per task and distinct message so a persistently invalid
+      # task does not flood the daemon log every tick.
+      def log_attempt_admission_failure(row, error)
+        @attempt_admission_failure_signatures ||= {}
+        key = task_key(row)
+        message = error.message.to_s[0, 300]
+        return if @attempt_admission_failure_signatures[key] == message
+
+        @attempt_admission_failure_signatures[key] = message
+        @logger.event(
+          :blocked, project: row.project, slug: row.slug, stage: row.stage,
+          reason: "attempt_admission_failed", message: message,
+          remediation: "inspect the task with `hive task #{row.slug} --project #{row.project}`; " \
+                       "a task without an id cannot be admitted"
+        )
       end
 
       def log_priority_capacity_fence(row, outcome)

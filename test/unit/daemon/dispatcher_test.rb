@@ -2865,6 +2865,45 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
   end
 
+  def test_one_tasks_attempt_admission_failure_blocks_only_that_task
+    # Regression: an id-less patrol-fix inbox task produced an attempt with
+    # task_id nil; Record identity validation raised, the RepositoryError
+    # escaped dispatch_prioritized_rows, and the whole daemon exited.
+    bad = row(project: "p1", slug: "no-id-task", id: nil)
+    good = row(project: "p1", slug: "good-task", id: 2)
+    dispatcher, = make_dispatcher(rows: [ bad, good ])
+    logger = StubLogger.new
+    dispatcher.instance_variable_set(:@logger, logger)
+    handled = []
+    failure = Hive::Attempts::InvalidAttemptRecord.new(
+      "attempt could not be created: attempt task subject has incompatible identity with legacy fields"
+    )
+    handler = lambda do |r, **|
+      handled << r.slug
+      raise failure if r.slug == "no-id-task"
+
+      :dispatched
+    end
+
+    with_replaced_singleton_method(dispatcher, :handle_row, handler) do
+      2.times { dispatcher.send(:dispatch_prioritized_rows, [ bad, good ], now: T0) }
+    end
+
+    assert_equal %w[no-id-task good-task no-id-task good-task], handled
+    blocked = logger.events.select { |name, attrs| name == :blocked && attrs[:reason] == "attempt_admission_failed" }
+    assert_equal 1, blocked.size, "a repeated identical failure is logged once"
+    assert_equal "no-id-task", blocked.first.last[:slug]
+    assert_match(/incompatible identity/, blocked.first.last[:message])
+  end
+
+  def test_storage_outage_is_not_swallowed_by_the_row_admission_rescue
+    dispatcher, = make_dispatcher(rows: [ row ])
+    outage = Hive::RuntimeControlPlane::Unavailable.new("down", code: :state_storage_inaccessible)
+    with_replaced_singleton_method(dispatcher, :handle_row, ->(*, **) { raise outage }) do
+      assert_raises(outage.class) { dispatcher.send(:dispatch_prioritized_rows, [ row ], now: T0) }
+    end
+  end
+
   def make_existing_row_folder(project:, stage:, slug:)
     root = Dir.mktmpdir([ "hive-dispatcher-row", project, stage, slug ].join("-"))
     @row_dirs << root

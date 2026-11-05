@@ -1,4 +1,4 @@
-require "hive/agent_skills/adapters/base"
+require "hive/agent_skills"
 require "hive/agent_support/muse"
 
 module Hive::AgentSupport::Muse
@@ -8,7 +8,7 @@ module Hive::AgentSupport::Muse
   # (see PluginStaging), then Muse installs or updates the plugin from
   # that staged tree with its own commands. Updates refresh the staging
   # first because `muse plugins update` re-reads the recorded source path.
-  class SetupAdapter < Hive::AgentSkills::Adapters::Base
+  class SetupAdapter < Hive::AgentSkills::Adapter
     AGENT = "muse"
 
     def execute(operation)

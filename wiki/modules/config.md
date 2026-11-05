@@ -356,6 +356,7 @@ reference.
      "codex" => "/llm-wiki:wiki-plan",
      "pi" => "/llm-wiki:wiki-plan",
      "opencode" => "/ce-plan",
+     "muse" => "/ce-plan",
      "default" => "/llm-wiki:wiki-plan"}},
  "plan_review" =>
   {"enabled" => true,

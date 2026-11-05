@@ -701,7 +701,7 @@ module Hive
       DELEGATED_METHODS = %i[
         name env_bin_override_keys headless_flag permission_skip_flag
         workspace_write_flags read_only_flags add_dir_flag tool_scope_flags
-        budget_flag output_format_flags version_flag prompt_style
+        budget_flag output_format_flags version_flag prompt_style prompt_argument
         model_argument_builder effort_argument_builder launcher_identity
         cli_capabilities declared_capability_support
         credential_environment_keys configuration_environment_key

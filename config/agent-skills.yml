@@ -12,6 +12,7 @@ packages:
       codex: { provider: codex, config_home: CODEX_HOME }
       pi: { provider: pi, config_home: PI_CODING_AGENT_DIR }
       opencode: { provider: opencode, config_home: OPENCODE_CONFIG_DIR }
+      muse: { provider: muse, config_home: XDG_CONFIG_HOME }
 
   - id: compound-engineering
     version: "~> 3.0"
@@ -54,6 +55,13 @@ packages:
         scope: user
         config_home: OPENCODE_CONFIG_DIR
         actions: [plugin_install, plugin_update]
+      muse:
+        provider: muse
+        package: compound-engineering
+        source: https://github.com/EveryInc/compound-engineering-plugin.git
+        scope: user
+        config_home: XDG_CONFIG_HOME
+        actions: [plugin_install, plugin_enable, plugin_update]
 
   - id: pr-review-toolkit
     version: ">= 0"
@@ -104,6 +112,7 @@ capabilities:
       codex: { invocation: "$hive", probe: SKILL.md }
       pi: { invocation: "/skill:hive", probe: SKILL.md }
       opencode: { invocation: /hive, probe: SKILL.md }
+      muse: { invocation: /hive, probe: SKILL.md }
 
   - id: ce-brainstorm
     package: compound-engineering
@@ -113,6 +122,7 @@ capabilities:
       pi: { invocation: "/skill:ce-brainstorm", probe: skills/ce-brainstorm/SKILL.md }
       grok: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
       opencode: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
+      muse: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
 
   - id: ce-plan
     package: compound-engineering
@@ -122,6 +132,7 @@ capabilities:
       pi: { invocation: "/skill:ce-plan", probe: skills/ce-plan/SKILL.md }
       grok: { invocation: /ce-plan, probe: skills/ce-plan/SKILL.md }
       opencode: { invocation: /ce-plan, probe: skills/ce-plan/SKILL.md }
+      muse: { invocation: /ce-plan, probe: skills/ce-plan/SKILL.md }
 
   - id: ce-code-review
     package: compound-engineering
@@ -131,6 +142,7 @@ capabilities:
       pi: { invocation: "/skill:ce-code-review", probe: skills/ce-code-review/SKILL.md }
       grok: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
       opencode: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
+      muse: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
 
   - id: ce-doc-review
     package: compound-engineering
@@ -140,6 +152,7 @@ capabilities:
       pi: { invocation: "/skill:ce-doc-review", probe: skills/ce-doc-review/SKILL.md }
       grok: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
       opencode: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
+      muse: { invocation: /ce-doc-review, probe: skills/ce-doc-review/SKILL.md }
 
   - id: ce-test-browser
     package: compound-engineering
@@ -149,6 +162,7 @@ capabilities:
       pi: { invocation: "/skill:ce-test-browser", probe: skills/ce-test-browser/SKILL.md }
       grok: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
       opencode: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
+      muse: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
 
   - id: pr-review-toolkit:review-pr
     package: pr-review-toolkit

@@ -91,7 +91,7 @@ class AgentSkillsInspectorTest < Minitest::Test
 
     targets = resolver.resolve
 
-    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive hive].sort,
+    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive hive hive].sort,
                  targets.select(&:managed).map(&:capability_id).sort
     assert_equal "/ce-code-review", targets.find { |t| t.capability_id == "ce-code-review" }.invocation
   end

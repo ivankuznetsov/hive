@@ -16,12 +16,12 @@ module Hive
         @version_cache = {}
       end
 
-      def inspect(profile:, bin:, native_spec:, root:)
+      def inspect(profile:, bin:, native_spec:, root:, environment: ENV)
         support = Hive::AgentProfiles.support_for(native_spec.provider)
         inventory = if support
           support::Skills.filesystem_inventory(
             native_spec:, root:, package_version: method(:package_version_from),
-            read_json: method(:read_optional_json)
+            read_json: method(:read_optional_json), environment: environment
           )
         else
           raise TypeError, "unsupported provider #{native_spec.provider.inspect}"

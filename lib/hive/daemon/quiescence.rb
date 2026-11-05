@@ -131,6 +131,7 @@ module Hive
           state, entry = settled
           pre_settled = true
         else
+          release_abandoned_reservations(timeout_sec: remaining(@budget.drain_cutoff))
           entry = @capability.call
         end
         return ownership_refusal(state, entry) unless entry.eligible?
@@ -216,6 +217,9 @@ module Hive
               @registry.settle_preclose_reservations!(
                 generation: state.generation, authority: authority,
                 timeout_sec: remaining(@budget.drain_cutoff)
+              )
+              release_abandoned_reservations(
+                authority: authority, timeout_sec: remaining(@budget.drain_cutoff)
               )
               verdict = @capability.call
             end
@@ -303,6 +307,14 @@ module Hive
       end
 
       def installation_id = @database.installation_identity.fetch(:installation_id)
+      # Best effort: a failure leaves the rows reserved, and the capability
+      # check that follows still refuses on them.
+      def release_abandoned_reservations(authority: nil, timeout_sec: nil)
+        @registry.release_abandoned_reservations!(authority: authority, timeout_sec: timeout_sec)
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+        []
+      end
+
       def remaining(cutoff) = [ cutoff - @monotonic.call, 0.0 ].max
       def expired?(cutoff) = @monotonic.call >= cutoff
 

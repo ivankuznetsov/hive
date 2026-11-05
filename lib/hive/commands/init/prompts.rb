@@ -71,11 +71,15 @@ module Hive
           }.freeze,
           "grok-ce-code-review" => {
             "kind" => "agent", "agent" => "grok", "capability" => "ce-code-review"
+          }.freeze,
+          "muse-ce-code-review" => {
+            "kind" => "agent", "agent" => "muse", "capability" => "ce-code-review"
           }.freeze
         }.freeze
         AVAILABLE_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
-        # Keep fresh-project defaults stable: Grok is available when selected,
-        # but does not become a credential/install prerequisite implicitly.
+        # Keep fresh-project defaults stable: Grok and Muse are available
+        # when selected, but do not become credential/install prerequisites
+        # implicitly.
         DEFAULT_REVIEWER_NAMES = %w[
           claude-ce-code-review
           codex-ce-code-review

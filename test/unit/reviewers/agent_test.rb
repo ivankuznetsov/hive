@@ -286,6 +286,7 @@ class ReviewersAgentTest < Minitest::Test
       reviewer_codex_ce_code_review.md.erb
       reviewer_pr_review_toolkit.md.erb
       reviewer_grok_ce_code_review.md.erb
+      reviewer_muse_ce_code_review.md.erb
     ].each do |template|
       with_tmp_dir do |dir|
         ctx = make_ctx(dir)

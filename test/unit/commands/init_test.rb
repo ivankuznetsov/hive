@@ -140,6 +140,18 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/prompt_template: reviewer_grok_ce_code_review\.md\.erb/, rendered)
   end
 
+  def test_project_config_can_render_optional_muse_reviewer
+    # init offers muse-ce-code-review; the template must render it rather
+    # than silently dropping the selection.
+    answers = project_config_answers.merge("enabled_reviewers" => [ "muse-ce-code-review" ])
+    rendered = render_fresh_config(:coding, answers: answers)
+
+    assert_match(/name: muse-ce-code-review/, rendered)
+    assert_match(/agent: muse/, rendered)
+    assert_match(/prompt_template: reviewer_muse_ce_code_review\.md\.erb/, rendered)
+    assert File.file?(File.expand_path("../../../templates/reviewer_muse_ce_code_review.md.erb", __dir__))
+  end
+
   def test_project_config_renders_discovery_only_refactor_patrol_choice
     enabled = render_fresh_config(
       :coding,

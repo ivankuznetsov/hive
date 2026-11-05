@@ -77,7 +77,21 @@ daemon are reserved by their parent before `Process.spawn`, remain blocked at
 `bin/hive`'s launch gate until the parent registers their process identity, and
 then adopt that exact durable row for exit cleanup. A parent crash during the
 handoff leaves unresolved ownership in the registry rather than an invisible
-child. (The former Hivebox container supervisor and its
+child.
+
+A reservation that can never be registered is released as abandoned, so it
+does not keep quiescence ineligible forever. That applies to an
+attempt-wrapper reservation whose attempt is no longer `launching` or `running`
+(reason `attempt_settled`), and to any other reservation whose reserving owner
+(pid plus start fingerprint) is proven missing or replaced (reason
+`owner_gone`). Owner death is enough here: the gated child exits before any
+work unless the parent registered it first. Rows with a live, unverifiable or
+unrecorded owner, and rows whose attempt is still live, stay unresolved. The
+daemon releases them after each attempt reconciliation and logs
+`launch_reservations_released`. `hive daemon quiesce` does the same before its
+entry capability check and again under the controller writer after it settles
+pre-close reservations. A failed release leaves the rows reserved, so the
+capability still refuses. (The former Hivebox container supervisor and its
 `.hivebox-supervisor.pid` receipt were removed by ADR-055; legacy service
 discovery now covers only the daemon, bot, and babysitter pid files.)
 

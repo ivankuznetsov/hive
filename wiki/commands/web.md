@@ -754,8 +754,8 @@ Honeycomb projections.
   `codex login`, because the callback server would bind on the Hive host and
   surface a localhost URL that a remote browser cannot reach. Grok uses
   `grok login --device-auth`, exposed through the same first-class login action
-  and constrained session routes as the other relayed agents. Codex, Grok,
-  and `gh`
+  and constrained session routes as the other relayed agents. Muse uses
+  `muse login` through those same constrained routes. Codex, Grok, Muse, and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the

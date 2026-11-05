@@ -1918,3 +1918,14 @@ otherwise rejects, and installs it as a native plugin.)
   shell (`--disable-write --disable-shell`) because Muse has no read-only
   filesystem sandbox; reviewers that need read-only shell commands cannot
   use that mode yet.
+
+## Patrol-fix tasks can be created without a task id (2026-11-05)
+
+A todero `patrol-fix` inbox task (`confirmation-email-form-re-renders-after-validat-43470975e497`)
+has `id:` null in `meta.yml`. `hive new` documents a null id when the global
+`Hive::TaskCounter` lock is unavailable, but nothing backfills it later.
+Such a task cannot be admitted as an attempt (record identity validation) and
+cannot be closed with `hive archive --reason` (the closure lease needs a stable
+id). Since the 2026-11-05 fix the daemon blocks it as `attempt_admission_failed`
+instead of exiting. Unresolved: whether patrol task creation should retry the
+counter lock or whether an id backfill command is needed.

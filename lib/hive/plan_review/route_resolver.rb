@@ -192,10 +192,17 @@ module Hive
         requested_model = requested["model"].to_s
         served_model = actual["model"].to_s
         family = requested["family"].to_s
-        return actual if provider.empty? || requested_model.empty? || served_model.empty? || family.empty?
+        return actual if provider.empty? || requested_model.empty? || family.empty?
         return actual unless provider == requested["provider"].to_s
 
         support = Hive::AgentSupport.for(provider)
+        if served_model.empty?
+          # Some providers never report a served model (Codex); only the
+          # provider's own launch contract may attest the family then.
+          attested = support&.respond_to?(:attests_family_without_served_model?) &&
+                     support.attests_family_without_served_model?(family:)
+          return attested ? actual.merge("family" => redact(family)).freeze : actual
+        end
         equivalent = served_model == requested_model ||
                      support&.respond_to?(:model_identity_equivalent?) &&
                        support.model_identity_equivalent?(

@@ -122,4 +122,23 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
       assert_nil binding.environment.fetch(key)
     end
   end
+
+  def test_muse_runs_on_the_default_binding_and_refuses_named_ones
+    # Muse has no private config-dir variable; exporting XDG_CONFIG_HOME
+    # would relocate every XDG tool in the agent tree.
+    binding = Hive::AgentProfiles::LaunchBindings.resolve(
+      adapter: "muse", binding_id: "default", environment: {}
+    )
+    assert_equal({ "META_API_KEY" => nil }, binding.environment)
+
+    with_tmp_dir do |root|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::AgentProfiles::LaunchBindings.resolve(
+          adapter: "muse", binding_id: "team",
+          environment: { "HIVE_PROVIDER_BINDING_MUSE_TEAM" => root }
+        )
+      end
+      assert_match(/muse supports only the default binding/, error.message)
+    end
+  end
 end

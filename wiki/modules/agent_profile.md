@@ -1,9 +1,9 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,muse,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-08-25
+updated: 2026-11-04
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -12,8 +12,8 @@ tags: [agent, profile, registry, architecture, skills, provisioning, permissions
 CLI prerequisites, verifies capabilities, extracts usage, and normalizes
 results. `Hive::AgentProfile` adds only Hive policy and preserves its
 optional-keyword custom extension contract. `Hive::AgentProfiles` remains the
-registry; its Claude, Codex, Pi, Grok, and OpenCode adapters reference the package's
-built-in profiles. Process lifetime, workflow selection, model routing,
+registry; its Claude, Codex, Pi, Grok, OpenCode, and Muse adapters reference the package's
+built-in profiles. Muse is appended last and selected nowhere by default. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
 
@@ -124,11 +124,11 @@ constructs a package profile from them. Every profile freezes after init.
 
 | Kwarg | Purpose |
 |-------|---------|
-| `runtime_profile:` | Optional `AgentCliRuntime::Profile`. The five shipped profiles use the package registry directly; custom profiles may omit it and use the compatibility kwargs below. |
+| `runtime_profile:` | Optional `AgentCliRuntime::Profile`. The six shipped profiles use the package registry directly; custom profiles may omit it and use the compatibility kwargs below. |
 | `auth_configuration_required:` | Hive preflight policy. The shipped Pi and Grok adapters require a CLI subscription/session artifact; custom profiles default false. |
 | `subscription_environment(unset_value: nil)` | Builds the Hive-only child environment scrub from the package credential-name inventory while preserving explicit session-file selectors such as `GROK_AUTH_PATH`. |
 | `name:` | Symbol used by the registry. |
-| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`). |
+| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`, `"muse"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
 | `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. The published runtime profile supplies the built-in default; custom profiles fall back to `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
@@ -300,6 +300,44 @@ representation decision.
   skill that shadows it, while normal execution never mutates the selected
   source config. `:output_file_exists` remains the generic profile default;
   individual Hive stages continue to select their existing status mode.
+- `muse` — Muse, headless via `muse exec --json` with the prompt delivered via
+  `--prompt-file=/dev/stdin` over Hive's tempfile-backed stdin, keeping
+  large prompts out of argv. The unscoped
+  path uses `--yolo`; `workspace-write` keeps Muse's default shell sandbox
+  with `--approval-mode never --trust-workspace`, and `read-only` additionally
+  passes `--disable-write --disable-shell` because Muse has no read-only
+  filesystem sandbox mode. Output flags add `--disable-reminders`,
+  `--disable-request-user-input`, and `--no-session-log`. The profile declares
+  `structured_output_protocol: :muse_terminal`:
+  `Hive::AgentSupport::Muse` takes the final message from
+  `run.terminal.completed`, treats prompt-echo (`turn.input.user`,
+  `run.lifecycle.started`), `run.output.delta`, and completed-terminal
+  payloads as sensitive so they stay out of durable logs, and deliberately
+  leaves failed terminals readable because their reason is the extracted
+  provider error (`task.lifecycle.failed` reminder children are never
+  provider errors). Token usage comes from the terminal `run.usage`
+  per-model breakdown; cache/reasoning inclusion stays unknown and no USD
+  cost is reported. Credentials and settings live under
+  `$XDG_CONFIG_HOME/muse` (default `~/.config/muse`); `META_API_KEY` is a
+  package-probe signal but Hive scrubs it and requires the `auth.json`
+  subscription session, matching the other adapters. The default model
+  resolves from `settings.json` `model`. Min version `1.4.14`.
+  `:output_file_exists`. `Hive::AgentSupport::Muse::Skills` resolves flat
+  skill ids across workspace `.agents/skills`, the managed personal root
+  under the XDG config directory, `~/.agents/skills`, and the foreign
+  Claude/Codex personal roots. The canonical Hive operating skill is
+  projected for Muse as `/hive`. Compound Engineering is provisioned as a
+  native Muse plugin: Muse rejects plugin bundles containing symlinks and
+  the upstream repository ships several, so
+  `Hive::AgentSupport::Muse::PluginStaging` clones the manifest git source
+  under `<muse data home>/hive/compound-engineering/`, copies it
+  dereferencing every symlink, and `muse plugins install`/`update` run
+  against that staged tree (it stays the plugin's recorded source, so
+  updates re-stage first). A plugin installed from any other source path is
+  an ownership conflict Hive will not replace. The plan stage maps Muse to
+  `/ce-plan` like OpenCode, and `muse-ce-code-review` is an opt-in init
+  reviewer (never a default). Managed-workflow actors fail closed: Muse has
+  no `Runtime` support facet.
 
 If a prepared launch fails after brainstorm answers were recorded, automatic
 recovery distinguishes Hive's `hive-answer:v1` bindings from legacy or manual
@@ -449,6 +487,15 @@ the attempt evidence channel.
   deny/command/domain enforcement, and multi-actor admission failure.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.
 - `test/unit/grok_preflight_test.rb` — Grok environment/file auth and usage semantics.
+- `test/unit/muse_agent_test.rb` — Muse argv/permission modes, dual-form
+  version output, XDG auth/default-model resolution, skill roots, and
+  fake-binary spawn success/failure/timeout behavior.
+- `test/unit/agent_skills/muse_skill_test.rb` — Muse operating-skill
+  projection, manifest coverage, and XDG publish cycle.
+- `test/unit/agent_skills/muse_ce_test.rb` — symlink-dereferencing plugin
+  staging from a real git clone, adapter install/update/enable/conflict
+  plans, live/filesystem plugin inventories, and the hermetic
+  inspect → stage → install → healthy provisioner cycle.
 - `test/unit/agent_skills/inspector_test.rb` — configured binary/home use and native/runtime evidence correspondence.
 
 ## Backlinks

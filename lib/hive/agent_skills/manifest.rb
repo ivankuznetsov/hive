@@ -12,13 +12,13 @@ module Hive
     # data-only: adapters map its closed action names to argv arrays.
     class Manifest
       SUPPORTED_SCHEMA_VERSION = 1
-      AGENTS = %w[claude codex pi grok opencode].freeze
+      AGENTS = %w[claude codex pi grok opencode muse].freeze
       ACTIONS = %w[
         marketplace_add plugin_install plugin_enable plugin_update package_install package_update
       ].freeze
       CONFIG_HOMES = %w[
         CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-        OPENCODE_CONFIG_DIR
+        OPENCODE_CONFIG_DIR XDG_CONFIG_HOME
       ].freeze
       SAFE_ID = /\A[a-z0-9][a-z0-9._:-]*\z/
       SAFE_SOURCE = %r{\A(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)\z}

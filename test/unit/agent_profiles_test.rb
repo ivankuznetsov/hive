@@ -85,6 +85,7 @@ class AgentProfilesTest < Minitest::Test
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
     Hive::AgentProfiles.register(:grok, Hive::AgentProfiles::GROK)
     Hive::AgentProfiles.register(:opencode, Hive::AgentProfiles::OPENCODE)
+    Hive::AgentProfiles.register(:muse, Hive::AgentProfiles::MUSE)
   end
 
   def test_lookup_returns_v1_built_in_profiles

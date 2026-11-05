@@ -3,12 +3,12 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-24
+updated: 2026-11-04
 tags: [agent, runtime, component, gem, cli]
 ---
 
 **TLDR**: `agent-cli-runtime` gives Ruby applications one stable integration
-layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Its versioned
+layer for Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, and Muse Code. Its versioned
 profiles centralize provider-specific commands, local capability checks,
 environment rules, usage extraction, and result normalization so consumers
 can add, switch, and upgrade agent CLIs behind one request and result
@@ -27,9 +27,13 @@ reads the managed stdin file instead of receiving a potentially oversized
 
 The package lives at `components/agent-cli-runtime/`, loads with
 `require "agent_cli_runtime"`, and exposes the `AgentCliRuntime` namespace.
-Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`.
-The appended profile leaves the order and behavior of the four legacy profiles
-unchanged. Callers construct immutable requests and receive immutable compiled
+Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`.
+Appended profiles leave the order and behavior of the earlier profiles
+unchanged. The `muse` profile also introduced two generic contract points:
+version output that repeats one version in two forms (Muse prints
+`1.4.14 (1.4.14-R7309.1)`) is unambiguous when every token shares one numeric
+core, and an optional `configuration_directory_probe:` lets a provider own a
+derived config root (Muse resolves `$XDG_CONFIG_HOME/muse`). Callers construct immutable requests and receive immutable compiled
 invocations, capability evidence, probe results, and observable results.
 Each profile also exposes an immutable `credential_environment_keys`
 inventory. This is compatibility metadata for an orchestrator that needs to

@@ -90,11 +90,11 @@ Rails.application.routes.draw do
   get  "agents" => "agents#index", as: :agents
   post "agents/skills/repair" => "agents#repair_skills", as: :agent_skills_repair
   post "agents/:agent/login" => "agents/logins#create", as: :agent_login,
-       constraints: { agent: /claude|codex|grok|gh/ }
+       constraints: { agent: /claude|codex|grok|muse|gh/ }
   get  "agents/:agent/login/:session_id" => "agents/logins#show", as: :agent_login_status,
-       constraints: { agent: /claude|codex|grok|gh/ }
+       constraints: { agent: /claude|codex|grok|muse|gh/ }
   post "agents/:agent/login/:session_id/complete" => "agents/login_completions#create", as: :agent_login_complete,
-       constraints: { agent: /claude|codex|grok|gh/ }
+       constraints: { agent: /claude|codex|grok|muse|gh/ }
   post "agents/pi_token" => "agents#save_pi_token", as: :agent_pi_token
 
   get  "telegram" => "telegram#show", as: :telegram

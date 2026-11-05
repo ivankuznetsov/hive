@@ -5,6 +5,8 @@ require "hive/commands/setup_agents"
 class SetupAgentsIntegrationTest < Minitest::Test
   include HiveTestHelper
 
+  FAKE_MUSE = File.expand_path("../fixtures/fake-muse", __dir__)
+
   FAKE_AGENT = <<~'RUBY'
     #!/usr/bin/env ruby
     require "json"
@@ -200,11 +202,14 @@ class SetupAgentsIntegrationTest < Minitest::Test
         "CODEX_HOME" => File.join(dir, "codex"),
         "PI_CODING_AGENT_DIR" => File.join(dir, "pi"),
         "OPENCODE_CONFIG_DIR" => File.join(dir, "opencode"),
+        "XDG_CONFIG_HOME" => File.join(dir, "xdg-config"),
+        "XDG_DATA_HOME" => File.join(dir, "xdg-data"),
         "XDG_CACHE_HOME" => File.join(dir, "cache"),
         "HIVE_CLAUDE_BIN" => nil,
         "HIVE_CODEX_BIN" => nil,
         "HIVE_PI_BIN" => nil,
-        "HIVE_OPENCODE_BIN" => nil
+        "HIVE_OPENCODE_BIN" => nil,
+        "HIVE_MUSE_BIN" => FAKE_MUSE
       }
       with_env(env) { yield dir, config_for(bins) }
     end

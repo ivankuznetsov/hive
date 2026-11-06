@@ -3123,6 +3123,41 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_repeated_failure_limit_surfaces_an_operator_blocker_with_the_failing_attempt
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-9", "generation-9", "terminal")
+    held = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: attempt, receipt: { "exit_status" => 4 },
+      attach_descriptor: nil, reason: Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+    )
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) { |*_args, **_options| held }
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher, operational_snapshot: snapshot
+    )
+    observed = row(
+      stage: "3-plan", action: "plan_reviewing",
+      command: "hive plan-review-run s1 --project p1"
+    )
+
+    outcome = dispatcher.send(:dispatch_or_block, observed, now: T0)
+    dispatcher.send(:observe_dispatch_outcome, observed, outcome)
+
+    assert_equal :attempt_failure_limit, outcome
+    disposition = snapshot.calls.last.last
+    assert_equal :attempt_failure_limit, disposition.fetch(:decision)
+    assert_equal "operator", disposition.fetch(:owner)
+    assert_includes disposition.fetch(:reason), "hive plan-review-run s1 --project p1 failed 3 times"
+    assert_includes disposition.fetch(:reason), "exit 4"
+    assert_includes disposition.fetch(:reason), "attempt-9"
+    limit_event = logger.events.find { |name, _attrs| name == :attempt_failure_limit }
+    assert_equal "attempt-9", limit_event.last.fetch(:attempt_id)
+
+    dispatcher.send(:observe_dispatch_outcome, observed, :attempt_failure_limit)
+    assert_includes snapshot.calls.last.last.fetch(:reason), "exit unknown"
+  end
+
   def test_durable_dispatch_refreshes_admission_time_after_a_long_tick
     admitted_at = nil
     request_created_at = nil

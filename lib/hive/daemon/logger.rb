@@ -88,6 +88,7 @@ module Hive
         owned_process_reconcile_failed
         attempt_terminal_replay
         attempt_transient_retry
+        attempt_failure_limit
         attempt_patrol_retry_deferred
         attempt_capacity_deferred
         attempt_route_unavailable

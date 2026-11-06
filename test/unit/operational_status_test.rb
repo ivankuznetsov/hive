@@ -1003,6 +1003,25 @@ class OperationalStatusTest < Minitest::Test
     end
   end
 
+  def test_plan_review_failure_limit_is_operator_owned_repair_not_scheduler_wait
+    source_task = task(action: "plan_reviewing", slug: "stuck-review")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "attempt_failure_limit",
+      reason: "hive plan-review-run failed 3 times in a row with exit 4"
+    )
+    projected = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_includes projected.fetch("reasons").map { |reason| reason.fetch("message") },
+                    "hive plan-review-run failed 3 times in a row with exit 4"
+  end
+
   def test_recovery_specific_scheduler_states_have_closed_classifications
     status = Hive::OperationalStatus.new(status_payload: status_payload)
 

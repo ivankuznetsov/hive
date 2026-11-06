@@ -292,6 +292,47 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_busy_claim_and_first_heartbeat_are_retried
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      claims = fail_store_calls(store, :claim, times: 2)
+      first_heartbeats = fail_store_calls(store, :first_heartbeat, times: 2)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      assert_equal 0, supervisor.run
+      assert_equal [ 3, 3 ], [ claims.call, first_heartbeats.call ]
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  # Busy retries never outlive the first-heartbeat deadline: the repository
+  # re-checks it on every retry and the attempt fails closed.
+  def test_busy_first_heartbeat_fails_closed_at_its_deadline
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      store.define_singleton_method(:first_heartbeat) do |observed, **kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed, "first heartbeat deadline expired" if
+          observed.active_deadline && kwargs.fetch(:now) > observed.active_deadline
+        raise Hive::Attempts::RepositoryError, AttemptsSupervisorTest::BUSY
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 0.2
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      _, err = capture_io do
+        assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run }
+      end
+      assert_includes err, "first heartbeat deadline expired"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
+
   # A swapping host can hold the write lock past the lease window; a live
   # owner is only a reconciler suspect then, so busy heartbeats keep deferring.
   def test_busy_heartbeats_outlast_the_lease_window

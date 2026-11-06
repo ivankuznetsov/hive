@@ -543,6 +543,11 @@ raises a SQLite busy error, then keeps ticking. Startup dispatch-claim
 recovery retries busy with bounded backoff (2 s, 5 s, 10 s, logged as
 `startup_deferred`) before failing.
 Non-busy repository, corruption, schema, and storage errors still propagate.
+`OperationalRepository#publish` encodes the observation document (the
+scheduler snapshot plus the multi-MB `hive-status` projection) before
+`BEGIN IMMEDIATE`; only the row upsert runs under the write lock. Encoding a
+5.7 MB projection inside the transaction held the lock ~0.8 s per tick at
+rest and for seconds on a swapping host.
 The shipped systemd unit sets `StartLimitIntervalSec=0` with `RestartSec=30s`
 growing to `RestartMaxDelaySec=10min` over `RestartSteps=5`, so a crash loop
 backs off instead of landing in `start-limit-hit`.

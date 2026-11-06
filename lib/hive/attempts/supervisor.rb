@@ -73,13 +73,18 @@ module Hive
         register_wrapper! if @reservation_id
 
         log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
-        now = @clock.call
-        record = @store.claim(
-          record, owner: process_identity(Process.pid),
-          claim_capability: @claim_capability,
-          first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: now
-        )
-        record = @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        # The claim and first heartbeat each re-check their own deadline, so a
+        # busy retry stays bounded by the launch window and fails closed there.
+        owner = process_identity(Process.pid)
+        record = with_store_retry do
+          @store.claim(
+            record, owner: owner, claim_capability: @claim_capability,
+            first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: @clock.call
+          )
+        end
+        record = with_store_retry do
+          @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        end
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 

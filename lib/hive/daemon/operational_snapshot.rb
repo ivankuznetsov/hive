@@ -474,20 +474,29 @@ module Hive
             status = receipt["status"].to_s
             task["disposition"] = {
               "status" => "available",
-              "decision" => {
-                "queued" => "retry_pending",
-                "cooldown" => "retry_cooldown",
-                "running" => "retry_in_flight",
-                "blocked" => "retry_safety_blocked",
-                "terminal" => "attempt_terminal_replay",
-                "unavailable" => "recovery_unavailable"
-              }.fetch(status, "recovery_unavailable"),
+              "decision" => recovery_decision(status, receipt),
               "owner" => receipt["owner"] || "hive",
               "reason" => receipt["reason"] || status.tr("_", " "),
               "recovery" => receipt,
               "routing" => entry["routing"]
             }
           end
+        end
+
+        # A queued retry that cannot dispatch because the project's daemon
+        # dispatch is disabled is operator-owned, not a scheduler wait.
+        def recovery_decision(status, receipt)
+          return "retry_dispatch_disabled" if
+            status == "queued" && receipt["reason"] == "project_dispatch_disabled"
+
+          {
+            "queued" => "retry_pending",
+            "cooldown" => "retry_cooldown",
+            "running" => "retry_in_flight",
+            "blocked" => "retry_safety_blocked",
+            "terminal" => "attempt_terminal_replay",
+            "unavailable" => "recovery_unavailable"
+          }.fetch(status, "recovery_unavailable")
         end
 
         def find_task(task_index, identity)

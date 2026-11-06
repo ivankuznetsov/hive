@@ -311,6 +311,17 @@ refines that projection. `retry_cooldown` carries the exact deadline and stays
 scheduler-owned; `retry_in_flight` is running/agent-owned; and
 `retry_safety_blocked` becomes `needs_repair` with the reported operator or
 Hive owner instead of falsely claiming the scheduler will clear it.
+`retry_in_flight` requires in-flight evidence: the recovery's dispatch request
+is claimed/admitted/awaiting delivery, or its referenced attempt is still
+launching or running. A durable `dispatched` recovery whose request went back
+to `queued` after its attempt ended is a queued retry, not running work:
+`retry_pending` (`waiting_on_provider_or_scheduler`, scheduler-owned, reason
+`retry_awaiting_dispatch`), or `retry_dispatch_disabled` (`needs_repair`,
+operator-owned, reason `project_dispatch_disabled`, remediation names the
+`daemon.enabled` flag and `hive daemon reload`) when the daemon will not
+dispatch the project. Both keep `recovery.status: queued` with the retry count,
+identical-failure count, and escalation tier, and neither counts toward
+`summary.states.running`.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 

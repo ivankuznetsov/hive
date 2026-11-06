@@ -779,6 +779,46 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  def test_queued_dispatched_recovery_overlays_scheduler_or_disabled_decisions
+    {
+      "retry_awaiting_dispatch" => "retry_pending",
+      "project_dispatch_disabled" => "retry_dispatch_disabled"
+    }.each do |reason, decision|
+      with_tmp_dir do |dir|
+        path = File.join(dir, "private", "operational-snapshot.json")
+        _store, assembler, reader = build(path)
+        markerless = row(marker: "none", marker_attrs: {})
+        receipt = {
+          "status" => "queued", "request_id" => "recovery-1", "attempt_id" => "attempt-1",
+          "phase" => "dispatched", "owner" => "scheduler", "reason" => reason,
+          "retry_count" => 3, "identical_failure_count" => 3, "escalation_tier" => "degraded"
+        }
+        recoveries = {
+          "coordinator" => {
+            "receipts" => [
+              {
+                "project" => "demo", "slug" => "ship-it", "stage" => "4-execute",
+                "recovery_phase" => "dispatched", "recovery_variant" => "markerless_failure",
+                "receipt" => receipt
+              }
+            ]
+          }
+        }
+
+        assembler.begin_tick(now: T0)
+        assembler.complete(
+          rows: [ markerless ],
+          controller: {}, queue: {}, recoveries: recoveries, now: T0 + 1
+        )
+
+        disposition = reader.read(now: T0 + 2).dig("tasks", 0, "disposition")
+        assert_equal decision, disposition.fetch("decision"), reason
+        assert_equal reason, disposition.fetch("reason")
+        assert_equal "degraded", disposition.dig("recovery", "escalation_tier")
+      end
+    end
+  end
+
   def test_terminal_recovery_does_not_overlay_a_different_live_attempt
     with_tmp_dir do |dir|
       path = File.join(dir, "private", "operational-snapshot.json")

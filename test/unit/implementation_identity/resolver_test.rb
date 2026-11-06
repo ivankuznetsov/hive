@@ -43,6 +43,17 @@ class ImplementationIdentityResolverTest < Minitest::Test
     end
   end
 
+  def test_muse_execute_resolves_open_pr_on_its_own_provider
+    # Production regression: a Muse-executed task failed at 5-open-pr with
+    # "no open-PR utility model policy for provider :muse".
+    cfg = config(execute: { "agent" => "muse", "model" => "muse-wonder-full-1.0", "effort" => "xhigh" })
+    execute = resolver(cfg).resolve_execute(generation: 1, attempt_id: "exec-muse")
+
+    open_pr = resolver(cfg).resolve_stage("open_pr", execute_identity: execute, attempt_id: "pr-muse")
+
+    assert_equal [ "muse", "muse-wonder-full-1.0" ], [ open_pr.provider, open_pr.model ]
+  end
+
   def test_field_level_overrides_apply_after_automatic_selection
     cfg = config(
       open_pr: { "effort" => "low" },

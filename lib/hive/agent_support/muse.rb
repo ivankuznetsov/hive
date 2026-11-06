@@ -44,6 +44,17 @@ module Hive::AgentSupport::Muse
     end
   end
 
+  # Muse has no separate low-cost model, so open-PR stays on the exact model
+  # the task executed with (mirrors OpenCode) instead of depending on a
+  # `model` key in the operator's Muse settings.json.
+  def downstream_model(stage:, execute_identity:, provider_changed:)
+    return unless stage == "open_pr" && !provider_changed
+
+    model = execute_identity.respond_to?(:model) ? execute_identity.model :
+      execute_identity["model"] || execute_identity[:model]
+    [ model, true ] unless model.to_s.strip.empty?
+  end
+
   def extract_message(data)
     return unless data["payload_type"] == "run.terminal.completed"
 

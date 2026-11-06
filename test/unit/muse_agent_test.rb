@@ -329,4 +329,16 @@ class MuseAgentTest < Minitest::Test
     assert_nil muse.extract_message(completed.call("done"))
     assert_nil muse.extract_message({ "payload_type" => "run.output.delta", "payload" => { "text" => "x" } })
   end
+  def test_open_pr_reuses_the_execute_model_only_on_the_same_provider
+    muse = Hive::AgentSupport::Muse
+
+    assert_equal [ "muse-wonder-1.0", true ],
+                 muse.downstream_model(stage: "open_pr", execute_identity: { "model" => "muse-wonder-1.0" },
+                                       provider_changed: false)
+    assert_nil muse.downstream_model(stage: "open_pr", execute_identity: { "model" => "muse-wonder-1.0" },
+                                     provider_changed: true)
+    assert_nil muse.downstream_model(stage: "review.fix", execute_identity: { "model" => "muse-wonder-1.0" },
+                                     provider_changed: false)
+    assert_nil muse.downstream_model(stage: "open_pr", execute_identity: { model: "" }, provider_changed: false)
+  end
 end

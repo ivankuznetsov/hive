@@ -612,7 +612,7 @@ module Hive
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         [ "unknown", "hive" ]
-      when "wait_for_answers"
+      when "wait_for_answers", "pull_request_merged", "pull_request_closed_unmerged"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
            "plan_approval_invalid", "legacy_layout", "markerless_stalled"

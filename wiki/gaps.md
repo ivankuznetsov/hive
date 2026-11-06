@@ -7,6 +7,21 @@ updated: 2026-11-06
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Settled-PR review fence (2026-11-06)
+
+- The fence reads only the task journal's latest `pr_observed` /
+  `merge_observed` record for the current `pr.md` URL. A merge that the
+  watcher has not yet polled (default 5 min) is not seen, and a merge observed
+  after `Review.run!` passes pre-flight does not stop the in-flight pass loop
+  or a running CI-fix attempt.
+- The `hive run` auto-rebase pre-step runs before the review pre-flight, so a
+  direct operator `hive run` of a merged task can still rebase (and spawn a
+  conflict agent) before the review guard returns. The daemon path is fenced
+  earlier, at dispatch.
+- A merged PR whose watcher state is `delivered_elsewhere`/`ambiguous` still
+  needs an operator `hive archive --reason already_delivered`; Hive does not
+  archive it automatically.
+
 ## Task-journal custody provenance (2026-11-06)
 
 - Artifact custody now admits growth of `task-journal.jsonl` that preserves

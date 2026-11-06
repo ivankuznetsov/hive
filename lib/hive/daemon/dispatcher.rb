@@ -34,6 +34,7 @@ require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
+require "hive/pull_request_outcome"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/lock"
 require "hive/paths"
@@ -96,6 +97,7 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
+      REVIEW_STAGE_DIR = Hive::Workflows::VERBS.fetch("review").fetch(:target)
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
@@ -2578,6 +2580,8 @@ module Hive
                                   reason: "folder_missing")
           return :folder_missing
         end
+        publication_hold = settled_pull_request_hold(row)
+        return publication_hold if publication_hold
 
         # Per-slug in-flight gate — prevents the row scan from
         # double-dispatching a slug the dispatch-request queue just
@@ -2665,6 +2669,25 @@ module Hive
           reason: "task_source_changed", error: e.message
         )
         :task_source_changed
+      end
+
+      # Review (and its CI-fix / fix / triage phases) works on an open pull
+      # request. Once Hive has observed the task's PR merged or closed, a
+      # review dispatch can only spend agent time or commit onto a delivered
+      # branch. Merged PRs are left to the merge watcher's archival (or an
+      # operator `already_delivered` archive); closed PRs need an operator
+      # decision. No observation keeps the pre-existing dispatch behavior.
+      def settled_pull_request_hold(row)
+        return nil unless row.stage.to_s == REVIEW_STAGE_DIR && Hive::Workflows.coding_id?(row.workflow)
+
+        outcome = Hive::PullRequestOutcome.latest(row.folder)
+        return nil unless outcome&.settled?
+
+        hold = outcome.merged? ? :pull_request_merged : :pull_request_closed_unmerged
+        @logger.event(outcome.merged? ? :skipped : :blocked,
+                      project: row.project, slug: row.slug, stage: row.stage,
+                      action: row.action, reason: hold.to_s, pr_url: outcome.pr_url)
+        hold
       end
 
       def failed_automatic_advance_replay?(row, trigger, result)
@@ -2756,6 +2779,11 @@ module Hive
           [ "operator", "task folder disappeared before dispatch" ]
         when :plan_approval_invalid
           [ "hive", "plan approval could not be prepared safely" ]
+        when :pull_request_merged
+          [ "operator", "task pull request is merged; review agents are not dispatched " \
+                        "(archive with --reason already_delivered if Hive does not)" ]
+        when :pull_request_closed_unmerged
+          [ "operator", "task pull request was closed without merging; review agents are not dispatched" ]
         when :shutdown
           [ "scheduler", "daemon admission is closed for shutdown" ]
         else

@@ -1137,6 +1137,39 @@ module Hive
         )
       end
 
+      # Request states in which a dispatcher still owns the request: a claim
+      # exists, the attempt was admitted, or its result awaits delivery.
+      IN_FLIGHT_REQUEST_STATES = %w[claimed admitted awaiting_delivery].freeze
+      PROJECT_DISPATCH_DISABLED = "project_dispatch_disabled".freeze
+      RETRY_AWAITING_DISPATCH = "retry_awaiting_dispatch".freeze
+
+      # Status-projection view of a request's lifecycle receipt. The durable
+      # `dispatched` phase alone is not evidence that work is running: a
+      # request can be released back to `queued` after its attempt ended
+      # without the phase being re-armed. Report `running` only while a
+      # dispatcher owns the request or the referenced attempt is live;
+      # otherwise the retry is queued behind the scheduler, or behind the
+      # operator when daemon dispatch is disabled for the project. Retry and
+      # escalation evidence are preserved either way.
+      def projected_receipt_for_request(request, dispatch_enabled: true, now: Time.now.utc)
+        receipt = receipt_for_request(request, now: now)
+        return receipt unless receipt.status == "running"
+        return receipt if IN_FLIGHT_REQUEST_STATES.include?(request.state.to_s)
+        return receipt if attempt_live?(receipt.attempt_id)
+        unless request.state.to_s == "queued"
+          return receipt.with(status: "unavailable", owner: "hive",
+                              reason: "recovery_transition_pending", remediation: nil)
+        end
+        return receipt.with(status: "queued", owner: "scheduler",
+                            reason: RETRY_AWAITING_DISPATCH, remediation: nil) if dispatch_enabled
+
+        receipt.with(
+          status: "queued", owner: "operator", reason: PROJECT_DISPATCH_DISABLED,
+          remediation: "daemon dispatch is disabled for #{request.project}; set " \
+                       "daemon.enabled: true in its config and run `hive daemon reload`"
+        )
+      end
+
       def escalation_tier_for(recovery)
         return "parked" if recovery["blocked_reason"] == "deterministic_failure"
         return "degraded" if recovery["identical_failure_count"].to_i > 1
@@ -1355,6 +1388,15 @@ module Hive
 
       def attempts_store
         @attempt_store ||= @attempt_store_factory.call
+      end
+
+      # Unreadable attempt storage keeps the conservative `running` view.
+      def attempt_live?(attempt_id)
+        return false if attempt_id.to_s.empty?
+
+        attempts_store.fetch(attempt_id.to_s)&.live? == true
+      rescue Hive::Attempts::RepositoryError
+        true
       end
 
       def validate_admission_decision!(decision, expected_status:)

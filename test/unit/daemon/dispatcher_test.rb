@@ -4088,7 +4088,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       )
     end
     coordinator = Object.new
-    coordinator.define_singleton_method(:receipt_for_request) do |request|
+    coordinator.define_singleton_method(:projected_receipt_for_request) do |request, **|
       raise IOError, "one corrupt lifecycle" if request.slug == "broken"
 
       Hive::Daemon::RecoveryCoordinator::Receipt.new(
@@ -4118,6 +4118,44 @@ class HiveDaemonDispatcherTest < Minitest::Test
         attrs[:request_id] == "recovery-broken" &&
         attrs[:message].include?("one corrupt lifecycle")
     }
+  end
+
+  def test_recovery_lifecycle_projection_passes_project_dispatch_enablement
+    requests = [
+      [ "enabled-task", "p1", "healer", "recovery/markerless_failure" ],
+      [ "disabled-task", "p2", "healer", "recovery/markerless_failure" ],
+      [ "action-task", "p2", "action", "recovery" ]
+    ].map do |slug, project, requestor, trigger|
+      Q::Request.new(
+        request_id: "recovery-#{slug}", created_at: T0, project: project, slug: slug,
+        argv: [ "hive", "run", slug ], requestor: requestor, trigger: trigger,
+        expected_stage: "1-inbox", recovery: { "phase" => "dispatched" }
+      )
+    end
+    seen = {}
+    coordinator = Object.new
+    coordinator.define_singleton_method(:projected_receipt_for_request) do |request, dispatch_enabled:|
+      seen[request.slug] = dispatch_enabled
+      Hive::Daemon::RecoveryCoordinator::Receipt.new(
+        status: "queued", request_id: request.request_id, attempt_id: "ended",
+        phase: "dispatched", failure_origin: nil, next_eligible_at: nil,
+        owner: "scheduler", reason: "retry_awaiting_dispatch", remediation: nil,
+        retry_count: 3, provider_hint: nil
+      )
+    end
+    dispatcher, = make_dispatcher(recovery_coordinator: coordinator)
+    dispatcher.define_singleton_method(:project_enabled?) { |project| project == "p1" }
+
+    with_replaced_singleton_method(Q, :pending, ->(**) { requests }) do
+      with_replaced_singleton_method(Q, :claimed, ->(**) { [] }) do
+        dispatcher.send(:durable_recovery_receipts)
+      end
+    end
+
+    assert_equal(
+      { "enabled-task" => true, "disabled-task" => false, "action-task" => true },
+      seen
+    )
   end
 
   def test_advance_action_dispatches_workflow_verb

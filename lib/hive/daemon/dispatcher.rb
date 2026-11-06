@@ -2977,7 +2977,11 @@ module Hive
           next unless request.recovery.is_a?(Hash)
 
           begin
-            receipt = @recovery_coordinator.receipt_for_request(request)
+            receipt = @recovery_coordinator.projected_receipt_for_request(
+              request,
+              dispatch_enabled: project_enabled?(request.project) ||
+                explicit_action_recovery?(request)
+            )
             {
               "project" => request.project,
               "slug" => request.slug,

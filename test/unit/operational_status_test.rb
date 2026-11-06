@@ -1029,6 +1029,8 @@ class OperationalStatusTest < Minitest::Test
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
+      "retry_pending" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "retry_dispatch_disabled" => [ "needs_repair", "operator" ],
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
       "model_unsupported" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
@@ -1053,6 +1055,38 @@ class OperationalStatusTest < Minitest::Test
 
       assert_equal state, projected.fetch("state"), decision
       assert_equal owner, projected.fetch("blocker_owner"), decision
+    end
+  end
+
+  def test_queued_retry_behind_terminal_attempt_is_not_running
+    {
+      [ "retry_pending", "retry_awaiting_dispatch", "scheduler" ] =>
+        [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      [ "retry_dispatch_disabled", "project_dispatch_disabled", "operator" ] =>
+        [ "needs_repair", "operator" ]
+    }.each do |(decision, reason, receipt_owner), (state, owner)|
+      source_task = task(action: "ready_to_run", slug: "queued-retry")
+      snapshot = scheduler_snapshot_for(source_task, decision: decision, reason: reason)
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "queued", "request_id" => "69d2202b", "attempt_id" => "0595da53",
+        "phase" => "dispatched", "failure_origin" => "agent_exited_without_terminal_marker",
+        "owner" => receipt_owner, "reason" => reason, "retry_count" => 3,
+        "identical_failure_count" => 3, "escalation_tier" => "degraded"
+      }
+      result = project(
+        status_payload(source_task),
+        project_context: { "demo" => { "daemon_enabled" => true } },
+        scheduler_snapshot: snapshot
+      )
+      projected = result.fetch("tasks").first
+
+      assert_equal [ state, owner ], [ projected.fetch("state"), projected.fetch("blocker_owner") ]
+      assert_equal 0, result.dig("summary", "states", "running").to_i
+      assert_equal decision, projected.dig("reasons", 0, "code")
+      assert_equal reason, projected.fetch("reason")
+      recovery = projected.fetch("recovery")
+      assert_equal [ "queued", receipt_owner, "degraded", 3 ],
+                   recovery.values_at("status", "owner", "escalation_tier", "retry_count")
     end
   end
 

@@ -1535,6 +1535,68 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     assert_equal "unavailable", coordinator.receipt_for_request(request).status
   end
 
+  def test_projected_receipt_reports_running_only_with_in_flight_evidence
+    attempts = {
+      "live-attempt" => Struct.new(:live?).new(true),
+      "ended-attempt" => Struct.new(:live?).new(false)
+    }
+    store = Object.new
+    store.define_singleton_method(:fetch) do |attempt_id|
+      raise Hive::Attempts::RepositoryError, "store unreadable" if attempt_id == "unreadable"
+
+      attempts[attempt_id]
+    end
+    coordinator = Hive::Daemon::RecoveryCoordinator.new(
+      state_home: "/tmp/hive-recovery-projection", dispatch_repository: Object.new,
+      attempt_store: store
+    )
+    request = lambda do |state:, attempt_id:, phase: "dispatched"|
+      Q::Request.new(
+        request_id: "retry-#{state}-#{attempt_id}", created_at: NOW, project: "shop",
+        slug: "demo-task", argv: %w[hive run demo-task], requestor: "healer",
+        state: state,
+        recovery: {
+          "phase" => phase, "attempt_id" => attempt_id,
+          "failure_origin" => "agent_exited_without_terminal_marker",
+          "next_eligible_at" => NOW.iso8601(6), "owner" => "agent", "retry_count" => 3,
+          "failure_fingerprint" => "f" * 64, "identical_failure_count" => 3
+        }
+      )
+    end
+    project = lambda do |state:, attempt_id:, phase: "dispatched", enabled: true|
+      coordinator.projected_receipt_for_request(
+        request.call(state: state, attempt_id: attempt_id, phase: phase),
+        dispatch_enabled: enabled, now: NOW
+      )
+    end
+
+    queued = project.call(state: "queued", attempt_id: "ended-attempt")
+    assert_equal [ "queued", "scheduler", "retry_awaiting_dispatch" ],
+                 [ queued.status, queued.owner, queued.reason ]
+    assert_equal [ "dispatched", "ended-attempt", 3, 3, "degraded" ],
+                 [ queued.phase, queued.attempt_id, queued.retry_count,
+                   queued.identical_failure_count, queued.escalation_tier ]
+
+    disabled = project.call(state: "queued", attempt_id: "ended-attempt", enabled: false)
+    assert_equal [ "queued", "operator", "project_dispatch_disabled" ],
+                 [ disabled.status, disabled.owner, disabled.reason ]
+    assert_includes disabled.remediation, "daemon dispatch is disabled for shop"
+    assert_equal "degraded", disabled.escalation_tier
+
+    assert_equal "queued", project.call(state: "queued", attempt_id: nil).status
+    assert_equal "running", project.call(state: "queued", attempt_id: "live-attempt").status
+    assert_equal "running", project.call(state: "queued", attempt_id: "unreadable").status
+    %w[claimed admitted awaiting_delivery].each do |state|
+      running = project.call(state: state, attempt_id: "live-attempt")
+      assert_equal [ "running", "agent" ], [ running.status, running.owner ], state
+    end
+    settling = project.call(state: "completed", attempt_id: "ended-attempt")
+    assert_equal [ "unavailable", "hive", "recovery_transition_pending" ],
+                 [ settling.status, settling.owner, settling.reason ]
+    assert_equal "terminal",
+                 project.call(state: "queued", attempt_id: "ended-attempt", phase: "terminal").status
+  end
+
   def test_defensive_recovery_helpers_keep_the_closed_contract
     coordinator = Hive::Daemon::RecoveryCoordinator.new(
       state_home: "/tmp/hive-recovery-helpers", dispatch_repository: Object.new

@@ -480,7 +480,18 @@ Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and
 `retry_safety_blocked` is operator-owned (or Hive-owned when inspection itself
-failed). A failed first reconciliation publishes `failed`; a later failure is
+failed). The recovery receipts published into the snapshot come from
+`RecoveryCoordinator#projected_receipt_for_request`: a durable `dispatched`
+phase projects `running` (`retry_in_flight`) only while the request is
+`claimed`, `admitted`, or `awaiting_delivery`, or its referenced attempt is
+still `launching`/`running` (unreadable attempt storage stays `running`). A
+request released back to `queued` behind a terminal attempt projects `queued`
+with reason `retry_awaiting_dispatch` (`retry_pending`, scheduler-owned), or
+reason `project_dispatch_disabled` (`retry_dispatch_disabled`, operator-owned,
+with enable-and-reload remediation) when `project_enabled?` is false for the
+project. A `completed`/`cancelled` request behind a final attempt projects
+`unavailable` with reason `recovery_transition_pending`. Retry count,
+fingerprint, and escalation tier are carried through unchanged. A failed first reconciliation publishes `failed`; a later failure is
 logged while the last completed snapshot remains authoritative until expiry.
 Every `Assembler#fail` (including a `complete` that rejects duplicate
 identities) returns an `IncompletePublication(reason, retained, duplicates)`,

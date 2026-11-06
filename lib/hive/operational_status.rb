@@ -31,6 +31,9 @@ module Hive
     HUMAN_ACTIONS = %w[needs_input].freeze
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
+    # A due plan-review retry is dispatched on the next daemon tick. One still
+    # pending this long after its retry_at is not waiting on anything.
+    PLAN_REVIEW_RETRY_OVERDUE_SEC = 60 * 60
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
     PATROL_FIX_WORKFLOW = Hive::PatrolFix::WORKFLOW_ID.to_s.freeze
 
@@ -631,6 +634,8 @@ module Hive
       end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+        return [ "needs_repair", "hive" ] if plan_review_retry_overdue?(row)
+
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
         return [ "waiting_on_provider_or_scheduler", owner ]
       end
@@ -962,6 +967,14 @@ module Hive
           Hive::PatrolFix::PublicationBlockReceipt::SUMMARY,
           "patrol_fix"
         )
+      elsif plan_review_retry_overdue?(row)
+        retry_at = row.dig("plan_review", "retry_at")
+        reasons << reason(
+          "plan_review_retry_overdue",
+          "plan review retry was due at #{retry_at} and has not run; " \
+          "run `hive plan-review-run #{row['slug']}` or inspect `hive plan-review #{row['slug']} show`",
+          "plan_review"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
@@ -1025,6 +1038,21 @@ module Hive
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    # A scheduled plan-review retry whose time passed long ago and that no
+    # dependency holds back. Reported as needs_repair instead of an
+    # indefinite scheduler wait.
+    def plan_review_retry_overdue?(row)
+      return false unless PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+      return false if row["blocked"] == true || dependency_wait?(row)
+
+      review = row["plan_review"]
+      return false unless review.is_a?(Hash) && review["state"] == "retry_scheduled"
+
+      @now - Time.iso8601(review["retry_at"].to_s) > PLAN_REVIEW_RETRY_OVERDUE_SEC
+    rescue ArgumentError
+      false
     end
 
     def dependency_wait?(row)

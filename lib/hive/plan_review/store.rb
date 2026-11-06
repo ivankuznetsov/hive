@@ -15,6 +15,10 @@ module Hive
       ROOT_BASENAME = "plan-review".freeze
       CURRENT_BASENAME = "current.json".freeze
       MAX_JSON_BYTES = 2 * 1024 * 1024
+      REJECTED_OUTPUT_BASENAME = "rejected-output.md".freeze
+      # Enough of a reviewer result to show the offending field; the parser
+      # itself refuses anything above ResultParser::MAX_BYTES.
+      MAX_REJECTED_OUTPUT_BYTES = 64 * 1024
       SAFE_SEGMENT = /\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}\z/
 
       attr_reader :task_folder, :root, :current_path
@@ -40,12 +44,13 @@ module Hive
         record
       end
 
-      def write_attempt!(review_id:, attempt_id:, plan_bytes:, result:, coverage:, route_receipt:)
+      def write_attempt!(review_id:, attempt_id:, plan_bytes:, result:, coverage:, route_receipt:,
+                         rejected_output: nil)
         ensure_review!(review_id)
         safe_segment!(attempt_id, "attempt id")
         directory = File.join(review_root(review_id), "attempts", attempt_id)
         ensure_directory!(directory)
-        {
+        refs = {
           "input_plan" => write_immutable(
             File.join(directory, "input-plan.md"),
             Hive::SecretPatterns.redact(plan_bytes.to_s),
@@ -62,7 +67,15 @@ module Hive
             canonical_json(sanitize(route_receipt)),
             json: true
           )
-        }.freeze
+        }
+        if rejected_output
+          refs["rejected_output"] = write_immutable(
+            File.join(directory, REJECTED_OUTPUT_BASENAME),
+            rejected_output_document(rejected_output, result:, route_receipt:, attempt_id:),
+            json: false
+          )
+        end
+        refs.freeze
       end
 
       def write_review_artifact!(review_id:, basename:, content:, json: false)
@@ -360,6 +373,30 @@ module Hive
         return value if value.to_s.match?(SAFE_SEGMENT)
 
         raise InvalidRecord, "#{label} is unsafe"
+      end
+
+      # Bounded, redacted copy of reviewer output the result parser refused,
+      # with the parse error, so a deterministic rejection is diagnosable.
+      def rejected_output_document(bytes, result:, route_receipt:, attempt_id:)
+        raw = bytes.to_s.b
+        truncated = raw.bytesize > MAX_REJECTED_OUTPUT_BYTES
+        text = raw.byteslice(0, MAX_REJECTED_OUTPUT_BYTES).force_encoding(Encoding::UTF_8).scrub
+        role = route_receipt.to_h.transform_keys(&:to_s)["role"]
+        diagnostic = result.to_h.transform_keys(&:to_s)["diagnostic"]
+        note = truncated ? "first #{MAX_REJECTED_OUTPUT_BYTES} of #{raw.bytesize} bytes" : "#{raw.bytesize} bytes"
+        Hive::SecretPatterns.redact(<<~MD)
+          # Rejected plan review output (#{role}, attempt #{attempt_id})
+
+          Parser error: #{diagnostic}
+
+          The reviewer finished, but Hive's result parser refused its output,
+          so the attempt counted as a retryable failure. The output below is
+          redacted (#{note}).
+
+          ````json
+          #{text}
+          ````
+        MD
       end
 
       def sanitize(value)

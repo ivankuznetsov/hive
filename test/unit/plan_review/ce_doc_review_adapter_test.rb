@@ -207,6 +207,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
       assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
+      assert_equal "invalid", JSON.parse(result.rejected_output).fetch("coverage"),
+                   "the refused bytes are kept for the operator"
+      refute result.to_h.key?("rejected_output"), "raw output is not part of the parsed result"
     end
   end
 

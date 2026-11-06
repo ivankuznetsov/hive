@@ -964,7 +964,9 @@ module Hive
       observation digest.
 
       Actions: show (read-only), approve-finding, answer-finding, waive-coverage,
-      downgrade-level, raise-level, retry, request-review.
+      downgrade-level, raise-level, retry, request-review, restart. `restart`
+      applies only to a stale review (its task generation, plan, or policy
+      changed) and starts a linked review for the current generation.
     DESC
     option :review_id, type: :string, desc: "current logical review id"
     option :task_generation, type: :string, desc: "current task/plan generation"

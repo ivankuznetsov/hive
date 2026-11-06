@@ -711,6 +711,29 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_run_ci_once_does_not_leak_hive_private_ruby_load_path_to_project_ci
+    deployment_lib = "/srv/hive/deployments/hive-dogfood-abc/lib"
+    hive_env = {
+      "RUBYLIB" => "#{deployment_lib}:/srv/hive/deployments/hive-dogfood-abc/components/agent-cli-runtime/lib",
+      "RUBYOPT" => "-rbundler/setup", "GEM_HOME" => "/srv/hive/gems",
+      "GEM_PATH" => "/srv/hive/gems", "BUNDLE_GEMFILE" => "/srv/hive/Gemfile",
+      "BUNDLER_ORIG_RUBYLIB" => deployment_lib, "HIVE_PROJECT_MARKER" => "kept"
+    }
+    probe = "for key in RUBYLIB RUBYOPT GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLER_ORIG_RUBYLIB " \
+            'HIVE_PROJECT_MARKER; do eval "printf \"%s=%s\n\" $key \"\${$key-unset}\""; done'
+
+    with_tmp_dir do |dir|
+      run = with_env(hive_env) { Hive::Stages::Review::CiFix.run_ci_once([ "sh", "-c", probe ], dir, 4096, 10) }
+
+      assert_equal 0, run.exit_code, run.combined
+      refute_includes run.combined, deployment_lib
+      %w[RUBYLIB RUBYOPT GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLER_ORIG_RUBYLIB].each do |key|
+        assert_includes run.combined, "#{key}=unset\n"
+      end
+      assert_includes run.combined, "HIVE_PROJECT_MARKER=kept\n"
+    end
+  end
+
   def test_run_ci_once_reports_empty_command_after_shell_parsing
     result = Hive::Stages::Review::CiFix.run_ci_once("   ", Dir.pwd, 1024, 1)
 

@@ -5,6 +5,7 @@ require "digest"
 require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/output_pulse"
+require "hive/project_command_environment"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
@@ -255,7 +256,12 @@ module Hive
 
           begin
             pipe_r, pipe_w = IO.pipe
-            pid = Process.spawn(*cmd, chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w)
+            # The project's CI must resolve its own Ruby toolchain, never the
+            # load path Hive's attempt worker inherited for itself.
+            pid = Process.spawn(
+              Hive::ProjectCommandEnvironment.overrides, *cmd,
+              chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w
+            )
             pipe_w.close
           rescue Errno::ENOENT, Errno::EACCES => e
             pipe_r&.close unless pipe_r&.closed?

@@ -1,5 +1,6 @@
 require "tempfile"
 require "hive/process_kill"
+require "hive/project_command_environment"
 
 module Hive
   module Stages
@@ -13,7 +14,7 @@ module Hive
         def run(env, command, chdir:, timeout_sec:, label:)
           Tempfile.create("hive-council-stderr") do |stderr|
             pid = Process.spawn(
-              env, "sh", "-c", command,
+              Hive::ProjectCommandEnvironment.overrides.merge(env), "sh", "-c", command,
               chdir: chdir,
               in: File::NULL,
               out: File::NULL,

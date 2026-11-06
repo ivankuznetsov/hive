@@ -34,6 +34,15 @@ Supervisor self-reentry preserves canonical directories from the running Ruby
 interpreter's resolved load path. This includes dependencies loaded without
 RubyGems activation, as in the isolated CLI scenario harness. It does not re-read
 ambient `RUBYLIB`; `bin/hive` places its own source directories first.
+That resolved `RUBYLIB` (Hive's lib, agent-cli-runtime, and every activated
+gem) is private to Hive and is inherited by the supervisor and worker. Commands
+the worker runs for the project (review CI in `CiFix.run_ci_once`, council
+`CommandRunner`, agent CLI launches) therefore merge
+`Hive::ProjectCommandEnvironment.overrides`, which unsets `RUBYLIB`, `RUBYOPT`,
+`RUBYGEMS_GEMDEPS`, `GEM_HOME`, `GEM_PATH`, Bundler keys, and `BUNDLER_ORIG_*`.
+Child `hive` calls do not need the inherited path: `bin/hive` (and the HIVE_BIN
+wrapper that execs it) put Hive's lib and agent-cli-runtime on `$LOAD_PATH`
+themselves and resolve gems through RubyGems.
 
 The private supervisor route is selected before public CLI dispatch. Its detached
 wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters

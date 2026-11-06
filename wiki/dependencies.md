@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-10-19
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -97,6 +97,13 @@ update the lockfile and fails setup with "the gemspecs for path gems changed"
 before a single test runs, so a missed web relock shows up as every web job
 dying in seconds rather than as a test failure.
 
+The JSON 3.1.0 update widened `agent-cli-runtime`'s upper bound from `< 3.0`
+to `< 4.0`. The web bundle locks Rails 8.1.4 because Rails 8.1.3.1 passes JSON
+parser options positionally, which JSON 3 rejects; the newer Rails patch uses
+keywords. Its web relock also moves the web-only RuboCop resolver from 1.87.0
+to 1.92.0 because the former required JSON 2.x. These resolver changes keep
+the frozen web bundle materializable and session reads functional.
+
 ## Runtime gems
 
 | Gem | Version | Purpose |
@@ -116,7 +123,7 @@ dying in seconds rather than as a test failure.
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
-| `sqlite3` | `~> 2.0` (locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
+| `sqlite3` | `~> 2.0` (locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.10.2 or newer to avoid GHSA-mwm8-39rw-8826 and GHSA-4fqr-96q8-xrfx. |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -140,9 +147,9 @@ The root bundle locks transitive Rack at 3.2.8 or newer. The
 3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
 change for the compatible patch update.
 
-The root bundle also locks transitive Addressable at 2.9.1 or newer. The
-advisory database flags 2.9.0 for seven 2026 advisories, including template
-regular-expression denial of service and URI host/path normalization flaws.
+Both lockfiles resolve transitive Addressable to 2.9.2 and SQLite3 to 2.10.2.
+These compatible patch updates satisfy the Addressable and SQLite3 advisories
+published after the preceding CI run.
 
 ## Web app bundle
 

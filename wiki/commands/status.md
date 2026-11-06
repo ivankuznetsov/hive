@@ -329,6 +329,14 @@ renders its sanitized declared outcome. Status still publishes the guarded
 only the current terminal stage and that propagated upstream blockers require
 a fresh task.
 
+When later daemon ticks cannot publish a complete scheduler record (for
+example `duplicate_task_identity`, the same slug in two stage folders of one
+project), the retained record carries `last_failure`. While it is still
+current, status adds a `scheduler_tick_failed` warning; after it expires, the
+`scheduler_stale` issue message names the failure (project, slug, and each
+`stage (folder)` for duplicates) instead of only `snapshot_expired`, and the
+remediation says to keep one stage folder per slug.
+
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale
 scheduler evidence, or a failed scheduler join cannot silently collapse into

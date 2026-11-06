@@ -3838,6 +3838,45 @@ class HiveDaemonDispatcherTest < Minitest::Test
     )
   end
 
+  def test_incomplete_operational_snapshot_is_logged_with_its_reason
+    snapshot = FakeOperationalSnapshot.new
+    duplicates = [ { "project" => "demo", "slug" => "x", "locations" => [
+      { "stage" => "1-inbox", "folder" => "/p/stages/1-inbox/x" },
+      { "stage" => "3-generate", "folder" => "/p/stages/3-generate/x" }
+    ] } ]
+    incomplete = Hive::Daemon::OperationalSnapshot::IncompletePublication.new(
+      reason: "duplicate_task_identity: demo:x", retained: true, duplicates: duplicates
+    )
+    snapshot.define_singleton_method(:complete) { |**| incomplete }
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      operational_snapshot: snapshot
+    )
+
+    dispatcher.send(:publish_complete_operational_snapshot, rows: [], now: T0)
+
+    name, attrs = logger.events.find { |event, _| event == :operational_snapshot_incomplete }
+    refute_nil name
+    assert_equal "complete", attrs.fetch(:phase)
+    assert_equal "duplicate_task_identity: demo:x", attrs.fetch(:reason)
+    assert_equal true, attrs.fetch(:retained_complete_snapshot)
+    assert_equal duplicates, attrs.fetch(:duplicates)
+    refute logger.events.any? { |event, _| event == :operational_snapshot_publish_failed }
+  end
+
+  def test_incomplete_operational_snapshot_logging_never_breaks_dispatcher
+    dispatcher, = make_dispatcher
+    logger = Object.new
+    logger.define_singleton_method(:event) { |*| raise IOError, "logger unavailable" }
+    dispatcher.instance_variable_set(:@logger, logger)
+    incomplete = Hive::Daemon::OperationalSnapshot::IncompletePublication.new(
+      reason: "status_failure", retained: false, duplicates: []
+    )
+
+    assert_nil dispatcher.send(
+      :log_operational_snapshot_incomplete, phase: "failed", result: incomplete
+    )
+  end
+
   def test_operational_queue_snapshot_uses_validated_rows_and_degrades_on_failure
     dispatcher, = make_dispatcher
     pending = Struct.new(:created_at).new(T0 - 5)

@@ -33,6 +33,7 @@ module Hive
         status_warning
         admission_check_failed
         operational_snapshot_publish_failed
+        operational_snapshot_incomplete
         dispatched
         completed
         skipped

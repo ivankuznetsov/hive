@@ -2882,9 +2882,28 @@ module Hive
       def publish_operational_snapshot(method, phase:, **attributes)
         return unless @operational_snapshot
 
-        @operational_snapshot.public_send(method, **attributes)
+        result = @operational_snapshot.public_send(method, **attributes)
+        log_operational_snapshot_incomplete(phase: phase, result: result)
+        result
       rescue StandardError => e
         log_operational_snapshot_failure(phase: phase, error: e)
+        nil
+      end
+
+      # A tick that publishes no complete record must be visible in the log
+      # even when the previous completed record stays authoritative, or the
+      # snapshot later expires with no recorded cause.
+      def log_operational_snapshot_incomplete(phase:, result:)
+        return unless result.is_a?(OperationalSnapshot::IncompletePublication)
+
+        @logger.event(
+          :operational_snapshot_incomplete,
+          phase: phase,
+          reason: result.reason,
+          retained_complete_snapshot: result.retained,
+          duplicates: result.duplicates
+        )
+      rescue StandardError
         nil
       end
 

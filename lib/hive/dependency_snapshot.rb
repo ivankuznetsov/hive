@@ -257,6 +257,19 @@ module Hive
       end
     end
 
+    def edited_task_verdict(task, depends_on:, plan_dependency:, stage:, registry_entries: Hive::Config.registered_projects)
+      entries = Array(registry_entries)
+      matches = entries.select { |entry| File.expand_path(entry.fetch("path")) == File.expand_path(task.project_root) }
+      raise Hive::InvalidTaskPath, "task project enrollment is missing or ambiguous" unless matches.one?
+
+      name = matches.first.fetch("name")
+      snapshot = admission_task(task.project_root, task.folder, Hive::Config.load(task.project_root), project_name: name)
+      proposed = snapshot.with(stage: stage, depends_on: depends_on, plan_dependency: plan_dependency,
+        metadata_status: :ok, metadata_error: nil, plan_status: :ok, plan_error: nil)
+      targeted_admission_context(entries, targets: { name => [ task.slug ] }, overlays: { name => [ proposed ] })
+        .verdict(project: name, slug: task.slug)
+    end
+
     # Builds the routine dependency view without reparsing terminal history.
     # Active tasks are scanned normally. When one names a prerequisite absent
     # from that active set, only exact matching task folders are loaded, then
@@ -310,7 +323,10 @@ module Hive
       end
       projects = projects.map do |project|
         additions = Array(overlays&.fetch(project.name, nil))
-        additions.empty? ? project : project.with(tasks: (project.tasks + additions).freeze)
+        replaced = project.tasks.reject do |existing|
+          additions.any? { |candidate| candidate.folder == existing.folder && candidate.id == existing.id }
+        end
+        additions.empty? ? project : project.with(tasks: (replaced + additions).freeze)
       end
       admission_context_with_fallback(
         entries, projects, workflow_generations: workflow_generations,

@@ -7,6 +7,18 @@ updated: 2026-11-04
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Dependency editing audit prerequisite (2026-11-02)
+
+Dependency edit preparation is implemented, but the operator commands and
+durable edit transaction are not exposed. A supported authoritative activity
+binding for tasks without a durable attempt is still required before those
+commands can guarantee an audit for idle, never-run tasks. `TaskActivity.for_task`
+returns nil for such tasks, while `TaskJournal::Writer` requires a real durable
+attempt; its legacy identity is limited to generation-zero baseline records.
+The attempts API supports worker task-stage and module-hook attempts, not an
+operator-only activity binding. A design decision for that binding is pending;
+synthetic worker attempts or relaxed journal validation have not been added.
+
 ## Task observation boundary (2026-10-02)
 
 Update-only metadata writers, completion clocks, managed-workflow rollback,

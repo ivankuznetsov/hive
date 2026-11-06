@@ -5036,6 +5036,54 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "s1", skipped[1][:slug]
   end
 
+  # Regression (hivedev#23/#24): once the task's PR was observed merged, a
+  # cleared review marker redispatched 6-review and its CI-fix phase
+  # committed onto the delivered branch.
+  def test_review_row_with_merged_pull_request_is_not_dispatched
+    observed = review_row_with_pull_request_state
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ observed ], operational_snapshot: snapshot)
+
+    with_observed_pull_request_state("delivered_elsewhere") { dispatcher.tick(now: T0) }
+
+    assert_empty sup.spawned, "a merged PR must not spawn a review agent"
+    refute events_include?(logger, :dispatched)
+    skipped = logger.events.find { |(name, attrs)| name == :skipped && attrs[:reason] == "pull_request_merged" }
+    refute_nil skipped
+    assert_equal "https://github.com/acme/demo/pull/23", skipped.last[:pr_url]
+    observed_disposition = snapshot.calls.find do |method, attrs|
+      method == :observe && attrs[:decision] == :pull_request_merged
+    end
+    refute_nil observed_disposition
+    assert_equal "operator", observed_disposition.last[:owner]
+  end
+
+  def test_review_row_with_closed_pull_request_is_held_for_the_operator
+    observed = review_row_with_pull_request_state
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ observed ], operational_snapshot: snapshot)
+
+    with_observed_pull_request_state("closed_unmerged") { dispatcher.tick(now: T0) }
+
+    assert_empty sup.spawned
+    blocked = logger.events.find { |(name, attrs)| name == :blocked && attrs[:reason] == "pull_request_closed_unmerged" }
+    refute_nil blocked
+    assert snapshot.calls.any? { |method, attrs| method == :observe && attrs[:owner] == "operator" &&
+                                                 attrs[:decision] == :pull_request_closed_unmerged }
+  end
+
+  def test_review_row_with_open_or_unobserved_pull_request_dispatches_as_before
+    [ "open", nil ].each do |state|
+      observed = review_row_with_pull_request_state
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ observed ])
+
+      with_observed_pull_request_state(state) { dispatcher.tick(now: T0) }
+
+      assert_equal 1, sup.spawned.size, "PR state #{state.inspect} keeps review dispatch"
+      refute logger.events.any? { |(_name, attrs)| attrs[:reason].to_s.start_with?("pull_request_") }
+    end
+  end
+
   def test_disabled_project_is_skipped
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows, project_enabled: false)
@@ -12096,6 +12144,27 @@ end
   end
 
   private
+
+  def review_row_with_pull_request_state
+    root = make_existing_row_folder(project: "p1", stage: "6-review", slug: "s1")
+    folder = File.join(root, ".hive-state", "stages", "6-review", "s1")
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, "pr.md"), "---\npr_url: https://github.com/acme/demo/pull/23\n---\n")
+    File.write(File.join(folder, "task.md"), "")
+    row(stage: "6-review", marker: "none", action: "ready_for_review",
+        command: "hive review s1 --from 6-review", folder: folder,
+        state_file: File.join(folder, "task.md"))
+  end
+
+  # The PR merge watcher's durable "pull request outcome changed" activity.
+  def with_observed_pull_request_state(state, &block)
+    records = []
+    if state
+      records << { "payload" => { "activity_kind" => "pr_observed", "pr_state" => state,
+                                  "pr_url" => "https://github.com/acme/demo/pull/23" } }
+    end
+    with_replaced_singleton_method(Hive::TaskProjection, :read_journal, ->(_path) { records }, &block)
+  end
 
   def assert_bounded_one_shot_liveness_failure(architecture_store)
     attempt_store = Object.new

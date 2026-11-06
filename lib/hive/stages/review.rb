@@ -31,6 +31,7 @@ require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
 require "hive/workflows"
+require "hive/pull_request_outcome"
 
 module Hive
   module Stages
@@ -170,6 +171,9 @@ module Hive
                "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
           return { commit: nil, status: :review_error }
         end
+
+        settled = settled_pull_request_result(task)
+        return settled if settled
 
         # Worktree pointer must exist (carried over from 4-execute).
         unless File.exist?(task.worktree_yml_path)
@@ -940,6 +944,26 @@ module Hive
       # Marker attr values are scanned by the internal task graph and read by
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
       # break the line-oriented marker format, so cap it at 500 bytes.
+      # A merged or closed task PR must not receive CI-fix, reviewer, triage,
+      # or fix agents: their commits would land on an already-delivered
+      # branch. The marker is left untouched so a later observation that the
+      # PR reopened resumes review normally; no observation keeps the
+      # pre-existing behavior.
+      def settled_pull_request_result(task)
+        outcome = Hive::PullRequestOutcome.latest(task.folder)
+        return nil unless outcome&.settled?
+
+        if outcome.merged?
+          warn "hive: #{outcome.pr_url} is merged; review agents will not run. If Hive does not archive it, run " \
+               "`hive archive #{task.slug} --reason already_delivered --evidence #{outcome.pr_url}`"
+          { commit: nil, status: :pull_request_merged }
+        else
+          warn "hive: #{outcome.pr_url} was closed without merging; review agents will not run. " \
+               "Reopen the pull request or archive the task with an operator closure reason"
+          { commit: nil, status: :pull_request_closed_unmerged }
+        end
+      end
+
       def truncate_marker_message(message, max: 500, ellipsis: "...")
         return "" if message.nil?
 

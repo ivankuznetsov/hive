@@ -979,6 +979,8 @@ class OperationalStatusTest < Minitest::Test
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
       "model_unsupported" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
+      "pull_request_merged" => [ "waiting_on_you", "operator" ],
+      "pull_request_closed_unmerged" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]
     }

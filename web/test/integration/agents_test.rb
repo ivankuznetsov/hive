@@ -146,6 +146,79 @@ class AgentsTest < ActionDispatch::IntegrationTest
     assert_select "a[data-turbo-frame='_top'][href='#{agents_path}']", text: "Back to agents"
   end
 
+  test "agents page names the agents and shows fresh-init or project workflow roles" do
+    sign_in!(login: "alice")
+    install_agent_skills_fake(health: ->(_entry) { [] })
+
+    get agents_path
+    assert_response :success
+    assert_select ".agent-role-list dt", text: "Brainstorm and plan"
+    assert_select ".agent-role-list div", text: /Brainstorm and plan\s*Claude Code/
+    assert_select ".agent-role-list div", text: /Implement\s*Codex/
+    assert_select ".agent-role-list div", text: /Review\s*Claude Code, Codex/
+    assert_select ".agent-roles", text: /Defaults for a new project/
+    assert_select ".agent-card[data-agent='claude'] h3", text: "Claude Code"
+    assert_select ".agent-card[data-agent='codex'] .agent-card-roles", text: "Coding: Implement · Review"
+
+    project = register_skill_project("agent-roles-app")
+    config_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "skill-projects", project, ".hive-state", "config.yml")
+    File.write(config_path, {
+      "project_name" => project,
+      "brainstorm" => { "agent" => "claude" }, "plan" => { "agent" => "codex" },
+      "execute" => { "agent" => "claude" },
+      "review" => { "reviewers" => [ { "name" => "grok-ce-code-review", "kind" => "agent", "agent" => "grok",
+                                       "skill" => "ce-code-review", "output_basename" => "grok-ce-code-review",
+                                       "prompt_template" => "reviewer_grok_ce_code_review.md.erb" } ] }
+    }.to_yaml)
+
+    get agents_path, params: { project: project }
+    assert_response :success
+    assert_select ".agent-role-list div", text: /\ABrainstorm\s*Claude Code\z/
+    assert_select ".agent-role-list div", text: /Plan\s*Codex/
+    assert_select ".agent-role-list div", text: /Implement\s*Claude Code/
+    assert_select ".agent-role-list div", text: /Review\s*Grok/
+    assert_select ".agent-roles", text: /Coding workflow configuration for\s*#{project}/
+    assert_select ".agent-roles", text: /default workflow is/, count: 0
+  end
+
+  test "agents roles include native codex review and stay scoped to the coding workflow" do
+    sign_in!(login: "alice")
+    install_agent_skills_fake(health: ->(_entry) { [] })
+    config_dir = ->(name) { File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "skill-projects", name, ".hive-state", "config.yml") }
+    native_review = { "name" => "codex-native", "kind" => "codex_review", "agent" => "codex",
+                      "output_basename" => "codex-native",
+                      "prompt_template" => "reviewer_codex_native_review.md.erb" }
+    claude_review = { "name" => "claude-ce-code-review", "kind" => "agent", "agent" => "claude",
+                      "skill" => "ce-code-review", "output_basename" => "claude-ce-code-review",
+                      "prompt_template" => "reviewer_claude_ce_code_review.md.erb" }
+
+    native = register_skill_project("native-review-app")
+    File.write(config_dir.call(native), {
+      "project_name" => native, "brainstorm" => { "agent" => "claude" }, "plan" => { "agent" => "claude" },
+      "execute" => { "agent" => "codex" }, "review" => { "reviewers" => [ native_review ] }
+    }.to_yaml)
+    get agents_path, params: { project: native }
+    assert_response :success
+    assert_select ".agent-role-list div", text: /Review\s*Codex/
+    assert_select ".agent-card[data-agent='codex'] .agent-card-roles", text: "Coding: Implement · Review"
+
+    mixed = register_skill_project("mixed-review-app")
+    File.write(config_dir.call(mixed), {
+      "project_name" => mixed, "default_workflow" => "content",
+      "execute" => { "agent" => "codex" }, "review" => { "reviewers" => [ claude_review, native_review ] }
+    }.to_yaml)
+    get agents_path, params: { project: mixed }
+    assert_response :success
+    assert_select "#agent-roles-heading", text: "Coding workflow roles"
+    assert_select ".agent-role-list div", text: /Review\s*Claude Code, Codex/
+    assert_select ".agent-roles", text: /default workflow is\s*content/
+    assert_select ".agent-roles", text: /apply only to coding-workflow tasks/
+    assert_select ".agent-roles", text: /research|outline|draft/, count: 0
+
+    get agents_path
+    assert_select ".agent-role-list div", text: /Implement\s*Codex/
+  end
+
   test "managed skill health is explicit and checked only for the selected project" do
     project = register_skill_project("agent-health-app")
     calls = []

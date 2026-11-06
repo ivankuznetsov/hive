@@ -3,8 +3,8 @@
 
 <% if @projects.empty? %>
   <div class="empty-state">
-    <p>Add a repository before managing modules.</p>
-    <p><%= link_to "Add a repository", repos_path %></p>
+    <p>Add a project before managing modules.</p>
+    <p><%= link_to "Add a project", projects_path %></p>
   </div>
 <% else %>
   <%= form_with url: modules_path, method: :get, class: "repo-form module-project-form" do |f| %>

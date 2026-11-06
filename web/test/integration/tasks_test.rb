@@ -331,6 +331,42 @@ class TasksTest < ActionDispatch::IntegrationTest
                   "/tasks/#{@project}/#{@slug}/approve", text: "Force approve", count: 0
   end
 
+  test "an actionable plan critique precedes the long plan; settled critique stays below" do
+    move_task_to_plan!
+    plan = stage_dir(@project, "3-plan").join(@slug, "plan.md")
+    plan.write("# Plan\n\n#{(1..8).map { |n| "## Section #{n}\n\n#{'Long plan prose. ' * 60}\n\n" }.join}<!-- WAITING -->\n")
+    order = lambda do |mutate|
+      details = plan_review_details_fixture
+      mutate.call(details.fetch("summary"))
+      with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+        get "/tasks/#{@project}/#{@slug}"
+      end
+      assert_response :success
+      assert_select "section.plan-review", 1, "the critique must render exactly once"
+      assert_select "#plan-review-title", 1
+      response.body.index('id="plan-review-title"') <=> response.body.index('id="workspace-primary-result"')
+    end
+
+    assert_equal(-1, order.call(->(_summary) { }), "awaiting decision: critique before plan")
+    assert_select "input[name=review_action][value=answer_finding]", 1
+    assert_operator response.body.index("value=\"answer_finding\""), :<, response.body.index("Long plan prose.")
+
+    assert_equal(-1, order.call(->(summary) { summary["freshness"] = { "status" => "stale", "reason" => "plan changed" } }),
+                 "stale awaiting decision keeps its reload warning above the plan")
+    assert_select "input[name=review_action][value=answer_finding]", 0
+
+    assert_equal(1, order.call(lambda do |summary|
+      summary["state"] = "running"
+      summary["required_action"] = nil
+    end), "a running critique without an operator action stays secondary")
+
+    assert_equal(1, order.call(lambda do |summary|
+      summary["state"] = "passed"
+      summary["required_action"] = nil
+      summary["execution_allowed"] = true
+    end), "settled historical critique stays secondary")
+  end
+
   test "verification blockers do not expose futile finding decisions" do
     move_task_to_plan!
     details = plan_review_details_fixture
@@ -1326,6 +1362,12 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}"
     assert_select "a", { text: "Diff", count: 1 }, "an existing worktree must expose the Diff link"
+    assert_select "#workspace-publication", 1
+    assert_select "#workspace-publication a", text: "View diff", count: 1
+    assert_select "turbo-frame[id^='task-diff-']", 0
+    assert_select ".workspace-change-grid", 0
+    assert_match '"lib/diff_renderer"', response.body, "the diff renderer must stay importable on demand"
+    assert_select "link[rel=modulepreload][href*='diff_renderer']", 0
   ensure
     FileUtils.rm_rf(row["worktree_path"]) if row && row["worktree_path"].present?
   end
@@ -1546,7 +1588,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
     assert_select "#workspace-summary-heading", text: "Ready"
-    assert_select "#workspace-summary .workspace-eyebrow", text: "Inbox"
+    assert_select "#workspace-summary .task-stage", text: "Inbox"
     assert_select "#workspace-summary", text: /Current step/, count: 0
     assert_select "#workspace-usage", 0
     assert_select "#workspace-primary-result[data-primary-artifact=?]",
@@ -1582,6 +1624,38 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".advanced form", minimum: 1
   ensure
     Task.define_method(:publication, original) if original
+  end
+
+  test "finished tasks lead with code changes while active tasks keep output first" do
+    original_publication = Task.instance_method(:publication)
+    original_worktree = Task.instance_method(:worktree?)
+    panel = publication_fixture
+    Task.define_method(:publication) { |cache: nil| panel }
+    Task.define_method(:worktree?) { true }
+
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_select "#workspace-publication", 1
+    body = response.body
+    assert_operator body.index('id="workspace-primary-result"'), :<, body.index('id="workspace-publication"'),
+                    "an active task shows its current output before code changes"
+    assert_operator body.index('id="task-state"'), :<, body.index('id="workspace-primary-result"')
+
+    folder = stage_dir(@project, "9-done").join(@slug)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)
+    Hive::TaskMeta.rewrite(folder.to_s, completed_at: Time.now.utc)
+    get task_path(@project, @slug, source: "archive")
+    assert_response :success
+    assert_select "#workspace-publication", 1
+    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    body = response.body
+    assert_operator body.index('id="workspace-publication"'), :<, body.index('id="workspace-primary-result"'),
+                    "a finished task leads with its delivered changes"
+    assert_select "#workspace-publication", text: /Open/, minimum: 1
+    assert_select "#workspace-publication", text: /Merged/, count: 0
+  ensure
+    Task.define_method(:publication, original_publication) if original_publication
+    Task.define_method(:worktree?, original_worktree) if original_worktree
   end
 
   test "timeline endpoint pages material events and expands bounded noise groups" do
@@ -1674,6 +1748,9 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "github.com/acme/demo", remote_calls.first.fetch(:repository)
     assert_select "turbo-frame[id^='task-publication-']", 1
     assert_select "form[data-turbo-frame^='task-publication-']", 1
+    assert_select "a[href=?]", "https://github.com/acme/demo", text: "github.com/acme/demo"
+    assert_select "a[href=?]", "https://github.com/acme/demo/tree/#{@slug}", text: @slug
+    assert_select "a[href=?]", "https://github.com/acme/demo/commit/#{'a' * 40}", text: "a" * 12
   ensure
     Task.define_method(:publication, original_publication) if original_publication
   end

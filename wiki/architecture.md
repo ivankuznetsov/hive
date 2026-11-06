@@ -47,8 +47,10 @@ when it genuinely loses the lease: a lost compare-and-swap, a non-transient
 store failure, or SQLite lock contention that outlasts the busy tolerance
 (`busy_tolerance_sec`, default 600s and never below `stale_sec`). A heartbeat
 that loses a lock race is deferred and retried at the heartbeat cadence, and
-the worker checkpoint and terminal receipt writes retry through lock
-contention for the same tolerance; each failed write rolled back, so the
+the launch claim, first heartbeat, worker checkpoint and terminal receipt
+writes retry through lock contention for the same tolerance (the claim and
+first heartbeat stay bounded by their own launch deadlines, which the
+repository re-checks on every retry); each failed write rolled back, so the
 observed record stays the CAS base. The tolerance may exceed the lease window
 because the reconciler only ever classifies a stale owner whose process still
 matches as a capacity-reserving suspect, never as lost. A supervisor that

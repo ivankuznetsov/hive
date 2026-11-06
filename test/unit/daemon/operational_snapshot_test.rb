@@ -477,6 +477,32 @@ class HiveDaemonOperationalSnapshotTest < Minitest::Test
     end
   end
 
+  # The status projection is several MB on a real install; encoding it inside
+  # BEGIN IMMEDIATE held the shared write lock that attempt heartbeats wait on.
+  def test_repository_encodes_the_observation_before_taking_the_write_lock
+    with_tmp_dir do |root|
+      database = database_for(File.join(root, "runtime.sqlite3"))
+      repository = Hive::RuntimeControlPlane::OperationalRepository.new(database: database)
+      codec = Hive::RuntimeControlPlane::Codec
+      original = codec.method(:dump_json)
+      encoded_in_transaction = []
+      encode = lambda do |value|
+        if value.is_a?(Hash) && value.key?("snapshot")
+          connection = database.instance_variable_get(:@connection)
+          encoded_in_transaction << (connection&.in_transaction? == true)
+        end
+        original.call(value)
+      end
+
+      with_replaced_singleton_method(codec, :dump_json, encode) do
+        repository.publish({ "phase" => "started", "tick_sequence" => 1 })
+      end
+
+      assert_equal [ false ], encoded_in_transaction
+      assert_equal "started", repository.snapshot.fetch("phase")
+    end
+  end
+
   def test_repository_rejects_invalid_projection_shape_and_corrupt_sql_payload
     with_tmp_dir do |root|
       path = File.join(root, "runtime.sqlite3")

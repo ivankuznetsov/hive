@@ -65,7 +65,20 @@ admission tick, including projects enabled by an ordinary config edit, and
 contains an unreadable project's config failure without blocking other
 projects. It retains a disabled or removed project's guard while its durable
 attempts or identity-verified task workers remain live, then releases the
-drained project. Guard collections key ownership by canonical state-root
+drained project. A project that is already disabled when the daemon starts is
+never enrolled, so its attempts were classified `:unowned` and a dead wrapper's
+`running` row stayed unsettled forever (keeping quiescence at
+`agent_attempt_root`). `Collection#with_maintenance_ownership` now covers that
+case: during attempt reconciliation only, the daemon tries to take each
+registered, dispatch-disabled project that still has live (`launching` or
+`running`) attempts, reconciles it under that guard, and releases the guard
+before the tick continues. A project held by any other process (a one-shot
+runner, another daemon) is skipped, the names never join `owned_projects`, and
+`project_enabled?` still gates dispatch on `daemon.enabled`, so a paused
+project is settled but never dispatched into; its lost attempts also wait for
+re-enablement before the loss healer acts. A one-shot started against that
+project during the brief hold gets the usual retryable `daemon_owned`.
+Guard collections key ownership by canonical state-root
 identity: aliases share one lock, while re-registering a project name at a new
 root cannot authorize that root through the old lock. The previous root stays
 guarded until its own work drains. One-shot commands acquire the same guard

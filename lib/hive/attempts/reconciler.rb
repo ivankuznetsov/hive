@@ -39,9 +39,24 @@ module Hive
         @store.fetch(attempt_id)
       end
 
-      def reconcile(now: Time.now.utc, authority: nil, timeout_sec: nil, mutate_projects: nil)
+      # mutate_projects limits mutation to the caller's owned projects.
+      # maintain_projects, when given with it, receives the remaining projects
+      # that still have live attempts and must yield the subset it could
+      # guard; those are reconciled while that guard is held.
+      def reconcile(now: Time.now.utc, authority: nil, timeout_sec: nil, mutate_projects: nil,
+                    maintain_projects: nil)
         records = @store.active_attempts
         mutable = mutate_projects && Array(mutate_projects).map(&:to_s).to_set
+        options = { now: now, authority: authority, timeout_sec: timeout_sec }
+        unowned = mutable && maintain_projects ? unowned_live_projects(records, mutable) : []
+        return reconcile_records(records, mutable, **options) if unowned.empty?
+
+        maintain_projects.call(unowned) do |held|
+          reconcile_records(records, mutable | held.map(&:to_s), **options)
+        end
+      end
+
+      private def reconcile_records(records, mutable, now:, authority:, timeout_sec:)
         statuses = []
         newly_lost = []
         all_lost = []
@@ -180,6 +195,11 @@ module Hive
       end
 
       private
+
+      def unowned_live_projects(records, mutable)
+        records.select(&:live?).map { |record| record["project"].to_s }.uniq
+               .reject { |project| mutable.include?(project) }
+      end
 
       def interruption_log_reference(record)
         return record["log_reference"] if record["log_reference"]

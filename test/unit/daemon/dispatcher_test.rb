@@ -819,6 +819,51 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "p1" ], calls.fetch(0).fetch(:mutate_projects)
   end
 
+  def test_maintenance_ownership_reaches_reconciliation_but_never_dispatch
+    ownership = Object.new
+    maintained = []
+    ownership.define_singleton_method(:refresh!) { [] }
+    ownership.define_singleton_method(:contentions) { {} }
+    ownership.define_singleton_method(:owned_projects) { [] }
+    ownership.define_singleton_method(:owned?) { |_project| false }
+    ownership.define_singleton_method(:with_maintenance_ownership) do |projects, &block|
+      maintained << projects
+      block.call(projects)
+    end
+    capacity = Hive::Attempts::CapacitySnapshot.new(
+      global_count: 0, per_project: {}, per_task: {}, daily_counts: {},
+      reserved_attempt_ids: []
+    )
+    snapshot = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [], newly_lost_attempts: [],
+      terminal_attempts: [], admission_view: nil
+    )
+    reconciler = Object.new
+    calls = []
+    held_projects = nil
+    reconciler.define_singleton_method(:reconcile) do |**arguments|
+      calls << arguments
+      arguments.fetch(:maintain_projects).call([ "p1" ]) { |held| held_projects = held }
+      snapshot
+    end
+    rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
+    dispatcher, sup, = make_dispatcher(
+      rows: rows, attempt_reconciler: reconciler, project_ownership: ownership
+    )
+    dispatcher.singleton_class.send(:remove_method, :project_enabled?)
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/p1" } }) do
+      with_replaced_singleton_method(Hive::Config, :load, ->(_path) { { "daemon" => { "enabled" => false } } }) do
+        dispatcher.tick(now: T0)
+      end
+    end
+
+    assert_empty calls.fetch(0).fetch(:mutate_projects)
+    assert_equal [ [ "p1" ] ], maintained
+    assert_equal [ "p1" ], held_projects
+    assert_equal 0, sup.spawned.size
+  end
+
   def test_patrol_discovery_scopes_candidate_evaluation_to_owned_projects
     ownership = Object.new
     ownership.define_singleton_method(:refresh!) { [ "owned" ] }

@@ -7,6 +7,20 @@ updated: 2026-11-06
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Owner-command failure limit scope (2026-11-06)
+
+- The repeated-failure limit applies only to `plan-review-run`
+  (`CommandProgress::FAILURE_LADDER_COMMANDS`). Other same-stage commands keep
+  their existing paths (advance replay + markerless stall, RecoveryCoordinator
+  ladder); whether any other owner command needs the same opt-in is unverified.
+- The failure signature is exit status plus generation. Durable receipts carry
+  no stderr text, so two different errors with the same exit code count as
+  identical; the operator blocker names the attempt id for log inspection
+  instead of quoting the error.
+- The limit is checked after capacity admission, so while capacity is
+  saturated a held row reports `attempt_capacity` rather than
+  `attempt_failure_limit`.
+
 ## Settled-PR review fence (2026-11-06)
 
 - The fence reads only the task journal's latest `pr_observed` /

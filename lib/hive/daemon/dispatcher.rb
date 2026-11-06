@@ -44,6 +44,7 @@ require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
+require "hive/attempts/dispatcher"
 require "hive/attempts/generation"
 require "hive/attempts/repository"
 require "hive/dependency_snapshot"
@@ -305,6 +306,10 @@ module Hive
         # they evaluated. The completed operational snapshot consumes these;
         # no selector is rerun for status rendering.
         @routing_observations = {}
+        # Per-tick repeated-failure evidence for rows whose owner command hit
+        # the attempt failure limit, so the operator-owned disposition names
+        # the failing attempt and exit status instead of a generic hold.
+        @failure_limit_observations = {}
         # A successful full scan replaces this snapshot. Changed-task ticks
         # inherit it so a freshly completed task cannot reuse its slot before
         # older capacity-deferred rows are reconsidered by the next full scan.
@@ -342,6 +347,7 @@ module Hive
           return
         end
         @routing_observations.clear
+        @failure_limit_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
 
@@ -2642,6 +2648,7 @@ module Hive
             row.marker.to_s == "none" && Policy.advance?(row.action)
         )
         remember_routing_observation(row, dispatch_result)
+        remember_failure_limit_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
         if failed_automatic_advance_replay?(row, trigger, dispatch_result)
           return record_markerless_stall(row, attempt: dispatch_result.attempt)
@@ -2725,6 +2732,7 @@ module Hive
           when "capacity", "capacity_saturated" then :attempt_capacity
           when "patrol_retry_delay" then :attempt_patrol_retry
           when "transient_retry", "transition_retry" then :attempt_transient_retry
+          when Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON then :attempt_failure_limit
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           else :attempt_deferred
@@ -2755,6 +2763,8 @@ module Hive
           [ "scheduler", "this Patrol task is waiting for its retry delay" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
+        when :attempt_failure_limit
+          failure_limit_disposition(row)
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
@@ -2795,6 +2805,29 @@ module Hive
         observe_operational_disposition(
           row, decision: outcome, owner: owner, reason: reason, **details
         )
+      end
+
+      def failure_limit_disposition(row)
+        evidence = @failure_limit_observations.delete([ row.project.to_s, row.slug.to_s ]) || {}
+        [
+          "operator",
+          "#{row.suggested_command || 'the owner command'} failed " \
+          "#{Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT} times in a row with " \
+          "exit #{evidence['exit_status'] || 'unknown'} on unchanged task input " \
+          "(latest attempt #{evidence['attempt_id'] || 'unknown'}); automatic " \
+          "redispatch is stopped until the plan, the plan review, or the Hive " \
+          "build changes, or an operator reruns it"
+        ]
+      end
+
+      def remember_failure_limit_observation(row, result)
+        return unless result.is_a?(Hive::Attempts::DispatchResult) &&
+                      result.reason == Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+
+        @failure_limit_observations[[ row.project.to_s, row.slug.to_s ]] = {
+          "attempt_id" => result.attempt&.attempt_id,
+          "exit_status" => result.receipt&.fetch("exit_status", nil)
+        }
       end
 
       def remember_routing_observation(row, result)
@@ -4952,6 +4985,7 @@ module Hive
           when :deferred
             case result.reason
             when "transient_retry", "transition_retry" then :attempt_transient_retry
+            when Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON then :attempt_failure_limit
             when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end

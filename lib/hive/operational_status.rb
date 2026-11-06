@@ -608,7 +608,7 @@ module Hive
         [ "running", "agent" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
-      when "semantic_terminal_error", Hive::ModelUnsupported::REASON
+      when "semantic_terminal_error", "attempt_failure_limit", Hive::ModelUnsupported::REASON
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         [ "unknown", "hive" ]

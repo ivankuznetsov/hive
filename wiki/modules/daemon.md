@@ -724,6 +724,19 @@ identity. A transient provider limit retains its attempt and `retry_at`; stable
 unsupported capability does not consume retries. The daemon does not derive
 coverage or clearance from logs.
 
+`plan-review-run` is a same-stage owner command, so the advance path's
+failed-terminal replay never applied and, before 2026-11-06, every tick
+admitted a fresh durable attempt (hivedev C5: 393 identical exit-4 attempts in
+7.5 h). `Hive::Attempts::CommandProgress::FAILURE_LADDER_COMMANDS` now opts it
+into the same `RetryPolicy` ladder transitions use, and
+`Attempts::Dispatcher#repeated_failure_limit` stops automatic admission after
+three identical `failed` exit statuses on one generation, derived from attempt
+rows (`recent_terminal_attempt_ids`) rather than a separate counter. The
+plan-review-run progress token includes the Hive runtime digest, so a
+deployment starts a fresh series. The daemon maps the deferral to
+`attempt_failure_limit` (log event and operator-owned `needs_repair`
+disposition).
+
 ## Trust boundary
 
 The daemon adds NO new forward-advance approval logic. Workflow-verb

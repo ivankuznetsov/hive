@@ -4,6 +4,7 @@ require "fileutils"
 require "json"
 require "yaml"
 require "open3"
+require "securerandom"
 require "lib/hive_config"
 require "lib/agent_limit"
 require "lib/pricing"
@@ -36,11 +37,14 @@ module HiveBench
     RESUME_EXECUTE_SH = File.expand_path("hive_resume_execute.sh", __dir__)
     OPENCODE_BENCH_RUNTIME = File.expand_path("opencode_bench_runtime.rb", __dir__)
     OPENCODE_BENCH_LAUNCHER = File.expand_path("opencode_bench_launcher.sh", __dir__)
+    OPENCODE_AUTH = File.expand_path("~/.local/share/opencode/auth.json")
     PI_BENCH_LAUNCHER = File.expand_path("pi_bench_launcher.sh", __dir__)
     PI_TOOL_STREAM = File.expand_path("pi_tool_stream.ts", __dir__)
     PI_OPENROUTER_MODELS = File.expand_path("../profiles/pi_openrouter_models.json", __dir__)
     CLAUDE_DIR = File.expand_path("~/.claude")
-    HOME = "/home/asterio"
+    # Match host paths so mounted Claude plugin installPaths remain valid for
+    # any operator; the container home itself is disposable tmpfs.
+    HOME = Dir.home.freeze
     HIVE_RUNTIME_CONTAINER_ROOT = "/opt/hb/hive-current"
     HIVE_GEM_HOME_CONTAINER_ROOT = "/usr/local/bundle"
     HIVE_CONTROL_GEM_HOME = "/opt/hb/control-bundle"
@@ -55,7 +59,8 @@ module HiveBench
     )
     GROK_AUTH = File.join(GROK_AUTH_DIR, "auth.json")
     GROK_AUTH_CONTAINER_DIR = "#{HOME}/.grok-auth".freeze
-    HIVE_HOME = "/work/.hb/hive-home".freeze
+    GROK_AUTH_SOURCE_CONTAINER_DIR = "#{HOME}/.grok-auth-source".freeze
+    HIVE_HOME = "/opt/hb/hive-home".freeze
     GENERATION_IDENTITY = "generation-identity.json"
     RESUMABLE_EXECUTE_FAILURE = %r{\Astream\ disconnected\ before\ completion:\ (?:
       failed\ to\ lookup\ address\ information:.*|
@@ -110,7 +115,7 @@ module HiveBench
       else
         refresh_resume_attempt_timers(work, candidate)
       end
-      seed_project_enrollment(work)
+      seed_project_enrollment(work, resume: !!(resume_review || resume_marker_id))
 
       started = @clock.call
       stdout = run_container(
@@ -295,9 +300,24 @@ module HiveBench
     # Hive validates stage actions against its global project registry. Keep a
     # one-project registry inside each cell so host enrollment cannot influence
     # task resolution or durable attempts in the benchmark container.
-    def seed_project_enrollment(work)
-      home = File.join(work, ".hb", "hive-home")
-      FileUtils.mkdir_p(home)
+    def seed_project_enrollment(work, resume: false)
+      home = controller_home(work)
+      raise "benchmark controller home must not be a symlink" if File.symlink?(home)
+      usage_export = File.join(File.dirname(File.expand_path(work)), "usage-export")
+      raise "benchmark usage export must not be a symlink" if File.symlink?(usage_export)
+      if resume
+        raise "benchmark resume requires its original controller home" unless File.directory?(home)
+
+        FileUtils.mkdir_p(usage_export)
+        return
+      end
+
+      # Preserve old receipts when a fresh generation replaces its target. A
+      # resumed cell instead retains the same database and installation identity.
+      File.rename(home, "#{home}.previous-#{SecureRandom.uuid}") if File.exist?(home)
+      File.rename(usage_export, "#{usage_export}.previous-#{SecureRandom.uuid}") if File.exist?(usage_export)
+      FileUtils.mkdir_p(usage_export)
+      FileUtils.mkdir_p(home, mode: 0o700)
       File.write(
         File.join(home, "config.yml"),
         YAML.dump(
@@ -309,6 +329,10 @@ module HiveBench
           ]
         )
       )
+    end
+
+    def controller_home(work)
+      File.join(File.dirname(File.expand_path(work)), "controller-home")
     end
 
     def generation_identity_matches?(work, expected)
@@ -381,6 +405,7 @@ module HiveBench
                           else
                             ""
                           end
+      usage_export = File.expand_path(File.join(out_dir, "usage-export"))
       cmd = ["docker", "run", "--rm",
              "-e", "HOME=#{HOME}",
              "-e", "HIVE_HOME=#{HIVE_HOME}",
@@ -405,6 +430,10 @@ module HiveBench
              "-v", "#{STAGES_SH}:/hive_stages.sh:ro",
              "-v", "#{RESUME_EXECUTE_SH}:/hive_resume_execute.sh:ro",
              "-v", "#{work}:/work",
+             "-v", "#{controller_home(work)}:#{HIVE_HOME}",
+             "-v", "#{usage_export}:/opt/hb/usage-export",
+             "-v", "#{File.join(__dir__, 'token_report.rb')}:/opt/hb/token_report.rb:ro",
+             "-v", "#{File.join(__dir__, 'pricing.rb')}:/opt/hb/lib/pricing.rb:ro",
              *(sealed_agent_runtime? ? ["-v", "#{CONTROLLER_GIT}:/opt/hb/controller-git:ro"] : []),
              *hive_runtime_args(hive_runtime),
              *opencode_runtime_args(candidate),
@@ -555,7 +584,7 @@ module HiveBench
         raise "sealed benchmark runtime requires an exact 40-character Hive build SHA"
       end
 
-      unsupported = agent_ids(candidate) - %w[pi opencode]
+      unsupported = agent_ids(candidate) - %w[pi opencode grok]
       unless unsupported.empty?
         raise "sealed benchmark runtime does not yet support candidate agent(s): #{unsupported.join(", ")}"
       end
@@ -677,21 +706,37 @@ module HiveBench
       if uses?(candidate, "pi")
         # Same for pi: the compound-engineering skill tree from pi's plugin
         # checkout, linked into ~/.pi/agent/skills by hive_stages.sh.
-        pi_skills = File.expand_path("~/.pi/agent/git/github.com/EveryInc/compound-engineering-plugin/skills")
-        raise "pi CE skills missing or not a directory: #{pi_skills}" unless File.directory?(pi_skills)
-
-        mounts += ["-v", "#{pi_skills}:/opt/hb/pi-ce-skills:ro",
-                   "-v", "#{PI_BENCH_LAUNCHER}:/opt/hb/pi-bench-launcher:ro",
+        catalog = PI_OPENROUTER_MODELS if HiveConfig.openrouter?(candidate, agent: "pi")
+        if candidate.pi_catalog
+          catalog = File.expand_path(File.join(out_dir, "pi-models.json"))
+          File.write(catalog, JSON.pretty_generate(candidate.pi_catalog))
+        end
+        mounts += ["-v", "#{PI_BENCH_LAUNCHER}:/opt/hb/pi-bench-launcher:ro",
                    "-v", "#{PI_TOOL_STREAM}:/opt/hb/pi-tool-stream.ts:ro",
-                   "-v", "#{PI_OPENROUTER_MODELS}:/opt/hb/pi-openrouter-models.json:ro",
+                   *(catalog ? ["-v", "#{catalog}:/opt/hb/pi-openrouter-models.json:ro"] : []),
+                   *(candidate.pi_catalog ? ["-e", "HB_PI_CUSTOM_CATALOG=1"] : []),
                    "-e", "HIVE_PI_BIN=/opt/hb/pi-bench-launcher"]
       end
       if uses?(candidate, "grok")
-        # Keep sessions/config/leader state ephemeral per cell. Only the
-        # separately authenticated benchmark credential is shared, so Grok can
-        # atomically rotate auth.json under one cross-container lock domain.
+        # Keep the host login immutable. Grok refreshes its adjacent lock and
+        # may rewrite auth.json; both must land in this cell's disposable
+        # tmpfs, never in the shared host credential directory.
         mounts += ["--tmpfs", "#{HOME}/.grok:exec,mode=1777",
-                   "-v", "#{prepare_grok_auth_dir}:#{GROK_AUTH_CONTAINER_DIR}:rw"]
+                   "--tmpfs", "#{GROK_AUTH_CONTAINER_DIR}:exec,mode=1777",
+                   "--tmpfs", "#{GROK_AUTH_SOURCE_CONTAINER_DIR}:exec,mode=1777",
+                   "-v", "#{File.join(prepare_grok_auth_dir, "auth.json")}:#{GROK_AUTH_SOURCE_CONTAINER_DIR}/auth.json:ro"]
+      end
+      if uses?(candidate, "opencode")
+        # OpenCode Go and other native OpenCode subscriptions authenticate via
+        # the operator's XDG auth store, not OPENCODE_API_KEY. Keep the store
+        # read-only and the parent disposable so parallel cells cannot share
+        # sessions or mutate host configuration.
+        raise "OpenCode auth missing or not a file: #{OPENCODE_AUTH}" unless File.file?(OPENCODE_AUTH)
+
+        mounts += ["--tmpfs", "#{HOME}/.local:exec,mode=1777",
+                   "--tmpfs", "#{HOME}/.local/share:exec,mode=1777",
+                   "--tmpfs", "#{HOME}/.local/share/opencode:exec,mode=1777",
+                   "-v", "#{OPENCODE_AUTH}:#{HOME}/.local/share/opencode/auth.json:ro"]
       end
       mounts
     end
@@ -705,7 +750,6 @@ module HiveBench
 
       File.chmod(0o700, GROK_AUTH_DIR)
       validate_grok_auth!
-      validate_grok_auth_lock!
       GROK_AUTH_DIR
     end
 
@@ -764,11 +808,14 @@ module HiveBench
         args += ["-e", "HTTPS_PROXY=#{proxy}", "-e", "HTTP_PROXY=#{proxy}",
                  "-e", "ALL_PROXY=#{proxy}", "-e", "NODE_USE_ENV_PROXY=1"]
       end
-      if uses?(candidate, "pi") || uses?(candidate, "opencode")
-        args += ENV["OPENROUTER_API_KEY"] ? ["-e", "OPENROUTER_API_KEY"] : []
+      HiveConfig.credentials(candidate).each do |name|
+        raise "missing benchmark credential environment variable #{name}" if ENV[name].to_s.empty?
+
+        args += ["-e", name]
       end
       if uses?(candidate, "grok")
-        args += ["-e", "GROK_AUTH_PATH=#{GROK_AUTH_CONTAINER_DIR}/auth.json"]
+        args += ["-e", "GROK_AUTH_PATH=#{GROK_AUTH_CONTAINER_DIR}/auth.json",
+                 "-e", "GROK_AUTH_SOURCE_PATH=#{GROK_AUTH_SOURCE_CONTAINER_DIR}/auth.json"]
       end
       args
     end
@@ -795,11 +842,7 @@ module HiveBench
     end
 
     def agent_ids(candidate)
-      stage_agents = [candidate.plan, candidate.execute, candidate.review]
-      reviewer_agents = Array(candidate.reviewers).filter_map do |reviewer|
-        reviewer.is_a?(Hash) ? (reviewer["agent"] || reviewer[:agent]) : nil
-      end
-      (stage_agents + reviewer_agents).compact.map(&:to_s).uniq
+      Candidates.agent_ids(candidate)
     end
 
     # Candidate model and effort live in Hive's stage routes, not the operator's
@@ -824,7 +867,18 @@ module HiveBench
       timeout_fallback = promote_execute_patch_after_timeout(work, stdout)
       diff_path = File.join(work, "candidate.patch")
       diff = File.file?(diff_path) ? File.read(diff_path) : ""
-      tel = telemetry(work).merge("wall_clock_sec" => wall)
+      status, reason = classify(stdout, work, diff)
+      begin
+        tel = telemetry(work).merge("wall_clock_sec" => wall)
+      rescue TokenReport::UsageUnavailable => error
+        # Missing accounting must still reject paid/executed cells, but must
+        # not hide the startup failure that prevented a session from starting.
+        # Only copy typed stage markers, never arbitrary potentially-secret stderr.
+        stages = stdout.to_s.lines.grep(/^HB_STAGE [a-z-]+ rc=\d+$/).map(&:strip).join(", ")
+        raise TokenReport::UsageUnavailable,
+              "#{status}: #{reason || 'generation completed'}; #{stages}; #{error.message}; " \
+              "stage stderr: #{File.join(work, '.hb', 'stage.err')}"
+      end
       if recovered
         tel["recovered_artifact"] = true
         tel["artifact_provenance"] = recovered
@@ -847,7 +901,6 @@ module HiveBench
         tel["answer_key_access_suspect"] = hit
         warn "hive-bench: ANSWER-KEY ACCESS SUSPECT — #{entry["task_id"]}: #{hit}"
       end
-      status, reason = classify(stdout, work, diff)
       # Failed runs can leave a zero-byte capture that `generate` would mistake
       # for a paid artifact sentinel. Preserve real diffs and terminal empties.
       FileUtils.rm_f(diff_path) if diff.empty? && !%w[generated empty_diff].include?(status)
@@ -977,55 +1030,26 @@ module HiveBench
     # (.hive-state/logs/<slug>/<stage>-*.log, lines prefixed `[stream] <ts> `).
     def telemetry(work)
       logs = Dir.glob(File.join(work, ".hive-state", "logs", "**", "*.log"))
-      input = output = cached = cache_creation = 0
       cost = 0.0
       logs.each do |log|
         File.foreach(log) do |line|
           obj = stream_json(line) or next
-          message = obj["message"]
-          u = (message["usage"] if message.is_a?(Hash)) || obj["usage"]
-          if u.is_a?(Hash)
-            # Pi emits interim message_update usage and repeats each finalized
-            # response on turn_end. Each assistant message_end is one billable
-            # response, so a multi-turn run can contribute several of them.
-            if u.key?("cacheRead") || u.key?("input")
-              next unless obj["type"] == "message_end" && message.is_a?(Hash) && message["role"] == "assistant"
-            end
-            # Two stream schemas: claude's snake_case *_tokens and pi's camelCase
-            # input/output/cacheRead/cacheWrite — without the aliases, open-model
-            # cells recorded zero tokens and no cost.
-            input += (u["input_tokens"] || u["input"]).to_i
-            output += (u["output_tokens"] || u["output"]).to_i
-            cached += (u["cache_read_input_tokens"] || u["cacheRead"]).to_i
-            # Cache WRITES are billed too (claude: ~1.25x input rate) — dropping
-            # them systematically understated the API-equivalent cost.
-            cache_creation += (u["cache_creation_input_tokens"] || u["cacheWrite"]).to_i
-          end
           cost += obj["total_cost_usd"].to_f if obj["type"] == "result"
         end
       end
-      telemetry = { "input_tokens" => input, "output_tokens" => output,
-                    "cached_tokens" => cached,
-                    "cache_creation_tokens" => cache_creation,
-                    "cost_usd" => cost.round(6) }.reject { |_, v| v.zero? }
-      return telemetry if telemetry.keys.any? { |key| key.end_with?("_tokens") }
-
-      # OpenCode events are intentionally redacted from Hive's stage logs. Hive
-      # still records their normalized usage in its per-cell SQLite database, so
-      # use that canonical store when no stream-token evidence exists.
-      database_usage = TokenReport.scan_usage_db(work)
-      return telemetry if database_usage.empty?
-
+      # One accounting path handles mixed harnesses and excludes cumulative
+      # result usage. OpenCode controller receipts supplement stream evidence.
       totals = Hash.new(0)
-      database_usage.each_value do |usage|
+      TokenReport.scan_cell(work).each_value do |usage|
         TokenReport::BUCKETS.each { |bucket| totals[bucket] += usage[bucket] }
       end
-      telemetry.merge(
+      {
         "input_tokens" => totals["input"],
         "output_tokens" => totals["output"],
         "cached_tokens" => totals["cache_read"],
-        "cache_creation_tokens" => totals["cache_write"]
-      )
+        "cache_creation_tokens" => totals["cache_write"],
+        "cost_usd" => cost.round(6)
+      }.reject { |_, value| value.zero? }
     end
 
     # Extract the JSON object from a `[stream] <ts> {json}` log line (or a bare

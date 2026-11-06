@@ -15,6 +15,7 @@ require "hive/events"
 require "hive/lock"
 require "hive/mcp"
 require "hive/permission_scope"
+require "hive/project_command_environment"
 require "hive/secret_patterns"
 
 module Hive
@@ -31,13 +32,10 @@ module Hive
       :termination, :output_completed
     )
 
-    # Hive runs under its own bundle, while native agent launches inherit the
-    # operator's environment. Unset Hive's Ruby toolchain so a child `ruby`,
-    # `gem`, or `bundle` resolves against the task repository instead.
-    SCRUBBED_TOOLCHAIN_ENV_KEYS = %w[
-      RUBYOPT RUBYLIB GEM_HOME GEM_PATH
-      BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_VERSION BUNDLER_SETUP
-    ].freeze
+    # Hive runs under its own load path, while native agent launches inherit
+    # the operator's environment. Unset Hive's Ruby toolchain so a child
+    # `ruby`, `gem`, or `bundle` resolves against the task repository instead.
+    SCRUBBED_TOOLCHAIN_ENV_KEYS = Hive::ProjectCommandEnvironment::TOOLCHAIN_KEYS
 
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so

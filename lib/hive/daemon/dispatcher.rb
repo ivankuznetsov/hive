@@ -4428,7 +4428,14 @@ module Hive
         return true unless @attempt_reconciler
 
         arguments = { now: now.utc }
-        arguments[:mutate_projects] = @project_ownership.owned_projects if @project_ownership
+        if @project_ownership
+          arguments[:mutate_projects] = @project_ownership.owned_projects
+          # A dispatch-disabled project is never owned, so its stranded
+          # attempts are settled under a transient reconciliation-only guard.
+          if @project_ownership.respond_to?(:with_maintenance_ownership)
+            arguments[:maintain_projects] = @project_ownership.method(:with_maintenance_ownership)
+          end
+        end
         @attempt_snapshot = @attempt_reconciler.reconcile(**arguments)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot

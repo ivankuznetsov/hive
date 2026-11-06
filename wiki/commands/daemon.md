@@ -113,7 +113,10 @@ Delegated-custody rows, live or unverifiable roots, unsettled or unknown
 attempts, missing session ids and an unreadable process table keep the row
 active. The daemon runs it (500 rows per pass) next to the reservation release
 and logs `owned_processes_reconciled`; `hive daemon quiesce` runs it at the
-same two points. This does not relax the capability itself: with no delegated
+same two points. An attempt row in a dispatch-disabled project only settles
+because the daemon reconciles such projects under a transient maintenance guard
+(see [[modules/daemon]]); before that, a paused project's dead wrapper kept its
+attempt `running` and therefore its owned-process row active. This does not relax the capability itself: with no delegated
 custody, any live attempt still refuses with `agent_attempt_root`, and any live
 direct CLI (for example `hive babysit` or `hive watch`) with
 `unproven_launch_surface`.

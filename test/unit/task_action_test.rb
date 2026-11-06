@@ -2279,6 +2279,23 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # hivedev F4: a reviewer whose output the parser keeps refusing needs its
+  # contract repaired; the row must not look like a runnable review.
+  def test_plan_review_blocked_on_rejected_reviewer_output_needs_repair
+    task = fake_task(stage_name: "plan", stage_index: 3)
+
+    action = Hive::TaskAction.for(
+      task, marker(:waiting),
+      plan_review: {
+        "state" => "blocked", "required_action" => "fix the output, then retry",
+        "blockers" => [ "legacy", { "owner" => "operator", "reason" => "reviewer_output_rejected" } ]
+      }
+    )
+
+    assert_equal "plan_review_unsupported", action.key
+    assert_nil action.command
+  end
+
   def test_plan_review_unattempted_unsupported_route_remains_operator_owned
     task = fake_task(stage_name: "plan", stage_index: 3)
 

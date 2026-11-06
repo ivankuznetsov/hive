@@ -163,7 +163,20 @@ valid without weakening the stricter machine-owned coverage-name contract or
 discarding otherwise valid findings and coverage. Historical parser, model and
 checkpoint repair resets have been removed. Current invalid results retain
 their normal diagnostics; offline conversion may choose to
-rerun review. Initial legs require empty `residual_evidence`; only disposition
+rerun review. A coverage-entry rejection names the entry index and the
+offending key or value, and the request-only keys Hive puts on its own coverage
+rows (`fingerprint`, `decision_id`) are dropped when a reviewer echoes them.
+When the result parser refuses an attempt's output, the raw bytes are kept
+beside the attempt as `attempts/<attempt>/rejected-output.md` (redacted, first
+64 KiB, with the parse error) and referenced from the projection artifacts as
+`<role>_rejected_output_<attempt>`. Three consecutive parser rejections of one
+role with the same diagnostic (`Orchestrator::REJECTED_OUTPUT_LIMIT`, equal to
+the owner-command `REPEATED_FAILURE_LIMIT`) stop automatic attempts: the review
+blocks with an operator-owned `reviewer_output_rejected` blocker whose
+diagnostic names the parse error, latest attempt, and rejected-output path.
+Automatic series resets do not break the count; an operator `retry` or
+`request-review` reset does. `TaskAction` classifies that block as
+`plan_review_unsupported` (needs repair, no automatic command). Initial legs require empty `residual_evidence`; only disposition
 verification may emit verified fingerprint attestations there.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
@@ -481,8 +494,18 @@ decision, which made chained decisions fail as stale. Each successful action's
 JSON also returns the next `observation_digest`, so several decisions can be
 chained without re-reading.
 
+`show` also returns `current_task_generation` (the live task's generation,
+which differs from `task_generation` when the review is stale), the review's
+`blockers`, and `next_action` (`restart` for a stale review, else null).
+
 Actions are `approve-finding`, `answer-finding`, `waive-coverage`,
-`downgrade-level`, `raise-level`, `retry`, and `request-review`. Every action is
+`downgrade-level`, `raise-level`, `retry`, `request-review`, and `restart`.
+`restart` is the only action a stale review accepts (and it is refused on a
+current one): it records the operator's decision on the stale review with the
+identities `show` printed, then the resumed orchestrator starts a linked review
+(`prior_review_id`) for the current generation. A restart always supersedes,
+even when only policy configuration drift made the review stale. Other actions
+on a stale review fail with a message naming `restart`. Every action is
 observation-bound and idempotent: an identical replay is a no-op, a stale
 observation exits temporary-failure, and a conflicting target decision is
 rejected. Both CLI and Web recheck the canonical plan, task generation, policy
@@ -555,6 +578,13 @@ review without mutation. Its Run action dispatches the projected
 mandatory failed or unsupported coverage row exposes an exact waiver form even
 when that row began as configured optional coverage. While a plan review
 applies, the generic force-approve control is hidden.
+
+Operational status classifies a `plan_reviewing`/`plan_review_retry` row whose
+review is `retry_scheduled` more than an hour past its `retry_at`
+(`OperationalStatus::PLAN_REVIEW_RETRY_OVERDUE_SEC`) as `needs_repair` owned by
+`hive`, with reason `plan_review_retry_overdue`, instead of an indefinite
+scheduler wait. A row a dependency holds back keeps its scheduler wait and
+`dependency_wait` reason.
 
 ## Tests and proof
 

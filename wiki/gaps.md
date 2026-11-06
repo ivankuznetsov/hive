@@ -1987,3 +1987,13 @@ sibling `hive-attempt-*.scope` units, so which daemon-spawned path launched a
 provider inside the service cgroup is unknown. Existing installs keep the old
 `StartLimitBurst=3` unit until `hive daemon install --force` rewrites it.
 
+
+## Plan review: stale reviews held by dependencies (2026-11-06)
+
+A stale plan review on a dependency-blocked task (hivedev C11) is still not
+superseded automatically: the daemon gates `plan-review-run` on unmet
+dependencies, and the overdue-retry report deliberately defers to the
+dependency wait. The operator escape is `hive plan-review TARGET restart`.
+Whether a stale review should be superseded (a paid review) before its
+dependencies settle is undecided. Reviews recorded under the legacy raw
+`meta.yml` generation formula still stale on any `depends_on` edit.

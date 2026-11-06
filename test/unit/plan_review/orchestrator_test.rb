@@ -2064,6 +2064,109 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # hivedev F4: a reviewer whose output the parser refuses the same way every
+  # time used to retry forever (mandatory initial legs recover their transient
+  # series automatically) with nothing kept to diagnose it.
+  def test_identical_parser_rejections_stop_retrying_and_name_the_kept_output
+    with_task(mandatory_plan) do |task, cfg|
+      now = Time.utc(2026, 8, 12, 12)
+      clock = -> { now }
+      diagnostic = "invalid plan review coverage entry 0: unknown keys notes"
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          rejected_result(diagnostic, "{\"coverage\":[{\"notes\":\"x\"}]}")
+        else
+          successful_result(request)
+        end
+      end
+
+      states = 3.times.map do
+        now += 3600
+        orchestrator(task, cfg, adapter:, clock:).advance!.record.state
+      end
+
+      assert_equal %w[retry_scheduled retry_scheduled blocked], states
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      blocker = record["blockers"].first
+      assert_equal "reviewer_output_rejected", blocker.fetch("reason")
+      assert_equal "operator", blocker.fetch("owner")
+      assert_includes blocker.fetch("diagnostic"), "primary output was rejected 3 times in a row: #{diagnostic}"
+      latest = record["routes"].reverse.find { |route| route["role"] == "primary" }.fetch("attempt_id")
+      reference = record["artifacts"].fetch("primary_rejected_output_#{latest}")
+      assert_includes blocker.fetch("diagnostic"), "raw output: plan-review/#{reference.fetch('path')}"
+      assert_includes File.read(File.join(task.folder, "plan-review", reference.fetch("path"))), "notes"
+      assert_match(/repair the primary reviewer output contract/, record.required_action)
+
+      now += 86_400
+      replay = orchestrator(task, cfg, adapter:, clock:).advance!.record
+      assert_equal 3, adapter.calls.count { |request| request.kind == "primary" }, "no further paid attempt"
+      assert_equal record.version, replay.version, "an unchanged block is not republished"
+
+      # An operator retry is a plain reset: it starts a fresh rejection run.
+      service = Hive::PlanReview::DecisionService.new(
+        task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+        committer: ->(*) { }, freshness_checker: ->(*) { }
+      )
+      service.apply(action: "retry", review_id: record.review_id, task_generation: record.task_generation,
+                    policy_fingerprint: record.policy_fingerprint,
+                    expected_artifact_digest: Hive::PlanReview::Projection.new(record).observation_digest,
+                    origin: "cli", operator: "test", authorized: true)
+      resumed = orchestrator(task, cfg, adapter:, clock:).advance!.record
+      assert_equal 4, adapter.calls.count { |request| request.kind == "primary" }
+      assert_equal "retry_scheduled", resumed.state
+    end
+  end
+
+  def test_different_parser_rejections_do_not_trip_the_identical_rejection_limit
+    with_task(mandatory_plan) do |task, cfg|
+      now = Time.utc(2026, 8, 12, 12)
+      count = 0
+      adapter = FakeAdapter.new do |request|
+        next successful_result(request) unless request.kind == "primary"
+
+        count += 1
+        rejected_result("invalid plan review coverage entry #{count}: unknown keys notes", nil)
+      end
+
+      3.times do
+        now += 3600
+        orchestrator(task, cfg, adapter:, clock: -> { now }).advance!
+      end
+
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      assert_equal 3, count
+      refute_equal "blocked", record.state
+      refute record["artifacts"].keys.any? { |key| key.include?("rejected_output") }
+    end
+  end
+
+  # An operator restart of a review that went stale only through policy
+  # configuration drift must still supersede it; resuming the same record
+  # would leave it stale and every action rejected.
+  def test_restart_decision_supersedes_the_review_even_when_its_identity_still_matches
+    with_task(standard_plan) do |task, cfg|
+      first = orchestrator(task, cfg, adapter: success_adapter).advance!.record
+      service = Hive::PlanReview::DecisionService.new(
+        task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+        committer: ->(*) { }, freshness_reader: ->(*) { { "status" => "stale", "reason" => "policy drift" } }
+      )
+      result = service.apply(
+        action: "restart", review_id: first.review_id, task_generation: first.task_generation,
+        policy_fingerprint: first.policy_fingerprint,
+        expected_artifact_digest: Hive::PlanReview::Projection.new(first).observation_digest,
+        origin: "cli", operator: "test", authorized: true
+      )
+      assert_equal "restart-#{first.review_id}", result.decision.target_fingerprint
+
+      second = orchestrator(task, cfg, adapter: success_adapter).advance!.record
+
+      refute_equal first.review_id, second.review_id
+      assert_equal first.review_id, second.prior_review_id
+      assert_empty second["decisions"]
+      assert_equal "cleared", second.state
+    end
+  end
+
   private
 
   def with_runner_custody(runner, task, observation: nil)
@@ -2124,6 +2227,13 @@ class PlanReviewOrchestratorTest < Minitest::Test
       end
       successful_result(request, findings:)
     end
+  end
+
+  def rejected_result(diagnostic, bytes)
+    Hive::PlanReview::Adapters::Base::Result.new(
+      outcome: "retryable_failure", diagnostic:, rejected_output: bytes,
+      route_receipt: { "diagnostic_source" => "parser" }
+    )
   end
 
   def successful_result(request, findings: [])

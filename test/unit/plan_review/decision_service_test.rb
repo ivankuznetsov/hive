@@ -390,9 +390,27 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_invalid_review_rejects_decisions_and_restart_with_its_reason
+    invalid = ->(*) { { "status" => "invalid", "reason" => "plan.md is missing" } }
+    with_service(finding: finding("gated_auto"), freshness_reader: invalid) do |service, _store, record|
+      target = record["findings"].first.fetch("fingerprint")
+
+      stale = assert_raises(Hive::PlanReview::StaleDecision) do
+        service.apply(**decision_arguments(record, action: "approve_finding", target:))
+      end
+      assert_equal "plan review changed; refresh the current observation", stale.message
+      restart = assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(record, action: "restart"))
+      end
+      assert_equal "restart applies only to a stale plan review; this review is invalid (plan.md is missing); " \
+                   "use retry or request-review", restart.message
+    end
+  end
+
   private
 
-  def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false)
+  def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false,
+                   freshness_reader: nil)
     with_task do |task|
       store = Hive::PlanReview::Store.new(task_folder: task.folder)
       manifest = manifest_record(level:)
@@ -401,9 +419,13 @@ class PlanReviewDecisionServiceTest < Minitest::Test
       store.publish_current!(record, expected_version: nil)
       options = {
         task:, clock: -> { Time.utc(2026, 8, 12, 12) },
-        commit_locker: ->(&block) { block.call }, committer: ->(*) { },
-        freshness_checker: ->(_current) { }
+        commit_locker: ->(&block) { block.call }, committer: ->(*) { }
       }
+      if freshness_reader
+        options[:freshness_reader] = freshness_reader
+      else
+        options[:freshness_checker] = ->(_current) { }
+      end
       options[:task_locker] = ->(&block) { block.call } unless real_task_lock
       service = Hive::PlanReview::DecisionService.new(**options)
       yield service, store, store.current

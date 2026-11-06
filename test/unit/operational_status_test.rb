@@ -1647,6 +1647,32 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  # hivedev C11: a retry_scheduled review sat 3+ days past its retry_at as
+  # an ordinary scheduler wait.
+  def test_overdue_plan_review_retry_is_reported_as_repair_unless_a_dependency_holds_it
+    overdue = { "state" => "retry_scheduled", "retry_at" => "2026-07-20T08:59:00Z",
+                "blocker_owner" => "provider" }
+    row = task(action: "plan_review_retry", slug: "overdue", stage: "3-plan", plan_review: overdue)
+
+    assert_equal [ "needs_repair", "hive" ], classify_row(row, daemon_enabled: true)
+    reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal "plan_review_retry_overdue", reasons.first.fetch("code")
+    assert_includes reasons.first.fetch("message"), "due at 2026-07-20T08:59:00Z"
+    assert_includes reasons.first.fetch("message"), "hive plan-review-run overdue"
+
+    recent = row.merge("plan_review" => overdue.merge("retry_at" => "2026-07-20T09:30:00Z"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(recent, daemon_enabled: true)
+    held = row.merge("blocked" => true)
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(held, daemon_enabled: true)
+    reviewing = row.merge("plan_review" => overdue.merge("state" => "reviewing"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(reviewing, daemon_enabled: true)
+    malformed = row.merge("plan_review" => overdue.merge("retry_at" => "soon"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(malformed, daemon_enabled: true)
+  end
+
   def test_execution_repair_stays_operator_owned_with_daemon_enabled
     row = task(action: "recover_execute", slug: "execute-repair", stage: "4-execute")
 

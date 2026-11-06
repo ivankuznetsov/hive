@@ -64,13 +64,16 @@ module Hive
           end
         end
 
+        # `rejected_output` carries the raw reviewer bytes the result parser
+        # refused. It is evidence for the operator, persisted beside the
+        # attempt, and deliberately not part of the parsed result (#to_h).
         Result = Data.define(
           :outcome, :findings, :coverage, :selected_lenses, :residual_evidence,
-          :diagnostic, :retry_at, :route_receipt, :decision_assessments
+          :diagnostic, :retry_at, :route_receipt, :decision_assessments, :rejected_output
         ) do
           def initialize(outcome:, findings: [], coverage: [], selected_lenses: [],
                          residual_evidence: [], diagnostic: nil, retry_at: nil,
-                         route_receipt: {}, decision_assessments: [])
+                         route_receipt: {}, decision_assessments: [], rejected_output: nil)
             normalized = outcome.to_s
             raise ArgumentError, "unknown plan review outcome #{outcome.inspect}" unless OUTCOMES.include?(normalized)
             super(
@@ -82,7 +85,8 @@ module Hive
               diagnostic: diagnostic&.to_s&.freeze,
               retry_at: retry_at&.to_s&.freeze,
               decision_assessments: Hive::PlanReview.deep_freeze(Array(decision_assessments).dup),
-              route_receipt: Hive::PlanReview.deep_freeze(route_receipt.to_h.dup)
+              route_receipt: Hive::PlanReview.deep_freeze(route_receipt.to_h.dup),
+              rejected_output: rejected_output&.b&.freeze
             )
             freeze
           end

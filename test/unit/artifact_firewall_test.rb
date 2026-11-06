@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/artifact_firewall"
+require "hive/task_journal"
 
 class ArtifactFirewallTest < Minitest::Test
   include HiveTestHelper
@@ -837,7 +838,222 @@ class ArtifactFirewallTest < Minitest::Test
     end
   end
 
+  def test_controller_journal_appends_during_custody_are_not_tampering
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      plan = File.join(dir, "plan.md")
+      File.write(plan, "trusted plan\n")
+      controller_journal_append(dir, "before")
+      baseline = File.binread(journal)
+      manifest = build_manifest(
+        dir, protected: { "task-journal.jsonl" => journal, "plan.md" => plan }
+      )
+      custody = Hive::ArtifactFirewall::AgentCustody.new(manifest)
+
+      custody.call do
+        controller_journal_append(dir, "session-started")
+        controller_journal_append(dir, "github-pr-merged")
+      end
+
+      assert_equal :clean, custody.report.status
+      assert custody.report.valid?
+      assert File.binread(journal).start_with?(baseline)
+      assert_equal %w[before session-started github-pr-merged], journal_ids(journal)
+    end
+  end
+
+  def test_restore_after_other_tamper_keeps_controller_journal_appends
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      plan = File.join(dir, "plan.md")
+      File.write(plan, "trusted plan\n")
+      controller_journal_append(dir, "before")
+      manifest = build_manifest(
+        dir, protected: { "task-journal.jsonl" => journal, "plan.md" => plan }
+      )
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+      controller_journal_append(dir, "during")
+      File.write(plan, "forged plan\n")
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal [ "plan.md" ], report.tampered_labels
+      assert_equal "trusted plan\n", File.read(plan)
+      assert_equal %w[before during], journal_ids(journal)
+    end
+  end
+
+  def test_agent_journal_truncation_and_rewrite_are_tampering_and_restore_keeps_controller_records
+    { truncate: ->(journal, _lines) { File.write(journal, "") },
+      rewrite: lambda { |journal, lines|
+        File.write(journal, lines.first.sub('"observed"', '"forged"') + lines[1..].join)
+      } }.each do |mode, mutate|
+      with_tmp_dir do |dir|
+        journal = File.join(dir, "task-journal.jsonl")
+        controller_journal_append(dir, "first")
+        controller_journal_append(dir, "second")
+        baseline = File.binread(journal)
+        manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+        snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+        mutate.call(journal, File.readlines(journal))
+        controller_journal_append(dir, "during-#{mode}")
+        report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+        assert_equal :tampered_restored, report.status, mode
+        assert_equal [ :protected_changed ], report.violations.map(&:kind)
+        assert_includes report.diagnostic, "append-only anchor"
+        assert File.binread(journal).start_with?(baseline), mode
+        assert_equal [ "first", "second", "during-#{mode}" ], journal_ids(journal)
+      end
+    end
+  end
+
+  def test_journal_growth_must_be_complete_new_journal_records_with_the_same_mode
+    first_line = nil
+    {
+      "partial line" => ->(journal) { File.open(journal, "ab") { |f| f.write('{"schema"') } },
+      "foreign line" => ->(journal) { File.open(journal, "ab") { |f| f.write("not json\n") } },
+      "non-journal json" => ->(journal) { File.open(journal, "ab") { |f| f.write("{\"event_id\":\"x\"}\n") } },
+      "array json" => ->(journal) { File.open(journal, "ab") { |f| f.write("[1]\n") } },
+      "blank event id" => lambda { |journal|
+        File.open(journal, "ab") { |f| f.write(first_line.sub(/"event_id":"[^"]+"/, '"event_id":""')) }
+      },
+      "replayed record" => ->(journal) { File.open(journal, "ab") { |f| f.write(first_line) } },
+      "invalid utf-8" => ->(journal) { File.open(journal, "ab") { |f| f.write("\xff\n".b) } },
+      "mode change" => ->(journal) { File.chmod(0o600, journal) },
+      "symlink" => lambda { |journal|
+        File.rename(journal, "#{journal}.real")
+        File.symlink("#{journal}.real", journal)
+      }
+    }.each do |name, mutate|
+      with_tmp_dir do |dir|
+        journal = File.join(dir, "task-journal.jsonl")
+        controller_journal_append(dir, "first")
+        File.chmod(0o644, journal)
+        first_line = File.read(journal)
+        manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+        snapshot = Hive::ArtifactFirewall.capture(manifest)
+
+        mutate.call(journal)
+        report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+        assert report.tampered?, name
+        assert_equal :tampered_restored, report.status, name
+        assert_equal first_line, File.read(journal), name
+        assert_equal 0o644, File.lstat(journal).mode & 0o777, name
+      end
+    end
+  end
+
+  def test_journal_created_during_custody_is_kept_only_when_controller_written
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      controller_journal_append(dir, "created")
+
+      assert_equal :clean, Hive::ArtifactFirewall.validate(manifest, snapshot).status
+    end
+
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.write(journal, "forged\n")
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal [ :protected_added ], report.violations.map(&:kind)
+      refute File.exist?(journal)
+    end
+
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.write(journal, "forged\n")
+      controller_journal_append(dir, "created")
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal %w[created], journal_ids(journal)
+      assert_equal 0o644, File.stat(journal).mode & 0o777
+    end
+  end
+
+  def test_journal_custody_without_an_openable_writer_lock_still_fails_closed
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      controller_journal_append(dir, "first")
+      lock = File.join(dir, Hive::TaskJournal::LOCK_BASENAME)
+      File.delete(lock)
+      Dir.mkdir(lock)
+      manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.open(journal, "ab") { |file| file.write("garbage\n") }
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :tampered_restored, report.status
+      assert_equal %w[first], journal_ids(journal)
+    end
+  end
+
+  def test_journal_that_was_not_a_regular_file_is_not_reconstructed
+    with_tmp_dir do |dir|
+      journal = File.join(dir, "task-journal.jsonl")
+      File.write(File.join(dir, "elsewhere"), "")
+      File.symlink(File.join(dir, "elsewhere"), journal)
+      manifest = build_manifest(dir, protected: { "task-journal.jsonl" => journal })
+      snapshot = Hive::ArtifactFirewall.capture(manifest)
+      File.unlink(journal)
+      File.write(journal, "replaced\n")
+
+      report = Hive::ArtifactFirewall.validate_and_restore(manifest, snapshot)
+
+      assert_equal :restore_failed, report.status
+      assert_includes report.restore_diagnostic, "cannot be reconstructed safely"
+    end
+  end
+
+  def test_append_only_log_names_match_the_task_journal_writer
+    assert_equal(
+      { Hive::TaskJournal::JOURNAL_BASENAME => Hive::TaskJournal::LOCK_BASENAME },
+      Hive::ProtectedFiles::APPEND_ONLY_LOGS
+    )
+    assert_equal Hive::TaskJournal::Envelope::SCHEMA,
+                 Hive::ProtectedFiles::APPEND_ONLY_RECORD_SCHEMA
+    assert_includes Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
+                    Hive::TaskJournal::JOURNAL_BASENAME
+  end
+
   private
+
+  # Appends exactly as Hive's controller and daemon writers do: through the
+  # work ledger, under the journal's own flock.
+  def controller_journal_append(dir, event_id)
+    record = Hive::TaskJournal::Envelope.authoritative(
+      {
+        event_id: event_id, event_type: "activity_recorded",
+        task: { "slug" => "journal-custody" }, stage: "7-artifacts",
+        attempt_id: "attempt-1", task_generation: 1, reason: "observed",
+        provenance: { "source" => "github" }
+      }
+    )
+    Hive::WorkLedger.journal(
+      path: File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME),
+      lock_path: File.join(dir, Hive::TaskJournal::LOCK_BASENAME),
+      record_id: ->(entry) { entry.fetch("event_id") }
+    ).append([ record ])
+  end
+
+  def journal_ids(journal)
+    File.readlines(journal).map { |line| JSON.parse(line).fetch("event_id") }
+  end
 
   def build_manifest(dir, protected: {}, outputs: {}, roots: [],
                      redactor: Hive::SecretPatterns.method(:redact),

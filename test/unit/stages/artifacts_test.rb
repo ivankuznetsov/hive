@@ -5,6 +5,7 @@ require "hive/markers"
 require "hive/stages/artifacts"
 require "hive/task"
 require "hive/task_action"
+require "hive/task_journal"
 
 class StagesArtifactsTest < Minitest::Test
   include HiveTestHelper
@@ -1010,6 +1011,56 @@ class StagesArtifactsTest < Minitest::Test
           assert_equal [], result.dig(:output, "claims")
           assert_equal "controller session start\ncontroller session finish\n",
                        File.binread(journal)
+        end
+      end
+    end
+  end
+
+  # Regression (hivedev C6/C14, 2026-11-06): the daemon's GitHub observer
+  # journaled the PR merge while the producer/reviewer ran, and custody
+  # failed the stage with "protected anchor 'task-journal.jsonl' changed".
+  def test_role_custody_admits_controller_journal_appends_and_rejects_agent_rewrites
+    %w[producer reviewer].each do |role|
+      [ :controller_append, :agent_truncation ].each do |writer|
+        Dir.mktmpdir("hive-artifacts-stage") do |dir|
+          task = make_artifacts_task(dir)
+          identity = { "implementation_head" => "a" * 40 }
+          resolver = Struct.new(:value) { def resolve = value }.new(identity)
+          journal = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+          artifacts_journal_append(task.folder, "before-#{role}")
+          baseline = File.binread(journal)
+          writable_root = File.join(task.folder, "outcome-evidence", "work", "g", "a")
+          append = method(:artifacts_journal_append)
+          spawn = lambda do |_task, agent_custody:, **|
+            agent_custody.call do
+              File.write(journal, "") if writer == :agent_truncation
+              append.call(task.folder, "github-pr-merged")
+              { status: :ok, final_message: "{}", final_message_truncated: false }
+            end
+          end
+          cfg = { "artifacts" => { "evidence" => { "producer" => { "agent" => "codex" } } } }
+          run = lambda do
+            Hive::Stages::Artifacts.run_role!(
+              role: role, task: task, cfg: cfg, prompt: role, identity: identity,
+              writable_root: (writable_root if role == "producer")
+            )
+          end
+
+          with_replaced_singleton_method(
+            Hive::Artifacts::OutcomeEvidence::Identity, :new, ->(**) { resolver }
+          ) do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, spawn) do
+              if writer == :controller_append
+                assert_equal({}, run.call.fetch(:output), role)
+              else
+                error = assert_raises(Hive::Stages::Artifacts::IntegrityError, role) { run.call }
+                assert_includes error.message, "#{role} modified protected task state"
+                assert_includes error.message, "append-only anchor"
+              end
+            end
+          end
+          assert File.binread(journal).start_with?(baseline), "#{role} #{writer}"
+          assert_includes File.binread(journal), "github-pr-merged", "#{role} #{writer}"
         end
       end
     end
@@ -2207,6 +2258,22 @@ class StagesArtifactsTest < Minitest::Test
         { "path" => "#{relative}/#{claim_id}.txt", "sha256" => digest_char.next * 64 }
       ]
     }
+  end
+
+  def artifacts_journal_append(task_folder, event_id)
+    record = Hive::TaskJournal::Envelope.authoritative(
+      {
+        event_id: event_id, event_type: "activity_recorded",
+        task: { "slug" => File.basename(task_folder) }, stage: "7-artifacts",
+        attempt_id: "attempt-1", task_generation: 1, reason: "observed",
+        provenance: { "source" => "github" }
+      }
+    )
+    Hive::WorkLedger.journal(
+      path: File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME),
+      lock_path: File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME),
+      record_id: ->(entry) { entry.fetch("event_id") }
+    ).append([ record ])
   end
 
   def make_artifacts_task(dir)

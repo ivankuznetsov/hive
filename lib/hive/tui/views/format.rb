@@ -18,7 +18,8 @@ module Hive
       #
       # Nil-tolerance contract: every public helper coerces its label
       # through `.to_s`, so a nil label is treated as the empty string
-      # rather than raising.
+      # rather than raising. `cell_chunks` rejects coerced labels containing
+      # CR or LF with ArgumentError: it accepts only one logical line.
       module Format
         # Reuse Text's ECMA-48 CSI matcher: SGR styling (Lipgloss `render`)
         # and cursor/erase sequences must never be measured or cut as
@@ -100,9 +101,8 @@ module Hive
           string.lines.flat_map { |line| wrap_line(line.chomp, width) }
         end
 
-        # Fixed-width character chunks for cursor-aware and read-only text
-        # surfaces. Always return one row so an empty composer has a cursor
-        # target and an empty preview line remains visible.
+        # Fixed-width character chunks for cursor-aware text surfaces.
+        # Always return one row so an empty composer has a cursor target.
         def character_chunks(label, capacity)
           string = label.to_s
           return [ "" ] if string.empty?
@@ -114,6 +114,39 @@ module Hive
             offset += capacity
           end
           chunks
+        end
+
+        # Lossless fixed-row wrapping by terminal cells. ANSI tokens cost no
+        # cells; visible runs split only at grapheme boundaries. A grapheme
+        # wider than the whole budget remains intact on an over-budget row.
+        # Joining the rows reconstructs the source, without added SGR resets.
+        def cell_chunks(label, capacity)
+          string = label.to_s
+          raise ArgumentError, "cell_chunks accepts one logical line" if string.match?(/[\r\n]/)
+          return [ "" ] if string.empty?
+
+          budget = [ capacity.to_i, 1 ].max
+          rows = []
+          current = +""
+          cells = 0
+          string.scan(TOKEN_PATTERN) do |token|
+            if token.start_with?("\e")
+              current << token
+            else
+              token.each_grapheme_cluster do |cluster|
+                cluster_width = Unicode::DisplayWidth.of(cluster)
+                if cells.positive? && cluster_width.positive? && cells + cluster_width > budget
+                  rows << current
+                  current = +""
+                  cells = 0
+                end
+                current << cluster
+                cells += cluster_width
+              end
+            end
+          end
+          rows << current
+          rows
         end
 
         def viewport_start(total:, capacity:, selected_index:)

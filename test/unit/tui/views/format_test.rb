@@ -8,6 +8,66 @@ class HiveTuiViewsFormatTest < Minitest::Test
   REVERSE = "\e[7m"
   RESET = "\e[0m"
 
+  def test_cell_chunks_wraps_cjk_by_terminal_cells_without_loss
+    source = "一二三四五六七八九十"
+
+    assert_equal [ "一二三四五", "六七八九十" ], cell_chunks(source, 10)
+  end
+
+  def test_cell_chunks_keeps_oversized_graphemes_on_separate_rows
+    assert_equal [ "界" ], cell_chunks("界", 1)
+    assert_equal 2, Hive::Tui::Views::Format.display_width(cell_chunks("界", 1).first)
+    assert_equal [ "界", "語" ], cell_chunks("界語", 1)
+    assert_equal [ "a", "界", "b" ], cell_chunks("a界b", 1)
+  end
+
+  def test_cell_chunks_preserves_mixed_and_combining_graphemes
+    assert_equal [ "ab界", "c語d" ], cell_chunks("ab界c語d", 4)
+    assert_equal [ "e\u0301", "界", "👩‍💻", "x" ], cell_chunks("e\u0301界👩‍💻x", 1)
+    assert_equal [ "\u200Ba\u200B", "b" ], cell_chunks("\u200Ba\u200Bb", 1)
+    assert_equal [ "\u200B" ], cell_chunks("\u200B", 1)
+    assert_equal [ "…", "x" ], cell_chunks("…x", 1)
+  end
+
+  def test_cell_chunks_preserves_control_tokens_without_charging_cells
+    source = "#{REVERSE}ab\e[2K界#{RESET}c\e"
+
+    assert_equal [ "#{REVERSE}ab\e[2K", "界#{RESET}", "c\e" ], cell_chunks(source, 2)
+    assert_equal [ "#{REVERSE}界#{RESET}\e" ], cell_chunks("#{REVERSE}界#{RESET}\e", 1)
+    assert_equal [ "#{REVERSE}#{RESET}" ], cell_chunks("#{REVERSE}#{RESET}", 1)
+  end
+
+  def test_cell_chunks_coerces_inputs_and_normalizes_nonpositive_budgets
+    assert_equal [ "" ], cell_chunks(nil, 3)
+    assert_equal [ "" ], cell_chunks("", 3)
+    assert_equal [ "1", "2" ], cell_chunks(12, 1)
+    [ 0, -2 ].each do |width|
+      assert_equal [ "a", "界", "b" ], cell_chunks("a界b", width)
+    end
+  end
+
+  def test_cell_chunks_rejects_physical_line_breaks_after_coercion
+    [ "a\nb", "a\rb", "\r\n" ].each do |source|
+      label = Object.new
+      label.define_singleton_method(:to_s) { source }
+      assert_raises(ArgumentError) { Hive::Tui::Views::Format.cell_chunks(label, 10) }
+    end
+  end
+
+  def test_character_and_word_wrappers_keep_their_existing_width_contracts
+    assert_equal [ "界語", "ab" ], Hive::Tui::Views::Format.character_chunks("界語ab", 2)
+    assert_equal [ "" ], Hive::Tui::Views::Format.character_chunks(nil, 2)
+    assert_equal [ "one two", "three" ], Hive::Tui::Views::Format.wrap("one two three", 9)
+    assert_equal [ "abc…" ], Hive::Tui::Views::Format.wrap("abcdef", 4)
+  end
+
+  # Every accepted line must reconstruct byte-for-byte, including ANSI tokens.
+  def cell_chunks(source, width)
+    rows = Hive::Tui::Views::Format.cell_chunks(source, width)
+    assert_equal source.to_s, rows.join
+    rows
+  end
+
   def test_display_width_ignores_ansi_escape_sequences
     assert_equal 3, Hive::Tui::Views::Format.display_width("#{REVERSE}abc#{RESET}")
   end

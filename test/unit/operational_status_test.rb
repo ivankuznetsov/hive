@@ -734,6 +734,59 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
   end
 
+  def test_expired_scheduler_snapshot_names_the_tick_failure_that_blocked_publication
+    source_task = task(action: "ready_to_plan", slug: "expired-scheduler")
+    reason = "duplicate_task_identity: demo:x in 1-inbox (/p/stages/1-inbox/x), " \
+             "3-generate (/p/stages/3-generate/x); keep exactly one stage folder per task slug"
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "status" => "stale", "reason" => "snapshot_expired",
+      "last_failure" => {
+        "reason" => reason, "since" => "2026-07-20T09:58:00.000000Z", "tick_sequence" => 7
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    stale = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_stale" }
+    assert_includes stale.fetch("message"), "snapshot_expired; no complete scheduler snapshot " \
+                                            "published since 2026-07-20T09:58:00.000000Z (tick 7)"
+    assert_includes stale.fetch("message"), "demo:x in 1-inbox (/p/stages/1-inbox/x)"
+    assert_match(/exactly one <project>\/\.hive-state\/stages\/<stage>\/ folder/,
+                 stale.fetch("remediation"))
+    assert_equal "snapshot_expired", result.dig("scheduler", "reason")
+  end
+
+  def test_current_scheduler_snapshot_warns_while_later_ticks_fail
+    source_task = task(action: "ready_to_plan", slug: "retained-scheduler")
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "last_failure" => {
+        "reason" => "status_failure", "since" => "2026-07-20T09:59:30.000000Z", "tick_sequence" => 2
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "current", result.dig("scheduler", "status")
+    warning = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_tick_failed" }
+    refute_nil warning
+    assert_equal "warning", warning.fetch("severity")
+    assert_includes warning.fetch("message"), "stays authoritative only until #{snapshot.fetch('valid_until')}"
+    assert_includes warning.fetch("message"), "(tick 2): status_failure"
+    assert_includes warning.fetch("remediation"), "operational_snapshot_incomplete"
+  end
+
   def test_task_graph_sampled_before_snapshot_completion_rejects_scheduler_dispositions
     source_task = task(action: "ready_to_plan", slug: "older-task-graph")
     snapshot = scheduler_snapshot_for(

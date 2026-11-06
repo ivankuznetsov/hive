@@ -22,7 +22,23 @@ module Hive
       PHASES = %w[started failed complete].freeze
       MAX_VALIDITY_MULTIPLIER = 3
 
+      # Returned by Assembler#fail (and #complete when it refuses a frame) so
+      # the dispatcher can log why no complete record was published.
+      # `retained` is true when a still-held completed record from an
+      # earlier tick stays authoritative instead of the failed record.
+      IncompletePublication = Data.define(:reason, :retained, :duplicates)
+
       module_function
+
+      # Human explanation of why later ticks never replaced a retained
+      # completed record, or nil when no later tick failed.
+      def failure_detail(record)
+        failure = record.is_a?(Hash) ? record["last_failure"] : nil
+        return unless failure.is_a?(Hash) && !failure["reason"].to_s.empty?
+
+        "no complete scheduler snapshot published since #{failure['since']} " \
+          "(tick #{failure['tick_sequence']}): #{failure['reason']}"
+      end
 
       def daemon_identity(pid:, process_start_time:)
         seed = "#{Integer(pid)}\0#{process_start_time}"
@@ -140,6 +156,7 @@ module Hive
           @runtime_ready = false
           @attempt_storage = Hive::Attempts::StorageStatus.unknown
           @last_completed_record = nil
+          @last_status_cache = nil
         end
 
         def reconfigure(poll_interval_sec:)
@@ -187,8 +204,14 @@ module Hive
           @attempt_storage = status
         end
 
-        def fail(reason:, now: Time.now.utc)
-          return if @last_completed_record
+        def fail(reason:, now: Time.now.utc, duplicates: [])
+          incomplete = IncompletePublication.new(
+            reason: reason.to_s, retained: !@last_completed_record.nil?, duplicates: duplicates
+          )
+          if @last_completed_record
+            annotate_retained_failure(reason.to_s, now)
+            return incomplete
+          end
 
           @repository.publish(
             base_record(phase: "failed", now: now).merge(
@@ -200,6 +223,7 @@ module Hive
               "tasks" => []
             )
           )
+          incomplete
         end
 
         def complete(rows:, controller:, queue:, recoveries:,
@@ -210,10 +234,11 @@ module Hive
           validate_hidden_count!(
             hidden_archived_task_count, label: "hidden_archived_task_count"
           )
-          duplicate_keys = duplicate_row_keys(rows)
-          unless duplicate_keys.empty?
-            identities = duplicate_keys.sort.map { |project, slug| "#{project}:#{slug}" }
-            return fail(reason: "duplicate_task_identity: #{identities.join(', ')}", now: now)
+          duplicates = duplicate_rows(rows)
+          unless duplicates.empty?
+            return fail(
+              reason: duplicate_reason(duplicates), now: now, duplicates: duplicates
+            )
           end
 
           tasks = observed_tasks(rows)
@@ -234,6 +259,7 @@ module Hive
           status_cache = status_cache_record(status_payload, now: now)
           published = @repository.publish(record, status_projection: status_cache)
           @last_completed_record = record
+          @last_status_cache = status_cache
           published
         end
 
@@ -268,6 +294,25 @@ module Hive
           retained = @last_completed_record.merge("valid_until" => deadline_string)
           @repository.publish(retained)
           @last_completed_record = retained
+          @last_status_cache = nil
+        end
+
+        # A later tick that cannot publish keeps the earlier completed record
+        # authoritative (never extending its deadline) but records why, so
+        # readers can explain the eventual expiry. Republished only when the
+        # reason changes; the paired status projection is preserved.
+        def annotate_retained_failure(reason, now)
+          return if @last_completed_record.dig("last_failure", "reason") == reason
+
+          annotated = @last_completed_record.merge(
+            "last_failure" => {
+              "reason" => reason,
+              "since" => now.utc.iso8601(6),
+              "tick_sequence" => tick_sequence
+            }
+          )
+          @repository.publish(annotated, status_projection: @last_status_cache)
+          @last_completed_record = annotated
         end
 
         def base_record(phase:, now:)
@@ -374,10 +419,32 @@ module Hive
           [ value(row, :project).to_s, value(row, :slug).to_s ]
         end
 
-        def duplicate_row_keys(rows)
+        def duplicate_rows(rows)
           rows.group_by { |row| row_key(row) }
               .select { |_key, grouped_rows| grouped_rows.size > 1 }
-              .keys
+              .sort_by(&:first)
+              .map do |(project, slug), grouped_rows|
+                {
+                  "project" => project,
+                  "slug" => slug,
+                  "locations" => grouped_rows.map do |row|
+                    { "stage" => value(row, :stage).to_s, "folder" => value(row, :folder).to_s }
+                  end.sort_by { |location| [ location["stage"], location["folder"] ] }
+                }
+              end
+        end
+
+        # Names the project, slug, and every physical stage folder so the
+        # operator can remove the stale copy without searching .hive-state.
+        def duplicate_reason(duplicates)
+          identities = duplicates.map do |duplicate|
+            places = duplicate["locations"].map do |location|
+              "#{location['stage']} (#{location['folder']})"
+            end
+            "#{duplicate['project']}:#{duplicate['slug']} in #{places.join(', ')}"
+          end
+          "duplicate_task_identity: #{identities.join('; ')}; " \
+            "keep exactly one stage folder per task slug"
         end
 
         def provider_holds(rows)
@@ -548,7 +615,9 @@ module Hive
             OperationalSnapshot.daemon_identity_matches?(record.fetch("daemon"), expected)
           return unavailable(record["reason"] || "tick_#{record.fetch('phase')}", record) unless
             record["phase"] == "complete"
-          return stale("snapshot_expired", record) if Time.parse(record.fetch("valid_until")) < now
+          if Time.parse(record.fetch("valid_until")) < now
+            return stale("snapshot_expired", record, OperationalSnapshot.failure_detail(record))
+          end
 
           record.merge("status" => "current")
         rescue Hive::RuntimeControlPlane::CodecError, ArgumentError, TypeError, KeyError => e

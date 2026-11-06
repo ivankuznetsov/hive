@@ -9,6 +9,7 @@ require "hive/task_projection"
 require "hive/terminal_outcome"
 require "hive/patrol_fix/publication_block_receipt"
 require "hive/dependencies"
+require "hive/daemon/operational_snapshot"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -296,11 +297,23 @@ module Hive
         {}
       end
       issues = []
-      unless status == "current"
+      failure = Hive::Daemon::OperationalSnapshot.failure_detail(snapshot)
+      if status == "current"
+        if failure
+          issues << issue(
+            code: "scheduler_tick_failed", source: "scheduler",
+            message: "the last complete scheduler snapshot (tick #{snapshot['tick_sequence']}) " \
+                     "stays authoritative only until #{snapshot['valid_until']}; #{failure}",
+            remediation: scheduler_failure_remediation(snapshot)
+          )
+        end
+      else
+        message = "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}"
         issues << issue(
           code: "scheduler_#{status}", source: "scheduler",
-          message: "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}",
-          remediation: "check hive daemon status --json and wait for one complete reconciliation tick"
+          message: failure ? "#{message}; #{failure}" : message,
+          remediation: failure ? scheduler_failure_remediation(snapshot) :
+            "check hive daemon status --json and wait for one complete reconciliation tick"
         )
       end
       {
@@ -314,6 +327,16 @@ module Hive
         "provider_holds" => Array(snapshot["provider_holds"]),
         "issues" => issues + Array(snapshot["issues"])
       }
+    end
+
+    def scheduler_failure_remediation(snapshot)
+      if snapshot.dig("last_failure", "reason").to_s.start_with?("duplicate_task_identity")
+        "remove or move the stale copy so each task slug lives in exactly one " \
+          "<project>/.hive-state/stages/<stage>/ folder; the next daemon tick then publishes"
+      else
+        "inspect operational_snapshot_incomplete events in the daemon log and " \
+          "wait for one complete reconciliation tick"
+      end
     end
 
     def task_graph_predates_snapshot?(snapshot)

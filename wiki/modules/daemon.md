@@ -441,7 +441,13 @@ timestamps retain microseconds for independently collected same-second
 ordering, and missing or malformed source-window timestamps fail closed. The
 assembler still rejects a source frame containing multiple physical
 rows for one project/slug as `duplicate_task_identity`, so a provider hold or
-dispatch decision from one row cannot be attached to another. The record also
+dispatch decision from one row cannot be attached to another. The whole frame
+stays fail-closed rather than excluding only the duplicated rows: the
+dispatcher itself still acts on both physical rows, so a `complete` record that
+omitted them would overstate scheduler coherence to quiesce and idle
+consumers. The reason names the project, slug, and every `stage (folder)`
+location, and ends with the remediation (keep exactly one stage folder per
+task slug). The record also
 carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
@@ -476,6 +482,19 @@ whether the boundary is due, the current safety verdict, and its reason.
 `retry_safety_blocked` is operator-owned (or Hive-owned when inspection itself
 failed). A failed first reconciliation publishes `failed`; a later failure is
 logged while the last completed snapshot remains authoritative until expiry.
+Every `Assembler#fail` (including a `complete` that rejects duplicate
+identities) returns an `IncompletePublication(reason, retained, duplicates)`,
+and the dispatcher logs it as `operational_snapshot_incomplete` with the
+reason, whether a completed record was retained, and structured duplicate
+locations. When a completed record is retained, the assembler annotates it
+with `last_failure` (`reason`, `since`, first failing `tick_sequence`) without
+changing its phase, tick, or `valid_until`, republishing only when the reason
+changes and keeping the paired status projection. The next complete tick
+drops the annotation. The reader turns it into `detail` on a
+`snapshot_expired` result, and operational status appends it to the
+`scheduler_stale` issue (with duplicate-specific remediation) or, while the
+retained record is still current, emits a `scheduler_tick_failed` warning
+issue that does not change completeness.
 Snapshot age starts at the actual completion sample rather than the tick-start
 sample, and a SIGHUP poll-interval reload can shorten retained authority but
 never extend it.
@@ -512,8 +531,9 @@ pacing rather than partitioning task capacity.
 The reader treats incomplete phases, a stopped/replaced daemon, generation
 mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and
 unreadable paths as typed non-authoritative evidence. Snapshot publication is
-advisory: write/assembly failure logs `operational_snapshot_publish_failed` but
-does not stop dispatch. Consumers therefore report partial/unknown status
+advisory: write/assembly failure logs `operational_snapshot_publish_failed`,
+and a tick that publishes no complete record logs
+`operational_snapshot_incomplete`, but neither stops dispatch. Consumers therefore report partial/unknown status
 rather than either crashing Hive or presenting old scheduler state as current.
 
 After attempt reconciliation, the daemon publishes one `attempt_storage` cell

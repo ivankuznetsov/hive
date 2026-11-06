@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/stages/review/ci_fix"
 require "hive/reviewers"
 require "hive/agent_profiles"
+require "hive/task_journal"
 
 # Direct coverage for the CI-fix loop. Uses tiny bash scripts as the
 # CI command (deterministic exit codes, optional output) and fake-claude
@@ -287,6 +288,72 @@ class CiFixTest < Minitest::Test
                      File.binread(task_md)
       end
     end
+  end
+
+  # Regression (f417): Hive's own writers (agent runtime, daemon GitHub/hold
+  # observers) append to task-journal.jsonl while the fix agent's custody
+  # window is open. That append is controller history, not agent tampering,
+  # and must survive.
+  def test_controller_journal_append_during_fix_agent_custody_is_not_tampering
+    with_ci_dir do |dir, task_folder|
+      journal = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      controller_journal_append(task_folder, "before-fix")
+      baseline = File.binread(journal)
+      marker = File.join(dir, ".ci-fixed")
+      ci = write_ci_script(dir, "[ -f \"#{marker}\" ] && exit 0\necho red >&2\nexit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = marker
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "fix landed\n"
+      original = Hive::ArtifactFirewall.method(:validate_and_restore)
+      append = method(:controller_journal_append)
+      during_custody = lambda do |manifest, snapshot|
+        append.call(task_folder, "pr-merged-during-fix")
+        original.call(manifest, snapshot)
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :validate_and_restore, during_custody
+      ) do
+        Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, task_folder))
+      end
+
+      assert_equal :green, result.status, result.error_message
+      assert File.binread(journal).start_with?(baseline)
+      assert_includes File.binread(journal), "pr-merged-during-fix"
+    end
+  end
+
+  def test_fix_agent_journal_truncation_is_still_tampering_and_restored
+    with_ci_dir do |dir, task_folder|
+      journal = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      controller_journal_append(task_folder, "before-fix")
+      baseline = File.binread(journal)
+      ci = write_ci_script(dir, "echo red >&2\nexit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = journal
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{}\n"
+
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, task_folder))
+
+      assert_equal :error, result.status
+      assert_includes result.error_message, "protected files: task-journal.jsonl"
+      assert_includes result.error_message, "restored=true"
+      assert File.binread(journal).start_with?(baseline)
+    end
+  end
+
+  def controller_journal_append(task_folder, event_id)
+    record = Hive::TaskJournal::Envelope.authoritative(
+      {
+        event_id: event_id, event_type: "activity_recorded",
+        task: { "slug" => File.basename(task_folder) }, stage: "6-review",
+        attempt_id: "attempt-1", task_generation: 1, reason: "observed",
+        provenance: { "source" => "github" }
+      }
+    )
+    Hive::WorkLedger.journal(
+      path: File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME),
+      lock_path: File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME),
+      record_id: ->(entry) { entry.fetch("event_id") }
+    ).append([ record ])
   end
 
   def test_reports_restore_failure_when_fix_agent_tampers_with_protected_files

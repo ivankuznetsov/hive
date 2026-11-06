@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "json"
 require "hive/atomic_file"
 
 module Hive
@@ -22,7 +23,29 @@ module Hive
       plan.md worktree.yml handoff.yml task.md task-journal.jsonl
     ].freeze
 
+    # Controller-owned append-only logs, keyed to the sibling flock their
+    # writer holds. The stage controller and daemon observers (session
+    # receipts, GitHub PR outcomes, holds) append to the task journal while an
+    # agent custody window is open, so custody must not treat a byte change as
+    # tampering: the captured bytes must survive unchanged and every appended
+    # line must be a complete authoritative journal record. Restoration keeps
+    # such records instead of rolling the log back to the pre-spawn bytes.
+    APPEND_ONLY_LOGS = { "task-journal.jsonl" => ".task-journal.lock" }.freeze
+    APPEND_ONLY_RECORD_SCHEMA = "hive-task-journal-event".freeze
+
     module_function
+
+    def append_only_log?(path)
+      APPEND_ONLY_LOGS.key?(File.basename(path.to_s))
+    end
+
+    # True when an append-only log still starts with its captured bytes (and
+    # mode) and everything after them is newly appended journal records.
+    # Truncation, rewritten lines, partial lines, and non-journal content all
+    # return false.
+    def appended_only?(path, entry)
+      with_append_lock(path) { appended_only_unlocked?(path, entry) }
+    end
 
     # Snapshot SHA-256 of every name in `names` resolved against `root`.
     # Missing files are recorded as `nil` so a deletion is detected as
@@ -107,6 +130,13 @@ module Hive
     private_class_method :fingerprint
 
     def capture_path(path)
+      return with_append_lock(path) { capture_path_unlocked(path) } if append_only_log?(path)
+
+      capture_path_unlocked(path)
+    end
+    private_class_method :capture_path
+
+    def capture_path_unlocked(path)
       stat = File.lstat(path)
       unless stat.file?
         return {
@@ -146,12 +176,13 @@ module Hive
     rescue Errno::ENOENT
       { kind: :missing, fingerprint: nil, identity: { kind: :missing }.freeze }
     end
-    private_class_method :capture_path
+    private_class_method :capture_path_unlocked
 
     def restore_path(path, entry)
       if File.directory?(path) && !File.symlink?(path)
         raise RestoreError, "refusing to replace protected path directory: #{path}"
       end
+      return restore_append_only_path(path, entry) if append_only_log?(path)
 
       case entry.fetch(:kind)
       when :missing
@@ -211,6 +242,8 @@ module Hive
     private_class_method :identity
 
     def restored_entry?(path, entry)
+      return appended_only?(path, entry) if append_only_log?(path)
+
       expected_identity = entry[:identity]
       if expected_identity
         identity(path) == expected_identity
@@ -219,6 +252,111 @@ module Hive
       end
     end
     private_class_method :restored_entry?
+
+    # Rebuild an append-only log as its captured bytes plus every complete
+    # journal record found in the current file that the capture did not
+    # already hold. Runs under the writer's lock so a concurrent controller
+    # append can neither land on the replaced inode nor be dropped.
+    def restore_append_only_path(path, entry)
+      with_append_lock(path) do
+        base, base_mode = append_base(entry)
+        raise RestoreError, "protected non-file path cannot be reconstructed safely: #{path}" unless base
+
+        current, = read_regular(path)
+        appended = current ? appended_lines(current, record_ids(base), strict: false) : []
+        if entry.fetch(:kind) == :missing && appended.empty?
+          FileUtils.rm_f(path)
+        else
+          mode = base_mode || 0o644
+          Hive::AtomicFile.write(path, base + appended.join, mode: mode)
+          File.chmod(mode, path)
+        end
+      end
+    end
+    private_class_method :restore_append_only_path
+
+    def appended_only_unlocked?(path, entry)
+      base, base_mode = append_base(entry)
+      return false unless base
+
+      current, mode = read_regular(path)
+      return entry.fetch(:kind) == :missing && !File.exist?(path) && !File.symlink?(path) unless current
+      return false if base_mode && mode != base_mode
+      return false unless current.start_with?(base)
+
+      !appended_lines(current.byteslice(base.bytesize..), record_ids(base), strict: true).nil?
+    end
+    private_class_method :appended_only_unlocked?
+
+    def append_base(entry)
+      case entry.fetch(:kind)
+      when :file then [ entry.fetch(:content).b, entry.fetch(:mode) ]
+      when :missing then [ "".b, nil ]
+      end
+    end
+    private_class_method :append_base
+
+    def read_regular(path)
+      File.open(path, File::RDONLY | File::NOFOLLOW) do |file|
+        stat = file.stat
+        stat.file? ? [ file.read.b, stat.mode & 0o777 ] : nil
+      end
+    rescue SystemCallError, IOError
+      nil
+    end
+    private_class_method :read_regular
+
+    # Strict: every byte of `text` must be complete, previously unseen journal
+    # records (returns nil otherwise). Lenient: salvage only such records.
+    def appended_lines(text, known_ids, strict:)
+      return nil if strict && !text.empty? && !text.end_with?("\n")
+
+      seen = known_ids.dup
+      text.each_line.each_with_object([]) do |line, kept|
+        id = line.end_with?("\n") ? journal_record_id(line) : nil
+        if id.nil? || seen.include?(id)
+          return nil if strict
+
+          next
+        end
+        seen << id
+        kept << line
+      end
+    end
+    private_class_method :appended_lines
+
+    def record_ids(text)
+      text.each_line.filter_map { |line| journal_record_id(line) }
+    end
+    private_class_method :record_ids
+
+    def journal_record_id(line)
+      record = JSON.parse(line.dup.force_encoding(Encoding::UTF_8))
+      return nil unless record.is_a?(Hash) && record["schema"] == APPEND_ONLY_RECORD_SCHEMA
+
+      id = record["event_id"]
+      id.is_a?(String) && !id.empty? ? id : nil
+    rescue JSON::ParserError, EncodingError
+      nil
+    end
+    private_class_method :journal_record_id
+
+    # The log writer's own flock. If the lock cannot be opened (missing
+    # parent, substituted lock path) custody proceeds unlocked and still
+    # fails closed on any partial or foreign line.
+    def with_append_lock(path)
+      lock_path = File.join(File.dirname(path), APPEND_ONLY_LOGS.fetch(File.basename(path)))
+      lock = begin
+        File.open(lock_path, File::RDWR | File::CREAT | File::NOFOLLOW, 0o644)
+      rescue SystemCallError
+        nil
+      end
+      lock&.flock(File::LOCK_EX)
+      yield
+    ensure
+      lock&.close
+    end
+    private_class_method :with_append_lock
 
     def validate_relative_name!(name)
       value = name.to_s

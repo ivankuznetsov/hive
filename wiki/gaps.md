@@ -3,9 +3,23 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-04
+updated: 2026-11-06
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Task-journal custody provenance (2026-11-06)
+
+- Artifact custody now admits growth of `task-journal.jsonl` that preserves
+  the captured bytes and adds only complete, previously unseen
+  `hive-task-journal-event` records. That is shape verification, not
+  provenance: a same-user agent can still append a well-formed forged record
+  during its window. A controller-held receipt (e.g. per-append HMAC or a
+  runtime-DB append ledger outside the task folder) would close this; not
+  designed yet.
+- `ce_doc_review`'s plan-review manifest still excludes the journal entirely
+  (`ORCHESTRATOR_JOURNALS`), and the daemon hold observer still defers while a
+  task lock is live. Both predate the append-only custody and could now be
+  simplified; left unchanged pending live validation.
 
 ## Task observation boundary (2026-10-02)
 

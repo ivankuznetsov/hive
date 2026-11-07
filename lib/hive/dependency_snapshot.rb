@@ -30,11 +30,12 @@ module Hive
     BaseSelection = Data.define(:branch, :mode)
     BranchRefInventory = Data.define(:needed, :refs)
 
-    # Terminal stage of a delivered prerequisite. Its branch has landed on the
-    # default branch (often squash-merged, so the prerequisite's own commits
-    # are not ancestors of the default branch) and its remote branch is
-    # usually deleted, so it is never a valid stacked base.
-    DELIVERED_STAGE = "9-done".freeze
+    # Terminal (archive) stage of a delivered prerequisite — the same fixed
+    # gate list edges use, derived from the coding descriptor. Its branch has
+    # landed on the default branch (often squash-merged, so the prerequisite's
+    # own commits are not ancestors of the default branch) and its remote
+    # branch is usually deleted, so it is never a valid stacked base.
+    DELIVERED_STAGE = Hive::Stages::DIRS.last
 
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|

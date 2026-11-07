@@ -17,9 +17,12 @@ module Hive
     # bin/hive performs it earlier, before runtime registration and repair.
     def self.start(given_args = ARGV, config = {})
       require "hive/remote/command_policy"
+      require "hive/remote/dispatcher"
       return super if Hive::Remote::CommandPolicy.current_invocation
 
-      invocation = Hive::Remote::CommandPolicy.preflight!(given_args)
+      contexts = Hive::Remote::Dispatcher.contexts
+      invocation = Hive::Remote::CommandPolicy.preflight!(given_args, contexts: contexts,
+        dispatcher: Hive::Remote::Dispatcher.new(contexts: contexts))
       return invocation.result if invocation.handled?
 
       Hive::Remote::CommandPolicy.with_invocation(invocation) { super(invocation.argv, config) }
@@ -63,6 +66,47 @@ module Hive
     class_option :context, type: :string, desc: "use named installation context for this invocation"
 
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
+
+    desc "context [ACTION] [NAME]", "Add, list, select, or inspect installation contexts"
+    long_desc <<~DESC
+      Add a verified HTTPS installation with:
+        hive context add NAME --url https://hive.example --token-stdin
+
+      Use `hive context list`, `hive context show [NAME]`, and
+      `hive context use NAME` to inspect or select a target. Show/use display
+      fresh scopes, project limits and expiry. The reserved local target uses
+      unrestricted local operator authority. `--context NAME` overrides the
+      saved selection for one invocation. Context configuration works before
+      local Hive setup and never accepts a bearer as a literal argument.
+    DESC
+    option :url, type: :string, desc: "HTTPS installation URL (context add only)"
+    option :token_stdin, type: :boolean, default: false, desc: "read the bearer from stdin (context add only)"
+    def context(action = "list", name = nil)
+      require "hive/commands/context"
+      require "hive/remote/dispatcher"
+      Hive::Commands::Context.new(action, name, url: options[:url], token_stdin: options[:token_stdin],
+        json: options[:json], contexts: Hive::Remote::Dispatcher.contexts).call
+    end
+
+    desc "token [ACTION] [ID]", "Create, list, or revoke server-local API tokens"
+    option :scopes, type: :string, desc: "comma-separated independent read,create,act,answer scopes"
+    option :projects, type: :string, desc: "comma-separated exact registered project names"
+    option :all_projects, type: :boolean, default: false, desc: "explicitly grant every registered project"
+    option :name, type: :string, desc: "token display name"
+    option :expires_at, type: :string, desc: "absolute expiry timestamp"
+    def token(action = "list", id = nil)
+      require "hive/commands/token"
+      Hive::Commands::Token.new(action, id, scopes: options[:scopes], projects: options[:projects],
+        all_projects: options[:all_projects], name: options[:name] || "personal",
+        expires_at: options[:expires_at], json: options[:json]).call
+    end
+
+    desc "operation ID --project PROJECT", "Inspect a durable remote command and linked task progress"
+    option :project, type: :string, desc: "exact authorized project name"
+    def operation(id)
+      require "hive/commands/operation"
+      Hive::Commands::Operation.new(id, project: options[:project], json: options[:json]).call
+    end
 
     desc "version", "Print hive version"
     def version
@@ -1561,7 +1605,7 @@ module Hive
       that idempotency check. Empty --diagnose values are rejected.
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
-    option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
+    option :project, type: :string, desc: "scope diagnosis or remote status to one registered project"
     option :stage, type: :string,
                    desc: "scope --diagnose slug lookup to one stage (#{STAGE_VOCABULARY})"
     option :write, type: :boolean, default: false,
@@ -1604,6 +1648,10 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :log, type: :boolean, default: false,
                  desc: "read the current receipt-correlated diagnostic log tail"
+    option :diff, type: :boolean, default: false, desc: "remote context: retrieve the bounded task diff"
+    option :artifacts, type: :boolean, default: false, desc: "remote context: list the bounded artifact manifest"
+    option :artifact, type: :string, desc: "remote context: retrieve an opaque artifact ID from the manifest"
+    option :output, type: :string, desc: "remote content: write to this explicit local destination"
     def task(target)
       require "hive/commands/task"
       Hive::Commands::Task.new(
@@ -1709,6 +1757,7 @@ module Hive
                   desc: "expected current stage; raises WRONG_STAGE on mismatch, idempotency (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
+    option :generation, type: :string, desc: "remote approval: fresh approval_generation from task details"
     option :idempotency_key, type: :string, desc: "durably replay an identical approval"
     def approve(target)
       require "hive/commands/approve"

@@ -26,22 +26,25 @@ end
 
 require "hive"
 require "hive/remote/command_policy"
+require "hive/remote/dispatcher"
 
 # Freeze the installation target before activation, command registration,
 # scheduler repair, or any command can discover a local project.
 begin
+  connection_contexts = Hive::Remote::Dispatcher.contexts
   connection_invocation = Hive::Remote::CommandPolicy.preflight!(
-    Hive::CliArgvPolicy.validate_encoding(ARGV)
+    Hive::CliArgvPolicy.validate_encoding(ARGV), contexts: connection_contexts,
+    dispatcher: Hive::Remote::Dispatcher.new(contexts: connection_contexts)
   )
   exit 0 if connection_invocation.handled?
   ARGV.replace(connection_invocation.argv)
 rescue Hive::Error, Thor::Error => error
   require "hive/cli_usage_contracts"
-  contract = Hive::CliUsageContracts.contract(ARGV)
+  contract = Hive::CliUsageContracts.contract(ARGV) unless error.is_a?(Hive::Remote::Dispatcher::ReportedError)
   if error.is_a?(Thor::Error)
     error = Hive::CliUsageContracts.usage_error(contract, error.message)
   end
-  if Hive::CliArgvPolicy.json_requested?(ARGV)
+  if !error.is_a?(Hive::Remote::Dispatcher::ReportedError) && Hive::CliArgvPolicy.json_requested?(ARGV)
     if contract
       puts JSON.generate(Hive::CliUsageContracts.error_payload(contract, error, argv: ARGV))
     end

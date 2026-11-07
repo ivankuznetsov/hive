@@ -9,6 +9,7 @@ module Hive
     SCHEMA_VERSIONS = {
       "hive-token" => 1,
       "hive-remote" => 1,
+      "hive-operation" => 1,
       "hive-status" => 9,
       "hive-running-status" => 2,
       "hive-operational-status" => 5,

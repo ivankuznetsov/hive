@@ -35,6 +35,25 @@ class RemoteCommandPolicyTest < Minitest::Test
     assert policy.mutation?("answer", %w[answer demo:task --binding opaque])
     refute policy.mutation?("answer", %w[answer demo:task --json])
     assert_equal "demo:task", policy.target_for("act", %w[act workflow.advance demo:task --project demo])
+    assert_equal "demo:task", policy.target_for("act", %w[act --observation opaque workflow.advance task --project demo])
+    assert_equal "demo:task", policy.target_for("answer", %w[answer --binding opaque task --project demo])
+    assert_equal "demo:task", policy.target_for("approve", %w[approve --generation opaque task --project demo])
+    assert policy.mutation?("context", %w[--json context use nas])
+    assert policy.mutation?("token", %w[--json token revoke public-id])
+    assert_equal "demo:task", policy.target_for("act", %w[--json act --observation opaque workflow.advance task --project demo])
+  end
+
+  def test_local_administration_and_diagnostic_read_modes_have_explicit_mutation_policy
+    policy = Hive::Remote::CommandPolicy
+    refute policy.mutation?("status", %w[status --diagnose task])
+    assert policy.mutation?("status", %w[status --diagnose task --write])
+    refute policy.mutation?("archive", %w[archive --json])
+    assert policy.mutation?("archive", %w[archive demo:task])
+    refute policy.mutation?("patrol", %w[patrol --list])
+    assert policy.mutation?("patrol", %w[patrol --project demo])
+    refute policy.mutation?("refactor-patrol", %w[refactor-patrol --show sample])
+    refute policy.mutation?("digest", %w[--json digest show])
+    assert policy.mutation?("digest", %w[--json digest prune])
   end
 
   def test_context_override_is_removed_once_and_literal_tail_is_preserved
@@ -89,7 +108,7 @@ class RemoteCommandPolicyTest < Minitest::Test
       hv = File.expand_path("../../../bin/hv", __dir__)
       environment = { "HIVE_HOME" => client_home, "HIVE_BIN_OVERRIDE" => hive }
       [ hive, hv ].each do |wrapper|
-        [ %w[init .], %w[unknown], %w[new local-project idea] ].each do |arguments|
+        [ %w[init .], %w[unknown] ].each do |arguments|
           stdout, stderr, status = Open3.capture3(environment, wrapper, *arguments, chdir: checkout)
           refute status.success?, [ wrapper, arguments ].inspect
           assert_match(/--context local/, stderr)

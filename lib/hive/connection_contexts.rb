@@ -128,7 +128,13 @@ module Hive
 
     def invoke_verifier(context, bearer)
       @verifier.call(context.dup.freeze, bearer)
-    rescue StandardError
+    rescue StandardError => error
+      # This one transport error constructs its diagnostic entirely from a
+      # fixed message and validated API base paths. Arbitrary verifier errors
+      # can include credentials and remain hidden.
+      if defined?(Hive::Remote::Client::UnsupportedVersion) && error.is_a?(Hive::Remote::Client::UnsupportedVersion)
+        raise
+      end
       # HTTP library and fixture exceptions can include request headers.
       # Only the boundary's own fixed diagnostics may reach CLI output.
       raise Hive::ConfigError, "could not verify remote context; check the server and credentials"

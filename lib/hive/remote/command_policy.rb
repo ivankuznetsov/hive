@@ -71,6 +71,7 @@ module Hive
           command: command
         )
         category = classify(command)
+        dispatcher.validate_local!(invocation) if context.fetch("type") == "local" && dispatcher.respond_to?(:validate_local!)
         if context.fetch("type") == "remote" && category != :context_management
           unless category == :supported_remote
             raise Hive::UsageError, "#{command} requires a local context; specify --context local"
@@ -80,12 +81,22 @@ module Hive
           end
           invocation.result = dispatcher.call(invocation)
           invocation.handled = true
+        elsif dispatcher && (command == "context" || dispatcher.respond_to?(:client_help?) && dispatcher.client_help?(invocation))
+          if mutation?(command, clean_argv)
+            stderr.puts("hive: context=local installation=local authority=unrestricted-local-operator target=local-client-configuration")
+            stderr.flush
+          end
+          invocation.result = dispatcher.call(invocation)
+          invocation.handled = true
         elsif mutation?(command, clean_argv)
           target = target_for(command, clean_argv)
           stderr.puts("hive: context=local installation=local authority=unrestricted-local-operator target=#{target}")
           stderr.flush
         end
         invocation
+      rescue Hive::Error => error
+        dispatcher.report_error(error, invocation) if invocation && dispatcher.respond_to?(:report_error)
+        raise
       end
 
       def mutation?(command, argv)
@@ -93,14 +104,14 @@ module Hive
 
         options = Hive::CliArgvPolicy.option_argv(argv)
         case command
-        when "context" then %w[add use].include?(options[1])
-        when "token" then %w[create revoke].include?(options[1])
+        when "context" then %w[add use].include?(positional_arguments(argv).first)
+        when "token" then %w[create revoke].include?(positional_arguments(argv).first)
         when "runtime" then ![ nil, "status", "projects", "payloads" ].include?(positional_arguments(argv).first)
         when "status" then options.include?("--write")
         when "answer" then options.include?("--binding") || options.any? { |arg| arg.start_with?("--binding=") }
         when "archive" then positional_arguments(argv).any?
         when "patrol", "refactor-patrol" then !options.include?("--list") && !options.include?("--show")
-        when "digest" then %w[prune repair resend send].include?(options[1])
+        when "digest" then %w[prune repair resend send].include?(positional_arguments(argv).first)
         else true
         end
       end
@@ -123,12 +134,13 @@ module Hive
       def positional_arguments(argv)
         arguments = []
         skip = false
-        argv.drop(1).each do |arg|
+        command_index = argv.index { |arg| !arg.start_with?("-") } || 0
+        argv.drop(command_index + 1).each do |arg|
           break if arg == "--"
           if skip
             skip = false
           elsif arg.start_with?("--")
-            skip = %w[--project --stage --from --to --idempotency-key --workflow --base --depends-on].include?(arg)
+            skip = %w[--project --stage --from --to --idempotency-key --workflow --base --depends-on --observation --binding --generation].include?(arg)
           elsif !arg.start_with?("-")
             arguments << arg
           end

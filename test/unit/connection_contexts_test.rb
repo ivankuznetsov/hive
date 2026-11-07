@@ -3,6 +3,7 @@ require "hive/connection_contexts"
 require "json"
 require "hive/commands/context"
 require "json_schemer"
+require "hive/remote/client"
 
 class ConnectionContextsTest < Minitest::Test
   def setup
@@ -66,6 +67,17 @@ class ConnectionContextsTest < Minitest::Test
     end
     refute_includes error.message, "secret-bearer"
     assert_equal "local", @store.resolve.fetch("name")
+  end
+
+  def test_only_safe_typed_version_guidance_survives_verifier_failure
+    store = Hive::ConnectionContexts.new(root: @root,
+      verifier: ->(*) { raise Hive::Remote::Client::UnsupportedVersion.new([ "/api/v2", "/secret-bearer" ]) })
+    error = assert_raises(Hive::Remote::Client::UnsupportedVersion) do
+      store.add("nas", url: "https://nas.example", token: "secret-bearer")
+    end
+    assert_includes error.message, "/api/v2"
+    refute_includes error.message, "secret-bearer"
+    assert_equal "local", store.resolve.fetch("name")
   end
 
   def test_files_are_versioned_atomic_and_private

@@ -60,6 +60,18 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     assert_equal hidden, response.parsed_body.fetch("error")
   end
 
+  test "explicit status project filters authorized projects before the projection" do
+    token = Hive::Remote::TokenStore.new.create(name: "both", scopes: ["read"], projects: [@project, @private])
+    headers = { "Authorization" => "Bearer #{token.fetch('token')}" }
+    get "/api/v1/status", params: { project: @project }, headers: headers
+    assert_response :success
+    data = response.parsed_body.fetch("data")
+    assert_equal [@project], data.fetch("projects").map { |project| project.fetch("name") }
+    assert_equal [@slug], data.fetch("tasks").map { |task| task.fetch("slug") }
+    get "/api/v1/status", params: { project: @private }, headers: @headers
+    assert_response :not_found
+  end
+
   test "write-only token cannot read status or questions" do
     token = Hive::Remote::TokenStore.new.create(name: "writer", scopes: ["answer"], projects: [@project])
     headers = { "Authorization" => "Bearer #{token.fetch('token')}" }

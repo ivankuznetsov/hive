@@ -7,7 +7,11 @@ module Api
     class StatusController < BaseController
       def index
         authority.scope!("read")
-        projects = authority.projects.sort_by { |project| project.fetch("name") }
+        projects = if params[:project]
+          [authority.project!(params[:project])]
+        else
+          authority.projects.sort_by { |project| project.fetch("name") }
+        end
         source = read_service.status(projects: projects)
         names = projects.map { |project| project.fetch("name") }
         rows = Array(source["projects"]).select { |project| names.include?(project["name"]) }.flat_map do |project|

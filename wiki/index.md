@@ -87,6 +87,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/task]] — `wiki/commands/task.md`
+- [[commands/token]] — `wiki/commands/token.md`
 - [[commands/tree]] — `wiki/commands/tree.md`
 - [[commands/watch]] — `wiki/commands/watch.md`
 - [[commands/tui]] — `wiki/commands/tui.md`

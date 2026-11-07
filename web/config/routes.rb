@@ -1,4 +1,5 @@
 Rails.application.routes.draw do
+  get "/api/v1/context" => "api/v1/context#show"
   # Healthcheck — unauthenticated by design; exposes only bounded
   # runtime build identity, never operator or task state.
   get "health" => "health#show"

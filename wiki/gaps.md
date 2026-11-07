@@ -7,6 +7,14 @@ updated: 2026-11-06
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Remote API deployment evidence (2026-11-07)
+
+The token and authentication checks use isolated local installations. Live NAS,
+TLS proxy/tunnel and discontinued Hivebox deployment captures are unavailable;
+these checks do not establish external-network deployment behavior. The remote
+access implementation does not provision a proxy, configure its rate limit, or
+change web bind policy.
+
 ## Owner-command failure limit scope (2026-11-06)
 
 - The repeated-failure limit applies only to `plan-review-run`

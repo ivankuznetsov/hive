@@ -2,6 +2,10 @@
 
 require "hive/remote/token_store"
 require "hive/remote/protocol"
+require "hive/remote/read_service"
+require "hive/remote/serializers"
+require "hive/remote/question_handles"
+require "hive/remote/command_service"
 
 module Api
   module V1
@@ -61,12 +65,56 @@ module Api
 
       def render_data(data, status: 200)
         audit["outcome"] = "ok_#{status}"
-        render json: Hive::Remote::Protocol.envelope(instance_id: instance_id, data: data), status: status
+        render body: JSON.generate(Hive::Remote::Protocol.envelope(instance_id: instance_id, data: data)),
+          content_type: "application/json", status: status
       end
 
       def render_error(status, code, message, **details)
         audit["outcome"] = code
+        response.set_header("WWW-Authenticate", "Bearer") if status == 401
         render json: Hive::Remote::Protocol.error(code, message, instance_id: instance_id, **details), status: status
+      end
+
+      def read_service
+        @read_service ||= Hive::Remote::ReadService.new
+      end
+
+      def handles
+        @handles ||= Hive::Remote::QuestionHandles.new
+      end
+
+      def serializers
+        @serializers ||= Hive::Remote::Serializers.new(project_names: authority.projects.map { |project| project.fetch("name") })
+      end
+
+      def read_target!(validate_state: true)
+        resolve_target!("read", validate_state: validate_state)
+      end
+
+      def resolve_target!(scope = nil, validate_state: true)
+        project = authorized_project!(scope)
+        identifier = params.fetch(:task).to_s
+        unless identifier.match?(/\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\z/)
+          raise Hive::InvalidTaskPath, "unknown task"
+        end
+        task = Hive::TaskResolver.new(identifier, project_filter: project.fetch("name")).resolve
+        Hive::Remote::ReadService.validate_state!(task) if validate_state
+        [project, task]
+      end
+
+      def response_limit(maximum)
+        value = params[:max_bytes]
+        return maximum if value.nil?
+        limit = Integer(value.to_s, 10)
+        raise ArgumentError unless limit.positive?
+        [limit, maximum].min
+      rescue ArgumentError, TypeError
+        raise Hive::UsageError, "max_bytes must be a positive integer"
+      end
+
+      def render_bounded(data, maximum: Hive::Remote::Protocol::MAX_RESPONSE_BYTES, limit: nil)
+        Hive::Remote::Serializers.bound!(data, max_bytes: limit || response_limit(maximum), instance_id: instance_id)
+        render_data(data)
       end
 
       def audit

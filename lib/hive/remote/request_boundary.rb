@@ -10,20 +10,6 @@ module Hive
     # ordinary Rails request log includes client addresses and arbitrary query
     # values; API requests instead produce one fixed-field audit entry.
     class RequestBoundary
-      class Body
-        def initialize(body, logger)
-          @body, @logger = body, logger
-        end
-
-        def each(&block)
-          @logger.silence(Logger::FATAL) { @body.each(&block) }
-        end
-
-        def close
-          @logger.silence(Logger::FATAL) { @body.close if @body.respond_to?(:close) }
-        end
-      end
-
       def initialize(app, logger: nil)
         @app = app
         @logger = logger
@@ -36,14 +22,36 @@ module Hive
         logger = @logger || Rails.logger
         env["hive.remote.audit"] = { "token_id" => "unknown", "project" => nil,
                                      "operation" => "api.request", "outcome" => "unavailable" }
-        response = logger.silence(Logger::FATAL) { process(env) }
+        response = logger.silence(Logger::FATAL) { consume(process(env), env) }
         logger.info(JSON.generate(env.fetch("hive.remote.audit")))
-        [response[0], response[1], Body.new(response[2], logger)]
+        response
       end
 
       private
 
+      # API JSON is bounded and never streamed. Closing Rails' response here
+      # also pops request log tags before the fixed-field audit is emitted.
+      def consume(response, env)
+        body = +""
+        response[2].each do |part|
+          body << part
+          if body.bytesize > Protocol::MAX_RESPONSE_BYTES
+            env.fetch("hive.remote.audit")["outcome"] = "response_too_large"
+            return json_response(503, Protocol.unavailable)
+          end
+        end
+        [response[0], response[1], [body]]
+      ensure
+        response[2].close if response[2].respond_to?(:close)
+      end
+
       def process(env)
+        path = env.fetch("PATH_INFO", "")
+        unless path == "/api/v1" || path.start_with?("/api/v1/")
+          env.fetch("hive.remote.audit")["outcome"] = "unsupported_version"
+          return json_response(404, Protocol.error("unsupported_version", "unsupported API version",
+            served_base_paths: Protocol::BASE_PATHS))
+        end
         mutation = !%w[GET HEAD OPTIONS].include?(env["REQUEST_METHOD"])
         if (code = Protocol.interlock(mutation: mutation))
           env.fetch("hive.remote.audit")["outcome"] = code

@@ -35,12 +35,12 @@ module Hive
       class InvalidBinding < Hive::UsageError; end
       class InvalidAnswer < Hive::UsageError; end
 
-      def self.inventory(target, project: nil)
-        new(target, project: project, output: StringIO.new).call
+      def self.inventory(target, project: nil, state_reader: nil)
+        new(target, project: project, output: StringIO.new, state_reader: state_reader).call
       end
 
       def self.write(target, project: nil, binding:, answer:, idempotency_key: nil,
-                     command_receipt_store: nil, principal: nil, principal_source: "local_cli")
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil)
         if binding.to_s.empty?
           raise InvalidBinding, "brainstorm answer binding is required for writes"
         end
@@ -54,13 +54,14 @@ module Hive
           principal: principal,
           principal_source: principal_source,
           input: StringIO.new(answer.to_s),
-          output: StringIO.new
+          output: StringIO.new,
+          state_reader: state_reader
         ).call
       end
 
       def initialize(target, project: nil, binding: nil, json: false,
                      input: $stdin, output: $stdout, idempotency_key: nil,
-                     command_receipt_store: nil, principal: nil, principal_source: "local_cli")
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil)
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
@@ -71,6 +72,7 @@ module Hive
         @command_receipt_store = command_receipt_store
         @principal = principal
         @principal_source = principal_source
+        @state_reader = state_reader
       end
 
       def call
@@ -572,6 +574,7 @@ module Hive
       end
 
       def read_brainstorm!(task)
+        return @state_reader.call(task) if @state_reader
         File.read(task.state_file, encoding: "UTF-8").scrub
       rescue Errno::ENOENT, Errno::EACCES, IOError => e
         raise Hive::InvalidTaskPath,

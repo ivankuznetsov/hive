@@ -1,5 +1,17 @@
 Rails.application.routes.draw do
   get "/api/v1/context" => "api/v1/context#show"
+  get "/api/v1/status" => "api/v1/status#index"
+  scope "/api/v1/projects/:project/tasks/:task", format: false do
+    get "" => "api/v1/tasks#show"
+    get "questions" => "api/v1/questions#index"
+    get "logs" => "api/v1/logs#show"
+    get "diff" => "api/v1/diffs#show"
+    get "artifacts" => "api/v1/artifacts#index"
+    get "artifacts/:id" => "api/v1/artifacts#show"
+  end
+  # Closed API routing: unknown v1 resources never enter browser controllers.
+  match "/api/v1/*path" => "api/v1/versions#not_found", via: :all, format: false
+  match "/api/v1" => "api/v1/versions#not_found", via: :all, format: false
   # Healthcheck — unauthenticated by design; exposes only bounded
   # runtime build identity, never operator or task state.
   get "health" => "health#show"

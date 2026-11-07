@@ -612,6 +612,17 @@ the existing dispatch result to release their original receipt pin.
 status producer, literal-answer inventory, owned-worktree diff and bounded
 artifact/log readers. The HTTP layer selects authorized projects before these
 readers and publishes explicit DTOs instead of serializing native objects.
+API responses use the registered `hive-remote.v1` envelope and name any native
+projection schema/version as provenance. Status pagination counts only granted
+projects and binds opaque cursors to those project registration fingerprints
+and the selected task snapshot. Read-only handle records (questions, artifact
+references and cursors) are private server metadata, separate from command
+receipts; they never admit work or represent mutation outcomes. Native answer
+bindings stay server-side. Unknown API base paths fail with typed
+`unsupported_version` and currently served base paths before parsing a mutation.
+The API middleware consumes and closes bounded JSON responses while ordinary
+request logging is silenced, then emits its fixed audit fields after Rails has
+removed request tags.
 Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
 so the grid and detail page use the same behavior rather than helper-owned
 filesystem reads or action tables. `TasksController` renders that resource.

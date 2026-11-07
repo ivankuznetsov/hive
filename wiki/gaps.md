@@ -9,6 +9,14 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Remote API deployment evidence (2026-11-07)
 
+CI run `42416154313` cannot execute the Rails-backed root integration tests
+`remote_operations_test.rb` and `remote_access_acceptance_test.rb`: coverage
+shards install the root Gemfile only, while their server subprocesses select
+`web/Gemfile`. Bundler exits with missing Rails dependencies before server
+startup. The CI bundle setup or test placement needs reconciliation before
+these tests can establish CI acceptance evidence; the runtime-bootstrap fixture
+fix does not resolve that dependency gap.
+
 The token and authentication checks use isolated local installations. Live NAS,
 TLS proxy/tunnel and discontinued Hivebox deployment captures are unavailable;
 these checks do not establish external-network deployment behavior. The remote

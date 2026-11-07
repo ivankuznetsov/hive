@@ -67,6 +67,12 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
+The copied-launcher fixtures in `status_error_envelope_test.rb` use
+`test/support/runtime_bootstrap_hive.rb` to isolate runtime activation,
+registration, and inspection cleanup. That fixture stubs remote preflight and
+invocation wrapping as well as CLI dispatch, so it reaches the runtime checks
+without mixing real connection discovery with its stubbed argv policy.
+
 Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`
 for the implementation loop. Selection includes branch changes against the merge
 base, staged/unstaged edits, untracked files, and deletions. Changed test files

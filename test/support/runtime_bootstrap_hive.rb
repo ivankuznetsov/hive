@@ -26,6 +26,24 @@ module Hive
     def state_home = ENV.fetch("HIVE_HOME", "/state")
   end
 
+  module Remote
+    module CommandPolicy
+      Invocation = Struct.new(:argv) do
+        def handled? = false
+      end
+
+      def self.preflight!(argv, contexts:, dispatcher:) = Invocation.new(argv)
+      def self.with_invocation(_invocation)
+        yield
+      end
+    end
+
+    class Dispatcher
+      def self.contexts = nil
+      def initialize(contexts:); end
+    end
+  end
+
   module Schemas
     module ErrorEnvelope
       module_function
@@ -168,6 +186,8 @@ module BootstrapFixture
 end
 
 %w[
+  hive/remote/command_policy.rb
+  hive/remote/dispatcher.rb
   hive/runtime_control_plane/activation_gate.rb
   hive/runtime_control_plane/command_registration.rb
   hive/runtime_control_plane/operational_inspection.rb

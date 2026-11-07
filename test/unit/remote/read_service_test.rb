@@ -65,6 +65,10 @@ class RemoteReadServiceTest < Minitest::Test
       assert result.fetch("truncated")
       refute_includes result.fetch("content"), secret
       assert_includes result.fetch("content"), "[REDACTED:github_token]"
+      log = { "tail" => "https://user:pass@host/path #{'a' * 24}.#{'b' * 64}" }
+      scrubbed = service.logs(project: {}, task: nil).fetch("content")
+      refute_includes scrubbed, "user:pass"
+      refute_includes scrubbed, "#{'a' * 24}.#{'b' * 64}"
       assert_nil result.fetch("continuation")
       assert_operator service.logs(project: {}, task: nil, max_bytes: 1_000_000).fetch("content").bytesize, :<=, 256 * 1024
       [ 0, -1, "bad", nil ].each do |limit|

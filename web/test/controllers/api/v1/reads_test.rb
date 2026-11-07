@@ -45,6 +45,59 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     Hive::Remote::ReadService.define_method(:status, original) if original
   end
 
+  test "status keeps unavailable projects and issues one cursor after shrinking despite volatile activity" do
+    original = Hive::Remote::ReadService.instance_method(:status)
+    rows = 20.times.map { |index| { "id" => index, "slug" => "task-#{index}", "stage" => "2-brainstorm",
+      "workflow" => "coding", "condition_task_generation" => 1, "display_name" => "x" * 300,
+      "marker" => "waiting", "action" => "waiting", "live_task_lock" => false } }
+    source = { "schema" => "hive-status", "schema_version" => 1,
+      "projects" => [ { "name" => @project, "tasks" => rows } ] }
+    Hive::Remote::ReadService.define_method(:status) { |**| source }
+    registry = Hive::Remote::QuestionHandles.new.path
+    before = File.exist?(registry) ? JSON.parse(File.read(registry)).fetch("handles").length : 0
+    get "/api/v1/status", params: { max_bytes: 2048 }, headers: @headers
+    assert_response :success
+    assert_operator response.body.bytesize, :<=, 2048
+    cursor = response.parsed_body.dig("data", "continuation")
+    refute_nil cursor
+    records = JSON.parse(File.read(Hive::Remote::QuestionHandles.new.path)).fetch("handles")
+    assert_equal 1, records.length - before
+    rows.last.merge!("marker" => "complete", "action" => "ready_to_advance", "live_task_lock" => true, "task_generation" => "worker-generation")
+    get "/api/v1/status", params: { cursor: cursor }, headers: @headers
+    assert_response :success
+    rows.last["condition_task_generation"] = 2
+    get "/api/v1/status", params: { cursor: cursor }, headers: @headers
+    assert_response :conflict
+    source["projects"] = [ { "name" => @project, "error" => "secret /private/path", "tasks" => [] } ]
+    get "/api/v1/status", headers: @headers
+    assert_response :success
+    project = response.parsed_body.dig("data", "projects").first
+    assert_equal "unavailable", project.fetch("state")
+    assert_nil project.fetch("task_count")
+    refute_includes response.body, "/private/path"
+    source["projects"] = []
+    get "/api/v1/status", headers: @headers
+    assert_equal "unavailable", response.parsed_body.dig("data", "projects").first.fetch("state")
+  ensure
+    Hive::Remote::ReadService.define_method(:status, original) if original
+  end
+
+  test "artifact fallback validates limit before any source read" do
+    get "#{@path}/artifacts/unknown", params: { max_bytes: "bad" }, headers: @headers
+    assert_response :bad_request
+    original = Hive::Remote::ReadService.instance_method(:artifact)
+    # First obtain a real, target-bound artifact identity.
+    get "#{@path}/artifacts", headers: @headers
+    handle = response.parsed_body.dig("data", "records").first.fetch("id")
+    Hive::Remote::ReadService.define_method(:artifact) { |**| raise Hive::TaskWorkspace::SourceError.new(source: "artifact", reason: "unavailable") }
+    get "#{@path}/artifacts/#{handle}", params: { max_bytes: 1024 }, headers: @headers
+    assert_response :success
+    assert_equal "unavailable", response.parsed_body.dig("data", "state")
+    assert_operator response.body.bytesize, :<=, 1024
+  ensure
+    Hive::Remote::ReadService.define_method(:artifact, original) if original
+  end
+
   test "task exact lookup hides filesystem paths and binds explicit approval generation" do
     get @path, headers: @headers
     assert_response :success

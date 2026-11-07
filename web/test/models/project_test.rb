@@ -54,11 +54,20 @@ class ProjectTest < ActiveSupport::TestCase
     inbox = stage_dir(name, "1-inbox")
     before = inbox.children
 
-    capture_io { project.add_idea!("Model the operator's idea") }
+    previous = Hive::Commands::New.instance_variable_get(:@name_generator_spawn)
+    calls = []
+    Hive::Commands::New.name_generator_spawn = ->(*argv, **options) { calls << argv; 12_345 }
+    stdout, stderr = capture_io { project.add_idea!("Model the operator's idea") }
+    assert_empty stdout
+    assert_empty stderr
+    assert_equal 1, calls.length
+    assert_includes calls.first, "generate-name"
 
     created = inbox.children - before
     assert_equal 1, created.size
     assert_includes created.sole.join("idea.md").read, "Model the operator's idea"
+  ensure
+    Hive::Commands::New.name_generator_spawn = previous
   end
 
   test "normalizes only idea-capture IO failures and preserves their cause" do

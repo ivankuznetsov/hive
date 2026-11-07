@@ -10,7 +10,7 @@ class RemoteCommandAdmissionGuardsTest < Minitest::Test
   include HiveTestHelper
 
   def test_canonical_effects_are_closed_and_never_derive_force
-    service = Hive::Remote::CommandService
+    service = Hive::WorkflowAdmission
     project = { "name" => "demo" }
     row = { "stage" => "2-brainstorm", "workflow" => "coding", "marker" => "complete" }
     { Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK => "evidence_rework", "ready_to_run" => "run" }.each do |action, kind|
@@ -44,10 +44,10 @@ class RemoteCommandAdmissionGuardsTest < Minitest::Test
       row = Hive::OperationalAction.observed_row(task, project: name)
       authority = { "project" => name, "task_id" => task.id, "slug" => task.slug,
                    "action_id" => descriptor.fetch("action_id"), "observation" => descriptor.fetch("observation_token"),
-                   "effect" => Hive::Remote::CommandService.effect_for(task: task, row: row, action_id: descriptor.fetch("action_id"), project: project),
-                   "execution_observation" => Hive::Remote::CommandService.execution_observation(task, row) }
+                   "effect" => Hive::WorkflowAdmission.effect_for(task: task, row: row, action_id: descriptor.fetch("action_id"), project: project),
+                   "execution_observation" => Hive::WorkflowAdmission.execution_observation(task, row) }
       verify = ->(binding) do
-        Hive::Remote::CommandService.verify_action!(task: task, project: name,
+        Hive::WorkflowAdmission.verify_action!(task: task, project: name,
           action_id: descriptor.fetch("action_id"), observation: descriptor.fetch("observation_token"), authority: binding)
       end
       assert verify.call(authority)
@@ -55,13 +55,13 @@ class RemoteCommandAdmissionGuardsTest < Minitest::Test
       assert_raises(Hive::StaleOperationalObservation) { verify.call(authority.merge("effect" => { "kind" => "approve", "force" => false })) }
       approval = authority.merge("stage" => "2-brainstorm", "generation" => "stale")
       assert_raises(Hive::StaleOperationalObservation) do
-        Hive::Remote::CommandService.verify_approval!(task: task, project: name, authority: approval)
+        Hive::WorkflowAdmission.verify_approval!(task: task, project: name, authority: approval)
       end
       File.write(task.state_file, "# Brainstorm\n### Q1. Which color?\n### A1.\n<!-- WAITING -->\n")
       assert_raises(Hive::StaleOperationalObservation) { verify.call(authority) }
-      approval["generation"] = Hive::Remote::CommandService.generation_for(task, project: name)
+      approval["generation"] = Hive::WorkflowAdmission.generation_for(task, project: name)
       assert_raises(Hive::OperationalActionUsageError) do
-        Hive::Remote::CommandService.verify_approval!(task: task, project: name, authority: approval)
+        Hive::WorkflowAdmission.verify_approval!(task: task, project: name, authority: approval)
       end
       reader = Hive::Remote::ReadService.new
       assert_nil reader.action(project: project, task: task)

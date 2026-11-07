@@ -869,7 +869,7 @@ module Hive
       end
 
       def spawn_name_generator(task_dir)
-        return nil if @structured
+        return nil if @principal_source == "api_token"
         return nil if defined?(Minitest) && !self.class.name_generator_spawn_configured?
 
         FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))

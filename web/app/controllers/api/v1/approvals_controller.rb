@@ -6,8 +6,8 @@ module Api
       def create
         project = authorized_project!("answer")
         input = mutation_input!(allowed: %w[stage generation], required: %w[stage generation])
-        malformed! unless input.fetch("stage").match?(/\A[0-9]+-[a-z][a-z0-9-]*\z/) &&
-          input.fetch("generation").match?(/\A[0-9a-f]{64}\z/)
+        malformed! unless input.fetch("stage").match?(Hive::Remote::Contract::STAGE) &&
+          input.fetch("generation").match?(Hive::Remote::Contract::GENERATION)
         existing = existing_operation(project)
         _, task = resolve_target!(validate_state: !existing)
         result = command_service.approve(project: project, task: task, stage: input.fetch("stage"),

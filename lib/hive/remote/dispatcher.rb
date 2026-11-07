@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "hive/remote/contract"
+
 require "hive/remote/client"
 require "hive/connection_contexts"
 require "hive/cli_argv_policy"
@@ -150,7 +152,7 @@ module Hive
         unless @command_reports_errors
           document = if %w[context token operation].include?(invocation.command)
             schema = "hive-#{invocation.command}"
-            kind = error.is_a?(Hive::ConfigError) ? "config" : error.is_a?(Hive::UsageError) ? "usage" : "remote"
+            kind = error.is_a?(Hive::ConfigError) || error.is_a?(Client::UnsupportedVersion) ? "config" : error.is_a?(Hive::UsageError) ? "usage" : "remote"
             kind = "internal" if invocation.command == "context" && kind == "remote"
             Hive::Schemas::ErrorEnvelope.build(schema: schema, error: error, error_kind: kind)
           else
@@ -202,10 +204,15 @@ module Hive
       end
 
       def status(invocation, transport)
-        args = arguments(invocation, values: [ "project" ], switches: [ "operational" ])
+        args = arguments(invocation, values: %w[project cursor], switches: [ "operational" ])
         args.arity!(0, usage: "status [--project PROJECT]")
+        if args["operational"]
+          raise Hive::UsageError, "remote status does not support --operational; use status --json or --context local"
+        end
         project_name!(args["project"]) if args["project"]
-        document = transport.get("/status", query: args["project"] ? { "project" => args["project"] } : {})
+        query = args.options.slice("project", "cursor")
+        opaque!(args["cursor"]) if args["cursor"]
+        document = transport.get("/status", query: query)
         emit(document, args)
       end
 
@@ -285,8 +292,8 @@ module Hive
           stage ||= data.dig("task", "stage")
           generation ||= data["approval_generation"]
         end
-        unless stage.is_a?(String) && stage.match?(/\A[0-9]+-[a-z][a-z0-9-]*\z/) &&
-            generation.is_a?(String) && generation.match?(/\A[0-9a-f]{64}\z/)
+        unless stage.is_a?(String) && stage.match?(Contract::STAGE) &&
+            generation.is_a?(String) && generation.match?(Contract::GENERATION)
           raise Hive::UsageError, "approval requires a full --from stage and its fresh --generation"
         end
         mutate(transport, "#{task_path(project, target)}/approvals", { "stage" => stage, "generation" => generation },
@@ -351,14 +358,14 @@ module Hive
           raise Hive::UsageError, "remote targets require an exact PROJECT:TASK or TASK with --project"
         end
         project_name!(project)
-        unless task&.match?(/\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\z/)
+        unless task&.match?(Contract::TASK_ID)
           raise Hive::UsageError, "remote tasks require exact IDs or slugs, never filesystem paths"
         end
         [ project, task ]
       end
 
       def project_name!(value)
-        unless value.is_a?(String) && value.match?(/\A[A-Za-z0-9_.-]{1,128}\z/) && !%w[. ..].include?(value)
+        unless value.is_a?(String) && value.match?(Contract::PROJECT_NAME) && !%w[. ..].include?(value)
           raise Hive::UsageError, "remote commands require an explicit registered project name"
         end
         value

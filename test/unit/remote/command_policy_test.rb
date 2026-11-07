@@ -125,6 +125,15 @@ class RemoteCommandPolicyTest < Minitest::Test
     end
   end
 
+  def test_context_inside_new_prose_is_literal_for_policy_and_child_wrappers
+    argv = %w[new myproj add a --context flag to the CLI]
+    assert_equal [ argv, nil ], Hive::CliArgvPolicy.extract_context(argv)
+    assert_equal [ argv, "nas" ], Hive::CliArgvPolicy.extract_context([ "--context", "nas", *argv ])
+    assert_equal [ "hive", "--context", "local", *argv ], Hive::CliArgvPolicy.local_child_argv([ "hive", *argv ])
+    assert_equal %w[new myproj -- add a --context flag to the CLI],
+      Hive::CliArgvPolicy.lift_new_options(argv, value_options: %w[--workflow --context])
+  end
+
   private
 
   def fixed_contexts(value)

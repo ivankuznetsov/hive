@@ -136,12 +136,11 @@ class RemoteAccessAcceptanceTest < Minitest::Test
     arguments = [ "--context", "act", "act", action.fetch("action_id"), fixture.fetch("task"), "--project", project,
       "--observation", action.fetch("observation_token"), "--idempotency-key", key, "--json" ]
     @drop_next_accepted = true
-    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     out, err, status = hive(*arguments)
     refute status.success?, out
     assert_includes err, key
     assert_includes err, @proxy.url
-    assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 3
+    refute File.exist?(File.join(@server_root, "remote-project", ".hive-state", "stages", "3-plan", fixture.fetch("task"), "plan.md"))
     assert_equal 1, @proxy.requests.count { |request| request.fetch(:method) == "POST" }
     stop_process(@server)
     @server = start_server(server_context: true)

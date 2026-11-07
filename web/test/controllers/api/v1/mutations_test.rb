@@ -48,6 +48,30 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     refute_includes response.body, first.fetch("operation_id")
   end
 
+  test "act-only tokens cannot admit a terminal inbox approval through actions" do
+    slug = create_task!(@project, "Needs approval")
+    task = Hive::TaskResolver.new(slug, project_filter: @project).resolve
+    Hive::TaskMeta.write(task.folder, id: task.id, slug: task.slug, display_name: "Approval", workflow: "content")
+    task = Hive::Task.new(task.folder)
+    File.write(task.state_file, "# Idea\n<!-- COMPLETE -->\n")
+    descriptor = Hive::OperationalAction.descriptor_for_task(task, project: @project)
+    headers = headers_for(issue([ "act" ]))
+    post "#{@base}/tasks/#{slug}/actions", params: { action_id: descriptor.fetch("action_id"),
+      observation: descriptor.fetch("observation_token"), idempotency_key: "act-denial" }, headers: headers, as: :json
+    assert_response :forbidden
+    assert_equal "insufficient_scope", response.parsed_body.dig("error", "code")
+    assert_empty Hive::RuntimeControlPlane::DispatchRepository.open_default.pending.select { |request| request.project == @project }
+    assert_includes File.read(task.state_file), "COMPLETE"
+  end
+
+  test "workflow traversal is rejected before lookup" do
+    [ "../config", "/tmp/config", "coding/../../config" ].each do |workflow|
+      post "#{@base}/tasks", params: { text: "Unsafe", workflow: workflow,
+        idempotency_key: "workflow-path" }, headers: @headers, as: :json
+      assert_response :bad_request
+    end
+  end
+
   test "scope and project are checked before target lookup and receipt access" do
     writer = headers_for(issue([ "create" ]))
     post "#{@base}/tasks/not-present/answers", params: { handle: "0" * 64, answer: "Yes", idempotency_key: "forbidden" }, headers: writer, as: :json
@@ -127,7 +151,7 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
   test "queued approval exposes admission separately from durable attempt progress" do
     task, = question_task!
     File.write(task.state_file, "# Brainstorm\n<!-- COMPLETE -->\n")
-    generation = Hive::Remote::CommandService.generation_for(task, project: @project)
+    generation = Hive::WorkflowAdmission.generation_for(task, project: @project)
     payload = { stage: "2-brainstorm", generation: generation, idempotency_key: "approve" }
     writer = headers_for(issue([ "answer" ]))
     post "#{@base}/tasks/#{task.slug}/approvals", params: payload, headers: writer, as: :json

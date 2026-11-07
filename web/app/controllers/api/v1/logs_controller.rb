@@ -5,7 +5,7 @@ module Api
     class LogsController < BaseController
       def show
         project, task = read_target!
-        cap = response_limit(256 * 1024)
+        cap = response_limit(Hive::Remote::Contract::MAX_LOG_BYTES)
         render_bounded(serializers.log(read_service.logs(project: project, task: task, max_bytes: cap)), limit: cap)
       end
     end

@@ -3,6 +3,7 @@
 require "hive/cli_usage_contracts"
 require "hive/schemas"
 require "json"
+require "hive/remote/contract"
 require "uri"
 
 module Hive
@@ -17,7 +18,7 @@ module Hive
       def call
         call_with_envelope do
           raise Hive::UsageError, "operation lookup requires --context <remote>; use hive receipt for local commands" unless @client
-          unless @id.to_s.match?(/\A[0-9a-f-]{36}\z/) && @project.to_s.match?(/\A[A-Za-z0-9_.-]{1,128}\z/) && !%w[. ..].include?(@project)
+          unless @id.to_s.match?(/\A[0-9a-f-]{36}\z/) && @project.to_s.match?(Hive::Remote::Contract::PROJECT_NAME) && !%w[. ..].include?(@project)
             raise Hive::UsageError, "operation requires a durable operation ID and --project PROJECT"
           end
           result = @client.get("/projects/#{URI.encode_www_form_component(@project)}/operations/#{@id}")

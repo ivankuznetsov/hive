@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require "digest"
+require "openssl"
 require "fileutils"
 require "json"
+require "hive/remote/registry_lock"
 require "securerandom"
 require "hive/atomic_file"
 require "hive/paths"
@@ -12,13 +14,18 @@ module Hive
   module Remote
     # Private read identities only. These records convey no mutation admission
     # or result authority; durable commands continue to use CommandReceiptStore.
-    # Original native answer bindings stay server-side so receipt replay remains
-    # possible even when a task has advanced since the handle was issued.
+    # Native answer bindings remain private while retained, including across
+    # task advancement. Authentic evicted handles request an inventory refresh.
     class QuestionHandles
+      HANDLE_LENGTH = 64
+      MAX_HANDLES = 4096
+      MAX_REGISTRY_BYTES = 8 * 1024 * 1024
+
       attr_reader :path
 
-      def initialize(root: File.join(Hive::Paths.state_home, "remote-access"))
+      def initialize(root: File.join(Hive::Paths.state_home, "remote-access"), max_handles: MAX_HANDLES)
         @root = root
+        @max_handles = max_handles
         @path = File.join(root, "read-handles.json")
       end
 
@@ -34,7 +41,7 @@ module Hive
               "binding" => slot.fetch("binding")
             )
             existing = identities[record]
-            handle = existing || SecureRandom.hex(32)
+            handle = existing || new_handle(data, "question", target(project, task))
             unless existing
               data.fetch("handles")[handle] = record
               identities[record] = handle
@@ -48,7 +55,7 @@ module Hive
       end
 
       def resolve(handle:, project:, task:)
-        record = lookup(handle, "question")
+        record = lookup(handle, "question", target(project, task))
         not_found! unless target(project, task).all? { |key, value| record[key] == value }
         record
       end
@@ -69,7 +76,7 @@ module Hive
       end
 
       def resolve_artifact(handle:, project:, task:, generation:)
-        record = lookup(handle, "artifact")
+        record = lookup(handle, "artifact", target(project, task))
         not_found! unless target(project, task).all? { |key, value| record[key] == value }
         stale! unless record["generation"] == generation
         record.fetch("reference")
@@ -80,7 +87,7 @@ module Hive
       end
 
       def resolve_cursor(handle:, projects:, snapshot:)
-        record = lookup(handle, "cursor")
+        record = lookup(handle, "cursor", { "projects" => projects })
         not_found! unless record["projects"] == projects
         stale! unless record["snapshot"] == snapshot
         record.fetch("offset")
@@ -97,22 +104,49 @@ module Hive
           record = identity.merge("kind" => kind)
           existing = data.fetch("handles").find { |_, value| value == record }
           next existing.first if existing
-          handle = SecureRandom.hex(32)
+          scope = kind == "cursor" ? identity.slice("projects") : identity.slice("project", "task_id", "task_slug")
+          handle = new_handle(data, kind, scope)
           data.fetch("handles")[handle] = record
           persist(data)
           handle
         end
       end
 
+      # Authenticate expired identities without retaining their full records.
+      # A foreign target or random handle still returns the same 404 as before.
+      def new_handle(data, kind, scope)
+        nonce = SecureRandom.hex(16)
+        nonce + signature(data, nonce, kind, scope)
+      end
+
+      def signature(data, nonce, kind, scope)
+        data["signing_key"] ||= SecureRandom.hex(32)
+        OpenSSL::HMAC.hexdigest("SHA256", data.fetch("signing_key"), JSON.generate([ nonce, kind, scope ])).slice(0, 32)
+      end
+
       def persist(data)
+        records = data.fetch("handles")
+        records.shift while records.length > @max_handles
+        bytes = JSON.generate(data).bytesize
+        while bytes > MAX_REGISTRY_BYTES && !records.empty?
+          key, record = records.shift
+          bytes -= JSON.generate({ key => record }).bytesize - 2
+          bytes -= 1 unless records.empty?
+        end
         Hive::AtomicFile.write(path, JSON.generate(data), mode: 0o600)
         Hive::AtomicFile.fsync_directory(@root)
       end
 
-      def lookup(handle, kind)
+      def lookup(handle, kind, scope)
         not_found! unless handle.to_s.match?(/\A[0-9a-f]{64}\z/)
         locked do |data|
           record = data.fetch("handles")[handle]
+          unless record
+            if data["signing_key"] && OpenSSL.fixed_length_secure_compare(signature(data, handle[0, 32], kind, scope), handle[32, 32])
+              stale!
+            end
+            not_found!
+          end
           not_found! unless record.is_a?(Hash) && record["kind"] == kind
           record
         end
@@ -128,7 +162,7 @@ module Hive
         flags = File::RDWR | File::CREAT
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         File.open(File.join(@root, ".read-handles.lock"), flags, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+          Hive::Remote::RegistryLock.acquire!(lock, File::LOCK_EX)
           yield read
         ensure
           lock.flock(File::LOCK_UN)
@@ -143,11 +177,13 @@ module Hive
         unless stat.file? && !stat.symlink? && stat.uid == Process.uid && (stat.mode & 0o077).zero?
           raise Hive::ConfigError, "remote read identity registry must be an owner-only regular file"
         end
+        raise Hive::ConfigError, "remote read identity registry is too large" if stat.size > MAX_REGISTRY_BYTES
         data = JSON.parse(File.read(path))
         if data.is_a?(Hash) && data["schema_version"].is_a?(Integer) && data["schema_version"] > 1
           raise Hive::ConfigError, "remote read identity registry is newer; upgrade Hive"
         end
         unless data.is_a?(Hash) && data["schema_version"] == 1 && data["handles"].is_a?(Hash) &&
+               (!data.key?("signing_key") || data["signing_key"].to_s.match?(/\A[0-9a-f]{64}\z/)) &&
                data["handles"].all? { |key, value| key.match?(/\A[0-9a-f]{64}\z/) && value.is_a?(Hash) }
           raise Hive::ConfigError, "invalid remote read identity registry"
         end

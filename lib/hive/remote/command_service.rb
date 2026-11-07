@@ -1,3 +1,5 @@
+require "hive/workflow_admission"
+require "hive/remote/contract"
 require "digest"
 require "time"
 require "shellwords"
@@ -27,6 +29,9 @@ module Hive
       def create(project:, text:, idempotency_key:, principal:, scopes:, slug: nil, body: nil,
                  workflow: nil, depends_on: nil, base: nil)
         scope!(scopes, "create")
+        if workflow && !workflow.match?(Contract::WORKFLOW_ID)
+          raise Hive::UsageError, "workflow must be an installed workflow identifier"
+        end
         require_key!(idempotency_key)
         Hive::CommandOperation.verify_receipt_extension!(@store)
         Hive::Commands::New.new(
@@ -65,11 +70,11 @@ module Hive
             Hive::OperationalAction.assert_current!(current, project: project.fetch("name"),
               action_id: action_id, target: target, observation_token: observation)
             row = Hive::OperationalAction.observed_row(current, project: project.fetch("name"))
-            effect = self.class.effect_for(task: current, row: row, action_id: action_id, project: project)
+            effect = Hive::WorkflowAdmission.effect_for(task: current, row: row, action_id: action_id, project: project)
             authorize_effect!(effect, scopes: scopes, action: true)
             authority = authority_for(project, current, principal, effect).merge(
               "action_id" => action_id, "observation" => observation,
-              "execution_observation" => self.class.execution_observation(current, row)
+              "execution_observation" => Hive::WorkflowAdmission.execution_observation(current, row)
             )
             if action_id == Hive::OperationalAction::RETRY_ACTION_ID
               retry_admission(project, current, row, authority)
@@ -91,7 +96,7 @@ module Hive
             authority = authority_for(project, current, principal, { "kind" => "approve", "force" => false }).merge(
               "stage" => stage, "generation" => generation
             )
-            self.class.verify_approval!(task: current, project: project.fetch("name"), authority: authority)
+            Hive::WorkflowAdmission.verify_approval!(task: current, project: project.fetch("name"), authority: authority)
             argv = [ "hive", "approve", current.slug, "--from", stage, "--project", project.fetch("name") ]
             queue(project, current, argv, authority)
           end
@@ -104,92 +109,11 @@ module Hive
         true
       end
 
-      def self.generation_for(task, project:)
-        Hive::Attempts::Generation.resolve(task: task, project: project,
-          intended_stage: stage_for(task)).ownership_generation
-      end
-
-      def self.effect_for(task:, row:, action_id:, project:)
-        if action_id == Hive::OperationalAction::RETRY_ACTION_ID
-          verb = Hive::Recovery::RetryPolicy.verb_for(row.fetch("stage"),
-            workflow: row.fetch("workflow"), project: project.fetch("name"))
-          unless verb == "run" || Hive::OperationalAction::STAGE_ACTIONS.value?(verb)
-            raise Hive::OperationalActionUsageError, "this recovery must be performed locally"
-          end
-          if verb != "run"
-            transition = Hive::Workflows.for_verb(verb)
-            if transition[:force_source] && row.fetch("stage") != transition.fetch(:target)
-              raise Hive::OperationalActionUsageError, "this recovery requires force; retry locally"
-            end
-          end
-          return { "kind" => "retry", "verb" => verb, "stage" => row.fetch("stage"), "force" => false }
-        end
-        action = row.fetch("action")
-        if (verb = Hive::OperationalAction::STAGE_ACTIONS[action])
-          transition = Hive::Workflows.for_verb(verb)
-          if transition[:force_source] && row.fetch("stage") != transition.fetch(:target)
-            raise Hive::OperationalActionUsageError, "this transition requires force; advance locally"
-          end
-          { "kind" => "stage_action", "verb" => verb, "force" => false }
-        elsif action == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
-          { "kind" => "evidence_rework", "force" => false }
-        elsif action == "ready_to_run"
-          { "kind" => "run", "force" => false }
-        elsif action == "ready_to_advance"
-          if row.fetch("marker") == "none"
-            raise Hive::OperationalActionUsageError, "this transition requires force; advance locally"
-          end
-          { "kind" => "approve", "force" => false }
-        else
-          raise Hive::OperationalActionUsageError, "unsupported remote workflow effect"
-        end
-      end
-
-      def self.verify_action!(task:, project:, action_id:, observation:, authority:)
-        unless authority.fetch("project") == project && authority.fetch("task_id").to_s == task.id.to_s &&
-               authority.fetch("slug") == task.slug
-          raise Hive::StaleOperationalObservation, "task identity changed before remote execution"
-        end
-        row = Hive::OperationalAction.observed_row(task, project: project)
-        expected = effect_for(task: task, row: row, action_id: action_id, project: { "name" => project })
-        unless expected == authority.fetch("effect") &&
-               execution_observation(task, row) == authority.fetch("execution_observation") &&
-               action_id == authority.fetch("action_id") && observation == authority.fetch("observation")
-          raise Hive::StaleOperationalObservation, "workflow effect changed before remote execution"
-        end
-        true
-      rescue Hive::OperationalActionUsageError
-        raise Hive::StaleOperationalObservation, "workflow effect changed before remote execution"
-      end
-
-      def self.execution_observation(task, row)
-        row.slice("stage", "workflow", "marker", "attrs", "mtime", "action").merge(
-          "state_sha256" => File.file?(task.state_file) ? Digest::SHA256.file(task.state_file).hexdigest : nil,
-          "task_input_epoch" => Hive::Attempts::Generation.current_task_input_epoch(task)
-        )
-      end
-
-      def self.verify_approval!(task:, project:, authority:)
-        stage = stage_for(task)
-        unless authority.fetch("project") == project && authority.fetch("slug") == task.slug &&
-               authority.fetch("task_id").to_s == task.id.to_s && authority.fetch("stage") == stage &&
-               authority.fetch("generation") == generation_for(task, project: project)
-          raise Hive::StaleOperationalObservation, "approval stage or generation changed"
-        end
-        marker = Hive::Markers.current(task.state_file)
-        unless Hive::Commands::Approve::VALID_TERMINAL_MARKERS.include?(marker.name)
-          raise Hive::OperationalActionUsageError, "this transition requires a terminal marker; advance locally"
-        end
-        true
-      end
-
-      def self.stage_for(task) = "#{task.stage_index}-#{task.stage_name}"
-
       private
 
       def scope!(scopes, required)
         return if Array(scopes).include?(required)
-        raise Hive::Remote::Error.new(code: "insufficient_scope", message: "insufficient token scope", status: 403)
+        raise Hive::Remote::AdmissionRefused.new(code: "insufficient_scope", message: "insufficient token scope", status: 403)
       end
 
       def require_key!(key)
@@ -232,12 +156,12 @@ module Hive
         intended = if authority.dig("effect", "kind") == "stage_action"
           Hive::Workflows.for_verb(authority.dig("effect", "verb")).fetch(:target)
         else
-          self.class.stage_for(task)
+          Hive::WorkflowAdmission.stage_for(task)
         end
         generation = Hive::Attempts::Generation.resolve(task: task, project: project.fetch("name"), intended_stage: intended)
         request_id = Hive::Bot::DispatchRequestWriter.write!(
           project: project.fetch("name"), slug: task.slug, argv: argv, trigger: "api",
-          task_id: task.id, expected_stage: self.class.stage_for(task), task_generation: generation.task_generation,
+          task_id: task.id, expected_stage: Hive::WorkflowAdmission.stage_for(task), task_generation: generation.task_generation,
           repository: @repository, remote_authority: authority,
           command_lifecycle: Hive::CommandDispatchLifecycle.new(repository: @repository, store: @store)
         )
@@ -249,10 +173,10 @@ module Hive
         verb = authority.dig("effect", "verb")
         row = row.merge("suggested_command" => Shellwords.join([
           "hive", verb, task.slug, "--project", project.fetch("name"),
-          verb == "run" ? "--stage" : "--from", self.class.stage_for(task), "--json"
+          verb == "run" ? "--stage" : "--from", Hive::WorkflowAdmission.stage_for(task), "--json"
         ]))
         guard = lambda do |locked_task|
-          self.class.verify_action!(task: locked_task, project: project.fetch("name"),
+          Hive::WorkflowAdmission.verify_action!(task: locked_task, project: project.fetch("name"),
             action_id: authority.fetch("action_id"), observation: authority.fetch("observation"), authority: authority)
         end
         result = Hive::Recovery::API.recover!(row: row, project: project.fetch("name"), requestor: "action",
@@ -260,13 +184,16 @@ module Hive
           admission_guard: guard, command_context: context, remote_authority: authority,
           coordinator: Hive::Daemon::RecoveryCoordinator.new(dispatch_repository: @repository))
         recovery = result.to_h
-        admission(task, request_id: recovery["request_id"], queued: !recovery["request_id"].nil?).merge("recovery" => recovery)
+        unless recovery["request_id"]
+          raise AdmissionRefused.new(code: "unavailable", status: 503, message: "remote recovery admission was refused")
+        end
+        admission(task, request_id: recovery.fetch("request_id"))
       end
 
       def admission(task, request_id:, queued: true)
         { "ok" => true, "queued" => queued, "state" => queued ? "queued" : "unavailable",
           "request_id" => request_id, "task_id" => task.id, "slug" => task.slug,
-          "stage" => self.class.stage_for(task) }
+          "stage" => Hive::WorkflowAdmission.stage_for(task) }
       end
     end
   end

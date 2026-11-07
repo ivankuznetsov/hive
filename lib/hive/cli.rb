@@ -1583,6 +1583,11 @@ module Hive
       ownership and recovery actions. Inspect one task in depth with
       `hive task TARGET --json`; use `hive archive --json` for terminal history.
 
+      With --context REMOTE, status returns a bounded authorized task page.
+      Use --cursor HANDLE from data.continuation for the next page, retaining
+      the same --project filter. Remote status does not support --operational;
+      select --context local for the local operational view.
+
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v2) and emit the diagnostic for a single task. Useful
       for agents that want to inspect one row without paying the

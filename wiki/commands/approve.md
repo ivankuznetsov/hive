@@ -23,6 +23,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
 
 `<stage>` accepts either the full directory name (`3-plan`) or the short suffix (`plan`). Both `--to` and `--from` are validated against the closed enum at parse time (Thor `enum:` constraint).
 
+Remote approval requires `answer` authority and full stage/generation guards.
+When omitted by a token with `read`, the CLI resolves them and prints the exact
+`--from`, `--generation` and retry key to stderr before submission. Reuse those
+values for a lost-response retry after advancement. Retained remote verification
+composes with caller observation guards and always refuses force/destination
+overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
+[[remote-access]].
+
 ## Steps performed (`Commands::Approve#call`)
 
 1. `resolve_target`: path-shaped `TARGET` (contains `/` or starts with `~`/`.`) is used directly; bare slugs are searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous. The resolved folder is then `File.realpath`'d so slug-named symlinks pointing outside the `.hive-state` hierarchy are rejected at the PATH_RE check.

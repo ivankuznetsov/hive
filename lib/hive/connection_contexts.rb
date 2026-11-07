@@ -5,6 +5,7 @@ require "hive/paths"
 require "hive/atomic_file"
 require "fileutils"
 require "json"
+require "hive/remote/registry_lock"
 require "securerandom"
 require "uri"
 
@@ -169,8 +170,8 @@ module Hive
 
     def write
       FileUtils.mkdir_p(@root, mode: 0o700)
-      File.chmod(0o700, @root)
       with_lock(File::LOCK_EX) do
+        File.chmod(0o700, @root)
         config = load_config
         credentials = load_credentials
         verify_references!(config, credentials)
@@ -190,17 +191,29 @@ module Hive
     end
 
     def with_lock(mode)
-      File.open(@lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+      stat = File.lstat(@root)
+      unless stat.directory? && !stat.symlink? && stat.uid == Process.uid
+        raise Hive::ConfigError, "context directory must belong to the current operator"
+      end
+      flags = File::RDWR | File::CREAT
+      flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+      File.open(@lock_path, flags, 0o600) do |lock|
         lock.chmod(0o600)
-        lock.flock(mode)
+        Hive::Remote::RegistryLock.acquire!(lock, mode)
         yield
       ensure
         lock.flock(File::LOCK_UN) if lock
       end
+    rescue Errno::ELOOP
+      raise Hive::ConfigError, "context lock cannot use a symlink"
     end
 
     def load_document(path, default)
-      return default unless File.exist?(path)
+      return default unless File.exist?(path) || File.symlink?(path)
+      stat = File.lstat(path)
+      unless stat.file? && !stat.symlink? && stat.uid == Process.uid && (stat.mode & 0o077).zero?
+        raise Hive::ConfigError, "context configuration must be an owner-only regular file"
+      end
       raise Hive::ConfigError, "context configuration is too large" if File.size(path) > MAX_FILE_BYTES
 
       document = JSON.parse(File.read(path))

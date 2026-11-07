@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "hive/connection_contexts"
+require "hive/remote/client"
 require "hive/schemas"
 require "json"
 
@@ -42,7 +43,7 @@ module Hive
       def envelope_schema = "hive-context"
       def envelope_error_kind(error)
         case error
-        when Hive::ConfigError then "config"
+        when Hive::ConfigError, Hive::Remote::Client::UnsupportedVersion then "config"
         when Hive::UsageError then "usage"
         else "internal"
         end

@@ -818,7 +818,10 @@ class NewTest < Minitest::Test
           12_345
         end
 
-        capture_io { Hive::Commands::New.new(project, "name me").call }
+        stdout, stderr = capture_io { Hive::Commands::New.new(project, "name me", structured: true).call! }
+        assert_empty stdout
+        assert_empty stderr
+        Hive::Commands::New.new(project, "api idea", structured: true, principal_source: "api_token").call!
 
         assert_equal 1, calls.size
         argv, opts = calls.first

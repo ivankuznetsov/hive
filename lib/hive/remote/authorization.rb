@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "hive/remote/contract"
+
 require "digest"
 require "json"
 require "hive/config"
@@ -8,8 +10,8 @@ require "hive/remote/errors"
 module Hive
   module Remote
     class Authorization
-      SCOPES = %w[read create act answer].freeze
-      NAME = /\A[A-Za-z0-9_.-]{1,128}\z/
+      SCOPES = Contract::SCOPES
+      NAME = Contract::PROJECT_NAME
 
       attr_reader :token
 

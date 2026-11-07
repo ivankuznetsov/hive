@@ -1,3 +1,4 @@
+require "hive/remote/contract"
 require "hive/commands/status"
 require "hive/commands/task"
 require "hive/commands/answer"
@@ -13,7 +14,7 @@ module Hive
     # project authorization and the public DTOs; no reader selects a client
     # checkout or interprets a caller-supplied filesystem path.
     class ReadService
-      STATE_BYTES = 512 * 1024
+      STATE_BYTES = Contract::MAX_CONTENT_BYTES
 
       # Domain generation and marker readers inspect the current state file.
       # Refuse unsafe sources before those shared readers can open them. The
@@ -56,13 +57,13 @@ module Hive
           state_reader: ->(current) { self.class.validate_state!(current, allow_missing: false, strict_text: true) })
       end
 
-      def logs(project:, task:, max_bytes: 256 * 1024)
+      def logs(project:, task:, max_bytes: Contract::MAX_LOG_BYTES)
         document = self.task(project: project, task: task)
         reference = document.dig("diagnostic", "log", "reference")
         return unavailable_log unless reference.is_a?(Hash)
         log = Hive::Attempts::API.new.correlated_log_reader.read(reference)
         return unavailable_log unless log
-        limit = bounded_limit(max_bytes, 256 * 1024)
+        limit = bounded_limit(max_bytes, Contract::MAX_LOG_BYTES)
         text = Hive::SecretPatterns.redact(log.fetch("tail").to_s)
         content = text.byteslice(0, limit).to_s.force_encoding(Encoding::UTF_8).scrub("")
         { "state" => "available", "content" => content,
@@ -70,10 +71,10 @@ module Hive
           "continuation" => nil }
       end
 
-      def diff(project:, task:, max_bytes: 512 * 1024)
+      def diff(project:, task:, max_bytes: Contract::MAX_CONTENT_BYTES)
         verify_target!(project, task)
         Hive::Web::TaskDiff.new(task: task, expected_root: project.fetch("path"),
-          max_bytes: bounded_limit(max_bytes, 512 * 1024)).call
+          max_bytes: bounded_limit(max_bytes, Contract::MAX_CONTENT_BYTES)).call
       end
 
       def artifacts(project:, task:)
@@ -82,12 +83,12 @@ module Hive
         Hive::Commands::Task::ProjectionTask.new(native_task: task, attributes: attributes).artifact_panel
       end
 
-      def artifact(project:, task:, reference:, max_bytes: 512 * 1024)
+      def artifact(project:, task:, reference:, max_bytes: Contract::MAX_CONTENT_BYTES)
         verify_target!(project, task)
         declared = [ task.workflow.result.primary_artifact, *task.workflow.stages.map(&:state_file) ].compact.uniq
         raise Hive::InvalidTaskPath, "unknown artifact" unless declared.include?(reference)
         Hive::TaskWorkspace::BoundedReader.new(root: task.folder).read(reference,
-          max_bytes: bounded_limit(max_bytes, 512 * 1024))
+          max_bytes: bounded_limit(max_bytes, Contract::MAX_CONTENT_BYTES))
       end
 
       private

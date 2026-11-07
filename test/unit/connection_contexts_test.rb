@@ -300,6 +300,34 @@ class ConnectionContextsTest < Minitest::Test
     end
   end
 
+  def test_credentials_and_lock_refuse_exposed_files_and_symlinks
+    add_remote
+    File.chmod(0o640, @store.credentials_path)
+    assert_raises(Hive::ConfigError) { @store.resolve }
+    File.chmod(0o600, @store.credentials_path)
+    target = File.join(@root, "real-credentials")
+    File.rename(@store.credentials_path, target)
+    File.symlink(target, @store.credentials_path)
+    assert_raises(Hive::ConfigError) { @store.resolve }
+    File.unlink(@store.credentials_path)
+    File.rename(target, @store.credentials_path)
+    lock = File.join(@root, ".lock")
+    File.unlink(lock)
+    File.symlink(target, lock)
+    assert_raises(Hive::ConfigError) { @store.resolve }
+  end
+
+  def test_version_mismatch_has_a_config_envelope_and_exit_code
+    contexts = Hive::ConnectionContexts.new(root: @root, verifier: ->(*) { raise Hive::Remote::Client::UnsupportedVersion.new })
+    output = StringIO.new
+    error = assert_raises(Hive::Remote::Client::UnsupportedVersion) do
+      Hive::Commands::Context.new("add", "nas", url: "https://nas.example", token_stdin: true,
+        json: true, contexts: contexts, stdin: StringIO.new("secret"), stdout: output).call
+    end
+    assert_equal 78, error.exit_code
+    assert_equal "config", JSON.parse(output.string).fetch("error_kind")
+  end
+
   private
 
   def add_remote

@@ -23,6 +23,7 @@ require "hive/plan_review/transition_guard"
 require "hive/task_activity"
 require "hive/command_operation"
 require "hive/command_error_kind"
+require "hive/workflow_admission"
 
 module Hive
   module Commands
@@ -50,7 +51,7 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
       DEFAULT_CLOCK = -> { Time.now.utc }.freeze
 
-      VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
+      VALID_TERMINAL_MARKERS = Hive::WorkflowAdmission::VALID_TERMINAL_MARKERS
 
       def self.error_kind_for(error)
         typed = Hive::CommandErrorKind.typed(error)
@@ -171,14 +172,19 @@ module Hive
         context = Hive::Attempts::Context.current
         authority = context&.remote_authority
         return unless authority && authority.fetch("effect").fetch("kind") == "approve"
-        return if @observation_guard
 
-        require "hive/remote/command_service"
         if @force || @to
           raise Hive::OperationalActionUsageError, "remote approval requires the guarded forward transition; advance locally"
         end
+        existing_guard = @observation_guard
         @observation_guard = lambda do |task|
-          Hive::Remote::CommandService.verify_approval!(task: task, project: @project_filter, authority: authority)
+          if authority["action_id"]
+            Hive::WorkflowAdmission.verify_action!(task: task, project: @project_filter,
+              action_id: authority.fetch("action_id"), observation: authority.fetch("observation"), authority: authority)
+          else
+            Hive::WorkflowAdmission.verify_approval!(task: task, project: @project_filter, authority: authority)
+          end
+          existing_guard&.call(task)
         end
       end
 

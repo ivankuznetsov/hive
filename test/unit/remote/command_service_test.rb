@@ -50,7 +50,7 @@ class RemoteCommandServiceTest < Minitest::Test
       row = Hive::OperationalAction.observed_row(task, project: project.fetch("name"))
       row["action"] = "ready_to_advance"
       row["marker"] = "complete"
-      effect = Hive::Remote::CommandService.effect_for(task: task, row: row, action_id: "workflow.advance", project: project)
+      effect = Hive::WorkflowAdmission.effect_for(task: task, row: row, action_id: "workflow.advance", project: project)
       assert_equal "approve", effect.fetch("kind")
       assert_raises(Hive::Remote::Error) do
         service.authorize_effect!(effect, scopes: [ "act" ], action: true)
@@ -58,7 +58,7 @@ class RemoteCommandServiceTest < Minitest::Test
       service.authorize_effect!(effect, scopes: %w[act answer], action: true)
       row["marker"] = "none"
       error = assert_raises(Hive::OperationalActionUsageError) do
-        Hive::Remote::CommandService.effect_for(task: task, row: row, action_id: "workflow.advance", project: project)
+        Hive::WorkflowAdmission.effect_for(task: task, row: row, action_id: "workflow.advance", project: project)
       end
       assert_match(/locally/, error.message)
       assert_empty repository.pending
@@ -141,7 +141,7 @@ class RemoteCommandServiceTest < Minitest::Test
   def test_queued_approval_is_executed_by_a_detached_worker_with_the_bound_principal
     with_server do |service, _store, repository, project, task|
       result = service.approve(project: project, task: task, stage: "2-brainstorm",
-        generation: Hive::Remote::CommandService.generation_for(task, project: project.fetch("name")),
+        generation: Hive::WorkflowAdmission.generation_for(task, project: project.fetch("name")),
         idempotency_key: "remote-approval", principal: PRINCIPAL, scopes: [ "answer" ])
       assert File.directory?(task.folder)
       request = repository.fetch(result.fetch("request_id"))
@@ -229,7 +229,7 @@ class RemoteCommandServiceTest < Minitest::Test
   def test_daemon_defers_an_unfinished_admission_and_closes_the_pin_for_rejected_work
     with_server do |service, _store, repository, project, task|
       result = service.approve(project: project, task: task, stage: "2-brainstorm",
-        generation: Hive::Remote::CommandService.generation_for(task, project: project.fetch("name")),
+        generation: Hive::WorkflowAdmission.generation_for(task, project: project.fetch("name")),
         idempotency_key: "remote-admission-lifecycle", principal: PRINCIPAL, scopes: [ "answer" ])
       request = repository.fetch(result.fetch("request_id"))
       daemon = daemon_for(repository)
@@ -321,7 +321,7 @@ class RemoteCommandServiceTest < Minitest::Test
         task_generation: generation.task_input_epoch, ownership_generation: generation.ownership_generation,
         intended_stage: "2-brainstorm", remote_authority: authority)
       with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-        [ { force: true }, { to: "3-plan" } ].each do |options|
+        [ { force: true }, { to: "3-plan" }, { force: true, observation_guard: ->(_) { } }, { to: "3-plan", observation_guard: ->(_) { } } ].each do |options|
           error = assert_raises(Hive::OperationalActionUsageError) do
             Hive::Commands::Approve.new(task.slug, project: project.fetch("name"), from: "2-brainstorm", **options).call
           end
@@ -329,8 +329,15 @@ class RemoteCommandServiceTest < Minitest::Test
           assert File.directory?(task.folder)
         end
         # A composing command already supplies its locked observation guard.
-        composed = Hive::Commands::Approve.new(task.slug, project: project.fetch("name"), observation_guard: ->(_) { })
-        assert_nil composed.send(:install_remote_guard!)
+        guard_called = false
+        composed = Hive::Commands::Approve.new(task.slug, project: project.fetch("name"), observation_guard: ->(_) { guard_called = true })
+        composed.send(:install_remote_guard!)
+        composed.instance_variable_get(:@observation_guard).call(task)
+        assert guard_called
+        before_marker = File.binread(task.state_file)
+        File.write(task.state_file, "# Changed\n<!-- WAITING -->\n")
+        assert_raises(Hive::OperationalActionUsageError, Hive::StaleOperationalObservation) { composed.instance_variable_get(:@observation_guard).call(task) }
+        File.binwrite(task.state_file, before_marker)
         before = store.receipt(result.dig("command_receipt", "id"))
         payload = nil
         stdout, stderr = capture_io do
@@ -376,11 +383,94 @@ class RemoteCommandServiceTest < Minitest::Test
     end
   end
 
+  def test_act_only_cannot_admit_an_approval_effect_under_the_task_lock
+    with_server do |service, store, repository, project, task|
+      task = Hive::Task.new(File.join(project.fetch("hive_state_path"), "stages", "1-inbox", "approval-260923-abcd")).tap do |current|
+        FileUtils.mkdir_p(current.folder)
+        Hive::TaskMeta.write(current.folder, id: 43, slug: current.slug, display_name: "Approval", workflow: "content")
+        File.write(current.state_file, "# Idea\n<!-- COMPLETE -->\n")
+      end
+      task = Hive::Task.new(task.folder)
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
+      error = assert_raises(Hive::Remote::Error) do
+        service.action(project: project, task: task, action_id: descriptor.fetch("action_id"),
+          observation: descriptor.fetch("observation_token"), idempotency_key: "deny-approval-effect",
+          principal: PRINCIPAL, scopes: [ "act" ])
+      end
+      assert_equal "insufficient_scope", error.code
+      assert_empty repository.pending
+      assert_includes File.read(task.state_file), "COMPLETE"
+    end
+  end
+
+  def test_act_and_answer_approval_executes_with_both_retained_and_composing_guards
+    with_server do |service, store, repository, project, _task|
+      folder = File.join(project.fetch("hive_state_path"), "stages", "1-inbox", "allowed-approval-260923-abcd")
+      FileUtils.mkdir_p(folder)
+      Hive::TaskMeta.write(folder, id: 43, slug: File.basename(folder), display_name: "Approval", workflow: "content")
+      task = Hive::Task.new(folder)
+      File.write(task.state_file, "# Idea\n<!-- COMPLETE -->\n")
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
+      result = service.action(project: project, task: task, action_id: descriptor.fetch("action_id"),
+        observation: descriptor.fetch("observation_token"), idempotency_key: "allowed-approval-effect",
+        principal: PRINCIPAL, scopes: %w[act answer])
+      authority = repository.fetch(result.fetch("request_id")).remote_authority
+      assert_equal "approve", authority.dig("effect", "kind")
+      generation = Hive::Attempts::Generation.resolve(task: task, project: project.fetch("name"), intended_stage: "1-inbox")
+      context = Hive::Attempts::Context.send(:new, attempt_id: "action-approval-worker", project: project.fetch("name"),
+        task_generation: generation.task_input_epoch, ownership_generation: generation.ownership_generation,
+        intended_stage: "1-inbox", remote_authority: authority)
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        executor = Hive::OperationalAction::Executor.new(remote_authority: authority)
+        payload = executor.execute(action_id: descriptor.fetch("action_id"), target: descriptor.fetch("target"),
+          observation_token: descriptor.fetch("observation_token"))
+        assert_equal "2-research", payload.fetch("stage")
+      end
+      refute File.exist?(folder)
+      assert_equal "succeeded", store.receipt(result.dig("command_receipt", "id")).fetch(:state)
+    end
+  end
+
+  def test_refused_retry_records_failure_without_dispatch
+    with_server do |service, store, repository, project, task|
+      File.write(task.state_file, "# Brainstorm\n<!-- ERROR reason=timeout marker_id=retry-marker -->\n")
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
+      refused = Struct.new(:to_h).new({ "state" => "safety_blocked", "request_id" => nil })
+      with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**) { refused }) do
+        [ Hive::Remote::AdmissionRefused, Hive::CommandReplayFailure ].each do |error_class|
+          assert_raises(error_class) do
+            service.action(project: project, task: task, action_id: descriptor.fetch("action_id"),
+              observation: descriptor.fetch("observation_token"), idempotency_key: "refused-retry",
+              principal: PRINCIPAL, scopes: [ "act" ])
+          end
+        end
+      end
+      assert_empty repository.pending
+      receipt = repository.database.read { |db| db[:command_receipts].where(command: "act").first }
+      assert_equal "failed", receipt.fetch(:state)
+      require "hive/remote/operation_projection"
+      result = Hive::Remote::OperationProjection.new(store: store).call(project: project,
+        id: receipt.fetch(:receipt_id), principal: PRINCIPAL, scopes: [ "act" ])
+      assert_equal "failed", result.fetch("state")
+    end
+  end
+
+  def test_workflow_identifiers_reject_paths_before_lookup
+    with_server do |service, _store, _repository, project, _task|
+      [ "../config", "/tmp/config", "coding/../../config", "..", "coding.yml" ].each do |workflow|
+        assert_raises(Hive::UsageError) do
+          service.create(project: project, text: "unsafe workflow", workflow: workflow,
+            idempotency_key: "workflow-path", principal: PRINCIPAL, scopes: [ "create" ])
+        end
+      end
+    end
+  end
+
   private
 
   def queue_approval(service, project, task, key:)
     service.approve(project: project, task: task, stage: "2-brainstorm",
-      generation: Hive::Remote::CommandService.generation_for(task, project: project.fetch("name")),
+      generation: Hive::WorkflowAdmission.generation_for(task, project: project.fetch("name")),
       idempotency_key: key, principal: PRINCIPAL, scopes: [ "answer" ])
   end
 

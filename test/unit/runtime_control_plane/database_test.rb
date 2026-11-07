@@ -29,6 +29,28 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     end
   end
 
+  def test_cached_installation_identity_is_per_database_and_process_without_diagnostics_or_checkout
+    with_database do |database|
+      expected = database.installation_identity
+      database.define_singleton_method(:diagnostics_uncoordinated) { flunk "request ran database diagnostics" }
+      guard = Hive::RuntimeControlPlane::ProcessGuard
+      with_replaced_singleton_method(guard, :checkout, ->(&_) { flunk "request checked out the process guard" }) do
+        first = database.cached_installation_identity
+        assert_equal expected, first
+        assert_same first, database.cached_installation_identity
+        database.disconnect
+        refute_same first, database.cached_installation_identity
+        pid = Process.pid
+        with_replaced_singleton_method(Process, :pid, -> { pid + 1 }) do
+          refute_same first, database.cached_installation_identity
+        end
+        other = Hive::RuntimeControlPlane::Database.new(path: database.path)
+        assert_equal first, other.cached_installation_identity
+        refute_same first, other.cached_installation_identity
+      end
+    end
+  end
+
   def test_live_connections_use_the_required_sqlite_settings
     with_database do |database|
       settings = database.read do |connection|

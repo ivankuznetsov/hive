@@ -87,7 +87,7 @@ if ENV["HIVE_REMOTE_DISPATCH_ACCEPTED"] == "1"
   fixture["action"] = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
   ENV["HIVE_CLAUDE_BIN"] = File.expand_path("fake-claude", __dir__)
   ENV["HIVE_CODEX_BIN"] = ENV.fetch("HIVE_CLAUDE_BIN")
-  ENV["HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE"] = "2"
+  ENV["HIVE_FAKE_CLAUDE_BEFORE_WRITE_RELEASE_FILE"] = File.join(root, "release-worker")
   ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(project.fetch("hive_state_path"), "stages", "3-plan", slug, "plan.md")
   ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "# Plan\n<!-- WAITING -->\n"
 end

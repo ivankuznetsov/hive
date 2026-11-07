@@ -9,13 +9,12 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 
 ## Remote API deployment evidence (2026-11-07)
 
-CI run `42416154313` cannot execute the Rails-backed root integration tests
-`remote_operations_test.rb` and `remote_access_acceptance_test.rb`: coverage
-shards install the root Gemfile only, while their server subprocesses select
-`web/Gemfile`. Bundler exits with missing Rails dependencies before server
-startup. The CI bundle setup or test placement needs reconciliation before
-these tests can establish CI acceptance evidence; the runtime-bootstrap fixture
-fix does not resolve that dependency gap.
+CI run `42416154313` could not execute the Rails-backed root integration tests
+`remote_operations_test.rb` and `remote_access_acceptance_test.rb` because its
+coverage shards installed only the root bundle. Commit `a67eb1f2d9` adds the
+web bundle installation to those shards. The dependency setup is repaired on
+this branch; a later green CI run is still required to establish acceptance
+evidence. Local fixture success does not establish coverage-shard success.
 
 The token and authentication checks use isolated local installations. Live NAS,
 TLS proxy/tunnel and discontinued Hivebox deployment captures are unavailable;
@@ -31,7 +30,12 @@ the error. A separate wiki read-only snapshot assertion observed concurrent
 worker logs/edits and passed in isolation (2 tests, 52 assertions). The parallel
 runner reused one worker's failed log for a later component job, so its complete
 earlier failure list was not retained. Focused remote checks pass; a green broad
-checkpoint and exhaustive CI coverage remain separate verification obligations.
+checkpoint and exhaustive CI coverage remain separate verification obligations. The review
+fix pass also reproduced the unchanged process-registry test's evidence mismatch
+(`root_gone` versus an additional `root_gone_led_group_empty`) in isolation.
+Broad execution overlapped edits and reported stale skill-manifest/reference
+expectations; focused post-update projection checks pass. These results do not
+establish a green full-suite checkpoint.
 
 ## Remote token incident-response limits (2026-11-07)
 

@@ -45,6 +45,50 @@ class RemoteCliTest < Minitest::Test
     refute_includes out + err, "secret-bearer"
   end
 
+  def test_remote_status_cursor_is_forwarded_and_operational_is_rejected
+    select_remote
+    out, err, status = hive("status", "--project", "demo", "--cursor", "opaque-cursor", "--json")
+    assert status.success?, err
+    assert_includes @server.requests.last.fetch(:path), "cursor=opaque-cursor"
+    @server.requests.clear
+    out, err, status = hive("status", "--operational", "--json")
+    assert_equal 64, status.exitstatus
+    assert_match(/does not support --operational/, err)
+    assert_empty @server.requests
+  end
+
+  def test_approval_lost_response_can_replay_printed_inputs_after_advancement
+    select_remote
+    submitted = nil
+    advanced = false
+    @handler = lambda do |request|
+      if request.fetch(:method) == "POST"
+        input = JSON.parse(request.fetch(:body))
+        identity = [ input, request.fetch(:headers).fetch("idempotency-key") ]
+        if submitted
+          assert_equal submitted, identity
+          [ 202, {}, RemoteTlsServer.envelope({ "operation_id" => OPERATION, "state" => "queued" }) ]
+        else
+          submitted = identity
+          advanced = true
+          :disconnect
+        end
+      elsif advanced && !request.fetch(:path).end_with?("/context")
+        [ 200, {}, RemoteTlsServer.envelope({ "task" => { "stage" => "3-plan" }, "approval_generation" => "b" * 64 }) ]
+      else
+        response_for(request)
+      end
+    end
+    out, err, status = hive("approve", "demo:task-1", "--json")
+    assert_equal 75, status.exitstatus
+    replay = err.match(/approval replay --from (\S+) --generation (\S+) --idempotency-key (\S+)/)
+    refute_nil replay
+    out, err, status = hive("approve", "demo:task-1", "--from", replay[1], "--generation", replay[2],
+      "--idempotency-key", replay[3], "--json")
+    assert status.success?, err
+    assert_equal OPERATION, JSON.parse(out).dig("data", "operation_id")
+  end
+
   def test_remote_task_selectors_and_explicit_outputs
     select_remote
     { "--log" => "/logs", "--diff" => "/diff", "--artifacts" => "/artifacts",
@@ -134,7 +178,7 @@ class RemoteCliTest < Minitest::Test
     assert_equal [ "first", "other:second" ], body.fetch("depends_on")
     assert_equal "content", body.fetch("workflow")
     out, err, status = Open3.capture3(environment.merge("HIVE_BIN_OVERRIDE" => HIVE), File.join(ROOT, "bin/hv"),
-      "new", "demo", "hv request", "--context=nas", "--json", chdir: @checkout)
+      "--context=nas", "new", "demo", "hv request", "--json", chdir: @checkout)
     assert status.success?, err
     assert_equal "hive-remote", JSON.parse(out).fetch("schema")
     assert_equal "hv request", JSON.parse(@server.requests.last.fetch(:body)).fetch("text")
@@ -197,7 +241,7 @@ class RemoteCliTest < Minitest::Test
 
   def test_remote_status_project_filter_and_default_task_have_json_and_human_output
     select_remote
-    out, err, status = hive("status", "--project", "demo", "--operational", "--json")
+    out, err, status = hive("status", "--project", "demo", "--json")
     assert status.success?, err
     assert JSON.parse(out).fetch("ok")
     assert_equal "/api/v1/status?project=demo", @server.requests.last.fetch(:path)
@@ -339,6 +383,7 @@ class RemoteCliTest < Minitest::Test
         "served_base_paths" => [ "/api/v2", "/secret-bearer" ] } } ] }
     out, err, status = hive("context", "use", "nas", "--json")
     assert_equal 78, status.exitstatus
+    assert_equal "config", JSON.parse(out).fetch("error_kind")
     assert_equal false, JSON.parse(out).fetch("ok")
     assert_match(%r{/api/v2}, err)
     refute_includes out + err, "secret-bearer"

@@ -17,7 +17,7 @@ metadata:
 platform: openclaw
 invocation: /hive
 skill-version: 0.1.5
-canonical-digest: 02204fc33cd356e0ea07760c8f9f33d302c7abea0a55092cbe2d90ea7e6a2ec3
+canonical-digest: 91fdc6ef3ac0917b95efc855a699913614aad9483a8d04093d13d663047de25d
 hive-version: 0.8.0
 -->
 
@@ -26,6 +26,18 @@ Invoke this projection as `/hive`.
 # Hive Operations
 
 Use Hive as the control plane. Do not replace its status, watch, scheduler, or recovery machinery with shell polling, process discovery, or an agent-authored sidecar.
+
+## Remote installations
+
+When the operator selects a named remote context or supplies `--context NAME`,
+read [remote-access.md](references/remote-access.md) before using the local
+operational loop below. Use `hive context show --json` to inspect the selected
+installation and verified authority. Remote `status --json` returns authorized
+pages; it does not support `--operational` or the local watch/scheduler views.
+Continue with `status --cursor HANDLE --json`, retaining the same project filter.
+Only `status`, `task`, `new`, `act`, `answer`, `approve`, and `operation` route
+remotely. Local-only commands fail closed; `--context local` explicitly selects
+this machine. Place a `new` context override before the idea's prose.
 
 ## Request routing
 

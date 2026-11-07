@@ -291,8 +291,8 @@ module Hive
 
       def verify_remote_effect!(task, project_name, action_id, observation_token)
         return unless @remote_authority
-        require "hive/remote/command_service"
-        Hive::Remote::CommandService.verify_action!(task: task, project: project_name,
+        require "hive/workflow_admission"
+        Hive::WorkflowAdmission.verify_action!(task: task, project: project_name,
           action_id: action_id, observation: observation_token, authority: @remote_authority)
       end
 

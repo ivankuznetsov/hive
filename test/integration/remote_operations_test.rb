@@ -49,9 +49,9 @@ class RemoteOperationsIntegrationTest < Minitest::Test
         descriptor = fixture.fetch("action")
         suffix = "/tasks/#{fixture.fetch('task')}/actions"
         payload = { "action_id" => descriptor.fetch("action_id"), "observation" => descriptor.fetch("observation_token"), "idempotency_key" => "long-disconnect" }
-        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
         assert_raises(EOFError, IOError) { request(server, "POST", suffix, payload) }
-        assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 2
+        refute File.exist?(File.join(root, "remote-project", ".hive-state", "stages", "3-plan", fixture.fetch("task"), "plan.md"))
+        File.write(File.join(root, "release-worker"), "release")
         response = request(server, "POST", suffix, payload)
         assert_equal "202", response.code, response.body
         acknowledgement = JSON.parse(response.body).fetch("data")

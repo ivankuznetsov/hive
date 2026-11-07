@@ -30,12 +30,38 @@ module Hive
     # past `--`, where new-task prose and other literal arguments are owned by
     # the command instead.
     def extract_context(argv)
+      # Find the prose boundary while skipping launcher and New option values.
+      command = nil
+      project_seen = false
+      prose_start = nil
+      scan = 0
+      values = %w[--context --base --depends-on --workflow --idempotency-key]
+      while scan < argv.length
+        arg = argv[scan]
+        break if arg == "--"
+        if values.include?(arg)
+          scan += 2
+          next
+        elsif arg.start_with?("-")
+          scan += 1
+          next
+        elsif command.nil?
+          command = arg
+        elsif %w[new new_task].include?(command)
+          if project_seen
+            prose_start = scan
+            break
+          end
+          project_seen = true
+        end
+        scan += 1
+      end
       result = []
       selected = nil
       index = 0
       while index < argv.length
         arg = argv[index]
-        if arg == "--"
+        if arg == "--" || (prose_start && index >= prose_start)
           result.concat(argv.drop(index))
           break
         elsif arg == "--context" || arg.start_with?("--context=")
@@ -170,6 +196,7 @@ module Hive
     end
 
     def lift_new_options(argv, value_options:)
+      value_options = value_options - [ "--context" ]
       normalized = argv.dup
       command_index = option_argv(normalized).index { |arg| !arg.start_with?("-") }
       return normalized unless command_index && normalized[command_index] == "new"

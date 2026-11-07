@@ -7,6 +7,18 @@ description: Operate Hive task pipelines and pre-release QA through its native C
 
 Use Hive as the control plane. Do not replace its status, watch, scheduler, or recovery machinery with shell polling, process discovery, or an agent-authored sidecar.
 
+## Remote installations
+
+When the operator selects a named remote context or supplies `--context NAME`,
+read [remote-access.md](references/remote-access.md) before using the local
+operational loop below. Use `hive context show --json` to inspect the selected
+installation and verified authority. Remote `status --json` returns authorized
+pages; it does not support `--operational` or the local watch/scheduler views.
+Continue with `status --cursor HANDLE --json`, retaining the same project filter.
+Only `status`, `task`, `new`, `act`, `answer`, `approve`, and `operation` route
+remotely. Local-only commands fail closed; `--context local` explicitly selects
+this machine. Place a `new` context override before the idea's prose.
+
 ## Request routing
 
 For daily-history questions such as what happened today, yesterday, on a

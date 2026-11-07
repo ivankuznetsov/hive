@@ -182,7 +182,7 @@ class RemoteOperationProjectionTest < Minitest::Test
 
   def approval(service, project, task)
     service.approve(project: project, task: task, stage: "2-brainstorm",
-      generation: Hive::Remote::CommandService.generation_for(task, project: project.fetch("name")),
+      generation: Hive::WorkflowAdmission.generation_for(task, project: project.fetch("name")),
       idempotency_key: "approval", principal: PRINCIPAL, scopes: [ "answer" ])
   end
 

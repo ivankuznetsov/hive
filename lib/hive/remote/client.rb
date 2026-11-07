@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
+require "hive/remote/contract"
+
 require "hive/errors"
 require "json"
+require "shellwords"
 require "net/http"
 require "openssl"
 require "uri"
@@ -11,9 +14,9 @@ module Hive
     # Native HTTPS transport. Only fixed diagnostics cross this boundary: HTTP
     # exceptions, response bodies and redirect locations may contain secrets.
     class Client
-      MAX_RESPONSE_BYTES = 2 * 1024 * 1024
-      MAX_MUTATION_BYTES = 256 * 1024
-      SCOPES = %w[read create act answer].freeze
+      MAX_RESPONSE_BYTES = Contract::MAX_RESPONSE_BYTES
+      MAX_MUTATION_BYTES = Contract::MAX_MUTATION_BYTES
+      SCOPES = Contract::SCOPES
 
       class Failure < Hive::Error
         attr_reader :code, :status
@@ -118,6 +121,10 @@ module Hive
         stderr.puts("hive: context=#{safe_text(@context.fetch('name'))} url=#{safe_text(@base.to_s)} " \
           "installation=#{safe_text(@context.fetch('instance_id'))} scopes=#{authority.fetch('scopes').join(',')} " \
           "projects=#{safe_text(projects)} target=#{target} idempotency_key=#{key}")
+        if path.end_with?("/approvals")
+          replay = [ "--from", payload.fetch("stage"), "--generation", payload.fetch("generation"), "--idempotency-key", key ]
+          stderr.puts("hive: approval replay #{Shellwords.join(replay)}")
+        end
         stderr.flush
         begin
           request("POST", path, body: body, key: key)
@@ -209,7 +216,7 @@ module Hive
       def protocol_error! = raise(Failure.new("remote response has an incompatible or malformed protocol", code: "protocol"))
       def response_too_large! = raise(Failure.new("remote response exceeds the size limit", code: "response_too_large"))
       def printable?(value, maximum) = value.is_a?(String) && value.valid_encoding? && value.bytesize.between?(1, maximum) && !value.match?(/[[:cntrl:]]/)
-      def project_name?(value) = value.is_a?(String) && value.valid_encoding? && value.match?(/\A[A-Za-z0-9_.-]{1,128}\z/) && !%w[. ..].include?(value)
+      def project_name?(value) = value.is_a?(String) && value.valid_encoding? && value.match?(Contract::PROJECT_NAME) && !%w[. ..].include?(value)
       def safe_text(value) = value.to_s.gsub(/[[:cntrl:]]/, "?")
     end
   end

@@ -1,5 +1,7 @@
 # frozen_string_literal: true
 
+require "hive/remote/contract"
+
 require "json"
 require "hive/schemas"
 require "hive/config"
@@ -10,8 +12,8 @@ module Hive
   module Remote
     module Protocol
       BASE_PATHS = [ "/api/v1" ].freeze
-      MAX_MUTATION_BYTES = 256 * 1024
-      MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+      MAX_MUTATION_BYTES = Contract::MAX_MUTATION_BYTES
+      MAX_RESPONSE_BYTES = Contract::MAX_RESPONSE_BYTES
 
       module_function
 

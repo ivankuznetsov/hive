@@ -128,11 +128,22 @@ internals or the agent.
 
 ```sh
 hive status --context nas --project demo --json
-hive new demo 'Investigate the backlog' --context nas --json
+hive --context nas new demo --json -- Investigate the backlog
 hive task TASK --project demo --context nas --json
 hive answer TASK --project demo --context nas --json
 hive operation OPERATION_ID --project demo --context nas --json
 ```
+
+Place `--context` before the command or before `new` idea prose; a literal
+`--context` inside that prose stays part of the idea. Remote status returns at
+most 100 task rows and a byte-bounded page. Pass `data.continuation` back with
+`hive status --context nas --cursor HANDLE --project demo --json`, retaining
+the same project filter. Membership, stage, workflow and task-generation
+changes invalidate continuation; the task generation comes from persistent
+projection identity rather than a live worker lease. Transient marker, action and live-lock changes
+do not. Missing or failed project loads expose `state: unavailable` with an
+unknown task count. Remote `--operational` is explicitly unsupported; use the
+remote status DTO or select `--context local` for that local view.
 
 Question inventories return opaque handles, not native server folder bindings.
 Pass the selected handle as `hive answer ... --binding HANDLE` and put the
@@ -140,6 +151,16 @@ literal answer on stdin. An answer-only token needs a handle obtained by an
 authorized reader; an act-only token similarly needs its action observation.
 Approval can supply `--from STAGE --generation GENERATION` explicitly for an
 answer-only token. No read scope is silently added.
+
+The private handle registry retains at most 4096 entries and 8 MiB. New handles
+authenticate their original kind and scope so eviction reports known-stale 409
+for that scope, while random or foreign handles remain 404. Refresh inventories
+after eviction. Legacy unsigned handles retain their existing records until
+eviction but cannot be authenticated after those records expire. Registry locks
+use nonblocking acquisition with a one-second deadline. Client credential and
+lock files reject symlinks; credential files must be current-operator-owned and
+private. Authentication caches the installation identity per database object and
+process without a request-time SQLite integrity diagnosis or ProcessGuard lease.
 
 Remote `hive task` also supports mutually exclusive `--log`, `--diff`,
 `--artifacts` and `--artifact ID` selectors. `--output DESTINATION` writes an
@@ -176,6 +197,11 @@ one is not supplied and displays it before submission. If the response is lost,
 the outcome is unknown: repeat the identical input against the same installation
 with the same `--idempotency-key`. Do not create a new key to retry the same
 effect. Once the acknowledgement is recovered, query its durable operation ID.
+
+For approval, stderr also prints the resolved `--from`, `--generation` and
+`--idempotency-key` before submission. Replay those exact values even if the
+task has advanced; resolving a fresh generation changes the request. A refused
+recovery admission records a failed receipt rather than successful acceptance.
 
 A same-key/input replay returns the original acknowledgement after the task
 advances. Changed input conflicts. Two distinct tokens reusing one key in the

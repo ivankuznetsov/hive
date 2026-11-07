@@ -52,7 +52,7 @@ module Hive
           return json_response(404, Protocol.error("unsupported_version", "unsupported API version",
             served_base_paths: Protocol::BASE_PATHS))
         end
-        mutation = !%w[GET HEAD OPTIONS].include?(env["REQUEST_METHOD"])
+        mutation = !Contract::SAFE_METHODS.include?(env["REQUEST_METHOD"])
         if (code = Protocol.interlock(mutation: mutation))
           env.fetch("hive.remote.audit")["outcome"] = code
           return json_response(503, Protocol.unavailable)

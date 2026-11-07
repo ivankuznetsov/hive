@@ -3,6 +3,7 @@
 require "digest"
 require "fileutils"
 require "json"
+require "hive/remote/registry_lock"
 require "securerandom"
 require "time"
 require "hive/atomic_file"
@@ -140,7 +141,7 @@ module Hive
         flags = File::RDWR | File::CREAT
         flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
         File.open(File.join(@root, ".tokens.lock"), flags, 0o600) do |lock|
-          lock.flock(mode)
+          Hive::Remote::RegistryLock.acquire!(lock, mode)
           yield
         ensure
           lock.flock(File::LOCK_UN)

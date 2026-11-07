@@ -45,6 +45,33 @@ class RemoteQuestionHandlesTest < Minitest::Test
     end
   end
 
+  def test_evicted_handles_remain_known_stale_only_for_their_original_scope
+    Dir.mktmpdir do |root|
+      store = Hive::Remote::QuestionHandles.new(root: root, max_handles: 2)
+      projects = [ [ "demo", "fingerprint" ] ]
+      expired = store.cursor(projects: projects, snapshot: "one", offset: 1)
+      5.times { |offset| store.cursor(projects: projects, snapshot: "two", offset: offset) }
+      assert_equal 2, JSON.parse(File.read(store.path)).fetch("handles").length
+      store = Hive::Remote::QuestionHandles.new(root: root)
+      assert_equal 409, assert_raises(Hive::Remote::Error) { store.resolve_cursor(handle: expired, projects: projects, snapshot: "one") }.status
+      assert_equal 404, assert_raises(Hive::Remote::Error) { store.resolve_cursor(handle: expired, projects: [], snapshot: "one") }.status
+      assert_equal 404, assert_raises(Hive::Remote::Error) { store.resolve_cursor(handle: "0" * 64, projects: projects, snapshot: "one") }.status
+    end
+  end
+
+  def test_byte_pressure_evicts_records_while_preserving_stale_artifact_identity
+    Dir.mktmpdir do |root|
+      store = Hive::Remote::QuestionHandles.new(root: root)
+      project = { "name" => "demo" }
+      task = Task.new(id: 1, slug: "task")
+      oversized = "x" * Hive::Remote::QuestionHandles::MAX_REGISTRY_BYTES
+      handle = store.artifact(project: project, task: task, generation: "one", reference: oversized)
+      assert_operator File.size(store.path), :<=, Hive::Remote::QuestionHandles::MAX_REGISTRY_BYTES
+      assert_equal 409, assert_raises(Hive::Remote::Error) { store.resolve_artifact(handle: handle, project: project, task: task, generation: "one") }.status
+      assert_equal 404, assert_raises(Hive::Remote::Error) { store.resolve_artifact(handle: handle, project: { "name" => "other" }, task: task, generation: "one") }.status
+    end
+  end
+
   def test_registry_fails_closed_on_corruption_future_versions_and_exposed_permissions
     Dir.mktmpdir do |root|
       store = Hive::Remote::QuestionHandles.new(root: root)

@@ -13,5 +13,10 @@ module Hive
         super(message)
       end
     end
+
+    # Only checks that guarantee no command was submitted use this error.
+    class AdmissionRefused < Error
+      def deterministic_non_application? = true
+    end
   end
 end

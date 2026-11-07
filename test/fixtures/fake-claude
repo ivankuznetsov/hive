@@ -96,6 +96,12 @@ if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
 fi
 
+if [[ -n "${HIVE_FAKE_CLAUDE_BEFORE_WRITE_RELEASE_FILE:-}" ]]; then
+  until [[ -e "${HIVE_FAKE_CLAUDE_BEFORE_WRITE_RELEASE_FILE}" ]]; do
+    sleep 0.02
+  done
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then
   sleep "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE}"
 fi

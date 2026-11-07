@@ -53,7 +53,7 @@ module Api
 
       def authenticate_remote!
         audit["operation"] = "#{controller_name}.#{action_name}"
-        if (reason = Hive::Remote::Protocol.interlock(mutation: !request.get? && !request.head?))
+        if (reason = Hive::Remote::Protocol.interlock(mutation: !Hive::Remote::Contract::SAFE_METHODS.include?(request.request_method)))
           audit["outcome"] = reason
           return render json: Hive::Remote::Protocol.unavailable, status: 503
         end
@@ -64,7 +64,7 @@ module Api
         return render_error(401, "invalid_token", "valid bearer authentication is required") unless token
 
         audit["token_id"] = token.fetch("id")
-        @instance_id = Hive::RuntimeControlPlane.database.installation_identity.fetch(:installation_id)
+        @instance_id = Hive::RuntimeControlPlane.database.cached_installation_identity.fetch(:installation_id)
         @authority = Hive::Remote::Authorization.new(token: token, installation_id: instance_id)
       end
 
@@ -106,7 +106,7 @@ module Api
       def resolve_target!(scope = nil, validate_state: true)
         project = authorized_project!(scope)
         identifier = params.fetch(:task).to_s
-        unless identifier.match?(/\A[A-Za-z0-9][A-Za-z0-9_-]{0,127}\z/)
+        unless identifier.match?(Hive::Remote::Contract::TASK_ID)
           raise Hive::InvalidTaskPath, "unknown task"
         end
         task = Hive::TaskResolver.new(identifier, project_filter: project.fetch("name")).resolve

@@ -22,10 +22,10 @@ module Api
       end
 
       def show
+        cap = response_limit(Hive::Remote::Contract::MAX_CONTENT_BYTES)
         project, task = read_target!(validate_state: false)
         generation = resource_generation(task)
         reference = handles.resolve_artifact(handle: params[:id], project: project, task: task, generation: generation)
-        cap = response_limit(512 * 1024)
         result = read_service.artifact(project: project, task: task, reference: reference, max_bytes: cap)
         render_bounded({ "state" => result.binary ? "unavailable" : "available",
           "content" => result.binary ? nil : result.content, "bytes" => result.bytes,

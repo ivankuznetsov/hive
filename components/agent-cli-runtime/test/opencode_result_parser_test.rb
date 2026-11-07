@@ -175,6 +175,47 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
     assert_equal :cli_failure, operational.kind
   end
 
+  def test_opencode_two_error_shape_is_classified_not_malformed
+    auth = normalize(
+      stdout: fixture("run-auth-expired.jsonl", version: "v2.2.6"),
+      termination: AgentCliRuntime::TerminationEvidence.new(exit_code: 1)
+    )
+    assert_equal :authentication_failure, auth.kind
+    assert_includes auth.diagnostic, "provider.auth: This API key has expired"
+
+    sessionless = normalize(
+      stdout: fixture("run-sessionless-error.jsonl", version: "v2.2.6"),
+      termination: AgentCliRuntime::TerminationEvidence.new(exit_code: 1)
+    )
+    assert_equal :cli_failure, sessionless.kind
+    assert_includes sessionless.diagnostic, "You must provide a message"
+
+    %w[run-auth-expired.jsonl run-sessionless-error.jsonl].each do |name|
+      error = assert_raises(AgentCliRuntime::MalformedOutput) do
+        AgentCliRuntime.parse_run(:opencode, stdout: fixture(name, version: "v2.2.6"))
+      end
+      assert_includes error.message, "emitted an error on a zero exit"
+    end
+  end
+
+  def test_opencode_two_success_run_parses
+    parsed = AgentCliRuntime.parse_run(
+      :opencode, stdout: fixture("run-one-step.jsonl", version: "v2.2.6")
+    )
+    assert_equal "ses_contract_v2_one", parsed.session_id
+    assert_equal "hello", parsed.final_message
+    assert_equal "stop", parsed.terminal_reason
+    assert_equal 1664, parsed.preliminary_usage.cache_read
+  end
+
+  def test_error_event_without_either_known_shape_stays_malformed
+    stdout = { type: "error", sessionID: "ses_x", error: { message: "no type" } }.to_json
+    error = assert_raises(AgentCliRuntime::MalformedOutput) do
+      AgentCliRuntime.parse_run(:opencode, stdout:)
+    end
+    assert_includes error.message, "error type must be a non-empty string"
+  end
+
   def test_signal_terminated_run_is_a_cli_failure_not_success
     outcome = normalize(
       stdout: fixture("run-one-step.jsonl"), stderr: "terminated",
@@ -292,9 +333,9 @@ class AgentCliRuntimeOpenCodeResultParserTest < Minitest::Test
 
   private
 
-  def fixture(name)
+  def fixture(name, version: "v1.18.16")
     File.read(File.expand_path(
-      "fixtures/opencode/v1.18.16/#{name}", __dir__
+      "fixtures/opencode/#{version}/#{name}", __dir__
     ))
   end
 

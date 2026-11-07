@@ -43,6 +43,7 @@ class DailyDigest
   def local_date = attributes["local_date"] || requested_date.presence || "today"
   def lifecycle = missing? ? "missing" : attributes.fetch("lifecycle", reader_status)
   def record_reference = attributes["record_id"].presence
+  def generation_failure = attributes["generation_failure"].presence
 
   def completeness
     return "unknown" if missing? || pruned?

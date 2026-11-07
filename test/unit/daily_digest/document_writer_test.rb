@@ -108,6 +108,45 @@ class DailyDigestDocumentWriterTest < Minitest::Test
     end
   end
 
+  def test_failed_generation_is_visible_to_readers_until_a_refresh_succeeds
+    with_tmp_global_config do |home|
+      store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))
+      config = { "enabled" => true, "time_zone" => "UTC" }
+      fail_generation = false
+      generator = Object.new
+      generator.define_singleton_method(:generate) do |_|
+        raise Hive::AgentError, "key expired sk-#{'a' * 40}" if fail_generation
+
+        "Saved document"
+      end
+      now = Time.utc(2026, 9, 17, 13)
+      writer = Hive::DailyDigest::DocumentWriter.new(
+        config_loader: -> { config }, projects_loader: -> { [] }, store: store,
+        facts_loader: ->(**_) { facts }, generator: generator, clock: -> { now }
+      )
+      writer.refresh(date: "2026-09-15")
+      fail_generation = true
+      assert_raises(Hive::AgentError) { writer.refresh(date: "2026-09-16") }
+
+      reader = Hive::DailyDigest::Reader.new(store: store, config_loader: -> { config }, clock: -> { now })
+      today = reader.read
+      assert_equal "2026-09-15", today.fetch("local_date")
+      assert today.fetch("stale")
+      failure = today.fetch("generation_failure")
+      assert_equal "2026-09-16", failure.fetch("local_date")
+      assert_equal "Hive::AgentError", failure.fetch("error_class")
+      assert_includes failure.fetch("message"), "key expired"
+      refute_includes failure.fetch("message"), "sk-aaaa"
+      refute reader.read(date: "2026-09-15").key?("generation_failure")
+      assert_equal "2026-09-16", reader.read(date: "2026-09-16").dig("generation_failure", "local_date")
+
+      fail_generation = false
+      writer.refresh(date: "2026-09-16")
+      refute reader.read.key?("generation_failure")
+      refute reader.read(date: "2026-09-16").key?("generation_failure")
+    end
+  end
+
   def test_empty_day_needs_no_agent_and_pruned_day_stays_pruned
     with_tmp_global_config do |home|
       store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))

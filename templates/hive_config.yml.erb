@@ -91,9 +91,14 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #
 # daily_digest:
 #   enabled: true
-#   # Optional digest-specific agent route (otherwise uses execute).
-#   agent: opencode
-#   model: opencode-go/deepseek-v4.1-flash
+#   # Optional digest-specific agent route (otherwise uses execute). Any
+#   # registered agent and model works; fallbacks run in order on failure.
+#   agent: codex
+#   model: gpt-6-astra
+#   effort: medium
+#   fallback_agents:
+#     - agent: opencode
+#       model: opencode-go/deepseek-v4.1-flash
 #   materialization_interval_sec: 300
 #   freshness_budget_sec: 900
 #   # Initialization-owned identity; setup or daemon writes these atomically.

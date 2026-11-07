@@ -80,16 +80,14 @@ module AgentCliRuntime
       end
     end
 
-    # OpenCode keeps provider failures under error.data.message rather than
-    # the top-level/message and error.message shapes used by the default
-    # extractor. Read only the dedicated error event so ordinary model text
-    # cannot forge a provider-limit signal.
+    # OpenCode 1.x keeps provider failures under error.data.message; 2.x
+    # flattens them to error.message (with error.type and error.status).
+    # Read only the dedicated error event so ordinary model text cannot forge
+    # a provider-limit signal.
     OPENCODE = lambda do |event|
       next nil unless event.is_a?(Hash) && event["type"] == "error"
 
-      data = event.dig("error", "data")
-      message = data["message"] if data.is_a?(Hash)
-      message if message.is_a?(String) && !message.strip.empty?
+      ErrorExtractors.opencode_error_message(event["error"])
     end
 
     # Muse terminates every headless run with one `run.terminal.*` event.
@@ -108,6 +106,14 @@ module AgentCliRuntime
 
       reason = payload["reason"].to_s.strip
       reason.empty? ? "muse run #{terminal}" : reason
+    end
+
+    def opencode_error_message(error)
+      return nil unless error.is_a?(Hash)
+
+      data = error["data"]
+      message = data.is_a?(Hash) ? data["message"] : error["message"]
+      message if message.is_a?(String) && !message.strip.empty?
     end
 
     def message_from(event)

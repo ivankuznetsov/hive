@@ -5718,7 +5718,13 @@ class ConfigTest < Minitest::Test
       base.merge("time_zone" => "Mars/Olympus"),
       base.merge("coverage_started_at" => "not-a-time"),
       base.merge("first_interval" => []),
-      base.merge("first_interval" => { "local_date" => "2026-08-30" })
+      base.merge("first_interval" => { "local_date" => "2026-08-30" }),
+      base.merge("agent" => "no-such-agent"),
+      base.merge("agent" => "codex", "model" => ""),
+      base.merge("agent" => "codex", "effort" => "extreme"),
+      base.merge("fallback_agents" => {}),
+      base.merge("fallback_agents" => [ { "model" => "gpt-6-astra" } ]),
+      base.merge("fallback_agents" => [ { "agent" => "nope" } ])
     ]
 
     invalid.each do |daily|
@@ -5728,6 +5734,10 @@ class ConfigTest < Minitest::Test
     end
 
     Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base }, path)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base.merge(
+      "agent" => "codex", "model" => "gpt-6-astra", "effort" => "medium",
+      "fallback_agents" => [ { "agent" => "opencode", "model" => "opencode-go/deepseek-v4.1-flash" } ]
+    ) }, path)
 
     enabled = base.merge("enabled" => true)
     Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)

@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb
 created: 2026-06-18
-updated: 2026-10-30
+updated: 2026-11-07
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -166,7 +166,8 @@ Admission returns exactly one verdict:
 Each `unmet_dependencies` entry contains `reference`, resolved `blocked_by`,
 `dependency_stage`, and `required_gate`. `hive-status.v9` and
 `hive-operational-status.v5` also expose `dependency_base_mode`: `stacked` only
-for a resolvable same-project scalar and `default` otherwise. The array is the
+for a resolvable same-project scalar whose prerequisite is undelivered (see
+[Stacked branches](#stacked-branches)) and `default` otherwise. The array is the
 authoritative fan-in explanation; scalar singulars remain compatibility
 projections and are always null for list declarations.
 Only a valid same-project scalar triggers the `git for-each-ref` branch
@@ -238,9 +239,27 @@ calls.
 ## Stacked branches
 
 A valid same-project scalar continues to supply the prerequisite slug to
-`DependencySnapshot.stacked_base`. Execute resolves the base from the remote
+`DependencySnapshot.stacked_base`, but only while the prerequisite is
+**undelivered**. Stacking exists to build on work that has not landed yet. A
+prerequisite with delivered evidence — it is in the terminal `9-done` stage, or
+`Hive::PullRequestOutcome.latest(<prerequisite folder>)` reports its current PR
+merged (journal `pr_observed`/`merge_observed`, no GitHub call) — returns no
+stacked base, warns `prerequisite <slug> is already delivered (<evidence>);
+branching from <default>`, and reports `dependency_base_mode: default`. This
+matters because delivered prerequisites are normally squash-merged and their
+remote branch deleted: a surviving local branch is then a stale commit that is
+not an ancestor of the default branch, and stacking on it drops every later
+default-branch commit (live 2026-11-07: a dependent of a 9-done prerequisite
+squash-merged as PR #1494 started six weeks behind main and stopped on a
+missing prerequisite).
+
+For an undelivered prerequisite, execute resolves the base from the remote
 branch, then local branch, then default branch under the existing placeholder
-preservation rules. Open-PR uses the prerequisite base only while that remote
+preservation rules. The local-branch fallback is loud: it warns that the
+prerequisite has no remote branch and the local branch is unverified and may be
+stale, and execute records the exact start ref as `base_ref` in `worktree.yml`
+(`refs/heads/<prereq>`), so the condition is visible in task state rather than
+only in a log line. Open-PR uses the prerequisite base only while that remote
 branch exists. Explicit cross-project scalars and all lists—including
 singleton arrays—return no stacked base and report `dependency_base_mode: default`.
 

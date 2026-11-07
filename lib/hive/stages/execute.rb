@@ -131,10 +131,13 @@ module Hive
         # baseline; `base_oid` is the durable range authority consumed later
         # by outcome evidence. They begin equal and neither is agent-authored.
         base_oid = Hive::GitOps.new(wt.path).head_sha
+        # `base_branch` stays the integration (PR target) branch; `base_ref`
+        # names the ref `base_oid` actually came from, so a stacked base is
+        # visible instead of masquerading as the default branch.
         wt.write_pointer!(
           task.folder, task.slug,
           execute_base_head: base_oid, base_branch: default_branch,
-          base_oid: base_oid
+          base_oid: base_oid, base_ref: wt.resolved_base
         )
 
         write_initial_task_md(task)

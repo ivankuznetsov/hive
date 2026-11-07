@@ -156,6 +156,13 @@ failed stop followed by an indeterminate observation retains its journal.
 Linux `ActiveState=deactivating` with a positive `MainPID` is transitional, not
 stopped: stop and removal keep waiting through the manager's bounded action or
 retain pending intent until no live main process remains.
+A stopped systemd unit reports `MainPID=0` but keeps the previous run's
+`ExecMainStartTimestampMonotonic`; `Manager::Inspection` drops that start
+together with the non-positive PID, so a stopped unit has no process identity.
+Recording the stale start as `prior_process_start` made the journal reject
+every force-replace/lifecycle transition of a stopped unit as an incoherent
+identity (surfaced by installers as "retained unverified recovery evidence",
+although nothing had been written).
 
 ## Verified endpoint modes
 

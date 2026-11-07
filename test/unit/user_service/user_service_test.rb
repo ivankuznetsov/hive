@@ -705,6 +705,68 @@ class UserServiceTest < Minitest::Test
     end
   end
 
+  # `hive setup` force-replaces the daemon unit while an operator has the
+  # service stopped. systemd then reports MainPID=0 with the previous run's
+  # start timestamp; recording that as the prior process identity made the
+  # transition journal refuse the apply as "unverified recovery evidence".
+  def test_force_replace_of_a_stopped_unit_with_a_stale_start_timestamp_succeeds
+    with_tmp_dir do |dir|
+      path = definition_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "previous\n")
+      loaded = "previous\n"
+      running = false
+      main_pid = 0
+      process_start = "441702948802"
+      calls = []
+      runner = lambda do |argv|
+        calls << argv
+        case argv
+        when %w[systemctl --user daemon-reload]
+          loaded = File.read(path)
+        when %w[systemctl --user restart hive-test]
+          running = true
+          main_pid = 42
+          process_start = "441800000000"
+        end
+        true
+      end
+      status_reader = lambda do |_argv|
+        [
+          [
+            "LoadState=loaded",
+            "FragmentPath=#{path}",
+            "NeedDaemonReload=#{File.read(path) == loaded ? 'no' : 'yes'}",
+            "UnitFileState=enabled",
+            "ActiveState=#{running ? 'active' : 'inactive'}",
+            "MainPID=#{main_pid}",
+            "ExecMainStartTimestampMonotonic=#{process_start}"
+          ].join("\n") + "\n",
+          true
+        ]
+      end
+      service = Hive::UserService.new(
+        definition: service_definition(dir),
+        runner: runner,
+        query_available: true,
+        manager_available: true,
+        status_reader: status_reader,
+        home: dir
+      )
+
+      plan = service.plan(autostart: true, force: true)
+      assert_nil plan.status.process_start
+      result = service.apply(plan)
+
+      assert result.success?, result.diagnostics.inspect
+      assert_equal :upgraded, result.kind
+      refute_includes result.diagnostics, :invalid_recovery_state
+      assert_equal "desired\n", File.read(path)
+      assert_includes calls, %w[systemctl --user restart hive-test]
+      assert_equal "441800000000", result.final_status.process_start
+    end
+  end
+
   def test_filesystem_only_receipt_restarts_a_process_from_the_previous_definition
     with_tmp_dir do |dir|
       path = definition_path(dir)

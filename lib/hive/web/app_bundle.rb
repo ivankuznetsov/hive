@@ -35,8 +35,18 @@ module Hive
         File.expand_path("../../..", __dir__)
       end
 
-      def agent_cli_runtime_root
-        Gem.loaded_specs.fetch("agent-cli-runtime").full_gem_path
+      # A packaged install activates the agent-cli-runtime gem, so its spec
+      # names the installed root. A source checkout (including dogfood
+      # deployments, which are detached worktrees launched through bin/hive
+      # or RUBYLIB) loads the component straight from $LOAD_PATH without
+      # activating any RubyGems spec; its root is the monorepo component the
+      # web Gemfile already defaults to. bundle_install! validates the
+      # returned root before anything consumes it.
+      def agent_cli_runtime_root(loaded_specs: Gem.loaded_specs)
+        spec = loaded_specs["agent-cli-runtime"]
+        return spec.full_gem_path if spec
+
+        File.join(hive_cli_root, "components", "agent-cli-runtime")
       end
 
       def present?

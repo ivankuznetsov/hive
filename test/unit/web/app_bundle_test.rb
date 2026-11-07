@@ -473,6 +473,47 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  # Dogfood deployments are detached source worktrees launched through
+  # bin/hive (or RUBYLIB), which put components/agent-cli-runtime/lib on
+  # $LOAD_PATH without activating a RubyGems spec. `hive setup` raised
+  # KeyError "agent-cli-runtime" there before the web bundle could install.
+  def test_bundle_install_resolves_runtime_component_of_a_dogfood_deployment_layout
+    Dir.mktmpdir("hive-web-app") do |app|
+      Dir.mktmpdir("hive-dogfood-deployment") do |deployment|
+        component = File.join(deployment, "components", "agent-cli-runtime")
+        FileUtils.mkdir_p(File.join(component, "lib"))
+        File.write(File.join(deployment, "hive.gemspec"), "")
+        File.write(File.join(component, "agent-cli-runtime.gemspec"), "")
+        File.write(File.join(app, "Gemfile"), "source 'https://rubygems.org'\n")
+        captured_env = nil
+        spec = Gem.loaded_specs.delete("agent-cli-runtime")
+        begin
+          with_replaced_singleton_method(Hive::Web::AppBundle, :hive_cli_root, -> { deployment }) do
+            assert_equal component, Hive::Web::AppBundle.agent_cli_runtime_root
+            Hive::Web::AppBundle.bundle_install!(
+              dir: app, output: nil,
+              runner: ->(_argv, env) { captured_env = env }
+            )
+          end
+        ensure
+          Gem.loaded_specs["agent-cli-runtime"] = spec if spec
+        end
+
+        assert_equal deployment, captured_env["HIVE_CLI_ROOT"]
+        assert_equal component, captured_env["HIVE_AGENT_CLI_RUNTIME_ROOT"]
+      end
+    end
+  end
+
+  def test_agent_cli_runtime_root_prefers_the_activated_gem_spec
+    spec = Struct.new(:full_gem_path).new("/installed/gems/agent-cli-runtime-0.2.4")
+
+    assert_equal "/installed/gems/agent-cli-runtime-0.2.4",
+                 Hive::Web::AppBundle.agent_cli_runtime_root(
+                   loaded_specs: { "agent-cli-runtime" => spec }
+                 )
+  end
+
   def test_bundle_install_restores_authenticated_lockfile_bytes_and_mode
     Dir.mktmpdir("hive-web-app") do |app|
       lockfile = File.join(app, "Gemfile.lock")

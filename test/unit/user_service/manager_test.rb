@@ -128,6 +128,21 @@ class UserServiceManagerTest < Minitest::Test
     refute stale.loaded_definition?("/tmp/hive-test.service")
   end
 
+  # A stopped systemd unit reports MainPID=0 but keeps the previous run's
+  # ExecMainStartTimestampMonotonic. That stale start names no process.
+  def test_systemd_inspection_drops_stale_start_timestamp_of_a_stopped_unit
+    inspection = build_manager(
+      :linux,
+      status_reader: lambda do |_argv|
+        [ systemd_status(active_state: "inactive", main_pid: "0", process_start: "441702948802"), true ]
+      end
+    ).inspect
+
+    refute inspection.running
+    assert_nil inspection.main_pid
+    assert_nil inspection.process_start
+  end
+
   def test_systemd_inspection_preserves_deactivating_state_and_live_main_pid
     manager = build_manager(
       :linux,

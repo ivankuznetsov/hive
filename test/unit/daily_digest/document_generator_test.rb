@@ -4,6 +4,15 @@ require "hive/daily_digest/document_generator"
 class DailyDigestDocumentGeneratorTest < Minitest::Test
   include HiveTestHelper
 
+  def test_document_prompt_wraps_fact_encoding_failures
+    require "prdigest"
+
+    with_replaced_singleton_method(Prdigest::Document, :facts_json, ->(*) { raise JSON::GeneratorError, "invalid facts" }) do
+      error = assert_raises(Prdigest::GenerationError) { Hive::DailyDigest::DocumentPrompt.build({}) }
+      assert_equal "digest facts could not be encoded", error.message
+    end
+  end
+
   def test_global_digest_route_reaches_the_compiled_invocation
     with_tmp_global_config do
       Hive::Config.update_global_config! do |data|

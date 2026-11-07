@@ -222,6 +222,77 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  # Live regression (2026-11-07): a dependent of a squash-merged, archived
+  # prerequisite stacked on the stale local prerequisite branch and lost six
+  # weeks of main. A delivered prerequisite is never a stacked base.
+  def test_base_selection_uses_default_for_a_prerequisite_in_the_terminal_stage
+    with_tmp_dir do |root|
+      done_folder = write_task_meta(root, "9-done", "base-task", id: 1)
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "base-task",
+        folder: execute_folder(root, "dependent"), project_root: root
+      )
+
+      selection = nil
+      _out, err = capture_io { selection = Hive::DependencySnapshot.base_selection(task, "main") }
+
+      assert_equal [ nil, "default" ], [ selection.branch, selection.mode ]
+      assert_match(/prerequisite base-task is already delivered \(stage 9-done\); branching from main/, err)
+      assert_equal done_folder, Hive::DependencySnapshot.tasks(root).first[:folder]
+      silent = Hive::DependencySnapshot.base_selection(task, "main", warn_on_fallback: false)
+      assert_equal "default", silent.mode
+    end
+  end
+
+  def test_base_selection_uses_default_when_the_prerequisite_pr_was_observed_merged
+    with_tmp_dir do |root|
+      folder = write_task_meta(root, "8-finalize", "base-task", id: 1)
+      pr_url = "https://github.com/acme/demo/pull/1494"
+      File.write(File.join(folder, "pr.md"), "---\npr_url: #{pr_url}\n---\n")
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "base-task",
+        folder: execute_folder(root, "dependent"), project_root: root
+      )
+      journal = lambda do |state|
+        [ { "payload" => { "activity_kind" => "merge_observed", "pr_url" => pr_url, "merge_state" => state } } ]
+      end
+
+      merged = with_replaced_singleton_method(Hive::TaskProjection, :read_journal, ->(_) { journal.call("merged") }) do
+        capture_io { @selection = Hive::DependencySnapshot.base_selection(task, "main") }
+        @selection
+      end
+      open = with_replaced_singleton_method(Hive::TaskProjection, :read_journal, ->(_) { journal.call("open") }) do
+        Hive::DependencySnapshot.base_selection(task, "main")
+      end
+
+      assert_equal [ nil, "default" ], [ merged.branch, merged.mode ]
+      assert_equal [ "base-task", "stacked" ], [ open.branch, open.mode ],
+                   "an undelivered prerequisite with an open PR still stacks"
+    end
+  end
+
+  def test_status_base_mode_is_default_for_a_delivered_prerequisite_in_the_admission_context
+    with_tmp_dir do |root|
+      write_task_meta(root, "9-done", "base-task", id: 1)
+      project = File.basename(root)
+      task = FakeTask.new(
+        slug: "dependent", id: 2, depends_on: "base-task",
+        folder: execute_folder(root, "dependent"), project_root: root
+      )
+      context = Hive::DependencySnapshot.admission_context([
+        { "name" => project, "path" => root, "repository_identity" => nil }
+      ])
+
+      selection = Hive::DependencySnapshot.base_selection(
+        task, "main", warn_on_fallback: false, admission_context: context, project_name: project,
+        available_branch_refs: [ "refs/heads/base-task" ]
+      )
+
+      assert_equal [ nil, "default" ], [ selection.branch, selection.mode ],
+                   "a stale local branch of a delivered prerequisite must not report stacked"
+    end
+  end
+
   def test_admission_fingerprint_hashes_the_current_task_verdict
     with_tmp_dir do |root|
       slug = "independent-task"
@@ -437,7 +508,7 @@ class DependencySnapshotTest < Minitest::Test
         dependent, id: 2, slug: "dependent-task", display_name: nil,
         depends_on: "base-task"
       )
-      write_task_meta(root, "9-done", "base-task", id: 1)
+      write_task_meta(root, "8-finalize", "base-task", id: 1)
       project = File.basename(root)
       registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
       task = FakeTask.new(
@@ -465,7 +536,7 @@ class DependencySnapshotTest < Minitest::Test
         dependent, id: 2, slug: "dependent-task", display_name: nil,
         depends_on: "base-task"
       )
-      write_task_meta(root, "9-done", "base-task", id: 1)
+      write_task_meta(root, "8-finalize", "base-task", id: 1)
       project = File.basename(root)
       registry = [ { "name" => project, "path" => root, "repository_identity" => nil } ]
       task = FakeTask.new(

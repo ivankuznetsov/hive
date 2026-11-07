@@ -518,9 +518,10 @@ head/reason/time. Bot and TUI consume this producer field rather than reading
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`,
 `unmet_dependencies`, `dependency_base_mode`, `blocked`, and required nullable
 `admission_error`. `depends_on` is a string, an ordered string array, or null.
-`dependency_base_mode` is `stacked` only for a resolvable same-project scalar;
-lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
-`default`. One scan reuses each project's already loaded default-branch policy
+`dependency_base_mode` is `stacked` only for a resolvable same-project scalar
+whose prerequisite is undelivered; delivered prerequisites (`9-done`, or a PR
+observed merged), lists, cross-project scalars, invalid fallbacks, and
+dependency-free tasks use `default`. One scan reuses each project's already loaded default-branch policy
 and one batched local/origin branch-ref inventory; it does not parse project
 configuration or fork Git once per row. Incremental projections build the
 bounded base-selection context only when a changed row declares a scalar

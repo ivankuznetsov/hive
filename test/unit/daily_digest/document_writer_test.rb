@@ -147,6 +147,28 @@ class DailyDigestDocumentWriterTest < Minitest::Test
     end
   end
 
+  def test_corrupt_generation_failure_ledger_is_ignored
+    with_tmp_global_config do |home|
+      store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))
+      writer = Hive::DailyDigest::DocumentWriter.new(
+        config_loader: -> { { "enabled" => true, "time_zone" => "UTC" } },
+        projects_loader: -> { [] }, store: store,
+        facts_loader: ->(**_) { { "digest" => { "repositories" => [] } } }, generator: Object.new,
+        clock: -> { Time.utc(2026, 9, 17, 13) }
+      )
+      writer.refresh(date: "2026-09-15")
+      File.write(File.join(store.root, Hive::DailyDigest::GenerationFailures::FILE), "{")
+
+      reader = Hive::DailyDigest::Reader.new(
+        store: store, config_loader: -> { { "time_zone" => "UTC" } }
+      )
+      view = reader.read(date: "2026-09-15")
+
+      assert_equal "2026-09-15", view.fetch("local_date")
+      refute view.key?("generation_failure")
+    end
+  end
+
   def test_empty_day_needs_no_agent_and_pruned_day_stays_pruned
     with_tmp_global_config do |home|
       store = Hive::DailyDigest::Store.new(root: File.join(home, "documents"))

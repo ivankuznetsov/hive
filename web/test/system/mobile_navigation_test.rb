@@ -32,7 +32,7 @@ class MobileNavigationTest < ApplicationSystemTestCase
     click_button "Menu"
     assert_selector "button[aria-label='Menu'][aria-expanded='true']"
     within "nav[aria-label='Primary']" do
-      %w[Status Digest Repos Honeycombs Patrol Agents Telegram].each { |label| assert_link label }
+      %w[Status Digest Projects Honeycombs Patrol Agents Integrations].each { |label| assert_link label }
     end
     assert_button "Log out"
     alignment = page.evaluate_script(<<~JS)
@@ -50,11 +50,11 @@ class MobileNavigationTest < ApplicationSystemTestCase
     assert_equal "Menu", page.evaluate_script("document.activeElement.getAttribute('aria-label')")
 
     click_button "Menu"
-    within("nav[aria-label='Primary']") { click_link "Repos" }
-    assert_current_path repos_path
+    within("nav[aria-label='Primary']") { click_link "Projects" }
+    assert_current_path projects_path
     assert_no_selector "nav[aria-label='Primary']"
     click_button "Menu"
-    assert_selector "nav a.nav-link-active", text: "Repos"
+    assert_selector "nav a.nav-link-active", text: "Projects"
 
     page.current_window.resize_to(1280, 812)
     assert_no_button "Menu"

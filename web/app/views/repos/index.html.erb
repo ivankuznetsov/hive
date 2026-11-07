@@ -1,10 +1,10 @@
-<% content_for(:title, "#{web_product_name} — repos") %>
-<h1>Repos</h1>
+<% content_for(:title, "#{web_product_name} — projects") %>
+<h1>Projects</h1>
 
-<h2>Registered</h2>
+<h2>Registered projects</h2>
 <% if @projects.empty? %>
   <div class="empty-state">
-    <p>No repositories registered yet.</p>
+    <p>No projects yet.</p>
     <p class="hint">Pick one of your GitHub repositories below, or clone by URL.</p>
   </div>
 <% else %>
@@ -65,7 +65,7 @@
         <% if repo["registered"] %>
           <span class="tag tag-registered">registered</span>
         <% else %>
-          <%= link_to "Add to hive", new_repo_path(url: repo["full_name"]), class: "btn btn-secondary btn-sm" %>
+          <%= link_to "Add project", new_repo_path(url: repo["full_name"]), class: "btn btn-secondary btn-sm" %>
         <% end %>
       </article>
     <% end %>

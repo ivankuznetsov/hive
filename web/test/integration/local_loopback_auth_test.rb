@@ -33,9 +33,9 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     assert_response :success, "an enabled loopback bypass must serve the dashboard without a session"
     assert_select "nav[aria-label='Primary'] a", text: "Status"
     assert_select "nav[aria-label='Primary'] a", text: "Honeycombs"
-    assert_select "nav[aria-label='Primary'] a", text: "Repos"
+    assert_select "nav[aria-label='Primary'] a", text: "Projects"
     assert_select "nav[aria-label='Primary'] a", text: "Agents"
-    assert_select "nav[aria-label='Primary'] a", text: "Telegram"
+    assert_select "nav[aria-label='Primary'] a", text: "Integrations"
     assert_select ".session-login", text: "Local"
     assert_select "a", text: "Connect GitHub"
     assert_select "form[action='/logout']", 0,

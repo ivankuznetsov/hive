@@ -2,3 +2,5 @@
 import "@hotwired/turbo-rails"
 import "status_stream_source"
 import "controllers"
+
+import "lib/diff_viewer"

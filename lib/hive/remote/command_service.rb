@@ -42,7 +42,7 @@ module Hive
         ).call!
       end
 
-      def answer(project:, task:, binding:, answer:, idempotency_key:, principal:, scopes:, state_reader: nil)
+      def answer(project:, task:, binding:, answer:, idempotency_key:, principal:, scopes:, state_reader: nil, remote_handle: nil)
         scope!(scopes, "answer")
         require_key!(idempotency_key)
         Hive::CommandOperation.verify_receipt_extension!(@store)
@@ -50,7 +50,7 @@ module Hive
         Hive::Commands::Answer.write(
           task.slug, project: project.fetch("name"), binding: binding, answer: answer,
           idempotency_key: idempotency_key, principal: principal, principal_source: "api_token",
-          command_receipt_store: @store, state_reader: state_reader
+          command_receipt_store: @store, state_reader: state_reader, remote_handle: remote_handle
         )
       end
 

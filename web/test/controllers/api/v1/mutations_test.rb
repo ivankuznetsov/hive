@@ -109,7 +109,7 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     assert_response :bad_request
   end
 
-  test "answer handles are target bound and replay original acknowledgement after advance with oversized new state" do
+  test "answer receipts replay after handle eviction and advance with oversized new state" do
     task, handle = question_task!
     payload = { handle: handle, answer: "Use blue", idempotency_key: "answer" }
     answer_headers = headers_for(issue([ "answer" ]))
@@ -119,6 +119,15 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     assert_equal "written", first.fetch("outcome")
     refute_includes response.body, "binding"
     refute_includes response.body, "Which color"
+    handles = Hive::Remote::QuestionHandles.new(max_handles: 1)
+    handles.cursor(projects: [ @project ], snapshot: "unrelated-read", offset: 1)
+    refute JSON.parse(File.read(handles.path)).fetch("handles").key?(handle)
+    post "#{@base}/tasks/#{task.slug}/answers", params: payload, headers: answer_headers, as: :json
+    assert_response :ok
+    assert_equal first, response.parsed_body.fetch("data")
+    assert_equal 1, File.read(task.state_file).scan("Use blue").length
+    post "#{@base}/tasks/#{task.slug}/answers", params: payload.merge(idempotency_key: "fresh-answer"), headers: answer_headers, as: :json
+    assert_response :conflict
     folder = task.folder.sub("/2-brainstorm/", "/3-plan/")
     FileUtils.mv(task.folder, folder)
     File.write(File.join(folder, "plan.md"), "x" * (512 * 1024 + 1))
@@ -129,6 +138,31 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     assert_response :ok
     assert_equal "succeeded", response.parsed_body.dig("data", "state")
     assert_equal first, response.parsed_body.dig("data", "acknowledgement")
+
+    [ payload.merge(answer: "Use red"), payload.merge(handle: "0" * 64) ].each do |changed|
+      post "#{@base}/tasks/#{task.slug}/answers", params: changed, headers: answer_headers, as: :json
+      assert_response :conflict
+      refute_includes response.body, first.fetch("operation_id")
+    end
+    other = create_task!(@project, "Different answer target")
+    post "#{@base}/tasks/#{other}/answers", params: payload, headers: answer_headers, as: :json
+    assert_response :conflict
+    post "#{@base}/tasks/#{task.slug}/answers", params: payload, headers: headers_for(issue([ "answer" ])), as: :json
+    assert_response :conflict
+    refute_includes response.body, first.fetch("operation_id")
+  end
+
+  test "answer receipts from before remote binding retention still replay with a retained handle" do
+    task, handle = question_task!
+    record = Hive::Remote::QuestionHandles.new.resolve(handle: handle, project: @project_record, task: task)
+    result = Hive::Remote::CommandService.new.answer(project: @project_record, task: task,
+      binding: record.fetch("binding"), answer: "Use blue", idempotency_key: "legacy-answer",
+      principal: "installation:#{@store.database.installation_identity.fetch(:installation_id)}:token:#{@issued.fetch('id')}", scopes: [ "answer" ])
+    post "#{@base}/tasks/#{task.slug}/answers", params: {
+      handle: handle, answer: "Use blue", idempotency_key: "legacy-answer"
+    }, headers: @headers, as: :json
+    assert_response :ok
+    assert_equal Hive::Remote::Serializers.acknowledgement(result), response.parsed_body.fetch("data")
   end
 
   test "unknown stale and cross-task question handles fail without writing" do

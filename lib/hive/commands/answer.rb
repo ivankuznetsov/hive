@@ -40,7 +40,7 @@ module Hive
       end
 
       def self.write(target, project: nil, binding:, answer:, idempotency_key: nil,
-                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil)
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil, remote_handle: nil)
         if binding.to_s.empty?
           raise InvalidBinding, "brainstorm answer binding is required for writes"
         end
@@ -55,13 +55,14 @@ module Hive
           principal_source: principal_source,
           input: StringIO.new(answer.to_s),
           output: StringIO.new,
-          state_reader: state_reader
+          state_reader: state_reader,
+          remote_handle: remote_handle
         ).call
       end
 
       def initialize(target, project: nil, binding: nil, json: false,
                      input: $stdin, output: $stdout, idempotency_key: nil,
-                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil)
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil, remote_handle: nil)
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
@@ -73,6 +74,7 @@ module Hive
         @principal = principal
         @principal_source = principal_source
         @state_reader = state_reader
+        @remote_handle = remote_handle
       end
 
       def call
@@ -184,7 +186,9 @@ module Hive
             "binding" => binding,
             "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
             "answer_sha256" => answer_fingerprint(answer_text)
-          },
+          }.merge(@remote_handle ? {
+            "remote_binding" => { "handle_sha256" => ::Digest::SHA256.hexdigest(@remote_handle), "binding" => @binding_token }
+          } : {}),
           project_roots: lambda {
             Hive::CommandOperation.registered_project_roots(
               target: @target, project: binding.fetch("project")

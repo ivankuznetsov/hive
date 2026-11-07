@@ -24,7 +24,7 @@ module Hive
       ),
       "answer" => Descriptor.new(
         command: "answer", mode: "write", key_policy: :optional, mutating: true,
-        semantic_options: %i[project binding binding_sha256 answer_sha256]
+        semantic_options: %i[project binding binding_sha256 answer_sha256 remote_binding]
       ),
       "approve" => Descriptor.new(
         command: "approve", mode: nil, key_policy: :optional, mutating: true,

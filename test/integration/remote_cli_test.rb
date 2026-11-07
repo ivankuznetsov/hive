@@ -177,8 +177,17 @@ class RemoteCliTest < Minitest::Test
     assert_equal "literal --context word", body.fetch("text")
     assert_equal [ "first", "other:second" ], body.fetch("depends_on")
     assert_equal "content", body.fetch("workflow")
+    [ %w[--context nas], %w[--context=nas] ].each do |override|
+      out, err, status = hive("new", "demo", "trailing context request", *override,
+        "--idempotency-key", "trailing-key", "--json")
+      assert status.success?, err
+      assert_equal "hive-remote", JSON.parse(out).fetch("schema")
+      body = JSON.parse(@server.requests.last.fetch(:body))
+      assert_equal "trailing context request", body.fetch("text")
+      assert_equal "trailing-key", @server.requests.last.dig(:headers, "idempotency-key")
+    end
     out, err, status = Open3.capture3(environment.merge("HIVE_BIN_OVERRIDE" => HIVE), File.join(ROOT, "bin/hv"),
-      "--context=nas", "new", "demo", "hv request", "--json", chdir: @checkout)
+      "new", "demo", "hv request", "--context=nas", "--json", chdir: @checkout)
     assert status.success?, err
     assert_equal "hive-remote", JSON.parse(out).fetch("schema")
     assert_equal "hv request", JSON.parse(@server.requests.last.fetch(:body)).fetch("text")

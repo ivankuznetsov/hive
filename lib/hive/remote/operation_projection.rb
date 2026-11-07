@@ -28,6 +28,21 @@ module Hive
         row
       end
 
+      # Retain the exact native token with the receipt, independently of the
+      # evictable read registry. CommandOperation still verifies the full input.
+      def answer_binding(row, handle:)
+        unless row[:command] == "answer" && row[:mode] == "write" && row[:principal_source] == "api_token"
+          raise Hive::CommandConflict
+        end
+        request = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:frozen_request_json))
+        binding = request["remote_binding"]
+        return nil unless binding # Older receipts still use the read registry.
+        unless binding.fetch("handle_sha256") == Digest::SHA256.hexdigest(handle)
+          raise Hive::CommandConflict
+        end
+        binding.fetch("binding")
+      end
+
       def call(project:, id:, principal:, scopes:)
         not_found! unless id.to_s.match?(/\A[0-9a-f-]{36}\z/)
         identity = identity(project)

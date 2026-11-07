@@ -125,8 +125,24 @@ class RemoteCommandPolicyTest < Minitest::Test
     end
   end
 
+  def test_context_after_new_prose_selects_the_remote_installation
+    contexts = fixed_contexts(remote)
+    dispatcher = lambda do |invocation|
+      assert_equal %w[new myproj idea], invocation.argv
+      :remote_capture
+    end
+    invocation = Hive::Remote::CommandPolicy.preflight!(
+      %w[new myproj idea --context nas], contexts: contexts, dispatcher: dispatcher
+    )
+    assert invocation.handled?
+    assert_equal :remote_capture, invocation.result
+    assert_equal [ "nas" ], contexts.selections
+    assert_equal %w[hive new myproj idea --context nas],
+      Hive::CliArgvPolicy.local_child_argv(%w[hive new myproj idea --context nas])
+  end
+
   def test_context_inside_new_prose_is_literal_for_policy_and_child_wrappers
-    argv = %w[new myproj add a --context flag to the CLI]
+    argv = %w[new myproj -- add a --context flag to the CLI]
     assert_equal [ argv, nil ], Hive::CliArgvPolicy.extract_context(argv)
     assert_equal [ argv, "nas" ], Hive::CliArgvPolicy.extract_context([ "--context", "nas", *argv ])
     assert_equal [ "hive", "--context", "local", *argv ], Hive::CliArgvPolicy.local_child_argv([ "hive", *argv ])

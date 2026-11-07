@@ -2050,3 +2050,12 @@ by booting the deployment against the live database. The manual rollback
 (`dogfood-current` link swap) is documented in [[commands/receipt]] but not
 automated or exercised; `hive-dogfood-deploy` only moves forward. The
 release-channel published package remains #1550.
+
+## Remote answer replay retention compatibility (2026-11-07)
+
+New remote answer receipts retain the exact native binding and a digest of the
+submitted handle, independently of bounded read-registry eviction. Older answer
+receipts lack this metadata and still need the original read-registry record
+for replay; an already-evicted legacy binding cannot be recovered safely.
+Focused controller regressions cover new receipt eviction, advancement, and
+changed-input conflicts plus replay of older receipts with retained handles.

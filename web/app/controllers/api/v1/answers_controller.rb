@@ -11,13 +11,19 @@ module Api
         end
         existing = existing_operation(project)
         _, task = resolve_target!(validate_state: !existing)
-        record = handles.resolve(handle: input.fetch("handle"), project: project, task: task)
-        unless existing
-          inventory = read_service.questions(project: project, task: task)
-          handles.current!(record: record, inventory: inventory)
+        handle = input.fetch("handle")
+        binding = existing && operation_projection.answer_binding(existing, handle: handle)
+        remote_handle = handle if binding || !existing
+        unless binding
+          record = handles.resolve(handle: handle, project: project, task: task)
+          unless existing
+            inventory = read_service.questions(project: project, task: task)
+            handles.current!(record: record, inventory: inventory)
+          end
+          binding = record.fetch("binding")
         end
-        result = command_service.answer(project: project, task: task, binding: record.fetch("binding"),
-          answer: input.fetch("answer"), **command_authority,
+        result = command_service.answer(project: project, task: task, binding: binding,
+          answer: input.fetch("answer"), remote_handle: remote_handle, **command_authority,
           state_reader: ->(current) { Hive::Remote::ReadService.validate_state!(current, allow_missing: false, strict_text: true) })
         case result["outcome"]
         when "stale", "conflict"

@@ -134,9 +134,9 @@ hive answer TASK --project demo --context nas --json
 hive operation OPERATION_ID --project demo --context nas --json
 ```
 
-Place `--context` before the command or before `new` idea prose; a literal
-`--context` inside that prose stays part of the idea. Remote status returns at
-most 100 task rows and a byte-bounded page. Pass `data.continuation` back with
+Place `--context` anywhere before an explicit `--`, including after `new` idea
+prose (`hive new demo "idea" --context nas`). After `--`, it stays literal idea
+text. Remote status returns at most 100 task rows and a byte-bounded page. Pass `data.continuation` back with
 `hive status --context nas --cursor HANDLE --project demo --json`, retaining
 the same project filter. Membership, stage, workflow and task-generation
 changes invalidate continuation; the task generation comes from persistent
@@ -155,8 +155,12 @@ answer-only token. No read scope is silently added.
 The private handle registry retains at most 4096 entries and 8 MiB. New handles
 authenticate their original kind and scope so eviction reports known-stale 409
 for that scope, while random or foreign handles remain 404. Refresh inventories
-after eviction. Legacy unsigned handles retain their existing records until
-eviction but cannot be authenticated after those records expire. Registry locks
+after eviction for fresh writes. Answer receipts retain their own private binding
+and handle digest, so identical retries survive read-handle eviction for the
+receipt retention period. Receipts created before this retention change still
+need their original read-handle record. Legacy unsigned handles retain their
+existing records until eviction but cannot be authenticated after those records
+expire. Registry locks
 use nonblocking acquisition with a one-second deadline. Client credential and
 lock files reject symlinks; credential files must be current-operator-owned and
 private. Authentication caches the installation identity per database object and

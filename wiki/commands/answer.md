@@ -72,8 +72,9 @@ this native binding. The owner-only handle registry retains the original
 binding on the server. Fresh writes recheck the handle against current question
 inventory, then inject the bounded no-follow state reader into the shared
 writer under its mutation lock. Answers retain the 64 KiB decoded limit. A
-receipt replay uses the original server-held binding before fresh inventory
-checks, preserving the original result after the task advances; see
+receipt replay uses the original binding retained with the durable receipt,
+verified against the submitted handle digest before fresh inventory checks.
+Read-handle eviction and task advancement do not invalidate that replay; see
 [[commands/token]] for the scoped endpoint.
 
 Before mutation, Hive re-resolves the exact registered project and task. It

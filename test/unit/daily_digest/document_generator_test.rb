@@ -11,14 +11,19 @@ class DailyDigestDocumentGeneratorTest < Minitest::Test
       end
       captured = nil
       generator = Hive::DailyDigest::DocumentGenerator.new
+      prompt = nil
       generator.define_singleton_method(:capture) do |invocation, _profile|
         captured = invocation.argv
+        prompt = invocation.stdin_data.to_s + invocation.argv.join(" ")
         raise Hive::AgentError, "test stops before launch"
       end
       assert_raises(Hive::AgentError) { generator.generate({}) }
       assert_includes captured, "opencode-go/deepseek-v4.1-flash"
       assert_includes captured, "--model"
       assert_includes captured, "run"
+      assert_includes prompt, "morning briefing"
+      assert_includes prompt, "```mermaid"
+      assert_includes prompt, "<prdigest_facts>"
     end
   end
 

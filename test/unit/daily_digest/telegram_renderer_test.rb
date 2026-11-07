@@ -92,6 +92,15 @@ class DailyDigestTelegramRendererTest < Minitest::Test
     refute rendered.document
   end
 
+  def test_mermaid_diagrams_become_a_web_link_instead_of_source
+    text = "## Hive\n\nReviews pause.\n\n```mermaid\nflowchart LR\n  A[Review] --> B{Third failure?}\n```\n\nDone."
+    rendered = Hive::DailyDigest::TelegramRenderer.new(web_origin: "https://hive.example").render(record.merge("document" => text))
+    refute_includes rendered.text, "flowchart"
+    refute_includes rendered.text, "```"
+    assert_includes rendered.text, '<a href="https://hive.example/digests/2026-08-30">Diagram: open the web digest</a>'
+    assert_includes rendered.text, "Done."
+  end
+
   private
 
   def record

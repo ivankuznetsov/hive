@@ -1817,5 +1817,35 @@ pre {
   color: var(--ink-muted);
 }
 
+/* What the writer found waiting on the owner reads as a callout. */
+.digest-document h2.digest-needs-you { color: var(--accent-strong); }
+.digest-document .digest-needs-you-list {
+  margin: 0 0 22px;
+  padding: 14px 18px 14px 2em;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-sunken);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.digest-document .digest-needs-you-list li:last-child { margin-bottom: 0; }
+
+/* Agent-drawn diagrams: rendered SVG when Mermaid succeeds, readable source otherwise. */
+.digest-document .digest-diagram {
+  margin: 4px 0 22px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow-x: auto;
+}
+.digest-diagram-rendered { display: flex; justify-content: center; }
+.digest-diagram-rendered svg { max-width: 100%; height: auto; }
+.digest-document .digest-diagram-source {
+  margin: 0;
+  font: 0.82rem/1.5 var(--font-mono);
+  white-space: pre;
+  overflow-wrap: normal;
+  color: var(--ink-muted);
+}
+
 .digest-loc-added { color: var(--ok); }
 .digest-loc-deleted { color: var(--danger); }

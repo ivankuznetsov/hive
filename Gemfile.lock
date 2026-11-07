@@ -13,7 +13,7 @@ PATH
       fiddle (>= 1.1)
       json_schemer (~> 2.5)
       lipgloss (~> 0.2.2)
-      prdigest (~> 0.4.0)
+      prdigest (~> 0.4.1)
       rexml (~> 3.2)
       sequel (~> 5.107)
       sqlite3 (~> 2.0)
@@ -138,7 +138,7 @@ GEM
     parser (3.3.13.0)
       ast (~> 2.4.1)
       racc
-    prdigest (0.4.0)
+    prdigest (0.4.1)
       erb (>= 4.0, < 7.0)
       faraday-retry (~> 2.2)
       octokit (~> 9.0)

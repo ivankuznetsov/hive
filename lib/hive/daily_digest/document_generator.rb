@@ -7,6 +7,7 @@ require "hive/mcp"
 require "hive/paths"
 require "hive/secret_patterns"
 require "hive/stages/base"
+require "hive/daily_digest/document_prompt"
 
 module Hive
   module DailyDigest
@@ -48,7 +49,7 @@ module Hive
       def generate_with(facts, config, route)
         profile = Hive::Stages::Base.stage_profile(config, "execute", explicit_agent: route["agent"])
         request = Hive::AgentRuntime::Request.new(
-          profile: profile, prompt: Prdigest::Document.prompt(facts),
+          profile: profile, prompt: DocumentPrompt.build(facts),
           permission_mode: Hive::Config.claude_permission_mode(config),
           **Hive::Stages::Base.model_launch_arguments(config, "execute", profile, current: route)
         )

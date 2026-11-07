@@ -333,8 +333,19 @@ class AgentProfilesTest < Minitest::Test
                  Hive::ImplementationIdentity::UtilityModels.resolve(:grok))
     assert_equal({ model: nil, pin_model: true },
                  Hive::ImplementationIdentity::UtilityModels.resolve(:opencode))
+    assert_equal({ model: nil, pin_model: false },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:muse))
     assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::ImplementationIdentity::UtilityModels.resolve(:unknown)
+    end
+  end
+
+  def test_every_built_in_provider_has_an_open_pr_utility_model_policy
+    # Regression: Muse shipped without an entry, so every Muse-executed task
+    # failed at 5-open-pr with "no open-PR utility model policy".
+    AgentCliRuntime::Profiles::PROVIDER_ORDER.each do |provider|
+      policy = Hive::ImplementationIdentity::UtilityModels.resolve(provider)
+      assert_includes [ true, false ], policy.fetch(:pin_model), provider
     end
   end
 

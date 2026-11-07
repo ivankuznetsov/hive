@@ -8,7 +8,10 @@ module Hive
         codex: { model: "gpt-5.6-terra", pin_model: true }.freeze,
         pi: { model: nil, pin_model: false }.freeze,
         grok: { model: nil, pin_model: false }.freeze,
-        opencode: { model: nil, pin_model: true }.freeze
+        opencode: { model: nil, pin_model: true }.freeze,
+        # Muse has no separate low-cost model; open-PR runs on the
+        # provider's configured model, like Pi and Grok.
+        muse: { model: nil, pin_model: false }.freeze
       }.freeze
 
       module_function

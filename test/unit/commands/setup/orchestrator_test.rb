@@ -605,6 +605,105 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal false, phase.fetch("ok")
   end
 
+  # ── --install-command-receipts on the dogfood channel ───────────────
+
+  DOGFOOD_ENVIRONMENT = {
+    "HIVE_RUNTIME_CHANNEL" => "dogfood",
+    "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+    "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-#{'a' * 9}"
+  }.freeze
+  DOGFOOD_ROLLBACK = {
+    kind: "dogfood_deployment", deployment_id: "hive-dogfood-#{'b' * 9}",
+    path: "/state/deployments/hive-dogfood-#{'b' * 9}", build_sha: "b" * 40,
+    committed_at: "2026-11-07T00:00:00Z", digest_scope: "bin/hive+lib", sha256: "c" * 64
+  }.freeze
+
+  def receipt_guard
+    Struct.new(:unused) { def verify!(**) = true }.new
+  end
+
+  def test_dogfood_receipt_installation_resolves_and_reports_the_previous_deployment
+    resolver = Object.new
+    seen = []
+    resolver.define_singleton_method(:resolve!) { |identity:| seen << identity; DOGFOOD_ROLLBACK }
+    error = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      yes: true, install_command_receipts: true, environment: DOGFOOD_ENVIRONMENT,
+      error: error, output: StringIO.new, command_schema_writer_guard: receipt_guard,
+      dogfood_rollback_resolver: resolver
+    )
+    received = nil
+    receipts = { "status" => "installed", "rollback" => DOGFOOD_ROLLBACK.transform_keys(&:to_s),
+                 "record_path" => "/state/command-receipts-installation.json", "record" => nil,
+                 "record_error" => "Errno::EACCES: denied" }
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" },
+                "command_receipts" => receipts }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::CommandSchemaInstallation, :validate_coordinates!, ->(coordinates) { coordinates }
+    ) do
+      setup.send(:validate_receipt_installation_preconditions!)
+    end
+    setup.send(:emit_receipt_installation_disclosure)
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup, ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal "dogfood", seen.fetch(0).fetch("channel")
+    assert_equal "hive-dogfood-#{'a' * 9}", seen.fetch(0).fetch("deployment_id")
+    assert_equal DOGFOOD_ROLLBACK, received.fetch(:rollback_package)
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal DOGFOOD_ROLLBACK.transform_keys(&:to_s), phase.fetch("rollback_package")
+    assert_equal receipts, phase.fetch("command_receipts")
+    assert_includes error.string, "Rollback target: dogfood deployment hive-dogfood-#{'b' * 9} at " \
+                                  "/state/deployments/hive-dogfood-#{'b' * 9}"
+    assert_includes error.string, "bin/hive+lib sha256 #{'c' * 64}"
+    assert_includes error.string, "rollback record was not written: Errno::EACCES: denied"
+  end
+
+  def test_dogfood_receipt_installation_refuses_without_an_eligible_previous_deployment
+    output = StringIO.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve!) do |identity:|
+      raise Hive::ConfigError, "dogfood channel: no eligible previous dogfood deployment (#{identity['channel']})"
+    end
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, environment: DOGFOOD_ENVIRONMENT,
+      output: output, command_schema_writer_guard: receipt_guard, dogfood_rollback_resolver: resolver
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    phase = JSON.parse(output.string).fetch("phases").find do |entry|
+      entry.fetch("name") == "command_receipts_preconditions"
+    end
+    assert_equal false, phase.fetch("ok")
+    assert_includes phase.fetch("message"), "no eligible previous dogfood deployment (dogfood)"
+  end
+
+  def test_release_channel_receipt_installation_keeps_the_published_package_path
+    output = StringIO.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve!) { |**| flunk "release channel must not resolve dogfood rollback" }
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, environment: {},
+      output: output, command_schema_writer_guard: receipt_guard, dogfood_rollback_resolver: resolver
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    phase = JSON.parse(output.string).fetch("phases").find do |entry|
+      entry.fetch("name") == "command_receipts_preconditions"
+    end
+    assert_includes phase.fetch("message"), "no published rollback package"
+    published = Hive::Commands::Setup.new(
+      install_command_receipts: true, environment: {}, error: (error = StringIO.new),
+      rollback_package: { version: "1.0.0", location: "https://example.invalid/p.gem", sha256: "d" * 64 }
+    )
+    published.send(:emit_receipt_installation_disclosure)
+    assert_includes error.string, "Rollback package: 1.0.0 at https://example.invalid/p.gem"
+  end
+
   # ── --service: web service installed ─────────────────────────────────
 
   def test_default_installs_web_service_phase

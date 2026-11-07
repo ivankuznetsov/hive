@@ -1997,3 +1997,15 @@ dependency wait. The operator escape is `hive plan-review TARGET restart`.
 Whether a stale review should be superseded (a paid review) before its
 dependencies settle is undecided. Reviews recorded under the legacy raw
 `meta.yml` generation formula still stale on any `depends_on` edit.
+
+## Dogfood receipt rollback target (2026-11-07)
+
+`DogfoodRollbackDeployment` orders retained deployments by commit time, not
+git ancestry, so a cherry-picked or rebased build could be chosen over a true
+predecessor. Its `bin/hive+lib` digest excludes `Gemfile.lock` and the installed
+gem set; a rollback deployment whose bundle no longer resolves is not caught by
+the pin. Receipt-awareness is proven from source literals (schema digests), not
+by booting the deployment against the live database. The manual rollback
+(`dogfood-current` link swap) is documented in [[commands/receipt]] but not
+automated or exercised; `hive-dogfood-deploy` only moves forward. The
+release-channel published package remains #1550.

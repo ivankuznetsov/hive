@@ -823,7 +823,7 @@ class NewTest < Minitest::Test
         assert_equal 1, calls.size
         argv, opts = calls.first
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "name-me-*")].first
-        assert_equal [ "/opt/hive/bin/hv", "generate-name", folder ], argv
+        assert_equal [ "/opt/hive/bin/hv", "--context", "local", "generate-name", folder ], argv
         assert_equal true, opts[:pgroup]
         assert_equal "a", opts[:out].last
         assert_equal opts[:out], opts[:err]

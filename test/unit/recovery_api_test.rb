@@ -4,6 +4,33 @@ require "hive/recovery/api"
 class HiveRecoveryAPITest < Minitest::Test
   include HiveTestHelper
 
+  def test_unsupported_observation_carriers_cannot_supply_recovery_identity
+    observation = Hive::Recovery::API.observation(Object.new)
+    assert_nil observation.project
+    assert_nil observation.slug
+    assert_nil observation.task_generation
+    assert_nil observation.suggested_command
+  end
+
+  def test_missing_optional_activity_does_not_prevent_the_canonical_recovery_outcome
+    with_tmp_dir do |root|
+      folder = File.join(root, "missing-task")
+      row = { "project" => "demo", "slug" => "missing-task", "folder" => folder,
+              "state_file" => File.join(folder, "task.md"), "stage" => "4-execute", "marker" => "error",
+              "state_file_mtime" => Time.utc(2026, 11, 7, 12) }
+      expected = { "status" => "unavailable", "reason" => "task_missing" }
+      calls = []
+      coordinator = Object.new
+      coordinator.define_singleton_method(:observation_token_for) { |_| "fresh-observation" }
+      coordinator.define_singleton_method(:request) { |**arguments| calls << arguments; expected }
+      result = Hive::Recovery::API.recover!(row: row, coordinator: coordinator)
+      assert_same expected, result
+      assert_equal 1, calls.length
+      assert_equal "missing-task", calls.first.fetch(:row).slug
+      refute File.exist?(folder)
+    end
+  end
+
   def test_observation_derives_the_state_file_from_a_task_folder
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")

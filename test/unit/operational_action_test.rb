@@ -27,6 +27,20 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_legacy_task_without_state_or_metadata_uses_its_owned_folder_for_freshness
+    with_tmp_dir do |folder|
+      workflow = Struct.new(:controller?).new(false)
+      task = Struct.new(:workflow, :folder, :state_file, :meta_yml_path).new(
+        workflow, folder, File.join(folder, "task.md"), File.join(folder, "meta.yml")
+      )
+      before = File.stat(folder)
+      assert_equal folder, Hive::OperationalAction.observation_mtime_source(task)
+      assert_equal before, File.stat(folder)
+      refute File.exist?(task.state_file)
+      refute File.exist?(task.meta_yml_path)
+    end
+  end
+
   def test_provider_administration_is_not_a_confirmation_free_operational_action
     assert_equal %w[workflow.advance workflow.retry],
                  Hive::OperationalAction::EXECUTABLE_ACTION_IDS

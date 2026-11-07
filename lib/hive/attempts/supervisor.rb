@@ -633,7 +633,9 @@ module Hive
         worker_argv = record["worker_argv"]
         return worker_argv unless worker_argv.first == "hive"
 
-        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), *worker_argv.drop(1) ]
+        # Execution belongs to this installation even if its operator uses the
+        # CLI to inspect another server. Keep the recorded logical argv intact.
+        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", *worker_argv.drop(1) ]
       end
 
       def hive_worker?(record)

@@ -100,4 +100,73 @@ class RemoteTokenStoreTest < Minitest::Test
       assert_equal ids.sort, store.list.map { |row| row.fetch("id") }.sort
     end
   end
+
+  def test_invalid_names_credentials_and_ambiguous_grants_do_not_issue_a_token
+    with_store do |store, project, _now|
+      assert_empty store.list
+      [ "", "  ", "line\nbreak", "a" * 129, "bad\xff".b ].each do |name|
+        assert_raises(Hive::UsageError) { store.create(name: name, scopes: [], all_projects: true) }
+      end
+      [ nil, "", "not-a-bearer", "#{'a' * 24}.#{'b' * 64}" ].each { |bearer| assert_nil store.authenticate(bearer) }
+      assert_raises(Hive::UsageError) { store.revoke("unknown-public-id") }
+      assert_raises(Hive::UsageError) { store.create(name: "bad expiry", scopes: [], all_projects: true, expires_at: "tomorrow") }
+      assert_raises(Hive::UsageError) { store.create(name: "mixed", scopes: [], all_projects: true, projects: [ "demo" ]) }
+      ambiguous = Hive::Remote::TokenStore.new(root: File.dirname(store.path), owner: -> { "operator" },
+        projects: -> { [ project, project.dup ] })
+      assert_raises(Hive::UsageError) { ambiguous.create(name: "ambiguous", scopes: [], projects: [ "demo" ]) }
+      assert_empty store.list
+    end
+  end
+
+  def test_corrupt_or_invalid_registry_fails_visibly_instead_of_authenticating
+    with_store do |store, _project, _now|
+      issued = store.create(name: "original", scopes: [ "read" ], all_projects: true)
+      data = JSON.parse(File.read(store.path))
+      invalid = [ "{", JSON.generate({ "schema_version" => 0, "tokens" => [] }) ]
+      missing_timestamp = Marshal.load(Marshal.dump(data))
+      missing_timestamp.fetch("tokens").first.delete("created_at")
+      invalid << JSON.generate(missing_timestamp)
+      bad_timestamp = Marshal.load(Marshal.dump(data))
+      bad_timestamp.fetch("tokens").first["expires_at"] = "not a timestamp"
+      invalid << JSON.generate(bad_timestamp)
+      duplicate = Marshal.load(Marshal.dump(data))
+      duplicate.fetch("tokens") << duplicate.fetch("tokens").first.dup
+      invalid << JSON.generate(duplicate)
+      invalid.each do |bytes|
+        File.write(store.path, bytes)
+        error = assert_raises(Hive::ConfigError) { store.authenticate(issued.fetch("token")) }
+        assert_includes error.message, "invalid API token registry"
+        refute_includes error.message, issued.fetch("token")
+      end
+    end
+  end
+
+  def test_registry_permissions_and_symlinks_fail_closed
+    with_store do |store, _project, _now|
+      store.create(name: "private", scopes: [], all_projects: true)
+      File.chmod(0o644, store.path)
+      assert_raises(Hive::ConfigError) { store.list }
+      File.chmod(0o600, store.path)
+      target = "#{store.path}.saved"
+      File.rename(store.path, target)
+      File.symlink(target, store.path)
+      assert_raises(Hive::ConfigError) { store.list }
+    end
+    with_store do |store, _project, _now|
+      directory = File.dirname(store.path)
+      FileUtils.mkdir_p("#{directory}.actual")
+      File.symlink("#{directory}.actual", directory)
+      assert_raises(Hive::ConfigError) { store.list }
+    end
+    return unless defined?(File::NOFOLLOW)
+
+    with_store do |store, _project, _now|
+      directory = File.dirname(store.path)
+      FileUtils.mkdir_p(directory)
+      File.write(File.join(directory, "sentinel"), "unchanged")
+      File.symlink(File.join(directory, "sentinel"), File.join(directory, ".tokens.lock"))
+      assert_raises(Hive::ConfigError) { store.list }
+      assert_equal "unchanged", File.read(File.join(directory, "sentinel"))
+    end
+  end
 end

@@ -14,7 +14,7 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     @private = create_hive_project!("private-reads-#{SecureRandom.hex(4)}")
     @slug = create_task!(@project, "A visible read fixture")
     @private_slug = create_task!(@private, "Invisible secret fixture")
-    @issued = Hive::Remote::TokenStore.new.create(name: "reader", scopes: %w[read act answer], projects: [@project])
+    @issued = Hive::Remote::TokenStore.new.create(name: "reader", scopes: %w[read act answer], projects: [ @project ])
     @headers = { "Authorization" => "Bearer #{@issued.fetch('token')}" }
     @path = "/api/v1/projects/#{@project}/tasks/#{@slug}"
   end
@@ -33,10 +33,10 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     end
     get "/api/v1/status", headers: @headers
     assert_response :success
-    assert_equal [@project], seen
+    assert_equal [ @project ], seen
     data = response.parsed_body.fetch("data")
     assert_equal 1, data.fetch("task_count")
-    assert_equal [@slug], data.fetch("tasks").map { |task| task.fetch("slug") }
+    assert_equal [ @slug ], data.fetch("tasks").map { |task| task.fetch("slug") }
     refute_includes response.body, @private
     refute_includes response.body, ENV.fetch("HIVE_TEST_HOME_ROOT")
     refute_includes response.body, "suggested_command"
@@ -61,19 +61,19 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
   end
 
   test "explicit status project filters authorized projects before the projection" do
-    token = Hive::Remote::TokenStore.new.create(name: "both", scopes: ["read"], projects: [@project, @private])
+    token = Hive::Remote::TokenStore.new.create(name: "both", scopes: [ "read" ], projects: [ @project, @private ])
     headers = { "Authorization" => "Bearer #{token.fetch('token')}" }
     get "/api/v1/status", params: { project: @project }, headers: headers
     assert_response :success
     data = response.parsed_body.fetch("data")
-    assert_equal [@project], data.fetch("projects").map { |project| project.fetch("name") }
-    assert_equal [@slug], data.fetch("tasks").map { |task| task.fetch("slug") }
+    assert_equal [ @project ], data.fetch("projects").map { |project| project.fetch("name") }
+    assert_equal [ @slug ], data.fetch("tasks").map { |task| task.fetch("slug") }
     get "/api/v1/status", params: { project: @private }, headers: @headers
     assert_response :not_found
   end
 
   test "write-only token cannot read status or questions" do
-    token = Hive::Remote::TokenStore.new.create(name: "writer", scopes: ["answer"], projects: [@project])
+    token = Hive::Remote::TokenStore.new.create(name: "writer", scopes: [ "answer" ], projects: [ @project ])
     headers = { "Authorization" => "Bearer #{token.fetch('token')}" }
     get "/api/v1/status", headers: headers
     assert_response :forbidden
@@ -167,7 +167,7 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     post "/api/v99/projects/#{@project}/tasks", params: "not JSON", headers: @headers
     assert_response :not_found
     assert_equal "unsupported_version", response.parsed_body.dig("error", "code")
-    assert_equal ["/api/v1"], response.parsed_body.dig("error", "served_base_paths")
+    assert_equal [ "/api/v1" ], response.parsed_body.dig("error", "served_base_paths")
     get "/api/v1/no-such-endpoint", headers: @headers
     assert_response :not_found
     assert_equal "not_found", response.parsed_body.dig("error", "code")
@@ -206,7 +206,7 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
         @logger = logger
       end
       def each
-        yield JSON.generate({"ok" => true})
+        yield JSON.generate({ "ok" => true })
       end
       def close
         @logger.pop_tags
@@ -214,11 +214,11 @@ class ApiReadsTest < ActionDispatch::IntegrationTest
     end
     app = ->(_env) do
       logger.push_tags("attacker-request-id")
-      [200, {"content-type" => "application/json"}, body.new(logger)]
+      [ 200, { "content-type" => "application/json" }, body.new(logger) ]
     end
     boundary = Hive::Remote::RequestBoundary.new(app, logger: logger)
     with_replaced_singleton_method(Hive::Remote::Protocol, :interlock, ->(**) { nil }) do
-      result = boundary.call({"PATH_INFO" => "/api/v1/context", "REQUEST_METHOD" => "GET"})
+      result = boundary.call({ "PATH_INFO" => "/api/v1/context", "REQUEST_METHOD" => "GET" })
       assert_equal 200, result.first
     end
     refute_includes output.string, "attacker-request-id"

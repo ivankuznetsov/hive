@@ -253,7 +253,141 @@ class RemoteCommandServiceTest < Minitest::Test
     end
   end
 
+  def test_worker_retains_authenticated_authority_without_reopening_completed_admission
+    with_server do |service, store, repository, project, task|
+      result = queue_approval(service, project, task, key: "retained-worker-authority")
+      record = worker_record(project, task, result)
+      origin = Hive::Attempts::Context.send(:load_command_context, repository, record)
+      authority = Hive::Attempts::Context.send(:load_remote_authority, repository, record, origin)
+      assert_equal PRINCIPAL, authority.fetch("principal")
+      before = store.receipt(origin.receipt_id)
+      assert_nil Hive::Attempts::Context.send(:writable_command_context, repository, origin, authority)
+      assert_equal before, store.receipt(origin.receipt_id)
+
+      [ nil, origin.with(principal: "installation:test:token:foreign"), origin.with(principal_source: "local_cli") ].each do |untrusted|
+        error = assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(:load_remote_authority, repository, record, untrusted)
+        end
+        assert_includes error.message, "authority does not match"
+      end
+      [ { "project" => "foreign" }, { "task_id" => "foreign" }, { "task_slug" => "foreign" } ].each do |identity|
+        assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(:load_remote_authority, repository, record.merge(identity), origin)
+        end
+      end
+
+      [ { state: "executing" }, { state: "unresolved" }, { mode: "local" },
+        { principal: "installation:test:token:foreign" }, { request_fingerprint: "0" * 64 } ].each do |changes|
+        repository.database.transaction { |db| db[:command_receipts].where(receipt_id: origin.receipt_id).update(changes) }
+        error = assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(:writable_command_context, repository, origin, authority)
+        end
+        assert_includes error.message, "admission receipt is not complete"
+        repository.database.transaction do |db|
+          db[:command_receipts].where(receipt_id: origin.receipt_id).update(before.slice(*changes.keys))
+        end
+      end
+      assert_equal before, store.receipt(origin.receipt_id)
+    end
+  end
+
+  def test_daemon_rejects_a_changed_admission_principal_or_receipt_before_dispatch
+    with_server do |service, _store, repository, project, task|
+      result = queue_approval(service, project, task, key: "changed-admission-binding")
+      request = repository.fetch(result.fetch("request_id"))
+      daemon = daemon_for(repository)
+      repository.database.transaction do |db|
+        db[:command_dispatch_contexts].where(request_id: request.request_id).update(principal: "foreign")
+      end
+      error = assert_raises(Hive::CommandConflict) { daemon.send(:remote_admission_ready?, request) }
+      assert_includes error.message, "admission identity changed"
+      repository.database.transaction do |db|
+        db[:command_dispatch_contexts].where(request_id: request.request_id).update(principal: PRINCIPAL)
+        db[:command_receipts].where(receipt_id: result.dig("command_receipt", "id")).update(request_fingerprint: "0" * 64)
+      end
+      error = assert_raises(Hive::CommandConflict) { daemon.send(:remote_admission_ready?, request) }
+      assert_includes error.message, "receipt identity changed"
+      assert File.directory?(task.folder)
+      assert_equal "queued", repository.fetch(request.request_id).state
+    end
+  end
+
+  def test_approval_worker_installs_its_retained_guard_and_refuses_force_or_destination_overrides
+    with_server do |service, store, repository, project, task|
+      result = queue_approval(service, project, task, key: "guarded-approval-worker")
+      authority = repository.fetch(result.fetch("request_id")).remote_authority
+      generation = Hive::Attempts::Generation.resolve(task: task, project: project.fetch("name"), intended_stage: "2-brainstorm")
+      context = Hive::Attempts::Context.send(:new, attempt_id: "approval-worker", project: project.fetch("name"),
+        task_generation: generation.task_input_epoch, ownership_generation: generation.ownership_generation,
+        intended_stage: "2-brainstorm", remote_authority: authority)
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        [ { force: true }, { to: "3-plan" } ].each do |options|
+          error = assert_raises(Hive::OperationalActionUsageError) do
+            Hive::Commands::Approve.new(task.slug, project: project.fetch("name"), from: "2-brainstorm", **options).call
+          end
+          assert_includes error.message, "advance locally"
+          assert File.directory?(task.folder)
+        end
+        # A composing command already supplies its locked observation guard.
+        composed = Hive::Commands::Approve.new(task.slug, project: project.fetch("name"), observation_guard: ->(_) { })
+        assert_nil composed.send(:install_remote_guard!)
+        before = store.receipt(result.dig("command_receipt", "id"))
+        payload = nil
+        stdout, stderr = capture_io do
+          payload = Hive::Commands::Approve.new(task.slug, project: project.fetch("name"),
+            from: "2-brainstorm", quiet: true).call
+        end
+        assert_empty stdout
+        assert_empty stderr
+        assert payload.fetch("ok")
+        assert_equal before, store.receipt(result.dig("command_receipt", "id"))
+      end
+      refute File.exist?(task.folder)
+    end
+  end
+
+  def test_retained_action_authority_is_checked_by_the_shared_executor
+    with_server do |service, store, repository, project, task|
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
+      accepted = service.action(project: project, task: task, action_id: descriptor.fetch("action_id"),
+        observation: descriptor.fetch("observation_token"), idempotency_key: "retained-executor-authority",
+        principal: PRINCIPAL, scopes: [ "act" ])
+      executor = Hive::OperationalAction::Executor.new(remote_authority: repository.fetch(accepted.fetch("request_id")).remote_authority)
+      plan = File.join(project.fetch("hive_state_path"), "stages", "3-plan", task.slug, "plan.md")
+      before = store.receipt(accepted.dig("command_receipt", "id"))
+      original_cwd = Dir.pwd
+      with_env("HIVE_CLAUDE_BIN" => FAKE_AGENT, "HIVE_CODEX_BIN" => FAKE_AGENT,
+               "HIVE_FAKE_CLAUDE_WRITE_FILE" => plan,
+               "HIVE_FAKE_CLAUDE_WRITE_CONTENT" => "# Plan\n<!-- WAITING -->\n") do
+        with_attempt_context(attempt_id: "retained-action-worker", task_generation: 0) do
+          result = nil
+          stdout, stderr = capture_io do
+            result = executor.execute(action_id: descriptor.fetch("action_id"), target: descriptor.fetch("target"),
+              observation_token: descriptor.fetch("observation_token"))
+          end
+          assert_empty stdout
+          assert_empty stderr
+          assert_equal "3-plan", result.fetch("stage")
+        end
+      end
+      assert_equal original_cwd, Dir.pwd
+      assert_equal before, store.receipt(accepted.dig("command_receipt", "id"))
+      assert File.file?(plan)
+    end
+  end
+
   private
+
+  def queue_approval(service, project, task, key:)
+    service.approve(project: project, task: task, stage: "2-brainstorm",
+      generation: Hive::Remote::CommandService.generation_for(task, project: project.fetch("name")),
+      idempotency_key: key, principal: PRINCIPAL, scopes: [ "answer" ])
+  end
+
+  def worker_record(project, task, result)
+    { "request_id" => result.fetch("request_id"), "project" => project.fetch("name"),
+      "task_id" => task.id, "task_slug" => task.slug }
+  end
 
   def daemon_for(repository)
     daemon = Hive::Daemon::Dispatcher.allocate

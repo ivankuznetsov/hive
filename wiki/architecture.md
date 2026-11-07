@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-07
 tags: [architecture, overview]
 ---
 
@@ -623,6 +623,29 @@ bindings stay server-side. Unknown API base paths fail with typed
 The API middleware consumes and closes bounded JSON responses while ordinary
 request logging is silenced, then emits its fixed audit fields after Rails has
 removed request tags.
+
+Native connection routing freezes a named installation before local activation,
+process registration or project discovery. Context administration reads only
+client configuration; remote task requests carry exact registered project names
+and task IDs/slugs. The HTTPS client verifies fresh token metadata and the pinned
+installation before each mutation, announces its authority/target/retry key on
+stderr, and sends no credentials through redirects. Local filesystem commands
+require an explicit local context while a remote installation is selected.
+Daemon-owned attempt wrappers and native workers explicitly select `local` in
+their execution argv. The server operator's saved client context cannot retarget
+accepted work; the recorded logical worker argv remains unchanged for attempt
+capability verification.
+Local name-generation, daemon, bot, one-shot and TUI native children likewise
+receive a local execution selection without changing logical command metadata
+or arguments for non-Hive executables.
+Rendered managed-service startup and native daemon/babysitter re-exec also keep
+their local target. Existing installed definitions retain drift protection and
+require explicit force-install to adopt the new argv; see [[remote-access]].
+Installed workflow packages and agents retain local operator authority within
+their checkout; the token effect allowlist does not sandbox package internals or
+prompts formed from remotely supplied task text and answers. Deployment and
+incident-response limits are documented in [[remote-access]].
+
 Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
 so the grid and detail page use the same behavior rather than helper-owned
 filesystem reads or action tables. `TasksController` renders that resource.

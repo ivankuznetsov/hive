@@ -99,7 +99,8 @@ module Hive
       private
 
       def validate_name!(name)
-        unless name.is_a?(String) && name.bytesize.between?(1, 128) && name.valid_encoding? &&
+        unless name.is_a?(String) && name.bytesize.between?(1, 128) &&
+               (name.encoding == Encoding::UTF_8 || name.ascii_only?) && name.valid_encoding? &&
                !name.match?(/[[:cntrl:]]/) && !name.strip.empty?
           raise Hive::UsageError, "token name must be 1 to 128 printable bytes"
         end

@@ -78,8 +78,11 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     post "#{@base}/tasks", params: { text: [ "wrong type" ], idempotency_key: "type" }, headers: @headers, as: :json
     assert_response :bad_request
     assert_empty Dir.children(stage_dir(@project, "1-inbox")).reject { |name| name.start_with?(".") }
-    post "#{@base}/tasks", params: { text: "Header key" }, headers: @headers.merge("Idempotency-Key" => "header-only"), as: :json
+    # Rack transports header bytes as ASCII-8BIT, even for ordinary ASCII keys.
+    post "#{@base}/tasks", params: { text: "Header key" }, headers: @headers.merge("Idempotency-Key" => "header-only".b), as: :json
     assert_response :created
+    post "#{@base}/tasks", params: { text: "Invalid header encoding" }, headers: @headers.merge("Idempotency-Key" => "bad\xff".b), as: :json
+    assert_response :bad_request
   end
 
   test "answer handles are target bound and replay original acknowledgement after advance with oversized new state" do

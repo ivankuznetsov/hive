@@ -25,7 +25,7 @@ module Hive
       def issue(project:, task:, inventory:)
         locked do |data|
           dirty = false
-          identities = data.fetch("handles").to_h { |handle, record| [record, handle] }
+          identities = data.fetch("handles").to_h { |handle, record| [ record, handle ] }
           slots = Array(inventory["slots"]).map do |slot|
             record = target(project, task).merge(
               "kind" => "question", "generation" => inventory.fetch("task").fetch("generation"),

@@ -9,6 +9,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
+require "hive/cli_argv_policy"
 require "hive/task_counter"
 require "hive/task_meta"
 require "hive/task"
@@ -876,7 +877,7 @@ module Hive
         argv = [ ENV.fetch("HIVE_BIN", "hive"), "generate-name", task_dir ]
         options = { pgroup: true, out: [ log_path, "a" ], err: [ log_path, "a" ] }
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: "generate-name", spawner: self.class.name_generator_spawn, **options
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: "generate-name", spawner: self.class.name_generator_spawn, **options
         )
         Thread.new do
           Thread.current.report_on_exception = false

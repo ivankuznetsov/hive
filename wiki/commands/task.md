@@ -74,6 +74,27 @@ current configuration and live attempt capacity; there is no health projection.
 
 ## Remote API projection
 
+With a remote context, `hive task TASK --project PROJECT --context NAME`
+resolves only that server project and task. `PROJECT:TASK` is also explicit
+project-qualified addressing. It never derives a local project from cwd or
+accepts a checkout path. Remote JSON uses the API envelope below.
+
+The remote content selectors are mutually exclusive:
+
+```sh
+hive task TASK --project PROJECT --context NAME --log
+hive task TASK --project PROJECT --context NAME --diff
+hive task TASK --project PROJECT --context NAME --artifacts --json
+hive task TASK --project PROJECT --context NAME --artifact RESOURCE_ID --output ./answer.md
+```
+
+Without `--output`, requested content goes to stdout. `--output` names an
+explicit client destination; server paths never become client targets. The new
+`--diff`, `--artifacts` and `--artifact ID` selectors fail under default or
+explicit local context before effects, with guidance to use the existing local
+`hive task --json` artifact panel or a remote context. Local `--log` still cannot
+be combined with `--json`; remote `--log --json` returns one API document.
+
 The bearer-authenticated `/api/v1/projects/:project/tasks/:task` reader accepts
 an exact registered project plus a task ID or slug. It returns a deliberately
 smaller DTO in the `hive-remote.v1` envelope, with native schema/version named

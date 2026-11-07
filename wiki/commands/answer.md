@@ -3,7 +3,7 @@ title: hive answer
 type: command
 source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-11
+updated: 2026-11-07
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents]
 ---
 
@@ -172,6 +172,7 @@ recommendation policy merely because the shared boundary is used.
 
 ## Backlinks
 
+- [[remote-access]] — remote context selection, opaque handles, independent `answer` scope and retry keys.
 - [[cli]]
 - [[commands/status]]
 - [[stages/brainstorm]]

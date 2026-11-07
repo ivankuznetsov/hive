@@ -149,7 +149,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
 
     assert_equal 999, launcher.send(:fork_wrapper, record, CLAIM_CAPABILITY, writer)
     args, kwargs = executed
-    assert_equal "attempt-command", args[4]
+    assert_equal [ "--context", "local", "__attempt-supervise", "attempt-command" ], args[3, 4]
     assert_includes args, "--timeout-sec"
     assert_equal "12", args[args.index("--timeout-sec") + 1]
     refute_includes args, "/bin/echo"
@@ -246,7 +246,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     assert_includes args, "--unit=hive-attempt-5a3f8270644f411031e77d7f"
     ruby_index = args.index(RbConfig.ruby)
     refute_nil ruby_index
-    assert_equal "__attempt-supervise", args[ruby_index + 2]
+    assert_equal [ "--context", "local", "__attempt-supervise", "attempt-command" ], args[ruby_index + 2, 4]
     claim_fd = args.first.fetch("HIVE_ATTEMPT_CLAIM_FD")
     ready_fd = args.first.fetch("HIVE_ATTEMPT_READY_FD")
     assert_equal claim_fd.to_i, kwargs.keys.grep(Integer).find { |fd| fd == claim_fd.to_i }

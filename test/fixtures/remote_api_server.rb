@@ -15,7 +15,12 @@ ENV["RAILS_ENV"] = "test"
 ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
-ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
+ENV["HIVE_CLAUDE_BIN"] ||= File.expand_path("fake-claude", __dir__)
+ENV["HIVE_CODEX_BIN"] ||= File.expand_path("fake-codex", __dir__)
+%w[PI GROK OPENCODE MUSE].each { |provider| ENV["HIVE_#{provider}_BIN"] ||= "/usr/bin/false" }
+ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] ||= File.join(root, "fake-agent-logs")
+ENV["HIVE_FAKE_CODEX_LOG_DIR"] ||= File.join(root, "fake-agent-logs")
+ENV.delete("HIVE_WEB_LOCAL_LOOPBACK") unless ENV["HIVE_REMOTE_PRESERVE_LOOPBACK"] == "1"
 ENV.delete("HIVEBOX_LOCAL_LOOPBACK")
 FileUtils.mkdir_p(ENV.fetch("HIVE_HOME"))
 require_relative "../../web/config/environment"
@@ -61,6 +66,11 @@ else
   token = Hive::Remote::TokenStore.new.create(name: "transport", scopes: %w[read create act answer], projects: [ project.fetch("name") ])
   fixture = { "project" => project.fetch("name"), "token" => token.fetch("token") }
   File.write(fixture_path, JSON.generate(fixture), mode: "w", perm: 0o600)
+end
+
+if ENV["HIVE_REMOTE_ACCEPTANCE"] == "1"
+  require_relative "remote_acceptance_setup"
+  fixture = RemoteAcceptanceSetup.prepare(root: root, fixture: fixture)
 end
 
 if ENV["HIVE_REMOTE_DISPATCH_ACCEPTED"] == "1"

@@ -66,6 +66,8 @@
     <string>/Users/YOU/.local/bin/hive</string>
     <string>daemon</string>
     <string>start</string>
+    <string>--context</string>
+    <string>local</string>
   </array>
 
   <key>RunAtLoad</key>

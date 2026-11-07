@@ -1311,7 +1311,9 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal 137, supervisor.send(:status_exit, status)
     assert_equal Hive::ExitCodes::SOFTWARE, supervisor.send(:status_exit, nil)
     record = { "worker_argv" => [ "hive", "run", "task" ] }
-    assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv, record).first
+    assert_equal [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", "run", "task" ],
+                 supervisor.send(:resolved_worker_argv, record)
+    assert_equal [ "hive", "run", "task" ], record.fetch("worker_argv")
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise Errno::ESRCH }) do
       assert_raises(Hive::Attempts::RepositoryError) { supervisor.send(:process_identity, 99) }

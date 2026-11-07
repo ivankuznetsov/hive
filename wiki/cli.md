@@ -62,6 +62,13 @@ enabled; redirects are refused and connect/read timeouts and response bytes
 are bounded. A disconnect or timeout after submission reports an unknown
 outcome with the same key and target. No POST is automatically retried.
 
+Internal native `hive`/`hv` children from task naming, daemon, bot, one-shot,
+and TUI execution carry an explicit local context, so a saved remote selection
+cannot redirect work already admitted to this installation. The execution
+arguments are separate from logged commands, verbs and roles. Explicit child
+context options remain authoritative, and arbitrary Ruby/shell executables or
+custom fixture commands retain their original arguments.
+
 Remote `task` retains `--log` and adds mutually exclusive `--diff`,
 `--artifacts`, and `--artifact ID`. Content goes to stdout or an explicit local
 `--output PATH`; no remote path is mapped into the checkout. The three new

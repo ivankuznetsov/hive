@@ -80,7 +80,6 @@ module Hive
           archive: archived,
           clock: @clock
         ).semantic
-
       end
 
       private

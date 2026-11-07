@@ -4,6 +4,22 @@ require "hive/cli_argv_policy"
 class HiveCliArgvPolicyTest < Minitest::Test
   VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key --context].freeze
 
+  def test_local_child_context_pins_only_native_hive_launches_without_an_explicit_context
+    policy = Hive::CliArgvPolicy
+    assert_equal %w[hive --context local run demo:task], policy.local_child_argv(%w[hive run demo:task])
+    assert_equal %w[/opt/hive/bin/hv --context local generate-name /task],
+      policy.local_child_argv(%w[/opt/hive/bin/hv generate-name /task])
+    [ %w[ruby -e puts], %w[sh -c echo], %w[/tmp/fake-hive-run.rb run task],
+     %w[hive --context remote status], %w[hive status --context=remote],
+     %w[hive --context local status] ].each do |argv|
+      assert_equal argv, policy.local_child_argv(argv)
+    end
+    logical = %w[hive new demo -- task --context remote]
+    assert_equal %w[hive --context local new demo -- task --context remote], policy.local_child_argv(logical)
+    assert_equal %w[hive new demo -- task --context remote], logical
+    assert_raises(Hive::UsageError) { policy.local_child_argv(%w[hive status --context]) }
+  end
+
   def test_context_options_work_before_the_command_and_after_new_project
     assert_equal [ %w[status --json], "nas" ], Hive::CliArgvPolicy.extract_context(%w[--context nas status --json])
     assert_equal [ %w[new project idea], "nas" ], Hive::CliArgvPolicy.extract_context(%w[new project idea --context nas])

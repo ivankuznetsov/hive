@@ -986,6 +986,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "global_cap", item.fetch("reason")
   end
 
+  def test_one_shot_observation_uses_reconciled_capacity_without_mutating_attempts
+    target = row(project: "p1", slug: "target", command: "hive brainstorm target")
+    capacity = Hive::Attempts::CapacitySnapshot.new(global_count: 1, per_project: { "p2" => 1 },
+      per_task: { [ "p2", "running" ] => 1 }, daily_counts: {}, reserved_attempt_ids: [ "other-attempt" ])
+    snapshot = Hive::Attempts::ReconciliationSnapshot.new(capacity: capacity, attempts: [], lost_attempts: [],
+      newly_lost_attempts: [], terminal_attempts: [], admission_view: nil)
+    observations = []
+    reconciler = Object.new
+    reconciler.define_singleton_method(:reconcile) { |**arguments| observations << arguments; snapshot }
+    dispatcher, supervisor, controller = make_dispatcher(rows: [ target ], scope_projects: [ "p1" ],
+      dry_run: true, attempt_reconciler: reconciler)
+    controller.update_limits(max_concurrent_runs: 1, max_concurrent_per_project: 1,
+      max_runs_per_day_per_project: 100, max_concurrent_patrol_scans: 1)
+    result = dispatcher.observe_one_shot(project: "p1", now: T0)
+    item = result.fetch(:items).find { |candidate| candidate.fetch("id") == "dispatch:task:target" }
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal "global_cap", item.fetch("reason")
+    assert_equal [ { now: T0, mutate_projects: [] } ], observations
+    assert_empty supervisor.spawned
+  end
+
   def test_one_shot_readiness_reports_provider_capacity_as_external_wait
     target = row(project: "p1", slug: "target", command: "hive brainstorm target")
     decision = Object.new

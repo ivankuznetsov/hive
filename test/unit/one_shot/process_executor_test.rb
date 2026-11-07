@@ -108,6 +108,21 @@ class OneShotProcessExecutorTest < Minitest::Test
                  executor.instance_variable_get(:@kill_grace_sec)
   end
 
+  def test_project_factory_loads_the_local_daemon_kill_grace_by_default
+    with_tmp_global_config do
+      with_tmp_git_repo do |project|
+        config = YAML.safe_load_file(Hive::Config.global_config_path)
+        config["daemon"] = { "child_kill_grace_sec" => 17 }
+        File.write(Hive::Config.global_config_path, config.to_yaml)
+
+        executor = Hive::OneShot::ProcessExecutor.for_entry({ "path" => project })
+
+        assert_equal 17.0, executor.instance_variable_get(:@kill_grace_sec)
+        assert_operator executor.instance_variable_get(:@timeout_sec), :>, 0
+      end
+    end
+  end
+
   def test_invalid_timeout_arguments_are_rejected
     assert_raises(ArgumentError) do
       Hive::OneShot::ProcessExecutor.new(timeout_sec: "invalid")

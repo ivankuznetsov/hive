@@ -26,10 +26,23 @@ class PathsTest < Minitest::Test
         "XDG_BIN_HOME" => File.join(dir, "bin")
       ) do
         assert_equal File.join(dir, "config", "hive"), Hive::Paths.config_home
+        assert_equal File.join(dir, "config", "hive", "connections"), Hive::Paths.connection_contexts_home
         assert_equal File.join(dir, "data", "hive"), Hive::Paths.data_home
         assert_equal File.join(dir, "state", "hive"), Hive::Paths.state_home
         assert_equal File.join(dir, "state", "hive", "runtime-control-plane.sqlite3"),
                      Hive::Paths.runtime_control_plane_path
+        assert_equal File.join(dir, "state", "hive", "runtime-quiescence-proof.json"),
+                     Hive::Paths.runtime_quiescence_proof_path
+        assert_equal File.join(dir, "state", "hive", ".runtime-quiescence-operation.lock"),
+                     Hive::Paths.runtime_quiescence_operation_lock_path
+        assert_equal File.join(dir, "state", "hive", ".runtime-launch.lock"),
+                     Hive::Paths.runtime_launch_fence_path
+        assert_equal File.join(dir, "state", "hive", ".runtime-writer.lock"),
+                     Hive::Paths.runtime_writer_fence_path
+        assert_equal File.join(dir, "state", "hive", "runtime-payloads"),
+                     Hive::Paths.runtime_payload_root
+        assert_equal File.join(dir, "data", "hive", "web"), Hive::Paths.web_app_home
+        refute Hive::Paths.hive_home_collapsed?
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
         publish = File.join(dir, "state", "hive", "workflow-publish", "v1")
@@ -57,6 +70,7 @@ class PathsTest < Minitest::Test
         assert_equal File.join(dir, "legacy"), Hive::Paths.data_home
         assert_equal File.join(dir, "legacy"), Hive::Paths.state_home
         assert_equal File.join(dir, "legacy"), Hive::Paths.cache_home
+        assert Hive::Paths.hive_home_collapsed?
       end
     end
   end

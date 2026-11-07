@@ -24,7 +24,7 @@ class BotServiceInstallerTest < Minitest::Test
       unit = File.join(dir, ".config/systemd/user/hive-bot.service")
       assert File.exist?(unit)
       body = File.read(unit)
-      assert_includes body, "ExecStart=#{hive} bot start --foreground"
+      assert_includes body, "ExecStart=#{hive} bot start --foreground --context local"
       assert_includes body, "Environment=PATH=",
                        "minimal PATH must be rewritten so the bot's bin/hive shebang resolves a Ruby with gem deps"
       refute_includes body, "HIVE_TELEGRAM_BOT_TOKEN",
@@ -179,7 +179,7 @@ class BotServiceInstallerTest < Minitest::Test
       assert_equal 1, backups.size,
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed"
       assert_equal "previous-stale-content\n", File.read(backups.first)
-      assert_includes File.read(unit), "ExecStart=/tmp/hive bot start --foreground"
+      assert_includes File.read(unit), "ExecStart=/tmp/hive bot start --foreground --context local"
     end
   end
 

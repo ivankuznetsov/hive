@@ -40,7 +40,7 @@ module Hive
             return json_response(503, Protocol.unavailable)
           end
         end
-        [response[0], response[1], [body]]
+        [ response[0], response[1], [ body ] ]
       ensure
         response[2].close if response[2].respond_to?(:close)
       end
@@ -94,7 +94,7 @@ module Hive
 
       def json_response(status, payload)
         body = JSON.generate(payload)
-        [status, { "content-type" => "application/json", "content-length" => body.bytesize.to_s }, [body]]
+        [ status, { "content-type" => "application/json", "content-length" => body.bytesize.to_s }, [ body ] ]
       end
     end
   end

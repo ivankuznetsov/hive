@@ -126,7 +126,7 @@ module Hive
           writer.close_on_exec = false
           claim_reader.close_on_exec = false
           command = [
-            RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
+            RbConfig.ruby, @hive_executable, "--context", "local", "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
             "--database-path", @store.database.path,
             "--heartbeat-sec", @heartbeat_sec.to_s,

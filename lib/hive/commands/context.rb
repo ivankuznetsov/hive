@@ -25,7 +25,6 @@ module Hive
           when "list" then @contexts.list
           when "show" then @contexts.show(@name)
           when "use" then @contexts.use(@name)
-          else raise Hive::UsageError, "expected context add, list, use, or show"
           end
           payload = { "schema" => envelope_schema,
                       "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(envelope_schema),

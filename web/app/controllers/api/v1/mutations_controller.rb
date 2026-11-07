@@ -28,6 +28,11 @@ module Api
         end
         body_key = input["idempotency_key"]
         header_key = request.headers["Idempotency-Key"]
+        if header_key
+          malformed! unless header_key.is_a?(String)
+          header_key = header_key.dup.force_encoding(Encoding::UTF_8)
+          malformed! unless header_key.valid_encoding?
+        end
         malformed! if input.key?("idempotency_key") && !body_key.is_a?(String)
         malformed! if header_key && body_key && header_key != body_key
         key = header_key || body_key

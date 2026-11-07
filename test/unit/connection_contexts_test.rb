@@ -138,6 +138,168 @@ class ConnectionContextsTest < Minitest::Test
     assert_empty schema.validate(Hive::CliUsageContracts.error_payload(contract, error)).to_a
   end
 
+  def test_human_command_output_exposes_verified_authority_and_never_the_bearer
+    output = StringIO.new
+    created = Hive::Commands::Context.new(
+      "add", "nas", url: "https://nas.example/", token_stdin: true,
+      contexts: @store, stdin: StringIO.new("secret-bearer\n"), stdout: output
+    ).call
+    assert_equal "https://nas.example", created.dig("data", "url")
+    assert_includes output.string, "nas: https://nas.example"
+    assert_includes output.string, "installation: server-1"
+    assert_includes output.string, "token: public-1; scopes: read"
+    assert_includes output.string, "projects: server-project"
+    assert_includes output.string, "expires: never"
+    refute_includes output.string, "secret-bearer"
+    assert_equal [ "https://nas.example", "secret-bearer" ], @calls.last
+
+    output.truncate(0)
+    output.rewind
+    Hive::Commands::Context.new("use", "nas", contexts: @store, stdout: output).call
+    assert_equal "nas", @store.resolve.fetch("name")
+    output.truncate(0)
+    output.rewind
+    Hive::Commands::Context.new("list", contexts: @store, stdout: output).call
+    assert_includes output.string, "nas *: https://nas.example"
+    assert_includes output.string, "local: local installation"
+    assert_includes output.string, "authority: unrestricted local operator"
+    refute_includes output.string, "secret-bearer"
+  end
+
+  def test_human_show_refreshes_all_project_grant_and_expiry_without_selecting_it
+    add_remote
+    all_projects = Hive::ConnectionContexts.new(root: @root, verifier: lambda do |context, token|
+      metadata = @verifier.call(context, token)
+      metadata.fetch("token").merge!("all_projects" => true, "projects" => [], "expires_at" => "2030-01-01T00:00:00Z")
+      metadata
+    end)
+    output = StringIO.new
+    Hive::Commands::Context.new("show", "nas", contexts: all_projects, stdout: output).call
+    assert_includes output.string, "projects: all projects"
+    assert_includes output.string, "expires: 2030-01-01T00:00:00Z"
+    assert_equal "local", @store.resolve.fetch("name")
+    assert_equal 2, @calls.length
+  end
+
+  def test_command_invalid_options_are_usage_errors_without_consuming_credentials
+    cases = [
+      [ "unknown", nil, {} ], [ "list", "nas", {} ],
+      [ "show", nil, { url: "https://nas.example" } ],
+      [ "use", "nas", { token_stdin: true } ],
+      [ "add", "nas", { url: "https://nas.example" } ],
+      [ "add", "nas", { token_stdin: true } ], [ "add", nil, {} ]
+    ]
+    cases.each do |action, name, options|
+      input = StringIO.new("untouched-bearer")
+      output = StringIO.new
+      assert_raises(Hive::UsageError) do
+        Hive::Commands::Context.new(action, name, **options, json: true, contexts: @store,
+                                   stdin: input, stdout: output).call
+      end
+      assert_equal "usage", JSON.parse(output.string).fetch("error_kind")
+      assert_equal 0, input.pos
+      refute_includes output.string, "untouched-bearer"
+    end
+    assert_empty @calls
+    refute_path_exists @store.contexts_path
+  end
+
+  def test_json_error_reporting_preserves_domain_failure_when_output_pipe_is_closed
+    reader, writer = IO.pipe
+    reader.close
+    error = assert_raises(Hive::UsageError) do
+      Hive::Commands::Context.new("unknown", json: true, contexts: @store, stdout: writer).call
+    end
+    assert_match(/expected context/, error.message)
+    refute_path_exists @store.contexts_path
+  ensure
+    writer&.close
+  end
+
+  def test_command_reports_configuration_and_unexpected_storage_failures_with_typed_errors
+    add_remote
+    File.write(@store.contexts_path, "not json")
+    output = StringIO.new
+    assert_raises(Hive::ConfigError) do
+      Hive::Commands::Context.new("show", json: true, contexts: @store, stdout: output).call
+    end
+    assert_equal "config", JSON.parse(output.string).fetch("error_kind")
+
+    unavailable = Hive::ConnectionContexts.new(root: File.join(@store.contexts_path, "child"), verifier: @verifier)
+    output = StringIO.new
+    assert_raises(Hive::InternalError) do
+      Hive::Commands::Context.new("add", "nas", url: "https://nas.example", token_stdin: true,
+                                 json: true, contexts: unavailable, stdin: StringIO.new("secret-bearer"), stdout: output).call
+    end
+    assert_equal "internal", JSON.parse(output.string).fetch("error_kind")
+    refute_includes output.string, "secret-bearer"
+  end
+
+  def test_invalid_names_and_credentials_are_rejected_before_verification_or_persistence
+    [ "local", "", "../nas", "name with spaces", "x" * 65 ].each do |name|
+      assert_raises(Hive::UsageError) { @store.add(name, url: "https://nas.example", token: "secret-bearer") }
+    end
+    [ "", " \n", "two tokens", "x" * 4097 ].each do |token|
+      assert_raises(Hive::UsageError) { @store.add("nas", url: "https://nas.example", token: token) }
+    end
+    assert_empty @calls
+    refute_path_exists @store.contexts_path
+    assert_raises(Hive::UsageError) { @store.use("missing") }
+    assert_raises(Hive::UsageError) { @store.show("missing") }
+  end
+
+  def test_replacing_context_removes_old_credentials_without_retargeting_a_frozen_invocation
+    add_remote
+    previous = @store.resolve(name: "nas")
+    @store.add("nas", url: "https://new-nas.example", token: "replacement-bearer")
+    error = assert_raises(Hive::ConfigError) { @store.credential(previous) }
+    assert_match(/missing credentials/, error.message)
+    assert_equal "replacement-bearer", @store.credential(@store.resolve(name: "nas"))
+    credentials = JSON.parse(File.read(@store.credentials_path)).fetch("credentials")
+    assert_equal [ "replacement-bearer" ], credentials.values
+    refute_includes File.read(@store.credentials_path), "secret-bearer"
+  end
+
+  def test_context_replacement_during_metadata_verification_cannot_change_selection
+    add_remote
+    racing = Hive::ConnectionContexts.new(root: @root, verifier: lambda do |context, token|
+      @store.add("nas", url: "https://replacement.example", token: "replacement-bearer")
+      @verifier.call(context, token)
+    end)
+    error = assert_raises(Hive::ConfigError) { racing.use("nas") }
+    assert_match(/context changed while being verified/, error.message)
+    assert_equal "local", @store.resolve.fetch("name")
+    assert_equal "https://replacement.example", @store.resolve(name: "nas").fetch("url")
+  end
+
+  def test_incompatible_and_malformed_metadata_never_pin_a_context
+    [ { "instance_id" => "server", "api_version" => "v2" },
+      { "instance_id" => "", "api_version" => "v1" },
+      { "instance_id" => "server" }, nil ].each do |metadata|
+      store = Hive::ConnectionContexts.new(root: @root, verifier: ->(*) { metadata })
+      error = assert_raises(Hive::ConfigError) { store.add("nas", url: "https://nas.example", token: "secret-bearer") }
+      refute_includes error.message, "secret-bearer"
+      assert_equal "local", @store.resolve.fetch("name")
+      refute_path_exists @store.contexts_path
+    end
+  end
+
+  def test_insecure_stored_urls_missing_credentials_and_invalid_credential_shapes_fail_closed
+    add_remote
+    original = JSON.parse(File.read(@store.contexts_path))
+    changed = Marshal.load(Marshal.dump(original))
+    changed.fetch("contexts").fetch("nas")["url"] = "http://insecure.example"
+    File.write(@store.contexts_path, JSON.generate(changed))
+    assert_raises(Hive::ConfigError) { @store.resolve }
+    File.write(@store.contexts_path, JSON.generate(original))
+
+    [ {}, { "unused" => 123 }, [] ].each do |credentials|
+      File.write(@store.credentials_path, JSON.generate("schema_version" => 1, "credentials" => credentials))
+      error = assert_raises(Hive::ConfigError) { @store.resolve }
+      assert_match(/credential/, error.message)
+    end
+  end
+
   private
 
   def add_remote

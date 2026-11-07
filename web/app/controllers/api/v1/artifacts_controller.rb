@@ -42,12 +42,12 @@ module Api
         folder = File.stat(task.folder)
         state = begin
           stat = File.lstat(task.state_file)
-          [stat.dev, stat.ino, stat.size, stat.mtime.to_r.to_s, stat.ctime.to_r.to_s, stat.symlink?]
+          [ stat.dev, stat.ino, stat.size, stat.mtime.to_r.to_s, stat.ctime.to_r.to_s, stat.symlink? ]
         rescue Errno::ENOENT
           nil
         end
-        Digest::SHA256.hexdigest(JSON.generate([task.id, task.slug, task.stage_index, task.stage_name,
-          folder.dev, folder.ino, state]))
+        Digest::SHA256.hexdigest(JSON.generate([ task.id, task.slug, task.stage_index, task.stage_name,
+          folder.dev, folder.ino, state ]))
       end
     end
   end

@@ -11,6 +11,21 @@ module Hive
   module CliArgvPolicy
     module_function
 
+    # Internal Hive children execute in the parent's local installation even
+    # when a saved client context points elsewhere. Other executables and an
+    # explicit caller context keep their argv. Return a copy so telemetry can
+    # retain the original command/verb without launcher options.
+    def local_child_argv(argv)
+      launch = argv.dup
+      binary = launch.first
+      return launch unless binary.is_a?(String) && %w[hive hv].include?(File.basename(binary))
+
+      _arguments, selected = extract_context(launch.drop(1))
+      return launch if selected
+
+      launch.insert(1, "--context", "local")
+    end
+
     # Context is a launcher option, including before the command. Never scan
     # past `--`, where new-task prose and other literal arguments are owned by
     # the command instead.

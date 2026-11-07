@@ -67,6 +67,38 @@ class AttemptsContextTest < Minitest::Test
     assert_nil legacy.admitted_route
   end
 
+  def test_admitted_billing_evidence_and_nested_collections_are_immutable
+    routing = explicit_routing
+    routing.fetch("route").merge!("billing_route" => "api", "billing_evidence_source" => "provider_account_config")
+    routing["exclusions"] = [ { "reason" => "hard_pin_mismatch" } ]
+    context = Hive::Attempts::Context.send(:new, attempt_id: "billing-evidence", task_generation: 0, routing: routing)
+    assert_equal "provider_account_config", context.billing_evidence_source
+    assert_equal "api", context.billing_route
+    routing.fetch("exclusions").first["reason"] = "changed-after-admission"
+    assert_equal "hard_pin_mismatch", context.routing.fetch("exclusions").first.fetch("reason")
+    assert_raises(FrozenError) { context.routing.fetch("exclusions") << "forged" }
+    assert_raises(FrozenError) { context.routing.fetch("exclusions").first["reason"].replace("forged") }
+    legacy = Hive::Attempts::Context.send(:new, attempt_id: "legacy-billing", task_generation: 0)
+    assert_equal "unavailable", legacy.billing_evidence_source
+  end
+
+  def test_qualified_operational_worker_binding_requires_its_admitted_project_and_stage
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = { "project" => "demo", "task_id" => "42", "task_slug" => "task", "intended_stage" => "4-execute" }
+    argv = %w[hive act workflow.retry demo:task --observation observation]
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_, **_) { resolver }) do
+      assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record, argv.take(3) + [ "foreign:task" ])
+      end
+      assert_includes error.message, "project does not match admission"
+      assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record.merge("intended_stage" => "3-plan"), argv)
+      end
+    end
+  end
+
   def test_environment_context_is_authenticated_bound_and_scrubbed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(

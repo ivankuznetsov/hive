@@ -8,7 +8,7 @@ module Api
       def index
         authority.scope!("read")
         projects = if params[:project]
-          [authority.project!(params[:project])]
+          [ authority.project!(params[:project]) ]
         else
           authority.projects.sort_by { |project| project.fetch("name") }
         end
@@ -16,13 +16,13 @@ module Api
         names = projects.map { |project| project.fetch("name") }
         rows = Array(source["projects"]).select { |project| names.include?(project["name"]) }.flat_map do |project|
           Array(project["tasks"]).map { |row| serializers.status_row(row, project: project.fetch("name")).merge("project" => project.fetch("name")) }
-        end.sort_by { |row| [row.fetch("project"), row.fetch("slug"), row.fetch("stage")] }
+        end.sort_by { |row| [ row.fetch("project"), row.fetch("slug"), row.fetch("stage") ] }
         snapshot = Digest::SHA256.hexdigest(JSON.generate(rows.map { |row| row.reject { |key, _| key == "age_seconds" } }))
-        project_binding = projects.map { |project| [project.fetch("name"), Hive::Remote::Authorization.fingerprint(project)] }
+        project_binding = projects.map { |project| [ project.fetch("name"), Hive::Remote::Authorization.fingerprint(project) ] }
         offset = params[:cursor] ? handles.resolve_cursor(handle: params[:cursor], projects: project_binding, snapshot: snapshot) : 0
         limit = params[:limit] ? Integer(params[:limit].to_s, 10) : 100
         raise Hive::UsageError, "limit must be positive" unless limit.positive?
-        count = [limit, 100].min
+        count = [ limit, 100 ].min
         data = serializers.provenance(source).merge(
           "projects" => names.map { |name| { "name" => name, "task_count" => rows.count { |row| row["project"] == name } } },
           "task_count" => rows.length, "tasks" => rows.slice(offset, count) || [], "truncated" => false, "continuation" => nil

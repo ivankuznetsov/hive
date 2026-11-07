@@ -46,7 +46,7 @@ module Hive
             @stdout_written = true
           else
             puts "API: #{reason || 'available'}"
-            rows = result.key?("tokens") ? result.fetch("tokens") : [result.fetch("token")]
+            rows = result.key?("tokens") ? result.fetch("tokens") : [ result.fetch("token") ]
             rows.each do |row|
               projects = row.fetch("all_projects") ? "all projects" : row.fetch("projects").map { |grant| grant.fetch("name") }.join(",")
               puts "#{row.fetch('id')} #{row.fetch('name')} scopes=#{row.fetch('scopes').join(',')} projects=#{projects} revoked=#{row.fetch('revoked')}"

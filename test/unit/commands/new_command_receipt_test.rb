@@ -111,6 +111,9 @@ class NewCommandReceiptTest < Minitest::Test
 
         assert_includes output, "idempotent task already exists at /tmp/task"
         assert_includes output, "next: hive brainstorm task"
+        rendered = command.send(:new_result_text,
+          "created" => false, "task_folder" => "/tmp/task", "next_action" => { "command" => "hive brainstorm task" })
+        assert_equal "hive: idempotent task already exists at /tmp/task\nnext: hive brainstorm task\n", rendered
       end
     end
   end

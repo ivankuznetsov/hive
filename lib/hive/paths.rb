@@ -6,6 +6,10 @@ module Hive
       hive_home_override || File.join(base_home("XDG_CONFIG_HOME", ".config"), "hive")
     end
 
+    def connection_contexts_home
+      File.join(config_home, "connections")
+    end
+
     def data_home
       hive_home_override || File.join(base_home("XDG_DATA_HOME", ".local/share"), "hive")
     end

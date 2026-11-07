@@ -19,6 +19,7 @@ module Hive
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-version" => 1,
+      "hive-context" => 1,
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,

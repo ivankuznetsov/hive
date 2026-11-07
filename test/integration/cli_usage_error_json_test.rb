@@ -21,7 +21,16 @@ class CliUsageErrorJsonTest < Minitest::Test
   MSG
 
   def run_hive(home, *args)
-    Open3.capture3({ "HIVE_HOME" => home }, RbConfig.ruby, "-Ilib", HIVE_BIN, *args)
+    out, err, status = Open3.capture3({ "HIVE_HOME" => home }, RbConfig.ruby, "-Ilib", HIVE_BIN, *args)
+    [ out, usage_diagnostics(err), status ]
+  end
+
+  # Target announcements have their own executable policy proofs. Keep these
+  # assertions focused on the historical usage diagnostics that follow them.
+  def usage_diagnostics(stderr)
+    stderr.lines.reject do |line|
+      line.match?(/\Ahive: context=local installation=local authority=unrestricted-local-operator target=[^\r\n]*\n\z/)
+    end.join
   end
 
   def assert_pre_dispatch_error(home, argv, schema:, error_kind:, version: :registered, extras: {})
@@ -563,7 +572,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       )
       trace = err.lines.find { |line| line.start_with?("USAGE_PROBE=") }
       refute_nil trace, err
-      [ out, err.lines.reject { |line| line == trace }.join, status,
+      [ out, usage_diagnostics(err.lines.reject { |line| line == trace }.join), status,
        JSON.parse(trace.delete_prefix("USAGE_PROBE=")) ]
     end
   end

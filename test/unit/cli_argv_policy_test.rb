@@ -2,7 +2,19 @@ require "test_helper"
 require "hive/cli_argv_policy"
 
 class HiveCliArgvPolicyTest < Minitest::Test
-  VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
+  VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key --context].freeze
+
+  def test_context_options_work_before_the_command_and_after_new_project
+    assert_equal [ %w[status --json], "nas" ], Hive::CliArgvPolicy.extract_context(%w[--context nas status --json])
+    assert_equal [ %w[new project idea], "nas" ], Hive::CliArgvPolicy.extract_context(%w[new project idea --context nas])
+    assert_equal [ %w[new project -- idea --context nas], nil ], Hive::CliArgvPolicy.extract_context(%w[new project -- idea --context nas])
+    assert_equal "status", Hive::CliArgvPolicy.command_name(%w[--context=nas --json status])
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[status --context]) }
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[status --context one --context two]) }
+    assert_equal %w[new --context nas project -- idea], Hive::CliArgvPolicy.lift_new_options(
+      %w[new project idea --context nas], value_options: VALUE_OPTIONS
+    )
+  end
 
   def test_json_and_encoding_policy
     assert Hive::CliArgvPolicy.json_requested?(%w[status --json])

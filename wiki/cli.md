@@ -23,6 +23,26 @@ recommends an answer nor advances a stage.
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
 
+`Hive::Remote::CommandPolicy` resolves the client connection context before
+runtime activation, process registration, scheduler reconciliation, or project
+discovery. The implicit selection is `local`; `--context NAME` overrides a saved
+selection for one invocation and is never read after a literal `--`. Local
+mutations announce their context, unrestricted local-operator authority, and
+target on stderr without changing JSON stdout. The explicit command vocabulary
+rejects local filesystem commands and unknown commands under a remote selection;
+`--context local` selects the local installation explicitly. `hv` delegates to
+the same executable, including this boundary.
+
+`Hive::ConnectionContexts` stores versioned client metadata and separate
+credentials beneath `Hive::Paths.config_home/connections`, using locked atomic
+writes, owner-only files, and an owner-only directory. Unknown newer schemas
+require an upgrade and never fall back to a local target. Remote metadata stores
+a confirmed installation ID instead of project paths. Add, show, and selection
+use an injected fresh metadata verifier; invalid HTTPS URLs are rejected before
+reading credentials. The context command boundary owns `hive-context.v1.json`
+and its pre-dispatch usage contract. Its public command registration is deferred
+until the consuming API and native transport are available.
+
 Before Thor dispatch, `bin/hive` delegates shared wrapper grammar to the pure
 `Hive::CliArgvPolicy`, while retaining command-specific JSON error contracts
 and dispatch. `bin/hive-e2e` uses the same policy for encoding validation,
@@ -44,7 +64,8 @@ values can be treated as a command argument or task target. `hive new` has a
 special lift-and-rebuild path: standalone allow-listed options are lifted from
 before the project, between project and text, or after text, then the remaining
 `PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
-task text as options. The allow-list is `--workflow`/`--depends-on`/`--base` (whose value
+task text as options. The allow-list is `--workflow`/`--depends-on`/`--base`/
+`--idempotency-key`/`--context` (whose value
 is the next token, but only when that token exists and is not option-like — a
 trailing or value-less `--workflow`/`--depends-on`/`--base` stays literal text rather than
 swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE`/`--base=VALUE` `name=`-prefix

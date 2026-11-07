@@ -13,6 +13,18 @@ module Hive
       true
     end
 
+    # Programmatic callers get the same target boundary as the executable.
+    # bin/hive performs it earlier, before runtime registration and repair.
+    def self.start(given_args = ARGV, config = {})
+      require "hive/remote/command_policy"
+      return super if Hive::Remote::CommandPolicy.current_invocation
+
+      invocation = Hive::Remote::CommandPolicy.preflight!(given_args)
+      return invocation.result if invocation.handled?
+
+      Hive::Remote::CommandPolicy.with_invocation(invocation) { super(invocation.argv, config) }
+    end
+
     # Stage vocabulary embedded in `--from`/`--to`/`--stage` option help so
     # `hive help run|approve|status` still advertises the valid stages to an
     # agent reading `--help`. R1 dropped Thor's static `enum:` (it couldn't
@@ -48,6 +60,7 @@ module Hive
     # document mode because it is a stream; use its --json-lines option.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
+    class_option :context, type: :string, desc: "use named installation context for this invocation"
 
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 

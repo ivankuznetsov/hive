@@ -3,6 +3,7 @@
 require "json"
 require "hive"
 require "hive/schemas"
+require "hive/cli_argv_policy"
 
 module Hive
   # Pre-dispatch JSON usage-error contracts for the Hive CLI.
@@ -57,6 +58,7 @@ module Hive
     end
 
     def contract(argv, on_failure: nil)
+      argv, = Hive::CliArgvPolicy.extract_context(argv)
       command_index = argv.index { |arg| !arg.b.start_with?("-") }
       return unless command_index
 

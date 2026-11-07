@@ -8,7 +8,7 @@ class ApiAuthenticationTest < ActionDispatch::IntegrationTest
     @loopback = ENV.delete("HIVE_WEB_LOCAL_LOOPBACK")
     @legacy_loopback = ENV.delete("HIVEBOX_LOCAL_LOOPBACK")
     configure_owner!(owner: "operator")
-    @issued = Hive::Remote::TokenStore.new.create(name: "reader", scopes: ["read"], all_projects: true)
+    @issued = Hive::Remote::TokenStore.new.create(name: "reader", scopes: [ "read" ], all_projects: true)
     @headers = { "Authorization" => "Bearer #{@issued.fetch('token')}" }
   end
 
@@ -27,7 +27,7 @@ class ApiAuthenticationTest < ActionDispatch::IntegrationTest
     payload = response.parsed_body
     assert_equal "hive-remote", payload.fetch("schema")
     assert_equal "v1", payload.dig("data", "api_version")
-    assert_equal ["read"], payload.dig("data", "token", "scopes")
+    assert_equal [ "read" ], payload.dig("data", "token", "scopes")
     refute_includes response.body, @issued.fetch("token")
     Hive::Remote::TokenStore.new.revoke(@issued.fetch("id"))
     get "/api/v1/context", headers: @headers
@@ -80,6 +80,24 @@ class ApiAuthenticationTest < ActionDispatch::IntegrationTest
     refute_includes log, "Started GET"
   ensure
     Rails.logger = original if original
+  end
+
+  test "explicitly blank owner values have the owner unavailable diagnostic and token setup guidance" do
+    path = File.join(ENV.fetch("HIVE_HOME"), "config.yml")
+    [ "", "  \t" ].each do |owner|
+      data = YAML.safe_load_file(path)
+      data.fetch("web").fetch("github")["owner"] = owner
+      File.write(path, data.to_yaml)
+      assert_equal "api_unavailable_owner_blank", Hive::Remote::Protocol.interlock(mutation: false)
+      get "/api/v1/context", headers: @headers
+      assert_response :service_unavailable
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Remote::TokenStore.new.create(name: "blocked", scopes: [], all_projects: true)
+      end
+      assert_includes error.message, "configure a non-blank web.github.owner"
+    end
+  ensure
+    configure_owner!(owner: "operator")
   end
 
   test "oversized bodies are refused before JSON parsing and receipts interlock is identical" do

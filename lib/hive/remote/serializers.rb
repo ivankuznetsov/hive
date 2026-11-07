@@ -60,6 +60,23 @@ module Hive
         }
       end
 
+      # A command result may include native paths, bindings and suggested shell
+      # commands. Acknowledgements expose identity and admission facts only.
+      def self.acknowledgement(document)
+        receipt = document.fetch("command_receipt").slice("id", "generation", "state")
+        result = document.slice("created", "workflow", "queued", "request_id", "outcome", "written",
+          "unanswered_count", "complete", "slug", "task_id", "stage")
+        task = document["task"]
+        if task.is_a?(Hash)
+          result["task_id"] = task["id"]
+          result["slug"] = task["slug"]
+          result["stage"] = task["stage"]
+        end
+        result["stage"] ||= document["current_stage"]
+        result["state"] = document.fetch("state", receipt.fetch("state"))
+        result.merge("operation_id" => receipt.fetch("id"), "command_receipt" => receipt)
+      end
+
       # The byte cap applies to the complete JSON envelope, after JSON escaping.
       # Only public content strings are shortened; identity/control fields stay
       # intact, so a bounded result remains usable rather than malformed JSON.
@@ -88,7 +105,7 @@ module Hive
         when Hash
           value.each do |key, child|
             if child.is_a?(String) && %w[content text answer committed staged unstaged untracked].include?(key)
-              strings << [value, key]
+              strings << [ value, key ]
             else
               collect_content(child, strings)
             end

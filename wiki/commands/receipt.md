@@ -118,6 +118,14 @@ JSON internally. If an applied effect's saved result is missing or corrupt,
 replay returns `command_original_result_unavailable` instead of presenting the
 loss as an in-progress command.
 
+Remote mutations use this same receipt store and project namespace, with the
+full installation/token principal and `principal_source=api_token`. The
+original receipt completes durable admission; later daemon work records its
+own attempt progress without reopening that completed receipt. The scoped
+operation lookup projects the original acknowledgement plus correlated durable
+attempt progress even after disposable dispatch results are removed. It never
+enrolls a namespace during lookup; see [[commands/token]].
+
 ## Maintenance
 
 All destructive commands preview by default. Repeat with `--confirm` only

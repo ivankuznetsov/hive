@@ -17,19 +17,31 @@ module Api
       end
       rescue_from Hive::Error do |error|
         status, code = case error
-        when Hive::CommandConflict then [409, "conflict"]
-        when Hive::CommandInProgress then [409, "in_progress"]
-        when Hive::CommandUnresolved then [409, "unresolved"]
-        when Hive::StaleOperationalObservation, Hive::WrongStage then [409, "stale"]
-        when Hive::InvalidTaskPath then [404, "not_found"]
-        when Hive::ConfigError, Hive::ConcurrentRunError then [503, "unavailable"]
-        when Hive::UsageError then [400, "malformed_input"]
-        else [422, "validation"]
+        when Hive::CommandConflict then [ 409, "conflict" ]
+        when Hive::CommandInProgress then [ 409, "in_progress" ]
+        when Hive::CommandUnresolved then [ 409, "unresolved" ]
+        when Hive::StaleOperationalObservation, Hive::WrongStage then [ 409, "stale" ]
+        when Hive::InvalidTaskPath then [ 404, "not_found" ]
+        when Hive::ConfigError, Hive::ConcurrentRunError, Hive::CommandCapacityError then [ 503, "unavailable" ]
+        when Hive::Commands::Answer::InvalidAnswer then [ 422, "validation" ]
+        when Hive::UsageError then [ 400, "malformed_input" ]
+        else [ 422, "validation" ]
         end
         render_error(status, code, code == "not_found" ? "resource not found" : "remote operation could not be completed")
       end
       rescue_from ActionController::ParameterMissing, ActionDispatch::Http::Parameters::ParseError do
         render_error(400, "malformed_input", "invalid request")
+      end
+      rescue_from Hive::OperationalActionUsageError do |error|
+        # These native errors are also used by local tools. Only recognized
+        # local-only transitions receive guidance; never forward their text.
+        local = [
+          "this recovery must be performed locally",
+          "this recovery requires force; retry locally",
+          "this transition requires force; advance locally",
+          "this transition requires a terminal marker; advance locally"
+        ].include?(error.message)
+        render_error(422, "validation", local ? "advance this task locally" : "remote operation could not be completed")
       end
       rescue_from Hive::Remote::Error do |error|
         render_error(error.status, error.code, error.message)
@@ -99,7 +111,7 @@ module Api
         end
         task = Hive::TaskResolver.new(identifier, project_filter: project.fetch("name")).resolve
         Hive::Remote::ReadService.validate_state!(task) if validate_state
-        [project, task]
+        [ project, task ]
       end
 
       def response_limit(maximum)
@@ -107,7 +119,7 @@ module Api
         return maximum if value.nil?
         limit = Integer(value.to_s, 10)
         raise ArgumentError unless limit.positive?
-        [limit, maximum].min
+        [ limit, maximum ].min
       rescue ArgumentError, TypeError
         raise Hive::UsageError, "max_bytes must be a positive integer"
       end

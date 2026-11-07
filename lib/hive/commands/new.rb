@@ -484,6 +484,7 @@ module Hive
           }
         }
         if @structured
+          payload["task_id"] = task.id
           payload
         elsif @json
           puts JSON.generate(payload)

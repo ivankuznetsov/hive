@@ -1,6 +1,8 @@
 Rails.application.routes.draw do
   get "/api/v1/context" => "api/v1/context#show"
   get "/api/v1/status" => "api/v1/status#index"
+  post "/api/v1/projects/:project/tasks" => "api/v1/creations#create", format: false
+  get "/api/v1/projects/:project/operations/:id" => "api/v1/operations#show", format: false
   scope "/api/v1/projects/:project/tasks/:task", format: false do
     get "" => "api/v1/tasks#show"
     get "questions" => "api/v1/questions#index"
@@ -8,6 +10,9 @@ Rails.application.routes.draw do
     get "diff" => "api/v1/diffs#show"
     get "artifacts" => "api/v1/artifacts#index"
     get "artifacts/:id" => "api/v1/artifacts#show"
+    post "actions" => "api/v1/actions#create"
+    post "answers" => "api/v1/answers#create"
+    post "approvals" => "api/v1/approvals#create"
   end
   # Closed API routing: unknown v1 resources never enter browser controllers.
   match "/api/v1/*path" => "api/v1/versions#not_found", via: :all, format: false

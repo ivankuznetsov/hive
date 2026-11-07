@@ -232,6 +232,10 @@ an idempotency key retain the existing capture behavior. The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
 
+The internal structured adapter also records `task_id` in its original durable
+result. This lets the remote API acknowledge the captured native task without
+reopening an old folder after advancement. Local CLI JSON remains unchanged.
+
 ## Serialization fallback
 
 Without an idempotency key, `hive new --json` retains its legacy text output.

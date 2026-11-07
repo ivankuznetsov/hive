@@ -67,6 +67,15 @@ slot re-observation below. It must not cross a trust boundary. If bindings are
 ever accepted from a mutually untrusted process or remote principal, the
 format must gain an HMAC (or equivalent authenticated envelope) first.
 
+The remote API accepts a separate opaque server-issued question handle, never
+this native binding. The owner-only handle registry retains the original
+binding on the server. Fresh writes recheck the handle against current question
+inventory, then inject the bounded no-follow state reader into the shared
+writer under its mutation lock. Answers retain the 64 KiB decoded limit. A
+receipt replay uses the original server-held binding before fresh inventory
+checks, preserving the original result after the task advances; see
+[[commands/token]] for the scoped endpoint.
+
 Before mutation, Hive re-resolves the exact registered project and task. It
 then acquires the existing task folder with `create: false` and rechecks:
 

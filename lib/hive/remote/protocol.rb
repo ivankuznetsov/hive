@@ -9,7 +9,7 @@ require "hive/command_operation"
 module Hive
   module Remote
     module Protocol
-      BASE_PATHS = ["/api/v1"].freeze
+      BASE_PATHS = [ "/api/v1" ].freeze
       MAX_MUTATION_BYTES = 256 * 1024
       MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -46,6 +46,8 @@ module Hive
           return "api_unavailable_receipts_absent"
         end
         nil
+      rescue Hive::ConfigError => error
+        error.message.start_with?("web.github.owner in ") ? "api_unavailable_owner_blank" : "api_unavailable_configuration"
       rescue Hive::Error, SystemCallError
         "api_unavailable_configuration"
       end

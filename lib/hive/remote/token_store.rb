@@ -19,7 +19,7 @@ module Hive
 
       def initialize(root: File.join(Hive::Paths.state_home, "remote-access"),
                      projects: Hive::Config.method(:registered_projects),
-                     owner: -> { Hive::Config.load_global_web.dig("github", "owner") },
+                     owner: TokenStore.method(:configured_owner),
                      clock: -> { Time.now.utc })
         @root = root
         @path = File.join(root, "tokens.json")
@@ -54,6 +54,13 @@ module Hive
           data.fetch("tokens") << row
         end
         public_record(row).merge("token" => "#{public_id}.#{secret}")
+      end
+
+      def self.configured_owner
+        Hive::Config.load_global_web.dig("github", "owner")
+      rescue Hive::ConfigError => error
+        raise unless error.message.start_with?("web.github.owner in ")
+        raise Hive::ConfigError, "configure a non-blank web.github.owner before creating API tokens"
       end
 
       def list
@@ -168,7 +175,7 @@ module Hive
           next false unless row.is_a?(Hash) && row["id"].to_s.match?(/\A[0-9a-f]{24}\z/) &&
             row["secret_sha256"].to_s.match?(/\A[0-9a-f]{64}\z/) && row["name"].is_a?(String) &&
             row["scopes"].is_a?(Array) && (row["scopes"] - Authorization::SCOPES).empty? &&
-            [true, false].include?(row["all_projects"]) && [true, false].include?(row["revoked"]) &&
+            [ true, false ].include?(row["all_projects"]) && [ true, false ].include?(row["revoked"]) &&
             row["projects"].is_a?(Array) && row["projects"].all? { |grant|
               grant.is_a?(Hash) && grant["name"].is_a?(String) && grant["fingerprint"].to_s.match?(/\A[0-9a-f]{64}\z/)
             }

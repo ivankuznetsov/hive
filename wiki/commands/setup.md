@@ -1,9 +1,9 @@
 ---
 title: hive setup
 type: command
-source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
+source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/runtime_control_plane/dogfood_rollback_deployment.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-09-27
+updated: 2026-11-07
 tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter, receipts]
 ---
 
@@ -24,10 +24,38 @@ non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
 Ordinary setup creates or validates the current base schema v2 only. The default-false
 `--install-command-receipts` flag separately requests the additive command
 receipt extension. `--yes` never implies it, and enabling a namespace intake
-gate never implies it. Pre-publication builds have no pinned published rollback
-package and refuse this opt-in with CONFIG before any setup mutation; use
-`hive setup` or `hive setup --yes` without the flag for base-only installation
-or service refresh until the compatibility package is published.
+gate never implies it. Release-channel builds have no pinned published
+rollback package yet (issue #1550) and refuse this opt-in with CONFIG before
+any setup mutation; use `hive setup` or `hive setup --yes` without the flag for
+base-only installation or service refresh until the compatibility package is
+published.
+
+On the dogfood channel (`HIVE_RUNTIME_CHANNEL=dogfood` with a valid
+`HIVE_RUNTIME_BUILD_SHA` and `HIVE_RUNTIME_DEPLOYMENT_ID`, as exported by
+`hive-dogfood-entrypoint`) the rollback target is instead the previous retained
+dogfood deployment, resolved by
+`Hive::RuntimeControlPlane::DogfoodRollbackDeployment`. Setup scans the
+directory that holds the running deployment (`~/.local/state/hive/deployments/`)
+for `hive-dogfood-<sha9>` checkouts and picks the newest one by commit time
+that:
+
+- is a different build: its `HEAD` is a readable commit matching its directory
+  name and is not the running build, and it is not newer than the running build;
+- is clean (no modified tracked files) and has an executable `bin/hive`;
+- is receipt-aware: its source pins the same command receipt schema
+  (`CommandSchema::VERSION` and `EXPECTED_SCHEMA_SHA256` in
+  `command_schema.rb`, plus `002_add_command_receipts.rb`, introduced by #1494)
+  and the same base runtime schema (`RuntimeControlPlane::SCHEMA_VERSION`,
+  `EXPECTED_SCHEMA_SHA256` in `database.rb`), so it opens the database this
+  installation produces.
+
+The chosen deployment is pinned by a `bin/hive+lib` digest: sha256 over a
+sorted manifest of `<file sha256> <relative path>` lines for `bin/hive` and
+every file under `lib/` (symlinks hash their target). The digest is recomputed
+before the transaction; a drifted or deleted deployment refuses. With no
+eligible deployment, setup refuses with CONFIG and names every rejected
+deployment by reason (same build, pre-receipt, different schema, modified,
+newer, no executable, unreadable). The release channel is unchanged.
 
 `--yes` accepts the revalidated plan for unattended operation. It does not
 bypass conflicts or let Hive replace user-owned agent skills. Without
@@ -72,9 +100,18 @@ Without `--no-bootstrap`, setup provisions in this order:
    refused. There are no cutover manifests or automatic historical imports.
    When and only when `--install-command-receipts` was explicitly accepted,
    setup first proves daemon, babysitter, and web writers stopped under the
-   activation lock, validates the pinned published compatibility package, and
-   adds the receipt tables/indexes in one transaction. Failure stops all later
-   daemon/babysitter/web provisioning.
+   activation lock, validates the pinned published compatibility package (or,
+   on dogfood, re-verifies the resolved rollback deployment digest), and adds
+   the receipt tables/indexes in one transaction. Failure stops all later
+   daemon/babysitter/web provisioning. The `runtime_control_plane` phase
+   reports the coordinates under `rollback_package` (release:
+   `version`/`location`/`sha256`; dogfood: `kind: dogfood_deployment`,
+   `deployment_id`, `path`, `build_sha`, `committed_at`, `digest_scope`,
+   `sha256`) and the install result under `command_receipts`. A fresh install
+   writes `command-receipts-installation.json` (mode 0600,
+   `hive-command-receipts-installation.v1`) beside the runtime database with
+   the same rollback coordinates, the runtime identity, and the receipt schema
+   digest; later runs report that original record back unchanged.
 6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
@@ -208,7 +245,8 @@ false `active_not_ready` install failure. This longer window does not make
 Use `hive setup --yes --json` for an unattended managed setup, or
 `hive setup --no-bootstrap --json` for a read-only diagnostic pass.
 
-After a compatibility package is published and pinned by the build,
+After a compatibility package is published and pinned by the build (or, on
+dogfood, while a previous receipt-aware deployment is retained),
 `hive setup --yes --install-command-receipts` explicitly changes the shared
 installation database. Even with all namespace intake gates disabled, every
 project/service using that database sees the added objects, and unmodified

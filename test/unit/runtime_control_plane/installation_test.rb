@@ -134,4 +134,46 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
       end
     end
   end
+  RECEIPT_PACKAGE = {
+    version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "9" * 64
+  }.freeze
+
+  def test_receipt_installation_records_rollback_coordinates_and_keeps_the_original_record
+    with_tmp_dir do |root|
+      guard = Object.new
+      guard.define_singleton_method(:verify!) { |**| true }
+      first = Hive::RuntimeControlPlane::Installation.setup(
+        state_home: root, install_command_receipts: true,
+        rollback_package: RECEIPT_PACKAGE, writer_guard: guard
+      )
+      receipts = first.fetch("command_receipts")
+      record_path = Hive::RuntimeControlPlane::Installation.command_receipt_installation_record_path(root)
+
+      assert_equal "installed", receipts.fetch("status")
+      assert_equal record_path, receipts.fetch("record_path")
+      assert_equal RECEIPT_PACKAGE.transform_keys(&:to_s), receipts.fetch("rollback")
+      record = JSON.parse(File.read(record_path))
+      assert_equal "hive-command-receipts-installation.v1", record.fetch("schema")
+      assert_equal RECEIPT_PACKAGE.transform_keys(&:to_s), record.fetch("rollback")
+      assert_equal Hive::RuntimeControlPlane::CommandSchema::EXPECTED_SCHEMA_SHA256,
+                   record.fetch("command_schema_sha256")
+      assert_equal 0o600, File.stat(record_path).mode & 0o777
+
+      other = RECEIPT_PACKAGE.merge(version: "0.0.1-test")
+      again = Hive::RuntimeControlPlane::Installation.setup(
+        state_home: root, install_command_receipts: true, rollback_package: other, writer_guard: guard
+      ).fetch("command_receipts")
+      assert_equal "already_installed", again.fetch("status")
+      assert_equal record, again.fetch("record")
+
+      File.write(record_path, "{")
+      broken = Hive::RuntimeControlPlane::Installation.setup(
+        state_home: root, install_command_receipts: true, rollback_package: other, writer_guard: guard
+      ).fetch("command_receipts")
+      assert_nil broken.fetch("record")
+      assert_match(/JSON::ParserError/, broken.fetch("record_error"))
+
+      refute Hive::RuntimeControlPlane::Installation.setup(state_home: root).key?("command_receipts")
+    end
+  end
 end

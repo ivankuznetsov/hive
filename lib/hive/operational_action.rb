@@ -193,6 +193,14 @@ module Hive
         descriptor(project: project, row: observed_row(task, project: project))
       end
 
+      def intended_stage_for(task, action_id: ACTION_ID)
+        return "#{task.stage_index}-#{task.stage_name}" if action_id == RETRY_ACTION_ID
+        project = Hive::Config.registered_projects.find { |entry| File.expand_path(entry.fetch("path")) == File.expand_path(task.project_root) }
+        row = observed_row(task, project: project.fetch("name"))
+        verb = STAGE_ACTIONS[row.fetch("action")]
+        verb ? Hive::Workflows.for_verb(verb).fetch(:target) : "#{task.stage_index}-#{task.stage_name}"
+      end
+
       def assert_current!(task, project:, action_id:, target:, observation_token:)
         current = descriptor_for_task(task, project: project)
         unless current && current.fetch("action_id") == action_id &&
@@ -235,8 +243,9 @@ module Hive
     # values select no command arguments beyond the registered action ID and
     # exact project/task identity; stage, verb, and guards are recomputed.
     class Executor
-      def initialize(recovery_writer: Hive::Recovery::API)
+      def initialize(recovery_writer: Hive::Recovery::API, remote_authority: nil)
         @recovery_writer = recovery_writer
+        @remote_authority = remote_authority
       end
 
       def execute(action_id:, target:, observation_token:)
@@ -251,7 +260,8 @@ module Hive
           action_id: action_id,
           target: target,
           observation_token: observation_token
-        )
+        ) unless @remote_authority
+        verify_remote_effect!(task, project_name, action_id, observation_token)
         if action_id == OperationalAction::RETRY_ACTION_ID
           receipt = @recovery_writer.recover!(
             row: observed,
@@ -269,16 +279,22 @@ module Hive
             action_id: action_id,
             target: target,
             observation_token: observation_token
-          )
+          ) unless @remote_authority
+          verify_remote_effect!(locked_task, project_name, action_id, observation_token)
         end
 
-        Dir.chdir(project.fetch("path")) do
-          dispatch(task, observed, project_name, guard)
-        end
+        dispatch(task, observed, project_name, guard)
         result_for(project_name, slug)
       end
 
       private
+
+      def verify_remote_effect!(task, project_name, action_id, observation_token)
+        return unless @remote_authority
+        require "hive/remote/command_service"
+        Hive::Remote::CommandService.verify_action!(task: task, project: project_name,
+          action_id: action_id, observation: observation_token, authority: @remote_authority)
+      end
 
       def validate_action_id!(action_id)
         return if OperationalAction::EXECUTABLE_ACTION_IDS.include?(action_id)
@@ -317,7 +333,7 @@ module Hive
         if (verb = OperationalAction::STAGE_ACTIONS[action])
           dispatch_stage_action(verb, task, project_name, observed.fetch("stage"), guard)
         elsif action == Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
-          dispatch_outcome_evidence_rework(task, project_name, observed)
+          dispatch_outcome_evidence_rework(task, project_name, observed, guard)
         elsif action == "ready_to_run"
           dispatch_run(task, project_name, observed.fetch("stage"), guard)
         elsif action == "ready_to_advance"
@@ -336,14 +352,14 @@ module Hive
         ).call
       end
 
-      def dispatch_outcome_evidence_rework(task, project_name, observed)
+      def dispatch_outcome_evidence_rework(task, project_name, observed, guard = nil)
         require "hive/commands/evidence"
         attrs = observed.fetch("attrs")
         Hive::Commands::Evidence.new(
           "rework", task.folder, project: project_name,
           stage: observed.fetch("stage"), generation: attrs.fetch("generation"),
           recovery_digest: attrs.fetch("recovery_digest"),
-          task_resolver: -> { task }, quiet: true
+          task_resolver: -> { task }, quiet: true, observation_guard: guard
         ).call
       end
 

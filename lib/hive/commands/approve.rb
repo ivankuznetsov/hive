@@ -72,7 +72,8 @@ module Hive
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
                      clock: DEFAULT_CLOCK, dependency_admission: true,
-                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil)
+                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil,
+                     structured: false, principal: nil, principal_source: "local_cli")
         @target = target
         @to = to
         @from = from
@@ -82,7 +83,10 @@ module Hive
         # Suppress all stdout/stderr emission. Used by composing callers
         # (e.g. StageAction) that emit their own unified envelope.
         # State changes and typed exceptions still propagate normally.
-        @quiet = quiet
+        @quiet = quiet || structured
+        @structured = structured
+        @principal = principal
+        @principal_source = principal_source
         @observation_guard = observation_guard
         @post_rearm_mutation = post_rearm_mutation
         @commit_lock = commit_lock
@@ -139,6 +143,10 @@ module Hive
           },
           project_root: -> { resolve_task.project_root },
           json: @json,
+          structured: @structured,
+          display_json: @json && !@structured,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
           text_renderer: ->(payload) { approval_text(payload) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
@@ -148,6 +156,7 @@ module Hive
       # ── Pipeline ────────────────────────────────────────────────────────
 
       def do_call
+        install_remote_guard!
         task = resolve_task
         if task.workflow.controller?
           require "hive/patrol_fix/stage_transition"
@@ -156,6 +165,21 @@ module Hive
           end
         end
         do_call_for(task)
+      end
+
+      def install_remote_guard!
+        context = Hive::Attempts::Context.current
+        authority = context&.remote_authority
+        return unless authority && authority.fetch("effect").fetch("kind") == "approve"
+        return if @observation_guard
+
+        require "hive/remote/command_service"
+        if @force || @to
+          raise Hive::OperationalActionUsageError, "remote approval requires the guarded forward transition; advance locally"
+        end
+        @observation_guard = lambda do |task|
+          Hive::Remote::CommandService.verify_approval!(task: task, project: @project_filter, authority: authority)
+        end
       end
 
       def do_call_for(task, patrol_transition: nil)

@@ -98,7 +98,8 @@ module Hive
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
-                     task_capture_factory: nil, command_receipt_store: nil)
+                     task_capture_factory: nil, command_receipt_store: nil,
+                     structured: false, principal: nil, principal_source: "local_cli")
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -110,6 +111,9 @@ module Hive
         @idempotency_key_raw = idempotency_key
         @task_capture_factory = task_capture_factory || ->(**options) { Hive::TaskCapture.new(**options) }
         @command_receipt_store = command_receipt_store
+        @structured = structured
+        @principal = principal
+        @principal_source = principal_source
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
@@ -154,6 +158,7 @@ module Hive
           end
         end
       rescue Hive::Error, SystemCallError, IOError => e
+        raise if @structured
         warn "hive: #{e.message}" unless @json
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
         # USAGE 64 so an agent can tell "typo'd --workflow, fix the flag" from a
@@ -163,6 +168,7 @@ module Hive
       end
 
       def envelope_schema = SCHEMA
+      def envelope_enabled? = @json && !@structured
 
       def envelope_error_kind(error)
         typed = Hive::CommandErrorKind.typed(error)
@@ -211,6 +217,10 @@ module Hive
             project.fetch("path")
           },
           json: @json,
+          structured: @structured,
+          display_json: @json && !@structured,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
           text_renderer: ->(payload) { new_result_text(payload) },
           store: receipt_store
@@ -252,6 +262,7 @@ module Hive
         # ProjectNotFound rather than a storage failure.
         require_project!
         unless Hive::CommandOperation.receipts_installed?(receipt_store)
+          raise Hive::CommandReceiptsNotInstalled if @structured
           warn RECEIPT_FALLBACK_NOTICE
           return perform_call!
         end
@@ -472,7 +483,9 @@ module Hive
             "outcomes" => action.allowed_outcomes
           }
         }
-        if @json
+        if @structured
+          payload
+        elsif @json
           puts JSON.generate(payload)
         elsif created
           puts "hive: captured #{task.state_file}"
@@ -854,6 +867,7 @@ module Hive
       end
 
       def spawn_name_generator(task_dir)
+        return nil if @structured
         return nil if defined?(Minitest) && !self.class.name_generator_spawn_configured?
 
         FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))

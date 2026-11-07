@@ -224,7 +224,7 @@ module Hive
 
       def request(row:, requestor:, request_id: nil, observation_token: nil,
                   chat_id: nil, update_id: nil,
-                  now: Time.now.utc)
+                  now: Time.now.utc, admission_guard: nil, command_context: nil, remote_authority: nil)
         now = now.utc
         failure_origin = marker_attrs(row)["reason"].to_s
         if task_history_invalid_row?(row)
@@ -280,6 +280,7 @@ module Hive
         task = resolve_task_for(row)
         Hive::Lock.with_task_lock(task.folder, "operation" => "recovery_admission") do
           locked_task = resolve_task_for(row)
+          admission_guard&.call(locked_task)
           unless same_task_identity?(task, locked_task) &&
                  observed_task_identity_matches?(row, locked_task)
             return receipt(
@@ -405,7 +406,9 @@ module Hive
             intended_stage: value(row, :stage),
             state_file_content: markerless_body
           )
-          canonical_request_id = if source_receipt
+          canonical_request_id = if command_context
+            command_context.transport_request_id
+          elsif source_receipt
             deterministic_request_id(
               row, locked_task, expected_generation, generation.task_generation,
               source_receipt: source_receipt
@@ -456,6 +459,14 @@ module Hive
               "owner" => "operator"
             )
           end
+          if command_context
+            Hive::CommandDispatchLifecycle.new(repository: request_queue, state_home: @state_home).protect_context!(
+              command_context, project: value(row, :project)
+            )
+            Hive::CommandOperation.record_effect_submission(kind: "dispatch_request", identity: {
+              "request_id" => canonical_request_id, "project" => value(row, :project), "slug" => value(row, :slug)
+            })
+          end
           request_queue.write_request!(
             project: value(row, :project),
             slug: value(row, :slug),
@@ -472,7 +483,7 @@ module Hive
             expected_marker_id: marker_id,
             recovery: recovery,
             state_home: @state_home,
-            now: now
+            now: now, command_context: command_context, remote_authority: remote_authority
           )
           request_queue.remove_terminal_recoveries(
             project: value(row, :project),

@@ -585,6 +585,33 @@ and recovery, and brainstorm answers. `Project` owns idea capture; the
 `Daemon` resource owns liveness and queued repair. These models delegate
 pipeline mechanics to the canonical gem commands, queue writer, and bot
 recovery/answer primitives rather than duplicating a web orchestration layer.
+`Hive::Remote::CommandService` admits only creation, literal answers, guarded
+workflow actions and forward approval. Its structured command seams return
+values without capturing process stdout or changing the working directory.
+Creation in a request omits the optional background display-name generator.
+Long workflow actions, including any run/rebase work, enter the existing daemon
+dispatch queue. The request payload carries the exact authorized effect and
+non-secret installation/token principal; the worker rechecks task identity,
+stage, workflow and unchanged input before the command's locked mutation.
+Any transition that derives force remains a local operator action, including
+the coding workflow's first brainstorm promotion.
+
+The API's durable caller receipt records admission, while the task-attempt
+receipt records later execution. An admitted worker validates the persisted
+receipt/principal binding and retains it for correlation and pin management,
+but does not reopen the completed admission effect as a writable command
+context. Worker freshness uses the observed task inputs and input epoch so
+its own attempt-journal bookkeeping cannot invalidate its admission. Genuine
+input, marker, workflow or stage changes still fail the worker's locked check.
+The daemon waits for the admission receipt to finish before dispatching; an
+unresolved admission remains queued. API requests retain their queue position
+when the daemon is offline, and terminal or rejected deliveries acknowledge
+the existing dispatch result to release their original receipt pin.
+
+`Hive::Remote::ReadService` reuses the native semantic task workspace, scoped
+status producer, literal-answer inventory, owned-worktree diff and bounded
+artifact/log readers. The HTTP layer selects authorized projects before these
+readers and publishes explicit DTOs instead of serializing native objects.
 Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
 so the grid and detail page use the same behavior rather than helper-owned
 filesystem reads or action tables. `TasksController` renders that resource.

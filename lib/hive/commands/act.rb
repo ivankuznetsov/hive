@@ -10,16 +10,23 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       def initialize(action_id, target, observation:, json: false,
-                     executor: Hive::OperationalAction::Executor.new,
-                     project: nil, idempotency_key: nil, command_receipt_store: nil)
+                     executor: nil,
+                     project: nil, idempotency_key: nil, command_receipt_store: nil,
+                     structured: false, principal: nil, principal_source: "local_cli")
         @action_id = action_id
         @target = target
         @observation = observation
         @json = json
-        @executor = executor
+        authority = if defined?(Hive::Attempts::Context)
+          Hive::Attempts::Context.current&.remote_authority
+        end
+        @executor = executor || Hive::OperationalAction::Executor.new(remote_authority: authority)
         @project_filter = project
         @idempotency_key = idempotency_key
         @command_receipt_store = command_receipt_store
+        @structured = structured
+        @principal = principal
+        @principal_source = principal_source
       end
 
       def call
@@ -38,6 +45,7 @@ module Hive
       end
 
       def envelope_schema = "hive-act"
+      def envelope_enabled? = @json && !@structured
 
       def envelope_extras
         { "action_id" => @action_id.to_s, "target" => @target.to_s }
@@ -84,6 +92,10 @@ module Hive
             Hive::TaskResolver.new(slug, project_filter: project_name).resolve.project_root
           },
           json: @json,
+          structured: @structured,
+          display_json: @json && !@structured,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
           text_renderer: ->(payload) { text_success(payload.fetch("result")) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
@@ -110,7 +122,9 @@ module Hive
           "observation_token" => @observation,
           "result" => result
         }
-        if @json
+        if @structured
+          payload
+        elsif @json
           puts JSON.generate(payload)
           @stdout_written = true unless @idempotency_key
         else

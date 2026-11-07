@@ -4056,6 +4056,7 @@ module Hive
 
         now = current_dispatch_time(now)
         begin
+          return :awaiting_admission unless remote_admission_ready?(req)
           validate_command_dispatch_context!(req)
         rescue Hive::CommandUnresolved, Hive::CommandConflict, Hive::ConfigError => error
           reject_request(
@@ -4228,6 +4229,25 @@ module Hive
         context
       end
 
+      def remote_admission_ready?(request)
+        authority = request.respond_to?(:remote_authority) && request.remote_authority
+        return true unless authority
+        context = dispatch_repository.command_context(request.request_id)
+        unless context && context.fetch("principal_source") == "api_token" &&
+               context.fetch("principal") == authority.fetch("principal")
+          raise Hive::CommandConflict, "remote dispatch admission identity changed"
+        end
+        receipt = dispatch_repository.database.read do |db|
+          db[:command_receipts][receipt_id: context.fetch("receipt_id")]
+        end
+        unless receipt && receipt.fetch(:principal) == context.fetch("principal") &&
+               receipt.fetch(:request_fingerprint) == context.fetch("request_fingerprint") &&
+               receipt.fetch(:mode) == "remote"
+          raise Hive::CommandConflict, "remote dispatch receipt identity changed"
+        end
+        receipt.fetch(:state) == "succeeded"
+      end
+
       def allocate_command_successor!(predecessor_request_id:, intent_id:, intent_version:,
                                       delivery_cycle_id:)
         command_dispatch_lifecycle.allocate_successor!(
@@ -4312,6 +4332,7 @@ module Hive
 
       def request_intended_stage(argv, task)
         verb = Array(argv)[1].to_s
+        return Hive::OperationalAction.intended_stage_for(task, action_id: Array(argv)[2]) if verb == "act"
         return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
 
         Hive::Workflows.for_verb(verb).fetch(:target)
@@ -4710,7 +4731,8 @@ module Hive
       end
 
       def write_attempt_dispatch_result(request, attempt, receipt, now:)
-        return if request.chat_id.nil?
+        remote = request.respond_to?(:remote_authority) && request.remote_authority
+        return if request.chat_id.nil? && !remote
 
         dispatch_repository.write_result!(
           chat_id: request.chat_id,
@@ -4726,6 +4748,7 @@ module Hive
           state_home: dispatch_result_state_home,
           now: now
         )
+        dispatch_repository.acknowledge_result(request.request_id, now: now) if remote
         @logger.event(
           :dispatch_result_written,
           request_id: request.request_id,
@@ -4845,6 +4868,14 @@ module Hive
         @logger.event(:dispatch_request_rejected,
                       request_id: req.request_id, project: req.project,
                       slug: req.slug, reason: reason)
+        if req.respond_to?(:remote_authority) && req.remote_authority
+          dispatch_repository.write_result!(
+            chat_id: nil, project: req.project, slug: req.slug, request_id: req.request_id,
+            exit_code: Hive::ExitCodes::TEMPFAIL, command: Shellwords.join(req.argv),
+            receipt: { "outcome" => "failed", "reason" => "admission_rejected" }
+          )
+          dispatch_repository.acknowledge_result(req.request_id)
+        end
         dispatch_repository.remove(
           req.request_id, state_home: dispatch_request_state_home
         )

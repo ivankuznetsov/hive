@@ -39,7 +39,8 @@ module Hive
         new(target, project: project, output: StringIO.new).call
       end
 
-      def self.write(target, project: nil, binding:, answer:)
+      def self.write(target, project: nil, binding:, answer:, idempotency_key: nil,
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli")
         if binding.to_s.empty?
           raise InvalidBinding, "brainstorm answer binding is required for writes"
         end
@@ -48,6 +49,10 @@ module Hive
           target,
           project: project,
           binding: binding,
+          idempotency_key: idempotency_key,
+          command_receipt_store: command_receipt_store,
+          principal: principal,
+          principal_source: principal_source,
           input: StringIO.new(answer.to_s),
           output: StringIO.new
         ).call
@@ -55,7 +60,7 @@ module Hive
 
       def initialize(target, project: nil, binding: nil, json: false,
                      input: $stdin, output: $stdout, idempotency_key: nil,
-                     command_receipt_store: nil)
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli")
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
@@ -64,6 +69,8 @@ module Hive
         @output = output
         @idempotency_key = idempotency_key
         @command_receipt_store = command_receipt_store
+        @principal = principal
+        @principal_source = principal_source
       end
 
       def call
@@ -185,6 +192,8 @@ module Hive
           json: true,
           structured: true,
           display_json: @json,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: lambda { |error|
             Hive::Schemas::ErrorEnvelope.build(
               schema: SCHEMA, error: error, error_kind: error_kind(error)

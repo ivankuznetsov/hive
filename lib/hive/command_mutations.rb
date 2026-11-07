@@ -28,7 +28,7 @@ module Hive
       ),
       "approve" => Descriptor.new(
         command: "approve", mode: nil, key_policy: :optional, mutating: true,
-        semantic_options: %i[to from project force]
+        semantic_options: %i[to from project force generation]
       ),
       "stage_action" => Descriptor.new(
         command: "stage_action", mode: nil, key_policy: :optional, mutating: true,

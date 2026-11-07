@@ -43,7 +43,11 @@ module Hive
           main_pid = Integer(main_pid, exception: false)
           main_pid = nil unless main_pid&.positive?
           process_start = process_start.to_s
-          process_start = nil if process_start.empty? || process_start == "0"
+          # systemd keeps ExecMainStartTimestampMonotonic from the last run
+          # after a unit stops (MainPID=0). That timestamp names no live
+          # process, and a start without a pid is an identity the transition
+          # journal rejects as incoherent, so it is dropped with the pid.
+          process_start = nil if process_start.empty? || process_start == "0" || main_pid.nil?
 
           super(
             availability: availability,

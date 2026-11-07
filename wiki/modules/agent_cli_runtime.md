@@ -229,6 +229,12 @@ Source Web declares the component as an explicit path gem so Rails boots
 against the same reviewed ABI. Managed Web provisioning and server launches
 replace that relative source with the installed component gem root through
 `HIVE_AGENT_CLI_RUNTIME_ROOT`, parallel to the existing `HIVE_CLI_ROOT` seam.
+`Hive::Web::AppBundle.agent_cli_runtime_root` takes that root from the
+activated `agent-cli-runtime` gem spec on packaged installs; source checkouts
+and dogfood deployments load the component through `$LOAD_PATH`/`RUBYLIB`
+without activating a spec, so the root falls back to
+`<hive_cli_root>/components/agent-cli-runtime` (the same default the web
+Gemfile uses) and `bundle_install!` validates its gemspec.
 
 The published 0.2.0 candidate was built from canonical commit
 `c8f62cacefb9d5982ab0e8d2328071763b3736c4`, published by the protected

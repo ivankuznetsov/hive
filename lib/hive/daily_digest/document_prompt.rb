@@ -37,9 +37,10 @@ module Hive
         Diagrams: when a change alters a flow, a lifecycle or state machine, a decision, or how
         components connect, and a picture explains it faster than prose, add one fenced ```mermaid
         block (flowchart, sequenceDiagram, or stateDiagram-v2) right after the paragraph it
-        illustrates. Keep it under twelve nodes, label nodes and edges with short plain words, use no
-        styling, classes, links, or HTML, and never draw a diagram that merely restates a list. Most
-        changes need none; a typical day has zero to three.
+        illustrates. Use top-to-bottom layout (`flowchart TD`) for more than five steps. Keep it
+        under twelve nodes, label nodes and edges with short plain words, use no styling, classes,
+        links, or HTML, and never draw a diagram that merely restates a list. Most changes need
+        none; a typical day has zero to three.
 
         Depth follows impact. A change that alters how the system behaves for the owner deserves a full
         explanation; a one-line fix gets one line. There is no word limit: be as long as the day needs

@@ -25,7 +25,11 @@ function loadMermaid(src) {
       startOnLoad: false,
       securityLevel: "strict",
       htmlLabels: false,
-      flowchart: { htmlLabels: false },
+      // Natural size keeps labels readable; the figure scrolls sideways
+      // instead of shrinking a wide diagram to fit the column.
+      flowchart: { htmlLabels: false, useMaxWidth: false },
+      sequence: { useMaxWidth: false },
+      state: { useMaxWidth: false },
       theme: dark ? "dark" : "neutral",
       fontFamily: "inherit"
     })

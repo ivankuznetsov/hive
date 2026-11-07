@@ -1789,8 +1789,10 @@ pre {
 }
 .digest-document h1 { margin: 0 0 16px; font: 500 clamp(1.4rem, 2vw, 1.7rem)/1.25 var(--font-serif); letter-spacing: -0.03em; }
 .digest-document h2 { margin: 28px 0 14px; padding-top: 18px; border-top: 1px solid var(--line); font: 600 1.2rem/1.3 var(--font-serif); }
-.digest-document h3 { margin: 22px 0 6px; font: 650 1em/1.55 var(--font-sans); letter-spacing: normal; }
+.digest-document h3 { margin: 30px 0 8px; font: 600 1.08rem/1.45 var(--font-serif); letter-spacing: normal; }
+.digest-document h4 { margin: 24px 0 8px; font: 650 0.8rem/1.5 var(--font-sans); letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-muted); }
 .digest-document p { margin: 0 0 18px; }
+.digest-document > h2:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
 .digest-document h1 + p { color: var(--ink-muted); font-size: 1.06rem; }
 .digest-document a { color: var(--accent-strong); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 .digest-document strong { font-weight: 650; }
@@ -1837,8 +1839,8 @@ pre {
   background: var(--bg);
   overflow-x: auto;
 }
-.digest-diagram-rendered { display: flex; justify-content: center; }
-.digest-diagram-rendered svg { max-width: 100%; height: auto; }
+.digest-diagram-rendered { display: flex; justify-content: safe center; }
+.digest-diagram-rendered svg { flex-shrink: 0; height: auto; }
 .digest-document .digest-diagram-source {
   margin: 0;
   font: 0.82rem/1.5 var(--font-mono);

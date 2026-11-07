@@ -391,7 +391,7 @@ module Hive
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
     option :install_command_receipts, type: :boolean, default: false,
-              desc: "explicitly install the shared command-receipt schema; requires a published rollback package"
+              desc: "explicitly install the shared command-receipt schema; requires a published rollback package (dogfood: a retained previous receipt-aware deployment)"
     def setup
       require "hive/commands/setup"
       exit Hive::Commands::Setup.new(

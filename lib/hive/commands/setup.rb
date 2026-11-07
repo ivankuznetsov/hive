@@ -13,6 +13,8 @@ require "hive/web/environment"
 require "hive/web/service_status"
 require "hive/runtime_control_plane/command_schema_installation"
 require "hive/runtime_control_plane/command_schema_writer_guard"
+require "hive/runtime_control_plane/dogfood_rollback_deployment"
+require "hive/runtime_identity"
 
 module Hive
   module Commands
@@ -51,6 +53,7 @@ module Hive
                      error: $stderr, environment: ENV, setup_agents_factory: nil,
                      rollback_package: Hive::RuntimeControlPlane::CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
                      command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard,
+                     dogfood_rollback_resolver: Hive::RuntimeControlPlane::DogfoodRollbackDeployment,
                      mcp_import_offer: !defined?(Minitest))
         @json = json
         @service = service
@@ -68,6 +71,7 @@ module Hive
         end
         @rollback_package = rollback_package
         @command_schema_writer_guard = command_schema_writer_guard
+        @dogfood_rollback_resolver = dogfood_rollback_resolver
         @mcp_import_offer = mcp_import_offer == true
         @phases = []
       end
@@ -151,6 +155,13 @@ module Hive
       def validate_receipt_installation_preconditions!
         require "hive/runtime_control_plane/command_schema_installation"
         require "hive/runtime_control_plane/command_schema_writer_guard"
+require "hive/runtime_control_plane/dogfood_rollback_deployment"
+require "hive/runtime_identity"
+        # The dogfood channel has no published release to fall back to; its
+        # rollback target is the newest retained receipt-aware deployment.
+        identity = Hive::RuntimeIdentity.new(environment: @environment).to_h
+        @rollback_package = @dogfood_rollback_resolver.resolve!(identity: identity) if
+          identity.fetch("channel") == "dogfood"
         Hive::RuntimeControlPlane::CommandSchemaInstallation.validate_coordinates!(@rollback_package)
         @command_schema_writer_guard.verify!(
           state_home: Hive::Paths.state_home, web_running: method(:managed_web_running?)
@@ -159,11 +170,17 @@ module Hive
 
       def emit_receipt_installation_disclosure
         coordinates = @rollback_package.transform_keys(&:to_sym)
+        target = if Hive::RuntimeControlPlane::DogfoodRollbackDeployment.dogfood?(coordinates)
+          "Rollback target: dogfood deployment #{coordinates.fetch(:deployment_id)} at " \
+            "#{coordinates.fetch(:path)} (build #{coordinates.fetch(:build_sha)}, " \
+            "#{coordinates.fetch(:digest_scope)} sha256 #{coordinates.fetch(:sha256)})."
+        else
+          "Rollback package: #{coordinates.fetch(:version)} at #{coordinates.fetch(:location)} " \
+            "(sha256 #{coordinates.fetch(:sha256)})."
+        end
         message = "hive setup: command receipt installation changes the shared host control-plane " \
           "database for every project/service, even while namespace intake gates are disabled; " \
-          "unmodified pre-compatibility builds will refuse it. Rollback package: " \
-          "#{coordinates.fetch(:version)} at #{coordinates.fetch(:location)} " \
-          "(sha256 #{coordinates.fetch(:sha256)})."
+          "unmodified pre-compatibility builds will refuse it. #{target}"
         @error.puts(message) unless @json
       end
 
@@ -313,6 +330,12 @@ module Hive
             details["shared_installation_impact"] = true
             details["namespace_intake_default"] = "disabled"
             details["rollback_package"] = @rollback_package.transform_keys(&:to_s)
+            receipts = status["command_receipts"]
+            details["command_receipts"] = receipts if receipts
+            if receipts && receipts["record_error"] && !@json
+              @error&.puts("hive setup: command receipts installed but the rollback record was not written: " \
+                          "#{receipts['record_error']}")
+            end
           end
           [ true, details ]
         end

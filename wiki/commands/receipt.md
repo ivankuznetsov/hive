@@ -3,7 +3,7 @@ title: hive receipt
 type: command
 source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
-updated: 2026-10-15
+updated: 2026-11-07
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
@@ -14,8 +14,11 @@ and preview-first. Only prune accepts its own idempotency key.
 
 ## Installation and enablement
 
-The additive receipt schema is not part of ordinary setup. A production build
-must name a published and retained compatibility package before this succeeds:
+The additive receipt schema is not part of ordinary setup. A release build
+must name a published and retained compatibility package before this succeeds
+(not yet published; tracked by issue #1550). A dogfood build instead uses the
+previous retained receipt-aware dogfood deployment as its rollback target; see
+[[commands/setup]] for the eligibility rules and digest:
 
 ```sh
 hive setup --install-command-receipts
@@ -28,6 +31,39 @@ service using it. All writers, including a foreground `hive web`, must be
 provably stopped. `--yes` alone never
 installs the extension. `--no-bootstrap` is diagnosis-only and takes precedence
 over the opt-in flag. Ordinary later setup retains an installed extension.
+
+### Dogfood install and rollback
+
+On the dogfood channel, install only from a deployment that has a retained
+receipt-aware predecessor (deploy at least twice after #1494):
+
+```sh
+systemctl --user stop hive-daemon.service hive-web.service hive-babysitter.service
+hive setup --yes --json --install-command-receipts   # stop any foreground `hive web` too
+systemctl --user start hive-daemon.service hive-web.service hive-babysitter.service
+hive runtime status --json
+```
+
+The `runtime_control_plane` phase and
+`~/.local/state/hive/command-receipts-installation.json` record the rollback
+`deployment_id`, `path`, `build_sha`, and `bin/hive+lib` `sha256`. Do not
+delete that deployment directory while the extension is installed. To roll
+back to it:
+
+1. Stop `hive-daemon`, `hive-web`, and `hive-babysitter`.
+2. Re-prove the pin from any receipt-aware checkout and compare the output
+   with the recorded `sha256`:
+   `bundle exec ruby -Ilib -e 'require "hive/runtime_control_plane/dogfood_rollback_deployment"; puts Hive::RuntimeControlPlane::DogfoodRollbackDeployment.digest(ARGV[0])' <path>`
+3. Point `~/.local/state/hive/dogfood-current` at the recorded `path` with an
+   atomic `ln -s <path> <tmp> && mv -T <tmp> ~/.local/state/hive/dogfood-current`
+   (the same swap `hive-dogfood-deploy` performs), then confirm
+   `hive version --json` reports the recorded `deployment_id` and `build_sha`.
+4. Start the three services again. The receipt tables stay in the database;
+   the recorded deployment already understands them.
+
+`hive-dogfood-deploy` only moves forward to `origin/main`, so use the manual
+link swap above rather than redeploying. The release-channel path (a published
+package) remains open in #1550.
 
 Without the extension, keyed `hive new` (the only keyed command that predates
 receipts) falls back to per-project TaskCapture idempotency with a one-line

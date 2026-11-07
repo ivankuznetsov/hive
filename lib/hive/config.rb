@@ -4458,6 +4458,19 @@ module Hive
               "between 0 and 23; got #{hour.inspect} (#{hour.class})"
       end
 
+      validate_daily_digest_route!(daily, "daily_digest", source_path)
+      fallbacks = daily["fallback_agents"]
+      unless fallbacks.nil?
+        unless fallbacks.is_a?(Array) && fallbacks.all? { |entry| entry.is_a?(Hash) && entry["agent"] }
+          raise ConfigError,
+                "daily_digest.fallback_agents in #{describe_source(source_path)} must be an Array " \
+                "of objects with an agent"
+        end
+        fallbacks.each_with_index do |entry, index|
+          validate_daily_digest_route!(entry, "daily_digest.fallback_agents[#{index}]", source_path)
+        end
+      end
+
       zone = daily["time_zone"]
       validate_daily_digest_zone!(zone, source_path) unless zone.nil?
       coverage = daily["coverage_started_at"]
@@ -4486,6 +4499,23 @@ module Hive
               "daily_digest coverage frontier, initial_membership, and first_interval are required " \
               "before enablement in #{describe_source(source_path)}; run `hive setup`"
       end
+    end
+
+    # Any registered agent and any model string it accepts may write the
+    # digest; the model itself is validated by the agent CLI at launch.
+    def validate_daily_digest_route!(route, label, source_path)
+      validate_agent_name!(route["agent"], "#{label}.agent", source_path)
+      model = route["model"]
+      unless model.nil? || (model.is_a?(String) && !model.strip.empty?)
+        raise ConfigError,
+              "#{label}.model in #{describe_source(source_path)} must be a non-empty String"
+      end
+      effort = route["effort"]
+      return if effort.nil? || Hive::ModelRouting::EFFORT_VALUES.include?(effort)
+
+      raise ConfigError,
+            "#{label}.effort in #{describe_source(source_path)} must be one of " \
+            "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
     end
 
     def validate_daily_digest_zone!(zone, source_path)

@@ -138,7 +138,13 @@ normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
 use marker-owned stages record the ordinary transient `timeout` reason while
 preserving any partial artifact bytes for scheduler-owned retry.
 OpenCode's profile-specific provider-error extractor reads only dedicated
-`error` events and their nested `error.data.message` payload. A structured
+`error` events and their message payload: OpenCode 1.x nests it as
+`error.name` + `error.data.message`, while OpenCode 2.x flattens it to
+`error.type` + `error.message` (+ `error.status`) and may emit a pre-session
+error with an empty `sessionID`. The strict run parser and the nonzero-exit
+classifier accept both shapes (fixtures under
+`test/fixtures/opencode/v2.2.6/`); before that, every 2.x failure surfaced as
+`MalformedOutput: OpenCode error name must be a non-empty string`. A structured
 upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
 signal and writes the normal cooldown-retry marker, while identical prose in
 ordinary model output cannot forge a retryable provider wall.

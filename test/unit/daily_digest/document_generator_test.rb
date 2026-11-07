@@ -22,6 +22,32 @@ class DailyDigestDocumentGeneratorTest < Minitest::Test
     end
   end
 
+  def test_fallback_agents_run_in_order_and_every_failure_is_reported
+    config = Hive::Config::DEFAULTS.merge("daily_digest" => {
+      "agent" => "opencode", "model" => "opencode-go/deepseek-v4.1-flash",
+      "fallback_agents" => [ { "agent" => "codex", "model" => "gpt-6-astra", "effort" => "medium" },
+                             { "agent" => "claude" } ]
+    })
+    generator = Hive::DailyDigest::DocumentGenerator.new(config_loader: -> { config })
+    launches = []
+    generator.define_singleton_method(:capture) do |invocation, profile|
+      launches << [ profile.name.to_s, invocation.argv ]
+      raise Hive::AgentError, "#{profile.name} down" unless profile.name.to_s == "claude"
+
+      { type: "result", subtype: "success", is_error: false, result: "Fallback document" }.to_json
+    end
+    assert_equal "Fallback document", generator.generate({})
+    assert_equal %w[opencode codex claude], launches.map(&:first)
+    assert_includes launches[1].last, "gpt-6-astra"
+    assert_includes launches[1].last, "model_reasoning_effort=medium"
+
+    generator.define_singleton_method(:capture) { |_, profile| raise Hive::AgentError, "#{profile.name} down" }
+    error = assert_raises(Hive::AgentError) { generator.generate({}) }
+    assert_includes error.message, "opencode opencode-go/deepseek-v4.1-flash: opencode down"
+    assert_includes error.message, "codex gpt-6-astra: codex down"
+    assert_includes error.message, "claude: claude down"
+  end
+
   def test_opencode_document_uses_structured_text_and_rejects_truncation
     profile = Hive::AgentProfiles.lookup("opencode", cfg: Hive::Config::DEFAULTS)
     generator = Hive::DailyDigest::DocumentGenerator.new
@@ -69,6 +95,25 @@ class DailyDigestDocumentGeneratorTest < Minitest::Test
       end
       assert_includes error.message, "exit 7"
       assert_operator error.message.length, :<=, 2_100
+    end
+  end
+
+  def test_failed_opencode_run_reports_the_provider_error_not_the_event_shape
+    with_tmp_global_config do
+      event = {
+        type: "error", sessionID: "ses_digest",
+        error: { type: "provider.auth", message: "This API key has expired.", status: 401 }
+      }.to_json
+      invocation = Struct.new(:argv, :stdin_data).new(
+        [ RbConfig.ruby, "-e", "STDERR.write('mise noise'); puts #{event.inspect}; exit 1" ], ""
+      )
+      profile = Hive::AgentProfiles.lookup("opencode", cfg: Hive::Config::DEFAULTS)
+      error = assert_raises(Hive::AgentError) do
+        Hive::DailyDigest::DocumentGenerator.new.send(:capture, invocation, profile)
+      end
+      assert_includes error.message, "exit 1"
+      assert_includes error.message, "This API key has expired."
+      refute_includes error.message, "mise noise"
     end
   end
 

@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/daily_digest/store"
+require "hive/daily_digest/generation_failures"
 
 class DigestsTest < ActionDispatch::IntegrationTest
   setup do
@@ -27,6 +28,26 @@ class DigestsTest < ActionDispatch::IntegrationTest
     assert_select ".digest-document script", 0
     assert_select ".digest-filter, .digest-attention, .digest-activity, .digest-amendments, .digest-badges", 0
     assert_select "nav[aria-label='Digest date']"
+  end
+
+  test "a failed generation is announced above the last saved digest" do
+    sign_in!
+    store = Hive::DailyDigest::Store.new
+    store.write_base(simple_record("2026-08-30").merge("document" => "Saved text", "content" => "non_empty"))
+    Hive::DailyDigest::GenerationFailures.new(root: store.root).record(
+      "2026-08-31", Hive::AgentError.new("digest agent failed (exit 1): This API key has expired.")
+    )
+
+    get digest_path("2026-08-30")
+    assert_response :success
+    assert_select ".digest-generation-failure", 0
+
+    get digest_path("today")
+    assert_response :success
+    assert_select ".digest-generation-failure[role='alert']", text: /Digest generation for 2026-08-31 failed/
+    assert_select ".digest-generation-failure", text: /This API key has expired/
+    assert_select ".digest-generation-failure code", text: "hive digest refresh --date 2026-08-31"
+    assert_select ".digest-document", text: /Saved text/
   end
 
   test "project headings link to repositories and show persisted numerical evidence" do

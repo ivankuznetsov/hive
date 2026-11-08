@@ -41,12 +41,14 @@ module Hive
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
                    status_payload_tick_sequence: nil,
                    runtime_identity: Hive::RuntimeIdentity.new.to_h,
+                   recovery_coordinator: nil,
                    now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
       @scheduler_snapshot = scheduler_snapshot
       @status_payload_tick_sequence = status_payload_tick_sequence
       @runtime_identity = runtime_identity
+      @recovery_coordinator = recovery_coordinator
       @now = now.utc
     end
 
@@ -128,6 +130,7 @@ module Hive
       scheduler = scheduler_payload(projects)
 
       active_rows(projects).filter_map do |project, row|
+        row = manual_observation(project, row) unless daemon_enabled?(project.fetch("name"))
         next unless recovery_candidate?(project, row, scheduler)
 
         disposition, freshness = scheduler_disposition_for(project, row, scheduler)
@@ -409,6 +412,7 @@ module Hive
     end
 
     def project_row(project, row, scheduler)
+      row = manual_observation(project, row) unless daemon_enabled?(project.fetch("name"))
       reasons = reasons_for(project, row)
       state, owner = classify(project, row)
       scheduler_disposition, scheduler_freshness = scheduler_disposition_for(
@@ -432,6 +436,7 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
+      action = nil if row.dig("manual_recovery_receipt", "status") == "running"
       if daemon_enabled?(project.fetch("name")) &&
          action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
@@ -490,7 +495,19 @@ module Hive
     end
 
     def scheduler_disposition_for(project, row, scheduler)
-      return [ nil, "not_applicable" ] unless daemon_enabled?(project.fetch("name"))
+      unless daemon_enabled?(project.fetch("name"))
+        receipt = row["manual_recovery_receipt"]
+        receipt ||= manual_marker_receipt(row) if Hive::Recovery::API.recoverable_marker?(row["marker"])
+        return [nil, "not_applicable"] unless receipt
+        decision = case receipt["status"]
+        when "running" then "retry_in_flight"
+        when "unavailable" then "recovery_unavailable"
+        else "retry_dispatch_disabled"
+        end
+        return [{ "status" => "available", "decision" => decision,
+          "owner" => receipt["owner"], "reason" => receipt["reason"],
+          "recovery" => receipt }, "not_applicable"]
+      end
 
       status = scheduler.fetch("status")
       return [ nil, status ] unless status == "current"
@@ -522,6 +539,39 @@ module Hive
       end
 
       [ disposition, "current" ]
+    end
+
+    def manual_observation(project, row)
+      row = row.merge("project" => project.fetch("name"))
+      return row if invalid_task?(row)
+      return row unless row["marker"] == "none" || Hive::Recovery::API.recoverable_marker?(row["marker"])
+      @recovery_coordinator ||= Hive::Daemon::RecoveryCoordinator.new
+      evidence = @recovery_coordinator.manual_evidence(row: row.merge("project" => project.fetch("name")))
+      return row unless evidence
+
+      row.merge("recovery_observation" => evidence.fetch("binding"),
+        "manual_recovery_receipt" => evidence.fetch("receipt"))
+    end
+
+    def manual_marker_receipt(row)
+      return nil if invalid_task?(row)
+      if running?(row)
+        return Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+          "status" => "running", "owner" => "agent", "reason" => "existing_live",
+          "attempt_id" => row["attempt_id"], "failure_origin" => row.dig("attrs", "reason"),
+          "remediation" => "hive task #{row['slug']} --project #{row['project']} --json"
+        }).to_h
+      end
+      diagnostic = typed_attempt_diagnostic(row)
+      owner = diagnostic ? diagnostic.fetch("owner") : "operator"
+      reason = row.dig("attrs", "marker_id").to_s.empty? ? "recovery_migration_required" : "project_dispatch_disabled"
+      Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "blocked", "owner" => owner, "reason" => reason,
+        "attempt_id" => row["attempt_id"], "failure_origin" => row.dig("attrs", "reason"),
+        "remediation" => reason == "recovery_migration_required" ?
+          "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status" :
+          "use a fresh local workflow.retry action from hive status --operational --json"
+      }).to_h
     end
 
     def scheduler_task_matches?(observed, row)
@@ -635,11 +685,12 @@ module Hive
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "retry_dispatch_disabled"
-        [ "needs_repair", "operator" ]
+        [ "needs_repair", disposition.dig("recovery", "owner") || "operator" ]
       when "semantic_terminal_error", "attempt_failure_limit", Hive::ModelUnsupported::REASON
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
-        [ "unknown", "hive" ]
+        owner = disposition["owner"] || "hive"
+        [ owner == "provider" ? "waiting_on_provider_or_scheduler" : "unknown", owner ]
       when "wait_for_answers", "pull_request_merged", "pull_request_closed_unmerged"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
@@ -840,7 +891,7 @@ module Hive
     end
 
     def recovery_candidate?(project, row, scheduler)
-      return true if Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return true if Hive::Recovery::API.recoverable_marker?(row["marker"]) || row["manual_recovery_receipt"]
       return false unless scheduler.fetch("status") == "current"
 
       observed = (@scheduler_task_index || {})[

@@ -880,3 +880,12 @@ means the action was evaluated; a failed terminal stage also exits nonzero.
 Keyed replay returns that same outcome without another attempt. Stale actions
 require `hive status --operational --json`; inspect live work using
 `hive task SLUG --project PROJECT --json`.
+
+Manual projects do not need scheduler snapshots to expose recovery. Status
+reads bounded recovery evidence scoped by project and slug. An identity-matched
+admitted/cleared request over unchanged markerless task input can advertise a
+fresh retry descriptor. The token binds request revision, phase, task identity,
+stage, dispatch generation and post-clear progress. Pending manual recovery is
+`blocked`, owned by the operator; a verified live attempt is agent-owned.
+Status only observes: it never clears a marker, resumes a request, dispatches,
+or terminalizes abandoned work.

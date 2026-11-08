@@ -1647,9 +1647,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
                    queued.identical_failure_count, queued.escalation_tier ]
 
     disabled = project.call(state: "queued", attempt_id: "ended-attempt", enabled: false)
-    assert_equal [ "queued", "operator", "project_dispatch_disabled" ],
+    assert_equal [ "blocked", "operator", "project_dispatch_disabled" ],
                  [ disabled.status, disabled.owner, disabled.reason ]
-    assert_includes disabled.remediation, "daemon dispatch is disabled for shop"
+    assert_includes disabled.remediation, "hive status --operational --json"
     assert_equal "degraded", disabled.escalation_tier
 
     assert_equal "queued", project.call(state: "queued", attempt_id: nil).status
@@ -2264,8 +2264,9 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       test_case = self
       with_replaced_singleton_method(
         Hive::Attempts::Repository, :open_default,
-        lambda { |state_home:|
+        lambda { |state_home:, create_directories:|
           test_case.assert_equal expected_state_home, state_home
+          test_case.refute create_directories
           opened
         }
       ) do

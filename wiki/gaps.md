@@ -2065,3 +2065,13 @@ receipts lack this metadata and still need the original read-registry record
 for replay; an already-evicted legacy binding cannot be recovered safely.
 Focused controller regressions cover new receipt eviction, advancement, and
 changed-input conflicts plus replay of older receipts with retained handles.
+
+### Manual retry recovery limitations
+
+Stranded manual recovery requests have no automatic reaper when no daemon is
+running. Status is query-only; a fresh local `workflow.retry` invokes guarded
+coordinator reconciliation and terminal/failure repair after caller loss.
+Web/TUI retry-button execution remains on its existing path and can still
+strand a request when no dispatcher consumes it. Remote `workflow.retry` now
+refuses admission for daemon-disabled projects with 503
+`dispatcher_unavailable` and an exact local attached action command.

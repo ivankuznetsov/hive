@@ -181,6 +181,12 @@ module Hive
         end
       end
 
+      def recovery_attempt_id(request_id)
+        database.read do |db|
+          db[:attempts].where(request_id: request_id.to_s).get(:attempt_id)
+        end
+      end
+
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)

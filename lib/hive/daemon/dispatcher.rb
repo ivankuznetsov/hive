@@ -2979,8 +2979,7 @@ module Hive
           begin
             receipt = @recovery_coordinator.projected_receipt_for_request(
               request,
-              dispatch_enabled: project_enabled?(request.project) ||
-                explicit_action_recovery?(request)
+              dispatch_enabled: project_enabled?(request.project)
             )
             {
               "project" => request.project,

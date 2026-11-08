@@ -155,7 +155,7 @@ module Hive
         @generation_resolver = generation_resolver || method(:resolve_generation)
         @attempt_store = attempt_store
         @attempt_store_factory = attempt_store_factory || lambda do
-          Hive::Attempts::Repository.open_default(state_home: @state_home)
+          Hive::Attempts::Repository.open_default(state_home: @state_home, create_directories: false)
         end
         @runtime_digest = runtime_digest.to_s
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
@@ -1249,6 +1249,27 @@ module Hive
       # escalation evidence are preserved either way.
       def projected_receipt_for_request(request, dispatch_enabled: true, now: Time.now.utc)
         receipt = receipt_for_request(request, now: now)
+        unless dispatch_enabled
+          attempt_id = receipt.attempt_id
+          attempt_id ||= request_queue.recovery_attempt_id(request.request_id) if request_queue.respond_to?(:recovery_attempt_id)
+          record = attempts_store.fetch(attempt_id) if attempt_id
+          if record&.live?
+            return receipt.with(status: "running", owner: "agent", attempt_id: attempt_id,
+              reason: "existing_live", remediation: Shellwords.join(["hive", "task", request.slug, "--project", request.project, "--json"]))
+          end
+          observation = request.recovery&.fetch("admission_observation", nil)
+          if observation.is_a?(Hash) && observation["status"] == "no_route"
+            owner = observation["next_action_owner"]
+            owner = "provider" unless %w[operator provider hive].include?(owner)
+            return receipt.with(status: "unavailable", owner: owner,
+              reason: observation["reason"], remediation: "hive status --operational --json")
+          end
+          if %w[queued cooldown running].include?(receipt.status)
+            return receipt.with(status: "blocked", owner: "operator", reason: PROJECT_DISPATCH_DISABLED,
+              remediation: "use a fresh local workflow.retry action from hive status --operational --json")
+          end
+          return receipt
+        end
         return receipt unless receipt.status == "running"
         return receipt if IN_FLIGHT_REQUEST_STATES.include?(request.state.to_s)
         return receipt if attempt_live?(receipt.attempt_id)
@@ -1256,14 +1277,11 @@ module Hive
           return receipt.with(status: "unavailable", owner: "hive",
                               reason: "recovery_transition_pending", remediation: nil)
         end
-        return receipt.with(status: "queued", owner: "scheduler",
-                            reason: RETRY_AWAITING_DISPATCH, remediation: nil) if dispatch_enabled
-
-        receipt.with(
-          status: "queued", owner: "operator", reason: PROJECT_DISPATCH_DISABLED,
-          remediation: "daemon dispatch is disabled for #{request.project}; set " \
-                       "daemon.enabled: true in its config and run `hive daemon reload`"
-        )
+        receipt.with(status: "queued", owner: "scheduler",
+                     reason: RETRY_AWAITING_DISPATCH, remediation: nil)
+      rescue Hive::Attempts::RepositoryError
+        receipt.with(status: "unavailable", owner: "hive", reason: "attempt_observation_unavailable",
+          remediation: "hive status --operational --json")
       end
 
       def escalation_tier_for(recovery)

@@ -3,6 +3,8 @@ require "hive/commands/init"
 require "hive/commands/act"
 require "hive/recovery/manual_retry"
 require "hive/attempts/dispatcher"
+require "hive/operational_status"
+require "json_schemer"
 require "hive/runtime_control_plane/command_schema_installation"
 
 class ManualWorkflowRetryTest < Minitest::Test
@@ -145,6 +147,41 @@ class ManualWorkflowRetryTest < Minitest::Test
       assert_equal :existing_live, loser.status
       assert_equal receipt.attempt_id, loser.attempt.attempt_id
       assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_status_reads_a_stranded_manual_request_without_resuming_or_repairing_it
+    with_retry(limits: { max_global: 0 }) do |row, coordinator, repository, store, launcher, runner|
+      deferred = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+      request = repository.fetch(deferred.request_id)
+      task = Hive::Task.new(row.fetch("folder"))
+      current = Hive::OperationalAction.observed_row(task, project: row.fetch("project"))
+      current["action_label"] = "Ready to retry"
+      current.delete("recovery_observation") # Status discovers evidence independently.
+      before = File.binread(task.state_file)
+      payload = { "schema" => "hive-status", "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
+        "ok" => true, "generated_at" => Time.now.utc.iso8601, "projects" => [{
+          "name" => row.fetch("project"), "path" => task.project_root,
+          "hive_state_path" => File.dirname(File.dirname(File.dirname(task.folder))),
+          "tasks" => [current], "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
+          "hidden_archived_task_count" => 0 }] }
+      status = Hive::OperationalStatus.new(status_payload: payload,
+        recovery_coordinator: coordinator).to_h
+      projected = status.fetch("tasks").first
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal "operator", projected.dig("recovery", "owner")
+      assert_equal "blocked", projected.dig("recovery", "status")
+      assert_equal "workflow.retry", projected.dig("action", "action_id")
+      assert_equal deferred.request_id, projected.dig("recovery", "request_id")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+      assert schema.valid?(status), schema.validate(status).map { |error| [error["data_pointer"], error["error"]] }.inspect
+      assert_equal before, File.binread(task.state_file)
+      assert_equal request, repository.fetch(deferred.request_id)
+      assert_empty store.active_attempts
+      result = runner.call(row: Hive::OperationalAction.observed_row(task, project: row.fetch("project")),
+        observation_token: projected.dig("action", "observation_token"))
+      assert_equal "blocked", result.status
+      assert_equal deferred.request_id, result.request_id
     end
   end
 

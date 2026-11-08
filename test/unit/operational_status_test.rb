@@ -1338,6 +1338,18 @@ class OperationalStatusTest < Minitest::Test
     assert_includes projected.dig("recovery", "remediation"), "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
   end
 
+  def test_manual_recovery_does_not_require_a_scheduler_snapshot
+    row = task(action: "error", slug: "manual-failure", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "operator", actual.fetch("blocker_owner")
+    assert_equal "operator", actual.dig("recovery", "owner")
+    assert_equal "blocked", actual.dig("recovery", "status")
+    assert_equal "project_dispatch_disabled", actual.dig("recovery", "reason")
+    assert_equal "workflow.retry", actual.dig("action", "action_id")
+    assert_includes actual.dig("recovery", "remediation"), "hive status --operational --json"
+  end
+
   def test_lean_recovery_projection_only_joins_recovery_candidates
     ordinary = 20.times.map do |index|
       task(action: "ready_to_plan", slug: "ordinary-#{index}", marker: "complete")
@@ -1590,7 +1602,7 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected.fetch("human").fetch("action")
     assert_nil projected.fetch("parked").fetch("action")
     assert_equal "workflow.retry", projected.dig("error", "action", "action_id")
-    assert_equal "unavailable", projected.dig("error", "recovery", "status")
+    assert_equal "blocked", projected.dig("error", "recovery", "status")
   end
 
   def test_human_outcomes_are_preserved_in_operational_position

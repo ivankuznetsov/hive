@@ -75,6 +75,17 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_no_repair_stops_after_one_failed_check_without_a_fix_agent
+    with_ci_dir do |dir, folder|
+      ci = write_ci_script(dir, "echo failure; exit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = "unexpected-repair"
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, folder), no_repair: true)
+      assert_equal :stale, result.status
+      assert_equal 1, result.attempts
+      refute File.exist?(File.join(dir, "unexpected-repair"))
+    end
+  end
+
   # --- skipped ----------------------------------------------------------
 
   def test_returns_skipped_when_command_is_nil

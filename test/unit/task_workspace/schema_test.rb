@@ -26,7 +26,7 @@ class TaskWorkspaceSchemaTest < Minitest::Test
 
     assert_equal Hive::TaskWorkspace.canonical_json(document), snapshot.to_json
     assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort, document.fetch("panels").keys.sort
-    assert_equal({ "questions" => [], "recovery" => nil, "diagnostic_summary" => nil },
+    assert_equal({ "questions" => [], "recovery" => nil, "diagnostic_summary" => nil, "review_publication" => nil },
                  document.fetch("operator"))
     assert_equal "unavailable", document.dig("panels", "attempts", "state")
   end

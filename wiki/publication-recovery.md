@@ -55,3 +55,26 @@ Never use a blanket rule or directory exception for a fixture finding.
 Operational status preserves a receipt-bound controller failure and its owner
 ahead of the generic no-progress scheduler brake. A controller's lack of a text
 marker is not evidence that its agent failed to produce one.
+
+## Review publication evidence
+
+Review publication uses the safe Agent Git Gate independently from hosted CI.
+Evidence belongs to the attempted HEAD: a changed-HEAD attempt clears prior
+publication and identity evidence even when the new attempt fails. Clearing
+guardrail withholding invalidates the cached attempt at the same HEAD.
+The owned path/branch and open, same-repository PR identity must agree. Only an
+ahead-only branch is publishable; divergence requires operator reconciliation.
+A gate receipt proves the exact branch ref reached the requested head. A failed
+PR API cross-check retains that publication proof but leaves verification pending.
+Confirmation checks local HEAD and branch both before and after remote identity
+validation. Concurrent local movement retains publication proof but prevents
+verified completion.
+Rejected publication is `unpublished` only after an independent remote observation;
+unobservable failures remain `unknown`.
+
+Review markers carry versioned `rp_*` evidence with URL-safe base64 JSON values,
+so paths, full commit IDs and shell-escaped commands survive marker formatting.
+Recovery recipes refresh operational status and select only the intended task's
+current `workflow.retry` action. An ineligible action stops the recipe; it cannot
+advance a stage. Draft readiness is conditional on publication, exact-head
+verification and a current secret scan; normal finalize remains the default.

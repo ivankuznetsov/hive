@@ -939,7 +939,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "b" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(
           Hive::Stages::Finalize,
@@ -1009,7 +1009,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "a" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
           result = Hive::Stages::Finalize.validate_pr_reference!(

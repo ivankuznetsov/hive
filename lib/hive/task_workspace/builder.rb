@@ -1,5 +1,7 @@
 require "digest"
 require "json"
+require "hive/review_publication_recovery"
+require "hive/operational_action"
 require "time"
 require "hive/attempts/repository"
 require "hive/markers"
@@ -21,7 +23,8 @@ module Hive
     # Composes one exact, already-resolved task into the normalized workspace
     # document used by Rails HTML and JSON. Every source is isolated behind a
     # panel boundary; the builder never enters fleet discovery or a remote
-    # transport and never exposes an executable action token or command.
+    # transport. Named review-publication fields intentionally retain scoped
+    # operator commands; ordinary workspace text keeps its redaction policy.
     class Builder
       DependencyTask = Data.define(:folder, :project_root, :slug)
 
@@ -91,7 +94,7 @@ module Hive
           applicability: applicability,
           usage: usage,
           evidence: semantic_evidence(applicability),
-          diagnostic: semantic_diagnostic(projection)
+          diagnostic: semantic_diagnostic(projection).merge("review_publication" => review_publication_payload)
         )
       end
 
@@ -732,6 +735,7 @@ module Hive
         recovery = @task.respond_to?(:recovery) ? @task.recovery : nil
         recovery_visible = task_predicate(:recovery_action_visible?)
         {
+          "review_publication" => review_publication_payload,
           "questions" => Array(@questions).first(100).filter_map do |question|
             n = question_value(question, :n)
             n = operator_text(n, 256) if n.is_a?(String) || n.is_a?(Symbol)
@@ -759,6 +763,18 @@ module Hive
             4 * 1024, nil_if_empty: true
           )
         }
+      end
+
+      # These named controller fields intentionally retain owned paths and
+      # exact commands. Arbitrary operator/log text still uses operator_text.
+      def review_publication_payload
+        action = if @task.respond_to?(:operational_action)
+          @task.operational_action
+        elsif task_value("slug") && task_value("action")
+          Hive::OperationalAction.descriptor(project: @project,
+            row: %w[slug action marker attrs folder state_file workflow stage mtime observation_mtime state_file_mtime task_generation attempt_id condition_task_generation commit_generation current_attempt held blocked].to_h { |key| [ key, task_value(key) ] })
+        end
+        Hive::ReviewPublicationRecovery.project(task_value("attrs") || {}, action: action, marker: task_value("marker"))
       end
 
       def question_value(question, name)

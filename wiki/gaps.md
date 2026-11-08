@@ -142,6 +142,13 @@ wait for an operator retry instead of retrying hourly. Only this Codex sentence
 is matched; other providers' "unknown model" errors still take their
 generic error path (`provider_error`/`exit_code`) and the normal backoff.
 
+## Review recovery publication proof (2026-11-01)
+
+Focused tests cover incomplete-fix withholding through entry CI, approval on an
+unchanged HEAD, per-gate proof after a hosted repair, and publisher reuse after
+conflicting or unobservable publication. These paths have not been exercised
+against a live hosted PR in this fix pass.
+
 ## Review verify-pass follow-ups (2026-10-15)
 
 The final fix pass now gets a verify-only pass (see [[stages/review]]). Open
@@ -154,14 +161,18 @@ items:
   `REVIEW_ERROR reason=config_error`. The ceiling is now
   `Review.admitted_pass_ceiling`: `max_passes + 1`, extended by one for each
   consecutive `kind=ci_repaired` sentinel from the verify pass upward. A pass
-  with no admitting receipt still fails loudly.
+  with no admitting receipt still fails loudly. New final verification no longer
+  creates these repair chains; legacy admitted pass numbers remain supported.
 - **No finalize-side backstop.** 8-finalize does not check that the review's
   `REVIEW_COMPLETE` HEAD matches the branch it finalizes; the fix relies on the
   review loop alone.
 - **Operator edits on a `final_fix_unverified` STALE are not consumed.** The TUI
-  still opens the verify pass's `escalations-NN.md`, but a retry re-runs the
-  reviewers instead of fixing from edited marks. To act on those findings the
-  operator commits fixes by hand (or raises `review.max_passes`) and retries.
+  may open an escalation artifact, but final-stale recovery does not consume
+  checkbox edits as fixes. Commit fixes locally and resolve escalations before
+  explicit operator/coordinator verification retry, which produces new evidence
+  without repair agents. Operator ownership also applies to findings-only stales
+  with no escalations file. Explicitly raising `review.max_passes` authorizes a
+  changed repair budget; Hive never raises it automatically.
 
 ## Hive-owned MCP follow-ups (2026-10-15)
 

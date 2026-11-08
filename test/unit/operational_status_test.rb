@@ -1,6 +1,7 @@
 require "test_helper"
 require "json_schemer"
 require "hive/operational_status"
+require "hive/review_publication_recovery"
 
 class OperationalStatusTest < Minitest::Test
   STATES = %w[
@@ -10,6 +11,21 @@ class OperationalStatusTest < Minitest::Test
 
   def setup
     Hive::RuntimeControlPlane.database.migrate!
+  end
+
+  def test_review_publication_evidence_is_projected_without_remote_or_git_reads
+    evidence = { "publication" => "published", "verification" => "pending", "worktree" => "/owned/path with spaces",
+      "branch" => "task", "local_head" => "a" * 40, "remote_head" => "a" * 40,
+      "is_draft" => true, "pr_state" => "OPEN", "ready_command" => "gh pr ready 42" }
+    attrs = Hive::ReviewPublicationRecovery.encode(evidence).merge("reason" => "final_fix_unverified", "pass" => "3", "accepted" => "1")
+    result = project(status_payload(task(action: "recover_review", slug: "fix", marker: "review_stale", attrs: attrs))).fetch("tasks").first
+    assert_nil result["action"]
+    diagnostic = result.fetch("review_publication")
+    assert_equal "published", diagnostic["publication"]
+    assert_equal evidence["worktree"], diagnostic["worktree"]
+    assert_nil diagnostic["retry_command"]
+    assert_includes diagnostic["remediation"], "Commit fixes locally"
+    assert_includes diagnostic["readiness_guidance"], "normal finalize"
   end
 
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts

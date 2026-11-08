@@ -319,6 +319,12 @@ plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
 
+The web lock pins Nokogiri 1.19.7, rails-html-sanitizer 1.7.2, and Loofah
+2.25.3 following the November 2026 HTML/XML parsing and sanitization
+advisories. All eight existing Nokogiri platform variants use the patched
+release. These compatible patch updates require no direct Gemfile changes;
+the CI audit checks the web lock as well as the root lock.
+
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 
 Why Thor: de-facto Ruby CLI framework (Rails generators use it), fits the Ruby-heavy stack. Bash rejected for not scaling past three commands; Go/Python rejected for stack mismatch.

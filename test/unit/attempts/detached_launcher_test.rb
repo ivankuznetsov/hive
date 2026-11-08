@@ -257,6 +257,62 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     writer&.close unless writer&.closed?
   end
 
+  def test_systemd_scope_carries_the_configured_memory_cap
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: launcher_store, systemd_scope: -> { true },
+      systemd_run: "/usr/bin/systemd-run",
+      memory_max: "6G", memory_swap_max: "0", systemd_version: -> { 262 }
+    )
+    args = launched_wrapper_argv(launcher)
+
+    assert_equal "/usr/bin/systemd-run", args[1]
+    assert_includes args, "--property=MemoryMax=6G"
+    assert_includes args, "--property=MemorySwapMax=0"
+    assert_includes args, "--property=OOMPolicy=continue"
+    assert_operator args.index("--property=MemoryMax=6G"), :<, args.index(RbConfig.ruby)
+  end
+
+  def test_disabled_memory_cap_adds_no_scope_properties_or_version_probe
+    probed = false
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: launcher_store, systemd_scope: -> { true },
+      memory_max: false, memory_swap_max: "0",
+      systemd_version: -> { probed = true }
+    )
+    args = launched_wrapper_argv(launcher)
+
+    assert_includes args, "--scope"
+    assert_empty args.grep(/Memory|OOMPolicy/)
+    refute probed
+  end
+
+  def test_memory_cap_is_a_no_op_without_a_systemd_user_scope
+    probed = false
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: launcher_store, systemd_scope: -> { false },
+      memory_max: "6G", memory_swap_max: "0",
+      systemd_version: -> { probed = true }
+    )
+    args = launched_wrapper_argv(launcher)
+
+    refute_includes args, "--scope"
+    assert_empty args.grep(/Memory|OOMPolicy/)
+    refute probed
+  end
+
+  def test_default_version_probe_uses_the_configured_systemd_run
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: launcher_store, systemd_run: "/opt/systemd-run", memory_max: "4G"
+    )
+    seen = nil
+    with_replaced_singleton_method(
+      Hive::Attempts::MemoryLimit, :systemd_version, ->(binary) { seen = binary; 249 }
+    ) do
+      assert_equal [ "--property=MemoryMax=4G" ], launcher.send(:memory_scope_properties)
+    end
+    assert_equal "/opt/systemd-run", seen
+  end
+
   def test_exec_delegates_to_the_process_guard
     launcher = Hive::Attempts::DetachedLauncher.new(store: launcher_store)
     call = nil
@@ -270,6 +326,28 @@ class AttemptsDetachedLauncherTest < Minitest::Test
   end
 
   private
+
+  # Drives launch → fork_wrapper → exec with every fork inlined and returns
+  # the wrapper's exec argv (environment first).
+  def launched_wrapper_argv(launcher)
+    record = Struct.new(:attempt_id).new("attempt-memory")
+    executed = nil
+    launcher.define_singleton_method(:preflight!) { true }
+    launcher.define_singleton_method(:fork) do |&block|
+      block.call
+      999
+    end
+    launcher.define_singleton_method(:exec) { |*args, **kwargs| executed = [ args, kwargs ] }
+    launcher.define_singleton_method(:exit!) { |_status| throw :launcher_exited }
+    with_replaced_singleton_method(Process, :setsid, -> { 123 }) do
+      with_replaced_singleton_method(Process, :wait, ->(_pid) { }) do
+        with_replaced_singleton_method(IO, :select, ->(*_args) { nil }) do
+          catch(:launcher_exited) { launcher.launch(record, claim_capability: CLAIM_CAPABILITY) }
+        end
+      end
+    end
+    executed.first
+  end
 
   def launcher_store
     database = Struct.new(:path).new("/state/runtime-control-plane.sqlite3")

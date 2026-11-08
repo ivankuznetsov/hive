@@ -3,7 +3,7 @@ title: hive pairing
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/pairing.rb, lib/hive/bot/pairing_store.rb, lib/hive/bot/pairing_approval_queue.rb, lib/hive/web/telegram_pairing.rb, web/app/controllers/telegram_controller.rb
 created: 2026-06-30
-updated: 2026-07-19
+updated: 2026-09-02
 tags: [command, bot, telegram, pairing, json]
 ---
 
@@ -41,6 +41,11 @@ hive pairing approve telegram <CODE> [--json]
 - Unknown or expired codes fail without mutating `config.yml` or writing an
   approval notice. Invalid argument shapes fail as usage errors.
 
+Pre-dispatch usage failures distinguish `pairing list` from `pairing approve`
+and use the corresponding `hive-pairing-list.v1` or
+`hive-pairing-approve.v1` envelope with
+`error_kind: "invalid_arguments"`.
+
 The approval notice queue is a separate owner-only
 `<state_home>/pairing_approvals/` directory, not an extension of the daemon
 dispatch-result schema. The bot reaper drains it and removes notices only after
@@ -61,6 +66,18 @@ therefore leaves the code retryable under the CLI contract, while a success
 reports whether the running bot reloaded or needs a restart.
 If the pending store is unreadable, the page renders that command error in the
 pairing panel; it never substitutes "No pending pairing requests."
+
+## Serialization and exit codes
+
+Both pairing schemas are encoded directly with `JSON.generate`. A serialization
+failure is not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | The pending list was read or the approval transaction completed. |
+| 1 | The code was unknown/expired, the store or notice queue failed, or reload signaling failed after validation. |
+| 64 | The subcommand, platform, code, or argument shape was invalid. |
+| 78 | Global bot configuration was invalid. |
 
 ## Related
 

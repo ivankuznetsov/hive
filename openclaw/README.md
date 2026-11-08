@@ -62,10 +62,10 @@ explicit blocking foreground path, not a status probe. The skill never creates
 LAN/public binding or Tailscale exposure; it only reports a non-loopback origin
 that an operator explicitly configured through Hive's existing gates.
 
-Choose Hivebox when the user needs container isolation, multiple local
-instances, containment for untrusted agents, or reproducible server/NAS
-deployment. Windows can use WSL with systemd for native Hive web or Hivebox
-through Docker Desktop; do not invent a separate Windows service manager.
+On Windows, install native Hive inside WSL with systemd enabled; do not invent
+a separate Windows service manager or a container install. Hive no longer ships
+a Docker distribution; users who would rather not self-host should use the
+hosted Hive cloud product at [hivedev.sh](https://hivedev.sh).
 
 ## Local projection test
 

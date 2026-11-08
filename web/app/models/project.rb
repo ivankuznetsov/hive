@@ -19,6 +19,15 @@ class Project
     @attributes = attributes
   end
 
+  def with_history(history)
+    return self unless history && ProjectArchive.identity(history) == ProjectArchive.identity(attributes)
+
+    completed = history.fetch("tasks", []).map { |task| task.merge("archive_source" => true) }
+    # A fresh active row wins if an archived task has since been reopened.
+    tasks = (completed + attributes.fetch("tasks", [])).index_by { |task| task.fetch("slug") }.values
+    self.class.new(attributes.merge("tasks" => tasks, "error" => attributes["error"] || history["error"]))
+  end
+
   def name
     attributes.fetch("name")
   end
@@ -58,10 +67,6 @@ class Project
   alias active_tasks tasks
   alias archived_tasks tasks
 
-  def hidden_archived_task_count
-    attributes.fetch("hidden_archived_task_count", 0)
-  end
-
   def default_workflow
     config["default_workflow"].presence
   rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
@@ -94,7 +99,7 @@ class Project
     text = text.to_s.strip
     raise Hive::Error, "idea text is empty" if text.empty?
 
-    Hive::Commands::New.new(name, text, attachments:).call!
+    Hive::Commands::New.new(name, text, attachments:, structured: true).call!
   rescue SystemCallError, IOError => e
     # Commands::New#call! deliberately leaves I/O errors raising for
     # in-process adapters to present in their native UI. Normalize them here

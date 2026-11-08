@@ -132,7 +132,7 @@ module Hive
           uncertainties << "malformed_frontmatter"
           return {}
         end
-        raw = text.byteslice(4, closing - 4)
+        raw = text[4...closing]
         if raw.bytesize > 64 * 1024
           uncertainties << "frontmatter_too_large"
           return {}
@@ -247,10 +247,10 @@ module Hive
       def explicitly_negated?(text, match)
         line_start = text.rindex("\n", match.begin(0))&.+(1) || 0
         line_end = text.index("\n", match.end(0)) || text.length
-        prefix = text.byteslice(line_start, match.begin(0) - line_start).to_s
-        suffix = text.byteslice(match.end(0), line_end - match.end(0)).to_s
+        prefix = text[line_start...match.begin(0)].to_s
+        suffix = text[match.end(0)...line_end].to_s
         clause_start = text.rindex(/[.!?;]/, match.begin(0) - 1)&.+(1) || 0
-        clause_prefix = text.byteslice(clause_start, match.begin(0) - clause_start).to_s
+        clause_prefix = text[clause_start...match.begin(0)].to_s
         prefix.match?(/\b(?:no|without|excluding)\s+(?:[a-z-]+\s+){0,3}\z/i) ||
           prefix.match?(/\b(?:do(?:es)?|will|would|is|are)\s+not\s+(?:[a-z-]+\s+){0,3}\z/i) ||
           clause_prefix.gsub(/\s+/, " ").match?(
@@ -292,7 +292,7 @@ module Hive
 
       def bounded_excerpt(text, offset)
         line_start = text.rindex("\n", offset)&.+(1) || 0
-        text.byteslice(line_start, 240).to_s.lines.first.to_s.strip
+        text[line_start, 240].to_s.lines.first.to_s.strip
       end
 
       def invalid(path, reason)

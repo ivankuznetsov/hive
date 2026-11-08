@@ -19,6 +19,11 @@ module Hive
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: coding brainstorm artifact repair
       DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
       OPERATOR_RETRY_REQUESTORS = %w[action bot cli web].freeze
+      FAILED_OUTCOMES = %w[failed cancelled interrupted].freeze
+      # Identical consecutive failures of one unchanged owner-command
+      # generation after which automatic admission stops for operator repair.
+      REPEATED_FAILURE_LIMIT = 3
+      REPEATED_FAILURE_REASON = "repeated_failure_limit".freeze
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
                      capability_generator: Capability.method(:generate),
@@ -144,7 +149,7 @@ module Hive
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request)
+          retry_release: explicit_retry_release?(request, task: task)
         ) if recoverable_source_attempt?(source_attempt)
 
         dispatch(
@@ -153,8 +158,47 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request),
+          retry_release: explicit_retry_release?(request, task: task),
           replay_semantic_terminal: replay_semantic_terminal
+        )
+      rescue RepositoryError
+        # Another consumer can win after the request lookup and before the
+        # admission transaction. Only that canonical, identically bound
+        # attempt can turn a claim conflict into attachment or terminal replay.
+        attempt_id = @store.attempt_id_for_request(request_id: request.request_id)
+        winner = @store.fetch(attempt_id) if attempt_id
+        unless generation && winner && winner["task_id"].to_s == generation.task_id.to_s &&
+            winner["project"] == generation.project && winner["task_slug"] == generation.task_slug &&
+            winner["intended_stage"] == generation.intended_stage &&
+            winner.task_generation == generation.task_generation
+          raise
+        end
+        return live_result(winner, interactive: interactive) if winner.live?
+        if winner.state == "terminal"
+          return DispatchResult.new(status: :terminal_replay, attempt: winner,
+            receipt: winner.receipt, attach_descriptor: nil, reason: nil)
+        end
+        raise
+      end
+
+      # Read-only provider-route projection used by scheduler readiness. Global,
+      # project, and task attempt capacity remain with the caller's normal gate.
+      def routing_decision_for_request(request, now: @clock.call, admission_view: nil)
+        task = @task_resolver.call(request)
+        intended_stage = intended_stage_for(request.argv, task)
+        generation = Generation.resolve(
+          task: task, project: request.project, intended_stage: intended_stage,
+          progress_token: command_progress_token(request.argv, task),
+          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
+        )
+        policy = resolve_routing_policy(task, intended_stage)
+        return nil unless policy.explicit?
+
+        view = admission_view || AdmissionView.new(store: @store, records: @store.active_attempts)
+        snapshot = view.capacity(now: now)
+        select_provider_route(
+          policy: policy, snapshot: snapshot, records: view.records,
+          generation: generation, now: now
         )
       end
 
@@ -242,14 +286,19 @@ module Hive
           return deferred_result("patrol_retry_delay")
         end
 
-        if task && !interactive && !retry_release &&
-           "#{task.stage_index}-#{task.stage_name}" != generation.intended_stage &&
-           !CommandProgress.patrol_fix?(task)
+        if task && !interactive && !retry_release && !CommandProgress.patrol_fix?(task) &&
+           ("#{task.stage_index}-#{task.stage_name}" != generation.intended_stage ||
+            CommandProgress.failure_ladder?(argv))
+          ladder_subject = subject || task_subject(generation)
           previous = view.latest_terminal_attempt(
-            task_generation: generation.task_generation,
-            subject: subject || task_subject(generation)
+            task_generation: generation.task_generation, subject: ladder_subject
           )
-          if previous && %w[failed cancelled].include?(previous.outcome)
+          if previous && FAILED_OUTCOMES.include?(previous.outcome)
+            if CommandProgress.failure_ladder?(argv)
+              limit = repeated_failure_limit(view, generation, ladder_subject, previous)
+              return limit if limit
+            end
+
             retry_at = Time.iso8601(previous.receipt.fetch("ended_at")) +
               Hive::Recovery::RetryPolicy.delay_sec(previous["retry_charge"])
             return deferred_result("transition_retry", attempt: previous, receipt: previous.receipt) if now.utc < retry_at
@@ -441,6 +490,33 @@ module Hive
         terminal if now.utc < ended_at + @transient_retry_backoff_sec
       end
 
+      # A deterministic owner-command failure repeats with the same exit status
+      # on the same generation (task artifact, owner progress, dependencies,
+      # and Hive build). Once the newest REPEATED_FAILURE_LIMIT terminal
+      # attempts agree, hold automatic admission until any of those inputs
+      # change. Cancellation, interruption, and TEMPFAIL are scheduler or
+      # operator events, not command verdicts, so they never count.
+      def repeated_failure_limit(view, generation, subject, latest)
+        exit_status = deterministic_exit_status(latest)
+        return unless exit_status
+
+        recent = view.recent_terminal_attempts(
+          task_generation: generation.task_generation, subject: subject,
+          limit: REPEATED_FAILURE_LIMIT
+        )
+        identical = recent.take_while { |record| deterministic_exit_status(record) == exit_status }
+        return if identical.length < REPEATED_FAILURE_LIMIT
+
+        deferred_result(REPEATED_FAILURE_REASON, attempt: latest, receipt: latest.receipt)
+      end
+
+      def deterministic_exit_status(record)
+        return unless record.outcome == "failed"
+
+        status = record.receipt&.fetch("exit_status", nil)
+        status if status.is_a?(Integer) && status != Hive::ExitCodes::TEMPFAIL
+      end
+
       def brainstorm_artifact_missing?(task, records)
         return false unless coding_brainstorm?(task)
 
@@ -607,7 +683,9 @@ module Hive
 
       def command_progress_token(argv, task)
         base = Generation.artifact_token(task)
-        Hive::Attempts::CommandProgress.token_for(argv:, task:, fallback: base)
+        Hive::Attempts::CommandProgress.token_for(
+          argv:, task:, fallback: base, runtime_digest: @runtime_digest
+        )
       end
 
       def starting_revision(task)
@@ -711,7 +789,13 @@ module Hive
         }
       end
 
-      def explicit_retry_release?(request)
+      def explicit_retry_release?(request, task: nil)
+        if request.respond_to?(:requestor) && request.requestor.to_s == "action" &&
+            request.respond_to?(:recovery) && request.recovery.is_a?(Hash) && request.recovery["variant"] == "marker" &&
+            task&.respond_to?(:project_root) && task.project_root &&
+            Hive::Config.load(task.project_root).dig("daemon", "enabled") != true
+          return false
+        end
         request.respond_to?(:recovery) && request.recovery.is_a?(Hash) &&
           request.respond_to?(:requestor) &&
           OPERATOR_RETRY_REQUESTORS.include?(request.requestor.to_s) &&
@@ -720,6 +804,10 @@ module Hive
 
       def intended_stage_for(argv, task)
         verb = Array(argv)[1].to_s
+        if verb == "act"
+          require "hive/operational_action"
+          return Hive::OperationalAction.intended_stage_for(task, action_id: Array(argv)[2])
+        end
         return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
         Hive::Workflows.for_verb(verb).fetch(:target)

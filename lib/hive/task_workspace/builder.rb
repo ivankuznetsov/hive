@@ -1,5 +1,7 @@
 require "digest"
 require "json"
+require "hive/review_publication_recovery"
+require "hive/operational_action"
 require "time"
 require "hive/attempts/repository"
 require "hive/markers"
@@ -21,7 +23,8 @@ module Hive
     # Composes one exact, already-resolved task into the normalized workspace
     # document used by Rails HTML and JSON. Every source is isolated behind a
     # panel boundary; the builder never enters fleet discovery or a remote
-    # transport and never exposes an executable action token or command.
+    # transport. Named review-publication fields intentionally retain scoped
+    # operator commands; ordinary workspace text keeps its redaction policy.
     class Builder
       DependencyTask = Data.define(:folder, :project_root, :slug)
 
@@ -60,6 +63,50 @@ module Hive
       end
 
       def call
+        build_snapshot(audit: true)
+      end
+
+      # HTML needs the existing action, dependency and publication evidence,
+      # but not the repository/wiki audit, timeline or a second artifact copy.
+      def page
+        build_snapshot(audit: false)
+      end
+
+      # Concise, workflow-aware read model used by operator HTML and native
+      # task inspection. The v1 audit snapshot above remains unchanged.
+      def semantic
+        read = history_read
+        projection = projection_hash(read)
+        attempts = attempts_panel(read: read, projection: projection)
+        artifacts = artifacts_panel
+        usage = semantic_usage(attempts)
+        status = status_payload(read)
+        result = semantic_result(artifacts)
+        applicability = semantic_applicability(result)
+
+        semantic_snapshot_with_budget(
+          generated_at: now,
+          task: semantic_task(projection),
+          status: status.slice("state", "freshness", "observed_at"),
+          headline: semantic_headline(status),
+          action: semantic_action(status),
+          result: result,
+          applicability: applicability,
+          usage: usage,
+          evidence: semantic_evidence(applicability),
+          diagnostic: semantic_diagnostic(projection).merge("review_publication" => review_publication_payload)
+        )
+      end
+
+      # Used by the authenticated cursor endpoint. It reuses the same bounded
+      # projection/event source policy but does not construct unrelated panels.
+      def timeline(cursor: nil, raw_cursor: nil)
+        timeline_panel(read: history_read, cursor: cursor, raw_cursor: raw_cursor)
+      end
+
+      private
+
+      def build_snapshot(audit:)
         read = history_read
         projection = projection_hash(read)
         attempts = attempts_panel(read: read, projection: projection)
@@ -68,18 +115,18 @@ module Hive
             attempts_panel: attempts, usage_reader: @usage_reader, limits: @limits
           ).call
         end
-        provenance = panel("provenance") do
+        provenance = audit ? panel("provenance") do
           Provenance.new(
             task: @native_task, attempts_panel: attempts, limits: @limits,
             current_observation: @current_context_observation, clock: @clock
           ).call
-        end
+        end : TaskWorkspace.unavailable_panel("provenance")
         publication = panel("publication") { publication_panel }
         dependencies = panel("dependencies") do
           dependency_panel(publication)
         end
-        timeline = timeline_panel(read: read)
-        artifacts = artifacts_panel
+        timeline = audit ? timeline_panel(read: read) : TaskWorkspace.unavailable_panel("timeline")
+        artifacts = audit ? artifacts_panel : TaskWorkspace.unavailable_panel("artifacts")
         panels = {
           "provenance" => provenance, "attempts" => attempts,
           "resources" => resources, "timeline" => timeline,
@@ -110,40 +157,6 @@ module Hive
           panels: panels
         )
       end
-
-      # Concise, workflow-aware read model used by operator HTML and native
-      # task inspection. The v1 audit snapshot above remains unchanged.
-      def semantic
-        read = history_read
-        projection = projection_hash(read)
-        attempts = attempts_panel(read: read, projection: projection)
-        artifacts = artifacts_panel
-        usage = semantic_usage(attempts)
-        status = status_payload(read)
-        result = semantic_result(artifacts)
-        applicability = semantic_applicability(result)
-
-        semantic_snapshot_with_budget(
-          generated_at: now,
-          task: semantic_task(projection),
-          status: status.slice("state", "freshness", "observed_at"),
-          headline: semantic_headline(status),
-          action: semantic_action(status),
-          result: result,
-          applicability: applicability,
-          usage: usage,
-          evidence: semantic_evidence(applicability),
-          diagnostic: semantic_diagnostic(projection)
-        )
-      end
-
-      # Used by the authenticated cursor endpoint. It reuses the same bounded
-      # projection/event source policy but does not construct unrelated panels.
-      def timeline(cursor: nil, raw_cursor: nil)
-        timeline_panel(read: history_read, cursor: cursor, raw_cursor: raw_cursor)
-      end
-
-      private
 
       def attempts_panel(read:, projection:)
         @attempts_panel ||= panel("attempts") do
@@ -247,7 +260,7 @@ module Hive
         capabilities = @native_task.workflow.result.capabilities.map(&:to_s)
         actual_worktree = actual_worktree_evidence?
         actual_publication = !task_value("pr_url").to_s.empty?
-        actual_dependencies = !task_value("depends_on").to_s.empty?
+        actual_dependencies = dependency_present?
         supporting = result.fetch("supporting").any?
         {
           "worktree" => capabilities.include?("worktree") || actual_worktree,
@@ -391,7 +404,7 @@ module Hive
             "current"
           elsif %w[worktree diff].include?(name) && actual_worktree_evidence?
             "current"
-          elsif name == "dependencies" && !task_value("depends_on").to_s.empty?
+          elsif name == "dependencies" && dependency_present?
             "current"
           else
             "missing"
@@ -722,6 +735,7 @@ module Hive
         recovery = @task.respond_to?(:recovery) ? @task.recovery : nil
         recovery_visible = task_predicate(:recovery_action_visible?)
         {
+          "review_publication" => review_publication_payload,
           "questions" => Array(@questions).first(100).filter_map do |question|
             n = question_value(question, :n)
             n = operator_text(n, 256) if n.is_a?(String) || n.is_a?(Symbol)
@@ -749,6 +763,18 @@ module Hive
             4 * 1024, nil_if_empty: true
           )
         }
+      end
+
+      # These named controller fields intentionally retain owned paths and
+      # exact commands. Arbitrary operator/log text still uses operator_text.
+      def review_publication_payload
+        action = if @task.respond_to?(:operational_action)
+          @task.operational_action
+        elsif task_value("slug") && task_value("action")
+          Hive::OperationalAction.descriptor(project: @project,
+            row: %w[slug action marker attrs folder state_file workflow stage mtime observation_mtime state_file_mtime task_generation attempt_id condition_task_generation commit_generation current_attempt held blocked].to_h { |key| [ key, task_value(key) ] })
+        end
+        Hive::ReviewPublicationRecovery.project(task_value("attrs") || {}, action: action, marker: task_value("marker"))
       end
 
       def question_value(question, name)
@@ -860,6 +886,11 @@ module Hive
 
       def task_value(key)
         @task.respond_to?(:[]) ? @task[key] : nil
+      end
+
+      def dependency_present?
+        value = task_value("depends_on")
+        value.is_a?(Array) ? !value.empty? : !value.to_s.empty?
       end
 
       def now

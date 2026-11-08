@@ -165,6 +165,11 @@ module Hive
         Dir.glob(File.join(workflows_dir, "*", LOCK_FILE)).sort.filter_map do |path|
           name = File.basename(File.dirname(path))
           selected_unlocked(name, cfg: cfg)
+        rescue Hive::ConfigError => e
+          Hive::Warnings.emit(
+            "hive: skipping managed workflow #{name.inspect}: #{e.message}"
+          )
+          nil
         end
       end
 

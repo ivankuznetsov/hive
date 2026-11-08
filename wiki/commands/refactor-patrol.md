@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-08-26
+updated: 2026-09-25
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -18,6 +18,8 @@ branches, publish pull requests, or hand work directly to review.
 ```bash
 # On-demand discovery
 hive refactor-patrol my-project
+hive refactor-patrol my-project --once --json
+hive refactor-patrol my-project --once --dry-run
 hive refactor-patrol my-project --feature route-home --changed-since origin/main
 hive refactor-patrol my-project --entrypoint bin/server
 hive refactor-patrol my-project --path lib/payments --json
@@ -55,6 +57,35 @@ Repeating it for a complete job is a no-op. The command emits
 the final `hive-refactor-patrol-jobs.v2` show projection, so no second archive
 status contract exists.
 
+`--once` runs the daemon's merged-PR intake, classification, durable job
+discovery, and downstream handoff path for one project, then emits
+`hive-one-shot.v1`. It does not run the daemon's separately wired current-main
+scheduled-slice producer. Manual selectors (`--pr`, `--job-manifest`, scope
+hints, list/show/archive options) are incompatible with `--once`.
+`--once --dry-run` observes readiness without intake, reservation, checkpoint
+writes, or child execution. Intake deadlines use the configured daemon
+`pr_merge_poll_interval_sec`; the reported deadline and persisted checkpoint
+are the same absolute timestamp. Classification retries and active claims stay
+visible before a job exists. A persisted daemon controller project-drop hold
+suppresses child discovery and reports operator action; a blocked scheduler
+observation still fails the pass instead of being reported as an operator wait.
+
+## Read-only job-query pagination
+
+`--list` and `--show` read the authoritative durable job ledger through its
+immutable query index and never mutate it.
+
+- List pages and per-job show histories default to 100 records; `--limit`
+  accepts integers from 1 through 100.
+- A list cursor freezes the intake-sequence high-water mark and index
+  generation of the issuing snapshot. Jobs recorded later do not change an
+  in-flight page, and a cursor from a rebuilt generation fails closed as a
+  usage error.
+- `--show` truncates history to the same 100-record default and requires
+  explicit `--full` for an unbounded history.
+
+Both modes emit `hive-refactor-patrol-jobs.v2`.
+
 ## Discovery
 
 On-demand discovery maps the current repository into bounded source and
@@ -83,8 +114,23 @@ classification, discovery, checkpointing, retries, and post-merge bookkeeping.
 Those manifests carry path/status/rename metadata rather than GitHub patch
 bodies; the pinned merge worktree is the source of code truth, and patch size
 does not gate reconciliation.
-Scheduled current-main scans use the Architecture Patrol launch lane and
-reserve their completed dispositions through the same source adapter.
+Scheduled current-main scans are wired into the daemon through
+`ScheduledArchitectureScheduler` and the shared Patrol arbiter. They become due
+independently of merged-PR jobs, using `patrol.poll_interval_sec` and the
+Architecture engine's daily discovery allowance. They use the existing patrol
+scan concurrency budget. The internal `refactor-patrol-scheduled` child claims
+one mapped slice at a frozen revision, runs the review, and durably admits the
+result before advancing its cursor. Failed or incomplete reviews release the
+slice for retry. Successful dispositions use the same source adapter as
+post-merge discovery.
+
+Daemon composition and dispatcher regression tests require a periodic launch
+when no merged-PR jobs exist. Command integration tests exercise the real slice
+producer, default mapper, real reviewer, and durable finding admission with only
+the external provider faked; provider failures must leave that cursor retryable.
+Both Patrol engines inherit batch feature persistence (`write_features`) from
+`Patrol::BaseStateStore`, so non-dry mapping writes to each engine's own namespace.
+Dry-run mapping skips persistence and cannot prove this interface works.
 
 The runtime has no action candidate selection, action reservation, fixer,
 issue filer, branch creator, PR opener, or review handoff. Historical action
@@ -107,6 +153,26 @@ errors. New records contain no publication attempts or actions. `--list` and
 `--show` emit `hive-refactor-patrol-jobs.v2`; `--archive` emits the same
 projection after its guarded transition.
 
+## Serialization and exit codes
+
+All three JSON families are encoded directly. If `JSON.generate` fails, no
+prose or fallback JSON document is substituted; the encoding failure
+propagates. A best-effort daemon result-file write does not change that stdout
+contract.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery, query, show, or an idempotent archive completed. |
+| 1 | An ordinary discovery/job-state invariant failed. |
+| 64 | Query pagination, job identity, mode selection, or another public argument was invalid. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A generation claim, checkout, or state lock was temporarily stale or busy. |
+| 78 | Project, policy, manifest, repository ownership, or scheduled input was invalid. |
+
 ## Backlinks
 
 - [[modules/patrol]] · [[modules/daemon]] · [[commands/patrol]]
+
+Scheduled completion waits a full configured poll interval before the next attempt,
+including failures and empty slices. Empty or allowance-exhausted children emit
+`architecture_patrol_skipped` with a reason, rather than claiming a review closed.

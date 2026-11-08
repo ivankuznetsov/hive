@@ -85,13 +85,13 @@ auto-commit. Unsupported effective controls therefore leave those stage
 surfaces unchanged.
 
 Non-durable built-in calls resolve immediately before their trusted launch
-seam through `Stages::Base.model_routing_arguments`. This covers brainstorm
-(headless and tmux), plan, reviewers (including direct Codex and shared Claude
-sessions), triage, browser testing, rebase, diagnosis, babysitter, ordinary
+seam through `Stages::Base.model_routing_arguments`. This covers brainstorm,
+plan, reviewers (including direct Codex and independent headless Claude
+reviewers), triage, browser testing, rebase, diagnosis, babysitter, ordinary
 patrol, artifacts, and finalize. Architecture Patrol overlays
 `patrol_review`/`patrol_fix` while building its immutable review/fix identities,
-so policy snapshots and resumed actions observe the same route. Shared Claude
-reviewers group by both resolved permission scope and routing arguments.
+so policy snapshots and resumed actions observe the same route. Each Claude
+reviewer resolves its own permission scope and routing arguments.
 
 `Config.validate_model_routing_capabilities!` constructs the enabled,
 reachable call/profile matrix after structural validation and before warnings.

@@ -95,7 +95,7 @@ Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-nam
 | `REVIEW_WORKING` | `phase=ci\|reviewers\|triage\|fix\|browser`, `pass=NN` | Transient — set at phase entry, replaced at phase exit per ADR-005's last-marker-wins. |
 | `REVIEW_WAITING` | Two shapes per `reason` attr: (1) **escalations-only** (no `reason`): `escalations=N`, `pass=NN` — user inspects `reviews/escalations-NN.md`. (2) **`reason=fix_guardrail`**: `matches=N`, `head=<sha>`, `pass=NN` — user inspects `reviews/fix-guardrail-NN.md` and ticks every `[x]` to approve; approval re-checks count + HEAD + worktree-clean. Exact fingerprint waivers affect new scans and are evented, but do not silently release an already parked marker. Legacy markers without `head=` (hive ≤ PR-A round-2) skip the HEAD check with a stderr notice. Reviewer infra failures use `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` because no user answer is required. | Terminal until the checked approval is resubmitted. |
 | `REVIEW_CI_STALE` | `attempts=N` | Terminal — `cfg.review.ci.max_attempts` reached without green CI. Reviewers don't run on red CI. After inspecting or editing `reviews/ci-blocked.md`, submit retry through the TUI, web, bot, or `Hive::Recovery::API`; the coordinator owns the guarded transition. |
-| `REVIEW_STALE` | `pass=NN` | Terminal — `cfg.review.max_passes` reached. If highest-NN reviewer files have no `escalations-NN.md`, the incomplete triage pass is directly retryable. Otherwise edit reviewer files / escalations, then use the TUI's forced `r` recovery gesture; both paths submit to the coordinator. |
+| `REVIEW_STALE` | `pass=NN`; optional `reason=wall_clock elapsed=S` or `reason=final_fix_unverified accepted=N escalations=M` | Terminal — `cfg.review.max_passes` reached (`final_fix_unverified`: the verify-only pass after the final fix pass found more work; retry re-runs its reviewers, never the fix agent). If highest-NN reviewer files have no `escalations-NN.md`, the incomplete triage pass is directly retryable. Otherwise edit reviewer files / escalations, then use the TUI's forced `r` recovery gesture; both paths submit to the coordinator. |
 | `REVIEW_COMPLETE` | `pass=NN`, `browser=passed\|warned\|skipped` | Terminal success — ready to run `hive artifacts` into 7-artifacts. `browser=warned` means browser test failed twice but loop continued (soft-warn); 8-finalize stage surfaces this in the PR body. |
 | `REVIEW_ERROR` | `phase=...`, `reason=...`; optional `message="..."` for phase-agent failures whose captured cause should be visible in status diagnostics; `retry_after=<iso8601>` for `reason=limits_reached`. Known `phase=resume` `reason=` values (added in PR-A round-3): `approval_head_mismatch` (worktree HEAD differs from marker `head=`), `approval_dirty_worktree` (uncommitted edits in worktree at approval time), `malformed_marker_matches` (fix_guardrail marker has missing/non-Integer `matches`), `resume_no_findings` (legacy: reviewer files were deleted between trip and resume). Triage/fix phase-agent non-limit failures are written through `Hive::ReviewErrorReason` as `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`; provider limits still write `limits_reached` first. In practice the plumbing forwards a condensed wrapper string (not raw agent output), so the specific buckets rarely fire and the reason normally lands on `unknown` with the raw cause in `message=` — see [[stages/review]]. Other phase/reason families (`phase=fix reason=fix_tampered`, `phase=reviewers reason=reviewer_partial_failure`, etc.) per the runner's protected-files + agent-error contracts. | Terminal agent-level error or protected-file tampering. Every persisted occurrence enters the shared recovery lifecycle after the configured cooldown when its safety gates permit; provider-limit metadata affects explanation, not eligibility. |
 
@@ -177,3 +177,25 @@ Parses the attribute string into a Hash. Format: `key=value` pairs, optional dou
 - [[state-model]]
 - [[modules/agent]]
 - [[stages/execute]]
+
+## Review publication attributes
+
+New review terminal markers retain ordinary `reason`, `pass`, `accepted`,
+`escalations` and occurrence IDs. Waiting guardrail markers also retain their
+exact `matches` and `head` approval bindings. `rp_version=1` selects a flat set of
+`rp_*` fields whose values are URL-safe base64 JSON. This narrow codec avoids
+Markers' lossy quote/comment-delimiter formatting without changing legacy attrs.
+`Hive::ReviewPublicationRecovery` alone decodes and projects these fields.
+
+Evidence names the owned worktree/branch, PR URL/number/state/draft metadata,
+local and observed remote full heads, publication (`published`, `unpublished`,
+`unknown`, `not_applicable`) and verification (`pending`, `failed`, `verified`),
+commit classification and full unpushed SHAs, observation time and failure reason.
+CI evidence includes its head and explicitly labels configured-out gates skipped.
+Oversized fields are unavailable with named diagnostics; executable strings and
+commit identifiers are never shortened into different values.
+
+Push guidance is an ordinary task-specific, immutable-source push and is withheld
+on divergence/remote conflict. Verification recipes refresh the current canonical
+`workflow.retry` action for the exact task; no token is embedded in the marker.
+Tokens hash marker evidence and mtime, so only a fresh action can be invoked.

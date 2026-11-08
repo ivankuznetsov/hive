@@ -6,7 +6,6 @@ require "time"
 require "yaml"
 require "hive/artifact_firewall"
 require "hive/events"
-require "hive/claude_completion_fallback"
 require "hive/config"
 require "hive/claude_launcher"
 require "hive/stages/base"
@@ -16,19 +15,23 @@ require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/review_error_reason"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/reviewer_reuse"
 require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/remote_ci"
 require "hive/stages/review/triage"
+require "hive/stages/review/convergence"
 require "hive/stages/review/browser_test"
 require "hive/stages/review/fix_guardrail"
 require "hive/stages/review/github_publisher"
 require "hive/workflows"
+require "hive/pull_request_outcome"
 
 module Hive
   module Stages
@@ -42,12 +45,16 @@ module Hive
     #   Branch:
     #     - any [x] → Phase 4 (fix) → loop to Phase 2 with pass++
     #     - escalations only → REVIEW_WAITING (terminal)
-    #     - all clean → Phase 5
+    #     - all clean → exact-head CI gates → Phase 5
     #   Phase 5: browser-test → REVIEW_COMPLETE (passed | warned | skipped)
     #
     # Wall-clock budget (review.max_wall_clock_sec) is enforced at
-    # every phase boundary. Pass-cap (review.max_passes) is enforced
-    # before re-entering Phase 2 with pass++.
+    # every phase boundary. Pass-cap (review.max_passes) bounds the
+    # passes that may spawn the fix agent. A pass beyond it is
+    # verify-only: it exists solely to review commits no reviewer has
+    # seen yet (the final fix pass's fixes, or a CI repair), and any
+    # finding it raises lands REVIEW_STALE reason=final_fix_unverified
+    # instead of another fix.
     #
     # Each `hive run` either lands a terminal marker (REVIEW_COMPLETE,
     # REVIEW_WAITING, REVIEW_CI_STALE, REVIEW_STALE, REVIEW_ERROR) or
@@ -83,6 +90,17 @@ module Hive
       # Phase 4 with the operator's existing `[x]` marks instead of
       # advancing past them.
       FIX_SUCCESS_FILENAME = "fix-success".freeze
+      # `kind=` recorded in a fix-success sentinel. `fixed` (Phase 4
+      # applied fixes) and `ci_repaired` (a CI fixer committed at the
+      # clean boundary) leave commits no reviewer has seen, so a restart
+      # that finds one of them bound to HEAD resumes into a review pass
+      # rather than Phase 5. `clean` and `approved` (the operator
+      # approved a guardrail trip) may resume at Phase 5.
+      FIX_SUCCESS_UNREVIEWED_KINDS = %w[fixed ci_repaired approved].freeze
+      # Outcome of the exact-head CI gate that guards every route into
+      # Phase 5: a terminal result hash, or the proven head plus whether a
+      # CI fixer moved it.
+      CompletionCiGate = Data.define(:terminal, :head, :repaired)
       AcceptedFindings = Data.define(:text, :count)
       # Resolved reviewer compare base. `degraded` is true when the
       # configured compare ref did not resolve and we fell back to the
@@ -119,6 +137,20 @@ module Hive
       end
 
       def run!(task, cfg)
+        @publication_context = nil
+        @review_publisher = nil
+        @publication_attempt_head = nil
+        @publication_attempt_withheld = nil
+        @reviewed_head = nil
+        @review_ci_evidence = {}
+        result = run_review_body!(task, cfg)
+        finalize_review_outcome(task, cfg, result)
+      rescue StandardError
+        finalize_review_outcome(task, cfg, nil) if @publication_context
+        raise
+      end
+
+      def run_review_body!(task, cfg)
         pre_effect_routing_validation = false
         # Track the current phase in a module-instance variable so the
         # top-level rescue at the end of this method can record it on
@@ -154,6 +186,9 @@ module Hive
           return { commit: nil, status: :review_error }
         end
 
+        settled = settled_pull_request_result(task)
+        return settled if settled
+
         # Worktree pointer must exist (carried over from 4-execute).
         unless File.exist?(task.worktree_yml_path)
           warn "hive: 6-review entered without a worktree.yml — this task did not pass through 4-execute. Move it back."
@@ -176,6 +211,25 @@ module Hive
           pass: 0 # placeholder; per-pass calls override
         )
 
+        @publication_context = ctx
+        @admissible_head = git_head(worktree_path)
+        @withheld_reason = if marker.attrs["reason"] == "fix_guardrail"
+          "guardrail_approval_required"
+        elsif marker.attrs["phase"] == "fix"
+          "fix_guardrail_receipt_required"
+        end
+        # Determine restart mode before entry CI can dispatch a repair agent.
+        initial_disk_pass = max_review_pass(task.folder, cfg)
+        initial_pass = next_pass_for(task, marker, cfg, max_pass: initial_disk_pass)
+        if completed_pass_receipt?(task.folder, initial_disk_pass) &&
+           (fix_success_head(task.folder, initial_disk_pass).nil? || fix_success_head(task.folder, initial_disk_pass) == @admissible_head)
+          @withheld_reason = nil unless marker.attrs["reason"] == "fix_guardrail"
+        elsif initial_pass <= (cfg.dig("review", "max_passes") || 3) &&
+              pass_completion_status(task.folder, initial_pass) == :fix_incomplete
+          @withheld_reason ||= "fix_guardrail_receipt_required"
+        end
+        @verify_mode = initial_pass > (cfg.dig("review", "max_passes") || 3)
+
         started_at = Time.now
         max_wall_clock = cfg.dig("review", "max_wall_clock_sec") || 14_400
 
@@ -195,6 +249,23 @@ module Hive
         # the review is still produced). This mirrors the Phase 4
         # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
         # review would still write fix commits here.
+        if @verify_mode && @withheld_reason.nil?
+          receipt_pass = initial_disk_pass.downto(1).find { |n| fix_success_head(task.folder, n) }
+          receipt_head = receipt_pass && fix_success_head(task.folder, receipt_pass)
+          if receipt_head && receipt_head != @admissible_head
+            recovery_ctx = ctx.with(pass: initial_pass)
+            guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: recovery_ctx,
+              base_sha: receipt_head, head_sha: @admissible_head)
+            if guardrail.status == :tripped
+              @withheld_reason = "guardrail_approval_required"
+              return ci_guardrail_terminal_result(task, guardrail, ctx: recovery_ctx, gate: "verification_recovery", pass: initial_pass)
+            end
+          end
+        end
+        if @verify_mode || resumed_unreviewed_receipt?(task.folder, initial_disk_pass, initial_pass)
+          publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: initial_pass))
+          return publication_stop if publication_stop
+        end
         entry_ci_repaired = false
         if marker.name != :review_waiting && adhoc_fix_enabled?(cfg, task)
           @current_phase = :ci
@@ -203,17 +274,18 @@ module Hive
           terminal = run_ci_gates(
             task, cfg, ctx,
             started_at: started_at, max_wall_clock_sec: max_wall_clock,
-            pass: 1
+            pass: 1, no_repair: @verify_mode
           )
           return terminal if terminal
           entry_ci_repaired = git_head(worktree_path) != before_entry_ci_head
+          @admissible_head = git_head(worktree_path) unless @withheld_reason
         end
 
         # HEAD proven by the entry gate. Normal REVIEW_WAITING resumes
         # deliberately skip that gate, so leave this nil and require an
         # exact-head gate at the all-clean boundary. Review-only ad-hoc tasks
         # stay non-mutating and retain the historical CI skip contract.
-        ci_validated_head = if marker.name == :review_waiting && adhoc_fix_enabled?(cfg, task)
+        ci_validated_head = if @withheld_reason || (marker.name == :review_waiting && adhoc_fix_enabled?(cfg, task))
           nil
         else
           git_head(worktree_path)
@@ -222,7 +294,16 @@ module Hive
         # --- Pass loop: Phase 2 → 3 → branch → 4 ---
         on_disk_pass = max_review_pass(task.folder, cfg)
         pass = next_pass_for(task, marker, cfg, max_pass: on_disk_pass)
-        max_passes = cfg.dig("review", "max_passes") || 4
+        max_passes = cfg.dig("review", "max_passes") || 3
+        # The configured cap bounds fix passes. `max_passes` below may widen
+        # to admit review of unreviewed commits, but every pass beyond this
+        # cap is verify-only and never spawns the fix agent.
+        fix_pass_cap = max_passes
+        # Persisted approval/repair receipts also admit their verification
+        # passes after restart, even if guardrail recovery preceded triage
+        # and the approved pass has no escalations file.
+        admitted_ceiling = admitted_pass_ceiling(task.folder, fix_pass_cap)
+        max_passes = admitted_ceiling if admitted_ceiling > fix_pass_cap + 1
         # A task can be intentionally rewound into review after exhausting its
         # configured pass cap. If the entry CI gate repairs that previously
         # reviewed head, admit exactly the next on-disk pass so the repair is
@@ -235,16 +316,22 @@ module Hive
         # while the completed on-disk pass still points at the older HEAD. Do
         # not turn that restart boundary into a false max-pass escalation.
         #
-        # New sentinels bind pass completion to HEAD. A matching HEAD means
-        # the pass had already reached the browser boundary, so resume there.
-        # A different HEAD authorizes one fresh pass. Legacy sentinels have no
-        # head binding; fail safe by reviewing the current HEAD once rather
-        # than requiring an operator to clear a synthetic stale marker.
+        # New sentinels bind pass completion to HEAD. A matching HEAD whose
+        # pass ended reviewer-clean (or operator-approved) had already reached
+        # the browser boundary, so resume there; the entry gate above has
+        # just proved CI on that exact HEAD. A matching HEAD whose pass ended
+        # by applying fixes still owes those fixes a review, so it opens the
+        # verify pass instead of completing unreviewed. A different HEAD
+        # authorizes one fresh pass. Legacy sentinels have no head binding;
+        # fail safe by reviewing the current HEAD once rather than requiring
+        # an operator to clear a synthetic stale marker.
         resume_browser = false
         if !entry_ci_repaired && pass > max_passes &&
            on_disk_pass == pass - 1 && completed_pass_receipt?(task.folder, on_disk_pass)
           completed_head = fix_success_head(task.folder, on_disk_pass)
-          if !completed_head.nil? && completed_head == git_head(worktree_path)
+          if !completed_head.nil? && completed_head == git_head(worktree_path) &&
+             completed_head == ci_validated_head &&
+             !completed_pass_unreviewed?(ctx.with(pass: on_disk_pass))
             pass = on_disk_pass
             resume_browser = true
           else
@@ -283,6 +370,15 @@ module Hive
           end
 
           ctx_pass = ctx.with(pass: pass)
+          # A verify-only pass never resumes into Phase 4 on stale [x] marks
+          # or answered escalations: a retry of it (including one after its
+          # own REVIEW_STALE) re-runs the reviewers against the current HEAD.
+          verify_only = pass > fix_pass_cap
+          @verify_mode = verify_only
+          if verify_only
+            publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+            return publication_stop if publication_stop
+          end
 
           # U5 — fix-guardrail approval-on-resume. When the user has
           # ticked [x] on every line of reviews/fix-guardrail-NN.md
@@ -299,8 +395,7 @@ module Hive
           #
           # Two safety checks before advancing:
           # worktree_dirty? catches manual edits between trip and
-          # approval; the max_passes-boundary check breaks to Phase 5
-          # instead of writing REVIEW_STALE on an approved pass. The
+          # approval; approval at the cap admits a verify-only pass. The
           # pass-match is handled by the enclosing `resuming_from_waiting?`
           # entry guard, so it's a precondition for entering this branch
           # rather than an additional check.
@@ -359,16 +454,15 @@ module Hive
                          status: :review_error }
               end
 
-              write_fix_success(ctx_pass)
+              write_fix_success(ctx_pass, kind: "approved")
+              @admissible_head = git_head(worktree_path)
+              @withheld_reason = nil
+              publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+              return publication_stop if publication_stop
               marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
               fix_retry_pass = nil
-              # If we approved the very last pass-cap-N pass, advancing
-              # to pass N+1 would immediately hit the `pass > max_passes`
-              # guard above and write REVIEW_STALE — masking the
-              # approval. Break to Phase 5 (browser test) instead so
-              # the approved commits make it through to the terminal
-              # state.
-              break if pass >= max_passes
+              # Review the approved commits without granting another fix pass.
+              max_passes = pass + 1 if pass >= max_passes
 
               pass += 1
               next
@@ -398,7 +492,8 @@ module Hive
           # deleted them between runs, surface as REVIEW_ERROR
           # resume_no_findings instead of looping with an empty fix
           # prompt.
-          skip_review_and_triage = resuming_from_waiting?(marker, pass) || pass == fix_retry_pass
+          skip_review_and_triage = !verify_only &&
+                                   (resuming_from_waiting?(marker, pass) || pass == fix_retry_pass)
           if skip_review_and_triage &&
              Hive::Stages::Review::Triage.discover_reviewer_files(ctx_pass).empty?
             Hive::Markers.set(task.state_file, :review_error,
@@ -415,13 +510,34 @@ module Hive
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
             reviewer_limit_texts = []
+            reviewer_unsupported_texts = []
+            # A cooled retry of a triage-limited pass reuses the reviewer
+            # outputs that pass already produced at this exact HEAD, so only
+            # the reviewers that failed re-spend provider quota.
+            reviewed_head = git_head(worktree_path)
+            @reviewed_head = reviewed_head
+            reusable_outputs = Hive::Stages::Review::ReviewerReuse.consume(ctx_pass, head: reviewed_head)
+            succeeded_reviewers = []
             reviewers_result = run_reviewers(
               cfg, ctx_pass, task,
               started_at: started_at, max_wall_clock_sec: max_wall_clock,
-              limit_texts: reviewer_limit_texts
+              limit_texts: reviewer_limit_texts,
+              reuse: reusable_outputs, succeeded: succeeded_reviewers,
+              unsupported_texts: reviewer_unsupported_texts
             )
+            if verify_only && git_head(worktree_path) != reviewed_head
+              return review_head_moved(task, pass)
+            end
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
+            end
+            if reviewers_result == :all_failed_model_unsupported
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :reviewers, reason: Hive::ModelUnsupported::REASON, pass: pass,
+                                model: Hive::ModelUnsupported.model_name(reviewer_unsupported_texts.first),
+                                message: model_unsupported_summary(reviewer_unsupported_texts.first, :reviewers))
+              return { commit: "reviewers_#{Hive::ModelUnsupported::REASON}_pass_#{format('%02d', pass)}",
+                       status: :review_error }
             end
             if reviewers_result == :all_failed || reviewers_result == :all_failed_limit
               limit = reviewers_result == :all_failed_limit
@@ -458,6 +574,7 @@ module Hive
               warn "[hive.review] suppressed #{stripped} no-fix finding(s) before triage for pass #{format('%02d', pass)}" if stripped.positive?
 
               @current_phase = :triage
+              pre_triage_digests = Hive::Stages::Review::ReviewerReuse.digests(ctx_pass, succeeded_reviewers)
               triage_result = run_triage_with_retries(
                 cfg, ctx_pass, task, pass: pass,
                 started_at: started_at, max_wall_clock_sec: max_wall_clock
@@ -491,6 +608,11 @@ module Hive
                   error_message: triage_result.error_message,
                   limit_text: triage_result.limit_text
                 )
+                if limited && git_head(worktree_path) == reviewed_head
+                  Hive::Stages::Review::ReviewerReuse.record(
+                    ctx_pass, head: reviewed_head, pre_triage_digests: pre_triage_digests
+                  )
+                end
                 label = limited ? "triage_limits_reached" : "triage_error"
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
                          status: :review_error }
@@ -542,38 +664,48 @@ module Hive
             # hosted checks on the exact PR head have settled. Only rerun the
             # gates when HEAD moved since the last proof; ordinary reviewers
             # are read-only, so an unchanged exact SHA preserves that proof.
-            before_ci_head = git_head(worktree_path)
-            if ci_validated_head != before_ci_head
-              @current_phase = :ci
-              mark_working(task, phase: :ci, pass: pass)
-              terminal = run_ci_gates(
-                task, cfg, ctx_pass,
-                started_at: started_at, max_wall_clock_sec: max_wall_clock,
-                pass: pass
-              )
-              return terminal if terminal
+            gate = completion_ci_gate(
+              task, cfg, ctx_pass, ci_validated_head,
+              started_at: started_at, max_wall_clock_sec: max_wall_clock
+            )
+            return gate.terminal if gate.terminal
 
-              after_ci_head = git_head(worktree_path)
-              ci_validated_head = after_ci_head
-              if after_ci_head != before_ci_head
-                # The CI repair is real implementation work. Complete this
-                # pass, then make a fresh reviewer pass validate that commit
-                # instead of allowing the repair to bypass review.
-                write_fix_success(ctx_pass)
-                marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
-                fix_retry_pass = nil
-                max_passes += 1
-                pass += 1
-                next
-              end
+            ci_validated_head = gate.head
+            if gate.repaired
+              # The CI repair is real implementation work. Complete this
+              # pass, then make a fresh reviewer pass validate that commit
+              # instead of allowing the repair to bypass review.
+              write_fix_success(ctx_pass, kind: "ci_repaired")
+              marker = Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+              fix_retry_pass = nil
+              max_passes += 1
+              pass += 1
+              next
             end
 
             # Phase 2 produced zero findings and the exact head is green →
             # skip Phase 4 and jump to Phase 5. Mark the pass complete so a
             # subsequent re-entry (for example, wall-clock stale before the
             # browser result) does not classify it as an incomplete fix.
-            write_fix_success(ctx_pass)
+            write_fix_success(ctx_pass, kind: "clean")
             break
+          end
+
+          if verify_only && git_head(worktree_path) != @reviewed_head
+            return review_head_moved(task, pass)
+          end
+          if verify_only
+            # The verify pass reviews commits that already used the final
+            # fix pass. Any accepted finding or escalation means those
+            # commits are not proven, and the fix budget is spent: stop for
+            # an operator without spawning another fix agent.
+            Hive::Markers.set(task.state_file, :review_stale,
+                              reason: "final_fix_unverified",
+                              accepted: accepted_findings.count,
+                              escalations: escalations_count,
+                              pass: pass)
+            return { commit: "stale_final_fix_unverified_pass_#{format('%02d', pass)}",
+                     status: :review_stale }
           end
 
           if accepted.strip.empty?
@@ -599,11 +731,20 @@ module Hive
           end
 
           # --- Phase 4: fix ---
+          @withheld_reason = "fix_guardrail_receipt_required"
           pre_effect_routing_validation = true
           fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           pre_effect_routing_validation = false
           @current_phase = :fix
           mark_working(task, phase: :fix, pass: pass)
+          # Bind the post-fix guardrail before CleanExit snapshots any residue.
+          # A recovery from fix_auto_commit_scope_failed re-enters with the
+          # rejected fix-agent edits still dirty. prepare_worktree_for_fix
+          # preserves those edits in a checkpoint commit before the retrying
+          # fix agent runs; capturing HEAD afterwards would omit that whole
+          # checkpoint from the guardrail diff and launder precisely the
+          # changes the scope check rejected.
+          before_fix_head = git_head(worktree_path)
           pre_fix_status = prepare_worktree_for_fix(task, cfg, worktree_path)
           case pre_fix_status
           when :dirty
@@ -663,8 +804,6 @@ module Hive
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
           agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-          before_fix_head = git_head(worktree_path)
-
           fix_result = spawn_fix_agent(
             task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
             agent_custody: agent_custody
@@ -692,20 +831,7 @@ module Hive
             task, cfg, "review.fix", fix_result
           )
 
-          # Compute the post-fix worktree status once and reuse it for both
-          # the completion-fallback evidence and the auto-commit branch
-          # below, rather than spawning the git subprocess twice.
-          post_fix_status = worktree_status(worktree_path)
-
-          if agent_failed?(fix_result) &&
-             !handle_fix_completion_fallback(
-               task,
-               ctx_pass,
-               fix_result,
-               before_fix_head: before_fix_head,
-               after_fix_head: after_fix_head,
-               worktree_status: post_fix_status
-             )
+          if agent_failed?(fix_result)
             limited = mark_review_phase_failure(
               task, phase: :fix, pass: pass,
               error_message: fix_result && fix_result[:error_message],
@@ -716,6 +842,7 @@ module Hive
                      status: :review_error }
           end
 
+          post_fix_status = worktree_status(worktree_path)
           case post_fix_status
           when :dirty
             auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
@@ -773,9 +900,16 @@ module Hive
           # wall-clock fired between this point and the next pass's
           # reviewers) recognises pass N as done and advances to N+1
           # rather than retrying the fix on already-applied [x] marks.
-          write_fix_success(ctx_pass)
+          write_fix_success(ctx_pass, kind: "fixed")
+          @admissible_head = after_fix_head
+          @withheld_reason = nil
+          publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx_pass)
+          return publication_stop if publication_stop
 
-          break if pass >= max_passes
+          # The fixes just applied have not been reviewed or CI-gated yet.
+          # After the final fix pass, admit exactly one verify-only pass
+          # (pass > fix_pass_cap) rather than completing on unreviewed code.
+          max_passes = pass + 1 if pass >= max_passes
 
           # On the next iteration, treat as fresh entry (not waiting-
           # resume / fix-retry). fix_retry_pass only ever applies to
@@ -786,10 +920,16 @@ module Hive
           pass += 1
         end
 
+        deferred = Hive::Stages::Review::Convergence.write_deferred_summary!(ctx.task_folder)
+        warn "[hive.review] deferred #{deferred} finding(s) for at most one follow-up" if deferred.positive?
+
         # --- Phase 5: browser test ---
         @current_phase = :browser
         mark_working(task, phase: :browser, pass: pass)
+        @reviewed_head ||= git_head(worktree_path)
         browser_result = Hive::Stages::Review::BrowserTest.run!(cfg: cfg, ctx: ctx.with(pass: pass))
+
+        return review_head_moved(task, pass) if git_head(worktree_path) != @reviewed_head
 
         case browser_result.status
         when :passed, :skipped, :warned
@@ -815,7 +955,10 @@ module Hive
         # `reason=runner_exception exception_class=Hive::ConfigError`,
         # discarding the message. Surface it as a config-phase error
         # marker that preserves the message in the `reason` attr.
-        raise if pre_effect_routing_validation
+        if pre_effect_routing_validation
+          @publication_context = nil
+          raise
+        end
 
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
@@ -835,14 +978,6 @@ module Hive
         end
         Hive::Markers.set(task.state_file, :review_error, attrs)
         raise
-      rescue Hive::AgentError => e
-        raise unless Hive::ClaudeLauncher.tmux_unavailable_error?(e)
-
-        Hive::Markers.set(task.state_file, :review_error,
-                          phase: @current_phase || :pre_flight,
-                          reason: "tmux_unavailable",
-                          message: e.message)
-        { commit: "review_error_tmux_unavailable", status: :review_error }
       rescue StandardError => e
         # Any uncaught helper exception would otherwise leave a stale
         # REVIEW_WORKING marker on disk. Translate to REVIEW_ERROR with
@@ -850,11 +985,11 @@ module Hive
         # the failure state, then re-raise so the runner / test suite
         # still surfaces the underlying bug.
         #
-        # Truncate `e.message` to a bounded length: when a helper
-        # (e.g. `prepare_claude_session!`) raises with a pane-tail
-        # context, that tail is the single most actionable debug signal
-        # for the operator. Dropping the message entirely (the previous
-        # `exception_class`-only marker) silently hid it.
+        # Truncate `e.message` to a bounded length: when a helper raises
+        # with diagnostic context, that context is the single most
+        # actionable debug signal for the operator. Dropping the message
+        # entirely (the previous `exception_class`-only marker) silently
+        # hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
                           reason: "runner_exception",
@@ -869,10 +1004,132 @@ module Hive
         close_phase_event!(task) if @open_phase_event
       end
 
+      def review_head_moved(task, pass)
+        Hive::Markers.set(task.state_file, :review_error, reason: "verification_head_moved", pass: pass)
+        { commit: "verification_head_moved", status: :review_error }
+      end
+
+      def publish_review_head(task:, cfg:, ctx:)
+        return nil unless adhoc_fix_enabled?(cfg, task)
+        pr_path = File.join(task.folder, "pr.md")
+        return nil unless File.file?(pr_path)
+        url = Hive::Gh.pr_frontmatter(pr_path)["pr_url"].to_s
+        return nil if url.empty?
+        head = git_head(ctx.worktree_path)
+        withheld = @withheld_reason
+        withheld ||= "unapproved_head_movement" if @admissible_head != head
+        if @publication_attempt_head != head || @publication_attempt_withheld != withheld || !@review_publisher
+          @review_publisher = Publication.new(task: task, cfg: cfg, ctx: ctx, pr_url: url)
+          @publication_attempt_head = head
+          @publication_attempt_withheld = withheld
+          @review_publisher.publish!(expected_head: head, withheld: withheld)
+        end
+        evidence = @review_publisher.evidence
+        if withheld
+          return nil unless Hive::Markers.current(task.state_file).name == :review_complete
+          Hive::Markers.set(task.state_file, :review_error, reason: "review_publication_withheld", publication_reason: withheld, pass: ctx.pass)
+          return { commit: "review_publication_withheld", status: :review_error }
+        end
+        return nil if evidence["publication"] == "published" && evidence["failure_reason"].nil?
+
+        Hive::Markers.set(task.state_file, :review_error, reason: "review_publication_failed",
+                          publication_reason: evidence["failure_reason"], pass: ctx.pass)
+        { commit: "review_publication_failed", status: :review_error }
+      end
+
+      def finalize_review_outcome(task, cfg, result)
+        return result unless @publication_context
+        marker = Hive::Markers.current(task.state_file)
+        return result unless %i[review_complete review_stale review_ci_stale review_error review_waiting].include?(marker.name)
+        original_attrs = marker.attrs.dup
+        original_name = marker.name
+        ctx = @publication_context.with(pass: marker.attrs["pass"].to_i)
+        waiting = marker.name == :review_waiting
+        @withheld_reason ||= "guardrail_approval_required" if waiting && marker.attrs["reason"] == "fix_guardrail"
+        # Pauses retain every resume attr; publication evidence cannot replace
+        # them with an error. A new admissible fix was already published at its
+        # receipt boundary; this handles deadlines and exceptional exits too.
+        stop = publish_review_head(task: task, cfg: cfg, ctx: ctx)
+        evidence = if @review_publisher
+          @review_publisher.evidence.dup
+        else
+          { "publication" => "not_applicable", "verification" => "pending",
+            "worktree" => ctx.worktree_path, "local_head" => git_head(ctx.worktree_path),
+            "failure_reason" => "no_mutating_pr_identity", "observed_at" => Time.now.utc.iso8601 }
+        end
+        evidence.merge!(@review_ci_evidence || {})
+        %w[local_ci hosted_ci].each do |gate|
+          if evidence[gate] != "skipped" && evidence["#{gate}_head"] != evidence["local_head"]
+            evidence[gate] = "pending"
+          end
+        end
+        evidence["local_ci"] = "skipped" if cfg.dig("review", "ci", "command").to_s.strip.empty?
+        evidence["hosted_ci"] = "skipped" if cfg.dig("review", "github_checks", "enabled") == false
+        evidence["origin_reason"] = original_attrs["reason"] if stop
+        if original_attrs["reason"] == "final_fix_unverified"
+          evidence["reviewer_files"] = Hive::Stages::Review::Triage.discover_reviewer_files(ctx).map { |path| "reviews/#{File.basename(path)}" }
+        end
+        if !waiting && @withheld_reason
+          evidence["publication"] = "unpublished"
+          evidence["failure_reason"] = @withheld_reason
+        elsif !waiting && @review_publisher && !stop
+          begin
+            @review_publisher.confirm!(evidence.fetch("local_head"))
+            evidence.merge!(@review_publisher.evidence)
+          rescue Publication::Stop => e
+            evidence.merge!(@review_publisher.evidence)
+            evidence["verification"] = "pending"
+            evidence["failure_reason"] = e.reason
+            Hive::Markers.set(task.state_file, :review_error,
+              reason: "review_publication_confirmation_failed", publication_reason: e.reason, pass: ctx.pass)
+            stop = { commit: "review_publication_confirmation_failed", status: :review_error }
+          end
+        end
+        if stop
+          evidence["origin_reason"] = original_attrs["reason"]
+        elsif original_name == :review_complete
+          evidence["verification"] = "verified"
+        elsif %i[review_stale review_ci_stale].include?(original_name)
+          evidence["verification"] = "failed"
+        end
+        if waiting
+          marker = Hive::Markers::State.new(name: original_name, attrs: original_attrs, raw: nil)
+        else
+          marker = Hive::Markers.current(task.state_file)
+          result = stop if stop
+        end
+        Hive::Markers.set(task.state_file, marker.name, **original_attrs.merge(marker.attrs).merge(Hive::ReviewPublicationRecovery.encode(evidence)))
+        if marker.name == :review_complete && evidence["is_draft"] == true && evidence["pr_state"] == "OPEN"
+          guidance = Hive::ReviewPublicationRecovery.project(Hive::ReviewPublicationRecovery.encode(evidence))
+          warn guidance["readiness_guidance"]
+          warn "Conditional manual alternative: #{guidance['ready_command']}" if guidance["ready_command"]
+        end
+        result
+      end
+
       # Marker attr values are scanned by the internal task graph and read by
       # the TUI; an unbounded multi-kilobyte tail in a single attr would
-      # break the line-oriented marker format. 500 bytes is the same cap
-      # `prepare_claude_session!` uses for its own tail capture.
+      # break the line-oriented marker format, so cap it at 500 bytes.
+      # A merged or closed task PR must not receive CI-fix, reviewer, triage,
+      # or fix agents: their commits would land on an already-delivered
+      # branch. The marker is left untouched so a later observation that the
+      # PR reopened resumes review normally; no observation keeps the
+      # pre-existing behavior.
+      def settled_pull_request_result(task)
+        outcome = Hive::PullRequestOutcome.latest(task.folder)
+        return nil unless outcome&.settled?
+
+        if outcome.merged?
+          warn "hive: #{outcome.pr_url} is merged; review agents will not run. If Hive does not archive it, run " \
+               "`hive archive #{task.slug} --reason already_delivered --evidence #{outcome.pr_url}`"
+          { commit: nil, status: :pull_request_merged }
+        else
+          warn "hive: #{outcome.pr_url} was closed without merging; review agents will not run. " \
+               "Reopen the pull request or archive the task with an operator closure reason"
+          { commit: nil, status: :pull_request_closed_unmerged }
+        end
+      end
+
       def truncate_marker_message(message, max: 500, ellipsis: "...")
         return "" if message.nil?
 
@@ -1019,210 +1276,6 @@ module Hive
           status: :review_stale }
       end
 
-      def handle_fix_completion_fallback(task, ctx, fix_result, before_fix_head:, after_fix_head:, worktree_status:)
-        evidence = fix_result && fix_result[:completion_evidence]
-        return false unless evidence
-
-        # Scan the reviewer files for whole-pass no-change evidence ONCE and
-        # thread the boolean through both the phase-fact gate and the audit
-        # message, rather than re-globbing/re-reading `reviews/*-NN.md` twice
-        # per fallback (mirrors the "compute worktree_status once" change).
-        no_change = no_change_evidence_present?(ctx)
-
-        phase_facts = fix_completion_fallback_phase_facts(
-          ctx,
-          before_fix_head: before_fix_head,
-          after_fix_head: after_fix_head,
-          worktree_status: worktree_status,
-          error_message: fix_result[:error_message],
-          no_change: no_change
-        )
-        decision = Hive::ClaudeCompletionFallback.suppress?(
-          evidence: evidence,
-          phase_facts: phase_facts
-        )
-        return false unless decision[:suppress]
-
-        # Do NOT write the success sentinel here. Control falls through to
-        # the normal post-fix path, where the FixGuardrail may trip and
-        # return review_waiting WITHOUT a sentinel (by design, so the
-        # pending human approval can't be bypassed). The legitimate
-        # write_fix_success there owns the sentinel; writing it early would
-        # let a stale sentinel launder a guardrail-blocked pass as complete.
-        #
-        # R5/R6: a suppression MUST be auditable. If the
-        # claude_completion_fallback event can't be recorded, do NOT laundry
-        # the pass to success silently — return false so control falls
-        # through to a terminal (but daemon-recoverable) REVIEW_ERROR instead
-        # of a SUCCESS with no audit trail.
-        emit_fix_completion_fallback(
-          task, ctx, evidence, phase_facts, decision,
-          before_fix_head: before_fix_head,
-          after_fix_head: after_fix_head,
-          worktree_status: worktree_status,
-          no_change: no_change
-        )
-      end
-
-      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_status:, error_message:, no_change:)
-        {
-          artifacts_present: fix_completion_fallback_artifacts_present?(ctx),
-          commit_or_no_change: fix_completion_commit_or_no_change?(
-            ctx,
-            before_fix_head: before_fix_head,
-            after_fix_head: after_fix_head,
-            worktree_status: worktree_status,
-            no_change: no_change
-          ),
-          no_unresolved_escalation: count_escalations(ctx).zero?,
-          worktree_readable: !worktree_status.is_a?(Array),
-          missing_output_absent: !missing_output_error?(error_message)
-        }
-      end
-
-      def fix_completion_fallback_artifacts_present?(ctx)
-        path = Hive::Stages::Review::Triage.escalations_path(ctx)
-        return false unless File.exist?(path) && File.size(path).positive?
-
-        count_escalations(ctx).is_a?(Integer)
-      rescue SystemCallError, IOError
-        false
-      end
-
-      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
-        return true if before_fix_head.to_s != "" &&
-                       after_fix_head.to_s != "" &&
-                       before_fix_head != after_fix_head
-
-        # A dirty worktree is a real, uncommitted code change the
-        # orchestrator's post-fix auto_commit_fix_worktree will land. HEAD
-        # is captured BEFORE that auto-commit, so for the normal case (the
-        # fix agent leaves changes uncommitted) before_fix_head ==
-        # after_fix_head and the SHA branch above misses it — treat a dirty
-        # worktree as a code change, not a no-change pass (KTD4/HLD).
-        return true if worktree_status == :dirty
-
-        # `no_change` is the whole-pass no-change scan, computed once by the
-        # caller and threaded in to avoid re-reading the reviewer files.
-        no_change
-      end
-
-      # "Whole-pass no-change": the fallback may treat the pass as needing
-      # no code change ONLY when no AUTO-FIX work remained unapplied (every
-      # finding was dispositioned RESOLVED/NO-FIX). A single no-fix line
-      # alongside an unapplied `[x] AUTO-FIX:` finding is NOT proof — that
-      # mixed pass still owes a real change and must not be suppressed
-      # without a commit/dirty worktree (brainstorm A2). Reuses
-      # `auto_fix_finding_line?` so this gate and the accepted-findings
-      # collector can never drift.
-      def no_change_evidence_present?(ctx)
-        pass_suffix = format("%02d", ctx.pass)
-        saw_no_fix = false
-        Dir[File.join(ctx.task_folder, "reviews", "*-#{pass_suffix}.md")].each do |path|
-          next unless reviewer_file?(File.basename(path))
-
-          File.readlines(path).each do |line|
-            return false if auto_fix_finding_line?(line)
-
-            saw_no_fix = true if line =~ /^\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:/i
-          end
-        end
-        saw_no_fix
-      rescue SystemCallError, IOError
-        false
-      end
-
-      # Forward-compat guard for the shared completion predicate. On the
-      # current exit_code_only fix path `error_message` is fixed to "claude
-      # stop hook did not signal completion", so this never matches and
-      # `missing_output_absent` is always true here. It stays so that any
-      # future `:output_file_exists`-mode caller of the fallback (whose
-      # errors DO read "expected output file missing") is gated correctly.
-      def missing_output_error?(message)
-        message.to_s.match?(/expected output file missing|missing output|output .* missing/i)
-      end
-
-      # Emit the audit event and report whether it was actually recorded.
-      # Returns true on a successful emit, false if recording failed — the
-      # caller treats a false here as "suppression is not auditable" and
-      # declines to launder the pass to success (R5/R6).
-      def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision,
-                                       before_fix_head:, after_fix_head:, worktree_status:, no_change:)
-        Hive::Events.emit(
-          task_folder: task.folder,
-          slug: task.slug,
-          stage: stage_label_for(task),
-          event_type: :claude_completion_fallback,
-          agent: "phase=fix pass=#{format('%02d', ctx.pass)}",
-          message: claude_completion_fallback_message(
-            task, ctx, evidence, phase_facts, decision,
-            before_fix_head: before_fix_head,
-            after_fix_head: after_fix_head,
-            worktree_status: worktree_status,
-            no_change: no_change
-          )
-        )
-        true
-      rescue SystemCallError, IOError, JSON::JSONError
-        false
-      end
-
-      def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision,
-                                             before_fix_head:, after_fix_head:, worktree_status:, no_change:)
-        # R5: record WHAT was checked, not just booleans — the artifact path
-        # inspected and the concrete commit (before→after head SHA) or the
-        # no-change basis — so a suppressed fallback is auditable after the
-        # fact. Events.emit truncates to MAX_MESSAGE_BYTES, so keep values
-        # compact (short SHAs, basename of the artifact).
-        #
-        # `outcome=fallback_evaluated` is deliberate: this event records that
-        # the completion fallback FIRED and its evidence held — NOT that the
-        # pass was accepted as complete. It is emitted before the post-fix
-        # guardrail runs, which may still trip and return review_waiting
-        # (pending human approval) WITHOUT a success sentinel. Wording it as
-        # "evaluated" keeps a guardrail-blocked pass from reading as done.
-        parts = {
-          phase: "fix",
-          pass: format("%02d", ctx.pass),
-          outcome: "fallback_evaluated",
-          task: task.slug,
-          pid: evidence[:pid],
-          session_alive: evidence[:session_alive],
-          done: evidence[:expected_done_path],
-          result: evidence[:expected_result_path],
-          reason: evidence[:reason],
-          artifacts: phase_facts[:artifacts_present],
-          artifacts_checked: File.basename(Hive::Stages::Review::Triage.escalations_path(ctx).to_s),
-          commit_or_no_change: phase_facts[:commit_or_no_change],
-          commit_evidence: fix_completion_commit_evidence(
-            ctx,
-            before_fix_head: before_fix_head,
-            after_fix_head: after_fix_head,
-            worktree_status: worktree_status,
-            no_change: no_change
-          ),
-          no_unresolved_escalation: phase_facts[:no_unresolved_escalation],
-          missing: Array(decision[:missing]).join("|")
-        }
-        parts.map { |key, value| "#{key}=#{value}" }.join(" ")
-      end
-
-      # Compact, human-auditable description of WHY commit_or_no_change held:
-      # the concrete before→after head SHAs when a commit landed, a dirty
-      # worktree (the auto-commit will land), or the whole-pass no-change
-      # basis. Mirrors fix_completion_commit_or_no_change?'s branch order.
-      def fix_completion_commit_evidence(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
-        before = before_fix_head.to_s
-        after = after_fix_head.to_s
-        return "commit:#{before[0, 12]}->#{after[0, 12]}" if before != "" && after != "" && before != after
-        return "dirty_worktree" if worktree_status == :dirty
-        # `no_change` is threaded in from the caller (computed once) so this
-        # audit string doesn't re-scan the reviewer files.
-        return "whole_pass_no_change" if no_change
-
-        "none"
-      end
-
       # A per-pass review-phase agent (triage, fix) that died because the
       # provider hit a usage/credit limit must self-heal like the reviewers
       # phase already does — not sit terminally red until a human retries.
@@ -1235,7 +1288,15 @@ module Hive
       # earns the self-healing retry stamp. Returns whether the limit path
       # was taken so the caller can label its commit.
       def mark_review_phase_failure(task, phase:, pass:, error_message:, limit_text: nil)
-        if limit_failure?(limit_text: limit_text, error_message: error_message)
+        if Hive::ModelUnsupported.detected?(error_message.to_s)
+          # Operator-owned model configuration: no provider cooldown, and the
+          # daemon healer leaves it for the operator (see ModelUnsupported).
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: phase, reason: Hive::ModelUnsupported::REASON, pass: pass,
+                            model: Hive::ModelUnsupported.model_name(error_message.to_s),
+                            message: model_unsupported_summary(error_message, phase))
+          false
+        elsif limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
@@ -1252,6 +1313,10 @@ module Hive
         end
       end
 
+      def model_unsupported_summary(error_message, phase)
+        review_phase_error_summary("#{phase}: #{Hive::ModelUnsupported.operator_message(error_message)}")
+      end
+
       def limit_failure?(limit_text:, error_message:)
         !limit_text.to_s.empty? || Hive::AgentLimit.from_limit?(error_message.to_s)
       end
@@ -1263,7 +1328,7 @@ module Hive
 
       # Condense a phase agent's `error_message` into a single-line marker
       # attribute. The reason attr carries the coarse closed-enum class; this
-      # preserves the condensed cause (a tmux session death, an "expected
+      # preserves the condensed cause (an agent crash, an "expected
       # output missing" timeout, a CLI crash) so `status.md`,
       # the internal task graph, and the web diagnostic card show something
       # actionable even when the class falls back to `unknown`. nil/blank
@@ -1282,13 +1347,11 @@ module Hive
       end
 
       # Run the triage phase with a bounded retry budget, mirroring the
-      # per-reviewer retry in Hive::Reviewers::Agent. Triage drives an
-      # interactive agent over tmux; on a loaded host a single transient
-      # infra blip (a momentary `tmux has-session` failure misread as
-      # "session terminated", an "expected output missing" timeout) used to
-      # fail triage outright and park the task in 6-review with a terminal
-      # review-error marker that the daemon never auto-retries. Retrying
-      # the same transient class that reviewers already retry keeps an infra
+      # per-reviewer retry in Hive::Reviewers::Agent. On a loaded host a
+      # single transient infra blip (an "expected output missing" timeout)
+      # used to fail triage outright and park the task in 6-review with a
+      # terminal review-error marker that the daemon never auto-retries.
+      # Retrying the same transient class that reviewers already retry keeps an infra
       # flake from sticking the whole task.
       #
       # Non-retryable outcomes return immediately:
@@ -1310,6 +1373,7 @@ module Hive
           return result if result.status == :ok
           return result if result.status == :tampered
           return result if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
+          return result if Hive::ModelUnsupported.detected?(result.error_message.to_s)
           return result if attempt >= max_attempts
 
           # Don't start another full triage spawn (timeout_sec default 1800s) if
@@ -1458,6 +1522,18 @@ module Hive
         true
       end
 
+      # A restart that advances past a completed pass whose admissible
+      # receipt (fixed/approved/ci_repaired) is bound to the current HEAD
+      # may have crashed between writing that receipt and publishing it.
+      # Publish before any further reviewer pass, pre-cap passes included.
+      def resumed_unreviewed_receipt?(task_folder, disk_pass, next_pass)
+        return false unless @withheld_reason.nil? && next_pass > disk_pass &&
+                            completed_pass_receipt?(task_folder, disk_pass)
+
+        FIX_SUCCESS_UNREVIEWED_KINDS.include?(fix_success_kind(task_folder, disk_pass)) &&
+          fix_success_head(task_folder, disk_pass) == @admissible_head
+      end
+
       def completed_pass_receipt?(task_folder, pass)
         File.exist?(fix_success_path(task_folder, pass)) &&
           pass_completion_status(task_folder, pass) == :complete
@@ -1468,6 +1544,56 @@ module Hive
         first_line[/\bhead=([0-9a-f]{40,64})\b/, 1]
       rescue SystemCallError, IOError
         nil
+      end
+
+      def fix_success_kind(task_folder, pass)
+        first_line = File.open(fix_success_path(task_folder, pass), &:gets).to_s
+        first_line[/\bkind=([a-z_]+)\b/, 1]
+      rescue SystemCallError, IOError
+        nil
+      end
+
+      # Whether a completed pass left commits that no reviewer has seen.
+      # The sentinel's `kind=` answers directly; a legacy sentinel without
+      # one falls back to the pass's own artifacts — accepted findings mean
+      # Phase 4 ran, so its fixes still owe a review.
+      def completed_pass_unreviewed?(ctx)
+        kind = fix_success_kind(ctx.task_folder, ctx.pass)
+        return FIX_SUCCESS_UNREVIEWED_KINDS.include?(kind) if kind
+
+        collect_accepted_findings_with_count(ctx).count.positive?
+      end
+
+      # Every route into Phase 5 crosses this gate: local CI and the hosted
+      # checks must have settled on the exact HEAD about to complete. The
+      # gates rerun only when HEAD moved since `validated_head` was proven;
+      # reviewers are read-only, so an unchanged SHA keeps its proof. Any
+      # CI fixer commit is reported as `repaired` so the caller can send it
+      # through a fresh reviewer pass.
+      def completion_ci_gate(task, cfg, ctx, validated_head, started_at:, max_wall_clock_sec:)
+        before_head = git_head(ctx.worktree_path)
+        if @verify_mode && @reviewed_head && before_head != @reviewed_head
+          return CompletionCiGate.new(terminal: review_head_moved(task, ctx.pass), head: nil, repaired: false)
+        end
+        if validated_head == before_head
+          return CompletionCiGate.new(terminal: nil, head: before_head, repaired: false)
+        end
+
+        @current_phase = :ci
+        mark_working(task, phase: :ci, pass: ctx.pass)
+        terminal = run_ci_gates(
+          task, cfg, ctx,
+          started_at: started_at, max_wall_clock_sec: max_wall_clock_sec,
+          pass: ctx.pass, no_repair: @verify_mode
+        )
+        return CompletionCiGate.new(terminal: terminal, head: nil, repaired: false) if terminal
+
+        after_head = git_head(ctx.worktree_path)
+        if @verify_mode && after_head != before_head
+          return CompletionCiGate.new(terminal: review_head_moved(task, ctx.pass), head: nil, repaired: false)
+        end
+        @admissible_head = after_head
+        CompletionCiGate.new(terminal: nil, head: after_head, repaired: after_head != before_head)
       end
 
       # Back-compat shim: PR #56 named the narrower predicate this. Now
@@ -1500,16 +1626,29 @@ module Hive
         end
 
         # Defend against hostile / stale `*-99.md` files by capping at
-        # max_passes + 1. A user manually editing a reviewer file with
-        # a wildly higher NN would otherwise drive the loop past
-        # `review.max_passes` and overwrite real findings.
+        # the highest pass the runner could have admitted. A user manually
+        # editing a reviewer file with a wildly higher NN would otherwise
+        # drive the loop past `review.max_passes` and overwrite real
+        # findings.
         max_passes = cfg ? (cfg.dig("review", "max_passes") || 4) : nil
-        if max_passes && max > max_passes + 1
+        if max_passes && max > admitted_pass_ceiling(task_folder, max_passes)
           raise Hive::ConfigError,
                 "review pass NN=#{max} exceeds review.max_passes=#{max_passes}; remove or rename #{offending}"
         end
 
         max
+      end
+
+      # Highest pass number the runner can legitimately have on disk. The
+      # verify pass (max_passes + 1) is always admissible. Beyond it, a pass
+      # exists because the previous pass completed through a CI repair or
+      # guardrail approval, each of which admits exactly one more reviewer
+      # pass. Walk that chain of controller-written receipts so a retry can
+      # resume that verify-only pass; the first pass without one bounds it.
+      def admitted_pass_ceiling(task_folder, max_passes)
+        ceiling = max_passes + 1
+        ceiling += 1 while %w[ci_repaired approved].include?(fix_success_kind(task_folder, ceiling))
+        ceiling
       end
 
       # Run every configured reviewer sequentially. Returns :all_failed
@@ -1538,7 +1677,8 @@ module Hive
       # we short-circuit between reviewers as soon as the budget is
       # gone — the partial results stay on disk for the next run to
       # consume.
-      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [])
+      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [],
+                        reuse: {}, succeeded: [], unsupported_texts: [])
         specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
@@ -1590,82 +1730,32 @@ module Hive
         # classified (e.g. every reviewer hit a usage/credit limit) instead of
         # being flattened to a generic "all_failed".
         error_messages = []
-        # Partition into claude-tmux specs vs everything else so the
-        # shared tmux session covers ONLY the group that needs it: a
-        # mixed reviewer list keeps non-claude reviewers running in
-        # parallel/headless and limits the session lifetime to the
-        # claude run — extra session-open cost was real (preflight +
-        # trust prompt + pane setup) for reviewers that did not consume it.
-        if shared_claude_reviewer_session?(cfg, specs)
-          claude_specs, other_specs = specs.partition { |spec| claude_tmux_reviewer?(cfg, spec) }
-
-          other_specs.each do |spec|
-            result = run_reviewer_spec(
-              cfg, ctx, spec,
-              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-              started_at: started_at,
-              max_wall_clock_sec: max_wall_clock_sec
-            )
-            return :wall_clock_exceeded if result == :wall_clock_exceeded
-
-            statuses << result.status
-            error_messages << result.error_message if result.error?
-            limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
-            handle_reviewer_result(task, cfg, ctx, spec, result)
+        specs.each do |spec|
+          if Hive::Stages::Review::ReviewerReuse.reusable?(ctx, spec["output_basename"], reuse)
+            # Already produced (and published) by this pass at this HEAD
+            # before a provider limit parked it; do not re-spend its quota.
+            warn "[hive.review] reusing reviewer #{spec['name'].inspect} pass " \
+                 "#{format('%02d', ctx.pass)} output produced before the provider-limit retry"
+            statuses << :ok
+            succeeded << spec["output_basename"]
             remaining_specs -= 1
+            next
           end
 
-          return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
-                                         wall_clock_exceeded?(started_at, max_wall_clock_sec)
+          result = run_reviewer_spec(
+            cfg, ctx, spec,
+            reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
+            started_at: started_at,
+            max_wall_clock_sec: max_wall_clock_sec
+          )
+          return :wall_clock_exceeded if result == :wall_clock_exceeded
 
-          shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
-            scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
-            routing_arguments = shared_reviewer_routing_arguments(cfg, group.first)
-            Hive::ClaudeLauncher.with_shared_session(
-              task: task,
-              cfg: cfg,
-              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
-              cwd: ctx.worktree_path,
-              add_dirs: scope.fetch(:add_dirs),
-              cli_flags: routing_arguments&.native_arguments,
-              **Hive::Stages::Base.tool_scope_kwargs(scope).slice(
-                :permission_mode, :allowed_tools, :disallowed_tools, :runtime_policy
-              )
-            ) do |handle|
-              group.each do |spec|
-                result = run_reviewer_spec(
-                  cfg, ctx, spec,
-                  reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-                  started_at: started_at,
-                  max_wall_clock_sec: max_wall_clock_sec,
-                  handle: handle
-                )
-                return :wall_clock_exceeded if result == :wall_clock_exceeded
-
-                statuses << result.status
-                error_messages << result.error_message if result.error?
-                limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
-                handle_reviewer_result(task, cfg, ctx, spec, result)
-                remaining_specs -= 1
-              end
-            end
-          end
-        else
-          specs.each do |spec|
-            result = run_reviewer_spec(
-              cfg, ctx, spec,
-              reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-              started_at: started_at,
-              max_wall_clock_sec: max_wall_clock_sec
-            )
-            return :wall_clock_exceeded if result == :wall_clock_exceeded
-
-            statuses << result.status
-            error_messages << result.error_message if result.error?
-            limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
-            handle_reviewer_result(task, cfg, ctx, spec, result)
-            remaining_specs -= 1
-          end
+          statuses << result.status
+          error_messages << result.error_message if result.error?
+          limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
+          succeeded << spec["output_basename"] if result.ok? && spec["output_basename"]
+          handle_reviewer_result(task, cfg, ctx, spec, result)
+          remaining_specs -= 1
         end
 
         return :wall_clock_exceeded if started_at && max_wall_clock_sec &&
@@ -1678,8 +1768,14 @@ module Hive
           # generic all_failed.
           fallback_limit = error_messages.find { |message| Hive::AgentLimit.from_limit?(message.to_s) }
           limit_texts << fallback_limit if limit_texts.empty? && fallback_limit
+          unsupported = error_messages.find { |message| Hive::ModelUnsupported.detected?(message.to_s) }
           if !limit_texts.empty?
             :all_failed_limit
+          elsif unsupported
+            # A refused model needs the operator to change config; it is not a
+            # transient all_failed the healer should keep replaying.
+            unsupported_texts << unsupported
+            :all_failed_model_unsupported
           else
             :all_failed
           end
@@ -1735,49 +1831,6 @@ module Hive
         warn "[hive.review] adhoc fix-gate could not read #{task.state_file.inspect}: " \
              "#{e.class}: #{e.message} — failing closed (auto-fix disabled, source unconfirmable)"
         :source_unknown
-      end
-
-      # Group reviewers that share an effective permission scope and routed
-      # launch identity so they can share one tmux session. The permission
-      # part of the key is the RESOLVED spec — an
-      # explicit `permissions:` value, or the project/stage default when the
-      # key is omitted — so a reviewer spelling out `permissions: yolo` and
-      # one inheriting the default yolo land in the SAME group (identical
-      # effective scope → one session) instead of two sessions keyed on
-      # present-vs-absent. RoutingArguments are immutable value objects, so
-      # equal effective model/effort controls coalesce while different ones
-      # cannot leak through a previously established Claude process. Each
-      # group's scope and route are built from group.first, which is sound
-      # because every member resolves to the same effective key.
-      def shared_reviewer_groups(cfg, specs)
-        default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
-        specs.group_by do |spec|
-          permission = spec.key?("permissions") ? spec["permissions"] : default
-          [ permission, shared_reviewer_routing_arguments(cfg, spec) ]
-        end.values
-      end
-
-      def shared_reviewer_routing_arguments(cfg, spec)
-        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        Hive::Stages::Base.model_routing_arguments(
-          cfg || {}, "review_reviewers", profile,
-          current: Hive::Stages::Base.model_routing_current(spec)
-        )
-      end
-
-      def shared_reviewer_session_name(task, pass, group_idx)
-        suffix = group_idx.zero? ? "" : "-scope#{group_idx + 1}"
-        Hive::ClaudeLauncher.tmux_session_name("6-review-pass#{pass}#{suffix}", task)
-      end
-
-      def shared_reviewer_permission_scope(cfg, ctx, task, spec)
-        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        Hive::Stages::Base.stage_permission_scope(
-          cfg, "review.reviewers", task, profile,
-          base_add_dirs: [ ctx.task_folder ],
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
-          **Hive::Stages::Base.explicit_permission_kwargs(spec)
-        )
       end
 
       def patrol_task?(task)
@@ -1843,12 +1896,11 @@ module Hive
         # `timeout_sec` (default 2h) is the real per-reviewer cap. The old
         # even split (`remaining / specs_remaining`) squeezed each reviewer
         # to a fraction of the budget and killed thorough 1-2h reviewers
-        # mid-run with "deadline reached", which then tore down the shared
-        # claude session and cascade-failed the rest of the pass.
+        # mid-run with "deadline reached".
         Process.clock_gettime(Process::CLOCK_MONOTONIC) + remaining
       end
 
-      def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil, handle: nil)
+      def run_reviewer_spec(cfg, ctx, spec, deadline, started_at: nil, max_wall_clock_sec: nil)
         if started_at && max_wall_clock_sec &&
            wall_clock_exceeded?(started_at, max_wall_clock_sec)
           return :wall_clock_exceeded
@@ -1877,9 +1929,7 @@ module Hive
         end
         result =
           begin
-            if handle
-              adapter.run_in_session!(handle: handle, deadline: deadline)
-            elsif accepts_deadline
+            if accepts_deadline
               adapter.run!(deadline: deadline)
             else
               adapter.run!
@@ -1890,14 +1940,6 @@ module Hive
             # same attempt to invoke another reviewer (or retry this one),
             # bypassing RecoveryCoordinator's sole retry authority.
             raise if e.is_a?(Hive::ProviderRouteFailed)
-
-            # R7: tmux unavailable is a hard-fail for `claude.mode: tmux`,
-            # not a per-reviewer infra error. Re-raise so the outer
-            # `Stages::Review.run!` rescue lands the dedicated
-            # `:review_error reason="tmux_unavailable"` marker instead
-            # of recording N per-reviewer errors-NN.md lines and an
-            # `:all_failed` envelope.
-            raise if Hive::ClaudeLauncher.tmux_unavailable_error?(e)
 
             Hive::Reviewers::Result.new(
               name: spec["name"],
@@ -1943,22 +1985,6 @@ module Hive
         else
           publish_review_file(task, cfg, ctx.pass, spec["name"] || result.name, result.output_path)
         end
-      end
-
-      def shared_claude_reviewer_session?(cfg, specs)
-        # A shared session is keyed only by adapter/model flags and therefore
-        # cannot bind the selected provider account or its evidence channel.
-        # Explicit attempts use the ordinary headless spawn path instead.
-        return false if Hive::Attempts::Context.current&.explicit_routing?
-
-        Hive::Config.claude_mode(cfg) == :tmux &&
-          specs.any? { |spec| claude_tmux_reviewer?(cfg, spec) }
-      end
-
-      def claude_tmux_reviewer?(cfg, spec)
-        Hive::Config.claude_mode(cfg) == :tmux &&
-          (spec["kind"] || "agent").to_s == "agent" &&
-          Hive::AgentSupport.supports?(spec["agent"], :Interactive)
       end
 
       # NOTE: no outer rescue here — `GithubPublisher.publish!` has
@@ -2078,7 +2104,7 @@ module Hive
 
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED|DEFERRED)\b/i
 
         true
       end
@@ -2229,23 +2255,19 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: ctx.worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "review_fix") || 100,
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_fix", profile, default: 100),
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           implementation_stage: "review.fix",
+          mcp_scope: "review.fix",
           agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,
           **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(
             task, **kwargs, cfg: cfg,
@@ -2283,14 +2305,15 @@ module Hive
       # again before a reviewer-clean head may complete. The local project
       # command remains optional; the hosted gate is independently enabled
       # whenever the task owns a GitHub PR.
-      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:)
+      def run_ci_gates(task, cfg, ctx, started_at:, max_wall_clock_sec:, pass:, no_repair: false, only_missing: false)
+        no_repair ||= !!@withheld_reason
         before_head = git_head(ctx.worktree_path)
         gates = [
           [ "local", lambda {
             Hive::Stages::Review::CiFix.run!(
               cfg: cfg, ctx: ctx,
               started_at: started_at,
-              max_wall_clock_sec: max_wall_clock_sec
+              max_wall_clock_sec: max_wall_clock_sec, no_repair: no_repair
             )
           } ],
           [ "github", lambda {
@@ -2298,13 +2321,52 @@ module Hive
               task: task, cfg: cfg, ctx: ctx,
               started_at: started_at,
               max_wall_clock_sec: max_wall_clock_sec,
-              publication_base_head: before_head
+              publication_base_head: before_head, no_repair: no_repair,
+              publication_withheld: @withheld_reason,
+              publication_observer: ->(publisher) {
+                @review_publisher = publisher
+                @publication_attempt_head = publisher.evidence["local_head"]
+                @publication_attempt_withheld = nil
+              },
+              admit_head: ->(head) {
+                write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
+                @admissible_head = head
+                @withheld_reason = nil
+              }
             )
           } ]
         ]
 
         gates.each do |gate, run_gate|
+          evidence_key = gate == "local" ? "local_ci" : "hosted_ci"
+          next if only_missing && ci_gate_proven?(evidence_key, before_head)
+
           result = run_gate.call
+          @review_ci_evidence ||= {}
+          @review_ci_evidence[gate == "local" ? "local_ci" : "hosted_ci"] = case result.status
+          when :green then "passed"
+          when :skipped then "skipped"
+          when :stale then "failed"
+          else "pending"
+          end
+          current_head = git_head(ctx.worktree_path)
+          @review_ci_evidence[gate == "local" ? "local_ci_head" : "hosted_ci_head"] = current_head
+          @review_ci_evidence[evidence_key] = "pending" if gate == "github" && @withheld_reason
+          if current_head != before_head
+            return review_head_moved(task, pass) if no_repair
+            guardrail = Hive::Stages::Review::FixGuardrail.run!(cfg: cfg, ctx: ctx,
+              base_sha: before_head, head_sha: current_head)
+            emit_guardrail_waivers(task, pass, guardrail.waived_matches)
+            if guardrail.status == :tripped
+              @withheld_reason = "guardrail_approval_required"
+              return ci_guardrail_terminal_result(task, guardrail, ctx: ctx, gate: gate, pass: pass)
+            end
+            write_fix_success(ctx.with(pass: pass), kind: "ci_repaired")
+            @admissible_head = current_head
+            @withheld_reason = nil
+            publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: pass))
+            return publication_stop if publication_stop
+          end
           if wall_clock_exceeded?(started_at, max_wall_clock_sec)
             return finalize_wall_clock_stale(task, started_at, pass: pass)
           end
@@ -2316,18 +2378,36 @@ module Hive
         end
 
         after_head = git_head(ctx.worktree_path)
-        return nil if after_head == before_head
+        return review_head_moved(task, pass) if no_repair && after_head != before_head
 
-        guardrail = Hive::Stages::Review::FixGuardrail.run!(
-          cfg: cfg, ctx: ctx,
-          base_sha: before_head, head_sha: after_head
-        )
-        emit_guardrail_waivers(task, pass, guardrail.waived_matches)
-        return nil unless guardrail.status == :tripped
+        if after_head != before_head
+          guardrail = Hive::Stages::Review::FixGuardrail.run!(
+            cfg: cfg, ctx: ctx,
+            base_sha: before_head, head_sha: after_head
+          )
+          emit_guardrail_waivers(task, pass, guardrail.waived_matches)
+          if guardrail.status == :tripped
+            @withheld_reason = "guardrail_approval_required"
+            return ci_guardrail_terminal_result(
+              task, guardrail, ctx: ctx, gate: "combined", pass: pass
+            )
+          end
+        end
 
-        ci_guardrail_terminal_result(
-          task, guardrail, ctx: ctx, gate: "combined", pass: pass
+        # A later gate can repair the head already checked by an earlier
+        # gate. Complete its missing proof without dispatching another fixer.
+        return nil if @withheld_reason || %w[local_ci hosted_ci].all? { |key| ci_gate_proven?(key, after_head) }
+
+        run_ci_gates(
+          task, cfg, ctx, started_at: started_at,
+          max_wall_clock_sec: max_wall_clock_sec, pass: pass,
+          no_repair: true, only_missing: true
         )
+      end
+
+      def ci_gate_proven?(key, head)
+        evidence = @review_ci_evidence || {}
+        %w[passed skipped].include?(evidence[key]) && evidence["#{key}_head"] == head
       end
 
       def ci_terminal_result(task, ci_result, gate:, pass:, ctx:)
@@ -2355,10 +2435,15 @@ module Hive
             return { commit: "ci_#{gate}_limits_reached", status: :review_error }
           end
 
+          message = truncate_marker_message(ci_result.error_message)
+          if ci_result.last_output && !ci_result.last_output.to_s.strip.empty?
+            artifact = write_ci_error(task, ci_result, gate: gate, pass: pass)
+            message = "#{message} (captured output: #{artifact})"
+          end
           Hive::Markers.set(
             task.state_file, :review_error,
             phase: :ci, gate: gate, reason: "ci_unrunnable", pass: pass,
-            message: truncate_marker_message(ci_result.error_message)
+            message: message
           )
           { commit: "ci_#{gate}_error", status: :review_error }
         when :guardrail
@@ -2405,6 +2490,32 @@ module Hive
           #{ci_result.last_output}
           ```
         MD
+      end
+
+      # The output a timed-out (wall-clock or idle) CI run printed before
+      # it was killed, written beside ci-blocked.md. Returns the path
+      # relative to the task folder for the marker message.
+      def write_ci_error(task, ci_result, gate:, pass:)
+        relative = File.join("reviews", "ci-error-#{format('%02d', pass.to_i)}.md")
+        path = File.join(task.folder, relative)
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, <<~MD)
+          # #{gate == "github" ? "GitHub" : "Local"} CI error (pass #{format('%02d', pass.to_i)})
+
+          #{ci_result.error_message}
+
+          The CI command did not finish, so no fix agent ran. The output it
+          printed before it was stopped is below; the last lines show where
+          it stalled. Fix the cause, then submit the task's current
+          `workflow.retry` action to retry.
+
+          ## Last captured CI output
+
+          ```
+          #{ci_result.last_output}
+          ```
+        MD
+        relative
       end
 
       def write_fix_guardrail_findings(ctx, matches)
@@ -2548,17 +2659,19 @@ module Hive
         true
       end
 
-      # Write the per-pass fix-success sentinel. Called from the two
+      # Write the per-pass fix-success sentinel. Called from the
       # "pass N is done, advance" sites: Phase 2's zero-findings break
-      # and the post-guardrail-not-tripped continuation. Body is
-      # operator-readable; the runner only cares about file presence.
-      def write_fix_success(ctx)
+      # (`clean`), a clean-boundary CI repair (`ci_repaired`), the
+      # post-guardrail-not-tripped continuation (`fixed`), and guardrail
+      # approval (`approved`). Body is operator-readable; the runner reads
+      # file presence plus the first line's `head=` and `kind=` bindings.
+      def write_fix_success(ctx, kind:)
         path = fix_success_path(ctx.task_folder, ctx.pass)
         FileUtils.mkdir_p(File.dirname(path))
         head = git_head(ctx.worktree_path)
         head_binding = head.to_s.match?(/\A[0-9a-f]{40,64}\z/) ? " head=#{head}" : ""
         body = +"<!-- HIVE: fix-success sentinel for pass " \
-               "#{format('%02d', ctx.pass)};#{head_binding} do not edit. " \
+               "#{format('%02d', ctx.pass)};#{head_binding} kind=#{kind} do not edit. " \
                "Removing this file makes the next markerless `hive run` " \
                "treat the pass as fix-incomplete and retry it. -->\n"
         body << "# Fix completed for pass #{format('%02d', ctx.pass)}\n\n"

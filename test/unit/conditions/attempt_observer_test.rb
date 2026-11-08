@@ -51,6 +51,27 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
+  def test_interrupted_terminal_attempt_is_observed_as_non_success
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
+      terminal = terminalize(store, create_attempt(store), outcome: "interrupted")
+      status = Hive::Attempts::ReconciledAttempt.new(
+        attempt: terminal, classification: :terminal,
+        owner_status: :not_applicable, evidence: {}
+      )
+
+      assert_equal :delivered, Hive::Conditions::AttemptObserver.new(
+        store: store, task_locator: ->(_attempt) { task }
+      ).observe(status, now: NOW + 4)
+      health = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
+        .current_condition("AgentHealthy")
+      assert_equal "unsatisfied", health.fetch("state")
+      assert_equal "attempt_terminal_interrupted", health.fetch("reason")
+      assert_equal false, health.dig("payload", "informational_after_terminal")
+    end
+  end
+
   def test_post_cutover_attempt_advances_from_the_self_contained_journal
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -373,7 +394,7 @@ class ConditionsAttemptObserverTest < Minitest::Test
       log_reference: {
         "path" => "logs/#{launching.attempt_id}.frames", "size" => 1, "sha256" => "b" * 64
       },
-      now: now + 3
+      pause_generation: outcome == "interrupted" ? 2 : nil, now: now + 3
     )
   end
 end

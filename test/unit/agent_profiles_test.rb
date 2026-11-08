@@ -85,6 +85,7 @@ class AgentProfilesTest < Minitest::Test
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
     Hive::AgentProfiles.register(:grok, Hive::AgentProfiles::GROK)
     Hive::AgentProfiles.register(:opencode, Hive::AgentProfiles::OPENCODE)
+    Hive::AgentProfiles.register(:muse, Hive::AgentProfiles::MUSE)
   end
 
   def test_lookup_returns_v1_built_in_profiles
@@ -332,8 +333,19 @@ class AgentProfilesTest < Minitest::Test
                  Hive::ImplementationIdentity::UtilityModels.resolve(:grok))
     assert_equal({ model: nil, pin_model: true },
                  Hive::ImplementationIdentity::UtilityModels.resolve(:opencode))
+    assert_equal({ model: nil, pin_model: false },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:muse))
     assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::ImplementationIdentity::UtilityModels.resolve(:unknown)
+    end
+  end
+
+  def test_every_built_in_provider_has_an_open_pr_utility_model_policy
+    # Regression: Muse shipped without an entry, so every Muse-executed task
+    # failed at 5-open-pr with "no open-PR utility model policy".
+    AgentCliRuntime::Profiles::PROVIDER_ORDER.each do |provider|
+      policy = Hive::ImplementationIdentity::UtilityModels.resolve(provider)
+      assert_includes [ true, false ], policy.fetch(:pin_model), provider
     end
   end
 
@@ -378,17 +390,17 @@ class AgentProfilesTest < Minitest::Test
     assert_includes names, :opencode
   end
 
-  def test_grok_prompt_rides_the_headless_flag_value
+  def test_grok_prompt_uses_stdin
     grok = Hive::AgentProfiles.lookup(:grok)
 
-    assert_equal :headless_flag_value, grok.prompt_style
+    assert_equal :piped_stdin, grok.prompt_style
   end
 
   def test_grok_profile_shape
     grok = Hive::AgentProfiles.lookup(:grok)
 
     assert_equal "grok", grok.bin_default
-    assert_equal "-p", grok.headless_flag
+    assert_equal "--prompt-file=/dev/stdin", grok.headless_flag
     assert_equal "--always-approve", grok.permission_skip_flag
     assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
     assert_equal :grok_end, grok.structured_output_protocol

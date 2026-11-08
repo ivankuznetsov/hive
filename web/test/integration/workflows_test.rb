@@ -107,11 +107,22 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     Workflow.reset_lifecycle!
   end
 
+  test "honeycombs groups workflows and modules while keeping the selected project" do
+    get honeycombs_path, params: { project: @project }
+
+    assert_response :success
+    assert_select "h1", text: "Honeycombs"
+    assert_select "p", text: /Install workflows and modules from Honeycomb/
+    assert_select "nav[aria-label=Primary] a", text: /\A(?:Workflows|Modules)\z/, count: 0
+    assert_select "nav[aria-label=Honeycombs] a[aria-current=page]", text: "Workflows"
+    assert_select "nav[aria-label=Honeycombs] a[href=?]", modules_path(project: @project), text: "Modules"
+  end
+
   test "page exposes built-in, authored, and managed workflows for one selected project" do
     get workflows_path, params: { project: @project }
 
     assert_response :success
-    assert_select "nav a.nav-link-active", text: "Workflows"
+    assert_select "nav[aria-label=Primary] a.nav-link-active", text: "Honeycombs"
     assert_select "[data-workflow-origin='built_in']", text: /coding/
     assert_select "[data-workflow-origin='authored']", text: /release-notes/
     assert_select "[data-workflow-origin='managed'][data-workflow-selection='selected']", text: /demo.*verified/m
@@ -142,7 +153,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_equal "text/html", response.media_type,
                  "Turbo form previews must return a navigable page, not a bare stream MIME type"
-    assert_select "nav a.nav-link-active", text: "Workflows"
+    assert_select "nav[aria-label=Primary] a.nav-link-active", text: "Honeycombs"
     assert_select "#workflow-preview-heading", text: /Review install: docs 1.2.0/
     assert_select ".permission-grid", text: /Filesystem read.*repository, task/m
     token = preview_token(install_workflow_path)

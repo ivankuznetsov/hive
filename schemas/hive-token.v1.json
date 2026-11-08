@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-token.v1.json",
+  "title": "hive token output (v1)",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": {"const": "hive-token"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "operation": {"enum": ["create", "list", "revoke"]},
+    "token": {"type": "object"},
+    "tokens": {"type": "array", "items": {"type": "object"}},
+    "interlock": {"type": "object"},
+    "error_kind": {"type": "string"},
+    "error_class": {"type": "string"},
+    "message": {"type": "string"},
+    "exit_code": {"type": "integer"}
+  },
+  "allOf": [{"if": {"properties": {"ok": {"const": false}}}, "then": {"required": ["error_kind", "message", "exit_code"]}}]
+}

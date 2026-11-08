@@ -56,10 +56,10 @@ module Hive
 
       def targeted_attributes(native_task)
         stage = "#{native_task.stage_index}-#{native_task.stage_name}"
-        payload = @status_command.project_payload(
+        payload = @status_command.task_target_payload(
           @project,
-          project_count: 1,
-          stages: [ stage ]
+          slug: native_task.slug,
+          stage: stage
         )
         if payload["error"] == "project_load_failed"
           raise Hive::Error,

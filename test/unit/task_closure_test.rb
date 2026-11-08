@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/task_closure"
+require "hive/commands/run"
 require "hive/task_meta"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/projection"
@@ -66,6 +67,165 @@ class TaskClosureTest < Minitest::Test
 
   EmptyAttempts = Struct.new(:unused) do
     def active_attempts = []
+  end
+
+  def test_cancel_archives_locally_without_delivery_or_terminal_agent_and_replays
+    with_closure_project(stage: "2-brainstorm", state_file: "brainstorm.md") do |task, project|
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Feature no longer wanted" }
+      original = File.binread(task.state_file)
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+
+      preview_schema = JSON.parse(File.read(File.expand_path("../../schemas/hive-task-closure-input.v1.json", __dir__)))
+      assert JSONSchemer.schema(preview_schema).valid?(preview.to_h)
+
+      with_replaced_singleton_method(
+        Hive::Commands::Run, :new, ->(*) { flunk "cancellation must not launch a terminal agent" }
+      ) do
+        receipt = service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+        assert_equal "9-done", "#{archived.stage_index}-#{archived.stage_name}"
+        assert_equal "archived", Hive::TaskAction.new(archived, Hive::Markers.current(archived.state_file)).key
+        assert_equal original, File.binread(File.join(archived.folder, "brainstorm.md"))
+        assert_equal "cancelled", receipt.fetch("reason")
+        assert_empty receipt.fetch("evidence")
+        schema = JSON.parse(File.read(File.expand_path("../../schemas/hive-task-closure.v1.json", __dir__)))
+        assert JSONSchemer.schema(schema).valid?(receipt)
+        assert service.read(archived, project: project).valid?
+        replay = service.confirm!(
+          task: archived, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        assert_equal receipt, replay
+      end
+    end
+  end
+
+  def test_cancel_requires_a_reason_and_does_not_accept_delivery_claims
+    with_closure_project do |task, project|
+      service = service_for(gh: Object.new)
+      [ { "attestation" => "" }, { "evidence" => [ "acme/app#42" ] },
+        { "successor" => "app:successor-task" } ].each do |extra|
+        input = { "reason" => "cancelled", "attestation" => "Not wanted" }.merge(extra)
+        # Rejected delivery references must never result in network access.
+        preview = service.preview(task: task, project: project, input: input)
+        refute preview.valid?
+      end
+    end
+  end
+
+  def test_cancel_content_without_a_deliverable_or_terminal_agent
+    with_closure_project(workflow: "content", stage: "4-draft", state_file: "draft.md") do |task, project|
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Not wanted" }
+      preview = service.preview(task: task, project: project, input: input)
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert_equal "6-done", "#{archived.stage_index}-#{archived.stage_name}"
+      assert_equal "archived", Hive::TaskAction.new(archived, Hive::Markers.current(archived.state_file)).key
+    end
+  end
+
+  def test_cancel_refuses_a_live_attempt
+    with_closure_project do |task, project|
+      attempt = Attempt.new(attempt_id: "live-1", state: "running",
+                            payload: { "project" => project, "task_slug" => task.slug })
+      service = service_for(gh: Object.new, attempt_store: AttemptStore.new(records: [ attempt ]))
+      preview = service.preview(task: task, project: project,
+                                input: { "reason" => "cancelled", "attestation" => "Not wanted" })
+      refute preview.valid?
+      assert_equal "live_attempt", preview.blockers.first.fetch("code")
+      assert File.directory?(task.folder)
+    end
+  end
+
+  def test_cancel_receipt_rejects_changed_checkout_and_delivery_claims
+    with_closure_project do |task, project|
+      service = service_for(gh: Object.new)
+      preview = service.preview(task: task, project: project,
+                                input: { "reason" => "cancelled", "attestation" => "Not wanted" })
+      base = service.send(:build_receipt, preview, operator: "tester", channel: "cli")
+      [
+        ->(receipt) { receipt["task_repository"]["path"] = "/different-checkout" },
+        ->(receipt) { receipt["authority"] = "remote_merge" },
+        ->(receipt) { receipt["attestation"] = "" },
+        ->(receipt) { receipt["confirmed_by"]["channel"] = "daemon" },
+        ->(receipt) { receipt["evidence"] = [ {} ] }
+      ].each do |mutation|
+        receipt = deep_copy(base)
+        mutation.call(receipt)
+        refresh_receipt_digests!(receipt)
+        assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, receipt, task: task, project: project)
+        end
+      end
+    end
+  end
+
+  def test_cancel_does_not_wait_for_missing_dependencies
+    with_closure_project do |task, project|
+      Hive::TaskMeta.rewrite(task.folder, depends_on: "missing-task")
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "Not wanted" }
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      assert_equal "done", archived.stage_name
+    end
+  end
+
+  def test_cancel_preserves_worktree_and_does_not_satisfy_a_dependency
+    with_closure_project(successor: true) do |task, project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "unfinished.txt"), "keep this work\n")
+      follower_folder = File.join(task.hive_state_path, "stages", "1-inbox", "successor-task")
+      Hive::TaskMeta.rewrite(follower_folder, depends_on: task.slug)
+      service = service_for(gh: Object.new)
+      input = { "reason" => "cancelled", "attestation" => "No longer needed" }
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      service.confirm!(task: task, project: project, input: input,
+                       preview_digest: preview.preview_digest,
+                       operator: "tester", channel: "cli", authorized: true)
+      assert_equal "keep this work\n", File.read(File.join(worktree.path, "unfinished.txt"))
+      context = Hive::DependencySnapshot.admission_context(Hive::Config.registered_projects)
+      assert context.verdict(project: project, slug: task.slug).clear?
+      verdict = context.verdict(project: project, slug: "successor-task")
+      assert verdict.blocked?
+      assert_includes verdict.admission_error.safe_correction, "cancelled"
+
+      archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+      File.write(File.join(archived.folder, "closure.json"), "{broken json")
+      registry = Hive::Config.registered_projects
+      invalid_context = Hive::DependencySnapshot.admission_context(registry)
+      invalid_verdict = invalid_context.verdict(project: project, slug: "successor-task")
+      assert invalid_verdict.blocked?, "invalid cancellation must not become delivery"
+      assert_includes invalid_verdict.admission_error.safe_correction, "closure receipt"
+      assert File.file?(File.join(archived.folder, "closure.json")), "admission must not quarantine evidence"
+
+      quarantined = service.read(archived, project: project)
+      refute quarantined.valid?
+      refute_nil quarantined.quarantine_path
+      refute File.exist?(File.join(archived.folder, "closure.json"))
+      [ :admission_context, :active_admission_context ].each do |builder|
+        after = Hive::DependencySnapshot.public_send(builder, registry)
+        assert after.verdict(project: project, slug: "successor-task").blocked?,
+               "#{builder} must preserve the blocker after receipt quarantine"
+      end
+    end
   end
 
   Attempt = Struct.new(:attempt_id, :state, :payload, keyword_init: true) do
@@ -588,6 +748,56 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  def test_closure_receipt_includes_the_keyed_command_receipt_identity
+    with_closure_project do |task, project|
+      service = service_for
+      preview = service.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      context = Hive::CommandOperation::Context.new(
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+        principal_source: "test", ordinal: 0, receipt_generation: 7,
+        request_fingerprint: "a" * 64,
+        transport_request_id: "command-dispatch:v1:#{'b' * 64}",
+        retry_horizon_expires_at: nil
+      )
+      Thread.current[:hive_command_operation_context] = context
+
+      receipt = service.send(
+        :build_receipt, preview, operator: "tester", channel: "cli"
+      )
+
+      assert_equal(
+        { "id" => "receipt-1", "generation" => 8, "state" => "succeeded" },
+        receipt.fetch("command_receipt")
+      )
+      service.send(:validate_receipt!, receipt, task: task, project: project)
+      schema = JSONSchemer.schema(
+        JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA)))
+      )
+      assert_empty schema.validate(receipt).to_a
+
+      [
+        "receipt-1",
+        { "id" => "receipt-1", "generation" => 8 },
+        { "id" => "", "generation" => 8, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 0, "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => "8", "state" => "succeeded" },
+        { "id" => "receipt-1", "generation" => 8, "state" => "executing" }
+      ].each do |malformed|
+        tampered = deep_copy(receipt)
+        tampered["command_receipt"] = malformed
+        refresh_receipt_digests!(tampered)
+        error = assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, tampered, task: task, project: project)
+        end
+        assert_equal "closure command receipt is malformed", error.message
+      end
+    ensure
+      Thread.current[:hive_command_operation_context] = nil
+    end
+  end
+
   def test_receipt_written_before_transition_failure_resumes_to_archive
     with_closure_project do |task, project|
       input = input_for("acme/app#42")
@@ -763,6 +973,166 @@ class TaskClosureTest < Minitest::Test
       )
 
       assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
+  def test_owned_worktree_squash_delivered_to_default_branch_allows_closure
+    with_closure_project do |task, project|
+      root = Hive::Worktree.canonical_root(task.project_root)
+      worktree = Hive::Worktree.new(task.project_root, task.slug, worktree_root: root)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+
+      File.write(File.join(worktree.path, "task-change.txt"), "task work\n")
+      run!("git", "-C", worktree.path, "add", "task-change.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "task change", "--quiet")
+      pr_head = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{pr_head}\n---\n")
+      File.write(File.join(worktree.path, "review-fix.txt"), "unpushed fix\n")
+      run!("git", "-C", worktree.path, "add", "review-fix.txt")
+      run!("git", "-C", worktree.path, "commit", "-m", "review fix", "--quiet")
+
+      fix_head = Hive::GitOps.new(worktree.path).head_sha
+
+      # Main squashes the task PR and lands the review fix separately, then
+      # moves on with unrelated work; no task commit is an ancestor of main.
+      File.write(File.join(task.project_root, "task-change.txt"), "task work\n")
+      run!("git", "-C", task.project_root, "add", "task-change.txt")
+      run!("git", "-C", task.project_root, "commit", "-m", "squash", "--quiet")
+      blocked = service_for.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+      refute blocked.valid?
+      diagnostic = blocked.blockers.find { |entry| entry["code"] == "unique_worktree_changes" }
+      assert_equal [ fix_head ], diagnostic.fetch("details").fetch("local_fix_shas")
+      assert_equal pr_head, diagnostic["details"]["reference_head"]
+      assert_equal "content_absent_from_default", diagnostic["details"]["delivery"]
+      assert_includes Hive::TaskClosure.format_diagnostic(diagnostic), fix_head
+      assert File.directory?(worktree.path)
+      assert_equal fix_head, Hive::GitOps.new(worktree.path).head_sha
+
+      File.write(File.join(task.project_root, "review-fix.txt"), "unpushed fix\n")
+      File.write(File.join(task.project_root, "unrelated.txt"), "later\n")
+      run!("git", "-C", task.project_root, "add", "review-fix.txt", "unrelated.txt")
+      run!("git", "-C", task.project_root, "commit", "-m", "follow-up", "--quiet")
+
+      preview = service_for.preview(
+        task: task, project: project, input: input_for("acme/app#42")
+      )
+
+      assert preview.valid?, preview.to_h.inspect
+    end
+  end
+
+  def test_retained_fix_diagnostics_survive_preview_and_all_archive_error_consumers
+    with_closure_project do |task, project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      reference = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{reference}\n---\n")
+      service = service_for
+      input = input_for("acme/app#42")
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      receipt = service.send(:build_receipt, preview, operator: "tester", channel: "cli")
+      shas = 3.times.map do |n|
+        File.write(File.join(worktree.path, "retained-fix"), n.to_s)
+        run!("git", "-C", worktree.path, "add", "retained-fix")
+        run!("git", "-C", worktree.path, "commit", "-qm", "fix #{n}")
+        Hive::GitOps.new(worktree.path).head_sha
+      end
+      blocked = service.preview(task: task, project: project, input: input)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input"))))
+      assert_empty schema.validate(blocked.to_h).to_a
+      operations = [
+        -> { service.send(:validate_preview!, blocked) },
+        -> { service.send(:validate_final_transition!, task, project, receipt) },
+        -> { service.send(:resume_existing!, task: task, project: project, input: input,
+          preview_digest: preview.preview_digest, receipt: receipt) }
+      ]
+      operations.each do |operation|
+        error = assert_raises(Hive::TaskClosure::VerificationFailed, &operation)
+        shas.each { |sha| assert_includes error.message, sha }
+        assert_includes error.message, worktree.path
+        assert_includes error.message, "new change"
+      end
+      assert_equal shas.last, Hive::GitOps.new(worktree.path).head_sha
+    end
+  end
+
+  def test_retained_fixes_with_missing_pr_reference_are_unknown_without_open_pr_calls
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "local-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "local-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "local fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      [ nil, "e" * 40 ].each do |reference|
+        File.write(File.join(task.folder, "pr.md"), "---\nhead_oid: #{reference}\n---\n")
+        # Object.new has no GitHub adapter methods. Classification stays local.
+        entry = service_for(gh: Object.new).send(:worktree_blockers, task).first
+        details = entry.fetch("details")
+        assert_equal "unknown", details["publication"]
+        assert_equal "unknown", details["classification"]
+        assert_nil details["local_fix_shas"]
+        assert_equal [ head ], details["candidate_shas"]
+        assert_includes Hive::TaskClosure.format_diagnostic(entry), "publication unknown"
+      end
+    end
+  end
+
+  def test_retained_fix_reference_requires_publication_evidence_bound_to_owned_worktree
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      reference = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      File.write(File.join(worktree.path, "local-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "local-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "local fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      evidence = { "publication" => "published", "pr_url" => "https://github.com/acme/app/pull/42",
+        "worktree" => worktree.path, "branch" => task.slug, "local_head" => reference, "remote_head" => reference }
+      [ {}, { "worktree" => "/another/worktree" }, { "branch" => "another-branch" },
+        { "local_head" => head }, { "pr_url" => "https://github.com/another/repo/pull/42" } ].each do |change|
+        Hive::Markers.set(task.state_file, :review_error, **Hive::ReviewPublicationRecovery.encode(evidence.merge(change)))
+        details = service_for(gh: Object.new).send(:worktree_blockers, task).first.fetch("details")
+        if change.empty?
+          assert_equal reference, details["reference_head"]
+          assert_equal [ head ], details["local_fix_shas"]
+        else
+          assert_nil details["reference_head"], "must not trust mismatched evidence: #{change}"
+          assert_equal "unknown", details["publication"]
+          assert_equal [ head ], details["candidate_shas"]
+        end
+      end
+    end
+  end
+
+  def test_published_commits_absent_from_default_still_require_an_operator_decision
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "published-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "published-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "published fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{head}\n---\n")
+      blocker = service_for.send(:worktree_blockers, task).first
+      assert_equal "unique_worktree_changes", blocker["code"]
+      assert_equal "published", blocker.dig("details", "publication")
+      assert_equal [], blocker.dig("details", "local_fix_shas")
+      assert_equal "content_absent_from_default", blocker.dig("details", "delivery")
+      assert File.directory?(worktree.path)
     end
   end
 

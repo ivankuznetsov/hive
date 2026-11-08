@@ -43,13 +43,11 @@ class HiveBotNotificationExactlyOnceTest < Minitest::Test
   end
 
   def needs_input_row(project: "hive", slug: "s1", stage: "2-brainstorm",
-                     marker: "waiting", attrs: { "round" => "1" },
-                     state_file_mtime: Time.utc(2026, 5, 28, 18, 0, 0))
+                     marker: "waiting", attrs: { "round" => "1" })
     Row.new(
       project: project, slug: slug, stage: stage, marker: marker,
       folder: "/tmp/#{slug}",
       state_file: "/tmp/#{slug}/brainstorm.md",
-      state_file_mtime: state_file_mtime,
       action: "needs_input",
       suggested_command: "hive run #{slug}",
       attrs: attrs
@@ -110,14 +108,12 @@ class HiveBotNotificationExactlyOnceTest < Minitest::Test
       agent_running = Row.new(
         project: "hive", slug: "s1", stage: "2-brainstorm", marker: nil,
         folder: "/tmp/s1", state_file: "/tmp/s1/brainstorm.md",
-        state_file_mtime: Time.utc(2026, 5, 28, 18, 10, 0),
         action: "agent_running", suggested_command: nil,
         attrs: {}
       )
       dispatcher.process_rows([ agent_running ])
 
-      round_2 = needs_input_row(attrs: { "round" => "2" },
-                                state_file_mtime: Time.utc(2026, 5, 28, 18, 13, 9))
+      round_2 = needs_input_row(attrs: { "round" => "2" })
       dispatcher.process_rows([ round_2 ])
 
       total = logger.events.count { |(n, _)| n == :notification_sent }

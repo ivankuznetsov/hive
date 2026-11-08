@@ -22,6 +22,9 @@ module Hive
         def render(model, width:)
           inner_width = [ width - 4, 20 ].max
           lines = [ Styles::HEADER.render(Format.truncate(TITLE, inner_width)), "" ]
+          archive_errors(model).each do |project|
+            lines << Styles::FLASH.render(render_error(project, inner_width))
+          end
           rows = archived_rows(model)
           if rows.empty?
             lines << Styles::HINT.render(EMPTY)
@@ -41,6 +44,18 @@ module Hive
           return [] unless model.snapshot
 
           model.snapshot.archive_rows
+        end
+
+        def archive_errors(model)
+          return [] unless model.snapshot
+
+          model.snapshot.archive_projects.select(&:error)
+        end
+
+        def render_error(project, inner_width)
+          name = Hive::Tui::Text.sanitize(project.name)
+          error = Hive::Tui::Text.sanitize(project.error)
+          Format.truncate("⚠ #{name}: archive unavailable (#{error}); showing last known rows", inner_width)
         end
 
         # Archive slugs and project names come from on-disk directory names,

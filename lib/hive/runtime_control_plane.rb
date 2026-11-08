@@ -6,7 +6,9 @@ module Hive
   module RuntimeControlPlane
     APPLICATION_ID = 0x48495645
     SCHEMA_VERSION = 2
-    BUSY_TIMEOUT_MS = 5_000
+    # Daemon dispatch, stage runners, and operator commands share this file;
+    # under concurrent writes a 5s wait expired with only healthy holders.
+    BUSY_TIMEOUT_MS = 15_000
     MINIMUM_SQLITE_VERSION = "3.35.0".freeze
     MIGRATIONS_DIR = File.expand_path("runtime_control_plane/migrations", __dir__).freeze
 
@@ -39,6 +41,22 @@ module Hive
 
     class CodecError < Error; def exit_code = Hive::ExitCodes::CONFIG; end
     class IdentityError < Error; def exit_code = Hive::ExitCodes::CONFIG; end
+
+    class AdmissionClosed < Error
+      def initialize(message = "runtime admission is closed", details: {})
+        super(message, code: :admission_closed, action: "run hive daemon resume", details: details)
+      end
+
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
+
+    class StaleLifecycle < Error
+      def initialize(message = "runtime lifecycle changed while the operation was in progress", details: {})
+        super(message, code: :stale_lifecycle, action: "read hive daemon status and retry", details: details)
+      end
+
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
 
     Diagnosis = Data.define(
       :status, :path, :application_id, :schema_version, :sqlite_version, :integrity, :error
@@ -93,4 +111,5 @@ end
 require "hive/runtime_control_plane/process_guard"
 require "hive/runtime_control_plane/codec"
 require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/operational_inspection"
 require "hive/runtime_control_plane/operational_repository"

@@ -18,7 +18,7 @@
       "additionalProperties": false,
       "required": ["reason", "evidence", "successor", "attestation"],
       "properties": {
-        "reason": { "type": ["string", "null"], "enum": ["already_delivered", "superseded", null] },
+        "reason": { "type": ["string", "null"], "enum": ["already_delivered", "superseded", "cancelled", null] },
         "evidence": {
           "type": "array",
           "maxItems": 16,
@@ -32,6 +32,8 @@
     "task_repository": {
       "oneOf": [
         { "type": "null" },
+        { "type": "object", "additionalProperties": false, "required": ["path"],
+          "properties": { "path": { "type": "string", "minLength": 1 } } },
         { "type": "object", "additionalProperties": false,
           "required": ["host", "repository", "identity", "default_branch"],
           "properties": {
@@ -67,6 +69,91 @@
     "blockers": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } }
   },
   "$defs": {
+    "RetainedFixDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "worktree": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "reference_head": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+        },
+        "publication": {
+          "enum": [
+            "published",
+            "unpublished",
+            "unknown"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "classification": {
+          "enum": [
+            "unknown",
+            "ahead",
+            "equal",
+            "divergent"
+          ]
+        },
+        "delivery": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "guidance": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 4096
+        },
+        "local_fix_shas": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+          }
+        },
+        "candidate_shas": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}(?:[0-9a-f]{24})?$"
+          }
+        }
+      }
+    },
     "Diagnostic": {
       "type": "object",
       "additionalProperties": false,
@@ -75,7 +162,8 @@
         "field": { "type": "string", "maxLength": 256 },
         "code": { "type": "string", "minLength": 1, "maxLength": 128 },
         "message": { "type": "string", "maxLength": 500 },
-        "owner": { "type": "string", "enum": ["operator"] }
+        "owner": { "type": "string", "enum": ["operator"] },
+        "details": { "$ref": "#/$defs/RetainedFixDetails" }
       }
     },
     "TaskObservation": {

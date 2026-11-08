@@ -12,6 +12,12 @@ class Repository
 
   attr_reader :source, :name, :path
 
+  # Where web-registered clones live: Hive's data home, beside the native
+  # install's other durable state.
+  def self.default_root
+    File.join(Hive::Paths.data_home, "repos")
+  end
+
   def initialize(source:, name: nil, token: nil, root: nil)
     @source = source.to_s.strip
     raise Hive::Error, "repo URL required" if @source.empty?
@@ -19,7 +25,7 @@ class Repository
 
     @name = normalized_name(name)
     @token = token
-    @root = root || ENV["HIVEBOX_REPOS_DIR"] || File.join(Hive::Paths.data_home, "repos")
+    @root = root || self.class.default_root
     @path = File.join(@root, @name)
   end
 
@@ -62,7 +68,7 @@ class Repository
     raise Hive::Error, "clone target already exists: #{name}" if File.exist?(path)
 
     env = @token ? { "GH_TOKEN" => @token } : {}
-    log = Tempfile.create("hivebox-clone")
+    log = Tempfile.create("hive-clone")
     pid = Process.spawn(env, "gh", "repo", "clone", source, path,
                         pgroup: true, out: log.path, err: log.path)
     deadline = monotonic_now + CLONE_TIMEOUT_SEC

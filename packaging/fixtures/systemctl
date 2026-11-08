@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "${1:-}" == --user ]] || exit 64
+shift
+verb=${1:-}
+shift
+state="$(dirname "$0")/systemd-state"
+mkdir -p "$state"
+printf '%s\n' "$verb $*" >> "$state/commands"
+unit="${!#}"
+[[ "$unit" == *.service ]] || unit="$unit.service"
+unit_path="$HOME/.config/systemd/user/$unit"
+case "$verb" in
+  --version) printf 'systemd 256\n' ;;
+  show-environment) ;;
+  daemon-reload)
+    rm -f "$state"/*.loaded
+    for path in "$HOME"/.config/systemd/user/*.service; do
+      [[ -f "$path" ]] || continue
+      cp "$path" "$state/$(basename "$path").loaded"
+    done
+    ;;
+  show)
+    loaded=not-found; fragment=; reload=no; enabled=disabled; active=inactive; pid=0
+    if [[ -f "$state/$unit.loaded" ]]; then
+      loaded=loaded; fragment=$unit_path
+      cmp -s "$unit_path" "$state/$unit.loaded" || reload=yes
+    fi
+    [[ ! -f "$state/$unit.enabled" ]] || enabled=enabled
+    if [[ -f "$state/$unit.running" ]]; then
+      active=active; pid=$(cat "$state/$unit.running")
+    fi
+    printf '%s\n' "LoadState=$loaded" "FragmentPath=$fragment" "NeedDaemonReload=$reload" \
+      "UnitFileState=$enabled" "ActiveState=$active" "MainPID=$pid" "ExecMainStartTimestampMonotonic=$pid"
+    ;;
+  enable)
+    touch "$state/$unit.enabled"
+    if [[ " $* " == *' --now '* ]]; then printf '1\n' > "$state/$unit.running"; fi
+    ;;
+  restart|start)
+    previous=0
+    [[ ! -f "$state/$unit.running" ]] || previous=$(cat "$state/$unit.running")
+    printf '%s\n' "$((previous + 1))" > "$state/$unit.running"
+    ;;
+  stop) rm -f "$state/$unit.running" ;;
+  disable) rm -f "$state/$unit.enabled" "$state/$unit.running" ;;
+  is-enabled) [[ -f "$state/$unit.enabled" ]] ;;
+  is-active) [[ -f "$state/$unit.running" ]] ;;
+  *) exit 64 ;;
+esac

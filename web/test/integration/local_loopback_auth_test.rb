@@ -32,7 +32,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     get "/", headers: { "Host" => "localhost" }
     assert_response :success, "an enabled loopback bypass must serve the dashboard without a session"
     assert_select "nav[aria-label='Primary'] a", text: "Status"
-    assert_select "nav[aria-label='Primary'] a", text: "Workflows"
+    assert_select "nav[aria-label='Primary'] a", text: "Honeycombs"
     assert_select "nav[aria-label='Primary'] a", text: "Repos"
     assert_select "nav[aria-label='Primary'] a", text: "Agents"
     assert_select "nav[aria-label='Primary'] a", text: "Telegram"
@@ -40,7 +40,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     assert_select "a", text: "Connect GitHub"
     assert_select "form[action='/logout']", 0,
                   "a tokenless local session must not offer a meaningless logout action"
-    assert_select "a.brand", text: "hive"
+    assert_select "a.brand", text: "Hive"
     assert_select "title", text: "hive — status"
     refute_includes response.body, "hivebox",
                     "local Hive Web must not present itself as the separate hivebox appliance"

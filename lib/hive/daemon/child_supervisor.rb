@@ -4,7 +4,9 @@ require "shellwords"
 require "time"
 require "tmpdir"
 require "hive/lock"
+require "hive/cli_argv_policy"
 require "hive/process_kill"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Daemon
@@ -36,13 +38,114 @@ module Hive
       # when the daemon config doesn't supply one. A wedged child gets
       # SIGTERM, then SIGKILL `kill_grace_sec` later if it ignored TERM.
       DEFAULT_KILL_GRACE_SEC = 30
+      WAIT_POLL_SEC = 0.02
+      TERMINATE_KILL_REAP_SEC = 1
+
+      class << self
+        # Wait for one exact child without ever consuming another process's
+        # status. The caller owns the monotonic deadline and sleep strategy so
+        # synchronous command surfaces can share this lifecycle primitive
+        # without sharing ChildSupervisor's output capture.
+        def wait_for_pid(pid:, deadline:, monotonic_clock:, sleeper:)
+          loop do
+            waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+            return status if waited_pid
+
+            remaining = deadline - monotonic_clock.call
+            return nil unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          end
+        rescue Errno::ECHILD
+          nil
+        end
+
+        # TERM one process group, wait for the supplied grace, then KILL and
+        # make one final bounded drain attempt. A reaped direct child is not
+        # enough: descendants can outlive it in the same process group, so the
+        # method returns only after that original group is also gone.
+        def terminate_pid(pid:, grace_sec:, monotonic_clock:, sleeper:, pgid: nil)
+          pgid ||= process_group_id(pid)
+          signal_process_group(:TERM, pgid)
+          status, drained = wait_for_pid_and_group(
+            pid: pid, pgid: pgid,
+            deadline: monotonic_clock.call + grace_sec.to_f,
+            monotonic_clock: monotonic_clock, sleeper: sleeper
+          )
+          return status if drained && status
+
+          signal_process_group(:KILL, pgid)
+          final_status, final_drained = wait_for_pid_and_group(
+            pid: pid, pgid: pgid,
+            deadline: monotonic_clock.call + TERMINATE_KILL_REAP_SEC,
+            monotonic_clock: monotonic_clock, sleeper: sleeper
+          )
+          return nil unless final_drained
+
+          final_status || status
+        end
+
+        private
+
+        def process_group_id(pid)
+          return unless pid.is_a?(Integer) && pid > 1
+
+          Process.getpgid(pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+
+        def signal_process_group(signal, pgid)
+          Process.kill(signal, -pgid) if pgid && pgid > 1
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+
+        def process_group_alive?(pgid)
+          return false unless pgid && pgid > 1
+
+          Process.kill(0, -pgid)
+          true
+        rescue Errno::ESRCH
+          false
+        rescue Errno::EPERM
+          true
+        end
+
+        def wait_for_pid_and_group(pid:, pgid:, deadline:, monotonic_clock:, sleeper:)
+          status = nil
+          loop do
+            unless status
+              waited_pid, observed = Process.wait2(pid, Process::WNOHANG)
+              status = observed if waited_pid
+            end
+            drained = !process_group_alive?(pgid)
+            return [ status, true ] if status && drained
+
+            remaining = deadline - monotonic_clock.call
+            return [ status, drained ] unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          rescue Errno::ECHILD
+            drained = !process_group_alive?(pgid)
+            return [ status, drained ] if drained
+
+            remaining = deadline - monotonic_clock.call
+            return [ status, false ] unless remaining.positive?
+
+            sleeper.call([ WAIT_POLL_SEC, remaining ].min)
+          end
+        end
+      end
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
                      log_dir_for_task: nil,
                      dry_run: false,
                      default_timeout_sec: 0,
                      verb_timeouts: {},
-                     kill_grace_sec: DEFAULT_KILL_GRACE_SEC)
+                     stage_timeouts: {},
+                     kill_grace_sec: DEFAULT_KILL_GRACE_SEC,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @hive_bin = hive_bin
         @dry_run = dry_run
         # Optional injection point: tests pass a lambda taking (project, slug)
@@ -61,7 +164,11 @@ module Hive
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
         end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
+        end
         @kill_grace_sec = kill_grace_sec.to_i
+        @monotonic = monotonic
         # pid → { project, slug, stage, command, started_at, log_path, pgid,
         #         timeout_sec, terminating_at, killed }
         @running = {}
@@ -75,14 +182,22 @@ module Hive
         @verb_timeouts.fetch(verb.to_s, @default_timeout_sec)
       end
 
+      def timeout_for_stage(stage, verb: nil)
+        @stage_timeouts.fetch(stage.to_s) { timeout_for_verb(verb) }
+      end
+
       # Re-read the timeout knobs after a SIGHUP config reload. Only
       # affects children spawned AFTER the reload — in-flight children
       # keep the timeout frozen on their running entry at spawn time, so
       # a reload never retroactively kills (or reprieves) a live run.
-      def update_timeouts(default_timeout_sec:, verb_timeouts:, kill_grace_sec:)
+      def update_timeouts(default_timeout_sec:, verb_timeouts:, stage_timeouts:,
+                          kill_grace_sec:)
         @default_timeout_sec = default_timeout_sec.to_i
         @verb_timeouts = (verb_timeouts || {}).each_with_object({}) do |(verb, secs), acc|
           acc[verb.to_s] = secs.to_i
+        end
+        @stage_timeouts = (stage_timeouts || {}).each_with_object({}) do |(stage, secs), acc|
+          acc[stage.to_s] = secs.to_i
         end
         @kill_grace_sec = kill_grace_sec.to_i
       end
@@ -113,7 +228,7 @@ module Hive
         # can swap in a fixture path via HIVE_BIN.
         argv[0] = @hive_bin
 
-        timeout_sec = timeout_for_verb(argv_verb(argv))
+        timeout_sec = timeout_for_stage(stage, verb: argv_verb(argv))
 
         if effective_dry_run
           @running[next_dry_pid] = {
@@ -135,8 +250,9 @@ module Hive
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
 
-        pid = Process.spawn(
-          *argv, pgroup: true, out: log_io, err: log_io, close_others: true
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "daemon-child",
+          pgroup: true, out: log_io, err: log_io, close_others: true
         )
         log_io.close
 
@@ -187,24 +303,24 @@ module Hive
         actions
       end
 
-      # Reap every child that has exited since the last call. Returns an
+      # Reap every tracked child that has exited since the last call. Returns an
       # Array<ChildExit> for the dispatcher to feed into the
       # concurrency controller. Empty array when nothing has completed.
       def reap_all(now: Time.now)
         completed = @forced_completions.shift(@forced_completions.length)
-        loop do
-          # Process.wait with WNOHANG returns nil when nothing is ready.
-          pid, status = Process.wait2(-1, Process::WNOHANG)
-          break if pid.nil?
-        rescue Errno::ECHILD
-          break
-        else
-          entry = @running.delete(pid)
-          # Could be a child we don't track (sub-spawn from a hive run),
-          # but since we use pgroup: true, kids of our children should
-          # be in their own process groups already. Be defensive anyway.
-          next if entry.nil?
+        @running.each do |pid, entry|
+          next if entry[:dry_run]
 
+          # Background discovery owns its own Gh subprocess waits. A process-
+          # wide wait would steal their statuses, including during shutdown.
+          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+          next if waited_pid.nil?
+        rescue Errno::ECHILD
+          # A missing status is not a successful completion. Keep this entry
+          # fenced, but still collect other children whose statuses we own.
+          next
+        else
+          @running.delete(pid)
           completed << child_exit(pid, status, entry, now)
         end
         completed
@@ -254,11 +370,12 @@ module Hive
         signal_shutdown_targets(:TERM, targets)
         merge_shutdown_targets!(targets, capture_shutdown_targets)
 
+        overall_deadline = @quiescence_shutdown_deadline
         drain_shutdown(
           targets: targets,
           pending: pending,
           completed: completed,
-          deadline: Time.now + grace_sec
+          deadline: [ @monotonic.call + grace_sec, overall_deadline ].compact.min
         )
         if shutdown_drained?(pending)
           record_shutdown_proof(targets, drained: true)
@@ -270,11 +387,18 @@ module Hive
           targets: targets,
           pending: pending,
           completed: completed,
-          deadline: Time.now + Hive::ProcessKill::KILL_GRACE_SECONDS
+          deadline: overall_deadline ||
+            (@monotonic.call + Hive::ProcessKill::KILL_GRACE_SECONDS)
         )
 
         record_shutdown_proof(targets, drained: shutdown_drained?(pending))
         completed
+      ensure
+        @quiescence_shutdown_deadline = nil
+      end
+
+      def clamp_quiescence_shutdown!(remaining_sec:)
+        @quiescence_shutdown_deadline = @monotonic.call + [ Float(remaining_sec), 0.0 ].max
       end
 
       def in_flight_pids
@@ -300,14 +424,11 @@ module Hive
         entry = @running[pid]
         return false unless entry && !entry[:dry_run]
 
-        pgid = pgid_for(pid)
-        safe_kill(:TERM, -pgid) if pgid
-        status = wait_for_child(pid, grace_sec)
-        unless status
-          pgid = pgid_for(pid)
-          safe_kill(:KILL, -pgid) if pgid
-          status = wait_for_child(pid, 1)
-        end
+        status = self.class.terminate_pid(
+          pid: pid, grace_sec: grace_sec,
+          monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+          sleeper: ->(seconds) { sleep(seconds) }, pgid: entry[:pgid]
+        )
         return false unless status
 
         @running.delete(pid)
@@ -332,16 +453,11 @@ module Hive
       private
 
       def wait_for_child(pid, seconds)
-        deadline = Time.now + seconds
-        loop do
-          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
-          return status if waited_pid
-          return nil if Time.now >= deadline
-
-          sleep 0.02
-        end
-      rescue Errno::ECHILD
-        nil
+        clock = -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
+        self.class.wait_for_pid(
+          pid: pid, deadline: clock.call + seconds.to_f,
+          monotonic_clock: clock, sleeper: ->(duration) { sleep(duration) }
+        )
       end
 
       def child_exit(pid, status, entry, now)
@@ -445,7 +561,7 @@ module Hive
           completed.concat(releasable)
           pending.replace(held)
 
-          break if shutdown_drained?(pending) || Time.now >= deadline
+          break if shutdown_drained?(pending) || @monotonic.call >= deadline
 
           sleep 0.1
         end

@@ -13,11 +13,11 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
   end
 
-  def test_gem_package_includes_launcher_scripts
+  def test_gem_package_includes_workflow_policy_hook_script
     spec = Gem::Specification.load(GEMSPEC_PATH)
 
-    assert_includes spec.files, "lib/hive/scripts/interactive_claude_wrapper.sh"
-    assert_includes spec.files, "lib/hive/scripts/stop_hook.sh"
+    assert_includes spec.files, "lib/hive/scripts/workflow_policy_hook.rb"
+    refute(spec.files.any? { |path| path.end_with?("interactive_claude_wrapper.sh", "stop_hook.sh") })
   end
 
   def test_gem_package_includes_the_explicit_runtime_migration_set
@@ -143,11 +143,13 @@ class GemspecTest < Minitest::Test
     end
   end
 
-  def test_runtime_dependencies_exclude_prdigest
+  def test_runtime_dependencies_include_shared_prdigest
     spec = Gem::Specification.load(GEMSPEC_PATH)
     dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "prdigest" }
 
-    assert_nil dependency
+    refute_nil dependency
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.4.1"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.4.0"))
   end
 
   # The web tier is a Rails app under web/, supported only in the Docker

@@ -7,24 +7,26 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 8,
+      "hive-token" => 1,
+      "hive-remote" => 1,
+      "hive-operation" => 1,
+      "hive-status" => 9,
       "hive-running-status" => 2,
-      "hive-operational-status" => 4,
+      "hive-operational-status" => 5,
       "hive-runtime-maintenance" => 1,
       "hive-watch-event" => 1,
       "hive-act" => 2,
-      "hive-init" => 2,
+      "hive-init" => 3,
       "hive-init-preview" => 1,
       "hive-new" => 1,
       "hive-setup-agents" => 1,
       "hive-setup" => 1,
       "hive-version" => 1,
+      "hive-context" => 1,
       "hive-web-status" => 1,
       "hive-web-install" => 1,
       "hive-capture-requirement" => 1,
-      # Controller-owned, generation-bound outcome-evidence ledger. Legacy
-      # visual capture remains readable through its own v1/v2 contracts but
-      # cannot satisfy these universal coding-task requirements.
+      # Controller-owned, generation-bound outcome-evidence ledger.
       "hive-outcome-evidence-requirement" => 1,
       "hive-outcome-evidence-candidate" => 1,
       "hive-outcome-evidence-attempt" => 1,
@@ -38,6 +40,7 @@ module Hive
       "hive-decide" => 1,
       "hive-plan-review" => 1,
       "hive-plan-review-action" => 1,
+      "hive-plan-review-show" => 1,
       "hive-plan-review-level" => 1,
       "hive-plan-review-adoption" => 1,
       "hive-findings" => 1,
@@ -45,14 +48,20 @@ module Hive
       "hive-metrics-rollback-rate" => 1,
       "hive-markers-clear" => 1,
       "hive-forget" => 1,
+      # `hive mcp import` discovery rows and catalog writes (plan
+      # 2026-10-15-001); `hive mcp login` failures share its error arm.
+      "hive-mcp-import" => 1,
       "hive-drop" => 2,
       "hive-prune" => 1,
       "hive-worktree" => 1,
       "hive-daemon-status" => 1,
+      "hive-daemon-quiesce" => 1,
+      "hive-daemon-resume" => 1,
       "hive-daemon-stop" => 1,
       "hive-daemon-enroll" => 1,
       "hive-daemon-reload" => 1,
       "hive-daemon-install" => 1,
+      "hive-one-shot" => 1,
       # Read-only inspection of the daemon's dispatch-request queue
       # (`hive daemon queue [list|show|prune]`). See AN-1/2/3 and
       # `Hive::Commands::Daemon#queue_command`.
@@ -109,10 +118,20 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
+      # Host-global immutable daily activity base. Amendments and public read
+      # envelopes have separate contracts so base bytes never drift with a
+      # renderer.
+      "hive-digest-record" => 1,
+      "hive-digest" => 1,
+      "hive-digest-refresh" => 1,
+      "hive-digest-prune" => 1,
+      "hive-digest-send" => 1,
       # Exact-slot brainstorm inventory/write boundary used by canonical-skill
       # conversations. Bindings are revalidated under a creation-disabled task
       # lock; the command never advances a workflow stage.
       "hive-answer" => 1,
+      "hive-command-receipt" => 1,
+      "hive-receipt-prune" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
@@ -131,24 +150,36 @@ module Hive
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
-      # and JSON. It is intentionally independent from fleet-wide status v8.
+      # and JSON. It is intentionally independent from fleet-wide status v9.
       "hive-task-workspace" => 2,
       # Forward-only controller and agent context provenance receipts.
       "hive-context-receipt" => 1
     }.freeze
 
+    # The status producers name their v9 projection semantics. The field remains
+    # optional for compatibility with earlier success documents.
+    # Keeping this compatibility marker in the daemon's code-fingerprint file
+    # also forces an already-running daemon to re-exec before it observes the
+    # active-only cutover from a freshly installed CLI.
+    module StatusProjectionKind
+      ORDINARY = "ordinary".freeze
+      ACTIVE = "active".freeze
+      ARCHIVE = "archive".freeze
+      PARTIAL = "partial".freeze
+      ALL = [ ORDINARY, ACTIVE, ARCHIVE, PARTIAL ].freeze
+    end
+
     # Closed enum of Diagnostic.generated_by values accepted by the
     # published status schemas. This is deliberately narrower than
     # AgentProfiles.registered_names because custom profiles are a
     # runtime extension point, while generated_by is a wire contract.
-    DIAGNOSTIC_GENERATORS = %w[local claude codex pi grok opencode].freeze
+    DIAGNOSTIC_GENERATORS = %w[local claude codex pi grok opencode muse].freeze
 
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
     # schema; external consumers validate emitted documents with any
-    # draft-2020-12 validator. Pass an explicit `version:` to load an
-    # older revision (e.g. for back-compat tests against pinned
-    # consumers).
+    # draft-2020-12 validator. Only current contracts are shipped.
+    # Explicit versions identify paths, including absent historical revisions.
     def self.schema_dir
       File.expand_path("../../schemas", __dir__)
     end
@@ -196,6 +227,15 @@ module Hive
           payload["reason_code"] = error.reason_code
           payload["offending_ref"] = error.offending_ref
           payload["safe_correction"] = error.safe_correction
+        end
+        if error.is_a?(Hive::CommandOutcomeError)
+          payload["reason"] = error.reason
+          payload["state"] = error.state
+          payload["command_receipt"] = error.command_receipt if error.command_receipt
+        end
+        if error.is_a?(Hive::CommandCapacityError)
+          payload["reason"] = error.reason
+          payload["scope"] = error.scope
         end
         payload
       end
@@ -281,6 +321,7 @@ module Hive
       PATROL_FIX_REJECTED = "patrol_fix_rejected".freeze
       PATROL_FIX_BLOCKED  = "patrol_fix_blocked".freeze
       PATROL_FIX_ESCALATED = "patrol_fix_escalated".freeze
+      PATROL_FIX_PUBLICATION_BLOCKED = "patrol_fix_publication_blocked".freeze
       ERROR               = "error".freeze
       ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
@@ -333,6 +374,19 @@ module Hive
       CONFIG            = "config".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
+      COMMAND_CONFLICT = "command_conflict".freeze
+      COMMAND_IN_PROGRESS = "command_in_progress".freeze
+      COMMAND_UNRESOLVED_PENDING = "command_unresolved_pending".freeze
+      COMMAND_PIN_HORIZON_ELAPSED = "command_pin_horizon_elapsed".freeze
+      COMMAND_CAPACITY_EXHAUSTED = "command_capacity_exhausted".freeze
+      COMMAND_NONTERMINAL_LIMIT = "command_nonterminal_limit".freeze
+      COMMAND_CONCURRENCY_LIMIT = "command_concurrency_limit".freeze
+      COMMAND_PRUNE_BUSY = "command_prune_busy".freeze
+      COMMAND_PRUNE_STORAGE_UNAVAILABLE = "command_prune_storage_unavailable".freeze
+      COMMAND_PRUNE_PREVIEW_UNAVAILABLE = "command_prune_preview_unavailable".freeze
+      COMMAND_ORPHANED_PIN = "command_orphaned_pin".freeze
+      COMMAND_ORIGINAL_RESULT_UNAVAILABLE = "command_original_result_unavailable".freeze
+      COMMAND_INTAKE_DISABLED = "command_intake_disabled".freeze
       ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
     end
 
@@ -382,7 +436,7 @@ module Hive
         emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        wrapped = Hive::InternalError.wrap(e)
         emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end

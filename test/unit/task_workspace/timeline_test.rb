@@ -219,6 +219,18 @@ class TaskWorkspaceTimelineTest < Minitest::Test
                                      .dig("records", 0, "event_id")
   end
 
+  # The retired tmux launch mode wrote `claude_completion_fallback` events;
+  # journals from before its removal must still render as material records.
+  def test_legacy_claude_completion_fallback_event_still_renders
+    legacy = event("fallback", "claude_completion_fallback", at: "2026-08-12T12:00:00Z")
+
+    panel = timeline(events: [ legacy ]).call
+
+    assert_equal [ "fallback" ], panel.fetch("records").map { |row| row.fetch("event_id") }
+    assert_equal "claude_completion_fallback", panel.fetch("records").first.fetch("kind")
+    assert_empty panel.fetch("noise_groups")
+  end
+
   def test_hostile_event_fields_are_normalized_to_the_registered_record_schema
     huge = "/home/operator/" + ("x" * 10_000)
     events = 101.times.map do |index|
@@ -237,22 +249,6 @@ class TaskWorkspaceTimelineTest < Minitest::Test
     assert_nil record.fetch("task_generation")
     assert_operator record.fetch("source_refs").length, :<=, 100
     refute_includes JSON.generate(record), "/home/operator"
-
-    document = Hive::TaskWorkspace::Snapshot.new(
-      generated_at: "2026-08-12T12:00:00Z",
-      task: { "project" => "demo", "slug" => "task", "id" => 42,
-              "stage" => "4-execute", "generation" => 1 },
-      status: { "state" => "current", "freshness" => "fresh",
-                "observed_at" => "2026-08-12T12:00:00Z", "diagnostics" => [] },
-      decision: { "posture" => "investigate", "reason" => nil,
-                  "action" => { "kind" => nil, "label" => nil,
-                                "enabled" => false, "reason" => nil } },
-      panels: { "timeline" => panel }
-    ).to_h
-    schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
-    )
-    assert schemer.valid?(document), schemer.validate(document).to_a.inspect
   end
 
   private

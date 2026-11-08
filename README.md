@@ -9,7 +9,7 @@
 Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
 feedback, and release discussions.
 
-Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, and opt-in OpenCode to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
+Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, opt-in OpenCode, and Muse to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
 
 The mental model is folders. Every task is a directory; the folder's location is the task state. Moving a task from `2-brainstorm/` to `3-plan/` is the approval gesture, and every stage writes a durable artefact the next stage can trust. That practice — making each step's output strong enough for the next one to run autonomously — is called *compound engineering*. It's how Hive carries work from rough idea to merged PR while letting humans drop in on their own terms instead of a chat thread's.
 
@@ -42,10 +42,10 @@ Hive ships as a rubygem (`hive-cli`) plus a managed Hive web bundle attached to 
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | [`brew install ivankuznetsov/hive/hive`](https://github.com/ivankuznetsov/homebrew-hive) |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.7.2/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.8.0/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
-Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
+Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, `opencode` ≥ 1.18.16 when explicitly selected, authenticated `gh`, `cosign` for release identity verification, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `cosign`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
 
 OpenCode is a fifth built-in profile but is selected nowhere by default. Its
 operator contract requires an exact nested `provider/model`, an explicit
@@ -78,9 +78,9 @@ On supported Linux and macOS installations, the normal first run is:
 hive setup
 ```
 
-`hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
+`hive setup` checks Ruby 3.4, git, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
-provisions Hive's operating skill for Claude, Codex, Pi, and OpenCode. It then installs
+provisions Hive's operating skill for Claude, Codex, Pi, OpenCode, and Muse. It then installs
 the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
 enrolls the current project, and reports the effective URL plus installed,
 enabled, running, and readiness state. Interactive setup confirms once; JSON
@@ -106,11 +106,17 @@ the intended owner before sharing that URL. Set
 `web.local_loopback: false` to require GitHub login even on literal loopback. See
 [wiki/commands/web.md](wiki/commands/web.md).
 
-Windows users should run the native path inside WSL with systemd enabled, or
-use Hivebox. **Choose [Hivebox](packaging/docker/README.md) when you need
-container isolation, multiple local instances, containment for untrusted
-agents, or a reproducible server/NAS deployment.** Hivebox remains fully
-supported; it is the container distribution of the same Rails app.
+Windows users should install native Hive inside WSL with systemd enabled.
+
+Hive has two supported routes: install native Hive (above) when you want to
+run and tinker with it yourself, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) when you
+would rather not. The Hivebox Docker distribution is discontinued: already
+published `ghcr.io/ivankuznetsov/hivebox` images keep running but receive no
+further builds or updates. To move a Hivebox install to native Hive, install
+Hive through a channel above and run `hive setup`, then copy your project
+checkouts out of the box's `/data/repos` bind mount (`~/hivebox-data/repos` with
+the old installer defaults) or reclone them, register each one with `hive
+init`, sign agents in again on the host, and remove the container.
 
 ### Install via a coding agent
 
@@ -184,7 +190,7 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
    filesystem evidence without launching Claude, Codex, Pi, OpenCode, or
    OpenClaw.
 
-   During `hive init`, choose the Claude launch mode and permission mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. With the upcoming Anthropic pricing changes this is the mode we now suggest for most users, but treat it as an **experimental workflow** for now — expect some rough edges. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
+   During `hive init`, choose the Claude permission mode for the project. Claude-backed stages always run as headless `claude -p` processes using your logged-in Claude subscription; Hive unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude, so it does not bill an API key. Follow a running stage through its log under `.hive-state/logs/<slug>/`. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules.
 
    When `hive init` asks about the daemon, keep the project enabled. The service itself is already global autostart infrastructure; this prompt only controls whether this project is picked up. The daemon is the worker: it polls Hive, starts the next stage when a task is ready, and stops at human-input or recovery gates.
 
@@ -211,12 +217,35 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
-## PR Digests
+## Daily Activity Digest
 
-[PRDigest](https://github.com/ivankuznetsov/prdigest) is a separate tool. Use
-`prdigest facts` when an agent will write the final message, or schedule
-`prdigest prose --deliver` for a standalone daily Telegram digest. Hive does
-not configure, schedule, or deliver PR digests.
+Hive owns a durable cross-project daily activity record. After initializing its
+IANA time zone and coverage frontier with `hive migrate --all`, opt in with the
+global `daily_digest.enabled` setting. The daemon refreshes the open day and
+closes elapsed days; ordinary reads are side-effect free:
+
+```bash
+hive digest
+hive digest --date 2026-08-29 --project hive --json
+```
+
+The authenticated Web view groups attention and project activity, preserves
+source gaps and late amendments, and hands waiting items back to the existing
+task answer route without copying question text into the digest. Telegram recap
+delivery is a separate `daily_digest.telegram.enabled` opt-in. Complete empty
+days are recorded but not sent. See
+[wiki/commands/digest.md](wiki/commands/digest.md).
+
+V1 is deliberately a private, single-operator surface. It adds no team
+identity, team ACL, or per-project reader ACL. Agents may read the stable JSON
+contract but do not manage recap schedules, destinations, or delivery status,
+and there is no MCP-specific digest wrapper. Digest work does not grant an
+agent authority to choose a version, release, publish, or deploy Hive.
+
+[PRDigest](https://github.com/ivankuznetsov/prdigest) remains a separate tool
+for PR-only facts or prose. Hive's broader activity record has no PRDigest
+runtime dependency, never treats PRDigest as authority, and continues to reject
+the retired top-level `digest:` configuration block.
 
 ## Manage Hive From Telegram in 2 Minutes
 
@@ -375,7 +404,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service reads an internal scheduler projection and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
 | PR babysitter | `hive babysit install/start/status/tail/stop` | Supervise opt-in repair of conflicted or red GitHub PRs. Normal `hive setup` installs the global service; each project remains gated by `babysitter.enabled`. |
 | Diagnostics & agent setup | `hive status [--operational]`, `hive task`, `hive watch`, `hive act`, `hive doctor`, `hive setup-agents`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect current liveness, active workflow state, or one task in depth; observe semantic transitions; execute a fresh closed routine action; or use explicit recovery diagnostics. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
-| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, migrate legacy project state, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
+| Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive tree` | Attach Hive to a project, upgrade the installed CLI, remove it, prune the global registry, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 
 Full per-command reference, every flag, every envelope field, and every exit code lives in [docs/cli.md](docs/cli.md).
 
@@ -392,5 +421,5 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 - **[docs/condition-rollout.md](docs/condition-rollout.md)** — Operator runbook for execute-stage marker/shadow/condition authority, task-journal validation, invalid-history recovery, divergence triage, explicit promotion, and lossless rollback.
 - **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
 - **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
-- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and when to choose Hivebox instead. Read this when you hit a surprise or want to know "why is it like this?".
+- **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, how native Hive web shares the file-backed state model, and how to move off the discontinued Hivebox container. Read this when you hit a surprise or want to know "why is it like this?".
 - **[wiki/index.md](wiki/index.md)** — The catalog of the LLM-maintained engineering wiki under `wiki/`, which is the deepest source of reference material for every command, module, and stage. Read this when the user-facing docs above don't have the depth you need.

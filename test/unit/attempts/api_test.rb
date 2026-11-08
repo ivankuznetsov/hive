@@ -19,6 +19,18 @@ class AttemptsAPITest < Minitest::Test
     assert_kind_of Hive::Error, Hive::Attempts::UnsupportedDetachment.new
   end
 
+  def test_read_only_fetch_and_attachment_use_the_same_attempt_identity
+    store = Object.new
+    store.define_singleton_method(:fetch) { |id| [ :record, id ] }
+    client = Object.new
+    calls = []
+    client.define_singleton_method(:attach) { |id, **options| calls << [ id, options ]; :terminal }
+    api = Hive::Attempts::API.new(store: store, client: client)
+    assert_equal [ :record, "attempt-1" ], api.fetch("attempt-1")
+    assert_equal :terminal, api.attach("attempt-1", stdout: :output, stderr: :error)
+    assert_equal [ [ "attempt-1", { stdout: :output, stderr: :error } ] ], calls
+  end
+
   def test_dispatch_delegates_foreground_admission
     foreground = Object.new
     call = nil
@@ -70,6 +82,25 @@ class AttemptsAPITest < Minitest::Test
     assert_equal Time.at(1).utc, call.last.fetch(:now)
     assert_equal :tick, call.last.fetch(:admission_view)
     assert_equal true, call.last.fetch(:replay_semantic_terminal)
+  end
+
+  def test_routing_decision_delegates_read_only_daemon_projection
+    daemon = Object.new
+    call = nil
+    daemon.define_singleton_method(:routing_decision_for_request) do |request, **options|
+      call = [ request, options ]
+      :capacity_saturated
+    end
+    api = Hive::Attempts::API.new(foreground: Object.new, daemon: daemon)
+
+    result = api.routing_decision_for_request(
+      :request, now: Time.at(1).utc, admission_view: :tick
+    )
+
+    assert_equal :capacity_saturated, result
+    assert_equal :request, call.first
+    assert_equal Time.at(1).utc, call.last.fetch(:now)
+    assert_equal :tick, call.last.fetch(:admission_view)
   end
 
   def test_dispatch_recovery_delegates_independent_admission
@@ -221,7 +252,7 @@ class AttemptsAPITest < Minitest::Test
     runtime_store.define_singleton_method(:fetch) { |attempt_id| "record:#{attempt_id}" }
 
     with_replaced_singleton_method(
-      Hive::Attempts::Repository, :open_default, -> { runtime_store }
+      Hive::Attempts::Repository, :open_default, ->(**) { runtime_store }
     ) do
       assert_equal "record:attempt-1", Hive::Attempts::API.new.fetch("attempt-1")
     end

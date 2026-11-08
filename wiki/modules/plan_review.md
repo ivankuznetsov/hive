@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-08-28
+updated: 2026-10-30
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -23,6 +23,18 @@ the reviewed plan digest, task generation, executable resolution, and empty
 blocker set remain mandatory. Raw moves and first-time plan transitions still
 require the current review policy fingerprint.
 
+A pending revised candidate does not make the original canonical plan stale.
+Until execution is cleared, freshness accepts either the original digest or the
+candidate digest (including recovery after promotion interrupted before final
+publication). Neither digest grants execution while the review remains pending.
+After clearance, only the final reviewed candidate digest is current; reverting
+to the original plan or making an unrelated edit invalidates that clearance.
+Re-entry resumes incorporated findings through verification before pausing for
+unanswered choices, including legacy records already parked awaiting a decision.
+A provider retry keeps its existing deadline. Exhausted verification or missing
+attestations remain a repair blocker, retaining unanswered findings; degraded
+initial coverage cannot clear a pending choice or unverified candidate.
+
 ## Applicability and boundary
 
 The first release applies only when all of these are true:
@@ -34,11 +46,24 @@ The first release applies only when all of these are true:
 There is no tenth workflow stage and no descriptor extension. Custom workflows,
 architecture/research/content/bench flows, and coding tasks already beyond plan
 project `plan_review: null`. New coding tasks carry
-`meta.yml: plan_review_required: true`; `hive migrate` adds that bit to existing
-coding tasks in stages 1–3 while leaving stages 4+ grandfathered. Consequently,
-an already-executing pre-feature task with no review root receives a private
-`legacy-execute-adoption.json` receipt, while removing evidence and raw-moving a
-new/migrated task fails closed at execute entry.
+`meta.yml: plan_review_required: true`. Execute entry rejects missing required
+review evidence. The existing marker/journal contract still permits a task
+without that requirement and without a review root to receive a private
+`legacy-execute-adoption.json` receipt; malformed metadata does not qualify.
+Hive does not automatically add the requirement to historical tasks. An offline
+conversion must preserve metadata and rerun required review rather than invent
+approval evidence.
+
+Persisting `plan_review_required: true` is a mandatory, identity-fenced update.
+Before creating task-local review storage, the orchestrator validates a retained
+directory observation and acquires the task lease without creating the task.
+That observed lease claim occurs under short project commit custody, closing
+the supported-Drop window before the task-local orchestration lock is entered.
+It retains that lifecycle custody through the bounded orchestration lock and
+every review-store side effect; the orchestration lock never acquires the
+project commit lock. Deletion, a same-path copied replacement, or an unapplied
+rewrite raises `InvalidRecord`; stale metadata can never satisfy or bypass the
+review gate, and review setup cannot recreate a dropped task.
 
 ## Deterministic policy
 
@@ -84,6 +109,21 @@ ambient OpenCode configuration does not contain the plugin. Provider selection
 therefore cannot pass configuration and runtime probing only to fail later
 because the review skill contract omitted or ignored that supported host.
 
+Primary and adversarial result prompts spell out the machine-only fields that
+are easy for a natural-language reviewer to misread: `selected_lenses` uses
+snake_case identifiers and `residual_evidence` stays empty until disposition
+verification. A malformed reviewer result is retryable within the existing
+bounded attempt budget; plan or snapshot mutation remains terminal. The
+adapter-contract version participates in the policy fingerprint, so shipping a
+corrected prompt/parser contract gives an unchanged plan a fresh review instead
+of replaying a verdict Hive never successfully parsed.
+
+The disposable revision workspace starts with a controller-owned, non-terminal
+copy of the immutable input plan. Long-form planners edit that checkpoint in
+place instead of holding a replacement document until their first full write.
+Only a candidate ending in `<!-- COMPLETE -->` is accepted or salvaged, so the
+seed can preserve useful progress without authorizing an unchanged revision.
+
 Reviewers run from that disposable checkout with search, shell, and network access so
 they can verify a plan against code, wiki context, history, and referenced
 contracts instead of checking only the document against itself. Codex and Grok
@@ -98,10 +138,9 @@ Hive's review-session journal, derived projection, and bounded projection
 checkpoint are excluded only from this review-time manifest because the
 controller updates all three while the provider is running. Canonical
 `plan.md`, task metadata, and every existing plan-review record remain anchored.
-Reviews blocked by the former checkpoint false positive are re-entered once per
-affected initial-review role when their immutable route carries the exact
-runner diagnostic. A versioned recovery reset prevents repeated retries and
-reviewer-authored or unrelated custody failures remain operator-owned.
+Historical checkpoint false positives do not trigger automatic contract repair.
+Current custody failures retain their normal diagnostics and guarded recovery
+requirements.
 
 The default adversarial request is native Grok Build, model `grok-4.6`, effort
 `high`. Every route records requested and actual provider, model, model family,
@@ -121,21 +160,24 @@ with a letter and then use letters, digits, hyphens, or underscores, up to 64
 characters. The primary, adversarial, and verification prompts publish that
 same grammar. Natural specialist names such as `product-lens` therefore remain
 valid without weakening the stricter machine-owned coverage-name contract or
-discarding otherwise valid findings and coverage. A blocked legacy primary or
-adversarial route with the exact old selected-lens diagnostic is classified as
-runnable and receives one versioned recovery reset; the daemon can therefore
-rerun each affected initial reviewer leg automatically after upgrade. Missing
-diagnostic provenance is accepted only for historical records. Current adapter
-receipts distinguish parser failures from reviewer- or runner-authored
-diagnostics, so a reviewer cannot request this migration retry by copying the
-old text. The reset is one-time, so a genuinely malformed current-contract
-result remains terminal instead of looping. Verification output uses the new
-grammar but is not eligible for the legacy reset, preserving the existing
-revision-round fence.
-Initial primary and adversarial prompts also require `residual_evidence` to be
-exactly empty; only disposition verification may emit verified fingerprint
-attestations there. A blocked initial leg with the exact historical parser
-diagnostic receives the same bounded, versioned, daemon-runnable recovery.
+discarding otherwise valid findings and coverage. Historical parser, model and
+checkpoint repair resets have been removed. Current invalid results retain
+their normal diagnostics; offline conversion may choose to
+rerun review. A coverage-entry rejection names the entry index and the
+offending key or value, and the request-only keys Hive puts on its own coverage
+rows (`fingerprint`, `decision_id`) are dropped when a reviewer echoes them.
+When the result parser refuses an attempt's output, the raw bytes are kept
+beside the attempt as `attempts/<attempt>/rejected-output.md` (redacted, first
+64 KiB, with the parse error) and referenced from the projection artifacts as
+`<role>_rejected_output_<attempt>`. Three consecutive parser rejections of one
+role with the same diagnostic (`Orchestrator::REJECTED_OUTPUT_LIMIT`, equal to
+the owner-command `REPEATED_FAILURE_LIMIT`) stop automatic attempts: the review
+blocks with an operator-owned `reviewer_output_rejected` blocker whose
+diagnostic names the parse error, latest attempt, and rejected-output path.
+Automatic series resets do not break the count; an operator `retry` or
+`request-review` reset does. `TaskAction` classifies that block as
+`plan_review_unsupported` (needs repair, no automatic command). Initial legs require empty `residual_evidence`; only disposition
+verification may emit verified fingerprint attestations there.
 `unsupported` is stable and consumes no transient retry. Provider limits,
 timeouts, and retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one
@@ -167,25 +209,32 @@ whose latest primary or adversarial route is explicitly `unsupported` classify
 as `plan_reviewing` once under the new code and enter the same paced recovery;
 configuration-only blocks without an attempted route remain operator-owned. A
 changed probe resets the stable-observation series and permits a new reviewer
-launch. A legacy successful adversarial receipt whose served-model alias is now
-explicitly attested by provider support receives one versioned rerun under the
-current identity contract. This repairs pre-contract `reviewer_family_unknown`
-coverage without rewriting old immutable attempt evidence or repeatedly
-launching a genuinely non-independent reviewer. Review identity includes adapter,
-reviewer, route configuration, and the effective `models.plan_review`,
-`models.plan_review_adversarial`, and `models.plan_review_verification`
-overrides. Unrelated stage-model changes plus attempt timeout and retry tuning
-remain operational and do not invalidate an otherwise identical verdict.
+launch. Historical served-model identity repair is not performed automatically.
+A successful adversarial attempt whose independence failed with `reviewer_family_unknown`
+can be rerun through `request-review`. This appends a normal recovery reset,
+preserves the successful primary leg and historical evidence, and requires the
+new attempt to earn independent coverage. It does not waive coverage or retry
+same-family reviews.
+
+Claude reviewer identity comes from the main conversation's init, assistant,
+or message-start events, ignoring events with `parent_tool_use_id`. Aggregate
+`modelUsage` can include subagents and cannot identify the reviewer by key order.
+An explicit main-agent identity takes precedence over usage; ambiguous usage
+without identity stays unknown instead of borrowing the configured model.
 
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
-the durable identity records provider-default sentinels instead. Legacy
-records carrying the impossible `provider: codex` plus `model: claude-*`
-combination receive one versioned recovery route. The same Codex authority is
-retained, the foreign model is replaced by Codex's default, any failed planner
-revision series is reset once, and both direct approvals and daemon resumes
-continue through the repaired identity. Blocked legacy rows are classified as
-runnable so the migration is reachable without an operator rewriting state.
+the durable identity records provider-default sentinels instead. Historical
+records with an impossible provider/model pair are not rewritten or retried by
+a one-time identity repair. Offline conversion can choose to rerun planning and
+review under a valid current identity; ordinary provider retries remain active.
+
+## Convergence defaults (2026-11-03)
+
+- **Adversarial lens is level-gated.** `plan_review.adversarial_min_level` (default `mandatory`, or `standard`, or `off` to disable it at every level) decides whether a new review requests adversarial coverage and runs the adversarial leg. Below that level the review needs only whole-document coverage. `Orchestrator#initial_roles` derives the legs from the record's own coverage, so a review created before this change keeps the adversarial leg it requested.
+- **Revision rounds per level.** `plan_review.max_revision_rounds` (default `standard: 1`, `mandatory: 3`) replaces the fixed `MAX_VERIFICATION_REVISION_ROUNDS` budget for the record's effective level; operator decisions still earn one extra round.
+- **Evidence gates stay out of requirements.** The planner prompt now places CI signoff, exact-commit checks and acceptance re-runs in a `## Definition of Done` section rather than `## Requirements Trace`, because as requirements every fix commit re-triggers them in code review.
+- Neither key is part of `Policy.configuration_fingerprint`, so changing them does not invalidate in-flight reviews.
 
 ## Findings, revision, and verification
 
@@ -202,14 +251,50 @@ of four classes:
 The primary and adversarial prompts classify by decision authority rather than
 severity. That prompt-level taxonomy is authoritative for the final Hive JSON,
 even when primary review invokes a skill with a different internal routing
-rubric. A routine, repository-grounded technical correction is `safe_auto`;
-`gated_auto` is reserved for a clear correction that itself crosses a material
+rubric. A correction that follows from already-authorized requirements or repository
+conventions is `safe_auto`, including high-risk security and recovery fixes;
+`gated_auto` is reserved for a clear correction that exceeds existing authorization across a material
 approval boundary. `manual` is reserved for a choice the existing contract and
 repository patterns cannot safely determine when the alternatives materially
 change product scope, authority or trust, privacy or compliance, risk
 acceptance, irreversible external effects, or architectural direction. Merely
 needing to choose, decide, specify, or add detail does not make a finding
 manual.
+
+Before an open `gated_auto` or `manual` finding can stop the workflow, a
+`decision_triage` pass reconciles its claimed approval boundary against the plan
+and repository. It uses the configured verification route and the existing
+read-only reviewer workspace and typed result envelope. Each disposition must
+account for its exact source fingerprints; the set must cover every supplied
+finding exactly once. Duplicate concerns may share one disposition. A retained
+human gate must name the unresolved or exceeded contract clause, the material
+change, and at least two alternatives. High severity or merely touching a
+security, compatibility, migration, or architecture area is insufficient.
+
+The controller retains original findings as resolved historical entries and
+adds the consolidated dispositions as open findings. Attempt results and a
+versioned, fingerprint-bound application receipt are immutable artifacts;
+triage does not write approvals, answers, waivers, or clearance. Automatic
+dispositions still require original-planner incorporation and verification.
+Missing or malformed source accounting retries through the adapter contract,
+then becomes a recoverable reviewer repair block after the configured bound;
+provider outages use the existing bounded attempt series and cooldown. Each
+attempt binds the exact source fingerprints it received. A completed result
+can be applied after a crash without another provider call when that set still
+matches; an intervening operator decision causes a fresh assessment of the
+remaining findings and preserves the recorded decision.
+Existing `awaiting_decision` records with unassessed findings become runnable
+through `TaskAction`; a completed assessment is not repeated on each tick.
+New verification findings pass through the same reconciliation boundary,
+together with still-unanswered gates so recurring concerns can be consolidated.
+Approved or answered findings remain outside that reassessment.
+
+Routine revisions can proceed while unrelated human choices remain open.
+Both planner and verifier receive those unresolved choices separately and must
+preserve them without choosing defaults. The candidate remains an internal
+artifact; it cannot authorize execution or replace the canonical plan while
+any required decision remains. The successful revision-round cap also applies
+to re-entry from `awaiting_decision`.
 
 The fingerprint binds classification, risk, source, and exact plan evidence,
 but deliberately excludes model-authored title, description, and excerpt
@@ -264,7 +349,18 @@ candidate as its input rather than discarding earlier incorporated work. Hive
 permits at most three successful planner-revision rounds; the cap is enforced
 again at every orchestration entry, so an external `advance!` call cannot
 restart a capped verification loop. A repeatedly unresolved defect then blocks
-instead of looping forever. A verified candidate
+instead of looping forever. One extra round (`OPERATOR_DECISION_ROUNDS`) is available only
+when the accepted findings include an operator decision (an approved
+`gated_auto` or answered `manual` finding). Safe fixes can spend the three
+rounds before the operator decides, and without this round every late decision
+forced a new linked plan whose fresh review restarted the cycle. The ceiling
+stays fixed at four, and safe-only residue still blocks at three.
+
+Re-running the plan stage on a plan that is already COMPLETE, and whose review
+has cleared and is still current (`TransitionGuard.freshness`), is a no-op
+that returns `complete`. It does not respawn the planner. `hive develop` is
+the move forward from there. Previously the re-run edited `plan.md`, which
+staled the cleared review and opened a fresh review cycle. A verified candidate
 is atomically promoted to canonical `plan.md` under the task mutation lock
 immediately before its matching terminal resolution is published under that
 same lock.
@@ -331,6 +427,16 @@ receipt under the task lock immediately before movement. `StageAction`,
 missing, corrupt, blocked, or changed observation raises a typed
 `PlanReview::TransitionBlocked`; `--force` does not bypass it.
 
+The task generation digests task id, slug, workflow, and `meta.yml` with its
+`depends_on` key removed (unparseable or non-mapping metadata falls back to raw
+bytes). Dependency edits are scheduling metadata that admission gates on its
+own, and including them meant adopting a revised plan's dependency at candidate
+promotion, or an operator copying it by hand, staled the review it completed
+and restarted critique (observed on hivedev f2-follow-up, 2026-10-30).
+`Identity.task_generation_current?` also accepts the legacy raw-bytes
+generation, so reviews recorded before the change stay current while metadata
+is byte-identical.
+
 The benchmark-only configuration grant documented in [[modules/config]] also
 disables this transition boundary. With the grant and `enabled: false`, plan to
 execute returns without initializing the orchestrator, requiring an
@@ -357,6 +463,16 @@ left alone; for an already-waiting row, daemon `PlanApproval` owns the guarded
 required review that has not completed cannot leave the plan artifact claiming
 terminal completion, including on legacy capability-recovery re-entry.
 
+When a review ends `blocked` and a new linked plan runs, the planner receives
+every operator approval and answer from that review as a `plan_review_decisions`
+data block, so accepted decisions that only reached unpromoted candidate plans are
+not lost and are not re-asked.
+
+Plan-review agents, planner revisions, and the planner itself inspect a disposable
+detached checkout of the execution base (`origin/<default>` after a fetch, else
+the local default branch), never the project checkout's `HEAD`, which may be an
+unrelated or stale branch with local edits.
+
 Authority-bearing actions use:
 
 ```text
@@ -369,8 +485,27 @@ hive plan-review TARGET ACTION \
   [--coverage NAME] [--level LEVEL] [--reason TEXT]
 ```
 
+Read the current identities first with the lock-free, read-only
+`hive plan-review TARGET show [--json]` (`hive-plan-review-show.v1`). It reads
+the task's plan-review projection directly, reports the `TransitionGuard`
+freshness verdict decisions must pass, and lists open findings with their
+fingerprints; operational status can be a daemon-cached snapshot that lags each
+decision, which made chained decisions fail as stale. Each successful action's
+JSON also returns the next `observation_digest`, so several decisions can be
+chained without re-reading.
+
+`show` also returns `current_task_generation` (the live task's generation,
+which differs from `task_generation` when the review is stale), the review's
+`blockers`, and `next_action` (`restart` for a stale review, else null).
+
 Actions are `approve-finding`, `answer-finding`, `waive-coverage`,
-`downgrade-level`, `raise-level`, `retry`, and `request-review`. Every action is
+`downgrade-level`, `raise-level`, `retry`, `request-review`, and `restart`.
+`restart` is the only action a stale review accepts (and it is refused on a
+current one): it records the operator's decision on the stale review with the
+identities `show` printed, then the resumed orchestrator starts a linked review
+(`prior_review_id`) for the current generation. A restart always supersedes,
+even when only policy configuration drift made the review stale. Other actions
+on a stale review fail with a message naming `restart`. Every action is
 observation-bound and idempotent: an identical replay is a no-op, a stale
 observation exits temporary-failure, and a conflicting target decision is
 rejected. Both CLI and Web recheck the canonical plan, task generation, policy
@@ -384,12 +519,19 @@ required route from the sanctioned recovery action. Its semantic target binds
 the current terminal attempt IDs, so a later failed attempt can receive a new
 recovery decision while an exact replay remains a no-op.
 
-A retired projection-checkpoint rollout briefly included Hive's own
-`task-projection.checkpoint.json` write in reviewer custody. The current
-reviewer firewall excludes that orchestrator-owned file. Exact historical
-runner diagnostics for this false positive receive one versioned recovery
-reset for primary, adversarial, or verification; unrelated diagnostics and a
-second failure under the current contract remain terminal.
+`approve-finding` accepts an open gated finding with the reviewer's
+recommended change. `answer-finding` answers an open manual finding, or an open
+gated one with the operator's chosen alternative, including declining the
+recommendation. Decision triage lists alternatives for every gated finding;
+before this, approval was the only action that could clear one, so an operator
+who chose another alternative had no sanctioned path. An answered finding keeps
+`answered` when verification reopens it, and the planner revision prompt
+follows its `answer` exactly.
+
+The reviewer firewall excludes the controller-owned
+`task-projection.checkpoint.json` file. Historical checkpoint diagnostics are
+not a special automatic retry trigger; use the current guarded recovery action
+when its requirements are satisfied.
 
 Under ADR-008's local same-user trust model, direct CLI invocation is the
 operator boundary; Web actions use the authenticated access predicate. An
@@ -406,7 +548,7 @@ manual or unmatched decisions remain operator-owned.
 
 ## Shared status and Web projection
 
-`hive-status.v8` and `hive-operational-status.v4` contain one required nullable
+`hive-status.v9` and `hive-operational-status.v5` contain one required nullable
 `plan_review` field. Applicable rows include review and observation identity,
 computed/effective level, state/outcome, degradation reason, attempt/current
 attempt, coverage and finding counts, blockers/owner/reason, retry time, one
@@ -437,6 +579,13 @@ mandatory failed or unsupported coverage row exposes an exact waiver form even
 when that row began as configured optional coverage. While a plan review
 applies, the generic force-approve control is hidden.
 
+Operational status classifies a `plan_reviewing`/`plan_review_retry` row whose
+review is `retry_scheduled` more than an hour past its `retry_at`
+(`OperationalStatus::PLAN_REVIEW_RETRY_OVERDUE_SEC`) as `needs_repair` owned by
+`hive`, with reason `plan_review_retry_overdue`, instead of an indefinite
+scheduler wait. A row a dependency holds back keeps its scheduler wait and
+`dependency_wait` reason.
+
 ## Tests and proof
 
 - `test/unit/plan_review/` covers policy, identity, immutable storage, parser,
@@ -457,3 +606,22 @@ applies, the generic force-approve control is hidden.
 - [[modules/config]] · [[modules/daemon]] · [[modules/model_routing]] · [[modules/task_action]]
 - [[commands/status]] · [[commands/daemon]] · [[commands/web]] · [[cli]]
 - [[decisions]] · [[testing]] · [[gaps]]
+
+### Conflicting automatic dispositions
+
+Decision reassessment includes unverified, unapproved `safe_auto` findings when
+an unanswered gate exists, including already incorporated dispositions. A false
+automatic default can therefore be consolidated with the reserved choice instead
+of surviving as a contradictory verification target. Verified findings and
+operator-approved or answered findings remain outside that reassessment. A blocked
+record with a prior completed triage and newly eligible sources is runnable again;
+exhausted triage itself is not rearmed. Verification blockers referring to sources
+resolved by reassessment are removed, while unrelated missing evidence remains.
+
+Reassessment at the final allowed revision round cannot clear newly reclassified
+routine work: accepted residuals at that boundary terminate with
+`revision_round_limit` before any obsolete source blocker is removed.
+
+### Repair label
+
+Blocked reviewer capability and execution failures share the label `Plan review needs repair`. The label does not assert that configuration is missing: disposable-worktree creation can fail even when the reviewer capability is present. The structured review blocker and route diagnostic retain the specific cause; the action key, retry policy, and execution gate are unchanged.

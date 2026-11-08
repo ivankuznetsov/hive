@@ -39,8 +39,9 @@ ARGV_LOG="${LOG_DIR}/fake-claude-argv.log"
 # Role detection is prompt-based because production intentionally launches
 # these agents with an isolated environment that drops harness-only variables.
 prompt_blob=$(printf '%s\n' "$@")
-if [[ "${!#:-}" == "-" ]]; then
+if [[ ! -t 0 ]]; then
   stdin_prompt=$(cat)
+  printf 'stdin=%s\n' "$stdin_prompt" >> "$ARGV_LOG"
   prompt_blob=$(printf '%s\n%s' "$prompt_blob" "$stdin_prompt")
 fi
 
@@ -93,6 +94,12 @@ fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_BEFORE_WRITE_RELEASE_FILE:-}" ]]; then
+  until [[ -e "${HIVE_FAKE_CLAUDE_BEFORE_WRITE_RELEASE_FILE}" ]]; do
+    sleep 0.02
+  done
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then

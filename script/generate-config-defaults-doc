@@ -1,0 +1,15 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Refreshes the managed Config::DEFAULTS reference in wiki/modules/config.md.
+# Rendering and marker validation live in Hive::ConfigDefaultsDoc so this
+# maintainer command cannot diverge from the read-only test guard.
+
+require "bundler/setup"
+require "hive/config"
+require "hive/config_defaults_doc"
+
+project_root = File.expand_path("..", __dir__)
+page = File.join(project_root, Hive::ConfigDefaultsDoc::WIKI_PAGE)
+changed = Hive::ConfigDefaultsDoc.regenerate(project_root:)
+puts "#{changed ? 'regenerated' : 'already current'} #{page}"

@@ -3,8 +3,8 @@ title: Hive::AgentSupport
 type: module
 source: lib/hive/agent_support.rb, lib/hive/agent_support/
 created: 2026-08-25
-updated: 2026-08-25
-tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude]
+updated: 2026-11-05
+tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude, muse]
 ---
 
 **TLDR**: `Hive::AgentSupport` is a small convention loader for optional
@@ -30,19 +30,34 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
   transaction, launch-scope translation, route observation normalization,
   exact-route/default-model policy, and completion-protocol exception. Its
   declarative portable-runtime marker selects the generic core compiler.
+- Muse owns its MSP stream rules (terminal final message, message-bearing
+  payload redaction for prompt-echo opacity), XDG config/data directories,
+  skill discovery across workspace, personal, foreign and plugin roots, and
+  Compound Engineering provisioning. Muse refuses plugin bundles containing
+  symlinks, so `Muse::PluginStaging` clones the manifest git source and
+  copies it with every in-repository symlink dereferenced (a link resolving
+  outside the clone fails staging; a dangling link is dropped), and
+  `Muse::SetupAdapter` installs or updates the plugin from that staged tree.
+  Muse has no `Runtime` or `Mcp` facet yet; see [[gaps]].
 - Codex owns its native reviewer, managed-runtime and evidence permissions,
   path-qualified reads, skill/plugin inventory, setup, credential, model,
   effort, and invocation rules. The generic runtime still materializes output
   schemas; `Hive::Reviewers::Runtime` owns its subprocess and findings writes,
   and the reviewer receives its generic stage host rather than loading
-  orchestration or process custody into the provider package.
+  orchestration or process custody into the provider package. Managed evidence
+  capture resolves Codex's native runtime through the runtime doctor's
+  provenance, so supported npm launchers and shell shims retain the same native
+  executable validation as direct installations.
 - Grok owns its terminal event protocol, auth precedence and environment,
   native model discovery, managed bubblewrap argv, skill/plugin inventory,
   runtime provenance checks, and setup operations.
 - Claude owns its stream protocol and accounting, native model and credential
   rules, skill/plugin inventory, setup operations, managed-policy translation,
-  TUI readiness grammar, wrapper argv, and skill-alias root. The existing
-  launcher retains tmux/process custody, task markers, logs, and cleanup.
+  launch helpers, and skill-alias root. The `Launch` facet holds the planner and
+  implementer tool scopes, the always-denied `AskUserQuestion`, MCP flags, and
+  the Claude profile guard; `supports?(profile, :Launch)` is how callers ask
+  "is this the Claude profile?". `Hive::ClaudeLauncher` extends it and hands
+  every launch to the headless `Stages::Base.spawn_agent` path.
 
 Generic callers resolve the selected support once at their existing seam and
 use the named facet. They do not switch on a migrated provider name. Loading

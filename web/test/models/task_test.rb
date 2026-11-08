@@ -3,6 +3,19 @@ require "stringio"
 require_relative "../support/outcome_evidence_helper"
 
 class TaskTest < ActiveSupport::TestCase
+  test "review publication distinguishes verified draft completion from non draft and merged states" do
+    project = Project.new("name" => "app", "path" => "/tmp/app", "hive_state_path" => "/tmp/app/.hive-state")
+    evidence = { "publication" => "published", "verification" => "verified", "is_draft" => true,
+                 "pr_state" => "OPEN", "ready_command" => "gh pr ready 42" }
+    attributes = { "slug" => "task", "action" => "ready_to_artifacts", "marker" => "review_complete",
+                   "attrs" => Hive::ReviewPublicationRecovery.encode(evidence) }
+    assert_includes Task.new(project: project, attributes: attributes).review_publication["readiness_guidance"], "pr_observed"
+    attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence.merge("is_draft" => false))
+    refute Task.new(project: project, attributes: attributes).review_publication.key?("ready_command")
+    attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence.merge("pr_state" => "MERGED"))
+    refute Task.new(project: project, attributes: attributes).review_publication.key?("ready_command")
+  end
+
   test "correlated log reads an integrity-bearing bounded frame tail and fails inert" do
     root = Dir.mktmpdir("hive-web-attempt-log")
     previous_home = ENV["HIVE_HOME"]
@@ -238,7 +251,7 @@ class TaskTest < ActiveSupport::TestCase
     FileUtils.remove_entry(root) if root&.exist?
   end
 
-  test "renders verified capture-manifest artifacts as stills and videos" do
+  test "rejects superseded v1 capture manifests" do
     root = Pathname(Dir.mktmpdir("hive-web-capture-model"))
     folder = root.join("task")
     media = folder.join("media")
@@ -267,8 +280,7 @@ class TaskTest < ActiveSupport::TestCase
 
     manifest = task.media_manifest
 
-    assert_equal "captured", manifest.fetch("status")
-    assert_equal %w[still video], manifest.fetch("items").map { |item| item.fetch("type") }
+    assert_nil manifest
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
@@ -570,8 +582,11 @@ class TaskTest < ActiveSupport::TestCase
     assert_equal [ "manual" ], details.fetch("findings").map { |row| row.fetch("classification") }
     assert_equal [ "adversarial" ], details.fetch("coverage").map { |row| row.fetch("name") }
     assert_equal [ "primary_result" ], details.fetch("artifacts").map { |row| row.fetch("name") }
+    refute details.key?("routes")
+    refute details.fetch("summary").key?("routes")
+    refute task.plan_review.key?("routes")
     refute_includes details.dig("artifacts", 0, "content"), "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-    assert store.current_validated
+    assert_equal 1, store.current_validated["routes"].length, "native review history remains available"
   ensure
     FileUtils.remove_entry(root) if root&.exist?
   end
@@ -645,7 +660,8 @@ class TaskTest < ActiveSupport::TestCase
         "kind" => "projection", "version" => 1, "candidate_plan_digest" => nil,
         "state" => "awaiting_decision", "outcome" => nil, "attempt_ids" => [],
         "current_attempt_id" => nil, "coverage" => [ coverage ],
-        "findings" => [ finding.to_h ], "decisions" => [], "routes" => [],
+        "findings" => [ finding.to_h ], "decisions" => [],
+        "routes" => [ { "role" => "primary", "outcome" => "success", "attempt_id" => "old-attempt" } ],
         "artifacts" => { "primary_result" => result_ref, "primary_input" => input_ref },
         "blockers" => [ { "owner" => "operator", "reason" => "manual finding" } ],
         "required_action" => "answer manual finding", "degradation_reason" => nil,

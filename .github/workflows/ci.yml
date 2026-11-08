@@ -16,7 +16,7 @@ permissions:
 jobs:
   coverage-shards:
     name: coverage shard ${{ matrix.label }}/6
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -44,7 +44,25 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Install web gems for remote API fixtures
+        # Remote access integration tests boot the web API fixture with
+        # BUNDLE_GEMFILE=web/Gemfile, so shards need the web bundle too.
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: web
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Collect coverage shard
         env:
@@ -56,7 +74,7 @@ jobs:
         run: bundle exec rake coverage:collect
       - name: Retain raw coverage results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-shard-${{ matrix.shard }}
           path: coverage/.resultset/shard-${{ matrix.shard }}
@@ -66,7 +84,7 @@ jobs:
           retention-days: 1
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-shard-${{ matrix.shard }}
           path: tmp/ci-failure-evidence.json
@@ -77,7 +95,7 @@ jobs:
     name: coverage (Ruby 3.4)
     if: ${{ always() }}
     needs: coverage-shards
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Aggregation-only notice (no tests run in this job)
@@ -101,7 +119,7 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - name: Download coverage shards
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: coverage-shard-*
           path: coverage/.resultset/merged
@@ -115,7 +133,7 @@ jobs:
         run: bundle exec rake coverage:report
       - name: Retain coverage evidence (uncovered lines, shard map)
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: coverage-evidence
           path: |
@@ -126,7 +144,7 @@ jobs:
 
   expensive-test-gates:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -138,6 +156,8 @@ jobs:
             task: test:tui_reactivity_perf
           - name: multi-agent setup integration
             task: test:setup_agents_integration
+          - name: operational status read-only mounts
+            task: test:status_read_only
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:
@@ -146,17 +166,71 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Run merge gate
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain read-only mount evidence
+        if: ${{ always() && matrix.task == 'test:status_read_only' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: operational-status-read-only-evidence
+          path: tmp/status-read-only-evidence.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-${{ matrix.name }}
+          path: tmp/ci-failure-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  systemd-user-gate:
+    name: systemd user offline reconnect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Provision a functional user manager
+        shell: bash
+        run: |
+          runtime_dir="/run/user/$(id -u)"
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" "$runtime_dir"
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=$runtime_dir" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=$runtime_dir/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="$runtime_dir" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime_dir/bus" \
+            systemctl --user show-environment > /dev/null
+      - name: Verify templates and offline reconnect
+        run: bundle exec rake test:systemd_user_service
+      - name: Disable test-session linger
+        if: ${{ always() }}
+        run: sudo loginctl disable-linger "$USER" || true
+      - name: Retain failure evidence
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: failure-evidence-systemd-user-gate
           path: tmp/ci-failure-evidence.json
           if-no-files-found: warn
           retention-days: 14
@@ -166,7 +240,7 @@ jobs:
   # still owns row completeness and archive-size scaling.
   tui-reactivity-latency:
     name: TUI reactivity absolute latency (advisory)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -193,7 +267,7 @@ jobs:
           fi
       - name: Retain failure evidence
         if: ${{ steps.measure.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-tui-reactivity-latency
           path: tmp/ci-failure-evidence.json
@@ -207,7 +281,8 @@ jobs:
       - test
       - expensive-test-gates
       - e2e
-    runs-on: ubuntu-latest
+      - systemd-user-gate
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Aggregation-only notice (no tests run in this job)
@@ -216,22 +291,24 @@ jobs:
           {
             echo "### Required-gate aggregation only — this job runs no tests"
             echo ""
-            echo "A red result here means one of its children failed: \`coverage (Ruby 3.4)\`, an \`expensive-test-gates\` entry, or \`real CLI scenario harness\`. Check those jobs, not this one."
+            echo "A red result here means coverage, an expensive proof, the systemd-user gate, or the real CLI harness failed. Check those jobs, not this one."
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Require coverage, functional e2e, and expensive proof gates
+      - name: Require coverage, functional e2e, systemd user, and expensive proof gates
         shell: bash
         env:
           HIVE_COVERAGE_RESULT: ${{ needs.test.result }}
           HIVE_EXPENSIVE_GATES_RESULT: ${{ needs.expensive-test-gates.result }}
           HIVE_E2E_RESULT: ${{ needs.e2e.result }}
+          HIVE_SYSTEMD_USER_RESULT: ${{ needs.systemd-user-gate.result }}
         run: |
           test "$HIVE_COVERAGE_RESULT" = "success"
           test "$HIVE_EXPENSIVE_GATES_RESULT" = "success"
           test "$HIVE_E2E_RESULT" = "success"
+          test "$HIVE_SYSTEMD_USER_RESULT" = "success"
 
   e2e:
     name: real CLI scenario harness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -243,7 +320,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes tmux
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Run harness library tests
         run: bundle exec rake e2e:lib_test
@@ -257,7 +344,7 @@ jobs:
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --integrity-only
       - name: Retain e2e reports
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
@@ -266,7 +353,7 @@ jobs:
           retention-days: 14
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-e2e
           path: tmp/ci-failure-evidence.json
@@ -277,7 +364,7 @@ jobs:
     name: incident duration budget (advisory)
     needs: e2e
     continue-on-error: true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -285,7 +372,7 @@ jobs:
         with:
           ruby-version: "3.4"
       - name: Download e2e report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
@@ -296,7 +383,7 @@ jobs:
 
   web-tests:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -318,7 +405,17 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           working-directory: web
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         working-directory: .
         run: ruby packaging/betterleaks.rb
       - name: Cache Playwright browsers
@@ -369,7 +466,7 @@ jobs:
     name: Hive web (Rails tests + system)
     if: ${{ always() }}
     needs: web-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Aggregation-only notice (no tests run in this job)
@@ -386,29 +483,9 @@ jobs:
           HIVE_WEB_TESTS_RESULT: ${{ needs.web-tests.result }}
         run: test "$HIVE_WEB_TESTS_RESULT" = "success"
 
-  # Hosted Windows runners cannot run Linux containers (Windows-container
-  # mode only, no WSL2) — the per-OS surface that CAN break is our
-  # PowerShell installer. Run it on real Windows PowerShell with a stubbed
-  # docker: failure copy, $LASTEXITCODE handling, argv shape.
-  hivebox-installer-windows:
-    name: hivebox installer (Windows PowerShell)
-    runs-on: windows-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Syntax-check both installers
-        shell: pwsh
-        run: |
-          $err = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile("packaging/docker/install-box.ps1", [ref]$null, [ref]$err)
-          if ($err) { $err; exit 1 }
-      - name: Exercise install-box.ps1 against a stubbed docker
-        shell: pwsh
-        run: packaging/docker/test-install-box.ps1
-
   rubocop:
     name: rubocop (37signals omakase)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -420,7 +497,7 @@ jobs:
 
   brakeman:
     name: brakeman
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -432,7 +509,7 @@ jobs:
 
   bundler-audit:
     name: bundler-audit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -441,6 +518,9 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - run: bundle exec bundler-audit check --update
+      # The Rails app ships its own lockfile; auditing only the root bundle
+      # let crass/mail advisories in web/Gemfile.lock go unnoticed.
+      - run: bundle exec bundler-audit check --gemfile-lock web/Gemfile.lock
 
   # The launchd path in Commands::ServiceInstaller::Base (plist write +
   # `launchctl load` + the `launchctl list <label>` enabled-probe, plus the
@@ -461,7 +541,17 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: workflow creator native publication happy path
         run: >-
@@ -531,7 +621,7 @@ jobs:
           done
       - name: Retain failure evidence
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: failure-evidence-launchd-macos
           path: tmp/ci-failure-evidence.json

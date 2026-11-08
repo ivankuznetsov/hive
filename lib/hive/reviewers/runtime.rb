@@ -9,8 +9,10 @@ module Hive::Reviewers::Runtime
 
   def capture(environment:, argv:, chdir:, timeout_sec:, timeout_message:)
     pipe_r, pipe_w = IO.pipe
+    # stdin is /dev/null: `codex exec` otherwise waits on an inherited
+    # stdin for "additional input" before it starts the review.
     pid = Process.spawn(
-      environment, *argv, chdir:, pgroup: true, out: pipe_w, err: pipe_w
+      environment, *argv, chdir:, pgroup: true, in: File::NULL, out: pipe_w, err: pipe_w
     )
     pipe_w.close
 

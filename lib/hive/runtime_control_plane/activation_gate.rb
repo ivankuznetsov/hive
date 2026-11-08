@@ -1,113 +1,74 @@
-require "yaml"
-require "hive/paths"
-require "hive/runtime_control_plane"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 
 module Hive
   module RuntimeControlPlane
-    # Read-only process-start gate. It runs before any scheduler reconciliation
-    # or command setup so an installed candidate cannot mutate legacy authority
-    # until the explicit fleet cutover has activated SQL.
+    # Read-only process-start validation, before scheduler reconciliation.
     module ActivationGate
-      GLOBAL_LEGACY_PATHS = %w[
-        dispatch_requests dispatch_results attempts provider-health operational .task-counter.lock task-counter.yml
-      ].freeze
-      DATA_LEGACY_PATHS = %w[usage.db usage.db-wal usage.db-shm usage.db.patrol-discovery-allowances].freeze
-      SERVICE_ACTIVATION_WAIT_SEC = 30
-
       module_function
 
-      def check!(argv: ARGV, state_home: Hive::Paths.state_home,
-                 data_home: Hive::Paths.data_home, config_home: Hive::Paths.config_home,
-                 before_allow: nil, sleeper: ->(seconds) { sleep(seconds) },
-                 monotonic_clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
+      def check!(argv: ARGV, state_home: Hive::Paths.state_home, before_allow: nil)
         argv = Array(argv).map(&:to_s)
         route = command(argv)
-        return allow(before_allow) if version_route?(argv) || route == "version"
-        status = runtime_status(state_home)
-        return allow(before_allow) if active_status?(status)
-        if managed_service_route?(argv) && status["phase"] == "intended"
-          wait_for_active!(state_home, sleeper: sleeper, monotonic_clock: monotonic_clock)
-          return allow(before_allow)
-        end
-        incomplete = database_present?(state_home) || cutover_present?(state_home)
-        legacy = legacy_present?(state_home, data_home, config_home)
-        return allow(before_allow) unless incomplete || legacy
-        return allow(before_allow) if maintenance_route?(argv, route)
-        return allow(before_allow) if route == "setup" && !incomplete && !legacy
-        action = incomplete ? "hive runtime status" : "hive migrate --all --yes"
-        raise MigrationRequired.new(
-          "Hive runtime activation is incomplete; ordinary commands are fenced",
-          code: :fleet_cutover_required, action: action,
-          details: { argv: Array(argv).map(&:to_s) }
-        )
+        maintenance = %w[setup doctor version].include?(route) ||
+          argv == [ "--version" ] || argv == [ "-v" ] ||
+          strict_no_write_route?(argv)
+        runtime_status(state_home) unless maintenance
+        before_allow&.call || true
       end
 
       def active?(state_home)
-        active_status?(runtime_status(state_home))
+        runtime_status(state_home).fetch("phase") == "active"
       rescue RuntimeControlPlane::Error, KeyError
         false
       end
 
-      def runtime_status(state_home)
-        database = Database.new(path: Hive::Paths.runtime_control_plane_path(state_home))
-        Cutover.inspect_status(state_home: state_home, database: database)
-      ensure
-        database&.disconnect
-      end
-
-      def wait_for_active!(state_home, sleeper:, monotonic_clock:)
-        deadline = monotonic_clock.call + SERVICE_ACTIVATION_WAIT_SEC
-        until active?(state_home)
-          if monotonic_clock.call >= deadline
-            raise MigrationRequired.new(
-              "Hive service activation is waiting for cutover completion",
-              code: :fleet_cutover_required, action: "hive runtime status"
-            )
-          end
-          sleeper.call(0.05)
-        end
-      end
-
-      def active_status?(status) = status.fetch("phase") == "active" && status.dig("database", "status") == "ok"
-
-      def managed_service_route?(argv)
-        argv == %w[daemon start] || argv == %w[bot start --foreground] || argv == [ "web" ]
-      end
-
-      def maintenance_route?(argv, route = command(argv))
-        route == "doctor" || (route == "migrate" && argv.include?("--all")) ||
-          (route == "runtime" && %w[status resume].include?(subcommand(argv, route)))
-      end
-
-      def legacy_present?(state_home, data_home, config_home)
-        return true if GLOBAL_LEGACY_PATHS.any? { |path| entry?(File.join(state_home, path)) }
-        return true if DATA_LEGACY_PATHS.any? { |path| entry?(File.join(data_home, path)) }
-        registry_has_projects?(File.join(config_home, "config.yml"))
-      end
-
-      def registry_has_projects?(path)
-        return false unless File.file?(path)
-
-        document = YAML.safe_load_file(path, permitted_classes: [], aliases: false)
-        !Array(document.is_a?(Hash) && document["registered_projects"]).empty?
-      rescue Psych::Exception, SystemCallError
-        true
-      end
-
       def command(argv) = argv.find { |arg| !arg.start_with?("-") }
 
-      def subcommand(argv, name)
-        index = argv.index(name)
-        argv.drop(index + 1).find { |arg| !arg.start_with?("-") } if index
+      def subcommand_after(argv, route, value_options: [])
+        skip_value = false
+        argv.drop(argv.index(route) + 1).each do |argument|
+          if skip_value
+            skip_value = false
+          elsif value_options.include?(argument)
+            skip_value = true
+          elsif value_options.any? { |option| argument.start_with?("#{option}=") }
+            next
+          elsif !argument.start_with?("-")
+            return argument
+          end
+        end
+        nil
       end
 
-      def version_route?(argv) = argv == [ "--version" ] || argv == [ "-v" ]
-      def cutover_present?(state_home) = entry?(File.join(state_home, ".runtime-cutover", "current"))
-      def database_present?(state_home) = entry?(Hive::Paths.runtime_control_plane_path(state_home))
-      def entry?(path) = File.exist?(path) || File.symlink?(path)
+      # These routes are observations (or lifecycle controls that own their
+      # own fenced writes). They must be recognized before startup command
+      # registration and scheduler reconciliation so their established
+      # no-write contract is not defeated by process bootstrap.
+      def strict_no_write_route?(argv)
+        words = Array(argv).map(&:to_s)
+        route = command(words)
+        if route == "daemon"
+          return %w[status quiesce resume].include?(
+            subcommand_after(words, route, value_options: %w[--timeout])
+          )
+        end
+        return [ nil, "status", "projects", "payloads" ].include?(subcommand_after(words, route)) if route == "runtime"
 
-      def allow(callback) = callback&.call || true
+        if route == "init"
+          return words.drop(words.index(route) + 1).any? do |argument|
+            argument == "--preview" || argument.match?(/\A--preview=true\z/i)
+          end
+        end
+        return false unless route == "workflow"
+
+        workflow_subcommands = %w[new validate commit install list update remove publish]
+        workflow_subcommand = words.drop(words.index(route) + 1).find do |argument|
+          workflow_subcommands.include?(argument)
+        end
+        workflow_subcommand == "validate"
+      end
+
+      def runtime_status(state_home) = Installation.status(state_home: state_home)
     end
   end
 end

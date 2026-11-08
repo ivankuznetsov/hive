@@ -171,7 +171,7 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
 
       error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(task) }
       assert_match(/is not selected/, error.message)
-      assert_match(/run hive migrate/, error.message)
+      assert_includes error.message, "install it and read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     end
   end
 
@@ -356,6 +356,12 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
       assert_empty selections
       assert_includes err, 'managed workflow "demo"'
       assert_includes err, "malformed"
+
+      inspected = nil
+      _out, inspection_err = capture_io { inspected = store.inspect_selections }
+      assert_empty inspected
+      assert_includes inspection_err, 'managed workflow "demo"'
+      assert_raises(Hive::ConfigError) { store.inspect_selected("demo") }
 
       malformed = { "schema_version" => 1, "name" => "demo" }
       File.write(path, JSON.generate(malformed))

@@ -190,7 +190,9 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
-  def test_idempotency_key_after_project_enables_machine_readable_retry
+  # Without the (unpublished, opt-in) command-receipt extension, keyed
+  # creation keeps its pre-receipt per-project idempotency end to end.
+  def test_idempotency_key_after_project_is_lifted_and_dedupes_without_receipt_extension
     with_workflow_project do |home, project_root, project|
       argv = [
         "new", project, "--workflow", WORKFLOW_ID,
@@ -203,12 +205,13 @@ class NewWrapperArgvTest < Minitest::Test
       assert retry_status.success?, retry_err
       first = JSON.parse(first_out)
       retry_payload = JSON.parse(retry_out)
-      assert_equal true, first.fetch("created")
-      assert_equal false, retry_payload.fetch("created")
+      assert_equal [ true, false ], [ first.fetch("created"), retry_payload.fetch("created") ]
       assert_equal first.fetch("slug"), retry_payload.fetch("slug")
-      folder = only_task_folder(project_root)
-      assert_equal "creator:wrapper:v1", Hive::TaskMeta.read(folder).fetch(:idempotency_key)
-      refute_includes File.read(File.join(folder, "idea.md")), "--idempotency-key"
+      assert_equal WORKFLOW_ID, first.fetch("workflow")
+      [ first_err, retry_err ].each do |err|
+        assert_includes err, "command receipts not installed; using per-project idempotency"
+      end
+      assert_equal 1, Dir.glob(File.join(project_root, ".hive-state", "stages", "*", "*")).size
     end
   end
 

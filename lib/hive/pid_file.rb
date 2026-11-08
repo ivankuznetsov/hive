@@ -87,6 +87,22 @@ module Hive
       recorded == live ? :verified : :reused
     end
 
+    # One safety-critical interpretation of PID liveness and start-time
+    # ownership. Callers may differ in the error they expose, but must not
+    # disagree about whether the recorded process is dead, reused, live, or
+    # unverifiable.
+    def self.death_classification(pid:, recorded_start_time:, alive: method(:alive?),
+                                  ownership: method(:ownership))
+      return :unverified unless pid.is_a?(Integer) && pid.positive? && recorded_start_time
+      return :dead unless alive.call(pid)
+
+      case ownership.call({ "process_start_time" => recorded_start_time }, pid)
+      when :reused then :reused
+      when :verified then :live
+      else :unverified
+      end
+    end
+
     # Ownership-aware shutdown boundary for callers that read *another*
     # hive process's PID file and want it stopped (e.g. `hive uninstall`
     # TERM-ing a foreground daemon before purge). Never re-implement this

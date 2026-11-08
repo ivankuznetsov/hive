@@ -68,16 +68,34 @@ class NativeWebPositioningTest < Minitest::Test
     end
   end
 
-  def test_designated_entry_points_lead_with_native_setup_before_hivebox
+  # Hive has two supported routes: native Hive (Homebrew, AUR, the glibc
+  # Linux installer, or WSL with systemd on Windows) for people who want to
+  # tinker, or the hosted cloud product for everyone else. The Docker
+  # Hivebox distribution is discontinued, so no maintained entry point may
+  # route a reader to it.
+  def test_designated_entry_points_lead_with_native_setup
     NATIVE_FIRST_ENTRY_POINTS.each do |path|
       text = read(path)
-      native = text.index("hive setup")
-      hivebox = text.index(/Hivebox/i)
 
-      refute_nil native, "#{path} must teach hive setup"
-      refute_nil hivebox, "#{path} must retain a concise Hivebox choice"
-      assert_operator native, :<, hivebox, "#{path} must put native setup first"
+      refute_nil text.index("hive setup"), "#{path} must teach hive setup"
     end
+  end
+
+  def test_maintained_entry_points_no_longer_route_to_the_hivebox_container
+    MAINTAINED_ENTRY_POINTS.each do |path|
+      text = read(path)
+
+      refute_includes text, "packaging/docker", "#{path} still points at the removed Hivebox packaging"
+      refute_match(/install-box\.(?:sh|ps1|\{)/, text, "#{path} still teaches the removed Hivebox installer")
+      refute_match(/choose Hivebox/i, text, "#{path} still offers Hivebox as an install route")
+    end
+  end
+
+  def test_windows_route_is_native_hive_under_wsl
+    setup = read("skills/hive/references/setup-and-platforms.md")
+
+    assert_match(/WSL/, setup)
+    refute_match(/Docker Desktop/i, setup)
   end
 
   def test_agent_installer_pre_authorizes_unattended_native_setup_after_approval
@@ -107,7 +125,7 @@ class NativeWebPositioningTest < Minitest::Test
     ].each { |field| assert_includes setup, "service.#{field}" }
     assert_includes setup, "hive web status --json"
     assert_match(/read-only follow-up.*without installing, enabling, starting, or restarting/m, setup)
-    assert_match(/Prefer this native managed-service path.*Choose Hivebox/m, setup)
+    refute_match(/Hivebox/i, setup)
   end
 
   def test_legacy_native_aliases_are_confined_to_explicit_migration_docs
@@ -146,30 +164,20 @@ class NativeWebPositioningTest < Minitest::Test
     assert_includes workflow, '%w[inactive active_not_ready].include?(d["readiness"])'
   end
 
-  def test_hivebox_container_and_installer_jobs_remain_pinned
+  def test_hivebox_container_and_installer_jobs_are_gone
     ci = read(".github/workflows/ci.yml")
     release = read(".github/workflows/release.yml")
     install_smoke = read(".github/workflows/install-smoke.yml")
     install_verify = read(".github/workflows/install-verify.yml")
 
-    assert_includes ci, "hivebox-installer-windows:"
-    assert_includes ci, "packaging/docker/test-install-box.ps1"
-    assert_includes release, "hivebox-image-amd64:"
-    assert_includes release, "hivebox-image-arm64:"
-    assert_includes release, "hivebox-image:"
-    assert_operator release.scan("packaging/docker/smoke.sh").length, :>=, 2
-    assert_includes install_smoke, "packaging/docker/test-install-box.sh"
+    [ ci, release, install_smoke ].each do |workflow|
+      refute_match(/hivebox/i, workflow)
+      refute_includes workflow, "packaging/docker"
+    end
+    refute_path_exists File.join(ROOT, ".github/workflows/hivebox-recover.yml")
+    refute_path_exists File.join(ROOT, "packaging/docker")
+    refute_path_exists File.join(ROOT, ".dockerignore")
     assert_includes install_verify, "packaging/verify-channel.sh"
-  end
-
-  def test_dedicated_hivebox_documentation_keeps_complete_container_contract
-    readme = read("packaging/docker/README.md")
-
-    assert_includes readme, "Hivebox"
-    assert_includes readme, "install-box.{sh,ps1}"
-    assert_match(/upgrade/i, readme)
-    assert_match(/troubleshoot/i, readme)
-    assert_includes readme, "127.0.0.1"
   end
 
   def test_hive_site_companion_handoff_pins_pages_build_and_delivery_boundary

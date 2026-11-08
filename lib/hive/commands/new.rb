@@ -9,6 +9,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
+require "hive/cli_argv_policy"
 require "hive/task_counter"
 require "hive/task_meta"
 require "hive/task"
@@ -21,7 +22,13 @@ require "hive/workflow_package/managed_store"
 require "hive/workflow_package/mutation_lock"
 require "hive/tui/text"
 require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/worktree"
+require "hive/daily_digest/task_creation_receipt"
+require "hive/runtime_control_plane/command_registration"
+require "hive/command_operation"
+require "hive/command_error_kind"
+require "hive/runtime_control_plane/command_registration"
 
 module Hive
   module Commands
@@ -53,7 +60,14 @@ module Hive
 
       class ProjectNotFound < TypedValueError; end
       class InvalidSlugError < TypedValueError; end
-      class InvalidDependencyError < TypedValueError; end
+      class InvalidDependencyError < TypedValueError
+        def initialize(message, value: nil, retryable_after_state_change: false)
+          super(message, value: value)
+          @retryable_after_state_change = retryable_after_state_change
+        end
+
+        def retryable_pre_application_rejection? = @retryable_after_state_change
+      end
       class InvalidBaseError < TypedValueError
         def exit_code = Hive::ExitCodes::USAGE
       end
@@ -85,7 +99,8 @@ module Hive
 
       def initialize(project_name, text, slug_override: nil, body_override: nil, attachments: [], base: nil,
                      depends_on: nil, workflow: nil, idempotency_key: nil, json: false,
-                     task_capture_factory: nil)
+                     task_capture_factory: nil, command_receipt_store: nil,
+                     structured: false, principal: nil, principal_source: "local_cli")
         @project_name = project_name
         @text = text.to_s
         @slug_override = slug_override
@@ -96,6 +111,10 @@ module Hive
         @workflow_name = workflow
         @idempotency_key_raw = idempotency_key
         @task_capture_factory = task_capture_factory || ->(**options) { Hive::TaskCapture.new(**options) }
+        @command_receipt_store = command_receipt_store
+        @structured = structured
+        @principal = principal
+        @principal_source = principal_source
         # Machine-readable creation was added for idempotent automation.
         # Preserve the legacy plain-text contract for a bare `hive new --json`
         # whose caller did not opt into that side-effect boundary.
@@ -122,8 +141,25 @@ module Hive
       # raising so they can rescue typed errors without losing the alt
       # screen.
       def call
-        call_with_envelope { call! }
+        call_with_envelope do
+          if @idempotency_key_raw.nil?
+            call!
+          else
+            # Reject a malformed key before CommandOperation opens receipt
+            # storage. Otherwise a host without the runtime control plane
+            # (a fresh workspace, a sandbox) reports a config error (78)
+            # instead of the usage error (64) the key itself deserves.
+            # Order: project, then key, then receipt storage. An unknown
+            # project is reported as ProjectNotFound whatever the key looks
+            # like (the order before keys gained receipts); a malformed key
+            # is still rejected before receipt storage is opened (#1518).
+            require_project!
+            validate_idempotency_key!
+            keyed_call!
+          end
+        end
       rescue Hive::Error, SystemCallError, IOError => e
+        raise if @structured
         warn "hive: #{e.message}" unless @json
         # Honor each typed error's contract exit code (e.g. UnknownWorkflow →
         # USAGE 64 so an agent can tell "typo'd --workflow, fix the flag" from a
@@ -133,8 +169,11 @@ module Hive
       end
 
       def envelope_schema = SCHEMA
+      def envelope_enabled? = @json && !@structured
 
       def envelope_error_kind(error)
+        typed = Hive::CommandErrorKind.typed(error)
+        return typed if typed
         case error
         when IdempotencyConflict, InvalidBaseError, InvalidDraftPrCombination,
              Hive::Workflows::UnknownWorkflow then "usage"
@@ -148,32 +187,119 @@ module Hive
       def envelope_extras_for(error)
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
-        extras["idempotency_key"] = @idempotency_key if @idempotency_key
+        if @idempotency_key_raw
+          extras["idempotency_key_sha256"] = ::Digest::SHA256.hexdigest(@idempotency_key_raw.to_s)
+        end
         extras
       end
 
       def envelope_serialization_failure_policy = :raise
 
-      def call!
-        project = Hive::Config.find_project(@project_name)
-        unless project
-          raise ProjectNotFound.new(
-            "project not initialized: #{@project_name} (run `hive init <path>` first)",
-            value: @project_name
-          )
+      def command_operation
+        Hive::CommandOperation.new(
+          key: @idempotency_key_raw,
+          command: "new",
+          target: @project_name,
+          request: {
+            "text_sha256" => ::Digest::SHA256.hexdigest(@text),
+            "slug" => @slug_override,
+            "body_sha256" => @body_override && ::Digest::SHA256.hexdigest(@body_override.to_s),
+            "base" => @base,
+            "depends_on" => dependency_receipt_value(@depends_on),
+            "workflow" => @workflow_name,
+            "attachments" => @attachments.map { |attachment| attachment_identity(attachment) }
+          },
+          project_root: lambda {
+            project = Hive::Config.find_project(@project_name)
+            raise ProjectNotFound.new(
+              "project not initialized: #{@project_name} (run `hive init <path>` first)",
+              value: @project_name
+            ) unless project
+            project.fetch("path")
+          },
+          json: @json,
+          structured: @structured,
+          display_json: @json && !@structured,
+          principal: @principal,
+          principal_source: @principal_source,
+          failure_payload: ->(error) { envelope_payload_for(error) },
+          text_renderer: ->(payload) { new_result_text(payload) },
+          store: receipt_store
+        )
+      end
+
+      def attachment_identity(attachment)
+        path, destination = if attachment.respond_to?(:path)
+          [ attachment.path, File.basename(attachment.path.to_s) ]
+        elsif attachment.is_a?(Array)
+          attachment
+        else
+          [ attachment, File.basename(attachment.to_s) ]
         end
+        {
+          "name" => File.basename(destination.to_s),
+          "sha256" => File.file?(path.to_s) ? ::Digest::SHA256.file(path.to_s).hexdigest : nil
+        }
+      end
+
+      def call!
+        return perform_call! if @idempotency_key_raw.nil? || @inside_command_operation
+
+        keyed_call!
+      end
+
+      RECEIPT_FALLBACK_NOTICE =
+        "hive: command receipts not installed; using per-project idempotency for this key".freeze
+
+      # Keyed creation predates durable command receipts: before them the key
+      # was deduplicated by TaskCapture against task metadata under the
+      # project's commit lock. Receipts are an opt-in host extension, so a host
+      # without them (including one whose runtime database was never created)
+      # keeps that per-project behavior instead of refusing every keyed call.
+      # Busy or unreadable receipt storage still raises.
+      def keyed_call!
+        # An unknown project is answered before receipt storage is probed, so
+        # a host without the runtime control plane still reports
+        # ProjectNotFound rather than a storage failure.
+        require_project!
+        unless Hive::CommandOperation.receipts_installed?(receipt_store)
+          raise Hive::CommandReceiptsNotInstalled if @structured
+          warn RECEIPT_FALLBACK_NOTICE
+          return perform_call!
+        end
+        @inside_command_operation = true
+        command_operation.call { perform_call! }
+      ensure
+        @inside_command_operation = false
+      end
+
+      def receipt_store
+        @command_receipt_store ||= Hive::CommandReceiptStore.new
+      end
+
+      def require_project!
+        project = Hive::Config.find_project(@project_name)
+        return project if project
+
+        raise ProjectNotFound.new(
+          "project not initialized: #{@project_name} (run `hive init <path>` first)",
+          value: @project_name
+        )
+      end
+
+      def perform_call!
+        project = require_project!
 
         @idempotency_key = validate_idempotency_key!
         prepare_idempotent_attachments! if @idempotency_key
-        depends_on = normalize_optional(@depends_on)
-        depends_on = validate_dependency!(depends_on) if depends_on
+        depends_on = validate_dependency!(@depends_on) unless @depends_on.nil?
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
         draft_pr = workflow.draft_pr_handoff?
         if depends_on && draft_pr
           raise InvalidDraftPrCombination.new(
             "workflow #{workflow.id} uses draft-PR handoff and does not support --depends-on stacking",
-            value: depends_on
+            value: dependency_error_value(depends_on)
           )
         end
         if normalize_optional(@base) && !draft_pr
@@ -211,21 +337,36 @@ module Hive
               name: :waiting,
               attrs: { "decision_id" => SecureRandom.hex(8) }
             } : nil,
-            git_ops: ops
+            candidate_validator: lambda do |candidate_folder|
+              validate_creation_dependency_cycle!(
+                project: project, slug: slug, depends_on: depends_on,
+                workflow: workflow, task_dir: candidate_folder
+              )
+            end,
+            git_ops: ops,
+            project: project
           ).call
           unless result.created
-            return emit_task_result(result.folder, workflow, created: false)
+            return emit_task_result(result.folder, workflow, created: false) unless @inside_command_operation
+
+            raise Hive::CommandUnresolved.new(
+              message: "legacy task creation matched, but its original caller response was not saved"
+            )
           end
 
           spawn_name_generator(task_dir)
           return emit_task_result(task_dir, workflow, created: true)
         end
 
+        validate_creation_dependency_cycle!(
+          project: project, slug: slug, depends_on: depends_on,
+          workflow: workflow, task_dir: task_dir
+        )
         create_task_candidate!(
           task_dir, slug: slug, entry_stage: entry_stage, workflow: workflow,
           depends_on: depends_on, base_branch: base_branch,
           workflow_info: workflow_info, hive_state: hive_state,
-          idempotency_key: nil, input_fingerprint: nil
+          idempotency_key: nil, input_fingerprint: nil, project: project
         )
         Hive::Lock.with_commit_lock(hive_state) do
           begin
@@ -243,7 +384,7 @@ module Hive
 
       def create_task_candidate!(task_dir, slug:, entry_stage:, workflow:, depends_on:, base_branch:,
                                  workflow_info:, hive_state:, idempotency_key:, input_fingerprint:,
-                                 stable_selection: :unlocked)
+                                 stable_selection: :unlocked, project:)
         created = false
         FileUtils.mkdir_p(File.dirname(task_dir))
         Dir.mkdir(task_dir)
@@ -259,12 +400,18 @@ module Hive
         copy_attachments!(task_dir)
         validate_stable_authored_workflow!(workflow_info, hive_state)
         id = Hive::TaskCounter.next_or_nil
-        write_task_meta(
+        metadata = write_task_meta(
           task_dir, id: id, slug: slug, depends_on: depends_on,
           base_branch: base_branch, workflow: workflow,
           workflow_info: workflow_info, hive_state: hive_state,
           idempotency_key: idempotency_key, input_fingerprint: input_fingerprint,
           stable_selection: stable_selection
+        )
+        Hive::DailyDigest::TaskCreationReceipt.write!(
+          task_folder: task_dir, project: project,
+          task: { "id" => metadata[:id], "slug" => slug },
+          workflow: workflow.id.to_s, stage: entry_stage.dir,
+          created_at: Time.now.utc
         )
       rescue Errno::EEXIST
         if created
@@ -337,7 +484,10 @@ module Hive
             "outcomes" => action.allowed_outcomes
           }
         }
-        if @json
+        if @structured
+          payload["task_id"] = task.id
+          payload
+        elsif @json
           puts JSON.generate(payload)
         elsif created
           puts "hive: captured #{task.state_file}"
@@ -354,6 +504,18 @@ module Hive
           puts "next: #{action.command}" if action.command
         end
         payload
+      end
+
+      def new_result_text(payload)
+        if payload.fetch("created")
+          task = Hive::Task.new(payload.fetch("task_folder"))
+          command = payload.dig("next_action", "command")
+          "hive: captured #{task.state_file}\n#{command ? "next: #{command}\n" : ''}"
+        else
+          command = payload.dig("next_action", "command")
+          "hive: idempotent task already exists at #{payload.fetch('task_folder')}\n" \
+            "#{command ? "next: #{command}\n" : ''}"
+        end
       end
 
       def resolve_workflow(project)
@@ -566,17 +728,51 @@ module Hive
       end
 
       def validate_dependency!(value)
-        Hive::Dependencies.parse_reference(value).to_s
-      rescue Hive::Dependencies::InvalidReference
+        Hive::Dependencies.normalize_declaration(value)
+      rescue Hive::Dependencies::InvalidReference => e
 
         # Describe the accepted shape in plain English for humans and
-        # agents; the raw offending value stays in the structured `value:`
-        # field for machine consumers (the regex source is an
-        # implementation detail, not an operator-facing format).
+        # agents; scalar values stay exact in the structured `value:` field,
+        # while composite values use JSON text so the existing envelope
+        # schema remains valid (the regex source is an implementation detail,
+        # not an operator-facing format).
         raise InvalidDependencyError.new(
-          "invalid dependency '#{value}' — expected one prerequisite task id, " \
-          "slug, or explicit project:slug reference",
-          value: value
+          "invalid dependency #{value.inspect} — #{e.message}; expected a prerequisite task id, " \
+          "slug, explicit project:slug reference, or a nonempty flat list of those references",
+          value: dependency_error_value(value)
+        )
+      end
+
+      def dependency_receipt_value(value)
+        return value unless value.is_a?(Array)
+
+        Hive::Dependencies.normalize_declaration(value)
+      rescue Hive::Dependencies::InvalidReference
+        dependency_error_value(value)
+      end
+
+      def dependency_error_value(value)
+        Hive::Dependencies.display_declaration(value)
+      end
+
+      def validate_creation_dependency_cycle!(project:, slug:, depends_on:, workflow:, task_dir:)
+        return unless depends_on
+
+        verdict = Hive::DependencySnapshot.proposed_task_verdict(
+          project: project,
+          slug: slug,
+          depends_on: depends_on,
+          workflow: workflow,
+          folder: task_dir
+        )
+        error = verdict.admission_error
+        return unless error&.cycle?
+
+        path = error.offending_ref
+        raise InvalidDependencyError.new(
+          "invalid dependency cycle: #{path}",
+          value: path,
+          retryable_after_state_change: true
         )
       end
 
@@ -673,15 +869,15 @@ module Hive
       end
 
       def spawn_name_generator(task_dir)
+        return nil if @principal_source == "api_token"
         return nil if defined?(Minitest) && !self.class.name_generator_spawn_configured?
 
         FileUtils.mkdir_p(File.join(Hive::Paths.state_home, "logs"))
         log_path = File.join(Hive::Paths.state_home, "logs", "display-name.log")
-        pid = self.class.name_generator_spawn.call(
-          ENV.fetch("HIVE_BIN", "hive"), "generate-name", task_dir,
-          pgroup: true,
-          out: [ log_path, "a" ],
-          err: [ log_path, "a" ]
+        argv = [ ENV.fetch("HIVE_BIN", "hive"), "generate-name", task_dir ]
+        options = { pgroup: true, out: [ log_path, "a" ], err: [ log_path, "a" ] }
+        pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: "generate-name", spawner: self.class.name_generator_spawn, **options
         )
         Thread.new do
           Thread.current.report_on_exception = false

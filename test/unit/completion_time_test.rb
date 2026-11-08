@@ -27,6 +27,16 @@ class CompletionTimeTest < Minitest::Test
     assert_includes err, "invalid completed_at for /task/meta.yml"
   end
 
+  def test_parse_warns_for_unstructured_completion_values
+    [ "yesterday", 123 ].each do |raw|
+      warnings = []
+      Hive::Warnings.with_sink(warnings) do
+        assert_nil Hive::CompletionTime.parse(raw, warn_context: "/task/meta.yml")
+      end
+      assert_equal [ "hive: completion_time: invalid completed_at for /task/meta.yml; keeping task visible" ], warnings
+    end
+  end
+
   def test_parse_routes_warning_through_active_warning_sink
     warnings = []
     value = :not_set

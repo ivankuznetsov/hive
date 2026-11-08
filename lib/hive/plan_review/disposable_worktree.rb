@@ -15,15 +15,37 @@ module Hive
 
       attr_reader :path
 
-      def self.open(project_root:, prefix: DEFAULT_PREFIX)
-        worktree = new(project_root:, prefix:)
+      def self.open(project_root:, prefix: DEFAULT_PREFIX, revision: nil)
+        worktree = new(project_root:, prefix:, revision:)
         yield worktree.create
       ensure
         worktree&.cleanup
       end
 
-      def initialize(project_root:, prefix: DEFAULT_PREFIX)
+      # The revision a coding task will execute from: `origin/<default>` after a
+      # quick fetch, falling back to the local default branch, exactly as
+      # Hive::Worktree#create! bases a new feature worktree. Planning and review
+      # must inspect that revision, not the project checkout's HEAD, which can
+      # be an unrelated branch far behind the default or carry local edits.
+      def self.execution_base(project_root)
+        require "hive/config"
+        require "hive/git_ops"
+        require "hive/worktree"
+        root = File.expand_path(project_root.to_s)
+        cfg = begin
+          Hive::Config.load(root)
+        rescue StandardError
+          {}
+        end
+        branch = cfg["default_branch"] || Hive::GitOps.new(root).default_branch
+        Hive::Worktree.new(root, "plan-review-base").freshest_base(branch)
+      rescue StandardError
+        "HEAD"
+      end
+
+      def initialize(project_root:, prefix: DEFAULT_PREFIX, revision: nil)
         @project_root = File.expand_path(project_root.to_s)
+        @revision = revision
         @prefix = prefix.to_s
         @temp_root = nil
         @path = nil
@@ -34,7 +56,8 @@ module Hive
         @temp_root = Dir.mktmpdir(@prefix)
         @path = File.join(@temp_root, "checkout")
         out, err, status = Open3.capture3(
-          "git", "-C", @project_root, "worktree", "add", "--detach", @path, "HEAD"
+          "git", "-C", @project_root, "worktree", "add", "--detach", @path,
+          @revision || self.class.execution_base(@project_root)
         )
         unless status.success?
           raise InvalidRecord,

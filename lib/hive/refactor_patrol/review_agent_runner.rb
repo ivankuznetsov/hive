@@ -59,22 +59,27 @@ module Hive
         end
         result = nil
         begin
-          result = Hive::Agent.new(
-            task: task,
-            prompt: prompt,
-            add_dirs: [ @project_root ],
-            cwd: @project_root,
-            max_budget_usd: nil,
-            max_turns: launch.fetch(:max_turns),
-            timeout_sec: effective_timeout(timeout_sec),
-            log_label: STAGE,
-            profile: profile,
-            expected_output: @read_only ? nil : output_path,
-            status_mode: @read_only ? :exit_code_only : :output_file_exists,
-            cli_flags: launch.fetch(:cli_flags),
-            **Hive::Stages::Base.implementation_launch_arguments(@review_identity, profile),
-            **scope
-          ).run!
+          result = Hive::Mcp.with_launch(
+            profile: profile, cfg: @cfg, scope: "refactor_patrol", cwd: @project_root
+          ) do |mcp_launch|
+            Hive::Agent.new(
+              task: task,
+              prompt: prompt,
+              add_dirs: [ @project_root ],
+              cwd: @project_root,
+              max_budget_usd: nil,
+              max_turns: launch.fetch(:max_turns),
+              timeout_sec: effective_timeout(timeout_sec),
+              log_label: STAGE,
+              profile: profile,
+              expected_output: @read_only ? nil : output_path,
+              status_mode: @read_only ? :exit_code_only : :output_file_exists,
+              cli_flags: launch.fetch(:cli_flags),
+              mcp_launch: mcp_launch,
+              **Hive::Stages::Base.implementation_launch_arguments(@review_identity, profile),
+              **scope
+            ).run!
+          end
           if @read_only && resource_limited_with_final_message?(result)
             result = result.merge(status: :ok)
           end
@@ -98,7 +103,7 @@ module Hive
 
       def read_only_scope(profile)
         return {} unless @read_only
-        if Hive::AgentSupport.supports?(profile, :Interactive)
+        if Hive::AgentSupport.supports?(profile, :Launch)
           scope = Hive::PermissionScope.resolve(
             "read-only",
             task_folder: @project_root,

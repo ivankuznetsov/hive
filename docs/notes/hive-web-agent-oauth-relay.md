@@ -25,10 +25,9 @@ Commands:
 - Pi: web form writes non-empty JSON to `~/.pi/agent/auth.json`
 - Grok: `grok login --device-auth`
 
-In the Hivebox distribution, credential survival is a Docker bind-mount
-property: Hivebox sets
-`HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, and `~/.grok` are part of the
-operator-provided `/data` mount and survive image upgrades.
+Credentials land in the Hive OS user's home (`~/.claude`, `~/.codex`, `~/.pi`,
+and `~/.grok`), so they survive Hive and web-bundle upgrades. (The discontinued
+Hivebox container kept that home on its `/data` bind mount.)
 
 B1, callback proxying to a localhost listener, is not implemented because the
 CLIs cannot be assumed to allow the configured Hive web origin as their redirect URI.

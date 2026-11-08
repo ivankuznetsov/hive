@@ -8,6 +8,7 @@ require "hive/dependency_snapshot"
 require "hive/github_publication"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/model_unsupported"
 require "hive/stages/base"
 require "hive/task"
 require "hive/worktree"
@@ -56,7 +57,10 @@ module Hive
           )
           current.to_h == request.to_h
         end
-        publication = controller.publish!(request, revalidate: revalidate)
+        options = { revalidate: revalidate }
+        recorded_url = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        options[:existing_pr_url] = recorded_url unless recorded_url.to_s.empty?
+        publication = controller.publish!(request, **options)
         complete_publication(task, publication)
       rescue Hive::GithubPublication::Blocked => e
         Hive::Markers.set(
@@ -121,12 +125,63 @@ module Hive
         Hive::Stages::Base.record_deferred_agent_observation(
           task, cfg, "open_pr", spawn_result
         )
+        return model_unsupported_error(task, profile, spawn_result) if authoring_model_unsupported?(spawn_result)
+        return limits_reached_error(task, profile, spawn_result) if authoring_limit?(spawn_result)
+
         unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
           return authoring_error(
             task, "open_pr_authoring_failed", spawn_result&.fetch(:error_message, nil)
           )
         end
         read_authoring(path)
+      end
+
+      # A provider quota wall during authoring must publish limits_reached so
+      # the daemon applies the provider cooldown instead of spending identical
+      # retries on the same wall and parking the task as deterministic.
+      def authoring_limit?(spawn_result)
+        return false unless spawn_result.is_a?(Hash) && spawn_result[:status] != :ok
+
+        spawn_result[:error_reason].to_s == "limits_reached" ||
+          Hive::AgentLimit.limit_reached?(spawn_result[:error_message].to_s)
+      end
+
+      # A refused model is operator-owned configuration, never a quota wall.
+      def authoring_model_unsupported?(spawn_result)
+        return false unless spawn_result.is_a?(Hash) && spawn_result[:status] != :ok
+
+        spawn_result[:error_reason].to_s == Hive::ModelUnsupported::REASON ||
+          Hive::ModelUnsupported.detected?(spawn_result[:error_message].to_s)
+      end
+
+      def model_unsupported_error(task, profile, spawn_result)
+        text = spawn_result[:error_message].to_s
+        Hive::Markers.set(
+          task.state_file, :error,
+          **{
+            reason: Hive::ModelUnsupported::REASON,
+            provider: profile&.name&.to_s,
+            model: Hive::ModelUnsupported.model_name(text),
+            message: Hive::ModelUnsupported.operator_message(text, agent: profile&.name)
+          }.compact
+        )
+        { commit: Hive::ModelUnsupported::REASON, status: :error }
+      end
+
+      def limits_reached_error(task, profile, spawn_result)
+        message = spawn_result[:error_message].to_s
+        limit_text = spawn_result[:limit_text].to_s
+        limit_text = message if limit_text.empty?
+        Hive::Markers.set(
+          task.state_file, :error,
+          **{
+            reason: "limits_reached",
+            provider: profile&.name&.to_s,
+            message: message.byteslice(0, 200).to_s.scrub,
+            retry_after: spawn_result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text)
+          }.compact
+        )
+        { commit: "limits_reached", status: :error }
       end
 
       def authoring_error(task, reason, detail = nil)
@@ -143,15 +198,25 @@ module Hive
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         expected_output ||= authoring_path(task)
+        support = Hive::AgentSupport.for(profile)
+        provider_launch = if support&.respond_to?(:open_pr_launch_kwargs)
+          support.open_pr_launch_kwargs(
+            expected_output:,
+            completion_probe: -> { complete_authoring_file?(expected_output) }
+          )
+        else
+          {}
+        end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "open_pr", task, profile,
-          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS,
+          **provider_launch.fetch(:permission_kwargs, {})
         )
         kwargs = {
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: cwd,
-          max_budget_usd: cfg.dig("budget_usd", "open_pr") || 50,
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "open_pr", profile, default: 50),
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr-author",
           profile: profile,
@@ -160,13 +225,11 @@ module Hive
           expected_output: expected_output,
           status_mode: :output_file_exists,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
+          **provider_launch.fetch(:agent_kwargs, {}),
           **launch_arguments
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task, cfg, **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: stable tmux label
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(
             task, **kwargs, cfg: cfg,
@@ -291,6 +354,13 @@ module Hive
         raise Hive::StageError, "#{AUTHORING_FILE} is unreadable: #{e.class}: #{e.message}"
       end
 
+      def complete_authoring_file?(path)
+        read_authoring(path)
+        true
+      rescue Hive::StageError, JSON::ParserError
+        false
+      end
+
       def complete_publication(task, publication)
         hosted_state = publication.fetch("hosted_state")
         if hosted_state == "closed"
@@ -348,7 +418,10 @@ module Hive
           reason: "pull request #{state}", source: "open_pr",
           payload: {
             "pr_number" => number, "pr_state" => state,
-            "commit_oid" => publication.fetch("head_oid")
+            "pr_url" => publication["url"],
+            "commit_oid" => publication.fetch("head_oid"),
+            "head_oid" => publication.fetch("head_oid"),
+            "draft" => state == "draft"
           }
         )
       end

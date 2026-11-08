@@ -8,6 +8,8 @@ module Hive
     class TaskLeaseRepository
       MAX_RETRIES = 8
       MAX_PAYLOAD_BYTES = 16 * 1024
+      IDENTITY_CONFLICT_ACTION = "give this task folder a fresh unique id in meta.yml " \
+                                 "(docs/guides/current-format-migration.md), then retry from fresh status".freeze
 
       attr_reader :database
 
@@ -21,14 +23,31 @@ module Hive
         @process_alive = process_alive
       end
 
-      def acquire(task_folder, payload, create: true)
+      # Resolve the stable alias, not observed_path: a folder can move between
+      # stages before its next lease updates that observation.
+      def self.registered_slug(task_id:, state_root:, database: RuntimeControlPlane.database)
+        return nil unless File.file?(database.path)
+
+        database.read do |db|
+          db[:task_subjects]
+            .join(:projects, project_id: :project_id)
+            .where(Sequel[:task_subjects][:task_id] => task_id.to_s,
+                   Sequel[:projects][:state_root_path] => File.expand_path(state_root))
+            .get(Sequel[:task_subjects][:task_slug])
+        end
+      end
+
+      def acquire(task_folder, payload, create: true, observation: nil)
         folder = File.expand_path(task_folder)
-        if create
+        if create && !observation
           FileUtils.mkdir_p(folder)
         elsif !File.directory?(folder)
+          if observation
+            raise Hive::TaskMeta::StaleTask, "task directory changed identity at #{folder}"
+          end
           raise Errno::ENOENT, folder
         end
-        subject = subject_for(folder, observe: true)
+        subject = subject_for(folder, observe: true, observation: observation)
         data = { "started_at" => Codec.dump_time(@clock.call) }.merge(payload.transform_keys(&:to_s))
         data["pid"] = Process.pid
         data["process_start_time"] = @process_start_time.call(Process.pid)
@@ -128,9 +147,32 @@ module Hive
         end
       end
 
-      def lease_key(task_folder)
+      # Read-only probe for a folder whose metadata id is already bound to a
+      # different task subject. Ids come from the counter of whichever Hive
+      # state home created the task, so a folder written under another state
+      # home (for example a throwaway HIVE_HOME pointed at a real project) can
+      # reuse an id this installation bound long ago. Such a task can never
+      # take its lease here; callers surface the conflict instead of retrying.
+      def identity_conflict(task_folder)
         require "hive/task_meta"
-        task_id = Hive::TaskMeta.read(File.expand_path(task_folder))[:id]&.to_s
+        folder = File.expand_path(task_folder.to_s)
+        metadata = Hive::TaskMeta.read(folder)
+        task_id = metadata[:id]&.to_s
+        return nil if task_id.to_s.empty?
+
+        project = project_for(folder)
+        return nil unless project
+
+        row = @database.read { |db| db[:task_subjects].where(task_id: task_id).first }
+        row && conflicting_subject(row, project, metadata, folder)
+      end
+
+      def lease_key(task_folder, observation: nil)
+        require "hive/task_meta"
+        folder = File.expand_path(task_folder)
+        # Bind the lock key to the observed task before reading its stable id.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
+        task_id = Hive::TaskMeta.read(folder)[:id]&.to_s
         raise IdentityError.new(
           "task metadata has no stable id", code: :missing_task_identity
         ) if task_id.to_s.empty?
@@ -140,8 +182,10 @@ module Hive
 
       private
 
-      def subject_for(folder, observe: false)
+      def subject_for(folder, observe: false, observation: nil)
         require "hive/task_meta"
+        # Guard registration and subject lookup against a same-path replacement.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         metadata = Hive::TaskMeta.read(folder)
         task_id = metadata[:id]&.to_s
         raise IdentityError.new("task metadata has no stable id", code: :missing_task_identity) if task_id.to_s.empty?
@@ -159,15 +203,18 @@ module Hive
           "task #{task_id} is not registered in the runtime control plane",
           code: :missing_task_identity
         ) unless row
-        workflow_id = (metadata[:workflow] || "coding").to_s
-        task_slug = (metadata[:slug] || File.basename(folder)).to_s
-        if project && (row.fetch(:project_id) != project.fetch(:project_id) ||
-                       row.fetch(:workflow_id) != workflow_id || row.fetch(:task_slug) != task_slug)
+        if project && (conflict = conflicting_subject(row, project, metadata, folder))
           raise IdentityError.new(
-            "task #{task_id} belongs to a different registered subject",
-            code: :task_identity_conflict
+            "task #{task_id} belongs to a different registered subject " \
+            "(#{conflict.fetch(:project_name)}:#{conflict.fetch(:task_slug)}, " \
+            "workflow #{conflict.fetch(:workflow_id)})",
+            code: :task_identity_conflict,
+            action: IDENTITY_CONFLICT_ACTION,
+            details: conflict
           )
         end
+        # Recheck after database reads before publishing a new observed path.
+        Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if observe && row.fetch(:observed_path) != folder
           timestamp = Codec.dump_time(@clock.call)
           @database.transaction do |db|
@@ -211,6 +258,24 @@ module Hive
           end
           row
         end
+      end
+
+      def conflicting_subject(row, project, metadata, folder)
+        workflow_id = (metadata[:workflow] || "coding").to_s
+        task_slug = (metadata[:slug] || File.basename(folder)).to_s
+        return nil if row.fetch(:project_id) == project.fetch(:project_id) &&
+                      row.fetch(:workflow_id) == workflow_id && row.fetch(:task_slug) == task_slug
+
+        # task_subjects.project_id is a foreign key, so the owner row exists.
+        owner = @database.read do |db|
+          db[:projects].where(project_id: row.fetch(:project_id)).get(:name)
+        end
+        {
+          task_id: row.fetch(:task_id), project_id: row.fetch(:project_id),
+          project_name: owner.to_s,
+          workflow_id: row.fetch(:workflow_id), task_slug: row.fetch(:task_slug),
+          observed_path: row.fetch(:observed_path)
+        }
       end
 
       def project_for(folder)

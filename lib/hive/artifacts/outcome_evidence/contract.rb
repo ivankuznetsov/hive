@@ -70,6 +70,7 @@ module Hive
           claims = requirement.fetch("claims")
           claim_by_id = claims.to_h { |item| [ item.fetch("id"), item ] }
           covered = Hash.new(0)
+          wrong_kind = {}
           expected_hashes = []
           entries.each do |entry|
             kind = entry.fetch("kind").to_s
@@ -77,7 +78,8 @@ module Hive
               claim = claim_by_id[claim_id.to_s]
               raise StoreError, "evidence names unknown claim #{claim_id.inspect}" unless claim
               unless claim.fetch("proof_kind") == kind
-                raise StoreError, "claim #{claim_id} requires #{claim.fetch('proof_kind')} proof, not #{kind}"
+                wrong_kind[claim.fetch("id")] ||= kind
+                next
               end
               covered[claim.fetch("id")] += 1
             end
@@ -97,6 +99,24 @@ module Hive
           verdicts = Array(output.fetch("verdicts")).map { |item| verdict!(item) }
           unless verdicts.map { |item| item.fetch("target_id") }.sort == target_ids
             raise StoreError, "reviewer must return exactly one verdict per claim and exclusion"
+          end
+          verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
+          # A rejected candidate is still valuable durable history: recording
+          # the independent review is what lets the next producer receive its
+          # revision guidance. Publication can never admit wrong-kind proof, so
+          # a reviewer "accepted" verdict on it is downgraded to "revise" with
+          # the required kind as guidance. Raising here discarded the whole
+          # round, so the next producer repeated the same wrong kind; stronger
+          # verdicts (rework, blocked) are kept as given.
+          verdicts = verdicts.map do |item|
+            kind = wrong_kind[item.fetch("target_id")]
+            next item unless kind && item.fetch("verdict") == "accepted"
+
+            required = claim_by_id.fetch(item.fetch("target_id")).fetch("proof_kind")
+            guidance = "Controller: this claim requires #{required} proof, but the evidence " \
+                       "supplied #{kind}; recapture it as #{required}. Reviewer note: #{item.fetch('reason')}"
+            item.merge("verdict" => "revise",
+                       "reason" => guidance.byteslice(0, MAX_STATEMENT_BYTES).scrub(""))
           end
           verdict_by_target = verdicts.to_h { |item| [ item.fetch("target_id"), item ] }
           accepted_without_proof = uncovered.select do |claim_id|

@@ -31,7 +31,6 @@ class RunErrorEnvelopeTest < Minitest::Test
   def init_project(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
     prepare_test_runtime_project(dir)
-    set_project_claude_mode(dir, "headless")
   end
 
   # When report_json wrote the SuccessPayload before raising TaskInErrorState,

@@ -57,6 +57,29 @@ class SecretScannerTest < Minitest::Test
     end
   end
 
+  def test_operator_can_allow_one_exact_git_finding_without_disabling_detection
+    with_tmp_dir do |repo|
+      run!("git", "init", "-b", "main", "--quiet", repo)
+      run!("git", "-C", repo, "config", "user.name", "Test")
+      run!("git", "-C", repo, "config", "user.email", "test@example.com")
+      File.write(File.join(repo, "base.txt"), "base\n")
+      base = commit(repo)
+      File.write(File.join(repo, "fixture.txt"), "token=#{token}\n")
+      first = commit(repo)
+      with_tmp_dir do |policy|
+        with_replaced_singleton_method(Hive::Paths, :config_home, -> { policy }) do
+          hits = Hive::SecretScanner.git_findings(repo, base_oid: base, head_oid: first)
+          assert_equal 1, hits.length
+          File.write(File.join(policy, "betterleaks.ignore"), hits.first.fetch(:fingerprint) + "\n")
+          refute Hive::SecretScanner.git_match?(repo, base_oid: base, head_oid: first)
+          File.write(File.join(repo, "another.txt"), "token=#{token}\n")
+          second = commit(repo)
+          assert Hive::SecretScanner.git_match?(repo, base_oid: base, head_oid: second)
+        end
+      end
+    end
+  end
+
   private
 
   def token

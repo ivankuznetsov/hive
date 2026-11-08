@@ -3,14 +3,167 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-08-25
-tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood]
+updated: 2026-10-14
+tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
 Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist/pairing setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, community support, and how to disable automation mid-flight.
+
+## Durable command-receipt operating envelope
+
+Command receipts live in the host runtime control-plane SQLite database, not
+task folders. Project movement, archive, deletion, or registry removal cannot
+delete them. The project marker and complete database (including committed WAL
+state) must be preserved together. A complete copied/rolled-back pair and
+multi-host continuity remain outside this increment's guarantee.
+
+Planning defaults are namespace A=32 executing and N=1,000 non-terminal;
+installation A=3,200 and N=140,000. A is a subset of N. At 100 fully occupied
+workspaces that is 3,200 executing within 140,000 non-terminal rows. One noisy
+namespace stops itself at its limits; installation backstops can stop all
+namespaces. The preview marks 70% warning and 85% action bands.
+
+Local SQLite 3 measurement on 2026-09-27 used the real additive schema, FULL
+synchronous/WAL settings, and 4 KiB pages. The empty base plus extension
+occupied 360 KiB (398 KiB WAL immediately after installation). At 1,000
+terminal receipts carrying 2 KiB request and 2 KiB result payloads, occupied
+pages were 6,201,344 bytes: about 5.7 KiB incremental per receipt, with WAL at
+about 4.0 MiB after automatic checkpointing. A 50-row near-maximum sample with
+32 KiB requests and 220 KiB results added about 248.3 KiB per receipt. These
+are local allocation measurements, not universal filesystem guarantees.
+
+A second 1,000-row differential run measured the auxiliary tables after a
+truncate checkpoint. The receipt-only control occupied 970,752 bytes. One
+effect added 180 bytes/receipt, one active pin 225 bytes/receipt, one
+maintenance audit row 193 bytes/receipt, and one dispatch-intent context 397
+bytes/receipt (rounded page-allocation deltas). Four concurrent writer
+processes inserting the same 1,000-row control serialized successfully and
+peaked at a 4,140,632-byte WAL against 970,752 occupied main bytes, a 4.27x
+transient amplification. A maximum-result finalization qualification then
+measured 225,280 bytes of main-file growth plus 263,712 bytes of WAL growth,
+488,992 bytes total. Admission therefore uses main occupied pages plus the
+current WAL and a rounded-up 512 KiB next-operation allowance. At the default
+installation A=3,200, one such allowance per executing command is 1.5625 GiB,
+leaving roughly 4.69 GiB below the 6.25 GiB installation threshold for
+retained rows, auxiliary evidence, checkpoints, and filesystem variation. The
+threshold remains an admission backstop, not reserved disk or a finalization
+guarantee. The installation N=140,000 limit is independently derived from that
+remaining envelope at a conservative 33 KiB charged per non-terminal row
+(roughly 145,000 rows before rounding down); it is not the namespace limit
+multiplied by the supported namespace count.
+
+With retention W=30 days and weekly prune interval P=7, retained rows are:
+
+`100 * daily_rate * (W + P) + missed_prune_backlog + pinned_terminals_outside_window + nonterminal_rows + orphan_namespace_rows`
+
+The base terms are 370,000, 3,700,000, and 37,000,000 receipts at 100, 1,000,
+and 10,000 operations/workspace/day. At the measured small-row footprint their
+occupied-page estimates alone are roughly 2.0 GiB, 19.6 GiB, and 196 GiB;
+near-maximum payloads are much larger. Pins, missed prune, and removed-project
+namespaces are unbounded until owner maintenance. Prune makes pages reusable
+and may relieve byte admission, but does not shrink the file and does not lower
+N; only terminalizing one non-terminal receipt lowers N.
+
+Unresolved incident sensitivities of 0.1, 1, and 10 per 1,000 operations are
+assumptions, not observed probabilities. At 10,000 operations/day and 10 per
+1,000, one namespace gains about 100 unresolved rows/day: N reaches 70% in 7
+days, 85% in 8.5 days, and stops at 10 days. Across 100 workspaces that is
+10,000/day against the installation cap. Disable new intake if actual arrivals
+exceed settlement capacity; replay and maintenance remain available.
+
+Classify unresolved arrivals before choosing a remedy. A crash before an
+effect is submitted can be proven non-applying and may become a retry-eligible
+failed receipt. A crash mid-effect, a partially completed composite effect,
+provider-response uncertainty, a lost acknowledgement after application, or a
+failure while persisting the original response all remain unresolved until an
+authoritative domain/provider reconciliation accounts for every effect. Never
+infer non-application from process death, elapsed time, or a missing response.
+Task-activity and GitHub publication observations are copied into the owning
+receipt by those domain authorities. Evidence retirement accepts only the exact
+original replay envelope already persisted by the command boundary and exact
+stored observations; operator-supplied result bytes or labels cannot establish
+success. Identical retries may finalize from an exact original boundary result
+or resume only the bounded publication, attempt-dispatch, and task-activity
+state machines whose durable correlation can be authoritatively re-observed.
+An uncorrelated activity record never authorizes resumption. A proven-dead
+executing owner with no effect rows is aborted and reacquired automatically;
+other unknown effects remain unresolved.
+
+Bot enqueue, foreground durable Attempts dispatch, and Daemon consumption use
+one receipt-owned dispatch lifecycle. Before any keyed delivery can rely on
+replay protection, that lifecycle acquires the pin carrying the caller's
+absolute retry horizon. A restarted daemon reloads the receipt, principal,
+request fingerprint, effect identity, ordinal, and horizon from the private
+dispatch-context row and reacquires the same pin identity. Missing or changed
+context fails closed; it never becomes an unkeyed delivery. All three callers
+also request successors from the store's single cycle allocator. Concurrent
+handlers and redelivery of a cycle whose successor failed receive the same
+binding; a changed frozen request cannot claim that binding. A released or
+unresolvable pin rejects and removes the queued dispatch instead of retrying it
+forever. Active predecessor pins protect their bound successors from prune even
+though the transport source identity and caller intent identity are distinct.
+
+The default staffing assumption is one operator able to act within one business
+day. It is not a service guarantee or an allocated minutes/day value.
+Installations may override operator count and response business days. The
+reproducible 100-receipt qualification now measures a complete deterministic
+settlement workflow: read the exact persisted provider observation, correlate
+it to every effect, construct the evidence, run the read-only preview, and
+commit the single-receipt retirement. On Ruby 3.4.10 / SQLite 3.53.2 it measured
+4.148 ms p50 and 5.425 ms p95 (`t_lab = 0.00009041` minutes). This is a lower
+bound for incidents whose authoritative evidence is already available; human
+judgment, restoring provider authority, queue cancellation, and ambiguous
+evidence increase the installation's measured `t_actual`.
+
+Conditional capacity is `floor(T/t_actual)`, with headroom for backlog and
+orphan triage. The qualification shows the arithmetic without assigning an
+operator budget: absent T has no numeric ceiling, T=0 has ceiling 0, and an
+illustrative T=30 minutes with the lab-only p95 lower bound gives 331,814/day.
+That last number is not a production sustainable-rate claim. Configure and use
+the actual shared operator allocation; `operator_count` is not multiplied into
+T. The one-business-day response assumption alone never supplies T. Reproduce
+the measurements with `bundle exec ruby script/measure_command_receipts.rb`;
+the complete F/P and exhaustion receipt is in
+`docs/implementation/command-receipt-capacity-qualification.md`.
+
+At an N stop, consider all of: raise the namespace N config with matching
+installation/byte headroom; terminal-only prune for reusable pages (not N);
+settle one receipt with `hive receipt retire ... --settle-without-result`;
+abandon a stranded maintenance batch; or provision storage. Owner-only
+`hive receipt prune --namespace-id UUID --json` supplies bounded ids and
+generations. An A stop additionally names a live config concurrency increase
+and confirmed orphan-owner reclassification when PID/start-time evidence proves
+death. See [[commands/receipt]] for the trust, pin, audit, and confirmation
+boundaries.
+
+The loopback web boundary trusts access to the local socket after state-home
+custody validation; it does not authenticate the calling process with peer
+credentials. Any local process that can reach that socket receives the
+installation-owner maintenance authority. Receipt maintenance audit rows are
+write-only in this increment and ordinary eligible prune deletes them with
+their owning receipt, so they are not an independent post-hoc accountability
+record.
+
+For a removed project, use the installation-owner preview first:
+`hive receipt prune --json`, then select the orphan with
+`hive receipt prune --namespace-id UUID --json`. The bounded namespace result
+includes nonterminal receipt ids/generations, active pins, unfinished batches,
+and utilization needed to choose a single-receipt retirement, pin release, or
+batch abandonment. Restore the project identity and database together when
+possible; otherwise use only the owner-authorized namespace selector. Terminal
+prune makes pages reusable but deliberately retains the compact namespace,
+capacity, and enrollment metadata. That residual metadata is roughly one row
+in each table (about 1 KiB logical data before SQLite page overhead); no
+physical file shrink is promised.
+
+Prune excludes active pins and protected successor bindings before applying its
+candidate limit, then refreshes maintenance authority inside every bounded
+deletion transaction. A stranded batch can be abandoned after its
+administrative receipt has already become terminal or been pruned; the batch
+audit remains the recovery record.
 
 ## Worktree-first workflow
 
@@ -178,8 +331,10 @@ enrolls the current project, and returns distinct web installed, enabled,
 running, manager-available, and ready state. Package hooks cannot reliably
 start a per-user service on every host, so Homebrew/AUR caveats direct users to
 run setup. `hive setup --no-service` opts out of every web-service mutation;
-`hive setup --no-bootstrap` is diagnose-only. Windows uses WSL with systemd or
-the Hivebox container distribution rather than a separate native manager.
+`hive setup --no-bootstrap` is diagnose-only. Windows runs native Hive inside
+WSL with systemd rather than a separate native manager. Hive no longer ships a
+container distribution (ADR-055); see the README for migrating a Hivebox
+install to native Hive.
 
 Updates and uninstall:
 
@@ -211,6 +366,12 @@ upstream Compound Engineering, llm-wiki, and Claude PR Review Toolkit packages. 
 does not depend on an unpublished companion `hive-skills` package. Setup does
 not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
 after correcting the scoped remediation printed by doctor.
+
+The canonical skill also routes named remote contexts through its
+`references/remote-access.md`: bounded status continuation, task/content reads,
+opaque answer handles, independent scopes, approval replay guards and durable
+operation lookup. Remote contexts reject local-only verbs and `--operational`;
+operators explicitly select `--context local` for the local operational loop.
 
 OpenClaw support is rendered from the same canonical `skills/hive/` source into
 `openclaw/skills/hive/`. It is one
@@ -297,9 +458,9 @@ For unreleased packaging fixes, validate against the locally built gem rather
 than by copying files into an installed gem directory. Build the artifact with
 `gem build hive.gemspec`, install it into an isolated `GEM_HOME`/XDG prefix,
 run `hive doctor`, then replay the affected `hive run <task-folder>` path from
-that install. Claude tmux launcher-script fixes should prove the target task
-reaches `WAITING` or later instead of `claude_launch_failed`, confirming the
-packaged `lib/hive/scripts/*.sh` files are present in the real artifact.
+that install. Claude launcher fixes should prove the target task reaches
+`WAITING` or later instead of `claude_launch_failed`, confirming the packaged
+files the launch needs are present in the real artifact.
 
 Exit codes:
 
@@ -474,7 +635,8 @@ the service after project setup, but the init prompt only controls whether that
 project is enrolled for dispatch. The recipes below are the manual fallback for
 environments where setup could not write or enable a unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
-a newer template.
+a newer template. [[modules/user_service]] is the authority for shared
+contention, replay, backup, manager-availability, and recovery behavior.
 
 ### Linux (systemd-user)
 
@@ -495,7 +657,14 @@ If you log out and want the daemon to keep running:
 sudo loginctl enable-linger $USER
 ```
 
-The unit declares `Type=simple` and runs `hive daemon start` in the
+All shipped systemd-user templates target `default.target` and deliberately
+omit `network.target` and `network-online.target`: those are system-manager
+targets, not a user-manager or remote-health contract. Bot and babysitter keep
+transient connectivity failures inside their application retry loops; web and
+daemon remain locally available while individual remote operations report
+their own failures. An active unit proves only local process readiness.
+
+The daemon unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
 the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
@@ -627,7 +796,7 @@ Linux sample unit:
 ```bash
 mkdir -p ~/.config/systemd/user
 cp examples/systemd/hive-bot.service ~/.config/systemd/user/
-$EDITOR ~/.config/systemd/user/hive-bot.service   # set token / paths
+$EDITOR ~/.config/systemd/user/hive-bot.service   # confirm ExecStart=
 systemctl --user daemon-reload
 systemctl --user enable --now hive-bot
 journalctl --user -u hive-bot -f
@@ -638,7 +807,7 @@ macOS sample plist:
 ```bash
 mkdir -p ~/Library/LaunchAgents
 cp examples/launchd/hive-bot.plist ~/Library/LaunchAgents/
-$EDITOR ~/Library/LaunchAgents/hive-bot.plist     # set token / paths
+$EDITOR ~/Library/LaunchAgents/hive-bot.plist     # confirm absolute paths
 launchctl load ~/Library/LaunchAgents/hive-bot.plist
 ```
 
@@ -671,6 +840,48 @@ cache is also cleared at the start of every tick (PR-40 follow-up
 #2), so within one `poll_interval_sec` the toggle takes effect on
 its own. Reload is just for instant pickup.
 
+### Increment-1 idle backup procedure
+
+Quiescence currently has one positive backup case: an already-idle runtime
+registry. No registered launch surface is yet certified unable to create
+unregistered descendants, and an agent attempt root is always disqualifying
+without delegated Linux custody. Do not use ordinary `hive daemon stop`, daemon
+absence, or an advisory capability result as backup authorization.
+
+First create an idle window using existing controls:
+
+1. Stop new direct CLI submissions and other external submitters.
+2. Disable enrolled daemon dispatch (`hive daemon disable --all`) and stop the
+   daemon, bot, babysitter, and web services you run using their existing
+   `stop` commands. These are ingress controls, not a successful quiesce.
+3. Let existing attempts finish. Check `hive daemon status --json` until
+   `quiescence_capability.eligible` is true, while remembering that this result
+   is advisory and can race a new launch.
+4. Run `hive daemon quiesce --json`. It must return `paused: true`, a generation
+   `G`, `checkpoint.complete: true`, and a proof for `G`.
+5. Immediately before copying, run `hive daemon status --json` again. It must
+   still report lifecycle `paused`, generation `G`, valid proof, and clear
+   liveness. Keep the installation paused until the copy finishes.
+6. Copy only `runtime-control-plane.sqlite3` and its bound
+   `runtime-quiescence-proof.json` from `Hive::Paths.state_home` (normally
+   `~/.local/state/hive`). This increment does not certify the runtime payload
+   root, workflow publication, daily-digest state, or any project's
+   `.hive-state` directory.
+7. Run `hive daemon resume --json`. Admission reopens only after reconciliation;
+   managed-service restart outcomes are reported separately.
+
+If either status check says `quiescing`, discard the in-progress copy, retry
+quiesce, and start the copy again. A pre-drain `ownership_unverifiable` response
+with `admission_open: true` changed nothing, so work can still arrive while you
+are trying to make the installation idle. A refusal with admission closed has
+`resume_required: true`; either retry the same generation or resume explicitly.
+
+This limitation applies on macOS as well as Linux without usable delegated
+custody. Darwin has no promised arbitrary-descendant success mode; only the
+same exact idle-registry predicate can pause there. Increment 1 also has no
+single command that creates its own idle window, so coordinating the existing
+ingress controls remains an operator step.
+
 **Bot shutdown latency**: `hive bot stop` sends `SIGTERM` and waits up to
 `shutdown_grace_sec` (default 60) for in-flight children before
 escalating to `SIGKILL`. The supervisor's signal-reaction wakeup is
@@ -688,7 +899,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | Knob                            | Default | Notes                                                       |
 |---------------------------------|---------|-------------------------------------------------------------|
 | `max_concurrent_runs`           | 3       | Global cap. Raise carefully — multiplies cost ceiling.      |
-| `max_concurrent_per_project`    | 3       | Per-project burst cap. Lower it below the global cap to force cross-project sharing. |
+| `max_concurrent_per_project`    | 3       | Per-project burst cap. Lower it below the global cap to force cross-project sharing. A project's own `.hive-state/config.yml` `daemon.max_concurrent_per_project` lowers that project's cap further (never raises it). |
 | `max_runs_per_day_per_project`  | 50      | Circuit-breaker. Raise if a project legitimately needs it.  |
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |

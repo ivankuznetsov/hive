@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-mcp-import.v1.json",
+  "title": "hive mcp output (v1)",
+  "description": "Stable contract emitted by `hive mcp import --json`. Lists every MCP server discovered in the operator's agent configs against Hive's global catalog and reports which ones were written. Credential values never appear: `exports` names the environment variables the operator must set, and `auth` names a variable or `oauth`. `hive mcp login` is interactive and has no success document; its JSON-mode failures use the error arm.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "action",
+        "dry_run",
+        "catalog_path",
+        "written",
+        "rows",
+        "notices"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-mcp-import"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "action": {
+          "const": "import"
+        },
+        "dry_run": {
+          "type": "boolean",
+          "description": "True when --dry-run previewed the selection without writing."
+        },
+        "catalog_path": {
+          "type": "string",
+          "description": "Absolute path of the global config.yml that holds the catalog."
+        },
+        "written": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Server names written to the catalog by this run (empty on a dry run)."
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Row"
+          }
+        },
+        "notices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Agents whose configuration could not be read, with the reason."
+        }
+      }
+    },
+    "Row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "name",
+        "status",
+        "sources",
+        "transport",
+        "auth",
+        "logins",
+        "exports",
+        "refusal",
+        "selected"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Selection key for --only: the server name, or NAME@AGENTS when agents disagree or a source is refused."
+        },
+        "name": {
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "new",
+            "imported",
+            "drift",
+            "catalog-only",
+            "conflict",
+            "refused"
+          ]
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "claude",
+              "codex",
+              "opencode",
+              "pi",
+              "grok"
+            ]
+          }
+        },
+        "transport": {
+          "enum": [
+            "http",
+            "stdio",
+            null
+          ]
+        },
+        "auth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "`oauth`, `env:VAR[,VAR]`, `none`, or null when the row carries no server definition."
+        },
+        "logins": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Agents that hold a saved OAuth login for the server (presence only)."
+        },
+        "exports": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Environment variable names the operator must export because the source held a literal credential."
+        },
+        "refusal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "selected": {
+          "type": "boolean"
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-mcp-import"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "action": {
+          "enum": [
+            "import",
+            "login"
+          ]
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "enum": [
+            "usage",
+            "consent_required",
+            "config",
+            "agent",
+            "internal"
+          ],
+          "description": "usage = malformed invocation (exit 64). consent_required = a write needs --yes, --all/--only, or a terminal (exit 64). config = malformed global config (exit 78). agent = the agent's sign-in failed (exit 1). internal = uncategorised crash (exit 70)."
+        },
+        "exit_code": {
+          "enum": [
+            1,
+            64,
+            70,
+            78
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

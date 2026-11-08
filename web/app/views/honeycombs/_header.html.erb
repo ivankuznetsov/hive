@@ -1,0 +1,10 @@
+<h1>Honeycombs</h1>
+<p class="muted">Install workflows and modules from Honeycomb to extend your projects. Workflows define the steps; modules add automation.</p>
+<nav class="honeycombs-nav" aria-label="Honeycombs">
+  <%= link_to "Workflows", honeycombs_path(project: @selected_project&.name),
+        class: class_names("nav-link", "nav-link-active": section == :workflows),
+        aria: { current: section == :workflows ? "page" : nil } %>
+  <%= link_to "Modules", modules_path(project: @selected_project&.name),
+        class: class_names("nav-link", "nav-link-active": section == :modules),
+        aria: { current: section == :modules ? "page" : nil } %>
+</nav>

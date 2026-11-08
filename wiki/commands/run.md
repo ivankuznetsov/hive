@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-08-27
+updated: 2026-10-02
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -66,6 +66,11 @@ is emitted before the typed exception propagates, so automation receives both
 machine-readable context and the exit code. `--force` is not a run option and
 workflow-verb composition cannot bypass this check.
 
+Pre-dispatch missing/extra-argument failures use the same `hive-run.v2` error
+contract. If command-level error-envelope encoding raises
+`JSON::GeneratorError`, run suppresses the serialization failure and preserves
+the original typed error and exit code without emitting a fallback document.
+
 ## Auto-rebase pre-step (`Hive::Rebase.perform`)
 
 `hive run` checks whether the task's worktree branch is behind `origin/<default_branch>` and, if so, attempts a rebase before dispatching the stage runner. This prevents the failure mode where a long-running task's branch drifts behind main and reviewers in 5-review see "phantom deletions" of code that landed on main after the branch was created (originating incident: `i-want-to-be-able-260507-7682` at REVIEW_STALE pass=4).
@@ -87,12 +92,13 @@ second conflict-resolution agent into a one-agent workflow.
 **Pre-rebase guards (in order, before any fetch):**
 1. `task.workflow.controller?` → `Result.skipped(:controller_workflow)`.
 2. `task.workflow.draft_pr_handoff?` → `Result.skipped(:managed_draft_pr_handoff)`.
-3. `--no-rebase` → `Result.skipped(:cli_override)`.
-4. `cfg.rebase.enabled == false` → `Result.disabled`.
-5. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
-6. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
-7. Worktree dirty → `Result.skipped(:dirty_worktree)`.
-8. Detached HEAD → `Result.skipped(:detached_head)`.
+3. Marker `REVIEW_WAITING reason=fix_guardrail` with a `head=` binding → `Result.skipped(:pending_head_bound_approval)`. The operator's approval is tied to that exact HEAD, so a rebase here would turn the resume into `approval_head_mismatch`.
+4. `--no-rebase` → `Result.skipped(:cli_override)`.
+5. `cfg.rebase.enabled == false` → `Result.disabled`.
+6. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
+7. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
+8. Worktree dirty → `Result.skipped(:dirty_worktree)`.
+9. Detached HEAD → `Result.skipped(:detached_head)`.
 
 **Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, plus a Ruby-side wall-clock budget (`FETCH_TIMEOUT_SEC = 60`) enforced via `Process.spawn` + `Process.waitpid2` polling with SIGTERM→SIGKILL escalation. So both credential/host-key prompts and HTTPS network hangs fail immediately rather than blocking the run. Failure → `Result.skipped(:fetch_failed)`.
 
@@ -163,10 +169,11 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 `post_rebase_warnings` is always an array. Empty on clean success; populated when a successful rebase's post-step (e.g., `worktree.yml execute_base_head` rewrite) hit a non-fatal warning. The rebase itself still counts as `succeeded: true` — the warnings record exactly which downstream step failed.
 
 When this run first enters archived state, the final commit writes the current
-UTC `completed_at` clock in the same transaction. A legacy task that was
-already archived before the run keeps a missing clock unchanged; only the
-explicit [[commands/migrate]] command may discover and persist its historical
-completion time.
+UTC `completed_at` clock in the same transaction. The write is update-only and
+bound to the task observation held by the run: deletion or same-path replacement
+raises a stale-task failure before a completion commit can be attributed to it.
+A legacy task that was already archived before the run keeps a missing clock
+unchanged; Hive does not backfill its historical completion time automatically.
 
 ## next: hints (by marker)
 

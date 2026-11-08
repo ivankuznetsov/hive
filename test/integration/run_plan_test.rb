@@ -5,6 +5,7 @@ require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
 require "hive/plan_review/orchestrator"
+require "hive/stages/plan"
 
 class RunPlanTest < Minitest::Test
   include HiveTestHelper
@@ -103,7 +104,6 @@ class RunPlanTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io do
           Hive::Commands::Init.new(dir).call
-          set_project_claude_mode(dir, "headless")
           Hive::Commands::New.new(File.basename(dir), "plan stage test").call
         end
         inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -155,7 +155,6 @@ class RunPlanTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io do
           Hive::Commands::Init.new(dir).call
-          set_project_claude_mode(dir, "headless")
           Hive::Commands::New.new(File.basename(dir), "plan stage waiting").call
         end
         inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -180,6 +179,37 @@ class RunPlanTest < Minitest::Test
     end
   end
 
+  def test_plan_checkpoint_is_seeded_atomically_and_survives_marker_changes
+    with_tmp_dir do |dir|
+      task = make_plan_task(dir)
+
+      assert Hive::Stages::Plan.ensure_durable_checkpoint!(task)
+      checkpoint = File.binread(task.state_file)
+      assert_includes checkpoint, "## Requirements Trace"
+      assert_includes checkpoint, "## Implementation Units"
+      refute_match(/<!-- (?:WAITING|COMPLETE) -->/, checkpoint)
+
+      Hive::Markers.set(task.state_file, :agent_working, pid: 123)
+      Hive::Markers.set(task.state_file, :error, reason: "provider_error")
+      preserved = Hive::Markers.without_markers(File.binread(task.state_file))
+      assert_equal checkpoint.rstrip, preserved.rstrip
+
+      refute Hive::Stages::Plan.ensure_durable_checkpoint!(task)
+      assert_equal :error, Hive::Markers.current(task.state_file).name
+    end
+  end
+
+  def test_plan_checkpoint_never_replaces_existing_plan_or_feedback
+    with_tmp_dir do |dir|
+      task = make_plan_task(dir)
+      existing = "# Existing plan\n\n- user feedback\n<!-- ERROR reason=provider_error -->\n"
+      File.binwrite(task.state_file, existing)
+
+      refute Hive::Stages::Plan.ensure_durable_checkpoint!(task)
+      assert_equal existing, File.binread(task.state_file)
+    end
+  end
+
   def test_public_plan_stage_runs_standard_and_mandatory_revision_and_verification
     {
       "standard" => standard_review_plan,
@@ -189,7 +219,6 @@ class RunPlanTest < Minitest::Test
         with_tmp_git_repo do |dir|
           capture_io do
             Hive::Commands::Init.new(dir).call
-            set_project_claude_mode(dir, "headless")
             Hive::Commands::New.new(File.basename(dir), "#{expected_level} review hook").call
           end
           inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -225,7 +254,10 @@ class RunPlanTest < Minitest::Test
           assert_equal expected_level, review.fetch("effective_level")
           assert_equal "cleared", review.fetch("state")
           assert review.fetch("execution_allowed")
-          assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+          # The adversarial leg runs only at plan_review.adversarial_min_level
+          # (default mandatory).
+          expected_legs = expected_level == "mandatory" ? %w[primary adversarial verification] : %w[primary verification]
+          assert_equal expected_legs, adapter.calls.map(&:kind)
           assert_equal 1, revision.calls.length
           assert_equal candidate, File.read(plan_md)
         end
@@ -238,7 +270,6 @@ class RunPlanTest < Minitest::Test
       with_tmp_git_repo do |dir|
         capture_io do
           Hive::Commands::Init.new(dir).call
-          set_project_claude_mode(dir, "headless")
           Hive::Commands::New.new(File.basename(dir), "required review marker").call
         end
         inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
@@ -281,6 +312,14 @@ class RunPlanTest < Minitest::Test
   end
 
   private
+
+  def make_plan_task(dir)
+    folder = File.join(
+      dir, ".hive-state", "stages", "3-plan", "checkpoint-260821-abcd"
+    )
+    FileUtils.mkdir_p(folder)
+    Hive::Task.new(folder)
+  end
 
   def low_risk_plan(marker)
     <<~MD

@@ -42,7 +42,7 @@ class TaskActionConditionsTest < Minitest::Test
         config: condition_config("shadow")
       )
 
-      assert_equal "needs_input", action.key
+      assert_equal "recover_execute", action.key
       assert_equal "condition shadow mismatch", action.condition_warning
       assert_equal "shadow", action.migration_selection.effective
     end
@@ -64,13 +64,42 @@ class TaskActionConditionsTest < Minitest::Test
         config: condition_config("conditions")
       )
 
-      assert_equal "needs_input", action.key
+      assert_equal "recover_execute", action.key
       next_action = action.next_action
       assert_equal Hive::Schemas::NextActionKind::RUN, next_action.fetch("kind")
       assert_equal "AgentHealthy", next_action.fetch("condition")
       assert_equal "attempt_lost", next_action.fetch("reason")
       assert_equal dir, next_action.fetch("target")
       assert_includes next_action.fetch("rerun_with"), "hive develop"
+    end
+  end
+
+  def test_no_change_condition_is_repair_while_an_actual_question_still_needs_input
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      %w[no_worktree_changes choose_scope].each do |reason|
+        waiting = observation(
+          "waiting", "AwaitingHuman", "satisfied", reason,
+          [ { "type" => "attempt_lease", "attempt_id" => "attempt-b",
+              "lease_version" => 1, "state" => "running" } ],
+          "blocked_transition" => "execute_to_open_pr"
+        )
+        no_changes = observation(
+          "changes", "ChangesPresent", "unsatisfied", "no_worktree_changes",
+          [ { "type" => "commit", "sha" => "b" * 40, "branch" => "task" } ]
+        )
+        records = satisfied_records.reject { |record| %w[wait changes].include?(record["event_id"]) } +
+                  [ no_changes, waiting ]
+        action = Hive::TaskAction.for(
+          task,
+          projection: Hive::TaskProjection.project(records: records, marker: marker(:execute_complete)),
+          config: condition_config("conditions")
+        )
+
+        assert_equal reason == "no_worktree_changes" ? "recover_execute" : "needs_input", action.key
+        refute action.condition_gate.eligible?, "classification must not waive the inhibitor"
+        assert_equal reason, action.next_action.fetch("reason")
+      end
     end
   end
 

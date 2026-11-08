@@ -4,8 +4,8 @@ require "uri"
 
 module Hive
   module Web
-    # GitHub OAuth **device flow** gate (RFC 8628). hivebox is a headless box
-    # whose public origin is unknown at auth time (localhost today, a Hetzner
+    # GitHub OAuth **device flow** gate (RFC 8628). A non-loopback Hive web
+    # instance's public origin is unknown at auth time (localhost today, a
     # VPS behind a tunnel tomorrow), so the callback-based web flow is a poor
     # fit: it demands a per-operator OAuth app whose redirect URI exactly
     # matches `web.origin`, plus a client secret in the environment. Device
@@ -93,7 +93,8 @@ module Hive
           token = body["access_token"]
           raise Hive::Error, "GitHub device grant returned no access_token" if token.to_s.empty?
 
-          { state: :ok, login: login_for_token(token), token: token }
+          identity = identity_for_token(token)
+          { state: :ok, login: identity.fetch(:login), id: identity.fetch(:id), token: token }
         when "authorization_pending" then { state: :pending }
         # RFC 8628 §3.5: `slow_down` is an ADDITIVE signal — the client must
         # raise its polling interval by SLOW_DOWN_PENALTY seconds. GitHub's
@@ -110,6 +111,16 @@ module Hive
 
       def owner?(login)
         login.to_s.downcase == owner.to_s.downcase
+      end
+
+      # Cross-principal maintenance is stronger than ordinary admission: both
+      # the current display login and GitHub's immutable numeric identity must
+      # match the enrolled owner record.
+      def maintenance_owner?(login, id)
+        return false unless owner?(login)
+        configured = owner_id
+        configured.is_a?(Integer) && configured.positive? &&
+          id.is_a?(Integer) && id.positive? && configured == id
       end
 
       private
@@ -130,17 +141,22 @@ module Hive
         raise Hive::Error, "#{context} returned an unparseable response"
       end
 
-      def login_for_token(token)
+      def identity_for_token(token)
         req = Net::HTTP::Get.new(USER_URL)
         req["Accept"] = "application/vnd.github+json"
         req["Authorization"] = "Bearer #{token}"
         res = request(req, USER_URL, "GitHub user lookup")
         raise Hive::Error, "GitHub user lookup failed (HTTP #{res.code})" unless res.is_a?(Net::HTTPSuccess)
 
-        login = JSON.parse(res.body)["login"]
+        payload = JSON.parse(res.body)
+        login = payload["login"]
+        id = payload["id"]
         raise Hive::Error, "GitHub user lookup returned no login" if login.to_s.empty?
+        unless id.is_a?(Integer) && id.positive?
+          raise Hive::Error, "GitHub user lookup returned no positive numeric id"
+        end
 
-        login
+        { login: login, id: id }
       rescue JSON::ParserError
         raise Hive::Error, "GitHub user lookup returned an unparseable response"
       end
@@ -157,6 +173,10 @@ module Hive
 
       def owner
         @config.dig("github", "owner")
+      end
+
+      def owner_id
+        @config.dig("github", "owner_id")
       end
     end
   end

@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-08-29
-tags: [config, yaml, validation, plan-review, opencode]
+updated: 2026-11-04
+tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, daily digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project-owned `models`, project/top-level and per-stage `permissions`, project-global `claude.permission_mode` plus `claude.model`/`claude.effort` pins, an optional project-owned artifact capture provider, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 The live project template includes a commented, copyable `models:` example.
 Exact and coarse entries inherit model and effort independently, never select an
@@ -46,17 +46,8 @@ error names the source config path. The loader raises
 discovery cannot mistake this shared validation result for a recoverable config
 read failure and fall back to the built-in `coding` workflow.
 
-There is one narrow upgrade compatibility alias. Older Hive versions silently
-ignored a literal root-level `reviewers` key, so the loader temporarily promotes
-that value in memory to `review.reviewers`, validates it there, and emits one
-warning per process and source path telling the operator to run `hive migrate`.
-This keeps an older project usable immediately after `hive update` without
-silently discarding its intended reviewer selection. `hive migrate` performs
-the durable, comment-preserving rewrite in the project's tracked Hive state.
-If both the legacy and canonical locations exist, Hive exits 78 and requires
-the operator to choose which value to keep; it never guesses. Invalid promoted
-values such as `reviewers: null` still fail the normal
-`review.reviewers` validation.
+Root-level `reviewers` is rejected. Set `review.reviewers` explicitly; older
+configuration can be converted using `docs/guides/current-format-migration.md`.
 
 The canonical form is:
 
@@ -76,8 +67,7 @@ This root allowlist applies only to project config loaded through
 same malformed project config fails consistently in `hive run`, `hive doctor`,
 `hive new`, text/JSON `hive status`, and other consumers instead of reaching
 command-specific fallback behavior. An invalid workflow path cannot pre-empt
-an unsupported-root diagnostic; the legacy reviewers alias is normalized before
-workflow-path resolution.
+an unsupported-root diagnostic. Root-level reviewers is not normalized.
 
 ## Model-routing ownership and structure
 
@@ -91,8 +81,7 @@ Structural validation rejects non-mapping roots, unknown or wrong-owner stage
 keys, empty/non-mapping entries, fields other than `model` and `effort`,
 blank/non-scalar models, and efforts outside the shared accepted vocabulary.
 Each entry retains only authored fields, so model-only and effort-only
-overrides stay distinguishable. This structural pass runs before the legacy
-top-level-reviewers warning. Reachable-profile capability validation remains a
+overrides stay distinguishable. Reachable-profile capability validation remains a
 separate, pure routing-domain step after exact/coarse shadowing is known.
 
 ## Explicit provider-routing validation
@@ -152,7 +141,7 @@ These roles control the authoritative outcome-evidence package described in
 used to create project-owned media bytes; a capture manifest is not completion
 authority by itself.
 
-Hive checkouts need no declaration: the complete locked Hivebox web layout
+Hive checkouts need no declaration: the complete locked Hive web layout
 selects the built-in recorder. A conventional project can declare one
 project-owned executable:
 
@@ -177,10 +166,33 @@ before capture starts. The provider request/result ABI and publication checks
 are documented in [[commands/web]].
 
 This declaration is additive. Projects that omit it retain their prior config
-shape: compatible Hivebox trees continue on the built-in recorder, while
+shape: compatible Hive web trees continue on the built-in recorder, while
 incompatible conventional trees receive the precise unsupported-provider
 diagnostic until they opt in. Retained v1 capture manifests remain readable;
 new successful capture emits the provider-neutral v2 manifest.
+
+## Installation command-receipt capacity
+
+The global `hive_config.yml` may bound durable keyed-command storage and
+concurrency across all registered projects. These installation limits are
+independent of the project-level `command_receipts` policy:
+
+```yaml
+command_receipts:
+  installation_nonterminal_limit: 140000
+  installation_concurrency_limit: 3200
+  installation_byte_admission_limit: 6710886400
+  staffing:
+    operator_count: 1
+    response_business_days: 1
+    minutes_per_namespace_per_day:
+```
+
+All three installation limits are positive integers. The optional `staffing`
+block describes the operator capacity used by maintenance diagnostics;
+`minutes_per_namespace_per_day` may be left unset when no daily settlement
+allocation is promised. A project can choose stricter local limits but cannot
+raise these installation-wide ceilings.
 
 ## Plan-review policy and routes
 
@@ -276,152 +288,447 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 
 ## Defaults (`Config::DEFAULTS`)
 
-```ruby
-{
-  "hive_state_path"   => ".hive-state",
-  "worktree_root"     => nil,
-  "default_branch"    => nil,
-  "default_workflow"  => "coding",
-  "dependency_gate_stage" => "8-finalize",
-  "project_name"      => nil,
-  "permissions"       => "yolo",
-  "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions",
-                           "model" => "default", "effort" => "default" },
-  # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
-  # caps for runaway agents, not cost targets. The deprecated
-  # `execute_review` key was DROPPED — 6-review owns reviewer budgets per
-  # ADR-014. Old project configs that still set it survive deep-merge but
-  # nothing reads it and fresh `hive init` no longer renders it.
-  "budget_usd" => {
-    "brainstorm" => 50, "plan" => 100,
-    "execute_implementation" => 500, "open_pr" => 50, "artifacts" => 100,
-    "finalize" => 50,
-    "review_ci" => 100, "review_triage" => 75,
-    "review_fix" => 500, "review_browser" => 100, "patrol" => 100
-  },
-  "timeout_sec" => {
-    "brainstorm" => 1800, "plan" => 3600,
-    "execute_implementation" => 14400, "open_pr" => 1800,
-    "artifacts" => 3600, "finalize" => 1800,
-    "review_ci" => 3600, "review_triage" => 1800,
-    "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600
-  },
-  # Stage-level agent defaults remain for independently owned stages.
-  # Implementation-owned downstream stages intentionally omit active
-  # agent/model/effort defaults so the persisted execute owner applies.
-  "brainstorm" => { "agent" => "claude", "runtime" => "headless" }, # runtime is legacy read-back-compat
-  "plan"       => { "agent" => "claude" },
-  "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
-  "open_pr"    => {},
-  "artifacts"  => {
-    "agent" => "claude",
-    "evidence" => {
-      "max_recaptures" => 2,
-      "inference" => { "permissions" => "read-only" },
-      "producer" => { "agent" => "codex" },
-      "reviewer" => {
-        "permissions" => "read-only",
-        "capabilities" => {
-          "proof_kinds" => %w[screenshot video terminal document],
-          "temporal_video" => true
-        }
-      }
-    },
-    "capture" => { "provider" => nil }
-  },
-  "finalize"   => { "agent" => "claude" },
-  "agents" => {
-    "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },
-    "codex"  => { "bin" => "codex",  "env_override" => "HIVE_CODEX_BIN",  "min_version" => "0.125.0" },
-    "pi"     => { "bin" => "pi",     "env_override" => "HIVE_PI_BIN",     "min_version" => "0.70.2" },
-    "grok"   => { "bin" => "grok",   "env_override" => "HIVE_GROK_BIN",   "min_version" => "0.2.90" }
-  },
-  "review" => {
-    "ci"           => { "command" => nil, "max_attempts" => 3,
-                        "prompt_template" => "ci_fix_prompt.md.erb" },
-    "reviewers"    => [],
-    "adhoc"        => { "reviewers" => nil, "fix" => false },
-    "triage"       => { "enabled" => true, "agent" => "claude", "bias" => "courageous",
-                        "prompt_template" => nil, "custom_prompt" => nil },
-    "fix"          => { "prompt_template" => "fix_prompt.md.erb" },
-    "browser_test" => { "enabled" => false, "agent" => "claude",
-                        "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
-    "max_passes"        => 2,
-    "max_wall_clock_sec" => 14400
-  },
-  "web" => {
-    "bind" => "127.0.0.1",
-    "port" => 4567,
-    "origin" => "http://127.0.0.1:4567",
-    "local_loopback" => true,
-    "github" => { "owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1" }, # nil owner => first-login claimable
-    "session_secret_file" => nil
-  },
-  "babysitter" => {
-    "enabled" => false,
-    "interval" => "10m",
-    "max_concurrent_prs" => 2,
-    "labels_ignore" => %w[wip do-not-merge draft],
-    "dry_run" => false,
-    "budget_minutes" => 30,
-    "budget_usd" => 50
-  },
-  "patrol" => {
-    "mode" => "medium",
-    "enabled" => false,
-    "trigger" => "continuous",
-    "poll_interval_sec" => 600,
-    "agent" => "claude",
-    "min_confidence_to_fix" => "medium",
-    "min_alpha_to_fix" => 70,
-    "max_findings_per_feature" => 3,
-    "max_features_per_cycle" => 12,
-    "max_fixes_per_feature_per_cycle" => 1,
-    "max_fix_attempts_per_cycle" => 6,
-    "max_rework_cycles" => 2,
-    "max_prs_per_cycle" => 3,
-    "scheduled_discovery_launches_per_engine_per_day" => 4,
-    "draft_prs" => false,
-    "review_prs" => true,
-    "include" => [],
-    "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
-    "commands" => { "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil },
-    "review" => {
-      "max_context_files" => 4,
-      "max_owned_files" => 4,
-      "reviewers" => [ { "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex", ... } ]
-    }
-  },
-  "daemon" => {
-    "enabled" => false,
-    "autostart" => false,
-    "auto_retry" => { "enabled" => true },
-    ...
-  },
-  "screenote" => { "base_url" => "https://screenote.ai" },
-  "bot" => {
-    "enabled" => false,
-    "pairing_enabled" => false,
-    "chat_id_allowlist" => [],
-    "idea_attachment_max_bytes" => 20 * 1024 * 1024,
-    "idea_attachment_max_count" => 10,
-    "idea_draft_ttl_sec" => 900,
-    "transcription" => {
-      "enabled" => true,
-      "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
-      "model" => "whisper-1",
-      "api_key_env" => "HIVE_WHISPER_API_KEY",
-      "max_retries" => 3,
-      "retry_backoff_sec" => 2,
-      "timeout_sec" => 120,
-      "no_speech_threshold" => 0.6,
-      "supported_languages" => %w[en ru]
-    }
-  }
-}
-```
+`Config::DEFAULTS` in `lib/hive/config.rb` is the sole owner of default
+values. The reference below is generated by
+`script/generate-config-defaults-doc`; only the marked block is generated, so
+the explanations and operational guidance around it remain hand-authored.
+Per-value commentary belongs next to the runtime constant rather than in this
+reference.
 
-`default_workflow` is the middle tier in task workflow selection: `<task>/meta.yml workflow:` wins first, then `Config.load(project_root)["default_workflow"]`, then built-in `coding`. It is deliberately not registry-validated during config load; unknown names fail when `Hive::Task` resolves the workflow so the error is tied to the affected task path. `dependency_gate_stage` belongs to the depending project, defaults to `8-finalize`, and may be set only to `9-done`; dependency admission also verifies that the prerequisite's own workflow can actually reach the selected gate.
+<!-- BEGIN GENERATED: Config::DEFAULTS -->
+```ruby
+{"hive_state_path" => ".hive-state",
+ "worktree_root" => nil,
+ "default_branch" => nil,
+ "default_workflow" => "coding",
+ "honeycomb" =>
+  {"repository" => "ivankuznetsov/honeycomb", "base_branch" => "main"},
+ "dependency_gate_stage" => "8-finalize",
+ "attempt_heartbeat_sec" => 5,
+ "attempt_stale_sec" => 30,
+ "attempt_launch_timeout_sec" => 30,
+ "attempt_first_heartbeat_timeout_sec" => 30,
+ "project_name" => nil,
+ "permissions" => "yolo",
+ "mcp" => {"inherit_user" => false, "use" => []},
+ "command_receipts" =>
+  {"keyed_intake_enabled" => false,
+   "nonterminal_limit" => 1000,
+   "concurrency_limit" => 32,
+   "byte_admission_limit" => 67108864,
+   "staffing" =>
+    {"operator_count" => 1,
+     "response_business_days" => 1,
+     "minutes_per_namespace_per_day" => nil}},
+ "claude" =>
+  {"permission_mode" => "bypassPermissions",
+   "model" => "default",
+   "effort" => "default"},
+ "budget_usd" =>
+  {"brainstorm" => 50,
+   "plan" => 100,
+   "execute_implementation" => 500,
+   "open_pr" => 50,
+   "artifacts" => 100,
+   "finalize" => 50,
+   "review_ci" => 100,
+   "review_triage" => 75,
+   "review_fix" => 500,
+   "review_browser" => 100,
+   "patrol" => 100},
+ "timeout_sec" =>
+  {"brainstorm" => 1800,
+   "plan" => 3600,
+   "execute_implementation" => 14400,
+   "open_pr" => 1800,
+   "artifacts" => 3600,
+   "finalize" => 1800,
+   "review_ci" => 3600,
+   "review_triage" => 1800,
+   "review_fix" => 14400,
+   "review_browser" => 3600,
+   "patrol" => 3600},
+ "brainstorm" => {"agent" => "claude", "skill" => "/ce-brainstorm"},
+ "plan" =>
+  {"agent" => "claude",
+   "skill_by_agent" =>
+    {"claude" => "/plan",
+     "codex" => "/llm-wiki:wiki-plan",
+     "pi" => "/llm-wiki:wiki-plan",
+     "opencode" => "/ce-plan",
+     "muse" => "/ce-plan",
+     "default" => "/llm-wiki:wiki-plan"}},
+ "plan_review" =>
+  {"enabled" => true,
+   "classifier_version" => 1,
+   "minimum_level" => "skip",
+   "coding" => {"minimum_level" => "skip"},
+   "skip" => {"max_files" => 5, "max_bytes" => 262144},
+   "protected_paths" =>
+    [".github/workflows/**",
+     "config/**",
+     "db/migrate/**",
+     "packaging/**",
+     "Gemfile",
+     "Gemfile.lock",
+     "hive.gemspec",
+     "install.sh"],
+   "attempts" => {"max_transient" => 2, "timeout_sec" => 1800},
+   "coverage" =>
+    {"required" => ["whole_document", "adversarial"], "optional" => []},
+   "adversarial_min_level" => "mandatory",
+   "max_revision_rounds" => {"standard" => 1, "mandatory" => 3},
+   "adapter" => "ce_doc_review",
+   "reviewers" =>
+    {"primary" => "plan_review",
+     "adversarial" => "plan_review_adversarial",
+     "verification" => "plan_review_verification"},
+   "routes" =>
+    {"primary" =>
+      {"agent" => "codex",
+       "model" => "gpt-5.6-sol",
+       "family" => "openai",
+       "effort" => "high",
+       "route" => "native_codex"},
+     "adversarial" =>
+      {"agent" => "grok",
+       "model" => "grok-4.6",
+       "family" => "grok",
+       "effort" => "high",
+       "route" => "native_grok_build"},
+     "verification" =>
+      {"agent" => "codex",
+       "model" => "gpt-5.6-sol",
+       "family" => "openai",
+       "effort" => "high",
+       "route" => "native_codex"},
+     "fallbacks" => []},
+   "approval_policies" => []},
+ "execute" => {"agent" => "claude"},
+ "conditions" => {"authority" => "markers", "stages" => {}},
+ "open_pr" => {},
+ "artifacts" =>
+  {"agent" => "claude",
+   "evidence" =>
+    {"max_recaptures" => 2,
+     "inference" => {"permissions" => "read-only"},
+     "producer" => {"agent" => "codex"},
+     "reviewer" =>
+      {"permissions" => "read-only",
+       "capabilities" =>
+        {"proof_kinds" => ["screenshot", "video", "terminal", "document"],
+         "temporal_video" => true}}},
+   "capture" => {"provider" => nil}},
+ "finalize" => {"agent" => "claude"},
+ "agents" =>
+  {"claude" =>
+    {"bin" => "claude",
+     "env_override" => "HIVE_CLAUDE_BIN",
+     "min_version" => "2.1.118"},
+   "codex" =>
+    {"bin" => "codex",
+     "env_override" => "HIVE_CODEX_BIN",
+     "min_version" => "0.125.0"},
+   "pi" =>
+    {"bin" => "pi", "env_override" => "HIVE_PI_BIN", "min_version" => "1.0.4"},
+   "grok" =>
+    {"bin" => "grok",
+     "env_override" => "HIVE_GROK_BIN",
+     "min_version" => "0.2.90"},
+   "opencode" =>
+    {"bin" => "opencode",
+     "env_override" => "HIVE_OPENCODE_BIN",
+     "min_version" => "1.18.16",
+     "credential_env" => [],
+     "plugins" => []},
+   "muse" =>
+    {"bin" => "muse",
+     "env_override" => "HIVE_MUSE_BIN",
+     "min_version" => "1.4.14"}},
+ "review" =>
+  {"ci" =>
+    {"command" => nil,
+     "max_attempts" => 3,
+     "prompt_template" => "ci_fix_prompt.md.erb"},
+   "reviewers" => [],
+   "adhoc" => {"reviewers" => nil, "fix" => false},
+   "triage" =>
+    {"enabled" => true,
+     "agent" => "claude",
+     "bias" => "courageous",
+     "prompt_template" => nil,
+     "custom_prompt" => nil},
+   "fix" =>
+    {"prompt_template" => "fix_prompt.md.erb",
+     "auto_commit" =>
+      {"sign_policy" => "inherit",
+       "scope_check" =>
+        {"enabled" => true,
+         "allowed_paths" =>
+          ["app/**",
+           "app/**/*",
+           "lib/**",
+           "lib/**/*",
+           "src/**",
+           "src/**/*",
+           "test/**",
+           "test/**/*",
+           "tests/**",
+           "tests/**/*",
+           "spec/**",
+           "spec/**/*",
+           "docs/**",
+           "docs/**/*",
+           "wiki/**",
+           "wiki/**/*",
+           "config/**",
+           "config/**/*",
+           "db/**",
+           "db/**/*",
+           "web/app/**",
+           "web/app/**/*",
+           "web/lib/**",
+           "web/lib/**/*",
+           "web/src/**",
+           "web/src/**/*",
+           "web/test/**",
+           "web/test/**/*",
+           "web/tests/**",
+           "web/tests/**/*",
+           "web/spec/**",
+           "web/spec/**/*",
+           "web/docs/**",
+           "web/docs/**/*",
+           "README",
+           "README.*",
+           "CHANGELOG",
+           "CHANGELOG.*",
+           "LICENSE",
+           "LICENSE.*",
+           "Gemfile",
+           "*.gemspec",
+           "Rakefile",
+           "Makefile",
+           "package.json",
+           "pyproject.toml",
+           "requirements.txt",
+           "requirements-*.txt",
+           "go.mod",
+           "Cargo.toml",
+           "composer.json",
+           "mix.exs"],
+         "denied_paths" =>
+          [".git/**",
+           ".git/**/*",
+           "bin/**",
+           "bin/**/*",
+           "config/master.key",
+           "config/credentials/**",
+           "config/credentials/**/*",
+           ".github/**",
+           ".github/**/*",
+           ".gitlab-ci.yml",
+           ".gitlab-ci.yaml",
+           ".circleci/**",
+           ".circleci/**/*",
+           "Jenkinsfile",
+           "bitbucket-pipelines.yml",
+           "bitbucket-pipelines.yaml",
+           ".azure-pipelines.yml",
+           ".azure-pipelines.yaml",
+           ".travis.yml",
+           ".env",
+           ".env.*",
+           "**/.env",
+           "**/.env.*",
+           "**/secrets.yml",
+           "**/secrets.yaml",
+           "**/secret.yml",
+           "**/secret.yaml",
+           "**/credentials.yml",
+           "**/credentials.yaml",
+           "**/credentials.yml.enc",
+           "**/credentials.yaml.enc",
+           "**/.npmrc",
+           "**/.pypirc",
+           "Gemfile.lock",
+           "package-lock.json",
+           "pnpm-lock.yaml",
+           "pnpm-lock.yml",
+           "yarn.lock",
+           "Cargo.lock",
+           "go.sum",
+           "poetry.lock",
+           "Pipfile.lock",
+           "composer.lock",
+           "uv.lock",
+           "**/Gemfile.lock",
+           "**/package-lock.json",
+           "**/pnpm-lock.yaml",
+           "**/pnpm-lock.yml",
+           "**/yarn.lock",
+           "**/Cargo.lock",
+           "**/go.sum",
+           "**/poetry.lock",
+           "**/Pipfile.lock",
+           "**/composer.lock",
+           "**/uv.lock"]}}},
+   "browser_test" =>
+    {"enabled" => false,
+     "agent" => "claude",
+     "prompt_template" => "browser_test_prompt.md.erb",
+     "max_attempts" => 2},
+   "github_publish" => {"enabled" => true, "max_attempts" => 2},
+   "github_checks" => {"enabled" => true},
+   "max_passes" => 2,
+   "severity_gate_from_pass" => 2,
+   "max_wall_clock_sec" => 28800},
+ "daemon" =>
+  {"enabled" => false,
+   "autostart" => false,
+   "auto_retry" => {"enabled" => true},
+   "poll_interval_sec" => 30,
+   "fast_poll_sec" => 1,
+   "edit_debounce_sec" => 30,
+   "pr_merge_poll_interval_sec" => 300,
+   "max_concurrent_runs" => 3,
+   "max_concurrent_per_project" => 3,
+   "max_runs_per_day_per_project" => 50,
+   "max_concurrent_patrol_scans" => 1,
+   "transient_retry_backoff_sec" => 60,
+   "shutdown_grace_sec" => 600,
+   "child_timeout_sec" => 0,
+   "child_kill_grace_sec" => 30,
+   "child_verb_timeouts" => {"answer-digest" => 3600, "digest" => 3600},
+   "child_stage_timeouts" =>
+    {"daily_digest_refresh" => 900,
+     "daily_digest_close" => 3600,
+     "daily_digest_delivery" => 300},
+   "log_max_bytes" => 10485760,
+   "log_max_files" => 5},
+ "update" => {"check" => true, "auto" => true},
+ "web" =>
+  {"bind" => "127.0.0.1",
+   "port" => 4567,
+   "origin" => "http://127.0.0.1:4567",
+   "local_loopback" => true,
+   "github" =>
+    {"owner" => nil, "owner_id" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1"},
+   "session_secret_file" => nil},
+ "screenote" => {"base_url" => "https://screenote.ai"},
+ "babysitter" =>
+  {"enabled" => false,
+   "interval" => "10m",
+   "max_concurrent_prs" => 2,
+   "labels_ignore" => ["wip", "do-not-merge", "draft"],
+   "dry_run" => false,
+   "auto_rebase" => true,
+   "budget_minutes" => 30,
+   "budget_usd" => 50},
+ "patrol" =>
+  {"mode" => "medium",
+   "enabled" => false,
+   "trigger" => "continuous",
+   "poll_interval_sec" => 600,
+   "agent" => "claude",
+   "fix" => {},
+   "min_confidence_to_fix" => "medium",
+   "min_alpha_to_fix" => 70,
+   "max_findings_per_feature" => 3,
+   "max_features_per_cycle" => 12,
+   "max_fixes_per_feature_per_cycle" => 1,
+   "max_fix_attempts_per_cycle" => 6,
+   "max_prs_per_cycle" => 3,
+   "max_rework_cycles" => 2,
+   "scheduled_discovery_launches_per_engine_per_day" => 4,
+   "draft_prs" => false,
+   "review_prs" => true,
+   "include" => [],
+   "exclude" => ["node_modules", "dist", "build", "vendor", ".git"],
+   "commands" =>
+    {"docs" => nil,
+     "format" => nil,
+     "lint" => nil,
+     "typecheck" => nil,
+     "test" => nil},
+   "review" =>
+    {"max_context_files" => 4,
+     "max_owned_files" => 4,
+     "reviewers" =>
+      [{"name" => "codex-native-review",
+        "kind" => "codex_review",
+        "agent" => "codex",
+        "output_basename" => "codex-native-review",
+        "prompt_template" => "reviewer_codex_native_review.md.erb",
+        "timeout_sec" => 5400}]}},
+ "refactor_patrol" =>
+  {"enabled" => false,
+   "auto_fix" => {"enabled" => false},
+   "issue_filing" => {"enabled" => false},
+   "min_confidence" => "medium",
+   "max_theses_per_feature" => 1,
+   "max_theses_per_run" => 10,
+   "max_review_seconds_per_run" => 3600,
+   "include" => [],
+   "exclude" => ["node_modules", "dist", "build", "vendor", ".git"],
+   "commands" =>
+    {"docs" => nil,
+     "format" => nil,
+     "lint" => nil,
+     "public_contract" => nil,
+     "typecheck" => nil,
+     "test" => nil},
+   "caps" =>
+    {"single_feature_only" => false,
+     "allow_dependency_bumps" => false,
+     "allow_public_api_changes" => false,
+     "allow_cross_feature" => true},
+   "review" => {"max_context_files" => 6, "max_owned_files" => 6}},
+ "answer_digest" => {"enabled" => false, "hour" => 9},
+ "daily_digest" =>
+  {"enabled" => true,
+   "time_zone" => nil,
+   "coverage_started_at" => nil,
+   "initial_membership" => nil,
+   "first_interval" => nil,
+   "materialization_interval_sec" => 300,
+   "freshness_budget_sec" => 900,
+   "telegram" => {"enabled" => false, "hour" => 9}},
+ "bot" =>
+  {"enabled" => false,
+   "pairing_enabled" => false,
+   "chat_id_allowlist" => [],
+   "poll_interval_sec" => 30,
+   "long_poll_timeout_sec" => 25,
+   "recovery_reminder_window_sec" => 28800,
+   "recovery_grace_sec" => 60,
+   "conversation_ttl_sec" => 3600,
+   "idea_attachment_max_bytes" => 20971520,
+   "idea_attachment_max_count" => 10,
+   "idea_draft_ttl_sec" => 900,
+   "transcription" =>
+    {"enabled" => true,
+     "endpoint" => "https://api.openai.com/v1/audio/transcriptions",
+     "model" => "whisper-1",
+     "api_key_env" => "HIVE_WHISPER_API_KEY",
+     "max_retries" => 3,
+     "retry_backoff_sec" => 2,
+     "timeout_sec" => 120,
+     "open_timeout_sec" => 10,
+     "no_speech_threshold" => 0.6,
+     "supported_languages" => ["en", "ru"]},
+   "shutdown_grace_sec" => 60,
+   "pid_file" => "~/Dev/hive/.bot.pid",
+   "log_file" => "~/Dev/hive/logs/bot.log",
+   "log_max_bytes" => 10485760,
+   "log_max_files" => 5,
+   "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"},
+ "stages" => {"ensure_clean_on_exit" => true},
+ "rebase" => {"enabled" => true, "conflict_resolution_timeout_sec" => 2700}}
+```
+<!-- END GENERATED: Config::DEFAULTS -->
+
+`default_workflow` is the middle tier in task workflow selection: `<task>/meta.yml workflow:` wins first, then `Config.load(project_root)["default_workflow"]`, then built-in `coding`. It is deliberately not registry-validated during config load; unknown names fail when `Hive::Task` resolves the workflow so the error is tied to the affected task path. `dependency_gate_stage` belongs to the depending project, defaults to `8-finalize`, and may be set only to `9-done`. It governs scalar declarations only. Every list edge has a fixed `9-done` gate regardless of this setting; dependency admission verifies that each prerequisite's own workflow can reach its required gate and reports list-specific remediation when it cannot.
 
 `worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` is **inert**: automatic `ERROR` / `REVIEW_ERROR` retry is unconditional and governed by a single backoff ladder in `RecoveryCoordinator`. The key is still shape-validated so an existing config with a typo fails loudly rather than looking meaningful; to pause a project use `daemon.enabled: false`. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
@@ -435,13 +742,8 @@ per-engine launch values are respectively 16, 8, 4, 2, and disabled for
 ordinary scheduling. The legacy `max_agent_spawns_per_day` key is inert and
 cannot distort either engine lane. Modes never change finding/PR
 caps, diversity, confidence, or alpha gates. Patrol has no token budget or
-token-based admission; usage totals remain telemetry. `hive migrate`, including
-the automatic fleet migration run by `hive update`, deletes retired token,
-per-cycle launch, architecture-specific launch, USD, and multiplier keys, then
-requests one daemon restart after the fleet succeeds.
-Standalone migration requests the normal best-effort restart immediately after
-that independent config commit, before later project-specific preparation can
-fail; fleet mode injects the coalescing restart request instead.
+token-based admission; usage totals remain telemetry. Retired configuration keys must be removed explicitly during offline conversion.
+Updates do not rewrite project YAML or restart services for old configuration.
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
@@ -493,9 +795,44 @@ instead of silently dropping that project. See [[commands/refactor-patrol]].
 
 ## Digest config
 
-Hive has no PR-digest configuration. A top-level `digest:` block in global
-config is rejected when the daemon starts, with guidance to schedule
-`prdigest prose --deliver` directly or use `prdigest facts` from an agent.
+Local document generation defaults on. An explicit `daily_digest.enabled: false`
+is preserved. Setup or daemon initialization supplies a timezone; historical
+coverage metadata from the former activity projection does not restrict PR
+queries. See [[modules/daily-digest]].
+
+```yaml
+daily_digest:
+  enabled: true
+  time_zone: Europe/London
+  # Optional; otherwise use the configured execute agent/model route.
+  agent: opencode
+  model: opencode-go/deepseek-v4.1-flash
+  materialization_interval_sec: 300
+  freshness_budget_sec: 900
+  telegram:
+    enabled: false
+    hour: 9
+```
+
+The daemon checks for yesterday's document on the configured cadence. A saved
+closed document requires no repeated GitHub or agent work. Telegram delivery is
+separate and uses the existing bot token and first allowlisted private chat.
+Reads remain available when generation is disabled.
+
+## MCP grants and catalog
+
+`mcp` is a strict root key (`DEFAULTS["mcp"] = {"inherit_user" => false, "use" => []}`).
+Project and stage blocks may set only `mcp.use` (plus project
+`mcp.inherit_user`); `validate_mcp!` scans every top-level block and the nested
+role blocks in `MCP_NESTED_GRANT_PATHS`, and rejects project `mcp.servers`.
+The global block (`load_global_mcp`, validated by `validate_global_mcp!`)
+holds `inherit_user`, `servers`, and `import_offered` (set once `hive setup` or
+`hive init` asked to run `hive mcp import`). Server keys: stdio `command`,
+`args`, `env`, `env_from`, `cwd`; HTTP `url`, `bearer_token_env`, `headers`,
+`headers_env`, `oauth_resource`, `oauth_client_id`, `oauth_scopes`,
+`oauth_logins` (agents with a saved login); common `imported_from`, `enabled`.
+A granted name missing from a readable catalog fails project load. Resolution
+and launch rendering live in [[modules/mcp]].
 
 ## Screenote config
 
@@ -530,25 +867,25 @@ they do not create a second writable copy of patrol checkpoints or ledgers.
 
 | Function | Returns / does |
 |----------|----------------|
-| `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
+| `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; no historical path fallback) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
 | `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
-| `registered_projects` | Reads the authoritative global config; returns `[{name, project_id, path, real_path, hive_state_path, repository_identity}, …]` (runtime paths `expand_path`-ed). `real_path` is the immutable canonical anchor captured at enrollment and is not recomputed by this projection. The repository identity is a normalized canonical `origin` captured at enrollment when available. The ordinary reader retains the existing one-off move of a legacy registry into XDG config storage. |
+| `registered_projects` | Reads the authoritative global config; returns `[{name, project_id, path, real_path, hive_state_path, repository_identity}, …]` (runtime paths `expand_path`-ed). `real_path` is the immutable canonical anchor captured at enrollment and is not recomputed by this projection. The repository identity is a normalized canonical `origin` captured at enrollment when available. Readers never move an old registry or config into XDG storage. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Before writing, canonicalizes the proposed `.hive-state` root through its nearest existing ancestor and rejects a distinct registered project identity that would share the same state root; a same-name replacement is excluded from its own conflict check. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. When an activated runtime database exists, the complete authoritative registry is projected to `projects` after the YAML mutation; omitted rows become inactive rather than remaining schedulable. Pre-activation enrollment never creates or migrates SQLite. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`, then refreshes the activated SQL projection. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `telegram_chat_id!` | Returns the first allowlisted Telegram chat or raises a configuration error; used by Hive's answer digest. |
+| `telegram_chat_id!` | Returns the first positive allowlisted Telegram chat or raises a configuration error; used as the sole private destination by Hive's answer digest and opt-in daily recap. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
 | `write_global_config!(data)` | Direct locked atomic write for the global config; restores existing mode bits after tempfile creation so umask cannot narrow them, leaves a sticky sibling lock file, and rewraps lock/write filesystem errors as `ConfigError`. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
 | `stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback:)` | Resolves an explicitly authored, non-null project limit before the descriptor default, then a merged config/default fallback. `Config.load` stores private raw-key provenance so `DEFAULTS` entries cannot masquerade as project overrides; synthetic config hashes retain present-key precedence. |
-| `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
-| `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Shared by headless `Hive::Agent` and tmux `Hive::ClaudeLauncher`. |
+| `obsolete_claude_mode_key?(cfg)` | True when the raw project YAML still set the retired `claude.mode` key (`Config.load` records it under `OBSOLETE_CLAUDE_MODE_KEY`); the value itself is ignored. `hive doctor` reads this to emit a `claude/config` warning. A cfg synthesised in-process without the flag reads as absent. |
+| `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Used by `Stages::Base.spawn_agent` and `Hive::ClaudeLauncher.launch!` (which also accepts per-stage `model:`/`effort:` overrides). |
 | `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
 | `permission_spec(cfg, stage)` | Returns a stage's complete `permissions:` spec when declared; otherwise returns the project default. Dotted review paths are supported. |
 | `deep_merge(base, override)` | Recursive merge: Hash-vs-Hash recurses; everything else (scalar, Array, mismatched types) replaces. |
@@ -584,14 +921,14 @@ include:
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
-5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
-6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
+5. **Retired `claude.mode`** — no longer validated: the `claude:` hash is only shape-checked, so a leftover `claude.mode` (any value) loads and is ignored; `Config.load` records its presence for `hive doctor`'s `claude/config` warning.
+6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. The headless `-p` path resolves this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, malformed `Tool(specifier)` rules, unresolvable file-rule paths, unsupported file-tool path rules (use `Read(path)` / `Edit(path)`), and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known. Scoped rules run in Claude `dontAsk` mode. Task-relative `Read(path)` / `Edit(path)` rules are resolved to absolute permission patterns at spawn time, including Claude's POSIX drive form on Windows. Qualified `Edit` covers every built-in file-edit tool, so all file-edit denies are removed to prevent a bare deny from overriding the path grant. Claude merges these CLI rules with loaded managed/user/project/local permission settings, so the descriptor expresses the requested Hive scope rather than overriding trusted operator policy from those sources.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, `scheduled_discovery_launches_per_engine_per_day >= 2`, and command shape are validated before the scheduler or `hive patrol` command can run. The selected mode always projects the closed 2/4/8/16 table; the projected key is not an independent override. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
 10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, and semantic scope plus contract/dependency policy booleans. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
-12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission then checks reachability against the prerequisite task's selected workflow rather than assuming the coding descriptor.
+12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission applies it to scalar dependencies, applies fixed `9-done` to lists, and checks reachability against each prerequisite task's selected workflow rather than assuming the coding descriptor.
 13. **`validate_model_routing_capabilities!`** — after structural role and
 patrol validation, resolves exact/coarse routes for enabled, reachable built-in
 calls and asks each already-selected profile to validate only its effective
@@ -647,10 +984,11 @@ Shared Rails environment input is resolved centrally by
 `HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their six named
 native-web `HIVEBOX_*` aliases remain accepted through the next major release:
 blank is unset, canonical wins conflicts, and alias use produces a deduplicated
-migration warning. Container-only Hivebox image/name/bind/port/data/repo,
-session-secret, and supervisor variables are not aliases and never warn.
+migration warning. The former container-only Hivebox
+image/name/bind/port/data/repo, session-secret, and supervisor variables are no
+longer read (ADR-055).
 
-The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the launch and permission-mode choices. The retained v1 schema is a compatibility artifact. See [[commands/init]].
+The current `hive init` JSON summary envelope (`schemas/hive-init.v3.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the permission-mode choice. v3 dropped v2's `claude_mode` field when the Claude launch mode was removed. See [[commands/init]].
 
 `claude.model` / `claude.effort` pin hive-launched claude sessions:
 `model: default` (the default) uses Claude Code's live alias for ITS
@@ -658,7 +996,7 @@ recommended model — no hardcoded name, no inheriting the operator's
 interactive selection; `inherit` omits the flag; aliases/full names pass
 through. `effort: default` omits `--effort` (Claude Code's own tier);
 low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
-the argv fragment used by the tmux wrapper, headless `Hive::Agent`, and
+the argv fragment used by headless `Hive::Agent`, `Hive::ClaudeLauncher`, and
 ordinary Patrol's shared review/fix launch envelope whenever no exact or
 coarse `models:` route overrides it.
 
@@ -725,6 +1063,10 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 ## Tests
 
 - `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, removed PR-digest config rejection, and answer-digest/bot validation.
+- `test/unit/config_defaults_doc_test.rb` — fixed-width defaults serialization,
+  full-page marker validation (including altered marker candidates alongside a
+  valid region), byte-preserved prose, changed/no-op regeneration, and the
+  read-only committed-page drift guard.
 - `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks

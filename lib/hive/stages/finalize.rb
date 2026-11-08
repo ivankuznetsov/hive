@@ -152,12 +152,17 @@ module Hive
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
         if (context = Hive::Attempts::Context.current)
+          pr_identity = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
           Hive::Stages::Base.record_task_activity(
             task, kind: "pr_observed",
             operation_id: "publication:#{context.attempt_id}:ready",
             correlation_id: "publication:#{context.attempt_id}",
             reason: "pull request marked ready", source: "finalize",
-            payload: { "pr_state" => "ready" }
+            payload: {
+              "pr_state" => "ready", "pr_url" => pr_url,
+              "pr_number" => pr_identity["pr_number"],
+              "head_oid" => pr_identity["head_oid"], "draft" => false
+            }
           )
         end
 
@@ -175,7 +180,7 @@ module Hive
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
-          max_budget_usd: finalize_budget(cfg),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "finalize", profile, default: 50),
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
@@ -187,13 +192,8 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
@@ -305,10 +305,10 @@ module Hive
           end
         end
 
-        return nil if pushed?(worktree_path, branch)
+        return nil if pushed?(worktree_path, branch, cfg: cfg)
 
         push_result = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg)
-        return nil if push_result.success? && pushed?(worktree_path, branch)
+        return nil if push_result.success? && pushed?(worktree_path, branch, cfg: cfg)
 
         # A remote-side auto-rebase (the PR branch rebased onto an advanced
         # base while this worktree stayed on the old base) leaves HEAD
@@ -332,7 +332,7 @@ module Hive
         forced = nil
         if head_supersedes_upstream?(worktree_path, branch)
           forced = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, force: true)
-          return nil if forced.success? && pushed?(worktree_path, branch)
+          return nil if forced.success? && pushed?(worktree_path, branch, cfg: cfg)
         end
 
         Hive::Markers.set(task.state_file, :error,
@@ -477,10 +477,19 @@ module Hive
         nil
       end
 
-      def pushed?(worktree_path, branch)
-        head, = capture_git(worktree_path, "rev-parse", "HEAD")
-        upstream, = capture_git(worktree_path, "rev-parse", "#{branch}@{u}")
-        !head.to_s.empty? && head == upstream
+      # Managed clones may deliberately fetch only the default branch. In
+      # that layout Git refuses `branch@{u}` for a feature branch even when
+      # the branch config and its old remote-tracking ref both exist. Observe
+      # the exact remote ref instead; finalize cares whether HEAD is published,
+      # not whether the clone's fetch refspec maps that branch locally.
+      def pushed?(worktree_path, branch, cfg:)
+        head, status = capture_git(worktree_path, "rev-parse", "HEAD")
+        return false unless status.success? && !head.to_s.empty?
+
+        remote = Hive::Gh.remote_branch_oid(worktree_path, branch, cfg: cfg)
+        head.casecmp?(remote.to_s)
+      rescue Hive::GhError
+        false
       end
 
       def capture_git(worktree_path, *args)
@@ -545,17 +554,8 @@ module Hive
         :failed
       end
 
-      # Migration shim: read `budget_usd.pr` / `timeout_sec.pr` for one
-      # version. `hive migrate` (Hive::Commands::Migrate::CONFIG_KEY_RENAMES)
-      # rewrites these onto the canonical `.finalize` keys so the
-      # fallback has a removal path. Slated for removal one version
-      # after migrate ships.
-      def finalize_budget(cfg)
-        cfg.dig("budget_usd", "finalize") || cfg.dig("budget_usd", "pr") || 50
-      end
-
       def finalize_timeout(cfg)
-        cfg.dig("timeout_sec", "finalize") || cfg.dig("timeout_sec", "pr") || 1800
+        cfg.dig("timeout_sec", "finalize") || 1800
       end
 
       def write_summary(task, worktree_path, branch, pr_url, cfg = nil)

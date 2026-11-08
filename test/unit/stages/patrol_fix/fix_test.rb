@@ -211,7 +211,7 @@ module PatrolFixStageFixture
   extend HiveTestHelper
 
   module_function
-  def with_task(stage:)
+  def with_task(stage:, source_evidence: "bug")
     Dir.mktmpdir do |dir|
       repo = File.join(dir, "repo")
       FileUtils.mkdir_p(repo)
@@ -227,7 +227,7 @@ module PatrolFixStageFixture
       manifest = { "schema" => "hive-patrol-fix-task-manifest", "schema_version" => 1,
         "task" => { "slug" => "repair-one", "generation" => 1 }, "evidence_revision" => { "generation" => 1, "digest" => "a" * 64 }, "target_revision" => head,
         "sources" => [ { "engine" => "ordinary_patrol", "identity" => "finding-1", "target_revision" => head,
-          "evidence" => [ "bug" ], "affected_code" => [ "app.rb" ], "reproduction_guidance" => "touch /tmp/never-from-prose",
+          "evidence" => [ source_evidence ], "affected_code" => [ "app.rb" ], "reproduction_guidance" => "touch /tmp/never-from-prose",
           "discovery_run" => "run-1", "semantic_lineage" => [ "root-1" ] } ], "aliases" => [], "relations" => { "successor" => nil, "issues" => [] } }
       Hive::PatrolFix::TaskManifest.new(task_folder: folder).write!(manifest)
       yield Hive::Task.new(folder), dir, manifest

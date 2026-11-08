@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/lock"
+require "hive/runtime_control_plane/task_lease_repository"
 
 class LockTest < Minitest::Test
   include HiveTestHelper
@@ -43,6 +44,53 @@ class LockTest < Minitest::Test
     assert_nil Hive::Lock.read_task_lock(folder)
     row = @database.read { |db| db[:task_leases].where(task_id: "1").first }
     assert_nil row.fetch(:holder_id)
+  end
+
+  def test_observed_task_lease_acquisition_runs_under_project_commit_custody
+    folder = task_folder(102)
+    observation = Hive::TaskMeta.observe(folder)
+    state_root = File.join(@root, ".hive-state")
+    inside_commit_lock = false
+    testcase = self
+    commit_lock = lambda do |path, **, &block|
+      testcase.assert_equal state_root, path
+      inside_commit_lock = true
+      block.call
+    ensure
+      inside_commit_lock = false
+    end
+    subject = Hive::Lock.task_lease_repository
+    original_acquire = subject.method(:acquire)
+    guarded_acquire = lambda do |*args, **kwargs|
+      testcase.assert inside_commit_lock, "observed lease claim escaped project commit custody"
+      original_acquire.call(*args, **kwargs)
+    end
+
+    with_replaced_singleton_method(subject, :acquire, guarded_acquire) do
+      with_replaced_singleton_method(Hive::Lock, :with_commit_lock, commit_lock) do
+        Hive::Lock.with_task_lock(
+          folder, create: false, observation: observation,
+          acquire_under_commit_lock: state_root
+        ) { assert Hive::Lock.task_lock_held?(folder) }
+      end
+    end
+  ensure
+    observation&.close
+  end
+
+  def test_registered_slug_lookup_is_scoped_to_the_state_root
+    folder = task_folder(19)
+    lookup = Hive::RuntimeControlPlane::TaskLeaseRepository
+    assert_equal "task-19", lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 19, state_root: File.join(@root, "other-state"), database: @database
+    )
+    assert_nil lookup.registered_slug(
+      task_id: 20, state_root: File.join(@root, ".hive-state"), database: @database
+    )
+    assert File.directory?(folder)
   end
 
   def test_live_holder_returns_typed_contention_with_identity
@@ -121,6 +169,27 @@ class LockTest < Minitest::Test
     assert_nil @database.read { |db| db[:task_leases].where(task_id: "11").first }
   end
 
+  def test_observed_replacement_is_rejected_before_subject_registration
+    folder = task_folder(17)
+    metadata = File.binread(File.join(folder, "meta.yml"))
+    subject_before = @database.read { |db| db[:task_subjects].where(task_id: "17").first }
+    observation = Hive::TaskMeta.observe(folder)
+    FileUtils.rm_rf(folder)
+    FileUtils.mkdir_p(folder)
+    File.binwrite(File.join(folder, "meta.yml"), metadata)
+
+    error = assert_raises(Hive::TaskMeta::StaleTask) do
+      Hive::Lock.acquire_task_lock(folder, create: false, observation: observation)
+    end
+
+    assert_includes error.message, "changed identity"
+    assert_equal subject_before,
+                 @database.read { |db| db[:task_subjects].where(task_id: "17").first }
+    assert_nil @database.read { |db| db[:task_leases].where(task_id: "17").first }
+  ensure
+    observation&.close
+  end
+
   def test_task_id_cannot_move_between_registered_projects
     folder = task_folder(12)
     other_root = File.join(@root, "other")
@@ -146,6 +215,67 @@ class LockTest < Minitest::Test
       db[:task_subjects].where(task_id: "12").get(:observed_path)
     end
     assert_equal folder, observed_path
+  end
+
+  # Regression: a task captured under a throwaway HIVE_HOME got id 1 from that
+  # state home's fresh counter, while this installation had already bound id
+  # 1 to another project's task. The lease refused it on every daemon tick
+  # with no hint of which subject owned the id.
+  def test_foreign_state_home_id_names_the_owning_subject
+    owner = task_folder(1)
+    other_root = File.join(@root, "digest-project")
+    timestamp = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
+    @database.transaction do |db|
+      installation = db[:installations].get(:installation_id)
+      db[:projects].insert(
+        project_id: "digest-project", installation_id: installation,
+        registration_id: "legacy:digest-project", name: "digest",
+        observed_path: other_root, state_root_path: File.join(other_root, ".hive-state"),
+        active: 1, registered_at: timestamp, last_observed_at: timestamp
+      )
+    end
+    foreign = File.join(other_root, ".hive-state", "stages", "2-discover", "preview-digest")
+    FileUtils.mkdir_p(foreign)
+    File.write(
+      File.join(foreign, "meta.yml"),
+      { "id" => 1, "slug" => "preview-digest", "workflow" => "digest" }.to_yaml
+    )
+
+    conflict = repository.identity_conflict(foreign)
+    assert_equal(
+      { task_id: "1", project_id: @project_id, project_name: "lock-test",
+        workflow_id: "coding", task_slug: "task-1", observed_path: owner },
+      conflict
+    )
+
+    error = assert_raises(Hive::RuntimeControlPlane::IdentityError) do
+      Hive::Lock.with_task_lock(foreign, op: "recovery_admission") { flunk "lease must be refused" }
+    end
+    assert_equal :task_identity_conflict, error.code
+    assert_includes error.message, "task 1 belongs to a different registered subject (lock-test:task-1, workflow coding)"
+    assert_includes error.action, "fresh unique id"
+    assert_equal conflict, error.details
+    assert_nil @database.read { |db| db[:task_subjects].where(task_slug: "preview-digest").first }
+  end
+
+  def test_identity_conflict_is_nil_without_a_competing_subject
+    owned = task_folder(30)
+    assert_nil repository.identity_conflict(owned)
+
+    unregistered = File.join(@root, ".hive-state", "stages", "4-execute", "fresh")
+    FileUtils.mkdir_p(unregistered)
+    File.write(File.join(unregistered, "meta.yml"), { "id" => 31, "slug" => "fresh" }.to_yaml)
+    assert_nil repository.identity_conflict(unregistered)
+
+    idless = File.join(@root, ".hive-state", "stages", "4-execute", "idless")
+    FileUtils.mkdir_p(idless)
+    File.write(File.join(idless, "meta.yml"), { "slug" => "idless" }.to_yaml)
+    assert_nil repository.identity_conflict(idless)
+
+    outside = File.join(@root, "elsewhere", "stages", "4-execute", "task-30")
+    FileUtils.mkdir_p(outside)
+    File.write(File.join(outside, "meta.yml"), { "id" => 30, "slug" => "other" }.to_yaml)
+    assert_nil repository.identity_conflict(outside)
   end
 
   def test_subject_registration_detects_a_concurrent_cross_project_insert
@@ -321,6 +451,23 @@ class LockTest < Minitest::Test
     end
 
     assert status.success?
+  end
+
+  def test_commit_lock_timeout_defaults_to_a_bounded_queue_drain
+    with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => nil) do
+      assert_equal 120, Hive::Lock.commit_lock_timeout
+    end
+  end
+
+  def test_commit_lock_timeout_honors_a_positive_env_override
+    with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => "45") do
+      assert_in_delta 45.0, Hive::Lock.commit_lock_timeout
+    end
+    %w[0 -5 abc 1e9].each do |raw|
+      with_env("HIVE_COMMIT_LOCK_TIMEOUT_SEC" => raw) do
+        assert_equal 120, Hive::Lock.commit_lock_timeout, "#{raw.inspect} must fall back to the default"
+      end
+    end
   end
 
   def test_commit_lock_remains_reentrant_and_process_scoped

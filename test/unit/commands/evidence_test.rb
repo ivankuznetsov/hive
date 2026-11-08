@@ -156,6 +156,12 @@ class CommandsEvidenceTest < Minitest::Test
         generation: pointer.fetch("generation"),
         recovery_digest: pointer.fetch("recovery_digest")
       )
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      %w[codex-ce-code-review-01.md escalations-01.md fix-success-01.md codex-ce-code-review-02.md].each do |name|
+        File.write(File.join(reviews, name), "pass\n")
+      end
+      File.write(File.join(reviews, "suppressed.md"), "kept\n")
       store = Object.new
       store.define_singleton_method(:package) { package }
       approve_calls = []
@@ -199,6 +205,12 @@ class CommandsEvidenceTest < Minitest::Test
         task.folder, "outcome-evidence", "reworks", "rework-01.json"
       )))
       assert_equal pointer.fetch("generation"), receipt.fetch("generation")
+      # The reworked code gets a fresh review: earlier passes leave the
+      # pass-numbered top level (so max_passes restarts) but are kept.
+      assert_empty Dir[File.join(reviews, "*-0*.md")]
+      assert_equal %w[codex-ce-code-review-01.md codex-ce-code-review-02.md escalations-01.md fix-success-01.md],
+                   Dir.children(File.join(reviews, "archive", "rework-01")).sort
+      assert File.exist?(File.join(reviews, "suppressed.md")), "non-pass files stay in place"
 
       plain = Hive::Commands::Evidence.new("rework", task.slug)
       plain_out, = capture_io { plain.send(:emit_rework, payload) }
@@ -378,6 +390,44 @@ class CommandsEvidenceTest < Minitest::Test
       Hive::Commands::Evidence.new(
         "terminal", "../bad", command: [ "true" ], environment: {}
       ).call
+    end
+  end
+
+  def test_project_server_is_controller_scoped_and_returns_readiness
+    requests = []
+    response = {
+      "ok" => true, "status" => 0,
+      "payload" => {
+        "driver" => "hive-project-server", "status" => "ready",
+        "app_port" => 45_678, "app_endpoint" => "http://127.0.0.1:45678"
+      }
+    }
+    with_capture_mailbox(->(request) { requests << request; response }) do |environment|
+      command = Hive::Commands::Evidence.new(
+        "server", "bin/rails", json: true,
+        command: [ "server", "-p", "45678" ], environment: environment
+      )
+
+      out, = capture_io { command.call }
+      payload = JSON.parse(out)
+
+      assert_equal "ready", payload.fetch("status")
+      assert_equal "server", requests.first.fetch("operation")
+      assert_equal [ "bin/rails", "server", "-p", "45678" ],
+                   requests.first.fetch("argv")
+
+      plain = Hive::Commands::Evidence.new(
+        "server", "bin/rails", command: [ "server", "-p", "45678" ],
+        environment: environment
+      )
+
+      out, = capture_io { plain.call }
+
+      assert_includes out, "ready at http://127.0.0.1:45678"
+    end
+
+    assert_raises(Hive::UsageError) do
+      Hive::Commands::Evidence.new("server", nil, environment: {}).call
     end
   end
 

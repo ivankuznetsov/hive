@@ -172,18 +172,17 @@ module Hive
 
             return :free_text_answer
           end
-          draft = @idea_draft_store.get(chat_id: update.chat_id)
-          if draft&.phase == :awaiting_transcript_confirm && draft.origin == :voice
+          if @idea_draft_store.awaiting_transcript_confirmation?(chat_id: update.chat_id)
             return :idea_voice if update.respond_to?(:voice?) && update.voice?
             return :idea_voice_edit_text if update.respond_to?(:text?) && update.text?
           end
           if update.respond_to?(:voice?) && update.voice?
-            return :idea_voice_during_draft if draft && draft.origin != :voice
+            return :idea_voice_during_draft if @idea_draft_store.non_voice_draft?(chat_id: update.chat_id)
 
             return :idea_voice
           end
           return :idea_media if update.respond_to?(:media?) && update.media?
-          return :idea_text_capture if draft&.phase == :awaiting_text
+          return :idea_text_capture if @idea_draft_store.awaiting_text_draft?(chat_id: update.chat_id)
 
           # Bare non-slash text now defaults to idea capture. Text-less updates
           # with no media/voice (stickers, locations, contacts, video) reach

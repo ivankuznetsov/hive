@@ -8,7 +8,6 @@ require "hive/commands/update"
 require "hive/commands/connect"
 require "hive/commands/disconnect"
 require "hive/commands/uninstall"
-require "hive/commands/migrate"
 require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/commands/generate_name"
@@ -24,6 +23,7 @@ require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/plan_review"
+require "hive/commands/plan_review_show"
 require "hive/commands/plan_review_run"
 require "hive/commands/patrol"
 require "hive/commands/refactor_patrol"
@@ -37,9 +37,149 @@ require "hive/commands/metrics"
 require "hive/commands/setup"
 require "hive/commands/setup_agents"
 require "hive/commands/evidence"
+require "hive/commands/digest"
+require "hive/commands/digest_refresh"
+require "hive/commands/digest_send"
+require "hive/commands/digest_prune"
+require "hive/commands/module"
+require "hive/commands/drop"
+require "hive/tui"
+require "hive/commands/receipt"
+require "hive/commands/mcp"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_framework_context_and_operation_adapters_preserve_explicit_options
+    require "hive/commands/context"
+    require "hive/commands/operation"
+    require "hive/remote/dispatcher"
+
+    with_command_new_stub(Hive::Commands::Context) do |calls|
+      cli = Hive::CLI.new([], { url: "https://server.example", token_stdin: true, json: true })
+      cli.context("add", "server")
+      assert_equal [ "add", "server" ], calls.first.fetch(:args)
+      assert_equal "https://server.example", calls.first.dig(:kwargs, :url)
+      assert_equal true, calls.first.dig(:kwargs, :token_stdin)
+      assert_equal true, calls.first.dig(:kwargs, :json)
+      assert_instance_of Hive::ConnectionContexts, calls.first.dig(:kwargs, :contexts)
+    end
+
+    with_command_new_stub(Hive::Commands::Operation) do |calls|
+      Hive::CLI.new([], { project: "demo", json: true }).operation("operation-1")
+      assert_equal [ "operation-1" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_one_shot_query_conflicts_are_rejected_before_command_construction
+    [ [ Hive::Commands::Patrol, %w[patrol demo --once --list] ],
+      [ Hive::Commands::RefactorPatrol, %w[refactor-patrol demo --once --list] ],
+      [ Hive::Commands::Daemon, %w[daemon start --once] ] ].each do |klass, argv|
+      with_command_new_stub(klass) do |calls|
+        error = assert_raises(Hive::InvalidTaskPath) { Hive::CLI.start(argv) }
+        assert_match(/--once/, error.message)
+        assert_empty calls
+      end
+    end
+  end
+
+  def test_failed_one_shot_result_preserves_its_reported_exit_code
+    require "hive/one_shot/result"
+    result = Hive::OneShot::Result.error(
+      component: :patrol, project: "demo", started_at: Time.utc(2026, 11, 7),
+      finished_at: Time.utc(2026, 11, 7), code: "unavailable", message: "provider unavailable"
+    )
+    with_command_new_stub(Hive::Commands::Patrol, return_value: result) do
+      error = assert_raises(Hive::OneShot::Result::ReportedError) do
+        Hive::CLI.start(%w[patrol demo --once])
+      end
+      assert_equal result.exit_code, error.exit_code
+      assert_equal "provider unavailable", error.message
+    end
+  end
+
+  def test_daemon_lifecycle_argument_errors_keep_json_and_human_contracts
+    %w[quiesce resume].each do |action|
+      out, = capture_io do
+        assert_raises(Hive::UsageError) do
+          Hive::CLI.start([ "daemon", action, "unexpected-project", "--json" ])
+        end
+      end
+      payload = JSON.parse(out)
+      assert_equal "hive-daemon-#{action}", payload.fetch("schema")
+      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal action, payload.fetch("action")
+    end
+
+    _out, err = capture_io do
+      assert_raises(Hive::UsageError) { Hive::CLI.start(%w[daemon quiesce unexpected-project]) }
+    end
+    assert_match(/takes no PROJECT/, err)
+
+    out, = capture_io do
+      assert_raises(Hive::Commands::Daemon::UsageError) do
+        Hive::CLI.start(%w[daemon status --timeout 1 --json])
+      end
+    end
+    assert_equal Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG,
+                 JSON.parse(out).fetch("error_kind")
+  end
+
+  def test_act_parser_consumes_the_idempotency_key_value_before_positionals
+    with_command_new_stub(Hive::Commands::Act) do |calls|
+      Hive::CLI.start([
+        "act", "--idempotency-key", "stable", "workflow.advance", "demo:task",
+        "--observation", "a" * 64
+      ])
+
+      assert_equal [ "workflow.advance", "demo:task" ], calls.first.fetch(:args)
+      assert_equal "stable", calls.first.dig(:kwargs, :idempotency_key)
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_receipt_routes_generation_fenced_enrollment_and_prune_key
+    with_command_new_stub(Hive::Commands::Receipt) do |calls|
+      Hive::CLI.start([
+        "receipt", "enroll", "--project", "demo", "--new-identity",
+        "--previous-identity", "11111111-1111-4111-8111-111111111111",
+        "--expected-generation", "0", "--confirm", "--json"
+      ])
+      assert_equal [ "enroll", nil ], calls.first.fetch(:args)
+      assert_equal true, calls.first.dig(:kwargs, :new_identity)
+      assert_equal 0, calls.first.dig(:kwargs, :expected_generation)
+      assert_equal true, calls.first.dig(:kwargs, :confirm)
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Receipt) do |calls|
+      Hive::CLI.start([
+        "receipt", "prune", "--project", "demo", "--idempotency-key", "weekly",
+        "--limit", "100", "--json"
+      ])
+      assert_equal "weekly", calls.first.dig(:kwargs, :idempotency_key)
+      assert_equal 100, calls.first.dig(:kwargs, :limit)
+    end
+  end
+
+  def test_mcp_routes_subcommand_server_and_options
+    with_command_new_stub(Hive::Commands::Mcp, return_value: 0) do |calls|
+      error = assert_raises(SystemExit) do
+        Hive::CLI.start([ "mcp", "login", "linear", "--agent", "codex" ])
+      end
+      assert_equal 0, error.status
+      assert_equal [ "login", "linear" ], calls.first.fetch(:args)
+      assert_equal "codex", calls.first.dig(:kwargs, :agent)
+
+      assert_raises(SystemExit) do
+        Hive::CLI.start([ "mcp", "import", "--only", "a,b", "--update", "--yes", "--dry-run", "--json" ])
+      end
+      kwargs = calls[2].fetch(:kwargs)
+      assert_equal [ "import", nil ], calls[2].fetch(:args)
+      assert_equal({ json: true, all: false, only: "a,b", dry_run: true, yes: true, update: true, agent: nil }, kwargs)
+    end
+  end
 
   def test_plan_review_run_wires_target_and_project_without_operator_authority
     with_command_new_stub(Hive::Commands::PlanReviewRun) do |calls|
@@ -71,8 +211,76 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_prdigest_delivery_command_is_absent
-    refute Hive::CLI.tasks.key?("digest")
+  def test_daily_digest_command_is_present_without_restoring_prdigest
+    assert Hive::CLI.tasks.key?("digest")
+    refute defined?(Hive::Prdigest)
+  end
+
+  def test_digest_routes_reads_refresh_send_and_prune_as_separate_actions
+    with_command_new_stub(Hive::Commands::Digest) do |calls|
+      Hive::CLI.start([ "digest", "--date", "2026-08-30", "--project", "alpha", "--json" ])
+      assert_equal [], calls.first.fetch(:args)
+      assert_equal({
+        date: "2026-08-30", project: "alpha", json: true, open_web: false
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestRefresh) do |calls|
+      Hive::CLI.start([ "digest", "refresh", "--date", "2026-08-30", "--json" ])
+      assert_equal({ date: "2026-08-30", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestSend) do |calls|
+      Hive::CLI.start([ "digest", "send", "--date", "2026-08-30", "--retry", "--json" ])
+      assert_equal({
+        date: "2026-08-30", retry: true, json: true
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::DigestPrune) do |calls|
+      Hive::CLI.start([ "digest", "prune", "--before", "2026-08-30", "--dry-run", "--json" ])
+      assert_equal({
+        before: "2026-08-30", dry_run: true, confirm: false, json: true
+      }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_unknown_digest_action_emits_the_digest_json_error_contract
+    out, _err = capture_io do
+      assert_raises(Hive::UsageError) do
+        Hive::CLI.start([ "digest", "surprise", "--json" ])
+      end
+    end
+    payload = JSON.parse(out)
+    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal false, payload.fetch("ok")
+    assert_equal "usage", payload.fetch("error_kind")
+  end
+
+  def test_digest_rejects_options_that_belong_to_a_different_action
+    cases = [
+      [ [ "digest", "refresh", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "send", "--date", "2026-08-30", "--dry-run" ], "--dry-run" ],
+      [ [ "digest", "prune", "--before", "2026-08-30", "--yes", "--retry" ], "--retry" ],
+      [ [ "digest", "--retry" ], "--retry" ]
+    ]
+    cases.each do |argv, option|
+      error = assert_raises(Hive::UsageError) { Hive::CLI.start(argv) }
+      assert_includes error.message, option
+    end
+
+    out, = capture_io do
+      assert_raises(Hive::UsageError) do
+        Hive::CLI.start([ "digest", "refresh", "--dry-run", "--json" ])
+      end
+    end
+    payload = JSON.parse(out)
+    assert_equal "hive-digest-refresh", payload.fetch("schema")
+    assert_equal "usage", payload.fetch("error_kind")
   end
 
   def test_setup_agents_help_exposes_consent_json_and_filters
@@ -82,6 +290,30 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "--json"
     assert_includes out, "--agent"
     assert_includes out, "--skill"
+  end
+
+  def test_setup_help_exposes_explicit_command_receipt_installation
+    help = capture_io { Hive::CLI.start(%w[help setup]) }.first
+
+    assert_includes help, "--install-command-receipts"
+    assert_includes help, "published rollback package"
+  end
+
+  def test_receipt_help_documents_destructive_subcommands_and_parser_examples
+    help = capture_io { Hive::CLI.start(%w[help receipt]) }.first
+    assert_includes help, "orphaned-owner"
+    assert_includes help, "release-pin"
+    assert_includes help, "abandon-batch"
+    assert_includes help, "--expected-generation"
+    assert_includes help, "hive receipt prune --project demo --json"
+    assert_equal "hive-receipt-prune",
+                 Hive::CliUsageContracts.contract(
+                   %w[receipt prune --project demo --json]
+                 ).fetch(:schema)
+    assert_equal "hive-command-receipt",
+                 Hive::CliUsageContracts.contract(
+                   %w[receipt release-pin PIN --expected-generation 1 --confirm]
+                 ).fetch(:schema)
   end
 
   def test_patrol_help_distinguishes_cycle_and_findings_json_contracts
@@ -136,6 +368,28 @@ class HiveCliTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_module_drop_and_tui_routes_reach_their_command_boundaries
+    with_command_new_stub(Hive::Commands::Module) do |calls|
+      Hive::CLI.start([ "module", "status", "demo", "--json" ])
+      assert_equal [ "status", "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.dig(:kwargs, :json)
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Drop) do |calls|
+      Hive::CLI.start([ "drop", "demo:task", "--project", "demo" ])
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal "demo", calls.first.dig(:kwargs, :project)
+      assert_equal :call, calls.last
+    end
+
+    called = false
+    with_replaced_singleton_method(Hive::Tui, :run, -> { called = true }) do
+      Hive::CLI.start([ "tui" ])
+    end
+    assert called
+  end
+
   def test_version_json_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     out, _err = with_env(
@@ -160,7 +414,7 @@ class HiveCliTest < Minitest::Test
     assert_empty schema.validate(payload).to_a
   end
 
-  def test_init_forget_prune_update_uninstall_and_migrate_pass_options
+  def test_init_forget_prune_update_uninstall_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
@@ -217,7 +471,7 @@ class HiveCliTest < Minitest::Test
 
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
-      assert_equal({ dry_run: true, confirm: false }, calls.first.fetch(:kwargs))
+      assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Connect) do |calls|
@@ -237,26 +491,11 @@ class HiveCliTest < Minitest::Test
       assert_equal({ purge: true, force_purge_state: true }, calls.first.fetch(:kwargs))
     end
 
-    with_command_new_stub(Hive::Commands::Migrate) do |calls|
-      Hive::CLI.start([ "migrate", "/tmp/project" ])
-      assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-    end
-
-    require "hive/commands/migrate_all"
-    with_command_new_stub(Hive::Commands::MigrateAll) do |calls|
-      Hive::CLI.start([ "migrate", "--all" ])
-      assert_empty calls.first.fetch(:args)
-    end
-
-    error = assert_raises(Hive::UsageError) do
-      Hive::CLI.start([ "migrate", "/tmp/project", "--all" ])
-    end
-    assert_match(/PROJECT_PATH and --all are mutually exclusive/, error.message)
-
     require "hive/commands/runtime"
-    with_command_new_stub(Hive::Commands::Runtime) do |calls|
-      Hive::CLI.start([ "runtime", "resume", "--json" ])
-      assert_equal [ "resume" ], calls.first.fetch(:args)
+    with_command_new_stub(Hive::Commands::Runtime, return_value: 1) do |calls|
+      _out, _err, status = with_captured_exit { Hive::CLI.start([ "runtime", "status", "--json" ]) }
+      assert_equal 1, status
+      assert_equal [ "status" ], calls.first.fetch(:args)
       assert_equal({ json: true }, calls.first.fetch(:kwargs))
     end
   end
@@ -307,12 +546,16 @@ class HiveCliTest < Minitest::Test
   def test_setup_wires_options_and_exits_with_command_status
     with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
       _out, _err, status = with_captured_exit do
-        Hive::CLI.start([ "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init" ])
+        Hive::CLI.start([
+          "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init",
+          "--install-command-receipts"
+        ])
       end
 
       assert_equal 3, status, "the CLI must exit with the Setup command's return value"
       assert_equal(
-        { json: true, service: true, no_bootstrap: true, no_init: true, yes: true },
+        { json: true, service: true, no_bootstrap: true, no_init: true,
+          install_command_receipts: true, yes: true },
         calls.first.fetch(:kwargs),
         "every setup flag must be forwarded to Hive::Commands::Setup.new"
       )
@@ -337,7 +580,8 @@ class HiveCliTest < Minitest::Test
 
       assert_equal 0, status
       assert_equal(
-        { json: false, service: true, no_bootstrap: false, no_init: false, yes: false },
+        { json: false, service: true, no_bootstrap: false, no_init: false,
+          install_command_receipts: false, yes: false },
         calls.first.fetch(:kwargs),
         "with no flags the CLI must pass the documented defaults"
       )
@@ -346,7 +590,8 @@ class HiveCliTest < Minitest::Test
 
   def test_new_task_dispatches_joined_text_and_rejects_blank_text
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([ "new", "proj", "build", "thing" ])
+      _out, err = capture_io { Hive::CLI.start([ "new", "proj", "build", "thing" ]) }
+      assert_match(/context=local.*authority=unrestricted-local-operator.*target=proj/, err)
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         { base: nil, depends_on: nil, workflow: nil, idempotency_key: nil, json: false },
@@ -355,10 +600,13 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::New) do |calls|
-      Hive::CLI.start([
-        "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
-        "--idempotency-key", "creator:v1", "--json", "build", "thing"
-      ])
+      _out, err = capture_io do
+        Hive::CLI.start([
+          "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture",
+          "--idempotency-key", "creator:v1", "--json", "build", "thing"
+        ])
+      end
+      assert_match(/context=local.*authority=unrestricted-local-operator.*target=proj/, err)
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
       assert_equal(
         {
@@ -369,9 +617,30 @@ class HiveCliTest < Minitest::Test
       )
     end
 
+    with_command_new_stub(Hive::Commands::New) do |calls|
+      _out, err = capture_io do
+        Hive::CLI.start([
+          "new", "proj", "--depends-on", "base-task", "build", "thing",
+          "--depends-on", "api:other-task"
+        ])
+      end
+      assert_equal [ "base-task", "api:other-task" ], calls.first.dig(:kwargs, :depends_on)
+      assert_includes err, "branches from the project default"
+      assert_includes err, "require 9-done"
+    end
+
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+
+  def test_new_help_explains_multi_dependency_base_and_gate_transition
+    out, _err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+
+    assert_includes out, "Repeat --depends-on"
+    assert_includes out, "project default branch"
+    assert_includes out, "9-done"
   end
 
   def test_workflow_option_help_advertises_project_authored_workflows
@@ -455,7 +724,7 @@ class HiveCliTest < Minitest::Test
       assert_equal(
         { project_root: Dir.pwd, json: true, template: nil, yes: false, dry_run: false,
           allow_escalation: false, mapping_overrides: [], input_bindings: [], version: nil,
-          expected_release_digest: nil },
+          expected_release_digest: nil, from: nil, ref: nil },
         calls.first.fetch(:kwargs)
       )
       assert_equal :call, calls.last
@@ -673,6 +942,53 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_closure_does_not_accept_and_ignore_a_key_on_read_only_preview
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--evidence", "acme/app#42", "--idempotency-key", "closure-1", "--json"
+      ])
+    end
+    assert_includes error.message, "confirmed archive closure"
+  end
+
+  def test_keyed_archive_closure_looks_up_receipts_across_registered_project_roots
+    operation = Object.new
+    operation.define_singleton_method(:call) do |&_block|
+      { "reason" => "already_delivered", "receipt_digest" => "a" * 64 }
+    end
+    roots = nil
+    constructor = lambda do |**options|
+      roots = options.fetch(:project_roots).call
+      operation
+    end
+    projects = [ { "name" => "demo", "path" => "/tmp/demo" } ]
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+      with_replaced_singleton_method(Hive::CommandOperation, :new, constructor) do
+        capture_io do
+          Hive::CLI.start([
+            "archive", "task", "--reason", "already_delivered",
+            "--evidence", "acme/app#42", "--idempotency-key", "closure-1"
+          ])
+        end
+      end
+    end
+
+    assert_equal [ "/tmp/demo" ], roots
+  end
+
+  def test_archive_closure_retry_horizon_requires_an_idempotency_key
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "already_delivered",
+        "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+
+    assert_includes error.message, "requires --idempotency-key"
+  end
+
   def test_archive_closure_rejects_noninteractive_confirmation
     noninteractive_error = assert_raises(Hive::TaskClosure::Unauthorized) do
       Hive::CLI.start([
@@ -680,7 +996,7 @@ class HiveCliTest < Minitest::Test
         "--evidence", "acme/app#42"
       ])
     end
-    assert_match(/interactive terminal/, noninteractive_error.message)
+    assert_match(%r{y/N prompt or pass --yes}, noninteractive_error.message)
   end
 
   def test_archive_closure_interactive_confirmation_archives_exact_preview
@@ -688,6 +1004,7 @@ class HiveCliTest < Minitest::Test
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     preview = Struct.new(:preview_digest, :payload) do
       def valid? = true
+      def blockers = []
       def to_h = payload
     end.new(
       "a" * 64,
@@ -699,7 +1016,7 @@ class HiveCliTest < Minitest::Test
       }
     )
     confirmations = []
-    input = StringIO.new("CLOSE aaaaaaaaaaaa\n")
+    input = StringIO.new("y\n")
     input.define_singleton_method(:tty?) { true }
     previous_stdin = $stdin
     $stdin = input
@@ -730,7 +1047,7 @@ class HiveCliTest < Minitest::Test
               ])
             end
 
-            assert_includes out, "Type CLOSE aaaaaaaaaaaa"
+            assert_includes out, "Archive task as already_delivered? [y/N]"
             assert_includes out, "archived task as already_delivered"
           end
         end
@@ -745,19 +1062,63 @@ class HiveCliTest < Minitest::Test
     $stdin = previous_stdin
   end
 
+  # --yes confirms without a terminal or prompt; the evidence preview
+  # still has to pass before anything is archived.
+  def test_archive_closure_yes_confirms_without_a_prompt
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = Struct.new(:preview_digest) do
+      def valid? = true
+      def blockers = []
+      def to_h = { "ok" => true }
+    end.new("a" * 64)
+    confirmations = []
+    previous_stdin = $stdin
+    $stdin = StringIO.new("")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :confirm!,
+            lambda { |**kwargs| confirmations << kwargs; { "reason" => "already_delivered", "receipt_digest" => "b" * 64 } }
+          ) do
+            out, = capture_io do
+              Hive::CLI.start([
+                "archive", "task", "--reason", "already_delivered",
+                "--evidence", "https://github.com/acme/app/pull/42", "--yes"
+              ])
+            end
+            refute_includes out, "[y/N]"
+          end
+        end
+      end
+    end
+
+    assert_equal 1, confirmations.length
+  ensure
+    $stdin = previous_stdin
+  end
+
   def test_archive_closure_interactive_flow_rejects_blocked_preview_and_wrong_phrase
     task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
     resolver = Struct.new(:task) { def resolve = task }.new(task)
     preview_class = Struct.new(:preview_digest, :payload, :valid)
     previews = [
-      preview_class.new("a" * 64, { "ok" => false }, false),
+      preview_class.new("a" * 64, { "ok" => false, "blockers" => [ {
+        "code" => "unique_worktree_changes", "message" => "PR already merged; retained fixes",
+        "details" => { "local_fix_shas" => [ "b" * 40 ], "worktree" => "/owned/a b" }
+      } ] }, false),
       preview_class.new("a" * 64, { "ok" => true }, true)
     ]
     previews.each do |preview|
       preview.define_singleton_method(:to_h) { payload }
       preview.define_singleton_method(:valid?) { valid }
+      preview.define_singleton_method(:blockers) { payload.fetch("blockers", []) }
     end
-    inputs = [ "ignored\n", "CLOSE wrong\n" ]
+    inputs = [ "ignored\n", "n\n" ]
     previous_stdin = $stdin
 
     with_replaced_singleton_method(
@@ -777,13 +1138,17 @@ class HiveCliTest < Minitest::Test
             expected = preview.valid? ?
               Hive::TaskClosure::Unauthorized :
               Hive::TaskClosure::VerificationFailed
-            assert_raises(expected) do
-              capture_io do
+            output, = capture_io do
+              assert_raises(expected) do
                 Hive::CLI.start([
                   "archive", "task", "--reason", "already_delivered",
                   "--evidence", "acme/app#42"
                 ])
               end
+            end
+            unless preview.valid?
+              assert_includes output, "b" * 40
+              assert_includes output, "/owned/a b"
             end
           end
         end
@@ -801,6 +1166,28 @@ class HiveCliTest < Minitest::Test
       ])
     end
     assert_match(/require an archive TARGET/, error.message)
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([ "archive", "--idempotency-key", "stable" ])
+    end
+    assert_match(/idempotency-key requires an archive TARGET/, error.message)
+
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+    assert_match(/retry-horizon-expires-at requires an archive TARGET/, error.message)
+  end
+
+  def test_plan_retry_horizon_requires_an_idempotency_key
+    error = assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "plan", "task", "--retry-horizon-expires-at", "2030-01-01T00:00:00Z"
+      ])
+    end
+
+    assert_includes error.message, "requires --idempotency-key"
   end
 
   def test_status_approve_findings_and_finding_toggles_pass_options
@@ -911,6 +1298,16 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_plan_review_show_wires_read_only_target_project_and_json_options
+    with_command_new_stub(Hive::Commands::PlanReviewShow) do |calls|
+      Hive::CLI.start([ "plan-review", "demo:task", "show", "--project", "demo", "--json" ])
+
+      assert_equal [ "demo:task" ], calls.first.fetch(:args)
+      assert_equal({ project: "demo", json: true }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
   def test_status_help_documents_bounded_default_and_operational_mode
     out, = capture_io { Hive::CLI.start([ "help", "status" ]) }
 
@@ -949,13 +1346,13 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: true, list: false }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: true, list: false, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Patrol) do |calls|
       Hive::CLI.start([ "patrol", "proj", "--list", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
-      assert_equal({ json: true, dry_run: false, list: true }, calls.first.fetch(:kwargs))
+      assert_equal({ json: true, dry_run: false, list: true, once: false }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|
@@ -1005,7 +1402,8 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Daemon) do |calls|
       Hive::CLI.start([ "daemon", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start", nil ], calls.first.fetch(:args)
-      assert_equal({ detach: true, dry_run: true, all: false, json: true, force: false, queue_args: [] },
+      assert_equal({ detach: true, dry_run: true, all: false, json: true, force: false,
+                     timeout: nil, queue_args: [] },
                    calls.first.fetch(:kwargs))
     end
 
@@ -1028,7 +1426,62 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_one_shot_modes_route_to_all_four_components
+    require "hive/commands/babysit"
+    result = Hive::OneShot::Result.ok(
+      component: :dispatch, project: "demo", started_at: Time.utc(2026, 9, 25),
+      finished_at: Time.utc(2026, 9, 25), ran: [], items: [], safe_to_stop: true
+    )
+
+    with_command_new_stub(Hive::Commands::Patrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:dry_run)
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrol, return_value: result) do |calls|
+      Hive::CLI.start(%w[refactor-patrol demo --once --dry-run])
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Babysit, return_value: result) do |calls|
+      Hive::CLI.start(%w[babysit demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+    with_command_new_stub(Hive::Commands::Daemon, return_value: result) do |calls|
+      Hive::CLI.start(%w[daemon demo --once --dry-run])
+      assert_equal [ nil, "demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:once)
+    end
+  end
+
+  def test_one_shot_modes_reject_service_and_manual_selector_options
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[refactor-patrol demo --once --pr 7])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[babysit demo --once --detach])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo extra --once])
+    end
+    assert_raises(Hive::InvalidTaskPath) do
+      Hive::CLI.start(%w[daemon demo --once --detach])
+    end
+  end
+
   def test_internal_patrol_commands_forward_fenced_identifiers
+    require "hive/commands/refactor_patrol_scheduled"
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => true }) do |calls|
+      Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json", "--json" ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal({ result_file: "/tmp/result.json" }, calls.first.fetch(:kwargs))
+    end
+    with_command_new_stub(Hive::Commands::RefactorPatrolScheduled, return_value: { "ok" => false }) do
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "refactor-patrol-scheduled", "proj", "--result-file", "/tmp/result.json" ])
+      end
+      assert_equal 1, status
+    end
     require "hive/commands/refactor_patrol_classify"
     with_command_new_stub(Hive::Commands::RefactorPatrolClassify) do |calls|
       Hive::CLI.start([

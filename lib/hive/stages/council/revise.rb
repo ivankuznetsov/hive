@@ -81,6 +81,7 @@ module Hive
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,
+            mcp_scope: @stage.name,
             **Hive::Stages::Base.tool_scope_kwargs(scope)
           )
           return if result[:status] == :ok
@@ -115,12 +116,9 @@ module Hive
               target_path: @target_path,
               triage_path: @triage_path,
               round: @round,
-              document: File.read(@target_path),
-              triage: File.read(@triage_path),
               skill_invocation: skill_invocation,
               instruction_body: instruction_body,
-              prompt_body: @revise.prompt,
-              user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+              prompt_body: @revise.prompt
             )
           )
         end

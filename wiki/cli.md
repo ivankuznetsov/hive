@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, lib/hive/commands/proposal.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-proposal-*.v1.json, schemas/hive-version.v1.json
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-11-07
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review, proposals]
 ---
 
@@ -22,6 +22,67 @@ recommends an answer nor advances a stage.
 ## Entry point
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
+
+`Hive::Remote::CommandPolicy` resolves the client connection context before
+runtime activation, process registration, scheduler reconciliation, or project
+discovery. The implicit selection is `local`; `--context NAME` overrides a saved
+selection for one invocation and is never read after a literal `--`. Local
+mutations announce their context, unrestricted local-operator authority, and
+target on stderr without changing JSON stdout. The explicit command vocabulary
+rejects local filesystem commands and unknown commands under a remote selection;
+`--context local` selects the local installation explicitly. `hv` delegates to
+the same executable, including this boundary.
+
+`Hive::ConnectionContexts` stores versioned client metadata and separate
+credentials beneath `Hive::Paths.config_home/connections`, using locked atomic
+writes, owner-only files, and an owner-only directory. Unknown newer schemas
+require an upgrade and never fall back to a local target. Remote metadata stores
+a confirmed installation ID instead of project paths. Add, show, and selection
+use an injected fresh metadata verifier; invalid HTTPS URLs are rejected before
+reading credentials. The context command boundary owns `hive-context.v1.json`
+and its pre-dispatch usage contract. `hive context add/list/use/show` runs before
+the local runtime lifecycle, so a fresh client home can configure a remote
+installation. Token create/list/revoke stays local to the server installation.
+
+The native transport supports remote `status`, `task`, `new`, `act`, `answer`,
+`approve`, and `operation`. Remote task targets require `PROJECT:TASK`, or an
+exact task ID/slug plus `--project PROJECT`; paths and cwd-derived targets are
+rejected. Status accepts an optional authorized `--project` filter. Remote
+JSON DTO commands retain the `hive-remote.v1` API envelope; they do not claim
+the richer local status/task schema. Context/token/operation retain their own
+CLI schemas, including pre-dispatch errors. Errors emit one document and fixed
+safe diagnostics, without raw HTTP exceptions, bodies or headers.
+
+Each remote mutation freshly verifies `/api/v1/context`, its `api_version: v1`
+and the pinned installation. Its flushed stderr line names context, URL,
+installation, scopes, project limits, target and supplied or random idempotency
+key before POST. The invocation retains its original URL, pin and credential
+even if another process changes the selected context. TLS verification stays
+enabled; redirects are refused and connect/read timeouts and response bytes
+are bounded. A disconnect or timeout after submission reports an unknown
+outcome with the same key and target. No POST is automatically retried.
+
+Internal native `hive`/`hv` children from task naming, daemon, bot, one-shot,
+and TUI execution carry an explicit local context, so a saved remote selection
+cannot redirect work already admitted to this installation. The execution
+arguments are separate from logged commands, verbs and roles. Explicit child
+context options remain authoritative, and arbitrary Ruby/shell executables or
+custom fixture commands retain their original arguments.
+
+Remote `task` retains `--log` and adds mutually exclusive `--diff`,
+`--artifacts`, and `--artifact ID`. Content goes to stdout or an explicit local
+`--output PATH`; no remote path is mapped into the checkout. The three new
+selectors fail under a local context before runtime effects, with guidance to
+the existing local `hive task TARGET --json` artifact panel or an explicit
+remote context. Local `--log`/`--json` incompatibility is preserved.
+
+Remote `act --observation TOKEN` needs no general task read. Remote
+`answer --binding HANDLE` sends the opaque question handle and bounded literal
+stdin without exposing a native folder-bearing binding. An answer-only token
+can approve using explicit `--from STAGE --generation GENERATION`; with read
+scope, omitted approval metadata comes from fresh task details. Remote force
+and destination bypass options are rejected before a request. See
+[[commands/context]], [[commands/operation]], and [[remote-access]].
 
 Before Thor dispatch, `bin/hive` delegates shared wrapper grammar to the pure
 `Hive::CliArgvPolicy`, while retaining command-specific JSON error contracts
@@ -44,7 +105,8 @@ values can be treated as a command argument or task target. `hive new` has a
 special lift-and-rebuild path: standalone allow-listed options are lifted from
 before the project, between project and text, or after text, then the remaining
 `PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
-task text as options. The allow-list is `--workflow`/`--depends-on`/`--base` (whose value
+task text as options. The allow-list is `--workflow`/`--depends-on`/`--base`/
+`--idempotency-key`/`--context` (whose value
 is the next token, but only when that token exists and is not option-like — a
 trailing or value-less `--workflow`/`--depends-on`/`--base` stays literal text rather than
 swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE`/`--base=VALUE` `name=`-prefix
@@ -96,13 +158,13 @@ contracts retain their established unversioned or schema-less shapes.
 
 | Command | Synopsis | Routes to | Page |
 |---------|----------|-----------|------|
-| `hive init [PROJECT_PATH] [--json] [--refactor-patrol\|--no-refactor-patrol]` | Bootstrap `.hive-state` plus managed llm-wiki context; fresh projects enable architecture discovery by default, and the boolean flag resolves it before any state write; `--json` emits `hive-init.v2` | `Hive::Commands::Init` | [[commands/init]] |
-| `hive new PROJECT TEXT... [--workflow ID] [--depends-on TASK] [--base BRANCH] [--json]` | Create a task in `1-inbox/` of a registered project, writing the request plus `meta.yml`; `--base` records the exact non-stacked origin base for managed draft-PR workflows, and stdout uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
+| `hive init [PROJECT_PATH] [--json] [--refactor-patrol\|--no-refactor-patrol]` | Bootstrap `.hive-state` plus managed llm-wiki context; fresh projects enable architecture discovery by default, and the boolean flag resolves it before any state write; `--json` emits `hive-init.v3` | `Hive::Commands::Init` | [[commands/init]] |
+| `hive new PROJECT TEXT... [--workflow ID] [--depends-on TASK]... [--base BRANCH] [--json]` | Create a task in `1-inbox/` of a registered project, writing the request plus `meta.yml`; repeat `--depends-on` for scheduling-only fan-in at `9-done` (the second flag switches the whole declaration to project-default-base list policy and emits a stderr notice); `--base` records the exact non-stacked origin base for managed draft-PR workflows, and stdout uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
 | `hive workflow new ID [--json]` | Scaffold a blank per-project workflow descriptor plus placeholder instruction under `<hive_state_path>/workflows/` | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive workflow commit ID` | Validate and commit a populated owner-authored workflow under the shared Hive state commit lock | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive proposal SUBCOMMAND ...` | Submit/evaluate through a durable proposal-bound task; list/show/filter live canonical history; append authority-gated decisions, supersession, and rollback; or enter the managed deterministic wiki refresh boundary. JSON uses the versioned proposal list/show/mutation contracts. Tracking only: no subcommand activates or reverts an artifact. | `Hive::Commands::Proposal` → `Hive::Proposals` | [[commands/proposal]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
-| `hive status [--json \| --operational [--json] \| --diagnose SLUG ...]` | Default text/JSON is bounded daemon and verified-live-task status (`hive-running-status.v2` for JSON); `--operational --json` emits `hive-operational-status.v4`; `--diagnose` inspects one red task. Use `hive task TARGET --json` for general single-task detail. | `Hive::Commands::Status` | [[commands/status]] |
+| `hive status [--json \| --operational [--json] \| --diagnose SLUG ...]` | Default text/JSON is bounded daemon and verified-live-task status (`hive-running-status.v2` for JSON); `--operational --json` emits `hive-operational-status.v5`; `--diagnose` inspects one red task. Use `hive task TARGET --json` for general single-task detail. | `Hive::Commands::Status` | [[commands/status]] |
 | `hive task TARGET [--project NAME] [--json]` | Resolve one registered task and emit the same bounded semantic `hive-task-workspace` v2 projection used by normal Web HTML: canonical headline/action, workflow result, primary artifact, applicable evidence, exact usage/API-equivalent coverage, and correlated diagnostic-log reference. Read-only; no provider-health or billing-invoice claim. | `Hive::Commands::Task` | [[commands/task]] |
 | `hive answer TARGET [--project NAME] [--binding TOKEN] [--json]` | Without a binding, inventory every coding-brainstorm slot in physical document order without a write or task lock. With a fresh opaque binding, read one final literal answer from stdin and atomically write only that exact slot under identity, stage, generation, and fingerprint checks. Never recommends or dispatches. | `Hive::Commands::Answer` | [[commands/answer]] |
 | `hive watch TARGET... [--project NAME] [--until settled\|completion] [--json-lines]` | Resolve at most 100 tasks once and emit only semantic initial/transition/warning/final events until a terminal condition, timeout, or event cap. Read-only; global `--json` is rejected. | `Hive::Commands::Watch` | [[commands/watch]] |
@@ -118,15 +180,18 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive plan TARGET [--from STAGE] [--review-level standard\|mandatory]` | Promote completed brainstorm to plan, or re-run plan. The optional level persists a raise-only review receipt before policy evaluation. | `Hive::Commands::StageAction` / `Hive::Commands::PlanReview` | [[commands/stage_action]], [[modules/plan_review]] |
 | `hive plan-review-run TARGET [--project NAME]` | Start or resume coding-plan critique without operator authority. Used by status/daemon automation. | `Hive::Commands::PlanReviewRun` | [[modules/plan_review]] |
 | `hive plan-review TARGET ACTION --review-id ID --task-generation GEN --policy-fingerprint SHA --expected-artifact-digest SHA [...] [--json]` | Apply one exact freshness-bound approval, answer, coverage waiver, mandatory downgrade, raise, retry, or review request. JSON is `hive-plan-review-action.v1`. | `Hive::Commands::PlanReview` → `Hive::PlanReview::DecisionService` | [[modules/plan_review]] |
+| `hive plan-review TARGET show [--json]` | Read-only, lock-free view of the live plan-review identities (review id, generation, policy fingerprint, observation digest) and open findings to quote in a decision | `Hive::Commands::PlanReviewShow` | [[modules/plan_review]] |
 | `hive develop TARGET [--from STAGE]` | Promote a completed, currently cleared coding plan to execute, or re-run execute. Plan-review authority is required even under force/generic approval paths. | `Hive::Commands::StageAction` → `PlanReview::TransitionGuard` → approve/run | [[commands/stage_action]], [[modules/plan_review]] |
 | `hive open-pr TARGET [--from STAGE]` | Promote completed execute to draft PR creation, or re-run open-pr | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive review TARGET [--from STAGE]` | Promote opened draft PR to review, or re-run review. Bare numeric targets remain task ids. | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive review --pr PR [--project NAME] [--json]` | Create or reuse a synthetic ad-hoc `6-review/adhoc-review-pr-N/` task for an existing GitHub PR (`N`, `#N`, or a `/pull/N` URL), materialize the PR head into the normal worktree root, then run review through the same StageAction path. | `Hive::Commands::AdhocReview` → `Hive::Commands::StageAction` | [[commands/stage_action]], [[stages/review]] |
 | `hive artifacts TARGET [--from STAGE]` | Promote completed review to artifact collection, or re-run artifacts | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
 | `hive finalize TARGET [--from STAGE]` | Promote completed artifacts to PR finalization, or re-run finalize | `Hive::Commands::StageAction` → approve/run | [[commands/stage_action]] |
-| `hive archive [TARGET] [--from STAGE]` | With no target, list every `9-done` task across registered projects through Status archive mode (`--json` returns a `hive-status` payload filtered to done rows). With a target, promote a completed finalized PR to done, re-run done, or use the explicit evidence-bound `--reason already_delivered|superseded` operator flow. Automatic task-bound merge closure uses an internal receipt API, not a CLI bypass flag. | no target: `Hive::Commands::Status`; target: `Hive::Commands::StageAction` / `Hive::TaskClosure` | [[commands/status]], [[commands/stage_action]] |
+| `hive archive [TARGET] [--from STAGE]` | With no target, list every `9-done` task across registered projects through Status archive mode (`--json` returns a `hive-status` payload filtered to done rows). With a target, promote a completed finalized PR to done, re-run done, or use the explicit evidence-bound `--reason already_delivered|superseded` operator flow, or `--reason cancelled --attestation "reason"` to retain unwanted work without delivery evidence or terminal execution. Automatic task-bound merge closure uses an internal receipt API, not a CLI bypass flag. | no target: `Hive::Commands::Status`; target: `Hive::Commands::StageAction` / `Hive::TaskClosure` | [[commands/status]], [[commands/stage_action]] |
 | `hive connect screenote [--base-url URL] [--json]` | Run Screenote OAuth 2.1 auth-code + PKCE setup, pick a default Screenote project via MCP `list_projects`, and persist `screenote.json` for artifacts-stage MCP injection. | `Hive::Commands::Connect` | [[commands/screenote]] |
 | `hive disconnect screenote [--json]` | Revoke the stored Screenote token when possible and clear `screenote.json`; no-op when already disconnected. | `Hive::Commands::Disconnect` | [[commands/screenote]] |
+| `hive mcp import [--all \| --only IDS] [--dry-run] [--update] [--yes] [--json]` | Discover the MCP servers configured in Codex, Claude, OpenCode, Pi and Grok and copy chosen ones into the global catalog (`mcp.servers`); credentials become env-var names. Emits `hive-mcp-import.v1`. | `Hive::Commands::Mcp` | [[commands/mcp]] |
+| `hive mcp login SERVER --agent codex\|claude` | Interactive: run the agent's own OAuth sign-in for a catalog server so Hive launches reuse the saved login, then record it in `oauth_logins`. | `Hive::Commands::Mcp` | [[commands/mcp]] |
 | `hive bench submit SLUG [--project NAME] [--json]` | Extract a completed `9-done` task into a hive-bench corpus entry and open a submission PR from the hive-bench checkout. Requires `HIVE_BENCH_PATH` or `~/Dev/hive-bench`, a GitHub `origin` remote for the source project, `worktree.yml`, `pr.md`, and a clean local secret-token preflight. | `Hive::Commands::BenchSubmit` | [[commands/bench-submit]] |
 | `hive refactor-patrol PROJECT [--list \| --show JOB_ID] [--limit N] [--cursor CURSOR] [--full] [--json]` | Run v4 architecture-patrol modes, or inspect the authoritative durable job ledger without mutation. On-demand `--changed-since` is only a filter paired with `--feature`, `--entrypoint`, or `--path`. List pages and show histories default to 100 records; list cursors freeze an immutable intake-sequence high-water and show requires explicit `--full` for unbounded histories. Job-query JSON uses `hive-refactor-patrol-jobs.v2`. | `Hive::Commands::RefactorPatrol` → `Hive::RefactorPatrol::JobQuery` | [[commands/refactor-patrol]] |
 | `hive run TARGET [--no-rebase]` | Lower-level dispatcher for a slug or task folder. `--no-rebase` skips the auto-rebase pre-step for one invocation (one-off override of `cfg.rebase.enabled`). | `Hive::Commands::Run` → stage runner | [[commands/run]] |
@@ -140,9 +205,9 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive reject-finding TARGET [ID...] [--severity S] [--all] [--stage STAGE]` | Untick `[x]` on review findings | `Hive::Commands::FindingToggle` (reject) | [[commands/findings]] |
 | `hive markers clear FOLDER --name <NAME> [--match-attr KEY=VALUE] [--project NAME] [--json]` | Low-level explicit operator repair: remove a recovery marker (`REVIEW_STALE`, `REVIEW_CI_STALE`, `REVIEW_ERROR`, `EXECUTE_STALE`, `ERROR`) from a task's state file (atomic write + hive_commit). Normal user-facing and automatic recovery submit through `Hive::Recovery::API`, where `RecoveryCoordinator` owns the guarded clear and retry. Terminal-success markers (`REVIEW_COMPLETE` / `EXECUTE_COMPLETE` / `COMPLETE`) are deliberately rejected — use `hive approve` instead. `--match-attr KEY=VALUE` refuses the clear unless the current marker carries the named attribute (exit 4 on mismatch), preventing an operator from erasing a replacement occurrence. | `Hive::Commands::Markers` | [[commands/markers]] |
 | `hive metrics SUBCOMMAND [--days N] [--project NAME] [--json]` | Compute project-wide metrics. Currently one subcommand: `rollback-rate` walks `git log --all` and reports the fraction of fix-commits (those carrying `Hive-Fix-Pass` trailer) that were later reverted, broken down by `Hive-Triage-Bias` and `Hive-Fix-Phase`. | `Hive::Commands::Metrics` → `Hive::Metrics` | — |
-| `hive update [--dry-run]` | Re-run the detected install channel, then invoke the updated binary's `hive migrate --all`. Reports updater and migration status; migration failures name the project/error and provide exact retry commands. | `Hive::Commands::Update` | [[commands/update]], [[commands/migrate]] |
+| `hive update [--dry-run]` | Re-run the detected install channel, then validate the updated binary with `hive runtime status`. Reports updater and validation failures. | `Hive::Commands::Update` | [[commands/update]], [[commands/migrate]] |
+| `hive runtime [status\|projects\|payloads] [--json]` | Read-only runtime observation: `status` validates the runtime database; `projects` lists registry project paths; `payloads` lists `payload_references` with absolute paths resolved under the payload root. Emits `hive-runtime-maintenance.v1`. | `Hive::Commands::Runtime` | [[commands/runtime]] |
 | `hive uninstall [--purge]` | Remove user-scoped hive runtime: stop daemon/bot, remove launchd/systemd units, drop xdg-installed binary, prune `~/.local/state/hive`. `--purge` also removes the global registry at `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` when overridden). Never touches per-project `.hive-state/` working trees. See `lib/hive/commands/uninstall.rb`. | `Hive::Commands::Uninstall` | — |
-| `hive migrate [PROJECT_PATH]` / `hive migrate --all` | Migrate one project, or global state plus every registered project with progress, failure inventory, and recovery commands. | `Hive::Commands::Migrate` / `Hive::Commands::MigrateAll` | [[commands/migrate]] |
 | `hive doctor [--json]` | Read-only inspection of always-required Hive operating skills, configured managed capabilities, native resolution/provenance, and OpenClaw/ClawHub inventory. Emits `hive-doctor.v2`; legacy checks remain separate. | `Hive::Commands::Doctor` | [[commands/doctor]] |
 | `hive forget NAME [--if-exists] [--json]` | Drop one named entry from the global registry (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml` when overridden). Inverse of `hive init`. The project's `.hive-state` directory on disk is not touched. Unknown name → exit 64 unless `--if-exists` makes it an exit-0 no-op. | `Hive::Commands::Forget` | [[commands/forget]] |
 | `hive prune [--dry-run] [--json]` | Drop every registry entry whose `path` is no longer a directory on disk, whose stored `real_path` no longer matches the current target, OR whose row shape is invalid (hand-edit accident). `--dry-run` returns the would-be-removed list without writing. | `Hive::Commands::Prune` | [[commands/prune]] |
@@ -157,7 +222,7 @@ contracts retain their established unversioned or schema-less shapes.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
 - `init` accepts `--force`, `--json`, and the pre-write `--refactor-patrol` / `--no-refactor-patrol` discovery choice. Omitting the boolean keeps fresh discovery enabled. The same fresh-init choice enables or disables deduplicated GitHub issue output; auto-fixing remains disabled.
 - `init` and `new` share one `--workflow` help string sourced from the built-in workflow registry, then append a static note that project-authored workflows are valid and can be created with `hive workflow new ID`. Thor captures (bakes) this string at class-load time and replays it later via `help`, so help does not dynamically enumerate active-project descriptors.
-- `--json` is a `class_option` honoured by `version`, `init`, `status`, `answer`, `act`, `doctor`, `setup-agents`, `run`, `rebase-status`, `approve`, `plan-review`, `proposal`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `connect screenote`, `disconnect screenote`, `bench submit`, `pairing`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). `watch` rejects that single-document mode and uses `--json-lines`. Version emits `hive-version.v1`; proposal discovery emits `hive-proposal-list.v1` or `hive-proposal-show.v1`, and proposal mutations emit `hive-proposal-mutation.v1`; Plan-review actions emit `hive-plan-review-action.v1`; Answer emits `hive-answer.v1`; Doctor emits `hive-doctor.v2`; setup emits `hive-setup.v1`; setup-agents emits `hive-setup-agents.v1`, never prompts in JSON mode, and requires `--yes` for mutation. Bare status selects `hive-running-status.v2`, while `--operational` selects `hive-operational-status.v4`. Superseded running-status v1, operational-status v1-v3, and act v1 contracts are removed after coordinated migration. Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`. Bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`; pairing JSON is published as `hive-pairing-list.v1` and `hive-pairing-approve.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope. `init` emits `hive-init.v2` on success (v1 remains loadable for pinned consumers); `drop` emits `hive-drop.v2`; `rebase-status` emits `hive-rebase-status`; and Screenote/workflow/bench keep their existing contracts.
+- `--json` is a `class_option` honoured by `version`, `init`, `status`, `answer`, `act`, `doctor`, `setup-agents`, `run`, `rebase-status`, `approve`, `plan-review`, `proposal`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `connect screenote`, `disconnect screenote`, `bench submit`, `pairing`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). `watch` rejects that single-document mode and uses `--json-lines`. Version emits `hive-version.v1`; proposal discovery emits `hive-proposal-list.v1` or `hive-proposal-show.v1`, and proposal mutations emit `hive-proposal-mutation.v1`; Plan-review actions emit `hive-plan-review-action.v1`; Answer emits `hive-answer.v1`; Doctor emits `hive-doctor.v2`; setup emits `hive-setup.v1`; setup-agents emits `hive-setup-agents.v1`, never prompts in JSON mode, and requires `--yes` for mutation. Bare status selects `hive-running-status.v2`, while `--operational` selects `hive-operational-status.v5`. Superseded running-status v1, operational-status v1-v4, and act v1 contracts are removed after coordinated migration. Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`. Bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`; pairing JSON is published as `hive-pairing-list.v1` and `hive-pairing-approve.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope. `init` emits `hive-init.v3` on success (v2 is retired; v3 dropped `claude_mode`); `drop` emits `hive-drop.v2`; `rebase-status` emits `hive-rebase-status`; and Screenote/workflow/bench keep their existing contracts.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 - `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional. For `hive new`, that rejection and the command-local help rewrite stop once `PROJECT` has been found; the remaining argv is task text and is protected with a `--` sentinel before Thor dispatch.
@@ -173,7 +238,7 @@ contracts retain their established unversioned or schema-less shapes.
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
 | 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
-| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError` |
+| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
 
 Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb`. See [CONTRIBUTING.md](../CONTRIBUTING.md) "CLI contract for agent callers".

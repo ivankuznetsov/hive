@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "hive/git_ops"
 require "hive/gh"
+require "hive/github_publication"
 require "hive/stages/base"
 
 module Hive
@@ -130,7 +131,10 @@ module Hive
 
       ref = "origin/#{default_branch}"
       commits_behind = git.commits_behind(ref)
-      return Result.no_op if commits_behind.zero?
+      if commits_behind.zero?
+        reconcile_stacked_base!(task, git, ref)
+        return Result.no_op
+      end
 
       publish_lease, warnings = capture_publish_lease(task, cfg, git)
       result = run_rebase(task, cfg, git, ref, commits_behind)
@@ -167,9 +171,15 @@ module Hive
       resolved_files = []
 
       begin
-        git.rebase_onto(ref)
+        upstream = git.squash_merged_prefix(ref)
+        if upstream
+          warn "[hive] rebase: commits through #{upstream[0, 12]} already landed on #{ref} " \
+               "(squash-merged dependency); replaying only the later commits"
+        end
+        git.rebase_onto(ref, upstream: upstream)
         warnings = []
         update_execute_base_head!(task, git, warnings)
+        reconcile_stacked_base!(task, git, ref, warnings)
         return Result.succeeded(commits_behind: commits_behind,
                                 agent_resolutions: 0,
                                 resolved_files: resolved_files,
@@ -352,12 +362,27 @@ module Hive
     def publish_rebased_branch!(task, cfg, publish_lease, warnings)
       return unless publish_lease
 
-      result = Hive::Gh.push_branch(
-        task.worktree_path,
-        publish_lease.branch,
-        cfg: cfg,
-        expected_remote_oid: publish_lease.remote_oid
-      )
+      push = lambda do
+        Hive::Gh.push_branch(
+          task.worktree_path, publish_lease.branch, cfg: cfg,
+          expected_remote_oid: publish_lease.remote_oid
+        )
+      end
+      state_path = File.join(task.folder, "github-publication.json")
+      result = if File.exist?(state_path)
+        controller = Hive::GithubPublication::Controller.new(
+          state_path: state_path,
+          git_gateway: Hive::GithubPublication::GitGateway.new(cfg: cfg),
+          github_gateway: Hive::GithubPublication::GithubGateway.new(cfg: cfg)
+        )
+        controller.publish_rebase!(
+          worktree_path: task.worktree_path, branch: publish_lease.branch,
+          before_oid: publish_lease.remote_oid,
+          after_oid: Hive::GitOps.new(task.worktree_path).head_sha, &push
+        )
+      else
+        push.call
+      end
       return if result.success?
 
       detail = result.stderr.to_s.strip
@@ -366,9 +391,10 @@ module Hive
       message = "#{message}: #{detail[0, 200]}" unless detail.empty?
       warn "[hive] #{message}; remote history was left unchanged"
       warnings << message
-    rescue Hive::GhError, SystemCallError, IOError => e
+    rescue Hive::GhError, Hive::GitError, Hive::GithubPublication::Blocked, Hive::ManagedDirectory::UnsafeError,
+           SystemCallError, IOError => e
       message = "rebased branch not published: #{e.class}: #{e.message}"
-      warn "[hive] #{message}; remote history was left unchanged"
+      warn "[hive] #{message}; publication outcome requires reconciliation"
       warnings << message
     end
 
@@ -390,7 +416,8 @@ module Hive
           cfg, "rebase", profile,
           current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
         ),
-        cfg: cfg
+        cfg: cfg,
+        mcp_scope: "rebase"
       )
     end
 
@@ -464,6 +491,39 @@ module Hive
     # (e.g., task hasn't entered 4-execute yet). Failure of the
     # rewrite itself emits a stderr warning but does NOT fail the
     # rebase — the downstream stage will catch any inconsistency.
+    # `worktree.yml` `base_oid` records the commit the task branch was
+    # stacked on (for a dependent task, the dependency's head). Once a rebase
+    # drops a squash-merged dependency's commits, that commit is no longer in
+    # HEAD's history and outcome evidence fails "controller base is not an
+    # ancestor of implementation head". Move the base to the merge base with
+    # `ref`. Runs on the no-op path too, so a pointer left stale by an earlier
+    # rebase heals on the next run.
+    def reconcile_stacked_base!(task, git, ref, warnings = [])
+      worktree_yml = File.join(task.folder, "worktree.yml")
+      return unless File.exist?(worktree_yml)
+
+      data = YAML.safe_load(File.read(worktree_yml), permitted_classes: [], aliases: false) || {}
+      return unless data.is_a?(Hash)
+
+      base = data["base_oid"].to_s
+      return if base.empty? || git.ancestor?(base, "HEAD")
+
+      merge_base = git.merge_base(ref)
+      return if merge_base.nil? || merge_base == base
+
+      data["base_oid"] = merge_base
+      tmp = "#{worktree_yml}.tmp.#{Process.pid}.#{Time.now.to_i}"
+      File.write(tmp, YAML.dump(data))
+      File.rename(tmp, worktree_yml)
+      warn "[hive] rebase: stacked base #{base[0, 12]} is no longer in HEAD's history; " \
+           "base_oid now #{merge_base[0, 12]} (merge base with #{ref})"
+    rescue Hive::GitError, SystemCallError, IOError, Psych::Exception => e
+      File.delete(tmp) if tmp && File.exist?(tmp)
+      message = "base_oid not reconciled in worktree.yml: #{e.class}: #{e.message}"
+      warn "[hive] #{message}"
+      warnings << message
+    end
+
     def update_execute_base_head!(task, git, warnings = [])
       worktree_yml = File.join(task.folder, "worktree.yml")
       return unless File.exist?(worktree_yml)

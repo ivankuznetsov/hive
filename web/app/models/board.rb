@@ -7,10 +7,7 @@ class Board
     def folded_by_default? = tasks.empty? || terminal
   end
 
-  Band = Data.define(
-    :project, :workflow_id, :columns, :daemon_enabled, :error,
-    :hidden_archived_task_count
-  ) do
+  Band = Data.define(:project, :workflow_id, :columns, :daemon_enabled, :error) do
     def task_count = columns.sum { |column| column.tasks.size }
 
     def unavailable? = error.present?
@@ -22,9 +19,14 @@ class Board
     end
   end
 
-  attr_reader :bands
+  StageSnapshot = Data.define(:dir, :name)
+  WorkflowSnapshot = Data.define(:stages)
 
-  def initialize(projects)
+  attr_reader :bands, :metadata
+
+  def initialize(projects, metadata: nil)
+    @snapshot_metadata = metadata
+    @metadata = {}
     @bands = projects.flat_map { |project| bands_for(project) }
   end
 
@@ -33,16 +35,31 @@ class Board
   private
 
   def bands_for(project)
-    default_workflow = default_workflow_for(project)
+    saved = @snapshot_metadata&.fetch(project.name, {})
+    default_workflow = saved ? saved.fetch("default_workflow", DEFAULT_WORKFLOW) : default_workflow_for(project)
     tasks_by_workflow = project.active_tasks.group_by do |task|
       task["workflow"].presence || default_workflow
     end
     tasks_by_workflow[default_workflow] = [] if tasks_by_workflow.empty?
-    daemon_enabled = project.daemon_enabled?
+    daemon_enabled = saved ? saved.fetch("daemon_enabled", true) : project.daemon_enabled?
     workflow_ids = tasks_by_workflow.keys.sort
-    workflows = workflows_for(project, workflow_ids)
+    workflows = if saved
+      saved.fetch("workflows", {}).transform_values do |stages|
+        WorkflowSnapshot.new(stages: stages.map { |stage| StageSnapshot.new(**stage.symbolize_keys) }) if stages
+      end
+    else
+      workflows_for(project, (workflow_ids + [ default_workflow ]).uniq)
+    end
+    unavailable_workflows = saved ? saved.fetch("unavailable_workflows", []) : workflows.select { |_, workflow| workflow.nil? }.keys
+    @metadata[project.name] = {
+      "default_workflow" => default_workflow, "daemon_enabled" => daemon_enabled,
+      "unavailable_workflows" => unavailable_workflows,
+      "workflows" => workflows.transform_values do |workflow|
+        workflow&.stages&.map { |stage| { "dir" => stage.dir, "name" => stage.name } }
+      end
+    }
 
-    workflow_ids.map.with_index do |workflow_id, index|
+    workflow_ids.map do |workflow_id|
       tasks = tasks_by_workflow.fetch(workflow_id)
       workflow = workflows[workflow_id]
       Band.new(
@@ -50,10 +67,7 @@ class Board
         workflow_id:,
         columns: columns_for(workflow, tasks),
         daemon_enabled:,
-        error: project["error"].presence || ("workflow_unavailable" unless workflow),
-        # The count is project-scoped, so attach it to exactly one band. A
-        # mixed-workflow project must render one summary, not one per band.
-        hidden_archived_task_count: index.zero? ? project.hidden_archived_task_count : 0
+        error: project["error"].presence || ("workflow_unavailable" if unavailable_workflows.include?(workflow_id) || (!workflow && saved != {}))
       )
     end
   end
@@ -69,6 +83,17 @@ class Board
     tasks_by_stage = tasks.group_by { |task| task["stage"].presence || "unknown" }
     configured_dirs = configured_stages.map(&:dir)
 
+    # Producing a terminal deliverable and completing it are different states.
+    # Keep pending delivery in its real stage; Done is only a presentation group.
+    terminal = configured_stages.last
+    completed = []
+    if terminal && terminal.name != "done"
+      completed, pending = tasks_by_stage.fetch(terminal.dir, []).partition do |task|
+        task["action"] == "archived"
+      end
+      tasks_by_stage[terminal.dir] = pending
+    end
+
     columns = configured_stages.map do |stage|
       Column.new(stage: stage.dir, label: Hive::StageLabel.format(stage.name), tasks: tasks_by_stage.fetch(stage.dir, []),
                  terminal: stage == configured_stages.last)
@@ -76,6 +101,7 @@ class Board
     (tasks_by_stage.keys - configured_dirs).sort_by { |stage| stage_sort_key(stage) }.each do |stage|
       columns << Column.new(stage:, label: Hive::StageLabel.format(stage), tasks: tasks_by_stage.fetch(stage), terminal: false)
     end
+    columns << Column.new(stage: "completed", label: "Done", tasks: completed, terminal: true) if completed.any?
     columns.presence || [ Column.new(stage: "unavailable", label: "Workflow unavailable", tasks:, terminal: false) ]
   end
 

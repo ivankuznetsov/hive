@@ -99,7 +99,9 @@ module Hive
           end
         end
 
-        safety = AutoCommit.auto_commit_safety_violations(worktree_path, staged[:paths])
+        safety = AutoCommit.auto_commit_safety_violations(
+          worktree_path, staged[:paths], cfg: cfg
+        )
         unless safety[:success]
           return failure_with_unstage(
             worktree_path, :git_failed,

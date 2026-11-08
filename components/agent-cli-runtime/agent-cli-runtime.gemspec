@@ -6,7 +6,7 @@ Gem::Specification.new do |spec|
   spec.authors = [ "Ivan Kuznetsov" ]
   spec.email = [ "ivan@ikuznetsov.com" ]
   spec.summary =
-    "One Ruby API for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode"
+    "One Ruby API for Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, and Muse Code"
   spec.description = <<~DESC
     Agent CLI Runtime gives Ruby applications one stable integration layer for
     local coding-agent CLIs. It builds provider-specific commands from a shared

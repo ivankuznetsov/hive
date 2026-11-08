@@ -87,6 +87,30 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     end
   end
 
+  # A tmux-era Stop-hook stub left in the worktree is repaired before the
+  # stage body runs, so entry-time dirty-worktree checks never see it.
+  # Stages that do not own a worktree leave it alone.
+  def test_with_stage_events_repairs_legacy_claude_settings_before_worktree_stages
+    { "4-execute" => true, "6-review" => true, "8-finalize" => true, "3-plan" => false }.each do |stage_dir, repaired|
+      root, task, worktree = make_task_and_worktree(stage_dir)
+      remember(root, worktree)
+      settings = File.join(worktree, ".claude", "settings.json")
+      FileUtils.mkdir_p(File.dirname(settings))
+      command = "HIVE_TASK_STAGE_DIR=#{task.folder} /opt/hive/lib/hive/scripts/stop_hook.sh"
+      File.write(settings, JSON.generate(
+        "hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => command } ] } ] }
+      ))
+
+      seen = nil
+      Hive::Stages::Base.with_stage_events(task) do
+        seen = File.exist?(settings)
+        { commit: nil, status: :complete }
+      end
+
+      assert_equal !repaired, seen, stage_dir
+    end
+  end
+
   def test_with_stage_events_marks_error_on_scope_violation
     root, task, worktree = make_task_and_worktree("6-review")
     remember(root, worktree)

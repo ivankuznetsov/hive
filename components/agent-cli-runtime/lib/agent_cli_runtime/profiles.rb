@@ -103,6 +103,47 @@ module AgentCliRuntime
       home_path(home, ".grok", "auth.json")
     end
 
+    # Muse keeps credentials and settings under the XDG config root
+    # ($XDG_CONFIG_HOME/muse, default ~/.config/muse). It has no config-dir
+    # environment override of its own, so XDG_CONFIG_HOME is the only
+    # relocation lever and it names the base, not the muse directory.
+    def muse_configuration_directory(home:, env:)
+      xdg = env["XDG_CONFIG_HOME"]
+      unless xdg.to_s.empty?
+        unless File.absolute_path?(xdg)
+          raise ArgumentError, "XDG_CONFIG_HOME must be absolute"
+        end
+
+        return File.join(File.expand_path(xdg), "muse")
+      end
+
+      base = home || env["HOME"]
+      base = nil if base.to_s.empty?
+      home_path(base, ".config", "muse")
+    end
+
+    def muse_auth_path(home:, env:)
+      File.join(muse_configuration_directory(home:, env:), "auth.json")
+    end
+
+    # Plugin state (installed.json, package cache) lives under the XDG data
+    # root ($XDG_DATA_HOME/muse, default ~/.local/share/muse), not beside
+    # the settings in the config root.
+    def muse_data_directory(home:, env:)
+      xdg = env["XDG_DATA_HOME"]
+      unless xdg.to_s.empty?
+        unless File.absolute_path?(xdg)
+          raise ArgumentError, "XDG_DATA_HOME must be absolute"
+        end
+
+        return File.join(File.expand_path(xdg), "muse")
+      end
+
+      base = home || env["HOME"]
+      base = nil if base.to_s.empty?
+      home_path(base, ".local", "share", "muse")
+    end
+
     def opencode_auth_path(home:, env:)
       data_home = env["XDG_DATA_HOME"]
       if !data_home.to_s.empty?
@@ -139,6 +180,8 @@ module AgentCliRuntime
       bin_default: "claude",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_CLAUDE_BIN HIVE_CLAUDE_BIN],
       headless_flag: "-p",
+      # Print mode reads stdin; keep large review prompts out of exec arguments.
+      prompt_style: :piped_stdin,
       permission_skip_flag: "--dangerously-skip-permissions",
       add_dir_flag: "--add-dir",
       tool_scope_flags: {
@@ -201,6 +244,7 @@ module AgentCliRuntime
         ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] },
       launcher_identity: "codex-cli/v1",
       usage_extractor: UsageExtractors::CODEX,
+      error_extractor: ErrorExtractors::CODEX,
       credential_environment_keys: %w[OPENAI_API_KEY],
       configuration_environment_key: "CODEX_HOME",
       default_configuration_directory: ".codex",
@@ -253,8 +297,9 @@ module AgentCliRuntime
       name: :grok,
       bin_default: "grok",
       env_bin_override_keys: %w[AGENT_CLI_RUNTIME_GROK_BIN HIVE_GROK_BIN],
-      headless_flag: "-p",
-      prompt_style: :headless_flag_value,
+      # Grok's Unix CLI reads a prompt file; stdin already has a managed lifetime.
+      headless_flag: "--prompt-file=/dev/stdin",
+      prompt_style: :piped_stdin,
       permission_skip_flag: "--always-approve",
       # Grok confines the filesystem natively, the same shape codex uses.
       # `workspace` limits writes to the working directory, `read-only`
@@ -334,7 +379,73 @@ module AgentCliRuntime
       end
     )
 
-    PROFILES = [ CLAUDE, CODEX, PI, GROK, OPENCODE ].to_h do |profile|
+    MUSE = Profile.new(
+      name: :muse,
+      bin_default: "muse",
+      env_bin_override_keys: %w[AGENT_CLI_RUNTIME_MUSE_BIN HIVE_MUSE_BIN],
+      headless_flag: "exec",
+      # Muse does not read a prompt from stdin, but --prompt-file accepts
+      # /dev/stdin when the host materializes stdin as a regular file (Hive
+      # spawns agents with stdin redirected from a tempfile). That keeps
+      # arbitrarily large prompts out of argv.
+      prompt_style: :piped_stdin,
+      prompt_argument: "--prompt-file=/dev/stdin",
+      # The unscoped path mirrors the other CLIs' skip flags: no approval
+      # prompts and no sandbox. The scoped modes below keep Muse's shell
+      # sandbox on (its default) and bound the run with approval policy
+      # instead of a prompt a headless caller can never answer.
+      permission_skip_flag: "--yolo",
+      workspace_write_flags: [
+        "--approval-mode", "never",
+        "--trust-workspace", "--disable-request-user-input"
+      ],
+      # Muse has no read-only filesystem sandbox mode. Disabling the write
+      # tools and the shell is the strongest native read-only boundary it
+      # offers; read/search tools stay available.
+      read_only_flags: [
+        "--approval-mode", "never",
+        "--trust-workspace", "--disable-request-user-input",
+        "--disable-write", "--disable-shell"
+      ],
+      # --json emits the MSP event stream (final text on
+      # run.terminal.completed, usage on run.usage). Reminder agents add
+      # extra model calls and injected prompts to a one-shot run, and
+      # request_user_input can never be answered headlessly.
+      output_format_flags: [
+        "--json", "--disable-reminders", "--disable-request-user-input",
+        "--no-session-log"
+      ],
+      version_flag: "--version",
+      min_version: "1.4.14",
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder:
+        ->(effort) { [ "--reasoning-effort", effort ] },
+      launcher_identity: "muse-code/v1",
+      usage_extractor: UsageExtractors::MUSE,
+      error_extractor: ErrorExtractors::MUSE,
+      credential_environment_keys: %w[META_API_KEY],
+      # No configuration_environment_key: Muse has no private config-dir
+      # variable, and XDG_CONFIG_HOME names a base shared by every XDG
+      # tool (gh, git, Hive), so a launch binding must not export it. The
+      # probe below resolves the directory; non-default bindings are
+      # unsupported until Muse grows its own override.
+      default_configuration_directory: ".config/muse",
+      configuration_directory_probe: lambda do |home:, env:|
+        muse_configuration_directory(home: home, env: env)
+      end,
+      auth_configuration_probe: lambda do |home:, env:|
+        if env_configured?(env, "META_API_KEY")
+          AuthConfiguration.new(status: :configured, source: "environment")
+        else
+          auth_from_file(
+            muse_auth_path(home: home, env: env),
+            source: "muse auth.json"
+          )
+        end
+      end
+    )
+
+    PROFILES = [ CLAUDE, CODEX, PI, GROK, OPENCODE, MUSE ].to_h do |profile|
       [ profile.name, profile ]
     end.freeze
     PROVIDER_ORDER = PROFILES.keys.freeze

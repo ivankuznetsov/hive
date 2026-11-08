@@ -216,6 +216,62 @@ class OutcomeEvidenceContractTest < Minitest::Test
     assert_match(/cannot accept a claim without admitted proof/, error.message)
   end
 
+  def test_wrong_proof_kind_can_be_durably_revised_but_never_accepted
+    requirement = Contract.requirement!(
+      implementation: { "changed_paths" => %w[app/checkout.rb] },
+      claims: [
+        claim(
+          "claim-flow", "A buyer can finish checkout and see confirmation.",
+          "video", %w[app/checkout.rb]
+        )
+      ],
+      exclusions: [],
+      inference: { "context_id" => "inference-1", "agent" => "claude" }
+    )
+    evidence = [
+      {
+        "kind" => "screenshot", "claims" => [ "claim-flow" ],
+        "representations" => [ { "sha256" => "a" * 64 } ]
+      }
+    ]
+    actors = {
+      producer: { "context_id" => "producer-1", "agent" => "pi" },
+      reviewer: { "context_id" => "reviewer-1", "agent" => "pi" }
+    }
+    output = {
+      "review_scope_hashes" => [ "a" * 64 ],
+      "verdicts" => [
+        {
+          "target_id" => "claim-flow", "verdict" => "revise",
+          "reason" => "The screenshot cannot prove the required temporal checkout transition."
+        }
+      ]
+    }
+
+    review = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "revise", review.fetch("status")
+
+    # An accepted verdict on wrong-kind proof is downgraded to revise with
+    # guidance, so the round is recorded and the next producer recaptures.
+    output.fetch("verdicts").first["verdict"] = "accepted"
+    downgraded = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "revise", downgraded.fetch("status")
+    refute downgraded.fetch("accepted")
+    verdict = downgraded.fetch("verdicts").first
+    assert_equal "revise", verdict.fetch("verdict")
+    assert_match(/requires video proof, but the evidence supplied screenshot/, verdict.fetch("reason"))
+
+    output.fetch("verdicts").first["verdict"] = "rework"
+    kept = Contract.review!(
+      requirement: requirement, evidence: evidence, **actors, output: output
+    )
+    assert_equal "rework", kept.fetch("status")
+  end
+
   def test_rejects_secret_shaped_semantic_claims_exclusions_and_verdicts
     secret = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     input = {
@@ -332,13 +388,12 @@ class OutcomeEvidenceContractTest < Minitest::Test
       ]
     }
 
-    assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
-      Contract.review!(
-        requirement: requirement,
-        evidence: [ evidence.first.merge("kind" => "screenshot") ],
-        producer: producer, reviewer: reviewer, output: output
-      )
-    end
+    wrong_kind = Contract.review!(
+      requirement: requirement,
+      evidence: [ evidence.first.merge("kind" => "screenshot") ],
+      producer: producer, reviewer: reviewer, output: output
+    )
+    assert_equal "revise", wrong_kind.fetch("status"), "wrong-kind proof can never be accepted"
     assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) do
       Contract.review!(
         requirement: requirement, evidence: evidence,

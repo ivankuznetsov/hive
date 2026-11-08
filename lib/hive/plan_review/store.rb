@@ -4,8 +4,10 @@ require "json"
 require "pathname"
 require "hive/atomic_file"
 require "hive/canonical_json"
+require "hive/lock"
 require "hive/plan_review/record"
 require "hive/secret_patterns"
+require "hive/task_meta"
 
 module Hive
   module PlanReview
@@ -13,6 +15,10 @@ module Hive
       ROOT_BASENAME = "plan-review".freeze
       CURRENT_BASENAME = "current.json".freeze
       MAX_JSON_BYTES = 2 * 1024 * 1024
+      REJECTED_OUTPUT_BASENAME = "rejected-output.md".freeze
+      # Enough of a reviewer result to show the offending field; the parser
+      # itself refuses anything above ResultParser::MAX_BYTES.
+      MAX_REJECTED_OUTPUT_BYTES = 64 * 1024
       SAFE_SEGMENT = /\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,255}\z/
 
       attr_reader :task_folder, :root, :current_path
@@ -38,12 +44,13 @@ module Hive
         record
       end
 
-      def write_attempt!(review_id:, attempt_id:, plan_bytes:, result:, coverage:, route_receipt:)
+      def write_attempt!(review_id:, attempt_id:, plan_bytes:, result:, coverage:, route_receipt:,
+                         rejected_output: nil)
         ensure_review!(review_id)
         safe_segment!(attempt_id, "attempt id")
         directory = File.join(review_root(review_id), "attempts", attempt_id)
         ensure_directory!(directory)
-        {
+        refs = {
           "input_plan" => write_immutable(
             File.join(directory, "input-plan.md"),
             Hive::SecretPatterns.redact(plan_bytes.to_s),
@@ -60,7 +67,15 @@ module Hive
             canonical_json(sanitize(route_receipt)),
             json: true
           )
-        }.freeze
+        }
+        if rejected_output
+          refs["rejected_output"] = write_immutable(
+            File.join(directory, REJECTED_OUTPUT_BASENAME),
+            rejected_output_document(rejected_output, result:, route_receipt:, attempt_id:),
+            json: false
+          )
+        end
+        refs.freeze
       end
 
       def write_review_artifact!(review_id:, basename:, content:, json: false)
@@ -162,11 +177,23 @@ module Hive
       # Serialize the full observe/dispatch/publish lifecycle, not only the
       # current.json CAS write. A waiter re-reads the winner's route after the
       # lock and coalesces instead of spawning a duplicate reviewer.
-      def with_orchestration_lock
+      def with_orchestration_lock(observation:, timeout: Hive::Lock.commit_lock_timeout)
+        Hive::TaskMeta.validate_observation!(task_folder, observation)
         ensure_directory!(root)
+        Hive::TaskMeta.validate_observation!(task_folder, observation)
         path = File.join(root, ".orchestrator.lock")
         File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
-          lock.flock(File::LOCK_EX)
+          deadline = Hive::Lock.monotonic_now + timeout
+          until lock.flock(File::LOCK_EX | File::LOCK_NB)
+            if Hive::Lock.monotonic_now >= deadline
+              raise Hive::ConcurrentRunError.new(
+                "plan review orchestration lock at #{path} held longer than #{timeout}s",
+                lock_path: path
+              )
+            end
+            sleep [ 0.05, deadline - Hive::Lock.monotonic_now ].min.clamp(0, 0.05)
+          end
+          Hive::TaskMeta.validate_observation!(task_folder, observation)
           yield
         end
       end
@@ -302,7 +329,10 @@ module Hive
           if (status = optional_lstat(root))
             validate_directory_status!(root, status)
           else
-            FileUtils.mkdir_p(root, mode: 0o700)
+            # The task directory is a lifecycle boundary. A non-recursive
+            # create fails if a forced deletion removed it, instead of
+            # resurrecting the task while setting up review storage.
+            Dir.mkdir(root, 0o700)
           end
           File.chmod(0o700, root)
           return root
@@ -343,6 +373,30 @@ module Hive
         return value if value.to_s.match?(SAFE_SEGMENT)
 
         raise InvalidRecord, "#{label} is unsafe"
+      end
+
+      # Bounded, redacted copy of reviewer output the result parser refused,
+      # with the parse error, so a deterministic rejection is diagnosable.
+      def rejected_output_document(bytes, result:, route_receipt:, attempt_id:)
+        raw = bytes.to_s.b
+        truncated = raw.bytesize > MAX_REJECTED_OUTPUT_BYTES
+        text = raw.byteslice(0, MAX_REJECTED_OUTPUT_BYTES).force_encoding(Encoding::UTF_8).scrub
+        role = route_receipt.to_h.transform_keys(&:to_s)["role"]
+        diagnostic = result.to_h.transform_keys(&:to_s)["diagnostic"]
+        note = truncated ? "first #{MAX_REJECTED_OUTPUT_BYTES} of #{raw.bytesize} bytes" : "#{raw.bytesize} bytes"
+        Hive::SecretPatterns.redact(<<~MD)
+          # Rejected plan review output (#{role}, attempt #{attempt_id})
+
+          Parser error: #{diagnostic}
+
+          The reviewer finished, but Hive's result parser refused its output,
+          so the attempt counted as a retryable failure. The output below is
+          redacted (#{note}).
+
+          ````json
+          #{text}
+          ````
+        MD
       end
 
       def sanitize(value)

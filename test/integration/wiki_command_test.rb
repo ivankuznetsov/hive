@@ -76,7 +76,10 @@ class WikiCommandTest < Minitest::Test
   end
 
   def test_cli_help_lists_wiki_command
-    out, _err = capture_io { Hive::CLI.start([ "help" ]) }
+    # Summary assertions need room for Thor's widest command and the runner name.
+    out, _err = with_env("THOR_COLUMNS" => "200") do
+      capture_io { Hive::CLI.start([ "help" ]) }
+    end
 
     assert_match(/^\s*\S+\s+wiki SUBCOMMAND\s+# Manage genera/, out)
   end

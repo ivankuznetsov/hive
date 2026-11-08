@@ -16,7 +16,8 @@ class ReviewersCodexReviewTest < Minitest::Test
   def teardown
     ENV["HIVE_CODEX_BIN"] = @prev_bin
     %w[HIVE_FAKE_CODEX_STDOUT HIVE_FAKE_CODEX_EXIT HIVE_FAKE_CODEX_ARGV_LOG
-       HIVE_FAKE_CODEX_HANG HIVE_FAKE_CODEX_VERSION HIVE_FAKE_CODEX_BIG_MIB].each { |k| ENV.delete(k) }
+       HIVE_FAKE_CODEX_HANG HIVE_FAKE_CODEX_VERSION HIVE_FAKE_CODEX_BIG_MIB
+       HIVE_FAKE_CODEX_STDERR].each { |k| ENV.delete(k) }
     Hive::AgentProfile.reset_version_cache!
   end
 
@@ -48,7 +49,7 @@ class ReviewersCodexReviewTest < Minitest::Test
 
   # --- argv construction -------------------------------------------------
 
-  def test_builds_codex_review_argv_with_title_and_prompt
+  def test_builds_codex_exec_review_argv_with_title_and_prompt
     with_tmp_dir do |dir|
       log = File.join(dir, "argv.log")
       ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
@@ -61,7 +62,16 @@ class ReviewersCodexReviewTest < Minitest::Test
       # Leading positional args are logged one-per-line; the trailing
       # prompt arg is multi-line, so assert against the raw log.
       args = raw.lines.grep(/^arg=/).map { |l| l.sub(/^arg=/, "").chomp }
-      assert_equal "review", args[0], "first codex arg must be the review subcommand"
+      assert_equal %w[exec review], args.first(2), "codex must run the exec review subcommand"
+      assert_equal 1, args.count("--ignore-user-config"),
+                   "the Hive MCP launch passes --ignore-user-config exactly once"
+      assert_operator args.index("--ignore-user-config"), :>, args.index("review"),
+                      "--ignore-user-config is an exec review flag, not a top-level one"
+      sandbox = args.index('sandbox_mode="read-only"')
+      refute_nil sandbox, "the review runs in codex's read-only sandbox"
+      assert_equal "-c", args[sandbox - 1]
+      assert_includes raw, "stdin=/dev/null",
+                      "codex exec must not wait on an inherited stdin"
       title_idx = args.index("--title")
       refute_nil title_idx, "argv must carry --title"
       assert_includes args[title_idx + 1], "pass 1", "title carries the pass number"
@@ -79,6 +89,10 @@ class ReviewersCodexReviewTest < Minitest::Test
       ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
       ctx = make_ctx(dir)
       FileUtils.mkdir_p(ctx.task_folder)
+      codex_home = File.join(dir, "codex-home")
+      FileUtils.mkdir_p(codex_home)
+      File.write(File.join(codex_home, "config.toml"),
+                 "model = \"personal-model\"\nmodel_reasoning_effort = \"low\"\n")
       reviewer = Hive::AgentSupport.for(:codex)::Reviewer.new(
         make_spec,
         ctx,
@@ -92,17 +106,21 @@ class ReviewersCodexReviewTest < Minitest::Test
         }
       )
 
-      result = reviewer.run!
+      # The carried personal model/effort yield to the routed ones.
+      result = with_env("CODEX_HOME" => codex_home) { reviewer.run! }
 
       assert result.ok?, result.error_message
       args = File.read(log).lines.grep(/^arg=/).map { |line| line.sub(/^arg=/, "").chomp }
       assert_equal [
         "--model", "gpt-5.6-sol",
         "-c", "model_reasoning_effort=xhigh",
-        "review"
-      ], args.first(5)
+        "exec", "review"
+      ], args.first(6)
       assert_operator args.index("review"), :<, args.index("--title")
       refute_includes args, "--effort"
+      assert_equal 1, args.count("--model")
+      assert_equal 1, args.count { |arg| arg.start_with?("model_reasoning_effort=") }
+      refute_includes args, "personal-model"
     end
   end
 
@@ -546,6 +564,99 @@ class ReviewersCodexReviewTest < Minitest::Test
       refute_includes body, "No plan was found", "the codex preamble must not leak into findings"
       refute_includes body, "<finding>", "the echoed prompt placeholder must not reach the file"
       refute_includes body, "succeeded in", "the tool transcript must be dropped"
+    end
+  end
+
+  # --- real `codex exec review` captures -----------------------------------
+  #
+  # test/fixtures/codex_exec_review/findings.{stderr,stdout} is a real
+  # codex-cli 0.162.1 `codex exec review --ignore-user-config` run against a
+  # throwaway repo (paths sanitized, plugin skill text elided). codex streams
+  # the session transcript to stderr and the final message to stdout; the fake
+  # replays both into the same pipe, as the real capture sees them.
+  # clean.* keeps that transcript with a clean verdict substituted, and
+  # usage_limit.stderr is the run's banner with codex's usage-limit error.
+  EXEC_REVIEW_FIXTURES = File.expand_path("../../fixtures/codex_exec_review", __dir__)
+
+  def replay_exec_review_capture(name)
+    stderr = File.join(EXEC_REVIEW_FIXTURES, "#{name}.stderr")
+    stdout = File.join(EXEC_REVIEW_FIXTURES, "#{name}.stdout")
+    ENV["HIVE_FAKE_CODEX_STDERR"] = File.read(stderr)
+    ENV["HIVE_FAKE_CODEX_STDOUT"] = File.exist?(stdout) ? File.read(stdout).chomp : ""
+  end
+
+  def test_real_exec_review_findings_capture_is_normalized_once
+    with_tmp_dir do |dir|
+      replay_exec_review_capture("findings")
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, result.error_message
+      body = File.read(reviewer.output_path)
+      high, rest = body.split("\n\n## Medium\n", 2)
+      medium, nit = rest.split("\n\n## Nit\n", 2)
+      assert_equal 2, high.lines.grep(/\A- \[ \] /).length
+      assert_includes high, "- [ ] Read configuration files without invoking a shell — /worktree/calc.py:17-17 " \
+                            "If `path` contains shell metacharacters"
+      assert_includes high, "- [ ] Include the first value in the average — /worktree/calc.py:4-4"
+      assert_equal 1, medium.lines.grep(/\A- \[ \] /).length
+      assert_includes medium, "- [ ] Preserve the empty-input validation — /worktree/calc.py:6-6"
+      assert_equal "No findings.", nit.strip
+      refute_includes body, "succeeded in", "the exec transcript must be dropped"
+      refute_includes body, "<finding>", "the echoed prompt must not reach the file"
+      refute_includes body, "Full review comments", "codex's summary prose is not a finding"
+    end
+  end
+
+  def test_real_exec_review_clean_capture_is_a_clean_pass_with_one_verdict
+    with_tmp_dir do |dir|
+      replay_exec_review_capture("clean")
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, result.error_message
+      body = File.read(reviewer.output_path)
+      assert body.start_with?(Hive::AgentSupport.for(:codex)::Reviewer::CLEAN_FINDINGS)
+      assert_equal 1, body.scan("I did not find any discrete, actionable bugs").length,
+                   "the final message codex prints twice is kept once"
+    end
+  end
+
+  def test_real_exec_review_usage_limit_is_limit_detectable
+    with_tmp_dir do |dir|
+      replay_exec_review_capture("usage_limit")
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert_match(/exited with status=1/, result.error_message)
+      assert Hive::AgentLimit.limit_reached?(result.error_message)
+      refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # When codex obeys the GFM contract, its final message is the findings
+  # block — printed under the transcript's last `codex` marker AND on stdout.
+  # It must be published once, whether or not a blank line separates the copies.
+  def test_repeated_gfm_final_message_is_published_once
+    gfm = "## High\n- [ ] a: b\n\n## Medium\nNo findings.\n\n## Nit\nNo findings."
+    [ "", "\n" ].each do |separator|
+      with_tmp_dir do |dir|
+        echo = "user\n## High\n- [ ] <finding>: <one-line justification>\n"
+        ENV["HIVE_FAKE_CODEX_STDERR"] =
+          "OpenAI Codex v0.162.1\n#{echo}exec\ngit diff\ncodex\n#{gfm}\n#{separator}"
+        ENV["HIVE_FAKE_CODEX_STDOUT"] = gfm
+        reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+        result = reviewer.run!
+
+        assert result.ok?, result.error_message
+        assert_equal "#{gfm}\n", File.read(reviewer.output_path)
+      end
     end
   end
 

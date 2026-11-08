@@ -15,6 +15,12 @@ aggregates a triage artifact, and marks the stage `COMPLETE` on quorum or
 
 ## Runtime Contract
 
+Reviewer prompts reference the target document by path; reviser prompts
+reference both the target and triage artifact by path. They do not embed
+copies of those documents. Agents read the complete artifacts from disk,
+keeping launch prompts small without truncating review material. Prompts
+explicitly distinguish artifact contents from workflow instructions.
+
 1. Resolve the current descriptor stage from `task.workflow`.
 2. Pre-flight resume on the current marker: a `COMPLETE` council short-circuits
    to done without re-spawning reviewers; a `WAITING` council resumes by

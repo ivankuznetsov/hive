@@ -9,11 +9,14 @@ require "hive/task_closure"
 require "hive/task_projection/reader"
 require "hive/task_resolver"
 require "hive/workflows"
+require "hive/task_activity"
 
 module Hive
   module Daemon
     # Tasks and GitHub are authority. Poll cadence is process-local; restart
     # rediscovers tasks and repeats idempotent intake and closure operations.
+    # An optional scheduler checkpoint preserves only the fair-selection cursor
+    # used by fresh one-shot processes.
     class PrMergeWatcher
       SUPPORTED_STAGES = %w[open-pr review artifacts finalize].map do |verb|
         Hive::Workflows::VERBS.fetch(verb).fetch(:target)
@@ -25,7 +28,8 @@ module Hive
                      gh: Hive::Gh, config_lookup: Hive::Config.method(:find_project),
                      config_loader: Hive::Config.method(:load),
                      task_factory: Hive::Task.method(:new),
-                     task_closure: Hive::TaskClosure, dry_run: false)
+                     task_closure: Hive::TaskClosure, dry_run: false,
+                     schedule_state_factory: nil)
         @poll_interval_sec = positive_number(poll_interval_sec, "poll interval", allow_zero: true)
         @poll_timeout_sec = positive_number(poll_timeout_sec, "poll timeout")
         @merge_intake = merge_intake
@@ -37,11 +41,17 @@ module Hive
         @task_factory = task_factory
         @task_closure = task_closure
         @dry_run = dry_run
+        @schedule_state_factory = schedule_state_factory
+        @selection_cursors = {}
         @contexts = {}
         @last_observation_results = []
       end
 
       attr_reader :last_observation_results
+
+      def next_poll_at(now: Time.now.utc)
+        now + @poll_interval_sec
+      end
 
       def observe(rows, now: Time.now.utc, projects: nil)
         @last_observation_results = []
@@ -92,11 +102,16 @@ module Hive
             item.dig("observation", "held") != true &&
               (!@polls[item["key"]] || @polls[item["key"]][:at] + @poll_interval_sec <= now)
           end
+          cursor = selection_cursor(project)
+          slugs = candidates.map { |item| item.dig("task", "slug") }.sort
+          rotation = slugs.rotate(cursor && slugs.include?(cursor) ? slugs.index(cursor) + 1 : 0)
           candidate = candidates.min_by do |item|
-            [ @polls.dig(item["key"], :at) || Time.at(0), item.dig("task", "slug") ]
+            [ @polls.dig(item["key"], :at) || Time.at(0),
+              rotation.index(item.dig("task", "slug")) ]
           end
           next unless candidate
 
+          record_selection_cursor(project, candidate.dig("task", "slug"), now: now)
           result = process_candidate(@contexts.fetch(project), candidate, now: now)
           @polls[candidate["key"]] = { at: now, state: result.dig(:remote, "state") }
           result.merge(project: project, slug: candidate.dig("task", "slug"))
@@ -119,6 +134,22 @@ module Hive
       end
 
       private
+
+      def selection_cursor(project)
+        return @selection_cursors[project] if @selection_cursors.key?(project)
+
+        state = @schedule_state_factory&.call(project)&.read("merge_watcher")
+        @selection_cursors[project] = state && state["last_selected_slug"]
+      end
+
+      def record_selection_cursor(project, slug, now:)
+        @selection_cursors[project] = slug
+        return if @dry_run
+
+        @schedule_state_factory&.call(project)&.update("merge_watcher", now: now) do
+          { "last_selected_slug" => slug }
+        end
+      end
 
       def candidate_for(row, identity)
         task = @task_factory.call(row.folder)
@@ -179,6 +210,7 @@ module Hive
           raise Hive::ConcurrentRunError, "task pull request binding changed before reconciliation"
         end
         result = remote_result(poll_facts(identity, candidate), candidate, now: now)
+        record_remote_activity(task, candidate, result, now: now)
         return result unless result.fetch(:status) == :merged
 
         unless Hive::TaskClosure.local_pr_head_binding(task, frontmatter: frontmatter) ==
@@ -218,6 +250,38 @@ module Hive
           cfg: cfg,
           timeout_sec: @poll_timeout_sec
         )
+      end
+
+      def record_remote_activity(task, candidate, result, now:)
+        remote = result[:remote]
+        return false unless remote
+
+        # TaskActivity deduplicates observations by operation ID across polls and restarts.
+        activity = Hive::TaskActivity.for_task(task, clock: -> { now.utc })
+        return false unless activity
+
+        number = candidate.dig("pull_request", "number")
+        state = remote.fetch("state")
+        kind = state == "merged" ? "merge_observed" : "pr_observed"
+        activity.record(
+          kind: kind,
+          operation_id: "github:pr:#{number}:#{state}:#{remote['merge_oid'] || 'none'}",
+          correlation_id: "publication:#{number}",
+          reason: "pull request outcome changed", source: "github",
+          occurred_at: remote["merged_at"] || now, observed_at: now,
+          payload: {
+            "pr_number" => number,
+            "pr_url" => candidate.dig("pull_request", "url"),
+            "pr_state" => state,
+            "head_oid" => candidate.dig("pull_request", "observed_head"),
+            "merge_oid" => remote["merge_oid"],
+            "merged_at" => remote["merged_at"],
+            "draft" => false
+          }
+        )
+        true
+      rescue Hive::TaskActivity::Error, SystemCallError, IOError
+        false
       end
 
       def remote_result(facts, candidate, now:)

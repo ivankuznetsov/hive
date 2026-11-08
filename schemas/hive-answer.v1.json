@@ -4,61 +4,157 @@
   "title": "hive answer output (v1)",
   "description": "Transport-neutral read-only brainstorm inventory and identity-bound literal answer result. The command never dispatches a stage.",
   "oneOf": [
-    { "$ref": "#/$defs/InventoryPayload" },
-    { "$ref": "#/$defs/WritePayload" },
-    { "$ref": "#/$defs/ErrorPayload" }
+    {
+      "$ref": "#/$defs/InventoryPayload"
+    },
+    {
+      "$ref": "#/$defs/WritePayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
   ],
   "$defs": {
     "Task": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["project", "id", "slug", "stage", "folder", "generation"],
+      "required": [
+        "project",
+        "id",
+        "slug",
+        "stage",
+        "folder",
+        "generation"
+      ],
       "properties": {
-        "project": { "type": "string", "minLength": 1 },
-        "id": { "type": ["integer", "null"], "minimum": 1 },
-        "slug": { "type": "string", "minLength": 1 },
-        "stage": { "const": "2-brainstorm" },
-        "folder": { "type": "string", "minLength": 1 },
-        "generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        "project": {
+          "type": "string",
+          "minLength": 1
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "slug": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "const": "2-brainstorm"
+        },
+        "folder": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       }
     },
     "Slot": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "ordinal", "round", "question_number", "text", "answered",
-        "answer", "fingerprint", "binding"
+        "ordinal",
+        "round",
+        "question_number",
+        "text",
+        "answered",
+        "answer",
+        "fingerprint",
+        "binding"
       ],
       "properties": {
-        "ordinal": { "type": "integer", "minimum": 1 },
-        "round": { "type": ["integer", "null"], "minimum": 1 },
-        "question_number": { "type": "integer", "minimum": 1 },
-        "text": { "type": "string" },
-        "answered": { "type": "boolean" },
-        "answer": { "type": ["string", "null"] },
-        "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "binding": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" }
+        "ordinal": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "round": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "question_number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "text": {
+          "type": "string"
+        },
+        "answered": {
+          "type": "boolean"
+        },
+        "answer": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "binding": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
       }
     },
     "InventoryPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "operation", "task",
-        "slot_count", "unanswered_count", "complete", "slots"
+        "schema",
+        "schema_version",
+        "ok",
+        "operation",
+        "task",
+        "slot_count",
+        "unanswered_count",
+        "complete",
+        "slots"
       ],
       "properties": {
-        "schema": { "const": "hive-answer" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": true },
-        "operation": { "const": "inventory" },
-        "task": { "$ref": "#/$defs/Task" },
-        "slot_count": { "type": "integer", "minimum": 0 },
-        "unanswered_count": { "type": "integer", "minimum": 0 },
-        "complete": { "type": "boolean" },
+        "schema": {
+          "const": "hive-answer"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "inventory"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        },
+        "slot_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unanswered_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "complete": {
+          "type": "boolean"
+        },
         "slots": {
           "type": "array",
-          "items": { "$ref": "#/$defs/Slot" }
+          "items": {
+            "$ref": "#/$defs/Slot"
+          }
         }
       }
     },
@@ -66,78 +162,268 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "operation", "outcome", "reason",
-        "written", "relocated", "task", "slot", "unanswered_count",
-        "complete", "acknowledgement"
+        "schema",
+        "schema_version",
+        "ok",
+        "operation",
+        "outcome",
+        "reason",
+        "written",
+        "relocated",
+        "task",
+        "slot",
+        "unanswered_count",
+        "complete",
+        "acknowledgement"
       ],
       "properties": {
-        "schema": { "const": "hive-answer" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": true },
-        "operation": { "const": "write" },
+        "schema": {
+          "const": "hive-answer"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "operation": {
+          "const": "write"
+        },
         "outcome": {
           "type": "string",
-          "enum": ["written", "idempotent", "stale", "ambiguous", "conflict", "lock_busy"]
+          "enum": [
+            "written",
+            "idempotent",
+            "stale",
+            "ambiguous",
+            "conflict",
+            "lock_busy"
+          ]
         },
         "reason": {
           "type": "string",
           "enum": [
-            "exact_match", "unique_relocation", "already_answered_same",
-            "already_answered_different", "question_changed", "question_missing",
-            "multiple_matches", "task_missing", "task_moved", "identity_changed",
-            "generation_changed", "task_lock_busy"
+            "exact_match",
+            "unique_relocation",
+            "already_answered_same",
+            "already_answered_different",
+            "question_changed",
+            "question_missing",
+            "multiple_matches",
+            "task_missing",
+            "task_moved",
+            "identity_changed",
+            "generation_changed",
+            "task_lock_busy"
           ]
         },
-        "written": { "type": "boolean" },
-        "relocated": { "type": "boolean" },
-        "task": { "$ref": "#/$defs/Task" },
+        "written": {
+          "type": "boolean"
+        },
+        "relocated": {
+          "type": "boolean"
+        },
+        "task": {
+          "$ref": "#/$defs/Task"
+        },
         "slot": {
           "oneOf": [
-            { "$ref": "#/$defs/Slot" },
-            { "type": "null" }
+            {
+              "$ref": "#/$defs/Slot"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
-        "unanswered_count": { "type": ["integer", "null"], "minimum": 0 },
-        "complete": { "type": ["boolean", "null"] },
-        "acknowledgement": { "type": "string", "minLength": 1 }
+        "unanswered_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "complete": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "acknowledgement": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
       }
     },
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "schema", "schema_version", "ok", "error_class", "error_kind",
-        "exit_code", "message"
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
       ],
       "properties": {
-        "schema": { "const": "hive-answer" },
-        "schema_version": { "const": 1 },
-        "ok": { "const": false },
-        "error_class": { "type": "string" },
+        "schema": {
+          "const": "hive-answer"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
         "error_kind": {
           "type": "string",
           "enum": [
-            "invalid_binding", "invalid_answer", "wrong_stage", "stale",
-            "ambiguous_slug", "invalid_task_path", "config", "usage", "internal"
+            "invalid_binding",
+            "invalid_answer",
+            "wrong_stage",
+            "stale",
+            "ambiguous_slug",
+            "invalid_task_path",
+            "config",
+            "usage",
+            "internal",
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
           ]
         },
-        "exit_code": { "type": "integer", "enum": [1, 4, 64, 70, 75, 78] },
-        "message": { "type": "string" },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            4,
+            20,
+            21,
+            22,
+            64,
+            70,
+            75,
+            78
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
         "candidates": {
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["project", "stage", "folder"],
+            "required": [
+              "project",
+              "stage",
+              "folder"
+            ],
             "additionalProperties": true,
             "properties": {
-              "project": { "type": "string" },
-              "stage": { "type": "string" },
-              "folder": { "type": "string" }
+              "project": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
             }
           }
         },
-        "current_stage": { "type": ["string", "null"] },
-        "target_stage": { "type": ["string", "null"] }
+        "current_stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "namespace",
+            "installation"
+          ]
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "generation",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "prepared",
+            "executing",
+            "unresolved",
+            "succeeded",
+            "failed",
+            "settled",
+            "aborted"
+          ]
+        }
       }
     }
   }

@@ -47,6 +47,8 @@
     <string>[ -x "$0" ] || exit 0; exec "$0" "$@"</string>
     <string>/Users/YOU/.local/bin/hive</string>
     <string>web</string>
+    <string>--context</string>
+    <string>local</string>
   </array>
 
   <key>EnvironmentVariables</key>

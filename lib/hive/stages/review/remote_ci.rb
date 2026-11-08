@@ -3,6 +3,7 @@ require "open3"
 require "set"
 require "yaml"
 require "hive/gh"
+require "hive/stages/review/publication"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/context"
 require "hive/stages/review/fix_guardrail"
@@ -33,7 +34,10 @@ module Hive
         module_function
 
         def run!(task:, cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 publication_base_head: nil, runner: nil)
+                 publication_base_head: nil, publication_withheld: nil, runner: nil, no_repair: false, admit_head: nil, publication_observer: nil)
+          # An incomplete fix still owes its receipt. Entry CI must leave that
+          # recovery to the fix phase rather than publish or repair its HEAD.
+          return skipped_result if publication_withheld
           return skipped_result if cfg.dig("review", "github_checks", "enabled") == false
 
           pr_path = File.join(task.folder, "pr.md")
@@ -44,7 +48,8 @@ module Hive
 
           runner ||= Runner.new(
             task: task, cfg: cfg, ctx: ctx, pr_url: pr_url,
-            publication_base_head: publication_base_head
+            publication_base_head: publication_base_head, publication_withheld: publication_withheld,
+            no_repair: no_repair, admit_head: admit_head, publication_observer: publication_observer
           )
           result = Hive::Stages::Review::CiFix.run!(
             cfg: cfg,
@@ -52,7 +57,7 @@ module Hive
             started_at: started_at,
             max_wall_clock_sec: max_wall_clock_sec,
             command: runner.command_label,
-            command_runner: runner
+            command_runner: runner, no_repair: no_repair
           )
           if result.status == :green && runner.settled_head
             Hive::Gh.persist_pr_identity!(
@@ -96,12 +101,16 @@ module Hive
           attr_reader :guardrail_result, :settled_head
 
           def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh,
-                         publication_base_head: nil,
+                         publication_base_head: nil, publication_withheld: nil, no_repair: false, admit_head: nil, publication_observer: nil,
                          clock: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                          sleeper: ->(seconds) { sleep(seconds) },
                          poll_interval_sec: POLL_INTERVAL_SEC,
                          quiet_settlement_sec: QUIET_SETTLEMENT_SEC,
                          no_checks_grace_sec: NO_CHECKS_GRACE_SEC)
+            @publication_observer = publication_observer
+            @publication_withheld = publication_withheld
+            @admit_head = admit_head
+            @no_repair = no_repair
             @task = task
             @cfg = cfg
             @ctx = ctx
@@ -134,9 +143,13 @@ module Hive
             unless remote_head == identity.fetch(:remote_head)
               raise Hive::GhError, "pull-request head changed during identity validation"
             end
-            @expected_checks.merge(check_keys(baseline))
+            @expected_checks.merge(carried_check_keys(baseline))
             guard_publication!(local_head)
-            publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
+            if @no_repair
+              raise Hive::GhError, "verification requires the published exact head" unless remote_head == local_head
+            else
+              publish_head!(identity.fetch(:branch), expected_remote_oid: remote_head)
+            end
             @published_head = local_head
             wait_for_settlement!(
               identity,
@@ -152,60 +165,16 @@ module Hive
 
           private
 
+          def publication
+            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh)
+          end
+
           def resolve_identity!
-            parsed = @gh.parse_pull_request_url(@pr_url)
-            raise Hive::GhError, "pr.md contains an invalid pull-request URL" unless parsed
-
-            root = Hive::Worktree.canonical_root(@task.project_root)
-            pointer = Hive::Worktree.read_owned_pointer(
-              @task.folder,
-              project_root: @task.project_root,
-              slug: @task.slug,
-              expected_root: root
-            )
-            unless File.realpath(pointer.fetch("path")) == File.realpath(@ctx.worktree_path)
-              raise Hive::WorktreeError, "review context does not match the owned worktree"
-            end
-
-            repository = @gh.repository_identity(@ctx.worktree_path, cfg: @cfg)
-            unless parsed.fetch("host") == repository.fetch("host").downcase &&
-                   parsed.fetch("repository") == repository.fetch("repository").downcase
-              raise Hive::GhError, "pull request is outside the task repository"
-            end
-
-            metadata = @gh.pr_metadata(
-              parsed.fetch("number"), cfg: @cfg, chdir: @ctx.worktree_path
-            )
-            unless metadata.number == parsed.fetch("number") &&
-                   @gh.parse_pull_request_url(metadata.url) == parsed &&
-                   metadata.state.to_s.upcase == "OPEN" &&
-                   metadata.is_cross_repository == false
-              raise Hive::GhError, "pull-request identity is stale or unsupported"
-            end
-
-            branch = pointer.fetch("branch")
-            matches = @gh.lookup_prs_for_branch(
-              @ctx.worktree_path, branch, cfg: @cfg
-            ).select do |candidate|
-              candidate["number"].to_i == parsed.fetch("number") &&
-                candidate["state"].to_s.upcase == "OPEN" &&
-                candidate["headRefName"].to_s == branch &&
-                @gh.parse_pull_request_url(candidate["url"]) == parsed
-            end
-            raise Hive::GhError, "task branch does not resolve to one open pull request" unless matches.one?
-
-            remote_head = metadata.head_ref_oid.to_s.downcase
-            unless remote_head.match?(/\A[0-9a-f]{40,64}\z/)
-              raise Hive::GhError, "pull-request head OID is unavailable"
-            end
-
-            {
-              number: parsed.fetch("number"), url: parsed.fetch("url"),
-              branch: branch, remote_head: remote_head
-            }
+            publication.resolve_identity!
           end
 
           def guard_publication!(local_head)
+            raise Hive::GhError, "review publication withheld: #{@publication_withheld}" if @publication_withheld
             return unless @published_head && @published_head != local_head
 
             guardrail = Hive::Stages::Review::FixGuardrail.run!(
@@ -213,23 +182,22 @@ module Hive
               base_sha: @published_head, head_sha: local_head
             )
             @guardrail_result = guardrail if guardrail.status == :tripped
-            return unless @guardrail_result
+            unless @guardrail_result
+              @admit_head&.call(local_head)
+              return
+            end
 
             raise Hive::GhError,
                   "CI repair requires fix-guardrail approval before publication"
           end
 
-          def publish_head!(branch, expected_remote_oid:)
-            result = @gh.push_branch(
-              @ctx.worktree_path, branch, cfg: @cfg,
-              expected_remote_oid: expected_remote_oid,
-              set_upstream: false
-            )
-            return if result.success?
-
-            detail = result.stderr.to_s.strip
-            detail = result.stdout.to_s.strip if detail.empty?
-            raise Hive::GhError, "review head publication failed#{": #{detail}" unless detail.empty?}"
+          def publish_head!(_branch, expected_remote_oid:)
+            publication.publish!(expected_head: git_head!)
+            @publication_observer&.call(publication)
+            evidence = publication.evidence
+            unless evidence["publication"] == "published" && evidence["failure_reason"].nil?
+              raise Hive::GhError, "review head publication failed: #{evidence['failure_reason']}"
+            end
           end
 
           def wait_for_settlement!(identity, local_head, max_bytes:, timeout_sec:)
@@ -264,7 +232,7 @@ module Hive
                     stable_signature = signature
                     stable_since = now
                   elsif now - stable_since >= required_quiet
-                    @expected_checks.merge(keys)
+                    @expected_checks.merge(carried_check_keys(latest))
                     @settled_head = local_head
                     return Hive::Stages::Review::CiFix::Run.new(
                       "GitHub checks settled for exact head #{local_head}\n", 0
@@ -316,6 +284,26 @@ module Hive
             Array(rollup["statusCheckRollup"]).filter_map do |entry|
               check_key(entry) if entry.is_a?(Hash) && !check_name(entry).empty?
             end.to_set
+          end
+
+          # Only push-triggered check runs must reappear on a new head. A commit
+          # status (StatusContext) names one exact SHA and is posted by whoever
+          # checked it, often local tooling after the run (hivedev's bin/ci
+          # posts `signoff` for a commit already on the remote). A push never
+          # re-triggers it, so carrying it over left the gate pending until the
+          # settlement timeout on every review of such a project.
+          def carried_check_keys(rollup)
+            Array(rollup["statusCheckRollup"]).filter_map do |entry|
+              next unless entry.is_a?(Hash) && !check_name(entry).empty?
+              next if status_context?(entry)
+
+              check_key(entry)
+            end.to_set
+          end
+
+          def status_context?(entry)
+            entry["__typename"] == "StatusContext" ||
+              (entry["__typename"].nil? && entry["name"].to_s.empty? && !entry["context"].to_s.empty?)
           end
 
           def check_key(entry)

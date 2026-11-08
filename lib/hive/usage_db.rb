@@ -8,7 +8,7 @@ module Hive
   # public hashes intentionally retain their historical shape; only the
   # storage authority changed.
   module UsageDb
-    AGENTS = %i[claude codex pi grok opencode].freeze
+    AGENTS = %i[claude codex pi grok opencode muse].freeze
     BUCKETS = %i[today 7d 30d all].freeze
     BILLING_ROUTES = Hive::BillingEvidence::ROUTES
     BILLING_EVIDENCE_SOURCES = Hive::BillingEvidence::SOURCES

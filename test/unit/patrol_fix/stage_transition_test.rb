@@ -58,9 +58,24 @@ class PatrolFixStageTransitionTest < Minitest::Test
   def approve_without_enrollment(task)
     original = Hive::DependencySnapshot.method(:enforce_admission!)
     Hive::DependencySnapshot.define_singleton_method(:enforce_admission!) { |*| true }
-    Hive::Commands::Approve.new(task.folder, quiet: true).call
+    with_registered_project_identity(task) do
+      Hive::Commands::Approve.new(task.folder, quiet: true).call
+    end
   ensure
     Hive::DependencySnapshot.define_singleton_method(:enforce_admission!, original)
+  end
+
+  def with_registered_project_identity(task)
+    original = Hive::Config.method(:registered_projects)
+    project = {
+      "name" => task.project_name,
+      "path" => task.project_root,
+      "project_id" => "test-project-id"
+    }
+    Hive::Config.define_singleton_method(:registered_projects) { [ project ] }
+    yield
+  ensure
+    Hive::Config.define_singleton_method(:registered_projects, original)
   end
 
   def test_crash_after_handoff_before_archive_intent_reuses_the_successor
@@ -70,7 +85,9 @@ class PatrolFixStageTransitionTest < Minitest::Test
       )
       transition = Hive::PatrolFix::StageTransition.new(task)
       transition.define_singleton_method(:append) { |_| raise "crash before intent" }
-      assert_raises(RuntimeError) { transition.begin!("6-done") }
+      with_registered_project_identity(task) do
+        assert_raises(RuntimeError) { transition.begin!("6-done") }
+      end
       successor = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read.dig("relations", "successor")
       assert File.directory?(task.folder)
       approve_without_enrollment(task)
@@ -209,7 +226,7 @@ class PatrolFixStageTransitionTest < Minitest::Test
           { moved_task_folder: destination, status: :complete, commit: nil }
         end
       end
-      command.define_singleton_method(:terminal_state_snapshot) { |_| nil }
+      command.define_singleton_method(:terminal_state_snapshot) { |_, **| nil }
       command.define_singleton_method(:commit_after) { |current, *| committed = current }
       command.define_singleton_method(:report) { |current, _result| reported = current }
 

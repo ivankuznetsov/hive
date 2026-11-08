@@ -49,6 +49,19 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_completion_probe_must_be_callable
+    Dir.mktmpdir("hive-agent-completion-probe-contract") do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: 1,
+          timeout_sec: 5, completion_probe: true
+        )
+      end
+
+      assert_equal "completion_probe must be callable", error.message
+    end
+  end
+
   def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
     task = make_task(dir)
     output = File.join(dir, "findings.json")
@@ -133,6 +146,36 @@ class AgentTest < Minitest::Test
         assert_nil agent.child_environment.fetch(key)
       end
       refute agent.child_environment.key?("GROK_AUTH_PATH")
+    end
+  end
+
+  def test_agent_child_environment_unsets_hive_private_ruby_load_path
+    with_tmp_dir do |dir|
+      with_env("RUBYLIB" => "/srv/hive/deployments/hive-dogfood-abc/lib", "RUBYGEMS_GEMDEPS" => "-") do
+        agent = Hive::Agent.new(task: make_task(dir), prompt: "test", max_budget_usd: nil, timeout_sec: 5)
+
+        Hive::ProjectCommandEnvironment::TOOLCHAIN_KEYS.each do |key|
+          assert agent.child_environment.key?(key), "#{key} must be explicitly unset"
+          assert_nil agent.child_environment.fetch(key)
+        end
+      end
+    end
+  end
+
+  def test_pi_child_environment_cannot_reach_controller_credential_transports
+    with_tmp_dir do |dir|
+      with_env(
+        "DBUS_SESSION_BUS_ADDRESS" => "unix:path=/run/user/1000/bus",
+        "SSH_AUTH_SOCK" => "/run/user/1000/keyring/ssh"
+      ) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: nil,
+          timeout_sec: 5, profile: Hive::AgentProfiles.lookup(:pi)
+        )
+
+        assert_nil agent.child_environment.fetch("DBUS_SESSION_BUS_ADDRESS")
+        assert_nil agent.child_environment.fetch("SSH_AUTH_SOCK")
+      end
     end
   end
 
@@ -870,6 +913,7 @@ class AgentTest < Minitest::Test
         "--dangerously-bypass-approvals-and-sandbox",
         "--model", "gpt-5.6-terra",
         "-c", "model_reasoning_effort=medium",
+        "--ignore-user-config",
         "--json",
         "-"
       ], codex_agent.send(:build_cmd)
@@ -889,12 +933,13 @@ class AgentTest < Minitest::Test
         "--max-budget-usd", "1",
         "--model", "opus",
         "--effort", "high",
+        "--strict-mcp-config", "--mcp-config", claude_agent.mcp_launch.arguments.last,
         "--output-format", "stream-json",
         "--include-partial-messages",
         "--verbose",
-        "--no-session-persistence",
-        "test"
+        "--no-session-persistence"
       ], claude_agent.send(:build_cmd)
+      claude_agent.cleanup_mcp_launch!
     end
   end
 
@@ -1092,7 +1137,7 @@ class AgentTest < Minitest::Test
       assert_includes argv_log, "arg=--max-budget-usd"
       assert_includes argv_log, "arg=5"
       assert_includes argv_log, "arg=--no-session-persistence"
-      assert_includes argv_log, "arg=do work"
+      refute_includes argv_log, "arg=do work"
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end
@@ -1330,6 +1375,49 @@ class AgentTest < Minitest::Test
       assert_equal :structured_truncated, result[:final_message_source]
       assert result[:final_message_truncated]
       assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_claude_model_identity_ignores_child_events_and_ambiguous_totals
+    identity = Hive::AgentSupport.for(:claude)::Stream::ModelIdentity.new
+    identity.observe({ "type" => "assistant", "parent_tool_use_id" => "child",
+                       "message" => { "model" => "claude-haiku-4-5-20251001" } })
+    identity.observe({ "type" => "result", "modelUsage" => { "haiku" => {}, "opus" => {} } })
+    assert_nil identity.model
+
+    identity.observe({ "type" => "system", "subtype" => "init", "model" => "configured-opus" })
+    identity.observe({ "type" => "assistant", "parent_tool_use_id" => nil,
+                       "message" => { "model" => "served-opus" } })
+    identity.observe({ "type" => "result", "modelUsage" => { "haiku" => {} } })
+    assert_equal "served-opus", identity.model
+  end
+
+  def test_claude_subagent_usage_does_not_replace_the_main_reviewer_identity
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      events = [
+        { "type" => "system", "subtype" => "init", "model" => "configured-opus" },
+        { "type" => "stream_event", "parent_tool_use_id" => nil,
+          "event" => { "type" => "message_start", "message" => {
+            "model" => "claude-opus-5", "usage" => { "input_tokens" => 90 } } } },
+        { "type" => "stream_event", "parent_tool_use_id" => "subagent-1",
+          "event" => { "type" => "message_start", "message" => {
+            "model" => "claude-haiku-4-5-20251001", "usage" => { "input_tokens" => 10 } } } },
+        { "type" => "result", "subtype" => "success", "result" => "done",
+          "usage" => { "input_tokens" => 100, "output_tokens" => 50 },
+          "modelUsage" => { "claude-haiku-4-5-20251001" => {}, "claude-opus-5" => {} } }
+      ]
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = events.map { |event| JSON.generate(event) }.join("\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "claude-opus-5", result[:model]
+      assert_equal "claude-opus-5", result.dig(:usage, :model)
+      assert_equal 100, result.dig(:usage, :input)
+      assert_equal 50, result.dig(:usage, :output)
     end
   end
 
@@ -1999,6 +2087,25 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_profile_pipes_large_prompt_without_an_argv_placeholder
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      fake = File.join(dir, "fake-claude")
+      received = File.join(dir, "prompt")
+      File.write(fake, "#!/usr/bin/env bash\ncat > #{received}\n")
+      File.chmod(0o755, fake)
+      prompt = "p" * (256 * 1024)
+      with_env("HIVE_CLAUDE_BIN" => fake) do
+        result = Hive::Agent.new(
+          task: task, prompt: prompt, max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:claude), status_mode: :exit_code_only
+        ).run!
+        assert_equal :ok, result[:status]
+        assert_equal prompt, File.binread(received)
+      end
+    end
+  end
+
   def test_pi_profile_pipes_large_prompt_without_an_argv_placeholder
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -2034,8 +2141,26 @@ class AgentTest < Minitest::Test
       ).run!
 
       assert_equal :ok, result[:status]
-      assert_equal [ "-p" ], File.read(argv_log).lines.map(&:chomp)
+      assert_equal [ "-p", "--no-mcp" ], File.read(argv_log).lines.map(&:chomp)
       assert_equal prompt, File.binread(stdin_log)
+    end
+  end
+
+  def test_grok_reads_a_large_prompt_through_its_prompt_file_option
+    with_tmp_dir do |dir|
+      fake = File.join(dir, "fake-grok")
+      received = File.join(dir, "prompt")
+      File.write(fake, "#!/usr/bin/env bash\npath=\"${1#--prompt-file=}\"\ncat \"$path\" > #{received}\n")
+      File.chmod(0o755, fake)
+      prompt = "p" * (256 * 1024)
+      with_env("HIVE_GROK_BIN" => fake) do
+        result = Hive::Agent.new(
+          task: make_task(dir), prompt: prompt, max_budget_usd: nil, timeout_sec: 5,
+          profile: Hive::AgentProfiles.lookup(:grok), status_mode: :exit_code_only
+        ).run!
+        assert_equal :ok, result[:status]
+        assert_equal prompt, File.binread(received)
+      end
     end
   end
 
@@ -2240,8 +2365,47 @@ class AgentTest < Minitest::Test
       agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
 
       with_replaced_singleton_method(Process, :wait2, ->(*) { raise Errno::ECHILD }) do
-        assert_equal [ false, nil ], agent.send(:wait_for_process, 123, 123, 5)
+        assert_equal [ false, nil, false ], agent.send(:wait_for_process, 123, 123, 5)
       end
+    end
+  end
+
+  def test_wait_for_process_completes_after_the_probe_grace_period
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      status = Object.new
+      now = Time.now
+      agent.define_singleton_method(:kill_group) { |_pgid| nil }
+      agent.define_singleton_method(:sleep_grace_then_kill) { |_pgid, _pid| nil }
+
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        with_replaced_singleton_method(
+          Process, :wait2, ->(_pid, flags = nil) { flags ? nil : raise(Errno::ECHILD) }
+        ) do
+          assert_equal [ false, nil, true ], agent.send(
+            :wait_for_process, 123, 123, 5,
+            completion_probe: -> { true }, completion_grace_seconds: 0
+          )
+        end
+      end
+    end
+  end
+
+  def test_cleanup_failure_is_a_terminal_state_marker_error
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      agent = Hive::Agent.new(task:, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        process_cleanup_completed: false,
+        process_cleanup_error: "synthetic cleanup failure"
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "process_cleanup_failed", result.fetch(:error_reason)
+      assert_equal "synthetic cleanup failure", result.fetch(:error_message)
+      assert_equal "process_cleanup_failed", Hive::Markers.current(task.state_file).attrs.fetch("reason")
     end
   end
 
@@ -2422,6 +2586,93 @@ class AgentTest < Minitest::Test
     end
   end
 
+  # Supersedes #1473: a refused model is operator-owned configuration, not a
+  # provider limit — no limits_reached marker, no retry_after cooldown.
+  def test_codex_unsupported_model_error_event_is_model_unsupported_not_a_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "error",
+        "message" => JSON.generate(
+          "type" => "error", "status" => 400,
+          "error" => { "type" => "invalid_request_error",
+                       "message" => "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
+        )
+      )
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal :error, result[:status]
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_nil result[:limit_text]
+      assert_nil result[:retry_at]
+      assert_equal "model unsupported for claude: 'gpt-6-sol' is not available to this account; " \
+                   "#{Hive::ModelUnsupported::CONFIG_HINT}", result[:error_message]
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "model_unsupported", marker.attrs["reason"]
+      assert_equal "gpt-6-sol", marker.attrs["model"]
+      assert_equal "claude", marker.attrs["provider"]
+      assert_nil marker.attrs["retry_after"]
+      refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+    end
+  end
+
+  def test_unsupported_model_plain_text_line_is_model_unsupported
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] =
+        "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account."
+      ENV["HIVE_FAKE_CLAUDE_EXIT"] = "1"
+
+      result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_match(/'gpt-6\.1-sol'/, result[:error_message])
+      assert_equal "gpt-6.1-sol", Hive::Markers.current(task.state_file).attrs["model"]
+    end
+  end
+
+  def test_unsupported_model_text_in_successful_output_is_not_classified
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+                              status_mode: :exit_code_only)
+      result = {
+        timed_out: false, exit_code: 0,
+        final_message: "Docs: 'The 'x' model is not supported when using Codex with a ChatGPT account.'"
+      }
+
+      agent.handle_exit(result)
+
+      refute_equal "model_unsupported", result[:error_reason]
+    end
+  end
+
+  def test_unsupported_model_provider_error_wins_in_exit_code_mode
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+                              status_mode: :exit_code_only)
+      result = {
+        timed_out: false, exit_code: 0, final_message: "",
+        provider_error: { kind: :provider_error, provider: "codex",
+                          message: "The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account." }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result[:status]
+      assert_equal "model_unsupported", result[:error_reason]
+      assert_equal "", File.read(task.state_file), "exit-code mode leaves the marker to the stage"
+    end
+  end
+
   def test_captures_claude_rejected_subscription_window_without_message_text
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -2568,7 +2819,12 @@ class AgentTest < Minitest::Test
 
       with_env(
         "HIVE_PI_BIN" => FAKE_BIN,
-        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event)
+        "HIVE_FAKE_CLAUDE_OUTPUT" => JSON.generate(event),
+        # Keep the fixture alive after it emits the terminal provider event.
+        # Hive deliberately terminates work once the model says its output was
+        # truncated; without the hang, natural exit and TERM race and make the
+        # asserted process status scheduler-dependent.
+        "HIVE_FAKE_CLAUDE_HANG" => "10"
       ) do
         result = Hive::Agent.new(
           task: task,
@@ -2580,10 +2836,7 @@ class AgentTest < Minitest::Test
           expected_output: output
         ).run!
 
-        # The reader may terminate the process as soon as Pi reports the
-        # output limit, before the fixture reaches its natural zero exit.
-        assert_includes [ 0, -Signal.list.fetch("TERM") ], result[:exit_code]
-        refute result[:timed_out]
+        assert_equal(-Signal.list.fetch("TERM"), result[:exit_code])
         assert_equal :error, result[:status]
         assert_equal "model_output_limit", result[:error_reason]
         assert_equal "model_output_limit", result.dig(:resource_exhaustion, :reason)

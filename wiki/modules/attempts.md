@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-09-04
+updated: 2026-10-02
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -26,6 +26,29 @@ and module-hook paths use the same dispatcher. A successful admission starts a
 detached supervisor; callers may attach or observe but do not own the worker's
 lifetime.
 The API does not own or reap child processes after handoff.
+It also exposes the dispatcher's read-only provider-route decision for daemon
+readiness. That projection uses the tick's existing admission view and never
+persists an attempt or starts a worker.
+
+Supervisor self-reentry preserves canonical directories from the running Ruby
+interpreter's resolved load path. This includes dependencies loaded without
+RubyGems activation, as in the isolated CLI scenario harness. It does not re-read
+ambient `RUBYLIB`; `bin/hive` places its own source directories first.
+That resolved `RUBYLIB` (Hive's lib, agent-cli-runtime, and every activated
+gem) is private to Hive and is inherited by the supervisor and worker. Commands
+the worker runs for the project (review CI in `CiFix.run_ci_once`, council
+`CommandRunner`, agent CLI launches) therefore merge
+`Hive::ProjectCommandEnvironment.overrides`, which unsets `RUBYLIB`, `RUBYOPT`,
+`RUBYGEMS_GEMDEPS`, `GEM_HOME`, `GEM_PATH`, Bundler keys, and `BUNDLER_ORIG_*`.
+Child `hive` calls do not need the inherited path: `bin/hive` (and the HIVE_BIN
+wrapper that execs it) put Hive's lib and agent-cli-runtime on `$LOAD_PATH`
+themselves and resolve gems through RubyGems.
+
+The private supervisor route is selected before public CLI dispatch. Its detached
+wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
+Hive, anchoring startup to the invoked Hive checkout rather than a caller bundle
+or transient test home. The capability and handshake descriptors are the only
+inherited launch authority.
 
 SQLite owns machine-local coordination only. Task Markdown and task journals
 remain workflow authority. Large logs and outputs live in the content-addressed
@@ -45,10 +68,49 @@ These are fixed one-to-one facts. Hive does not maintain separate accounting,
 capacity-reservation, lost-outcome, failure-event, publication-obligation, or
 attempt-relationship tables. `payload_references` remains separate because it
 is genuinely one-to-many. Patrol retry pacing reads the latest final attempt
-for the same task, generation, stage and runtime. A failed, cancelled or lost
+for the same task, generation, stage and runtime. A failed, cancelled, interrupted or lost
 attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+
+An interrupted attempt is terminal non-success, not a successful checkpoint
+and not an inferred loss. Its version-2 terminal receipt binds the pause
+generation and retains the last durable checkpoint, output references, and log
+reference. The supervisor publishes interruption only after its worker and
+recorded process group have stopped; a natural completion that wins first keeps
+its genuine success receipt. A restarted controller may finalize the same
+outcome only after identity checks prove both the wrapper and worker group are
+absent, and the attempt lease compare-and-swap prevents a later interruption
+from replacing an already committed terminal result.
+
+During quiescing, an already admitted supervisor stops ordinary heartbeat
+writes and may use its single bounded cleanup-write window to publish the
+terminal receipt. A quiesce signal uses the lifecycle generation and clamps
+worker termination to the persisted escalation slice without consuming the
+generation's finalization reserve. The same signal outside quiescing remains
+an ordinary cancellation. The installation controller aggregates any receipt
+the supervisor already committed for that generation with interruptions it
+finishes after verified wrapper and worker-group absence.
+
+Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
+an ambient or transient systemd scope are not complete descendant custody. The
+Linux delegated-cgroup adapter is eligible only for an explicitly established
+installation-exclusive domain when delegation is writable and parent escape is
+blocked. Automatic detection does not adopt the ambient service cgroup; the
+default therefore remains `unverified` until a launch adapter can inject that
+exclusive domain. Membership snapshots freeze the domain and recurse through
+descendant cgroups; unreadable member identities remain unresolved instead of
+disappearing from the inventory. Wrapper exit retains its process registration
+until both root identity and descendant-domain absence are proven, including
+after controller restart. Darwin and hosts without that custody remain fail
+closed whenever unregistered descendants may exist.
+
+`interrupted` remains fully implemented and independently tested at the real
+supervisor/reconciler boundary. Command-level interruption is intentionally not
+claimed by increment 1, because its pre-drain gate refuses an agent root before
+drain or signals. That end-to-end path belongs to the later custody increment;
+the idle success contract does not manufacture an interruption receipt merely
+to exercise it.
 
 `request_id` is immutable provenance, not a foreign key to the disposable
 dispatch queue. Completing or pruning a request must not change an attempt
@@ -57,10 +119,11 @@ prevents duplicate admission. Finalization retains its full-record equality
 checks; mismatches are not ignored or retried inside the tick.
 
 The immutable attempt value contract is v5. Task-stage subjects may carry a
-controller-admitted typed proposal binding; the runtime-control-plane database
-schema advances to v2 even though `subject_json` needs no column change. That
-explicit no-layout-change migration ensures older Hive processes refuse newer
-rows before trying to decode the added closed subject member.
+controller-admitted typed proposal binding stored in the existing
+`subject_json` column. Under the current-format-only runtime database model
+there is no separate version-fence migration for this member; the base schema
+stays at v2 and an older binary rejects such a row as an invalid attempt record
+when it decodes the closed subject.
 
 For the preceding SQLite layout only, explicit `Database#migrate!` recognizes
 the exact old schema fingerprint and atomically rebuilds the attempts table
@@ -122,6 +185,76 @@ dispatch-request row and is at-least-once across an external send boundary.
 After all acknowledgements, the row remains active until log archival finishes
 and the daemon durably marks promotion.
 
+## Attempt frame log and tail recovery
+
+`lib/hive/attempts/stream_log.rb` owns append-time recovery for the binary
+JSON-lines attempt log. Construction never mutates existing log bytes for
+recovery: it securely opens an append descriptor and a retained read
+descriptor, verifies that both reference the same regular inode, and captures
+the replayable sequence and physical size as one lock-held snapshot. Strict
+reads through the retained descriptor are the sequence authority, so an I/O
+error during construction or reconciliation fails closed instead of becoming
+an empty sequence-zero log. Public `StreamLog.read` remains tolerant of
+filesystem errors and malformed records. Constructor failure releases any
+acquired log lock and closes both log descriptors and an owned custody
+descriptor without replacing the initiating error, including asynchronous
+unwinds such as `Interrupt`.
+
+Every append takes the per-instance mutex and then polls for the log's exclusive
+advisory lock with nonblocking `flock` and a five-second monotonic deadline.
+While holding both, it inspects the physical last byte, optionally seals the
+tail, reconciles the sequence when its coherent sequence/size snapshot is
+stale, writes and flushes the complete frame, and only then publishes the new
+sequence and size snapshot. Reconciliation streams complete records, validates
+their replayability—including canonical Base64 padding bits, and skipping
+non-object JSON lines and out-of-range sequences exactly as public replay
+does—and tracks only the
+maximum sequence; it does not decode payloads, allocate frames, sort, or retain
+the whole log. An unchanged healthy
+snapshot avoids that scan, but does not skip physical tail inspection. Any
+append failure invalidates the snapshot, so the next append performs streaming
+strict reconciliation under the lock. The same mutex makes `close` and
+`closed?` wait behind an in-flight append; a forked child must independently
+open its own `StreamLog`. This contract coordinates `StreamLog` writers
+only—direct writers that ignore the advisory lock remain outside its scope.
+
+An unterminated tail is isolated by completely appending the fixed invalidating
+separator `"#\n".b` and defensively flushing it before sequence selection or
+frame writing. Recovery preserves every existing byte: it never truncates,
+rewrites, parses, or generally repairs the damaged fragment. The `#` keeps even
+a syntactically valid JSON value without its newline unreadable after the
+separator establishes the next boundary; a newline-terminated malformed record
+is already bounded and remains untouched.
+
+A separator write or flush error, including `Errno::EINTR`, escapes unchanged
+without an internal retry or sequence advance. A caller-controlled retry on the
+same or a reopened instance re-inspects the physical tail, so no separator, a
+partial separator, and a complete separator before a write or flush raises all
+converge safely. `syswrite` bypasses Ruby buffering, so the separator flush is a
+defensive assertion rather than an additional durability barrier. A successful
+append establishes independently replayable bytes and their line boundary in
+the kernel page cache for process-crash recovery; it does not promise survival
+of power loss or kernel panic. `close` retains the existing `fsync` behavior.
+
+A separator `SystemCallError` during Supervisor output drain remains fatal: the
+outer handler stops the worker group and returns `ExitCodes::SOFTWARE`; the
+failed chunk has no successful frame, and the drain path neither silently
+discards it nor retries inside `StreamLog`. For a one-shot fault, the diagnostic
+append can re-inspect and recover the tail, and the attempt terminalizes as
+failed with a readable log reference. If the fault persists into the
+diagnostic append, no success or terminal receipt is manufactured; the running
+row remains for lost recovery, and cleanup releases the log and custody
+handles.
+
+`close` flushes and syncs before closing any descriptor. A flush or sync error
+leaves the writer and custody handles open for a caller-controlled retry; this
+lets Supervisor append one terminal diagnostic and retry close after a one-shot
+sync failure. Once synchronization succeeds, all descriptor and custody cleanup
+steps run while preserving the first cleanup error. If lock-release recovery
+cannot install a replacement append descriptor, the instance remains explicitly
+closeable until its retained reader and custody handles have also been released;
+an opened but rejected replacement is closed immediately.
+
 ## Maintenance
 
 Only the daemon schedules periodic attempt maintenance. Its timer is
@@ -133,6 +266,8 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 ## Tests
 
 - `test/unit/attempts/`
+- `test/unit/attempts/stream_log_test.rb`
+- `test/integration/attempts_stream_log_recovery_test.rb`
 - `test/unit/runtime_control_plane/admission_transition_test.rb`
 - `test/unit/daemon/attempt_loss_healer_test.rb`
 - `test/integration/provider_routing_admission_test.rb`
@@ -140,3 +275,31 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Guarded attached recovery uses `Recovery::API` with an explicit manual execution
+policy. The coordinator alone validates a persisted recovery observation and
+repairs markers. Its query-only evidence is scoped by project and task before
+applying a bound; tokens include the request revision, phase and post-clear
+binding. A fresh operator action can expedite an admitted or cleared request
+without charging another retry. Other recovery callers retain queued admission.
+
+The bounded restart investigation is recorded in
+[[log.d/20261108-004-operator-attempt-restart-investigation]]. On the exercised
+Linux host, real external supervisors survived disposable services modeling
+all three shipped kill policies, for direct execute and attached review work.
+Actual application-service restarts and the historical incident remain
+unverified; no production orphan policy was changed based on that probe.
+
+`Attempts::API#fetch` and `#attach` expose canonical observation and read-only
+attachment without constructing internal repositories or clients in recovery
+adapters. A contended request admission re-reads the canonical request attempt
+and verifies its task/stage/generation binding before returning existing-live
+or terminal replay. Genuine loss remains a ledger state; manual recovery maps
+it to the `lost` outcome and retains its canonical end time.
+
+Manual retry validates every accepted, existing-live, or terminal-replay
+admission result against the recovery request's task, project, slug, stage,
+generation and post-clear progress before binding or attaching. The daemon's
+marker-recovery consumer applies the same fence. A foreign semantic owner
+leaves the request cleared and unbound, so a fresh operator retry remains
+available after that owner ends.

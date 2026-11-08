@@ -3,11 +3,28 @@
   "$id": "urn:hive:schema:runtime-maintenance:v1",
   "title": "hive runtime maintenance output (v1)",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/StatusPayload" },
+    { "$ref": "#/$defs/ProjectsPayload" },
+    { "$ref": "#/$defs/PayloadsPayload" },
     { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
-    "SuccessPayload": {
+    "StatusPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "result"],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" },
+        "action": { "type": "string", "enum": ["status"] },
+        "result": { "$ref": "#/$defs/StatusResult" }
+      },
+      "if": { "properties": { "result": { "properties": { "phase": { "const": "active" } } } } },
+      "then": { "properties": { "ok": { "const": true } } },
+      "else": { "properties": { "ok": { "const": false } } }
+    },
+    "ProjectsPayload": {
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "schema_version", "ok", "action", "result"],
@@ -15,12 +32,82 @@
         "schema": { "const": "hive-runtime-maintenance" },
         "schema_version": { "const": 1 },
         "ok": { "const": true },
-        "action": { "type": "string", "enum": ["status", "resume"] },
+        "action": { "const": "projects" },
         "result": {
-          "oneOf": [
-            { "$ref": "#/$defs/StatusResult" },
-            { "$ref": "#/$defs/ResumeResult" }
-          ]
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["registry_path", "projects"],
+          "properties": {
+            "registry_path": { "type": "string" },
+            "projects": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "project_id", "path", "real_path", "hive_state_path"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "project_id": { "type": "string" },
+                  "path": { "type": "string" },
+                  "real_path": { "type": ["string", "null"] },
+                  "hive_state_path": { "type": "string" },
+                  "worktree_root": {
+                    "type": ["string", "null"],
+                    "description": "Effective worktree root (project config worktree_root, else <HIVE_WORKTREE_BASE or ~/Dev>/<basename>.worktrees); null when project config could not be read"
+                  },
+                  "worktree_root_error": {
+                    "type": "string",
+                    "description": "Why worktree_root is null; present only then"
+                  }
+                },
+                "if": { "properties": { "worktree_root": { "type": "null" } }, "required": ["worktree_root"] },
+                "then": { "required": ["worktree_root_error"] },
+                "else": { "not": { "required": ["worktree_root_error"] } }
+              }
+            }
+          }
+        }
+      }
+    },
+    "PayloadsPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "result"],
+      "properties": {
+        "schema": { "const": "hive-runtime-maintenance" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "const": "payloads" },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["phase", "payload_root", "payloads"],
+          "properties": {
+            "phase": { "type": "string", "enum": ["absent", "active"] },
+            "payload_root": { "type": "string" },
+            "payloads": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "payload_id", "kind", "state", "task_id", "attempt_id",
+                  "relative_path", "path", "sha256", "bytes"
+                ],
+                "properties": {
+                  "payload_id": { "type": "string" },
+                  "kind": { "type": "string" },
+                  "state": { "type": "string", "enum": ["open", "sealed", "releasable"] },
+                  "task_id": { "type": ["string", "null"] },
+                  "attempt_id": { "type": ["string", "null"] },
+                  "relative_path": { "type": "string" },
+                  "path": { "type": "string" },
+                  "sha256": { "type": ["string", "null"] },
+                  "bytes": { "type": ["integer", "null"], "minimum": 0 }
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -48,23 +135,28 @@
     "StatusResult": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase", "installation_id", "next_action", "database"],
+      "required": ["phase", "installation_id", "next_action", "lifecycle", "database"],
       "properties": {
-        "phase": { "type": "string", "enum": ["absent", "preparing", "ready", "intended", "active"] },
+        "phase": { "type": "string", "enum": ["absent", "active"] },
         "installation_id": { "type": ["string", "null"] },
         "next_action": { "type": ["string", "null"] },
+        "lifecycle": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["phase", "generation", "revision", "admission_open"],
+              "properties": {
+                "phase": { "enum": ["running", "quiescing", "paused", "resuming"] },
+                "generation": { "type": "integer", "minimum": 0 },
+                "revision": { "type": "integer", "minimum": 0 },
+                "admission_open": { "type": "boolean" }
+              }
+            }
+          ]
+        },
         "database": { "$ref": "#/$defs/DatabaseDiagnosis" }
-      }
-    },
-    "ResumeResult": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["phase", "cutover_id", "database_path", "exclusions"],
-      "properties": {
-        "phase": { "const": "active" },
-        "cutover_id": { "type": "string" },
-        "database_path": { "type": "string" },
-        "exclusions": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
       }
     },
     "DatabaseDiagnosis": {

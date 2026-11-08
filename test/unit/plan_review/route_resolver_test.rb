@@ -42,24 +42,48 @@ class PlanReviewRouteResolverTest < Minitest::Test
     refute unknown.key?("family")
   end
 
-  def test_recoverable_identity_route_fails_closed_for_malformed_legacy_evidence
-    invalid_contract = {
-      "identity_contract_recovery" => true,
-      "identity_contract_version" => "invalid"
-    }
-    assert_nil Hive::PlanReview::RouteResolver.recoverable_identity_route(
-      routes: [ invalid_contract ], planner_identity: { "family" => "openai" }
-    )
+  def test_codex_without_a_served_model_is_attested_only_on_its_built_in_openai_provider
+    # Codex --json never names the served model. With no replayed
+    # model_provider the Hive launch guarantees OpenAI; any other provider,
+    # directly or through the active profile, stays unattested.
+    requested = candidate("codex", "gpt-6-astra", "openai")
+    actual = { "provider" => "codex", "model" => "", "effort" => "high", "route" => "native_codex" }
+    resolve = -> { Hive::PlanReview::RouteResolver.attest_observed_identity(requested:, actual:) }
 
-    malformed_identity = {
-      "role" => "adversarial", "outcome" => "success",
-      "independence_verified" => false,
-      "requested" => candidate("grok", "grok-4.6", "grok"),
-      "actual" => { "provider" => 5, "model" => "grok-4.6-build" }
-    }
-    assert_nil Hive::PlanReview::RouteResolver.recoverable_identity_route(
-      routes: [ malformed_identity ], planner_identity: { "family" => "openai" }
+    with_tmp_dir do |home|
+      with_env("CODEX_HOME" => home) do
+        assert_equal "openai", resolve.call.fetch("family"), "no config file"
+
+        File.write(File.join(home, "config.toml"), "model = \"gpt-6-astra\"\nmodel_provider = \"openai\"\n")
+        assert_equal "openai", resolve.call.fetch("family"), "explicit openai provider"
+
+        File.write(File.join(home, "config.toml"), "model_provider = \"ollama\"\n")
+        refute resolve.call.key?("family"), "a non-OpenAI provider is not attested"
+
+        File.write(File.join(home, "config.toml"),
+                   "profile = \"local\"\n\n[profiles.local]\nmodel_provider = \"ollama\"\n")
+        refute resolve.call.key?("family"), "an active profile can switch the provider"
+
+        File.write(File.join(home, "config.toml"),
+                   "profile = \"fast\"\n\n[profiles.fast]\nmodel = \"gpt-6-astra\"\n")
+        assert_equal "openai", resolve.call.fetch("family"), "a profile without a provider keeps OpenAI"
+
+        File.write(File.join(home, "config.toml"), "model_provider = \"bad\\q\"\n")
+        refute resolve.call.key?("family"), "an unparseable provider value fails closed"
+      end
+    end
+
+    other_family = Hive::PlanReview::RouteResolver.attest_observed_identity(
+      requested: candidate("codex", "gpt-6-astra", "anthropic"), actual:
     )
+    refute other_family.key?("family"), "Codex can only attest the OpenAI family"
+  end
+
+  def test_providers_without_a_launch_attestation_stay_unattested_without_a_served_model
+    requested = candidate("claude", "claude-opus-5", "anthropic")
+    actual = { "provider" => "claude", "model" => "", "effort" => "high", "route" => "native_claude" }
+
+    refute Hive::PlanReview::RouteResolver.attest_observed_identity(requested:, actual:).key?("family")
   end
 
   def test_fallback_counts_only_when_attested_family_differs

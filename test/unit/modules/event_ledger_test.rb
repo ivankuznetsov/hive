@@ -145,6 +145,37 @@ class ModulesEventLedgerTest < Minitest::Test
     end
   end
 
+  def test_read_only_projection_rejects_bad_cursor_schedule_and_index_without_repair
+    with_tmp_dir do |root|
+      ledger = Hive::Modules::EventLedger.new(root: root)
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.inspect_events_after("bad")
+      end
+
+      ledger.record(
+        **attributes.merge(
+          event_name: "schedule", idempotency_key: "schedule-read-only",
+          payload: { "schedule" => "0 * * * *" }
+        ),
+        recorded_at: NOW
+      )
+      index_path = File.join(ledger.events_root, "index.json")
+      index = JSON.parse(File.binread(index_path))
+      index["latest_schedules"]["0 * * * *"] = "not-a-time"
+      File.binwrite(index_path, Hive::WorkflowPackage::CanonicalJSON.generate(index))
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.inspect_latest_schedule("0 * * * *")
+      end
+
+      File.write(index_path, "{")
+      assert_raises(Hive::Modules::EventLedgerError) do
+        ledger.inspect_events_after(0)
+      end
+      assert_equal "{", File.binread(index_path),
+                   "read-only inspection must not repair malformed evidence"
+    end
+  end
+
   private
 
   def attributes

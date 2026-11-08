@@ -12,6 +12,28 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
 
   teardown { StatusBroadcaster.stop! }
 
+  test "review publication detail preserves full commands at desktop and mobile widths" do
+    destination = stage_dir(@project, "6-review").join(@slug)
+    FileUtils.mv(@folder, destination)
+    state = destination.join("task.md")
+    state.write("# Review publication\n")
+    Hive::Markers.set(state, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1,
+      **Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending",
+        "worktree" => "/owned/work tree", "branch" => @slug, "is_draft" => true, "pr_state" => "OPEN",
+        "ready_command" => "cd /owned/work\\ tree && gh pr ready 42", "local_head" => "a" * 40))
+    sign_in!
+    visit task_path(@project, @slug)
+    assert_text "Review publication and verification"
+    assert_text "Commit fixes locally"
+    [ [ 1280, 800 ], [ 375, 812 ] ].each do |width, height|
+      page.current_window.resize_to(width, height)
+      assert_text "gh pr ready 42"
+      assert_text "successful current secret scan"
+      metrics = page.evaluate_script("({viewport:document.documentElement.clientWidth, width:document.documentElement.scrollWidth})")
+      assert_operator metrics["width"], :<=, metrics["viewport"] + 1
+    end
+  end
+
   test "one semantic workspace reflows from wide desktop through actual 400 percent zoom" do
     sign_in!
     visit task_path(@project, @slug)
@@ -82,10 +104,9 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_no_selector "#workspace-attempts"
     assert_no_selector "#workspace-provenance"
     assert_no_selector "#workspace-timeline"
-    assert_selector "#workspace-usage h2"
+    assert_no_selector "#workspace-usage"
     assert_selector "#workspace-primary-result"
-    assert_selector "#workspace-dependencies h2", text: "Dependency component"
-    assert_selector "#workspace-dependencies table", minimum: 1
+    assert_no_selector "#workspace-dependencies"
 
     undersized = page.evaluate_script(<<~JS)
       Array.from(document.querySelectorAll("#status-stream-owner button, #status-stream-owner summary"))
@@ -138,6 +159,8 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     page.current_window.resize_to(1280, 900)
     visit task_path(@project, @slug)
     assert_selector "#workspace-primary-result .markdown h1", text: "Long-form operator guide", wait: 10
+    assert_no_selector ".document-outline[open]"
+    find(".document-outline > summary").click
     assert_selector ".document-outline[aria-label='Document outline'] a[href='#evidence-review']", count: 1
     assert_selector ".document-outline a[href='#evidence-review-2']", count: 1
 
@@ -205,7 +228,7 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
                     "wide tables must scroll inside the document"
   end
 
-  test "pushed morphs preserve the exact Q&A selection range" do
+  test "pushed morphs preserve the exact Q&A selection range after refocusing" do
     brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
     FileUtils.mv(@folder, brainstorm)
     @folder = brainstorm
@@ -246,6 +269,12 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
       arguments[0].dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText" }))
       arguments[0].setSelectionRange(2, 9)
       arguments[0].dispatchEvent(new Event("select", { bubbles: true }))
+
+      // Exercise focus restoration even when Turbo preserves the textarea node.
+      // The answers controller snapshots first; the morph may then lose focus.
+      document.addEventListener("turbo:before-render", () => {
+        document.querySelector("textarea[data-question-number='1']").blur()
+      }, { once: true })
     JS
 
     idea_path = @folder.join("idea.md")
@@ -276,11 +305,12 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_equal field_name, selection.fetch("name"),
                  "the normalized question binding must remain stable across the morph"
     assert_equal "precise selection", selection.fetch("value")
+    assert selection.fetch("focused"), "the answer field must regain focus after the morph"
     assert_equal 2, selection.fetch("start")
     assert_equal 9, selection.fetch("end")
   end
 
-  test "keyboard users can reach disclosures and the semantic dependency alternative" do
+  test "keyboard users can reach supporting documents without empty dependency panels" do
     @folder.join("brainstorm.md").write("# Supporting context\n")
     sign_in!
     visit task_path(@project, @slug)
@@ -296,9 +326,43 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     summary.send_keys(:tab)
     assert page.evaluate_script("document.activeElement !== document.body"),
            "Tab must continue through the task controls"
-    assert_selector ".workspace-table-scroll[role='region'][tabindex='0']", minimum: 1
-    assert_selector "#workspace-dependencies table caption",
-                    text: /Authoritative bounded node and edge relationships/
+    assert_no_selector "#workspace-dependencies"
+  end
+
+  test "task detail renders list dependencies as per-prerequisite scheduling edges" do
+    landed = create_task!(@project, "Landed prerequisite")
+    waiting = create_task!(@project, "Waiting prerequisite")
+    Hive::TaskMeta.rewrite(@folder.to_s, depends_on: [ landed, waiting ])
+
+    landed_folder = stage_dir(@project, "9-done").join(landed)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(landed), landed_folder)
+    landed_folder.join("task.md").write("<!-- COMPLETE -->\n")
+    Hive::TaskMeta.rewrite(landed_folder.to_s, completed_at: Time.now.utc)
+
+    waiting_folder = stage_dir(@project, "8-finalize").join(waiting)
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(waiting), waiting_folder)
+    waiting_folder.join("pr.md").write("<!-- WAITING -->\n")
+
+    sign_in!
+    visit task_path(@project, @slug)
+
+    assert_selector "#workspace-dependencies", wait: 10
+    within "#workspace-dependencies" do
+      assert_selector "caption", text: "Tasks this work depends on"
+      assert_selector "tbody tr", minimum: 3
+      assert_text landed
+      assert_text waiting
+
+      edges = find("details", text: "All dependency edges (2)")
+      edges.find("summary").click
+      within edges do
+        assert_selector "td", text: "Scheduling", count: 2
+        assert_selector "td .workspace-state-label", text: "Clear", count: 1
+        assert_selector "td .workspace-state-label", text: "Blocking", count: 1
+      end
+    end
+    assert_text "Waiting for #{waiting}."
+    refute_text "[\"#{landed}"
   end
 
   test "pushed morphs preserve workspace ownership and announce only safe decisions" do
@@ -309,16 +373,14 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     assert_selector "#workspace-summary-heading", wait: 10
     wait_for_live_status
 
-    disclosure = find("details[data-workspace-disclosure-key='usage-details']")
+    disclosure = find("details[data-workspace-disclosure-key='advanced']")
     disclosure.find("summary").click
     assert disclosure[:open]
     artifact = find("details[data-artifact-name='brainstorm.md']")
     artifact.find("summary").click
     assert artifact[:open]
     execute_script(<<~JS)
-      document.querySelector("turbo-frame[id^='task-publication-']").__workspaceOwned = true
-      document.querySelector("turbo-frame[id^='task-diff-']").__workspaceOwned = true
-      document.querySelector("details[data-workspace-disclosure-key='usage-details'] summary").focus()
+      document.querySelector("details[data-workspace-disclosure-key='advanced'] summary").focus()
       window.scrollTo(0, Math.min(500, document.documentElement.scrollHeight - innerHeight))
     JS
     original_scroll = page.evaluate_script("window.scrollY")
@@ -328,10 +390,10 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     create_task!(@project, "Equivalent workspace refresh trigger")
     assert_text "more detail", wait: 10
     assert_equal "", page.evaluate_script("document.querySelector('#task-workspace-announcement').textContent")
-    assert find("details[data-workspace-disclosure-key='usage-details']")[:open]
+    assert find("details[data-workspace-disclosure-key='advanced']")[:open]
     assert find("details[data-artifact-name='brainstorm.md']")[:open]
-    assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-publication-']\").__workspaceOwned")
-    assert page.evaluate_script("document.querySelector(\"turbo-frame[id^='task-diff-']\").__workspaceOwned")
+    assert_no_selector "turbo-frame[id^='task-publication-']"
+    assert_no_selector "turbo-frame[id^='task-diff-']"
     assert_in_delta original_scroll, page.evaluate_script("window.scrollY"), 2
 
     brainstorm = stage_dir(@project, "2-brainstorm").join(@slug)
@@ -342,8 +404,8 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
     refute_empty page.evaluate_script(
       "document.querySelector('#task-workspace-announcement').textContent"
     ), "a canonical action change should be announced without relying on attempts/resources"
-    assert find("details[data-workspace-disclosure-key='usage-details']")[:open]
-    assert_equal "usage-details",
+    assert find("details[data-workspace-disclosure-key='advanced']")[:open]
+    assert_equal "advanced",
                  page.evaluate_script("document.activeElement.closest('details')?.dataset.workspaceDisclosureKey")
   end
 end

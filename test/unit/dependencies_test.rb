@@ -30,97 +30,46 @@ class DependenciesTest < Minitest::Test
     end
   end
 
-  def test_parse_optional_reference_allows_only_absence
-    assert_nil Hive::Dependencies.parse_optional_reference(nil)
-    assert_raises(Hive::Dependencies::InvalidReference) do
-      Hive::Dependencies.parse_optional_reference(" ")
+  def test_parse_declaration_preserves_scalar_and_array_shape
+    scalar = Hive::Dependencies.parse_declaration("base-task")
+    singleton = Hive::Dependencies.parse_declaration([ "base-task" ])
+    multiple = Hive::Dependencies.parse_declaration([ "base-task", 42, "api:other-task" ])
+
+    assert_instance_of Hive::Dependencies::Reference, scalar
+    assert_equal "base-task", scalar.to_s
+    assert_equal [ "base-task" ], singleton.map(&:to_s)
+    assert_equal [ "base-task", "42", "api:other-task" ], multiple.map(&:to_s)
+  end
+
+  def test_normalize_declaration_deduplicates_without_collapsing_array_shape
+    assert_equal "42", Hive::Dependencies.normalize_declaration(42)
+    assert_equal [ "base-task" ],
+                 Hive::Dependencies.normalize_declaration([ "base-task", "base-task" ])
+  end
+
+  def test_display_declaration_uses_json_for_composites_and_safe_scalar_fallbacks
+    assert_equal '["a",{"k":"v"}]',
+                 Hive::Dependencies.display_declaration([ "a", { "k" => "v" } ])
+    assert_equal "NaN", Hive::Dependencies.display_declaration(Float::NAN)
+  end
+
+  def test_parse_declaration_rejects_invalid_elements_with_their_indexes
+    invalid = [ [], [ "base-task", nil ], [ [ "base-task" ] ], [ {} ], { "task" => "base-task" } ]
+
+    invalid.each do |value|
+      error = assert_raises(Hive::Dependencies::InvalidReference) do
+        Hive::Dependencies.parse_declaration(value)
+      end
+      assert_match(/depends_on/, error.message)
     end
+
+    error = assert_raises(Hive::Dependencies::InvalidReference) do
+      Hive::Dependencies.parse_declaration([ "base-task", "BAD TASK" ])
+    end
+    assert_match(/element 2/, error.message)
   end
 
   Task = Struct.new(:slug, :id, :stage_index, :stage, keyword_init: true)
-
-  def test_resolve_blocks_when_prerequisite_is_before_threshold
-    result = Hive::Dependencies.resolve(
-      depends_on: "base-task",
-      tasks: [ task("base-task", stage_index: 7) ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal true, result.blocked
-    assert_equal false, result.unresolved?
-    assert_equal "base-task", result.blocked_by
-    assert_equal "7-artifacts", result.dependency_stage
-  end
-
-  def test_resolve_unblocks_at_and_after_threshold
-    at_threshold = Hive::Dependencies.resolve(
-      depends_on: "base-task",
-      tasks: [ task("base-task", stage_index: 8) ],
-      threshold_stage: "8-finalize"
-    )
-    after_threshold = Hive::Dependencies.resolve(
-      depends_on: "base-task",
-      tasks: [ task("base-task", stage_index: 9) ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal false, at_threshold.blocked
-    assert_equal "8-finalize", at_threshold.dependency_stage
-    assert_equal false, after_threshold.blocked
-    assert_equal "9-done", after_threshold.dependency_stage
-  end
-
-  def test_resolve_missing_dependency_stays_blocked_unresolved
-    result = Hive::Dependencies.resolve(
-      depends_on: "missing-task",
-      tasks: [ task("base-task", stage_index: 8) ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal true, result.blocked
-    assert_equal true, result.unresolved?
-    assert_nil result.blocked_by
-    assert_nil result.dependency_stage
-  end
-
-  def test_resolve_matches_numeric_id
-    result = Hive::Dependencies.resolve(
-      depends_on: "42",
-      tasks: [ task("base-task", id: 42, stage_index: 8) ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal false, result.blocked
-    assert_equal "base-task", result.blocked_by
-  end
-
-  def test_self_reference_stays_blocked_unresolved
-    current = task("current-task", id: 42, stage_index: 4)
-    result = Hive::Dependencies.resolve(
-      depends_on: "current-task",
-      tasks: [ current ],
-      threshold_stage: "8-finalize",
-      task: current
-    )
-
-    assert_equal true, result.blocked
-    assert_equal true, result.unresolved?
-    assert_nil result.blocked_by
-    assert_nil result.dependency_stage
-  end
-
-  def test_no_dependency_is_unblocked
-    result = Hive::Dependencies.resolve(
-      depends_on: nil,
-      tasks: [ task("base-task", stage_index: 1) ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal false, result.blocked
-    assert_equal false, result.unresolved?
-    assert_nil result.blocked_by
-    assert_nil result.dependency_stage
-  end
 
   def test_base_branch_for_resolvable_dependency_returns_prerequisite_slug
     branch = Hive::Dependencies.base_branch_for(
@@ -132,11 +81,22 @@ class DependenciesTest < Minitest::Test
     assert_equal "base-task", branch
   end
 
+  def test_base_branch_for_lists_always_returns_the_default_branch
+    tasks = [ task("base-task", stage_index: 9), task("other-task", stage_index: 9) ]
+
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: [ "base-task" ], tasks: tasks, default_branch: "main"
+    )
+    assert_equal "main", Hive::Dependencies.base_branch_for(
+      depends_on: %w[base-task other-task], tasks: tasks, default_branch: "main"
+    )
+  end
+
   # Stacking is threshold-blind by design: base_branch_for returns the
   # prerequisite slug regardless of how far the prereq has progressed, so a
   # dependent worktree branches off the prereq even while the gate still
   # blocks dispatch. Pin both a below-threshold and an at/after-threshold
-  # prereq to lock that contract independent of `resolve`'s gate.
+  # prereq to lock that contract independent of admission's gate.
   def test_base_branch_for_is_threshold_blind
     below_gate = Hive::Dependencies.base_branch_for(
       depends_on: "base-task",
@@ -172,29 +132,6 @@ class DependenciesTest < Minitest::Test
                  )
   end
 
-  def test_threshold_stage_is_honored
-    result = Hive::Dependencies.resolve(
-      depends_on: "base-task",
-      tasks: [ task("base-task", stage_index: 8) ],
-      threshold_stage: "9-done"
-    )
-
-    assert_equal true, result.blocked
-    assert_equal "8-finalize", result.dependency_stage
-  end
-
-  def test_hash_tasks_are_supported
-    result = Hive::Dependencies.resolve(
-      depends_on: "base-task",
-      tasks: [ { "slug" => "base-task", "id" => "42", "stage" => "finalize" } ],
-      threshold_stage: "8-finalize"
-    )
-
-    assert_equal false, result.blocked
-    assert_equal "base-task", result.blocked_by
-    assert_equal "8-finalize", result.dependency_stage
-  end
-
   # `blocked_label` is the single source of truth for the "⏸ blocked by …"
   # indicator both renderers share. Pin both branches directly so a
   # regression localises to the helper instead of surfacing only through
@@ -211,73 +148,81 @@ class DependenciesTest < Minitest::Test
     assert_equal "⏸ blocked by typo-task (unresolved)", unresolved
   end
 
-  # A numeric self-reference where the current task and its snapshot entry
-  # share an id but NOT a slug (absent on the task-under-eval) must be
-  # recognised via same_task?'s id-equality arm — the slug arm short-
-  # circuits to false when either slug is missing, so only the id branch
-  # can catch this self-reference.
-  def test_self_reference_by_numeric_id_only_stays_blocked_unresolved
-    current = task(nil, id: 42, stage_index: 4)
-    snapshot_entry = task("base-task", id: 42, stage_index: 4)
-    result = Hive::Dependencies.resolve(
-      depends_on: "42",
-      tasks: [ snapshot_entry ],
-      threshold_stage: "8-finalize",
-      task: current
+  def test_blocked_label_renders_every_unmet_dependency_without_array_inspection
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first", "dependency_stage" => "7-artifacts" },
+      { "reference" => "other:second", "blocked_by" => "other:second",
+        "dependency_stage" => "8-finalize" },
+      { "reference" => "missing", "blocked_by" => nil, "dependency_stage" => nil }
+    ]
+
+    label = Hive::Dependencies.blocked_label(
+      depends_on: %w[first other:second], blocked_by: nil, dependency_stage: nil,
+      unmet_dependencies: unmet
     )
 
-    assert_equal true, result.blocked
-    assert_equal true, result.unresolved?
-    assert_nil result.blocked_by
+    assert_equal "⏸ blocked by first (7-artifacts), other:second (8-finalize), " \
+                 "missing (unresolved)", label
+    refute_includes label, "[\""
   end
 
-  # A numeric depends_on whose only candidate carries a garbage (non-integer)
-  # id must leave a breadcrumb on stderr AND degrade to unresolved rather
-  # than mis-resolve — the corrupt id can't satisfy the numeric match.
-  def test_corrupt_numeric_prerequisite_id_warns_and_degrades_to_unresolved
-    result = nil
+  def test_blocked_label_names_stronger_gate_and_has_a_generic_fallback
+    label = Hive::Dependencies.blocked_label(
+      depends_on: [ "base" ], blocked_by: nil, dependency_stage: nil,
+      unmet_dependencies: [ {
+        "reference" => "base", "blocked_by" => "base",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done"
+      } ]
+    )
+
+    assert_equal "⏸ blocked by base (8-finalize, needs 9-done)", label
+    assert_equal "⏸ blocked by a task dependency", Hive::Dependencies.blocked_label(
+      depends_on: [], blocked_by: nil, dependency_stage: nil
+    )
+    assert_equal "blocked by a task dependency", Hive::Dependencies.blocker_summary(
+      depends_on: [], blocked_by: nil, dependency_stage: nil
+    )
+  end
+
+  def test_blocker_names_preserves_order_deduplicates_and_uses_references
+    names = Hive::Dependencies.blocker_names(
+      unmet_dependencies: [
+        { "reference" => "one", "blocked_by" => "one" },
+        { "reference" => "remote:two", "blocked_by" => "" },
+        { "reference" => "one", "blocked_by" => "one" }
+      ],
+      blocked_by: "fallback"
+    )
+
+    assert_equal [ "one", "remote:two" ], names
+  end
+
+  def test_same_task_matches_numeric_id_when_slugs_differ
+    current = task(nil, id: 42, stage_index: 4)
+    snapshot_entry = task("base-task", id: 42, stage_index: 4)
+
+    assert Hive::Dependencies.same_task?(snapshot_entry, current)
+  end
+
+  def test_same_task_accepts_numeric_string_ids_and_warns_for_corrupt_raw_ids
+    assert Hive::Dependencies.same_task?(
+      { "id" => "42" }, { id: 42 }
+    )
+
     _out, err = capture_io do
-      result = Hive::Dependencies.resolve(
-        depends_on: "42",
-        tasks: [ task("base-task", id: "not-a-number", stage_index: 8) ],
-        threshold_stage: "8-finalize"
+      refute Hive::Dependencies.same_task?(
+        { "id" => "not-an-id" }, { id: 42 }
       )
     end
-
-    assert_match(/prerequisite id "not-a-number" is not an integer/, err,
-                 "a corrupt prereq id must leave a breadcrumb on stderr")
-    assert_equal true, result.blocked,
-                 "an unresolvable numeric depends_on must stay blocked"
-    assert_equal true, result.unresolved?,
-                 "a numeric depends_on whose only candidate has a garbage id must " \
-                 "degrade to unresolved, not mis-resolve"
-    assert_nil result.blocked_by
+    assert_includes err, "is not an integer"
   end
 
-  def test_resolve_raises_when_prerequisite_has_no_valid_stage
-    err = assert_raises(ArgumentError) do
-      Hive::Dependencies.resolve(
-        depends_on: "prereq",
-        tasks: [ { slug: "prereq", id: 1, stage: "not-a-stage" } ],
-        threshold_stage: "8-finalize"
-      )
-    end
-    assert_match(/no valid stage/, err.message)
-  end
-
-  def test_resolve_warns_and_skips_unrecognized_task_shape
-    # `field`'s else arm: a task that is neither hash-like nor reader-exposing
-    # leaves a breadcrumb and resolves the field to nil (prerequisite not
-    # found ⟹ blocked + unresolved), never a crash.
-    result = nil
+  def test_same_task_warns_for_an_unrecognized_task_shape
     _out, err = capture_io do
-      result = Hive::Dependencies.resolve(
-        depends_on: "x", tasks: [ Object.new ], threshold_stage: "8-finalize"
-      )
+      refute Hive::Dependencies.same_task?(Object.new, { slug: "task" })
     end
-    assert result.blocked
-    assert_nil result.blocked_by
-    assert_match(/unrecognized task shape/, err)
+
+    assert_includes err, "unrecognized task shape"
   end
 
   private

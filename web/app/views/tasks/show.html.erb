@@ -14,7 +14,7 @@
 <div class="task-header">
   <h1><%= @task.title %></h1>
 </div>
-<p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>
+<p class="muted"><%= link_to @project.name, grid_path(project: @project.name) %><% if @task["id"] %> · #<%= @task["id"] %><% end %> · <%= @task["workflow"].to_s.humanize %></p>
 
 <%# Live by PUSH, not poll: the page subscribes to the status channel and
     morph-refreshes when StatusBroadcaster signals a change — answers
@@ -32,6 +32,14 @@
       last_success_at: @status_last_success_at,
       error: @status_error %>
 <%= render "tasks/state" %>
+<%= render "tasks/diagnostic", diagnostic: @semantic_workspace.fetch("diagnostic") %>
+<%= render "tasks/primary_result", result: @semantic_workspace.fetch("result") %>
+<% if @semantic_workspace.dig("usage", "tokens") %>
+  <details class="task-secondary" data-workspace-disclosure-key="task-usage">
+    <summary>Usage · <%= number_with_delimiter(@semantic_workspace.dig("usage", "tokens", "input_output")) %> tokens</summary>
+    <%= render "tasks/usage", usage: @semantic_workspace.fetch("usage") %>
+  </details>
+<% end %>
 
 <% if (closure = @task["closure"]).is_a?(Hash) && closure["schema"] == Hive::TaskClosure::SCHEMA %>
   <section class="task-closure" aria-labelledby="task-closure-title">
@@ -46,7 +54,6 @@
                       item.fetch("url"), rel: "noopener noreferrer" %></li>
       <% end %>
     </ul>
-    <p><code><%= closure.fetch("receipt_digest") %></code></p>
   </section>
 <% end %>
 
@@ -62,15 +69,12 @@
       <%= render "tasks/supporting_artifacts", result: @semantic_workspace.fetch("result") %>
     <% end %>
 
-    <% if @semantic_workspace.dig("applicability", "dependencies") ||
-          @semantic_workspace.dig("evidence", "dependencies", "state") == "current" %>
+    <% if @task["depends_on"].present? || Array(@workspace.dig("panels", "dependencies", "edges")).any? %>
       <%= render "tasks/dependencies", workspace: @workspace %>
     <% end %>
 
-    <% show_diff = @semantic_workspace.dig("applicability", "diff") ||
-                   @semantic_workspace.dig("evidence", "diff", "state") == "current" %>
-    <% show_publication = @semantic_workspace.dig("applicability", "publication") ||
-                          @semantic_workspace.dig("evidence", "publication", "state") == "current" %>
+    <% show_diff = @task.worktree? %>
+    <% show_publication = @task["pr_url"].present? || @task.worktree? %>
     <% if show_diff || show_publication %>
       <div class="workspace-wide workspace-change-grid" aria-label="Change and publication evidence">
         <% if show_diff %>
@@ -89,8 +93,7 @@
       </div>
     <% end %>
 
-    <% if @semantic_workspace.dig("applicability", "media") ||
-          @semantic_workspace.dig("evidence", "media", "state") == "current" %>
+    <% if @media && (@media["status"] == "failed" || Array(@media["items"]).any?) %>
       <div class="workspace-wide">
         <%= render "tasks/media", media: @media, project: @project, task: @task %>
       </div>
@@ -98,8 +101,12 @@
   </div>
 </div>
 
-<details class="advanced">
+<details class="advanced" data-workspace-disclosure-key="advanced">
   <summary>Advanced</summary>
+  <p class="muted">Task reference: <code><%= @task.slug %></code></p>
+  <% unless @task.terminal? || @task_source == "archive" %>
+    <p><%= link_to "Close with evidence", new_task_closure_path(@project.name, @task.slug) %></p>
+  <% end %>
   <div class="advanced-item">
     <div>
       <p class="advanced-title">Send back a stage</p>

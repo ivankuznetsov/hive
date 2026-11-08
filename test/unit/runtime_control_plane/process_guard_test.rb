@@ -5,6 +5,27 @@ require "hive/runtime_control_plane"
 class RuntimeControlPlaneProcessGuardTest < Minitest::Test
   include HiveTestHelper
 
+  class ForkResource
+    attr_reader :closed
+
+    def after_fork_child!
+      @closed = true
+    end
+  end
+
+  def test_registered_fork_resources_are_closed_only_in_child_state
+    resource = ForkResource.new
+    guard = Hive::RuntimeControlPlane::ProcessGuard
+    guard.register_fork_resource(resource)
+
+    guard.after_fork_child!
+
+    assert resource.closed
+    refute_includes guard.send(:state).fetch(:fork_resources), resource
+  ensure
+    guard&.unregister_fork_resource(resource) if resource
+  end
+
   def test_connected_database_stays_registered_without_an_external_owner
     with_tmp_dir do |root|
       database = database_at(File.join(root, "unowned.sqlite3"))
@@ -207,6 +228,46 @@ class RuntimeControlPlaneProcessGuardTest < Minitest::Test
     ensure
       read_pipe&.close unless read_pipe&.closed?
       write_pipe&.close unless write_pipe&.closed?
+    end
+  end
+
+  def test_fork_waiter_does_not_deadlock_inspection_mount_confirmation
+    with_database do |database|
+      entered = Queue.new
+      release = Queue.new
+      original = database.method(:storage_mount_status)
+      calls = 0
+      database.define_singleton_method(:storage_mount_status) do
+        calls += 1
+        if calls == 1
+          entered << true
+          release.pop
+        end
+        original.call
+      end
+
+      reader = Thread.new { database.installation_identity }
+      entered.pop
+      forked = Queue.new
+      forker = Thread.new do
+        Hive::RuntimeControlPlane::ProcessGuard.before_fork!
+        forked << true
+        Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
+      end
+      wait_for_fork_barrier
+      release << true
+
+      Timeout.timeout(2) do
+        reader.join
+        forker.join
+      end
+      assert_equal true, forked.pop
+      assert_operator calls, :>=, 2
+    ensure
+      release << true if reader&.alive?
+      Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!
+      reader&.join
+      forker&.join
     end
   end
 

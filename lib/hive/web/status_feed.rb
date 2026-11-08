@@ -7,6 +7,8 @@ require "hive/config"
 require "hive/daemon/operational_snapshot"
 require "hive/secret_patterns"
 require "hive/tui/state_source"
+require "hive/web/status_snapshot_store"
+require "hive/web/status_payload"
 
 module Hive
   module Web
@@ -43,13 +45,10 @@ module Hive
     class CachedStatusCommand
       include StatusCommand
 
-      ARCHIVE_REFRESH_FALLBACK_SECONDS = 300.0
-
       def initialize(
         source: Hive::Tui::StateSource.new(
           poll_interval_seconds: 60,
-          archive_cache_mode: :visible,
-          archive_refresh_fallback_seconds: ARCHIVE_REFRESH_FALLBACK_SECONDS
+          payload_transform: StatusPayload.method(:call)
         ),
         recovery_status_command: Hive::Commands::Status.new(json: true),
         scheduler_snapshot_reader: Hive::Daemon::OperationalSnapshot::Reader.new,
@@ -67,7 +66,9 @@ module Hive
       end
 
       def dependency_context_snapshot
-        @mutex.synchronize { @source.dependency_context_snapshot }
+        # StateSource publishes the completed context and fingerprint as one
+        # frozen value. Task requests can read it while the next fleet scan runs.
+        @source.dependency_context_snapshot
       end
 
       # Keep the daemon-owned recovery receipt overlay available without
@@ -93,10 +94,9 @@ module Hive
     #
     # The Cable poller enters refresh_state while HTTP status renders only read
     # the latest completed state. The default command makes each background
-    # scan a bounded active-task refresh:
-    # terminal membership/policy changes and a five-minute archive backstop
-    # refresh the ordinary archive projection, while complete archive reads
-    # remain on-demand. An idle server performs no scans.
+    # scan an active-task refresh. Complete archive reads are requested
+    # separately and never merged into the active feed. An idle server
+    # performs no scans.
     #
     # Failures never manufacture a healthy empty fleet: they publish either a
     # degraded latest-good snapshot or an explicit unavailable envelope. A new
@@ -133,17 +133,20 @@ module Hive
 
       def initialize(
         interval: DEFAULT_INTERVAL,
+        snapshot_store: nil,
         status_command: CachedStatusCommand.new,
         archive_status_command: Hive::Commands::Status.new(json: true, archive: true),
         clock: -> { Time.now.utc }
       )
         @interval = interval
+        @snapshot_store = snapshot_store
         @status_command = status_command
         @archive_status_command = archive_status_command
         @clock = clock
         @monitor = Monitor.new
         @tick = @monitor.new_cond
         @refresh_done = @monitor.new_cond
+        @poll_wait = @monitor.new_cond
         @generation = 0
         @scan_count = 0
         @state = nil
@@ -153,6 +156,10 @@ module Hive
         @prime_claim = nil
         @refreshing = false
         @poller = nil
+        @polling = false
+        @poller_refreshing = false
+        @refresh_on_start = false
+        restore_snapshot
       end
 
       # Compatibility read for callers that only consume the status payload.
@@ -162,10 +169,10 @@ module Hive
         snapshot_state.payload
       end
 
-      # Dedicated archive reads are lossless and deliberately stay outside
+      # Dedicated reads include all archived tasks and stay outside
       # the ordinary feed's priming, availability, and dedup lifecycle.
       def archive_snapshot
-        @archive_status_command.json_payload(Hive::Config.registered_projects)
+        StatusPayload.call(@archive_status_command.json_payload(Hive::Config.registered_projects))
       end
 
       # One fresh scan, coalesced across all callers already waiting for it.
@@ -190,6 +197,7 @@ module Hive
       # payload. A competing page receives the token for its own content but
       # cannot replace the active lifecycle's baseline.
       def prime(payload)
+        payload = StatusPayload.call(payload)
         key = state_key("fresh", payload)
         token = cached_token_for(key)
         @monitor.synchronize do
@@ -223,8 +231,11 @@ module Hive
       # State-aware subscribers receive degradation and recovery transitions
       # even when the underlying last-good rows are unchanged.
       def each_state(on_idle: nil)
+        # Preserve the restored baseline even if the first background scan
+        # finishes before this subscriber gets scheduled again.
+        initial = current_publication
         ensure_poller!
-        state, last_key, seen_generation = current_publication
+        state, last_key, seen_generation = initial.first ? initial : current_publication
         yield state
 
         loop do
@@ -260,29 +271,40 @@ module Hive
       end
 
       def stop
-        thread = nil
-        detached_prime_claim = nil
-        @monitor.synchronize do
-          thread = @poller
-          @poller = nil
-          detached_prime_claim = @prime_claim
-          @prime_claim = nil unless thread
-        end
-        return unless thread
-
-        thread.kill
-        thread.join
-        @monitor.synchronize do
-          if !@poller&.alive? && @prime_claim.equal?(detached_prime_claim)
+        thread = @monitor.synchronize do
+          @polling = false
+          @refresh_on_start = true if @poller
+          # Finish an already-started scan even when no page remains visible.
+          # A quick return shares that work instead of repeatedly aborting it.
+          unless @poller_refreshing
+            previous = @poller
+            @poller = nil
             @prime_claim = nil
+            @poll_wait.broadcast
+            previous
           end
         end
+        thread&.join
       end
 
       private
 
-      def compute_snapshot
-        projects = Hive::Config.registered_projects
+      def restore_snapshot
+        saved = @snapshot_store&.read
+        return unless saved
+
+        payload = saved.fetch("payload")
+        @latest_good = payload
+        @latest_key = state_key("cached", payload)
+        @latest_token = token_for(@latest_key)
+        @state = State.new(
+          payload: payload, availability: "cached", token: @latest_token,
+          last_success_at: saved.fetch("last_success_at"), error: nil,
+          scan_count: 0, generation: 0
+        )
+      end
+
+      def compute_snapshot(projects)
         payload = @status_command.json_payload(projects)
         overlay_operational_recoveries(payload, projects)
       end
@@ -300,7 +322,8 @@ module Hive
         end
 
         begin
-          publish_success(compute_snapshot)
+          projects = Hive::Config.registered_projects
+          publish_success(compute_snapshot(projects), projects: projects)
         rescue StandardError => e
           publish_failure(e)
         ensure
@@ -314,7 +337,7 @@ module Hive
         @monitor.synchronize { @state }
       end
 
-      # The web page already paid for one ordinary status scan. Reuse that
+      # The web page already paid for one active status scan. Reuse that
       # exact payload when asking the status producer to join the daemon's
       # owner-private snapshot, then copy only canonical recovery receipts
       # onto the matching task rows. This is a file read + in-memory join, not
@@ -350,27 +373,63 @@ module Hive
       end
 
       def ensure_poller!
-        needs_initial = @monitor.synchronize { @state.nil? }
-        refresh_state if needs_initial
-
         @monitor.synchronize do
-          return if @poller&.alive?
+          @polling = true
+          unless @poller&.alive?
+            refresh_on_start = @refresh_on_start || @state.nil? || @state.availability == "cached"
+            @poller = Thread.new { poll_loop(refresh_on_start: refresh_on_start) }
+            @poller_refreshing = refresh_on_start
+          end
 
-          @poller = Thread.new { poll_loop }
+          @refresh_on_start = false
+          # Even the cold scan belongs to the poller: losing the subscribing
+          # broadcaster must not kill the producer before its first result.
+          @tick.wait until @state
         end
       end
 
-      def poll_loop
-        loop do
-          sleep @interval
+      def poll_loop(refresh_on_start:)
+        # The last visible page may have left this snapshot idle for hours.
+        # Keep serving it while the restarted poller catches up immediately.
+        refresh_state if refresh_on_start
+
+        while wait_for_next_poll
           refresh_state
         end
+      ensure
+        @monitor.synchronize do
+          if @poller.equal?(Thread.current)
+            @poller = nil
+            @poller_refreshing = false
+            @prime_claim = nil
+          end
+        end
       end
 
-      def publish_success(payload)
+      def wait_for_next_poll
+        @monitor.synchronize do
+          return false unless @poller.equal?(Thread.current)
+
+          @poller_refreshing = false
+          unless @polling
+            @poller = nil
+            @prime_claim = nil
+            return false
+          end
+
+          @poll_wait.wait(@interval)
+          return false unless @poller.equal?(Thread.current)
+
+          @poller_refreshing = true
+        end
+      end
+
+      def publish_success(payload, projects: Hive::Config.registered_projects)
+        payload = StatusPayload.call(payload)
         key = state_key("fresh", payload)
         token = cached_token_for(key)
         now = iso_time(@clock.call)
+        @snapshot_store&.write(payload, last_success_at: now, projects: projects)
         @monitor.synchronize do
           @generation += 1
           @latest_good = payload

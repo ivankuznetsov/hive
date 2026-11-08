@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "open3"
 require "hive/config"
+require "hive/commands/drop"
 require "hive/git_ops"
 require "hive/task"
 require "hive/task_meta"
@@ -74,6 +75,52 @@ class DropCommandIntegrationTest < Minitest::Test
       assert_equal [ "2-brainstorm", "3-plan" ], payload["from_stages"]
       refute File.directory?(folder2)
       refute File.directory?(folder3)
+    end
+  end
+
+  def test_supported_drop_contends_then_serializes_after_task_custody_releases
+    with_cli_project do |_home, dir, project|
+      slug = "custody-drop-261014-abcd"
+      folder = create_task(dir, "2-brainstorm", slug)
+      hive_state = File.join(dir, ".hive-state")
+      Hive::GitOps.new(dir).hive_commit(
+        stage_name: "2-brainstorm", slug: slug, action: "seed custody test"
+      )
+      base_repository = prepare_test_runtime_project(
+        dir, state_root_path: hive_state
+      )
+      repository = Hive::RuntimeControlPlane::TaskLeaseRepository.new(
+        database: base_repository.database,
+        process_start_time: ->(*) { "test-holder-start" },
+        process_alive: ->(*, **) { true }
+      )
+      Hive::Lock.task_lease_repository = repository
+      lease = repository.acquire(
+        folder, { "op" => "completion-persistence-test" }, create: false
+      )
+      head_before = run!("git", "-C", hive_state, "rev-parse", "HEAD")
+      registry_before = Hive::Config.registered_projects
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        Hive::Commands::Drop.new(slug, project: project, json: true).send(:do_call)
+      end
+
+      assert_includes error.message, "another hive run is active"
+      assert File.directory?(folder), "contended drop must not remove the task"
+      assert_equal registry_before, Hive::Config.registered_projects
+      assert_equal head_before, run!("git", "-C", hive_state, "rev-parse", "HEAD")
+
+      repository.release(folder, lock_id: lease.fetch("lock_id"))
+      lease = nil
+      capture_io do
+        Hive::Commands::Drop.new(slug, project: project, json: true).send(:do_call)
+      end
+
+      refute File.exist?(folder)
+      refute_equal head_before, run!("git", "-C", hive_state, "rev-parse", "HEAD")
+      assert_equal registry_before, Hive::Config.registered_projects
+    ensure
+      repository&.release(folder, lock_id: lease.fetch("lock_id")) if lease
     end
   end
 

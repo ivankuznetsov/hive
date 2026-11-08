@@ -131,6 +131,34 @@ class AttemptsRepositoryTest < Minitest::Test
     end
   end
 
+  def test_verified_interruption_is_terminal_non_success_with_pause_provenance
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+
+      interrupted = repository.interrupt(
+        running, pause_generation: 3, exit_status: Hive::ExitCodes::TEMPFAIL,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: log_reference, now: NOW + 3
+      )
+
+      assert_equal "terminal", interrupted.state
+      assert_equal "interrupted", interrupted.outcome
+      assert_equal 3, interrupted.receipt.fetch("pause_generation")
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        repository.terminalize(
+          running, outcome: "succeeded", exit_status: 0,
+          final_checkpoint: checkpoint, output_references: [],
+          log_reference: log_reference, now: NOW + 4
+        )
+      end
+    end
+  end
+
   def test_unique_index_allows_only_one_live_attempt_for_a_subject_generation
     with_repository do |repository|
       gate = Queue.new
@@ -188,6 +216,79 @@ class AttemptsRepositoryTest < Minitest::Test
       repository.database.define_singleton_method(:read) do |**|
         raise Hive::RuntimeControlPlane::IntegrityError.new("boom", code: :database_corrupt)
       end
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_match(/live attempt query failed/, error.message)
+    end
+  end
+
+  def test_operational_storage_errors_keep_their_runtime_code_through_attempt_reads
+    with_repository do |repository|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "Hive state is mounted read-only",
+        code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      repository.database.define_singleton_method(:read) { |**| raise unavailable }
+
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        repository.live_attempt_for(task_id: "42")
+      end
+      assert_equal :state_storage_read_only, error.code
+      assert_equal Hive::RuntimeControlPlane::Database::STORAGE_ACTION, error.action
+    end
+  end
+
+  def test_operational_storage_errors_keep_their_runtime_code_during_initialization
+    with_tmp_dir do |root|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "Hive state is mounted read-only",
+        code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      database = Object.new
+      database.define_singleton_method(:path) { File.join(root, "runtime.sqlite3") }
+      database.define_singleton_method(:open!) { |**| raise unavailable }
+
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
+        )
+      end
+
+      assert_same unavailable, error
+      refute_path_exists File.join(root, "payloads")
+    end
+  end
+
+  def test_non_storage_unavailable_errors_remain_repository_errors_during_initialization
+    with_tmp_dir do |root|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "unsupported sqlite", code: :sqlite_version_unsupported
+      )
+      database = Object.new
+      database.define_singleton_method(:path) { File.join(root, "runtime.sqlite3") }
+      database.define_singleton_method(:open!) { |**| raise unavailable }
+
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Repository.new(
+          database: database, root: File.join(root, "payloads")
+        )
+      end
+
+      assert_equal "attempt runtime control plane is unavailable: unsupported sqlite", error.message
+      refute_path_exists File.join(root, "payloads")
+    end
+  end
+
+  def test_non_storage_unavailable_errors_remain_repository_errors
+    with_repository do |repository|
+      unavailable = Hive::RuntimeControlPlane::Unavailable.new(
+        "unsupported sqlite", code: :sqlite_version_unsupported
+      )
+      repository.database.define_singleton_method(:read) { |**| raise unavailable }
 
       error = assert_raises(Hive::Attempts::RepositoryError) do
         repository.live_attempt_for(task_id: "42")
@@ -490,6 +591,20 @@ class AttemptsRepositoryTest < Minitest::Test
 
   def with_repository
     with_tmp_dir { |root| yield Hive::Attempts::Repository.new(root: root, migrate: true) }
+  end
+
+  def test_task_without_an_id_raises_the_per_task_invalid_attempt_record_error
+    # A task whose meta.yml id is null yields task_id nil. That record fails
+    # identity validation; the dedicated subclass lets the daemon block just
+    # that task while other repository errors keep propagating.
+    with_tmp_dir do |root|
+      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+      error = assert_raises(Hive::Attempts::InvalidAttemptRecord) do
+        repository.create_launching(**identity(task_id: nil), launch_timeout_sec: 30, now: NOW)
+      end
+      assert_kind_of Hive::Attempts::RepositoryError, error
+      assert_match(/attempt could not be created: .*incompatible identity/, error.message)
+    end
   end
 
   def identity(attempt_id: "attempt-1", request_id: "request-1", task_id: "42",

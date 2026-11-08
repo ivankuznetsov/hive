@@ -57,7 +57,10 @@ module Hive::AgentSupport::Pi::Runtime
     )
 
     tool_names = %w[read ls grep find evidence_write evidence_terminal]
-    tool_names << "evidence_browser" if browser
+    if browser
+      tool_names << "evidence_browser"
+      tool_names << "evidence_server"
+    end
     flags = [
       "--no-builtin-tools", "--no-extensions", "--no-skills",
       "--no-prompt-templates", "--no-context-files",
@@ -95,7 +98,7 @@ module Hive::AgentSupport::Pi::Runtime
       agent_add_dirs: [].freeze, command_prefix: prefix.freeze,
       executable: File.join(RUNTIME_MOUNT, File.basename(executable)).freeze,
       task_root: source_root.freeze, output_paths: {}.freeze,
-      cleanup_paths: [ runtime_home ].freeze
+      cleanup_paths: [ runtime_home ].freeze, mcp_isolated: true
     ).freeze
   rescue StandardError
     FileUtils.remove_entry_secure(runtime_home, true) if runtime_home
@@ -142,7 +145,7 @@ module Hive::AgentSupport::Pi::Runtime
       scope, task_root: task_root, directories: directories,
       environment: pi_environment, outputs: outputs, runtime_root: runtime_home,
       cli_flags: flags, executable: File.join(RUNTIME_MOUNT, File.basename(executable)),
-      command_prefix: prefix
+      command_prefix: prefix, mcp_isolated: true
     )
   end
 
@@ -253,13 +256,29 @@ module Hive::AgentSupport::Pi::Runtime
         pi.registerTool(defineTool({
           name: "evidence_browser",
           label: "Capture browser evidence",
-          description: "Run one controller-admitted browser capture action.",
+          description: "Run one controller-admitted browser capture action. Pass the complete action argv, beginning with open, snapshot, click, fill, wait, screenshot, or record.",
           parameters: Type.Object({
-            command: Type.String({ minLength: 1, maxLength: 64 }),
-            argv: Type.Array(Type.String({ maxLength: 4096 }), { maxItems: 64 })
+            argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+              minItems: 1, maxItems: 64
+            })
           }),
           async execute(_id, params, signal) {
-            return runHive(["evidence", "browser", params.command, ...params.argv], signal);
+            return runHive(["evidence", "browser", ...params.argv], signal);
+          }
+        }));
+
+        pi.registerTool(defineTool({
+          name: "evidence_server",
+          label: "Start project evidence server",
+          description: "Start one repository application command on the controller-issued evidence port and keep it under Hive custody for this attempt.",
+          parameters: Type.Object({
+            argv: Type.Array(Type.String({ minLength: 1, maxLength: 4096 }), {
+              minItems: 1, maxItems: 64
+            })
+          }),
+          async execute(_id, params, signal) {
+            const [executable, ...argv] = params.argv;
+            return runHive(["evidence", "server", executable, "--json", "--", ...argv], signal, 100000);
           }
         }));
       TYPESCRIPT
@@ -310,9 +329,9 @@ module Hive::AgentSupport::Pi::Runtime
         pi.registerTool(scopedReadTool(createGrepTool(cwd)));
         pi.registerTool(scopedReadTool(createFindTool(cwd)));
 
-        async function runHive(argv: string[], signal: AbortSignal) {
+        async function runHive(argv: string[], signal: AbortSignal, timeout = 70000) {
           const result = await pi.exec("/usr/bin/ruby", [hiveExecutable, ...argv], {
-            signal, timeout: 70000
+            signal, timeout
           });
           const text = [result.stdout, result.stderr].filter(Boolean).join("\\n").slice(0, 524288);
           if (result.code !== 0) throw new Error(text || `Hive evidence command failed (${result.code})`);

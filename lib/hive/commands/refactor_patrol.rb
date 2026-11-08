@@ -38,6 +38,63 @@ require "hive/worktree"
 module Hive
   module Commands
     class RefactorPatrol
+      # Pre-dispatch usage errors for `hive refactor-patrol` ride the reporter
+      # envelope, so agent callers keep the v4 patrol document shape even when
+      # Thor rejects argv before this class is instantiated.
+      def self.usage_error_payload(error, error_kind:)
+        Hive::RefactorPatrol::Reporter.error_envelope(
+          error,
+          version: Hive::RefactorPatrol::Reporter::V4_SCHEMA_VERSION,
+          error_kind: error_kind
+        )
+      end
+
+      # Classifies the job-listing flags in a refactor-patrol argv region: a
+      # jobs envelope (with its action) applies whenever the argv selects a
+      # jobs surface (archive/show, explicit list toggle, --full, or any list
+      # pagination modifier).
+      def self.usage_jobs_argv(argv)
+        archive = false
+        list = nil
+        full = nil
+        show = false
+        modifier = argv.any? do |arg|
+          arg == "--limit" || arg.start_with?("--limit=") ||
+            arg == "--cursor" || arg.start_with?("--cursor=")
+        end
+        argv.each do |arg|
+          if arg == "--archive" || arg.start_with?("--archive=")
+            archive = true
+          elsif arg == "--show" || arg.start_with?("--show=")
+            show = true
+          elsif %w[--no-list --skip-list].include?(arg)
+            list = false
+          elsif arg == "--list"
+            list = true
+          elsif arg.start_with?("--list=")
+            value = arg.split("=", 2).last.to_s.downcase
+            list = !%w[false f no n 0].include?(value)
+          elsif %w[--no-full --skip-full].include?(arg)
+            full = false
+          elsif arg == "--full"
+            full = true
+          elsif arg.start_with?("--full=")
+            value = arg.split("=", 2).last.to_s.downcase
+            full = !%w[false f no n 0].include?(value)
+          end
+        end
+        action = if archive
+          "show"
+        elsif list == true
+          "list"
+        elsif show
+          "show"
+        end
+        return unless action || full == true || modifier
+
+        { action: action }
+      end
+
       CLAIM_HEARTBEAT_INTERVAL_SEC = 30
       CLAIM_HEARTBEAT_LEASE_SEC = 7200
       # Durable discovery checkpoints each completed slice before returning,
@@ -60,8 +117,10 @@ module Hive
                      heartbeat_clock: -> { Time.now },
                      heartbeat_resolver: Hive::RefactorPatrol::ClaimLivenessResolver.new,
                      project_entry: nil, capability_context: nil,
-                     scheduled_slice: nil,
+                     once: false, one_shot_factory: nil,
+                     scheduled_slice: nil, output: nil,
                      config_loader: ->(path) { Hive::Config.load(path) })
+        @output = output
         @project = project
         @json = json
         @dry_run = dry_run
@@ -108,6 +167,8 @@ module Hive
         @heartbeat_resolver = heartbeat_resolver
         @project_entry = project_entry
         @capability_context = capability_context
+        @once = once
+        @one_shot_factory = one_shot_factory
         @scheduled_slice = scheduled_slice
         @feature_hint = @scheduled_slice.fetch("feature_id") if @scheduled_slice
         @config_loader = config_loader
@@ -118,6 +179,7 @@ module Hive
       end
 
       def call
+        return run_once if @once
         validate_mode!
         return run_job_archive if archive_mode?
         return run_job_query if query_mode?
@@ -125,16 +187,32 @@ module Hive
         emit(payload, theses)
       rescue Hive::Error => e
         release_manual_claim("command_error")
-        emit_error(e)
+        emit_error(e) unless @once
         raise
       rescue StandardError => e
         release_manual_claim("command_error")
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error(wrapped)
+        wrapped = Hive::InternalError.wrap(e)
+        emit_error(wrapped) unless @once
         raise wrapped
       end
 
       private
+
+      def run_once
+        require "hive/one_shot/architecture_patrol_adapter"
+        entry = @project_entry || Hive::Config.find_project(@project)
+        raise Hive::ConfigError,
+              "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
+
+        factory = @one_shot_factory || lambda do |project_entry|
+          Hive::OneShot::ArchitecturePatrolAdapter.new(
+            entry: project_entry, dry_run: @dry_run
+          )
+        end
+        result = factory.call(entry).call
+        (@output || $stdout).puts result.to_json
+        result
+      end
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
@@ -610,7 +688,7 @@ module Hive
           now: Time.now
         )
         unless @manual_claim_token
-          raise Hive::ConfigError, "refactor patrol job is already claimed by another worker"
+          raise Hive::ConfigError, "refactor patrol job is already claimed or waiting for retry backoff"
         end
         @durable_aggregate = @job_store.read_job(aggregate.fetch("job_id"))
       end
@@ -1061,7 +1139,7 @@ module Hive
           )
         end
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
           puts query.text(payload)
         end
@@ -1086,7 +1164,7 @@ module Hive
           job: result.fetch(:job)
         )
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
           puts "hive refactor-patrol archive: #{result.fetch(:status)} " \
                "archived_actions=#{result.fetch(:archived_actions)}"
@@ -1222,9 +1300,9 @@ module Hive
       def emit(payload, theses)
         write_result_file(payload)
         if @json
-          puts JSON.generate(payload)
+          (@output || $stdout).puts JSON.generate(payload)
         else
-          puts @reporter.text(payload, theses)
+          (@output || $stdout).puts @reporter.text(payload, theses)
         end
         payload
       end
@@ -1255,7 +1333,7 @@ module Hive
         rescue StandardError
           nil
         end
-        puts JSON.generate(payload)
+        (@output || $stdout).puts JSON.generate(payload)
       end
 
       def validate_result_file!(entry, project_root = nil)
@@ -1288,4 +1366,26 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary: the base
+# surface rides this boundary's v4 reporter envelope, while job-listing argv
+# variants ride the generic hive-refactor-patrol-jobs envelope with the
+# action they named (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
+
+Hive::OneShot::Result.declare_usage_contract("refactor-patrol", component: :architecture_patrol) do |_argv, command_index:, option_argv:|
+  jobs = Hive::Commands::RefactorPatrol.usage_jobs_argv(option_argv)
+  if jobs
+    next {
+      schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+      extras: { "action" => jobs.fetch(:action) }
+    }
+  end
+
+  {
+    error_kind: "error",
+    payload: ->(error, argv: []) { Hive::Commands::RefactorPatrol.usage_error_payload(error, error_kind: "error") }
+  }
 end

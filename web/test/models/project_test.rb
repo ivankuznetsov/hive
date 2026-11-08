@@ -38,19 +38,14 @@ class ProjectTest < ActiveSupport::TestCase
     assert_equal "ship-it-260720-abcd", task.slug
   end
 
-  test "exposes project hidden count without adding fields to task rows" do
-    attributes = {
+  test "uses context-specific payload rows for active and archive views" do
+    project = Project.new(
       "name" => "alpha",
-      "hidden_archived_task_count" => 2,
-      "tasks" => [ { "slug" => "visible-archive-260720-abcd" } ]
-    }
-    project = Project.new(attributes)
+      "tasks" => [ { "slug" => "task-260720-abcd" } ]
+    )
 
-    assert_equal 2, project.hidden_archived_task_count
     assert_same project.tasks, project.active_tasks
     assert_same project.tasks, project.archived_tasks
-    refute project.tasks.sole.instance_variable_get(:@attributes).key?("hidden_archived_task_count")
-    assert_equal 0, Project.new("name" => "legacy").hidden_archived_task_count
   end
 
   test "creates an idea through the project resource" do
@@ -59,11 +54,20 @@ class ProjectTest < ActiveSupport::TestCase
     inbox = stage_dir(name, "1-inbox")
     before = inbox.children
 
-    capture_io { project.add_idea!("Model the operator's idea") }
+    previous = Hive::Commands::New.instance_variable_get(:@name_generator_spawn)
+    calls = []
+    Hive::Commands::New.name_generator_spawn = ->(*argv, **options) { calls << argv; 12_345 }
+    stdout, stderr = capture_io { project.add_idea!("Model the operator's idea") }
+    assert_empty stdout
+    assert_empty stderr
+    assert_equal 1, calls.length
+    assert_includes calls.first, "generate-name"
 
     created = inbox.children - before
     assert_equal 1, created.size
     assert_includes created.sole.join("idea.md").read, "Model the operator's idea"
+  ensure
+    Hive::Commands::New.name_generator_spawn = previous
   end
 
   test "normalizes only idea-capture IO failures and preserves their cause" do

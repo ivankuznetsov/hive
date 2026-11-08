@@ -15,6 +15,10 @@ stage never reads the feature worktree, so rebasing an obsolete branch would
 only add latency and conflict-agent work. Ordinary workflow dispatch keeps its
 existing rebase policy.
 
+Operator cancellation (`archive --reason cancelled --attestation "reason"`)
+skips this runner altogether. It records cancellation and retains the worktree
+and history; it does not publish a successful-delivery completion event.
+
 ## State file
 
 Reuses `task.md` from `4-execute/`. Falls back to creating an empty `task.md` if missing (e.g. task somehow skipped execute).

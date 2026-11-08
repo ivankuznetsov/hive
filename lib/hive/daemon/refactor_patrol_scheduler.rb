@@ -68,7 +68,8 @@ module Hive
                      lease_sec: 7200, dry_run: false,
                      classifier_factory: nil, manifest_resolver_factory: nil,
                      post_merge_batch_store_factory: nil,
-                     post_merge_slice_mapper: nil)
+                     post_merge_slice_mapper: nil, scheduled_scheduler: nil)
+        @scheduled_scheduler = scheduled_scheduler
         @registry = registry
         @config_loader = config_loader
         @job_store_factory = job_store_factory
@@ -113,9 +114,13 @@ module Hive
         end
       end
 
-      def candidates(now: Time.now)
+      def candidates(now: Time.now, projects: nil, include_scheduled: true)
         @events.clear
+        selected = Array(projects).map(&:to_s) if projects
+        scheduled = include_scheduled && @scheduled_scheduler ?
+          @scheduled_scheduler.candidates(now: now) : []
         managed = managed_entries
+        managed.select! { |entry| selected.include?(entry.fetch("name").to_s) } if selected
         stores_by_project = {}
         block_configuration_errors(now)
         due_by_project = managed.to_h do |entry|
@@ -150,7 +155,7 @@ module Hive
                  discovery.map { |job| { aggregate: job, phase: :discovery } }
           [ entry.fetch("name"), work ]
         end
-        return [] if due_by_project.values.all?(&:empty?)
+        return scheduled if due_by_project.values.all?(&:empty?)
 
         ownership_snapshot = if @repository_ownership.respond_to?(:snapshot)
           @repository_ownership.snapshot
@@ -158,7 +163,7 @@ module Hive
           @repository_ownership
         end
 
-        managed.flat_map do |entry|
+        scheduled + managed.flat_map do |entry|
           project = entry.fetch("name")
           work = due_by_project.fetch(project)
           next [] if work.empty?
@@ -192,14 +197,79 @@ module Hive
       end
 
       def drain_events
-        drained = @events.dup
+        drained = @events.dup + (@scheduled_scheduler ? @scheduled_scheduler.drain_events : [])
         @events.clear
         drained
       end
 
+      def recover_stale_claims(project:, now: Time.now)
+        entry = Array(@registry.call).find do |candidate|
+          candidate.fetch("name").to_s == project.to_s
+        end
+        return { recovered: [], unresolved: [] } unless entry
+
+        store_for(entry).recover_stale_discovery_claims!(
+          now: now,
+          claim_resolver: @claim_resolver,
+          claim_liveness_resolver: @claim_liveness_resolver
+        )
+      end
+
+      def readiness(project:, now: Time.now, candidates: nil)
+        candidates ||= self.candidates(
+          now: now, projects: [ project ], include_scheduled: false
+        )
+        entry = managed_entries.find { |item| item.fetch("name").to_s == project.to_s }
+        return [] unless entry
+
+        runnable_ids = candidates.map { |candidate| readiness_candidate_id(candidate) }
+        items = candidates.map do |candidate|
+          {
+            "bucket" => "runnable_now",
+            "id" => readiness_candidate_id(candidate),
+            "component" => "architecture_patrol", "reason" => "eligible",
+            "next_check_at" => nil, "condition" => nil
+          }
+        end
+        store_for(entry).jobs.each do |job|
+          job_id = "architecture:discovery:#{job.fetch('job_id')}"
+          next if job.fetch("complete") || runnable_ids.include?(job_id)
+
+          attempt = Array(job["attempts"]).last || {}
+          deadline = attempt["next_eligible_at"] || attempt["expires_at"]
+          condition = deadline ?
+            { "kind" => "time_due", "task" => job.fetch("job_id"),
+              "deadline" => deadline } :
+            { "kind" => "attempt_completed", "task" => job.fetch("job_id") }
+          items << {
+            "bucket" => "waiting_external",
+            "id" => "architecture:job:#{job.fetch('job_id')}",
+            "component" => "architecture_patrol", "reason" => job.fetch("state"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+        items.concat(classification_readiness(entry, runnable_ids: runnable_ids, now: now))
+        items
+      end
+
       def reserve(candidate, now: Time.now)
-        entry = candidate.fetch(:entry)
+        return @scheduled_scheduler.reserve(candidate, now: now) if candidate[:action_phase] == :scheduled
+        observed_entry = candidate.fetch(:entry)
         phase = candidate.fetch(:action_phase, :discovery).to_sym
+        entry = begin
+          current_candidate_entry(observed_entry)
+        rescue ReservationBlocked => error
+          if error.reason == "repository_registration_missing" &&
+             !%i[classification post_merge].include?(phase)
+            stale_store = store_for(observed_entry)
+            stale_aggregate = stale_store.read_job(candidate.fetch(:job_id))
+            block(
+              observed_entry, stale_aggregate, reason: error.reason,
+              evidence: error.evidence, now: now, phase: phase
+            )
+          end
+          raise
+        end
         store = %i[classification post_merge].include?(phase) ? nil : store_for(entry)
         aggregate = store&.read_job(candidate.fetch(:job_id))
         cfg = begin
@@ -330,7 +400,7 @@ module Hive
       end
 
       def spawned(dispatch, pid:, process_start_time:, pgid:, now: Time.now)
-        return dispatch if @dry_run
+        return dispatch if @dry_run || dispatch.dig(:dispatch_token, :phase) == :scheduled
         return dispatch if dispatch.dig(:dispatch_token, :phase) == :classification
 
         @claim_maintenance_transitions.attach_discovery(
@@ -345,6 +415,8 @@ module Hive
       end
 
       def cancel(dispatch, reason:, now: Time.now)
+        return @scheduled_scheduler.cancel(dispatch, reason: reason, now: now) if
+          dispatch.dig(:dispatch_token, :phase) == :scheduled
         token = dispatch[:dispatch_token]
         return unless token
         return dispatch if @dry_run || token[:dry_run]
@@ -368,6 +440,11 @@ module Hive
       end
 
       def complete(dispatch_token:, exit_code:, envelope:, now: Time.now)
+        if dispatch_token[:phase] == :scheduled
+          return @scheduled_scheduler.complete(
+            dispatch_token: dispatch_token, exit_code: exit_code, envelope: envelope, now: now
+          )
+        end
         return completion_result(:dry_run, dispatch_token, envelope) if @dry_run || dispatch_token[:dry_run]
         return complete_classification(dispatch_token, exit_code, now) if
           dispatch_token[:phase] == :classification
@@ -424,6 +501,42 @@ module Hive
 
       private
 
+      def readiness_candidate_id(candidate)
+        identity = candidate[:classification_occurrence_id] || candidate.fetch(:job_id)
+        "architecture:#{candidate.fetch(:action_phase)}:#{identity}"
+      end
+
+      def classification_readiness(entry, runnable_ids:, now:)
+        classifier = classifier_for(entry)
+        return [] unless classifier.respond_to?(:each_record)
+
+        classifier.each_record.filter_map do |record|
+          next if record["materialization"]
+          next unless %w[pending retry_wait feature].include?(record["status"])
+
+          phase = record.fetch("status") == "feature" ? :post_merge : :classification
+          id = "architecture:#{phase}:#{record.fetch('occurrence_id')}"
+          next if runnable_ids.include?(id)
+
+          claim_deadline = record.dig("claim", "expires_at")
+          retry_deadline = record["retry_at"]
+          deadline = [ claim_deadline, retry_deadline ].compact
+            .map { |value| Time.iso8601(value) }
+            .select { |value| value > now }.min
+          condition = if deadline
+            { "kind" => "time_due", "task" => record.fetch("occurrence_id"),
+              "deadline" => deadline.utc.iso8601(6) }
+          else
+            { "kind" => "attempt_completed", "task" => record.fetch("occurrence_id") }
+          end
+          {
+            "bucket" => "waiting_external", "id" => id,
+            "component" => "architecture_patrol", "reason" => record.fetch("status"),
+            "next_check_at" => deadline, "condition" => condition
+          }
+        end
+      end
+
       def claim_discovery!(entry, store, aggregate, analysis_sha:, now:)
         @discovery_transitions.claim(
           entry: entry,
@@ -477,6 +590,7 @@ module Hive
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
           next unless Hive::Workflows.coding_id?(cfg["default_workflow"])
+          next unless cfg.dig("refactor_patrol", "enabled") == true
 
           entry.merge("_refactor_patrol_cfg" => cfg)
         rescue StandardError => e
@@ -904,6 +1018,8 @@ module Hive
           pr_number: aggregate.dig("source", "number"), pr_url: aggregate.dig("source", "url"),
           reason: reason, evidence: evidence
         }
+      rescue Hive::RefactorPatrol::JobStore::StaleClaim
+        nil
       rescue Hive::RefactorPatrol::JobStore::Error => e
         @events << { status: :blocked, project: entry.fetch("name"), reason: reason, error: e.message }
       end
@@ -947,6 +1063,36 @@ module Hive
         entry = Array(@registry.call).find { |candidate| candidate.fetch("name") == registration }
         raise Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found" unless entry
         entry
+      end
+
+      def current_candidate_entry(observed)
+        current = Array(@registry.call).find do |entry|
+          entry.fetch("name") == observed.fetch("name")
+        end
+        unless current
+          raise ReservationBlocked.new(
+            "repository_registration_missing",
+            "name" => observed["name"].to_s
+          )
+        end
+        matches = %w[project_id registration_id].all? do |key|
+          observed[key].to_s == current[key].to_s
+        end && %w[path hive_state_path].all? do |key|
+          File.expand_path(observed.fetch(key)) ==
+            File.expand_path(current.fetch(key))
+        end
+        return current if matches
+
+        evidence = {
+          "name" => observed["name"].to_s,
+          "project_id" => observed["project_id"].to_s,
+          "registration_id" => observed["registration_id"].to_s
+        }
+        raise ReservationBlocked.new("registration_identity_changed", evidence)
+      rescue KeyError, TypeError => error
+        raise ReservationBlocked.new(
+          "registration_identity_changed", "error" => error.message
+        )
       end
 
       def completion_failure_reason(exit_code, envelope)

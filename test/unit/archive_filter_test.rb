@@ -94,6 +94,15 @@ class ArchiveFilterTest < Minitest::Test
     assert_empty projection.ordinary_rows
   end
 
+  def test_invalid_rows_use_captured_archive_membership
+    captured_terminal = { invalid: true, archive_member: true, stage: "9-done" }
+    captured_active = { invalid: true, archive_member: false, stage: "9-done" }
+
+    projection = Hive::ArchiveFilter.project([ captured_terminal, captured_active ])
+
+    assert_equal [ captured_terminal ], projection.archive_rows
+  end
+
   private
 
   def workflow_with_retention(retention)

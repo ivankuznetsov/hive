@@ -5,6 +5,7 @@ require "hive/agent_git_gate"
 require "hive/patrol/validator"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/task_manifest"
+require "hive/patrol_fix/transition"
 require "hive/patrol_fix/validation_receipt"
 require "hive/patrol_fix/worktree_receipt"
 
@@ -15,6 +16,10 @@ module Hive
         module_function
 
         def run!(task, cfg = {}, command_runner: nil, worktree_root: nil)
+          recovered = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root).reconcile!
+          if recovered && recovered[:task_folder] != task.folder
+            return { status: :complete, commit: nil, moved_task_folder: recovered.fetch(:task_folder) }
+          end
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           existing = current(store, manifest, "validation", "validate")
@@ -95,7 +100,6 @@ module Hive
         rescue Hive::AgentGitGate::Error => e
           raise Hive::StageError, "validation checkout failed: #{e.message}"
         end
-        private_class_method :with_validation_checkout
 
         # Cleanup is recovery work, not validation authority. Losing a completed
         # result or replacing the original validator/materialization exception is

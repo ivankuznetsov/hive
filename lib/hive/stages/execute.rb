@@ -2,6 +2,7 @@ require "digest"
 require "fileutils"
 require "json"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/claude_launcher"
 require "hive/dependencies"
 require "hive/dependency_snapshot"
@@ -130,10 +131,13 @@ module Hive
         # baseline; `base_oid` is the durable range authority consumed later
         # by outcome evidence. They begin equal and neither is agent-authored.
         base_oid = Hive::GitOps.new(wt.path).head_sha
+        # `base_branch` stays the integration (PR target) branch; `base_ref`
+        # names the ref `base_oid` actually came from, so a stacked base is
+        # visible instead of masquerading as the default branch.
         wt.write_pointer!(
           task.folder, task.slug,
           execute_base_head: base_oid, base_branch: default_branch,
-          base_oid: base_oid
+          base_oid: base_oid, base_ref: wt.resolved_base
         )
 
         write_initial_task_md(task)
@@ -170,6 +174,8 @@ module Hive
         worktree_git = Hive::GitOps.new(worktree_path)
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
+        checkout_failure = validate_execution_checkout(task, cfg, worktree_path, worktree_git, baseline_head)
+        return checkout_failure if checkout_failure
 
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
           execute_custody_manifest(
@@ -226,12 +232,10 @@ module Hive
         dirty_worktree = worktree_state.fetch(:dirty)
         expected_branch = expected_worktree_branch(task)
         new_commit = head_after != baseline_head
-        # Research-mode parity across headless + tmux. Headless agents
-        # may emit a :structured (JSON-stream `result` event) OR a
-        # :plain (untagged stdout tail) final message; tmux runs in an
-        # interactive pane and so always lands :plain. Either source is
-        # acceptable proof that the agent said something coherent —
-        # the source tag only matters for headless debugging.
+        # Headless agents may emit a :structured (JSON-stream `result`
+        # event) OR a :plain (untagged stdout tail) final message. Either
+        # source is acceptable proof that the agent said something
+        # coherent — the source tag only matters for debugging.
         final_message_present = impl_result &&
                                 %i[structured plain].include?(impl_result[:final_message_source]) &&
                                 !impl_result[:final_message].to_s.strip.empty?
@@ -451,6 +455,23 @@ module Hive
       end
 
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+        if implementer_model_unsupported?(impl_result)
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :error,
+            attrs: {
+              reason: Hive::ModelUnsupported::REASON,
+              provider: implementation_provider(impl_result, cfg),
+              model: Hive::ModelUnsupported.model_name(impl_result[:error_message].to_s),
+              message: Hive::ModelUnsupported.operator_message(
+                impl_result[:error_message].to_s, agent: implementation_provider(impl_result, cfg)
+              )
+            },
+            commit: Hive::ModelUnsupported::REASON, status: :error,
+            waiting_reason: "agent_failure"
+          )
+        end
+
         if implementer_hit_limit?(impl_result)
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
@@ -521,6 +542,17 @@ module Hive
         elsif custody.safe_after?
           yield
         end
+      end
+
+      # A refused model is operator-owned configuration; it must not inherit
+      # the limits_reached provider cooldown.
+      def implementer_model_unsupported?(impl_result)
+        return false unless impl_result
+
+        typed_reason = impl_result[:error_reason].to_s
+        return typed_reason == Hive::ModelUnsupported::REASON unless typed_reason.empty?
+
+        Hive::ModelUnsupported.detected?(impl_result[:error_message].to_s)
       end
 
       def implementer_hit_limit?(impl_result)
@@ -604,18 +636,15 @@ module Hive
         # :state_file_marker because Hive::Agent#run! reads the marker
         # AFTER the agent exits to derive the envelope status, and the
         # rules around `Hive::Markers.current(...).name == :none` happen
-        # to land :complete on a happy exit. Under tmux that path
-        # cannot work: ClaudeLauncher.wait_for_terminal_marker
-        # actively WAITS for the agent to stamp EXECUTE_COMPLETE and
-        # times out when it doesn't. Use :exit_code_only here so the
-        # runner gets a non-error envelope on a clean exit and applies
+        # to land :complete on a happy exit. Use :exit_code_only here so
+        # the runner gets a non-error envelope on a clean exit and applies
         # its own marker-write logic. Codex's profile default is
-        # :output_file_exists; this pin overrides it for both modes.
+        # :output_file_exists; this pin overrides it.
         kwargs = {
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
-          max_budget_usd: cfg.dig("budget_usd", "execute_implementation"),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "execute_implementation", profile),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
@@ -625,13 +654,8 @@ module Hive
           status_mode: :exit_code_only,
           **launch_arguments
         }
-        result = if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task) # coding-scoped: coding execute stage tmux session
-          )
+        result = if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(
             task, **kwargs, cfg: cfg,
@@ -737,6 +761,30 @@ module Hive
         }
       rescue Hive::GitError
         nil
+      end
+
+      # A stale pointer after an external history rewrite cannot be repaired by
+      # implementing the plan. Check before spending an agent turn; retain the
+      # post-spawn checks as the agent can still change branch or history.
+      def validate_execution_checkout(task, cfg, worktree_path, worktree_git, baseline_head)
+        state = inspect_worktree_state(task, worktree_git)
+        return worktree_git_failed(task, cfg, worktree_path, baseline_head) unless state
+
+        reason = if state.fetch(:branch) != expected_worktree_branch(task)
+          "branch_mismatch"
+        elsif !worktree_git.ancestor?(baseline_head, state.fetch(:head))
+          "head_not_descendant"
+        end
+        return unless reason
+
+        apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :execute_waiting, attrs: { reason: reason },
+          commit: "execute_waiting_#{reason}", status: :execute_waiting,
+          waiting_reason: reason
+        )
+      rescue Hive::GitError
+        worktree_git_failed(task, cfg, worktree_path, baseline_head)
       end
 
       def worktree_git_failed(task, cfg, worktree_path, baseline_head = nil)

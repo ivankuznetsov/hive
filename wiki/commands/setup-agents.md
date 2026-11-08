@@ -3,14 +3,18 @@ title: hive setup-agents
 type: command
 source: skills/hive/, config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-08-06
+updated: 2026-11-04
 tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
 **TLDR**: `hive setup-agents` provisions the bundled Hive operating skill for
-Claude, Codex, and Pi plus unresolved built-in native capabilities for those
-agents and Grok. Grok currently participates through native Compound
-Engineering plugin capabilities, not a copied Hive operating-skill projection.
+Claude, Codex, Pi, OpenCode, and Muse plus unresolved built-in native
+capabilities for those agents and Grok. Grok currently participates through
+native Compound Engineering plugin capabilities, not a copied Hive
+operating-skill projection. Muse installs Compound Engineering as a native
+plugin too, but through a Hive-staged symlink-free copy of the upstream git
+source because Muse refuses plugin bundles containing symlinks (see
+`Hive::AgentSupport::Muse::PluginStaging`).
 Setup prints one immutable aggregate preview, obtains consent once, revalidates
 state, publishes whole skill directories or uses supported native package
 operations, and reinspects the result. It never provisions arbitrary custom
@@ -193,6 +197,10 @@ unconsented unattended response is always exit 64 even when the installation
 might already be healthy: Hive deliberately does not launch native discovery
 to find out. Stdout contains exactly one JSON document; prompts/progress never
 contaminate it.
+
+Success and configuration-error documents are encoded directly. A
+`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
+it propagates.
 
 ## Extension contract
 

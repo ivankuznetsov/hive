@@ -13,9 +13,9 @@ class WorkflowFlowTest < ApplicationSystemTestCase
 
   test "operator creates a project workflow from the primary navigation" do
     sign_in!
-    click_link "Workflows"
+    click_link "Honeycombs"
 
-    assert_current_path workflows_path
+    assert_current_path honeycombs_path
     select @project, from: "Project workflows"
     click_button "View workflows"
     assert_selector "h2", text: "#{@project} workflows", wait: 5
@@ -58,12 +58,14 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     assert_equal [ "honeycomb/docs@1.2.0" ], lifecycle.installed_sources
   end
 
-  test "mobile header keeps every capability visible beside the account action" do
+  test "mobile menu keeps every capability accessible beside the account action" do
     sign_in!
     page.current_window.resize_to(390, 844)
     visit workflows_path(project: @project)
 
+    click_button "Menu"
     assert_button "Log out"
+    page.execute_script("document.documentElement.style.fontSize = '20px'")
     metrics = page.evaluate_script(<<~JS)
       (() => {
         const nav = document.querySelector("nav[aria-label='Primary']")
@@ -76,7 +78,8 @@ class WorkflowFlowTest < ApplicationSystemTestCase
         }
       })()
     JS
-    assert_equal %w[Status Repos Workflows Modules Patrol Agents Telegram], metrics.fetch("links")
+    assert_equal %w[Status Digest Repos Honeycombs Patrol Agents Telegram],
+                 metrics.fetch("links")
     assert_operator metrics.fetch("navWidth"), :<=, metrics.fetch("navViewport"),
                     "primary capabilities must not start hidden in a tiny horizontal scroller"
     assert_equal metrics.fetch("viewportWidth"), metrics.fetch("pageWidth"),

@@ -16,7 +16,7 @@ class HiveStagesOpenPrTest < Minitest::Test
   end
 
   class FakeController
-    attr_reader :request, :phases
+    attr_reader :request, :phases, :existing_pr_url
     attr_accessor :creation_base_oid
 
     def initialize(publication)
@@ -24,8 +24,9 @@ class HiveStagesOpenPrTest < Minitest::Test
       @phases = []
     end
 
-    def publish!(request, revalidate:)
+    def publish!(request, revalidate:, existing_pr_url: nil)
       @request = request
+      @existing_pr_url = existing_pr_url
       %i[prepare before_push before_create final].each do |phase|
         @phases << phase
         raise "stale request" unless revalidate.call(phase)
@@ -306,6 +307,56 @@ class HiveStagesOpenPrTest < Minitest::Test
       assert_equal task.folder, captured.fetch(:cwd)
       assert_equal "open_pr", captured.fetch(:implementation_stage)
       assert captured.fetch(:defer_implementation_observation)
+      assert captured.fetch(:completion_probe).call
+    end
+  end
+
+  def test_opencode_authoring_scope_overrides_project_bash_with_exact_output_edit
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      FileUtils.rm_f(output)
+      profile = Hive::AgentProfiles.lookup(:opencode)
+      project_cfg = {
+        "open_pr" => {
+          "permissions" => {
+            "preset" => "scoped",
+            "tools" => [ "Read", "Edit", "Bash(*)" ]
+          }
+        }
+      }
+      captured = nil
+
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent,
+        lambda do |*_args, **kwargs|
+          captured = kwargs
+          { status: :error }
+        end
+      ) do
+        Hive::Stages::OpenPr.spawn_open_pr_agent(
+          task, project_cfg, "prompt", profile, task.folder,
+          launch_arguments: { identity_arguments: [] },
+          expected_output: output
+        )
+      end
+
+      assert_equal "workspace-write", captured.fetch(:permission_mode)
+      assert_equal [ output ], captured.fetch(:edit_patterns)
+      assert_empty captured.fetch(:bash_patterns)
+      assert_equal [ task.folder ], captured.fetch(:additional_write_roots)
+      assert_nil captured.fetch(:allowed_tools)
+      assert_nil captured.fetch(:disallowed_tools)
+      refute captured.fetch(:completion_probe).call
+    end
+  end
+
+  def test_completion_probe_waits_for_a_partially_written_authoring_file
+    with_task do |task, _repo, _base_oid|
+      output = File.join(task.folder, Hive::Stages::OpenPr::AUTHORING_FILE)
+      File.write(output, '{"title":')
+      refute Hive::Stages::OpenPr.complete_authoring_file?(output)
+      write_authoring(task)
+      assert Hive::Stages::OpenPr.complete_authoring_file?(output)
     end
   end
 
@@ -351,6 +402,53 @@ class HiveStagesOpenPrTest < Minitest::Test
           )
           assert_equal({ commit: "open_pr_authoring_failed", status: :error }, result)
           assert_equal "provider failed", Hive::Markers.current(task.state_file).attrs.fetch("detail")
+        end
+
+        # A classified provider wall keeps the daemon's cooldown path.
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          lambda do |*|
+            { status: :error, error_reason: "limits_reached",
+              error_message: "limits reached for codex: usage limit reached" }
+          end
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "limits_reached", status: :error }, result)
+          assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+        end
+
+        # Codex refusing the configured model is operator-owned config, not a
+        # quota wall (supersedes #1473): no cooldown, a message naming the fix.
+        codex_refusal = "{'type':'error','status':400,'error':{'type':'invalid_request_error'," \
+                        "'message':'The 'gpt-6-sol' model is not supported when using Codex with a ChatGPT account.'}}"
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          ->(*) { { status: :error, error_message: codex_refusal } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "model_unsupported", status: :error }, result)
+          attrs = Hive::Markers.current(task.state_file).attrs
+          assert_equal "model_unsupported", attrs.fetch("reason")
+          assert_equal "gpt-6-sol", attrs.fetch("model")
+          assert_nil attrs["retry_after"]
+          assert_includes attrs.fetch("message"), ".hive-state/config.yml"
+        end
+
+        typed = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
+                "#{Hive::ModelUnsupported::CONFIG_HINT}"
+        with_replaced_singleton_method(
+          Hive::Stages::OpenPr, :spawn_open_pr_agent,
+          ->(*) { { status: :error, error_reason: "model_unsupported", error_message: typed } }
+        ) do
+          result = Hive::Stages::OpenPr.authoring_for(
+            task, cfg, pointer, nil, profile, {}
+          )
+          assert_equal({ commit: "model_unsupported", status: :error }, result)
+          assert_equal typed, Hive::Markers.current(task.state_file).attrs.fetch("message")
         end
       end
     end
@@ -524,6 +622,22 @@ class HiveStagesOpenPrTest < Minitest::Test
           assert_equal "dependency",
                        Hive::Stages::OpenPr.dependency_pr_base_branch(task, cfg)
         end
+      end
+    end
+  end
+
+  def test_dependency_list_does_not_select_a_pr_base_branch
+    with_task do |task, repo, _base_oid|
+      task.depends_on = [ "base-task" ]
+      base_folder = File.join(repo, ".hive-state", "stages", "9-done", "base-task")
+      FileUtils.mkdir_p(base_folder)
+      Hive::TaskMeta.write(base_folder, id: 1, slug: "base-task", display_name: nil)
+
+      with_replaced_singleton_method(
+        Hive::Worktree, :origin_branch_exists?,
+        ->(*) { raise "list dependencies must not probe a prerequisite branch" }
+      ) do
+        assert_nil Hive::Stages::OpenPr.dependency_pr_base_branch(task, cfg)
       end
     end
   end

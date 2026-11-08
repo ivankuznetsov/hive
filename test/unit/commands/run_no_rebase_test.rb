@@ -72,6 +72,40 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     end
   end
 
+  # The operator's fix_guardrail approval is bound to the scanned HEAD; a
+  # pre-run rebase used to rewrite it and fail the resume with
+  # approval_head_mismatch (hivedev C1).
+  def test_pending_head_bound_approval_skips_auto_rebase
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    replacement = lambda do |*_args|
+      raise "Hive::Rebase.perform must not rewrite a head-bound approval"
+    end
+    marker = Hive::Markers::State.new(
+      name: :review_waiting, attrs: { "reason" => "fix_guardrail", "head" => "c51da0f", "matches" => "4" }, raw: nil
+    )
+
+    with_replaced_singleton_method(Hive::Rebase, :perform, replacement) do
+      result = cmd.send(:perform_rebase, fake_task, {}, marker: marker)
+      assert_equal :pending_head_bound_approval, result.reason
+      refute result.attempted
+    end
+  end
+
+  def test_legacy_fix_guardrail_marker_without_head_still_rebases
+    cmd = Hive::Commands::Run.new("demo-260514-bbbb")
+    marker = Hive::Markers::State.new(name: :review_waiting, attrs: { "reason" => "fix_guardrail" }, raw: nil)
+    called = false
+    replacement = lambda do |*_args|
+      called = true
+      Hive::Rebase::Result.no_op
+    end
+
+    with_replaced_singleton_method(Hive::Rebase, :perform, replacement) do
+      cmd.send(:perform_rebase, fake_task, {}, marker: marker)
+    end
+    assert called, "no head binding means nothing to invalidate"
+  end
+
   def test_controller_workflow_never_runs_auto_rebase
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
     replacement = lambda do |*_args|
@@ -91,7 +125,7 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     # mustn't make every skip state spammy.
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
     [ :disabled, :no_worktree, :cli_override, :managed_draft_pr_handoff,
-      :controller_workflow,
+      :controller_workflow, :pending_head_bound_approval,
       :dirty_worktree, :detached_head ].each do |reason|
       result = Hive::Rebase::Result.skipped(reason)
       _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }

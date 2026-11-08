@@ -31,6 +31,40 @@ class HiveRebaseTest < Minitest::Test
     FakeTask.new(worktree, folder, File.join(folder, "logs"), File.join(folder, "task.md"), "4-execute")
   end
 
+  def test_rebased_publication_wraps_the_exact_lease_push_in_its_record_update
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    File.write(File.join(folder, "github-publication.json"), "{}")
+    git = FakeGitOps.new(worktree)
+    git.head_sha_value = "b" * 40
+    controller = Object.new
+    recorded = nil
+    pushed = nil
+    controller.define_singleton_method(:publish_rebase!) do |**values, &block|
+      recorded = values
+      block.call
+    end
+    push = lambda do |path, branch, **options|
+      pushed = [ path, branch, options ]
+      Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+    end
+    warnings = []
+    stub_gitops!(git) do
+      with_replaced_singleton_method(Hive::GithubPublication::Controller, :new, ->(**) { controller }) do
+        with_replaced_singleton_method(Hive::Gh, :push_branch, push) do
+          Hive::Rebase.publish_rebased_branch!(
+            task, base_cfg, Hive::Rebase::PublishLease.new(branch: "task", remote_oid: "a" * 40), warnings
+          )
+        end
+      end
+    end
+    assert_equal({ worktree_path: worktree, branch: "task", before_oid: "a" * 40, after_oid: "b" * 40 }, recorded)
+    assert_equal "a" * 40, pushed.last.fetch(:expected_remote_oid)
+    assert_empty warnings
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def base_cfg(overrides = {})
     {
       "rebase" => { "enabled" => true, "conflict_resolution_timeout_sec" => 60 },
@@ -51,7 +85,8 @@ class HiveRebaseTest < Minitest::Test
                   :fetch_result, :commits_behind_value,
                   :rebase_onto_outcome, :rebase_continue_outcomes,
                   :unmerged_files_sequence, :head_sha_value, :default_branch_value,
-                  :current_branch_value, :ancestor_value, :project_root
+                  :current_branch_value, :ancestor_value, :project_root,
+                  :squash_prefix_value, :rebase_upstream, :merge_base_value
 
     def initialize(project_root)
       @project_root = project_root
@@ -82,7 +117,11 @@ class HiveRebaseTest < Minitest::Test
     def current_branch; @current_branch_value; end
     def ancestor?(_ancestor, _descendant); @ancestor_value; end
 
-    def rebase_onto(_ref)
+    def squash_merged_prefix(_ref); @squash_prefix_value; end
+    def merge_base(_ref); @merge_base_value; end
+
+    def rebase_onto(_ref, upstream: nil)
+      @rebase_upstream = upstream
       case @rebase_onto_outcome
       when :ok then true
       when :conflict
@@ -324,6 +363,24 @@ class HiveRebaseTest < Minitest::Test
     teardown_dirs(worktree, folder)
   end
 
+  def test_squash_merged_dependency_prefix_is_skipped_with_a_note
+    worktree, folder = make_worktree_and_folder
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.squash_prefix_value = "82a0490948f9642d0adb351796c42336caadeea0"
+
+    stub_gitops!(git) do
+      result = nil
+      _out, err = capture_io { result = Hive::Rebase.perform(task, base_cfg) }
+      assert result.succeeded
+      assert_equal "82a0490948f9642d0adb351796c42336caadeea0", git.rebase_upstream
+      assert_match(/commits through 82a0490948f9 already landed/, err)
+    end
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
   def test_successful_rebase_publishes_rewritten_branch_before_later_stage_commits
     scenario = make_remote_rebase_scenario(push_feature: true)
     worktree = scenario.fetch(:worktree)
@@ -458,7 +515,7 @@ class HiveRebaseTest < Minitest::Test
 
     assert result.succeeded
     assert(result.post_rebase_warnings.any? { |warning| warning.include?("Hive::GhError: offline") })
-    assert_match(/remote history was left unchanged/, err)
+    assert_match(/publication outcome requires reconciliation/, err)
   ensure
     teardown_dirs(worktree, folder)
   end
@@ -839,6 +896,48 @@ class HiveRebaseTest < Minitest::Test
   end
 
   # ---- U8: execute_base_head rewrite after successful rebase ----
+
+  # hivedev C1: a stacked base (the squash-merged dependency's old head)
+  # dropped out of HEAD's history after the squash-aware rebase, and outcome
+  # evidence failed "controller base is not an ancestor". The no-op path
+  # heals a pointer an earlier rebase left stale.
+  def test_no_op_run_reconciles_stale_stacked_base
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(folder, "worktree.yml"),
+               YAML.dump({ "base_oid" => "olddepsha", "branch" => "feature/x" }))
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 0
+    git.ancestor_value = false
+    git.merge_base_value = "mainmergebase"
+
+    stub_gitops!(git) do
+      _out, err = capture_io { assert Hive::Rebase.perform(task, base_cfg).succeeded }
+      assert_match(/stacked base olddepsha is no longer in HEAD's history/, err)
+    end
+
+    data = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))
+    assert_equal "mainmergebase", data["base_oid"]
+    assert_equal "feature/x", data["branch"]
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_base_still_in_history_is_left_alone
+    worktree, folder = make_worktree_and_folder
+    File.write(File.join(folder, "worktree.yml"), YAML.dump({ "base_oid" => "goodbase" }))
+    task = make_task(worktree: worktree, folder: folder)
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 1
+    git.rebase_onto_outcome = :ok
+    git.merge_base_value = "other"
+
+    stub_gitops!(git) { assert Hive::Rebase.perform(task, base_cfg).succeeded }
+
+    assert_equal "goodbase", YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["base_oid"]
+  ensure
+    teardown_dirs(worktree, folder)
+  end
 
   def test_update_execute_base_head_rewrites_yaml_on_success
     worktree, folder = make_worktree_and_folder

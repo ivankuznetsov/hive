@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/runtime_control_plane/dispatch_repository"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
   include HiveTestHelper
@@ -25,6 +26,31 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     refute Hive::RuntimeControlPlane::DispatchRepository.valid_argv?(
       %w[hive evidence terminal task-260831-abcd]
     )
+  end
+
+  def test_batched_recovery_query_keeps_an_independent_bound_for_each_slug_in_one_read
+    with_repository do |repository|
+      %w[alpha beta ignored].each do |slug|
+        3.times do |index|
+          repository.write_request!(project: "hive", slug: slug, argv: [ "hive", "run", slug ],
+            request_id: "#{slug}-#{index}", recovery: { "phase" => "terminal" }, now: NOW + index)
+        end
+      end
+      reads = 0
+      original = repository.database.method(:read)
+      result = nil
+      with_replaced_singleton_method(repository.database, :read, lambda { |&block|
+        reads += 1
+        original.call(&block)
+      }) do
+        result = repository.recovery_requests_by_slug(project: "hive", slugs: %w[alpha beta], limit: 2)
+      end
+      assert_equal 1, reads
+      assert_equal %w[alpha beta], result.keys.sort
+      assert_equal %w[alpha-1 alpha-2], result.fetch("alpha").map(&:request_id)
+      assert_equal %w[beta-1 beta-2], result.fetch("beta").map(&:request_id)
+      assert_empty repository.recovery_requests_by_slug(project: "other", slugs: %w[alpha beta], limit: 2)
+    end
   end
 
   def test_request_claim_sequence_and_result_are_transactional_and_idempotent
@@ -77,6 +103,118 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       assert restarted.acknowledge_result(id, now: NOW + 2)
       refute restarted.acknowledge_result(id, now: NOW + 2)
       assert_empty restarted.pending_results
+    end
+  end
+
+  def test_tagged_command_dispatch_persists_authenticated_context_atomically
+    with_repository do |repository|
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: repository.database,
+        package_coordinates: {
+          version: "test", location: "https://example.invalid/compat.gem",
+          sha256: "a" * 64
+        }
+      )
+      request_id = "command-dispatch:v1:#{'b' * 64}"
+      context = {
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "principal-1",
+        principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
+        request_fingerprint: "c" * 64, transport_request_id: request_id
+      }
+      installation_id = repository.database.installation_identity.fetch(:installation_id)
+      repository.database.transaction do |db|
+        db[:command_namespaces].insert(
+          namespace_id: "namespace-1", installation_id: installation_id,
+          git_common_dir_digest: "d" * 64, enrollment_state: "active",
+          enrollment_generation: 1, keyed_intake_enabled: 1, policy_revision: 1,
+          created_at: NOW.iso8601(6), activated_at: NOW.iso8601(6),
+          updated_at: NOW.iso8601(6)
+        )
+        db[:command_capacity].insert(
+          namespace_id: "namespace-1", updated_at: NOW.iso8601(6)
+        )
+        db[:command_receipts].insert(
+          receipt_id: "receipt-1", namespace_id: "namespace-1",
+          key_digest: "e" * 64, principal: "principal-1",
+          principal_source: "local_cli", command: "run", original_target: "sqlite-cutover",
+          request_fingerprint: "c" * 64, frozen_request_json: "{}",
+          state: "executing", generation: 1, retry_eligible: 0,
+          created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+        )
+      end
+      repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context
+      )
+
+      assert_equal "principal-1", repository.command_context(request_id).fetch("principal")
+      assert_equal 512, repository.database.read {
+        |db| db[:command_capacity][namespace_id: "namespace-1"].fetch(:logical_bytes)
+      }
+      assert_equal request_id, repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context
+      )
+      repository.database.transaction do |db|
+        db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
+      end
+      assert_equal request_id, repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: request_id, task_generation: "generation-1", now: NOW,
+        command_context: context.merge(receipt_generation: 2)
+      )
+      assert_equal 2, repository.command_context(request_id).fetch("receipt_generation")
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: request_id, task_generation: "generation-1", now: NOW,
+          command_context: context.merge(principal: "forged")
+        )
+      end
+
+
+      repository.database.transaction do |db|
+        db[:command_receipt_pins].insert(
+          pin_id: "pin-1", receipt_id: "receipt-1", principal: "principal-1",
+          intent_id: request_id, intent_generation: 0, generation: 1,
+          owner_host: Socket.gethostname, owner_pid: Process.pid,
+          owner_process_start: "start", lifecycle_status: "active",
+          retry_horizon_expires_at: (NOW + 3600).iso8601(6),
+          created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+        )
+      end
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: request_id, exit_code: 0, command: "hive run sqlite-cutover", now: NOW
+      )
+      assert_equal 1, repository.acknowledge_results([ request_id ], now: NOW + 1)
+      assert_equal "closed", repository.database.read {
+        |db| db[:command_receipt_pins][pin_id: "pin-1"].fetch(:lifecycle_status)
+      }
+
+      stale_request = "command-dispatch:v1:#{'f' * 64}"
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: stale_request, task_generation: "generation-1", now: NOW,
+          command_context: context.merge(transport_request_id: stale_request)
+        )
+      end
+    end
+  end
+
+  def test_tagged_command_dispatch_refuses_missing_context
+    with_repository do |repository|
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        repository.write_request!(
+          project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+          request_id: "command-dispatch:v1:#{'d' * 64}", now: NOW
+        )
+      end
+      assert_equal :dispatch_context_missing, error.code
+      assert_empty repository.pending
     end
   end
 
@@ -153,6 +291,31 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
       assert repository.acknowledge_result(id, now: NOW + 7200)
       assert_equal 1, repository.prune_results(now: NOW + 7200)
       assert_nil repository.fetch(id)
+    end
+  end
+
+  # hivedev F2: a recovery request is also the failure history. Deleting it
+  # with its delivered result an hour later reset the deterministic-failure
+  # series, so a slow loop never parked.
+  def test_expired_recovery_result_keeps_the_recovery_row
+    with_repository do |repository|
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "recovery-result", recovery: { "phase" => "admitted", "retry_count" => 4 }, now: NOW
+      )
+      repository.write_result!(
+        chat_id: 42, project: "hive", slug: "sqlite-cutover",
+        request_id: id, exit_code: 1, command: "hive run sqlite-cutover", now: NOW
+      )
+      assert repository.remove(id)
+      assert repository.acknowledge_result(id, now: NOW + 7200)
+
+      assert_equal 1, repository.prune_results(now: NOW + 7200)
+
+      kept = repository.fetch(id)
+      refute_nil kept, "the recovery row outlives its delivered result"
+      assert_equal 4, repository.recovery_retry_count(project: "hive", slug: "sqlite-cutover")
+      assert_empty repository.pending_results(now: NOW + 7200).map(&:request_id)
     end
   end
 
@@ -430,6 +593,37 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  def test_claim_recovery_only_mutates_selected_projects
+    with_repository do |repository|
+      timestamp = NOW.iso8601(6)
+      repository.database.transaction do |db|
+        installation = db[:installations].first.fetch(:installation_id)
+        db[:projects].insert(
+          project_id: "project-2", installation_id: installation,
+          registration_id: "registration-2", name: "other", observed_path: "/other",
+          state_root_path: "/other/.hive-state", active: 1,
+          registered_at: timestamp, last_observed_at: timestamp
+        )
+      end
+      selected = repository.write_request!(
+        project: "hive", slug: "selected-task", argv: %w[hive run selected-task],
+        request_id: "selected", now: NOW
+      )
+      unrelated = repository.write_request!(
+        project: "other", slug: "other-task", argv: %w[hive run other-task],
+        request_id: "unrelated", now: NOW
+      )
+      repository.claim(selected, pid: 1, now: NOW)
+      repository.claim(unrelated, pid: 1, now: NOW)
+
+      assert_equal 1, repository.recover_claims(
+        projects: [ "hive" ], now: NOW + 20_000, alive: ->(*) { false }
+      )
+      assert_nil repository.fetch(selected)
+      assert_equal "claimed", repository.fetch(unrelated).state
+    end
+  end
+
   def test_payload_lookup_and_revision_race_fail_closed
     with_repository do |repository|
       id = repository.write_request!(
@@ -494,7 +688,111 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  # A write that loses a unique race to a concurrent identical request adopts
+  # the winner only when the winner's command context is the same binding (or
+  # an advanced generation of it), never when the bindings disagree.
+  def test_identical_request_that_wins_a_race_is_adopted_only_with_a_matching_context
+    request_id = "command-dispatch:v1:#{'9' * 64}"
+    context = {
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "principal-1",
+      principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "c" * 64, transport_request_id: request_id
+    }
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      assert_equal request_id, race_identical_request(
+        repository, request_id: request_id, winner_context: context, loser_context: context
+      )
+      assert_equal 1, repository.command_context(request_id).fetch("receipt_generation")
+    end
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      advance_receipt = lambda do
+        repository.database.transaction do |db|
+          db[:command_receipts].where(receipt_id: "receipt-1").update(generation: 2)
+        end
+      end
+      assert_equal request_id, race_identical_request(
+        repository, request_id: request_id, winner_context: context,
+        loser_context: context.merge(receipt_generation: 2), after_win: advance_receipt
+      )
+      assert_equal 2, repository.command_context(request_id).fetch("receipt_generation")
+    end
+
+    with_repository do |repository|
+      assert_equal "untagged-race", race_identical_request(
+        repository, request_id: "untagged-race", winner_context: nil, loser_context: nil
+      )
+    end
+
+    with_repository do |repository|
+      install_executing_receipt(repository.database)
+      untagged = context.merge(transport_request_id: "untagged-race")
+      error = assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        race_identical_request(
+          repository, request_id: "untagged-race", winner_context: nil, loser_context: untagged
+        )
+      end
+      assert_equal :dispatch_request_conflict, error.code
+    end
+  end
+
   private
+
+  # The loser's insert collides with an active holder of the same subject; before
+  # the loser re-reads, a concurrent writer replaces the holder with the identical
+  # request carrying +winner_context+; +after_win+ runs once the winner commits.
+  def race_identical_request(repository, request_id:, winner_context:, loser_context:, after_win: nil)
+    register_task(repository.database, task_id: "race-task")
+    attributes = {
+      project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+      task_id: "race-task", task_generation: "generation-1", now: NOW
+    }
+    repository.write_request!(**attributes, request_id: "race-holder")
+    database = repository.database
+    original_read = database.method(:read)
+    raced = false
+    database.define_singleton_method(:read) do |&block|
+      unless raced
+        raced = true
+        transaction { |db| db[:dispatch_requests].where(request_id: "race-holder").delete }
+        repository.write_request!(**attributes, request_id: request_id, command_context: winner_context)
+        after_win&.call
+      end
+      original_read.call(&block)
+    end
+    repository.write_request!(**attributes, request_id: request_id, command_context: loser_context)
+  ensure
+    database&.define_singleton_method(:read, original_read) if original_read
+  end
+
+  def install_executing_receipt(database)
+    Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+      database: database,
+      package_coordinates: {
+        version: "test", location: "https://example.invalid/compat.gem", sha256: "a" * 64
+      }
+    )
+    installation_id = database.installation_identity.fetch(:installation_id)
+    database.transaction do |db|
+      db[:command_namespaces].insert(
+        namespace_id: "namespace-1", installation_id: installation_id,
+        git_common_dir_digest: "d" * 64, enrollment_state: "active",
+        enrollment_generation: 1, keyed_intake_enabled: 1, policy_revision: 1,
+        created_at: NOW.iso8601(6), activated_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+      )
+      db[:command_capacity].insert(namespace_id: "namespace-1", updated_at: NOW.iso8601(6))
+      db[:command_receipts].insert(
+        receipt_id: "receipt-1", namespace_id: "namespace-1", key_digest: "e" * 64,
+        principal: "principal-1", principal_source: "local_cli", command: "run",
+        original_target: "sqlite-cutover", request_fingerprint: "c" * 64,
+        frozen_request_json: "{}", state: "executing", generation: 1, retry_eligible: 0,
+        created_at: NOW.iso8601(6), updated_at: NOW.iso8601(6)
+      )
+    end
+  end
 
   def with_repository
     with_tmp_dir do |root|

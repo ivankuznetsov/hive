@@ -119,6 +119,39 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = nil
   end
 
+  test "concurrent first callers share one status feed" do
+    StatusBroadcaster.feed = nil
+    constructor_started = Queue.new
+    release_constructor = Queue.new
+    callers = []
+    constructor = lambda do |**|
+      constructor_started << true
+      release_constructor.pop
+      FakeFeed.new
+    end
+
+    with_replaced_singleton_method(StatusPageFeed, :new, constructor) do
+      callers << Thread.new { StatusBroadcaster.feed }
+      Timeout.timeout(2) { constructor_started.pop }
+      callers << Thread.new { StatusBroadcaster.feed }
+      # The second caller must reach either the constructor or its guard
+      # before the first construction can finish; no timing sleeps are needed.
+      Timeout.timeout(2) { Thread.pass until callers.last.status == "sleep" }
+      2.times { release_constructor << true }
+      first, second = Timeout.timeout(2) { callers.map(&:value) }
+
+      assert_same first, second,
+                  "HTTP renders and the broadcaster must share the same feed"
+      assert constructor_started.empty?, "only one feed may be constructed"
+      assert_same first, StatusBroadcaster.feed
+    end
+  ensure
+    callers&.each do |thread|
+      thread.kill
+      thread.join
+    end
+  end
+
   test "projects are ordered by active task count with stable ties" do
     payload = {
       "projects" => [

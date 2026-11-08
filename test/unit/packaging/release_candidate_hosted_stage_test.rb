@@ -1,7 +1,6 @@
 require "test_helper"
 require "json"
 require_relative "../../../packaging/release_candidate/hosted_stage"
-require_relative "../../../packaging/release_candidate/hosted_upgrade_lane"
 
 class ReleaseCandidateHostedStageTest < Minitest::Test
   include HiveTestHelper
@@ -146,70 +145,6 @@ class ReleaseCandidateHostedStageTest < Minitest::Test
     end
   end
 
-  def test_install_rebinds_legacy_closure_roots_to_the_consumer_cache_namespace
-    with_tmp_dir do |dir|
-      run_root = File.join(dir, "run")
-      source_cache = File.join(dir, "runner-cache")
-      consumer_cache = File.join(dir, "container-cache")
-      dependency_fixture = File.join(
-        ROOT, "test/e2e/sample-project/vendor/cache/rake-13.4.2.gem"
-      )
-      dependency = {
-        "filename" => File.basename(dependency_fixture),
-        "size" => File.size(dependency_fixture),
-        "sha256" => Digest::SHA256.file(dependency_fixture).hexdigest
-      }
-      row_root = File.join(consumer_cache, "closures", "legacy-bench-v041", "gems")
-      candidate_root = File.join(consumer_cache, "closures", "candidate", "gems")
-      [ row_root, candidate_root ].each do |root|
-        FileUtils.mkdir_p(root)
-        FileUtils.cp(dependency_fixture, File.join(root, dependency.fetch("filename")))
-      end
-      staged_path = write_staged_inputs(
-        run_root,
-        row_id: "legacy-bench-v041",
-        closures: {
-          "baseline" => closure(
-            "baseline", File.join(source_cache, "closures/legacy-bench-v041/gems"), dependency
-          ),
-          "observer" => closure(
-            "observer", File.join(source_cache, "closures/legacy-bench-v041/gems"), dependency
-          ),
-          "candidate" => closure(
-            "candidate", File.join(source_cache, "closures/candidate/gems"), dependency
-          )
-        }
-      )
-      staged_bytes = File.binread(staged_path)
-      installed_closures = nil
-      installed_dependencies = nil
-      stage = HiveReleaseCandidate::HostedStage.new(
-        repo_root: ROOT, cache_root: consumer_cache, run_root: run_root
-      )
-      stage.define_singleton_method(:stage_targets) do |_row, _manifest, closures|
-        installed_closures = closures
-        installed_dependencies = closures.transform_values do |closure|
-          installable_dependencies(closure)
-        end
-      end
-
-      stage.install(
-        row_id: "legacy-bench-v041", platform: "linux-x86_64", candidate_sha: SHA
-      )
-
-      assert_equal row_root, installed_closures.dig("baseline", "root")
-      assert_equal row_root, installed_closures.dig("observer", "root")
-      assert_equal candidate_root, installed_closures.dig("candidate", "root")
-      assert_equal [ File.join(row_root, dependency.fetch("filename")) ],
-                   installed_dependencies.fetch("baseline")
-      assert_equal [ File.join(row_root, dependency.fetch("filename")) ],
-                   installed_dependencies.fetch("observer")
-      assert_equal [ File.join(candidate_root, dependency.fetch("filename")) ],
-                   installed_dependencies.fetch("candidate")
-      assert_equal staged_bytes, File.binread(staged_path)
-    end
-  end
-
   def test_install_rejects_an_unexpected_staged_closure_role
     with_tmp_dir do |dir|
       run_root = File.join(dir, "run")
@@ -251,15 +186,6 @@ class ReleaseCandidateHostedStageTest < Minitest::Test
       end
       assert_includes error.message, "closure identity mismatch"
     end
-  end
-
-  def test_hosted_upgrade_entrypoint_maps_terminal_statuses_to_process_codes
-    lane = HiveReleaseCandidate::HostedUpgradeLane
-
-    assert_equal 0, lane.exit_code_for("status" => "passed")
-    assert_equal 1, lane.exit_code_for("status" => "failed")
-    assert_equal 69, lane.exit_code_for("status" => "unavailable")
-    assert_equal 1, lane.exit_code_for("status" => "unexpected")
   end
 
   private

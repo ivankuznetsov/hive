@@ -2,7 +2,7 @@ require "hive"
 
 module Hive
   # Top-level TUI module: a Charm bubbletea + lipgloss full-screen,
-  # modal dashboard that polls `Hive::Commands::Status#json_payload` at
+  # modal dashboard that polls `Hive::Commands::Status#active_payload` at
   # ~1 Hz, renders every active task across registered projects grouped
   # by action label, and dispatches workflow verbs as fresh subprocesses
   # on single-key keystrokes.

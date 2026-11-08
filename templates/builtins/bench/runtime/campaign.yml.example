@@ -8,7 +8,7 @@ corpus_version: v3
 
 # Corpus slugs. Each must exist at corpus/<slug>/manifest.yml.
 tasks:
-  - fix-claude-tmux-ready-detector-260629-50cc
+  - example-corpus-slug
 
 # Candidate ids from harness/profiles/candidates.rb.
 candidates:
@@ -66,7 +66,7 @@ timeouts:
 
 # Cells intentionally excluded from the campaign matrix.
 # Example:
-#   - task: fix-claude-tmux-ready-detector-260629-50cc
+#   - task: example-corpus-slug
 #     candidate: all-opus-4.8
 #     reason: documented reason
 exclusions: []

@@ -47,7 +47,8 @@ Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
   run it locally only when changing coverage machinery or when explicitly
   requested.
 - Packaged Hive web bootstrap, TUI reactivity scale, multi-agent setup
-  integration, and the babysitter dry-run security matrix are CI merge gates,
+  integration, operational status on read-only mounts, and the babysitter
+  dry-run security matrix are CI merge gates,
   not default local tests. Agents do not need to run them locally unless
   diagnosing their CI checks. The packaged-web task archives `HEAD:web`, so run
   it only after committing the relevant web changes.

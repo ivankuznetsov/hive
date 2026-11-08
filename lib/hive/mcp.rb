@@ -1,0 +1,208 @@
+require "fileutils"
+require "json"
+require "open3"
+require "tmpdir"
+require "hive/agent_runtime"
+require "hive/agent_support"
+require "hive/atomic_file"
+require "hive/mcp/settings"
+
+module Hive
+  # Hive-owned MCP for launched agents (plan 2026-10-15-001). A launch starts
+  # with no personal or project MCP servers and receives only the servers
+  # its scope is granted. `prepare` turns a resolved Settings::Policy into
+  # the provider-specific argv/env one launch needs, through the
+  # `AgentSupport.for(profile)::Mcp` renderer.
+  module Mcp
+    # `arguments` append to the trusted argv; `default_arguments` are
+    # `[flag, value]` groups appended only when the launch's own identity
+    # or routing argv does not already set that key; `environment` merges
+    # into the child env; `passthrough_env` names host vars a rendered server reads
+    # (copied from ENV so they survive `unsetenv_others`); `config_overlay`
+    # is a provider config fragment (OpenCode). `isolation` is :isolated,
+    # :partial (rendered, but a discovery step failed), :none (no renderer),
+    # or :inherit (`mcp.inherit_user`). `notices` go to the launch log.
+    Launch = Data.define(
+      :arguments, :default_arguments, :environment, :passthrough_env, :config_overlay,
+      :cleanup_paths, :isolation, :notices
+    ) do
+      # The argv this launch adds next to `existing` (the launch's identity
+      # and routing arguments). A key is a flag, or the `key` of `-c key=v`.
+      def arguments_for(existing)
+        present = existing.each_with_index.filter_map do |argument, index|
+          argument == "-c" ? existing[index + 1].to_s.split("=", 2).first : argument
+        end
+        arguments + default_arguments.reject do |flag, value|
+          present.include?(flag == "-c" ? value.split("=", 2).first : flag)
+        end.flatten
+      end
+
+      # `base` plus the host vars the rendered servers read and the launch's
+      # own env.
+      def environment_for(base)
+        passthrough = passthrough_env.each_with_object({}) do |name, out|
+          out[name] = ENV[name] if ENV.key?(name)
+        end
+        base.merge(passthrough).merge(environment)
+      end
+
+      def cleanup!
+        cleanup_paths.each do |path|
+          FileUtils.remove_entry_secure(path)
+        rescue Errno::ENOENT
+          nil
+        end
+      end
+    end
+
+    ONCE_FLAG = "--ignore-user-config".freeze
+    EMPTY_POLICY = Settings::Policy.new(inherit_user: false, servers: [].freeze, notices: [].freeze)
+
+    module_function
+
+    # The policy for one launch scope. A cfg-less launch grants nothing but
+    # still honors the global `inherit_user`.
+    def policy(cfg, scope:)
+      Settings.resolve(cfg || {}, scope: scope)
+    end
+
+    # The config block a task's stage reads its grant from: the stage folder
+    # name without its numeric prefix, dashes as underscores (the
+    # admitted-route convention).
+    def scope_for(stage_name)
+      stage_name.to_s.sub(/\A\d+-/, "").tr("-", "_")
+    end
+
+    # The per-agent MCP facet (`AgentSupport::<Agent>::Mcp`): `prepare`,
+    # `discover`, the ISOLATES/ACCEPTS_GRANTS capabilities, and optionally
+    # `login_argv` and `doctor_rows`. nil for a custom profile.
+    def adapter(profile)
+      Hive::AgentSupport.supports?(profile, :Mcp) ? Hive::AgentSupport.for(profile)::Mcp : nil
+    end
+
+    def prepare(profile:, policy:, cwd:, version: nil)
+      return launch(isolation: :inherit, notices: policy.notices) if policy.inherit_user
+
+      renderer = adapter(profile)
+      unless renderer
+        name = profile.respond_to?(:name) ? profile.name : profile
+        notices = policy.notices + [
+          "MCP isolation incomplete: agent #{name} has no Hive MCP renderer, so it keeps its own MCP config" \
+          "#{skipped_suffix(policy.servers)}"
+        ]
+        return launch(isolation: :none, notices: notices)
+      end
+
+      renderer.prepare(policy: policy, cwd: cwd, version: version, profile: profile)
+    end
+
+    # Prepare a launch for a caller outside spawn_agent (a direct
+    # Hive::Agent, or a launcher that compiles and spawns itself) and remove
+    # its rendered files once the block returns.
+    def with_launch(profile:, cfg:, scope:, cwd:)
+      launch = prepare(profile: profile, policy: policy(cfg, scope: scope), cwd: cwd)
+      yield launch
+    ensure
+      launch&.cleanup!
+    end
+
+    def launch(isolation:, arguments: [], default_arguments: [], environment: {}, passthrough_env: [],
+               config_overlay: nil, cleanup_paths: [], notices: [])
+      Launch.new(
+        arguments: arguments.map { |argument| argument.to_s.dup.freeze }.freeze,
+        default_arguments: default_arguments.map { |group| group.map { |item| item.to_s.dup.freeze }.freeze }.freeze,
+        environment: environment.dup.freeze,
+        passthrough_env: passthrough_env.uniq.freeze,
+        config_overlay: config_overlay.nil? ? nil : Hive::Config.deep_freeze(config_overlay),
+        cleanup_paths: cleanup_paths.dup.freeze,
+        isolation: isolation,
+        notices: notices.dup.freeze
+      )
+    end
+
+    # Compile `request` for a launcher that spawns the agent itself, adding
+    # `launch`'s argv. Carried defaults yield to keys the request's own
+    # argv already sets.
+    def compile(request, launch)
+      base = Hive::AgentRuntime.compile(request)
+      extra = launch.arguments_for(base.argv)
+      return base if extra.empty?
+
+      collapse_repeated_flags(Hive::AgentRuntime.compile(
+        request.with(trusted_cli_arguments: request.trusted_cli_arguments + extra)
+      ))
+    end
+
+    # Codex's sandbox presets already pass `--ignore-user-config`, and clap
+    # rejects a repeated flag; keep its first occurrence.
+    def collapse_repeated_flags(invocation)
+      argv = invocation.argv
+      first = argv.index(ONCE_FLAG)
+      return invocation if first.nil? || argv.count(ONCE_FLAG) == 1
+
+      invocation.with(argv: argv.reject.with_index { |argument, index| argument == ONCE_FLAG && index != first })
+    end
+
+    # Run a read-only agent CLI inspection (`opencode debug config`, `codex
+    # mcp list --json`) with a deadline. Returns [stdout, status]; a hung
+    # process group is killed and reported as Hive::AgentError.
+    def capture(argv, chdir:, timeout:)
+      Open3.popen3(*argv, chdir: chdir, pgroup: true) do |stdin, stdout, stderr, waiter|
+        stdin.close
+        out = Thread.new { stdout.read }
+        Thread.new { stderr.read }
+        unless waiter.join(timeout)
+          Process.kill("KILL", -waiter.pid)
+          raise Hive::AgentError, "`#{[ File.basename(argv.first), *argv.drop(1) ].join(' ')}` timed out after #{timeout}s"
+        end
+        [ out.value, waiter.value ]
+      end
+    end
+
+    # A per-launch 0700 directory for rendered config.
+    def private_dir = Dir.mktmpdir("hive-mcp-")
+
+    def write_private_json(path, data)
+      Hive::AtomicFile.write(path, JSON.pretty_generate(data), mode: 0o600, fsync: false)
+    end
+
+    # Host env var NAMES a server reads; values never enter Hive config,
+    # argv, or rendered files.
+    def referenced_env(servers)
+      servers.flat_map do |server|
+        [ server.bearer_token_env, *server.env_from.values, *server.headers_env.values ]
+      end.compact.uniq
+    end
+
+    # An HTTP server signs in through the agent's own OAuth flow when it
+    # carries OAuth fields or a recorded login list; one with a bearer or
+    # header credential, or none at all, does not.
+    def oauth?(server)
+      return false unless server.transport == :http
+      return false if server.bearer_token_env || !server.headers_env.empty?
+
+      !server.oauth_logins.nil? || !server.oauth_resource.nil? ||
+        !server.oauth_client_id.nil? || !server.oauth_scopes.empty?
+    end
+
+    # Logins are per agent: a headless launch cannot run an OAuth browser
+    # step, so an OAuth server is rendered only to an agent `hive mcp import`
+    # or `hive mcp login` recorded a saved login for. The rest are skipped
+    # with a notice.
+    def signed_in_servers(servers, agent, notices)
+      servers.select do |server|
+        next true unless oauth?(server) && !Array(server.oauth_logins).include?(agent.to_s)
+
+        notices << "MCP server #{server.name} skipped: #{agent} has no saved login for it; " \
+                   "run `hive mcp login #{server.name} --agent #{agent}`"
+        false
+      end
+    end
+
+    def skipped_suffix(servers)
+      return "" if servers.empty?
+
+      "; granted server(s) #{servers.map(&:name).join(', ')} not rendered"
+    end
+  end
+end

@@ -56,6 +56,25 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_idempotent_replay_returns_before_candidate_validation
+    with_initialized_project do |project_root|
+      first = build_capture(project_root).call
+      validations = 0
+      replay = build_capture(
+        project_root,
+        candidate_validator: lambda do |_folder|
+          validations += 1
+          raise "candidate validation must not run for an exact replay"
+        end
+      ).call
+
+      assert first.created
+      refute replay.created
+      assert_equal first.folder, replay.folder
+      assert_equal 0, validations
+    end
+  end
+
   def test_input_identity_and_attachment_validation_fail_closed
     with_tmp_dir do |dir|
       base = capture_options(dir)
@@ -126,6 +145,16 @@ class TaskCaptureTest < Minitest::Test
     end
   end
 
+  def test_task_creation_requires_a_current_registered_project_identity
+    capture = Hive::TaskCapture.allocate
+    capture.instance_variable_set(:@project, nil)
+    capture.instance_variable_set(:@project_root, "/tmp/unregistered-project")
+
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [] }) do
+      assert_raises(Hive::ConfigError) { capture.send(:project_identity!) }
+    end
+  end
+
   private
 
   def capture_options(project_root)
@@ -155,7 +184,7 @@ class TaskCaptureTest < Minitest::Test
   end
 
   def build_capture(project_root, fingerprint: "a" * 64, slug: "patrol-fix-task",
-                    candidate_writer: nil)
+                    candidate_validator: nil, candidate_writer: nil)
     descriptor = Hive::Workflows::Registry.default
     Hive::TaskCapture.new(
       project_root: project_root,
@@ -171,6 +200,7 @@ class TaskCaptureTest < Minitest::Test
       state_bytes: "---\nslug: #{slug}\n---\n\n# #{slug}\n\n<!-- WAITING -->\n",
       idempotency_key: "patrol-fix:capture:one",
       input_fingerprint: fingerprint,
+      candidate_validator: candidate_validator,
       candidate_writer: candidate_writer
     )
   end

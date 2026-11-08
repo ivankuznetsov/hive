@@ -19,6 +19,12 @@ module Hive
       # than by the type. PHASES enumerates every legal phase; ORIGINS the
       # legal non-nil origins (nil = a plain typed/media draft). A typo'd
       # symbol raises at the transition rather than silently mis-routing.
+      #
+      # Because callers receive this mutable representation, compound state
+      # interpretations (phase + origin + attachments) and the commit-time
+      # view must be decided HERE, not re-derived from raw fields by the
+      # router, callback handlers, or supervisor. The decision predicates and
+      # commit_snapshot below are that single authority.
       PHASES = %i[awaiting_text awaiting_project awaiting_transcript_confirm collecting_files].freeze
       ORIGINS = %i[voice].freeze
 
@@ -64,6 +70,111 @@ module Hive
 
       def find_by_token(token)
         @drafts.each_value.find { |draft| draft.token == token && !expired?(draft) }
+      end
+
+      # ---- State decisions ----
+      # Compound interpretations of a draft's phase/origin/attachments that
+      # routing and callbacks depend on. Consumers must ask these instead of
+      # reading raw Draft fields, so the phase/origin contract keeps a single
+      # authority alongside the transition methods above.
+
+      # A live draft sitting on the voice transcript Confirm/Discard keyboard:
+      # the router routes follow-up voice/text to the confirm flow only here.
+      def awaiting_transcript_confirmation?(chat_id:)
+        draft = get(chat_id: chat_id)
+        !draft.nil? && draft.phase == :awaiting_transcript_confirm && draft.origin == :voice
+      end
+
+      # A live draft that is NOT voice-origin: a voice note arriving now must
+      # be short-circuited (VOICE_DURING_DRAFT_MESSAGE) instead of merged in.
+      def non_voice_draft?(chat_id:)
+        draft = get(chat_id: chat_id)
+        !draft.nil? && draft.origin != :voice
+      end
+
+      # A live voice-origin draft: the only kind a voice note may reuse or
+      # clear without destroying an operator's typed/media work.
+      def voice_draft?(chat_id:)
+        draft = get(chat_id: chat_id)
+        !draft.nil? && draft.origin == :voice
+      end
+
+      # A live draft still waiting for its idea text, so the next plain text
+      # message continues idea capture instead of opening a new one.
+      def awaiting_text_draft?(chat_id:)
+        draft = get(chat_id: chat_id)
+        !draft.nil? && draft.phase == :awaiting_text
+      end
+
+      # A voice draft reached through its callback token whose transcript is
+      # confirmed and which has no staged fallback audio: it can commit
+      # immediately instead of entering the file-collection flow.
+      def transcript_only_voice_draft?(token:)
+        draft = find_by_token(token)
+        !draft.nil? && draft.origin == :voice && draft.attachments.empty?
+      end
+
+      # The voice-draft reuse decision for an incoming voice note: reuse a
+      # live voice-origin draft, start a fresh one when no draft exists, and
+      # return nil when a non-voice (text/media) draft is open so the caller
+      # never clobbers the operator's in-progress work. Returns the draft to
+      # act on, or nil.
+      def ensure_voice_draft(chat_id:, token:)
+        existing = get(chat_id: chat_id)
+        return existing if existing&.origin == :voice
+        return nil if existing
+
+        start(chat_id: chat_id, phase: :awaiting_transcript_confirm,
+              token: token, origin: :voice)
+      end
+
+      # Clear only a voice-origin draft. A :no_speech / :unsupported_language
+      # voice note must not wipe an unrelated in-progress text/media draft
+      # (and its staging dir) the operator was building.
+      def clear_voice_draft(chat_id:)
+        draft = get(chat_id: chat_id)
+        clear(chat_id: chat_id) if draft&.origin == :voice
+      end
+
+      # Commit gate: nil when the draft can be committed, otherwise the reason
+      # it cannot (:draft_expired, :project_missing, :text_missing). Callers
+      # map the reason to operator copy; the decision lives here.
+      def commit_blocker(chat_id:)
+        draft = get(chat_id: chat_id)
+        return :draft_expired unless draft
+        return :project_missing if draft.project.to_s.empty?
+        return :text_missing if draft.text.to_s.strip.empty?
+
+        nil
+      end
+
+      # Frozen execution view for commit: project, text, and the attachment
+      # tuples execution needs (staging_path, dest_name, ext). Execution must
+      # not depend on the live mutable Draft, which transition methods keep
+      # mutating; this snapshot cannot drift under it.
+      #
+      # Freezing the containers alone is not enough: freezing an object does
+      # not deep-freeze its contents, so every String leaf is also duplicated
+      # and frozen here. Without that the snapshot would still alias the live
+      # draft's mutable String values and in-place edits (<<, replace) on the
+      # live draft would rewrite what was already handed to execution.
+      CommitSnapshot = Struct.new(:project, :text, :attachments, keyword_init: true)
+
+      def commit_snapshot(chat_id:)
+        draft = get(chat_id: chat_id)
+        return nil unless draft
+
+        CommitSnapshot.new(
+          project: frozen_string(draft.project),
+          text: frozen_string(draft.text),
+          attachments: draft.attachments.map do |attachment|
+            {
+              staging_path: frozen_string(attachment.fetch(:staging_path)),
+              dest_name: frozen_string(attachment.fetch(:dest_name)),
+              ext: frozen_string(attachment.fetch(:ext))
+            }.freeze
+          end.freeze
+        ).freeze
       end
 
       def set_text(chat_id:, text:)
@@ -149,6 +260,13 @@ module Hive
       end
 
       private
+
+      # Deep-freeze helper for snapshot leaves: freeze does not apply to a
+      # container's contents, so every String handed into a frozen snapshot
+      # container is duplicated and frozen individually (nil passes through).
+      def frozen_string(value)
+        value.nil? ? nil : value.dup.freeze
+      end
 
       def assign_phase!(draft, phase)
         validate_phase!(phase)

@@ -14,6 +14,42 @@ workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
 
+## Build And Share A Private Workflow
+
+The companion website guide, [Build and share a private workflow](https://hivecli.sh/docs/build-private-workflow/),
+covers a complete YAML/instruction example, repository layout, portable paths,
+dependencies, fresh-state setup, clean-project testing and collaborator access.
+The guide is being prepared with the unreleased private-source importer; the
+website must be deployed before that URL is available.
+
+## Install From A Private Git Repository
+
+Direct Git imports are **unreleased**. Check `hive workflow --help` for `--from`
+and `--ref`; the commands below require a build containing that feature.
+Repository access alone does not install a compatible Hive build.
+
+After the owner grants repository read access, authenticate Git. For GitHub
+HTTPS, run `gh auth login` and `gh auth setup-git`; SSH can use an existing key.
+From an initialized Hive project:
+
+```sh
+hive workflow install weekly-news --from https://github.com/OWNER/PRIVATE-REPO.git
+hive workflow validate weekly-news --json
+```
+
+Replace the example repository and ID. The source must contain
+`workflows/weekly-news.yml` and `workflows/weekly-news/` with its instructions
+and assets. Add `--dry-run --json` for an optional read-only preview, then use
+`--ref FULL_COMMIT` with its `source_commit` to import that exact revision.
+
+The imported workflow is editable and records its source in
+`.hive-state/workflows/weekly-news/hive-source.json`. Existing workflows are
+never overwritten. Git credentials stay in your credential helper or SSH
+configuration. Companion dependencies, portable paths, fresh state, API access
+and schedules must be configured separately according to the workflow README;
+importing does not start tasks or run setup scripts. Subsequent edits use
+`hive workflow commit weekly-news`; managed Honeycomb updates do not apply.
+
 ## Run The Built-In Benchmark Workflow
 
 The `bench` workflow drives a reproducible hive-bench campaign through

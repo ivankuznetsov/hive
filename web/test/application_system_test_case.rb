@@ -13,6 +13,12 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
 
   setup do
     reset_system_test_projects!
+    # Browser examples never depend on GitHub's avatar CDN being reachable.
+    page.driver.with_playwright_page do |browser|
+      browser.route("https://github.com/*.png?size=64", ->(route, _request) {
+        route.fulfill(contentType: "image/svg+xml", body: Rails.root.join("test/fixtures/files/github-avatar.svg").read)
+      })
+    end
   end
 
   # Sign in through the env-gated dev seam (never drawn in production) and
@@ -20,7 +26,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   def sign_in!(login: "alice")
     configure_owner!(owner: login)
     visit "/dev_login?as=#{login}"
-    assert_selector ".topbar-session", text: login,
+    assert_selector ".topbar-session", text: login, visible: :all,
                     wait: 5
     wait_for_status_snapshot
   end
@@ -49,7 +55,7 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   # transient, so wait for Cable's first background projection explicitly.
   def wait_for_status_snapshot
     assert_selector "[data-status-version]", visible: :all, wait: 15
-    assert_no_selector "[data-status-availability='unavailable']", visible: :all, wait: 15
+    assert_no_selector "[data-status-availability='unavailable'], [data-status-version='loading']", visible: :all, wait: 15
   end
 
   private
@@ -59,12 +65,27 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
   # made every later status refresh scan dozens of unrelated fixture tasks.
   def reset_system_test_projects!
     StatusBroadcaster.stop!
+    # Hidden pages let an in-flight scan finish. Drain it before replacing the
+    # fixture registry so the previous example cannot publish into this one.
+    poller = StatusBroadcaster.instance_variable_get(:@feed)&.instance_variable_get(:@poller)
+    if poller && !poller.join(5)
+      poller.kill
+      poller.join
+      raise "status scan did not finish before system fixture reset"
+    end
     StatusBroadcaster.feed = nil
 
     sandbox = File.expand_path(ENV.fetch("HIVE_TEST_HOME_ROOT"))
     unless File.basename(sandbox).start_with?("hive-web-test")
       raise "refusing to reset a non-test Hive sandbox: #{sandbox}"
     end
+
+    # These caches outlive a feed and would accept a recreated fixture at the
+    # same registered path as the preceding example. Restart tests seed their
+    # own stores after setup; only cross-example state is discarded here.
+    FileUtils.rm_f(File.join(Hive::Config.hive_home, "web-status.json"))
+    ProjectArchive::CACHE.clear
+    ProjectArchive::REQUESTS.clear
 
     Hive::Config.registered_projects.each do |project|
       Hive::Config.unregister_project(name: project.fetch("name"))

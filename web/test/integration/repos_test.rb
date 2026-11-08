@@ -45,6 +45,12 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "select[name='settings[planning_agent]']", 1
     assert_select "select[name='settings[workflow]']", 1
+    select_names = css_select("select").map { |select| select["name"] }
+    assert_equal %w[
+      settings[planning_agent] settings[development_agent] settings[workflow]
+      settings[claude_permission_mode] settings[claude_effort] settings[patrol_mode] settings[triage_bias]
+    ].sort, select_names.sort, "Claude is headless-only, so the form offers no launch-mode select"
+    assert_no_match(/launch mode/i, response.body)
     # Assert the built-ins without pinning an exact option count, so future
     # built-ins do not break this test with no behavior regression.
     workflow_options = css_select("select[name='settings[workflow]'] option").map { |o| o["value"] }
@@ -92,7 +98,7 @@ class ReposTest < ActionDispatch::IntegrationTest
         url: "ivankuznetsov/configured-app", name: "configured-app",
         settings: {
           workflow: "content",
-          claude_mode: "headless", triage_bias: "safetyist", patrol_mode: "off",
+          triage_bias: "safetyist", patrol_mode: "off",
           adhoc_auto_fix: "1",
           refactor_patrol_enabled: "1",
           enabled_reviewers_submitted: "1", enabled_reviewers: [ "claude-ce-code-review" ],
@@ -112,9 +118,10 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_instance_of StringIO, captured_provisioning_error,
                        "web init must capture preflight findings instead of writing them only to Puma stderr"
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
-    assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
     parsed_config = YAML.safe_load(config)
+    refute parsed_config.fetch("claude").key?("mode"),
+           "web init must not write the retired claude.mode key"
     assert_equal "content", parsed_config.fetch("default_workflow"),
                  "the chosen workflow must land in the project config through Init.new(workflow:)"
     assert_equal true, parsed_config.dig("review", "adhoc", "fix"),
@@ -259,19 +266,17 @@ class ReposTest < ActionDispatch::IntegrationTest
     name = create_hive_project!("rerun-nonworkflow-app")
     sign_in!
     dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
-    # The fresh init used CLI defaults: claude.mode=tmux, review.triage.bias=courageous.
+    # The fresh init used CLI defaults: review.triage.bias=courageous.
 
     post "/repos", params: {
       project: name,
-      settings: { workflow: "content", claude_mode: "headless", triage_bias: "safetyist" }
+      settings: { workflow: "content", triage_bias: "safetyist" }
     }
 
     assert_redirected_to "/repos"
     config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
     assert_equal "content", config.fetch("default_workflow"),
                  "the re-run must rebind default_workflow on disk"
-    assert_equal "tmux", config.dig("claude", "mode"),
-                 "re-init does not consume prompts: answers — claude.mode must stay the original default"
     assert_equal "courageous", config.dig("review", "triage", "bias"),
                  "re-init does not consume prompts: answers — triage bias must stay the original default"
   end
@@ -351,10 +356,10 @@ class ReposTest < ActionDispatch::IntegrationTest
 
   test "an out-of-range setting is a readable 422, not a silent default" do
     sign_in!
-    post "/repos", params: { url: "ivankuznetsov/x", settings: { claude_mode: "yolo" } }
+    post "/repos", params: { url: "ivankuznetsov/x", settings: { claude_permission_mode: "yolo" } }
 
     assert_response :unprocessable_entity
-    assert_match "claude_mode must be one of", response.body
+    assert_match "claude_permission_mode must be one of", response.body
   end
 
   test "an existing directory is re-inited without cloning" do
@@ -435,10 +440,10 @@ class ReposTest < ActionDispatch::IntegrationTest
   end
 
   def with_repos_root(root)
-    old = ENV["HIVEBOX_REPOS_DIR"]
-    ENV["HIVEBOX_REPOS_DIR"] = root
+    original = Repository.method(:default_root)
+    Repository.define_singleton_method(:default_root) { root }
     yield
   ensure
-    old.nil? ? ENV.delete("HIVEBOX_REPOS_DIR") : ENV["HIVEBOX_REPOS_DIR"] = old
+    Repository.define_singleton_method(:default_root, original)
   end
 end

@@ -131,7 +131,8 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_includes result.warning, "council declares a revise agent with max_rounds: 1"
       assert_includes result.warning, "bot.notification_dedupe_window_sec"
       assert_includes result.warning, 'skipping managed workflow "managed"'
-      assert_includes result.warning, "hive: completion_time: invalid completed_at"
+      # Exact task reads bypass retention, even for an explicitly named archive row.
+      refute_includes result.warning, "hive: completion_time: invalid completed_at"
       assert_empty stderr
     ensure
       Hive::Workflows::Project.reset!
@@ -411,9 +412,16 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
 
   def test_parses_dependency_fields_and_coerces_blocked_to_boolean
     task_blocked = task_row(slug: "dependent").merge(
-      "depends_on" => "base",
-      "blocked_by" => "base",
-      "dependency_stage" => "7-artifacts",
+      "depends_on" => %w[base second],
+      "blocked_by" => nil,
+      "dependency_stage" => nil,
+      "unmet_dependencies" => [
+        { "reference" => "base", "blocked_by" => "base",
+          "dependency_stage" => "7-artifacts", "required_gate" => "9-done" },
+        { "reference" => "second", "blocked_by" => "second",
+          "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+      ],
+      "dependency_base_mode" => "default",
       "blocked" => true
     )
     task_missing = task_row(slug: "legacy-payload")
@@ -428,9 +436,11 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert result.ok
       rows = result.rows.each_with_object({}) { |row, hash| hash[row.slug] = row }
       dependent = rows.fetch("dependent")
-      assert_equal "base", dependent.depends_on
-      assert_equal "base", dependent.blocked_by
-      assert_equal "7-artifacts", dependent.dependency_stage
+      assert_equal %w[base second], dependent.depends_on
+      assert_nil dependent.blocked_by
+      assert_nil dependent.dependency_stage
+      assert_equal %w[base second], dependent.unmet_dependencies.map { |entry| entry["blocked_by"] }
+      assert_equal "default", dependent.dependency_base_mode
       assert_equal true, dependent.blocked
       assert_equal false, rows.fetch("legacy-payload").blocked
     end

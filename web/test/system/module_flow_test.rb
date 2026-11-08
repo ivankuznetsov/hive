@@ -66,8 +66,10 @@ class ModuleFlowTest < ApplicationSystemTestCase
 
   test "operator previews grants and installs from primary navigation" do
     sign_in!
-    click_link "Modules"
-    visit modules_path(project: @project)
+    click_link "Honeycombs"
+    assert_selector "h2", text: "#{@project} workflows"
+    within("nav[aria-label=Honeycombs]") { click_link "Modules" }
+    assert_current_path modules_path(project: @project)
     assert_selector "#project-modules-heading", text: "#{@project} modules"
 
     within("[aria-labelledby='install-module-heading']") do

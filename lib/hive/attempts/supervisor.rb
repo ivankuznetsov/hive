@@ -9,6 +9,8 @@ require "hive/attempts/repository"
 require "hive/attempts/stream_log"
 require "hive/lock"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/runtime_control_plane/lifecycle_repository"
+require "hive/runtime_control_plane/process_registry"
 
 module Hive
   module Attempts
@@ -18,13 +20,22 @@ module Hive
     # commits the only valid terminal receipt.
     class Supervisor
       READ_CHUNK = 16 * 1024
+      # Pause between retries of a lease write that lost a SQLite lock race.
+      STORE_RETRY_SEC = 1
+      # How long lock contention may defer lease writes. A stale owner whose
+      # process still matches is only ever a reconciler "suspect", never lost,
+      # so this may exceed the lease window; a swapping host can hold the
+      # runtime database's write lock far longer than `stale_sec`.
+      BUSY_TOLERANCE_SEC = 600
 
       def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
-                     kill_grace_sec: 1, clock: -> { Time.now.utc },
+                     kill_grace_sec: 1, busy_tolerance_sec: BUSY_TOLERANCE_SEC,
+                     clock: -> { Time.now.utc },
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
-                     install_signal_handlers: false)
+                     install_signal_handlers: false, process_registry: nil,
+                     reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"])
         @store = store
         @attempt_id = attempt_id
         @claim_io = claim_io
@@ -34,15 +45,22 @@ module Hive
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
         @timeout_sec = timeout_sec&.positive? ? timeout_sec : nil
         @kill_grace_sec = kill_grace_sec
+        @busy_tolerance_sec = [ busy_tolerance_sec, stale_sec ].max
         @clock = clock
         @monotonic = monotonic
         @install_signal_handlers = install_signal_handlers
+        @process_registry = process_registry
+        @reservation_id = reservation_id
+        @wrapper_registered = false
         @ready_sent = false
         @cancel_reason = nil
         @cancel_signal = nil
         @worker_signal = nil
         @worker_pid = nil
         @worker_pgid = nil
+        @pause_generation = nil
+        @quiescence_grace_sec = nil
+        @admission_closed = false
       end
 
       def run
@@ -52,14 +70,21 @@ module Hive
         record = @store.fetch(@attempt_id)
         return fail_before_start("attempt_not_launching") unless record&.state == "launching"
 
+        register_wrapper! if @reservation_id
+
         log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
-        now = @clock.call
-        record = @store.claim(
-          record, owner: process_identity(Process.pid),
-          claim_capability: @claim_capability,
-          first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: now
-        )
-        record = @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        # The claim and first heartbeat each re-check their own deadline, so a
+        # busy retry stays bounded by the launch window and fails closed there.
+        owner = process_identity(Process.pid)
+        record = with_store_retry do
+          @store.claim(
+            record, owner: owner, claim_capability: @claim_capability,
+            first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: @clock.call
+          )
+        end
+        record = with_store_retry do
+          @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        end
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 
@@ -82,15 +107,33 @@ module Hive
           provider_signal: provider_signal
         )
         output_references << diagnostic_reference if diagnostic_reference
-        terminal = @store.terminalize(
-          record, outcome: outcome, exit_status: exit_status,
-          final_checkpoint: record.checkpoint,
-          output_references: output_references,
-          log_reference: log_reference, provider_evidence: provider_evidence,
-          now: @clock.call
-        )
+        terminal = with_store_retry do
+          if outcome == "interrupted"
+            @store.interrupt(
+              record, pause_generation: @pause_generation, exit_status: exit_status,
+              final_checkpoint: record.checkpoint,
+              output_references: output_references,
+              log_reference: log_reference, now: @clock.call
+            )
+          else
+            @store.terminalize(
+              record, outcome: outcome, exit_status: exit_status,
+              final_checkpoint: record.checkpoint,
+              output_references: output_references,
+              log_reference: log_reference, provider_evidence: provider_evidence,
+              now: @clock.call
+            )
+          end
+        end
         terminal.receipt.fetch("exit_status")
+      rescue RuntimeControlPlane::AdmissionClosed => e
+        signal_ready(
+          "claimed" => false, "attempt_id" => @attempt_id,
+          "state" => "quiescing", "error" => e.message
+        )
+        Hive::ExitCodes::TEMPFAIL
       rescue CompareAndSwapFailed, RepositoryError => e
+        warn "hive attempt supervisor: #{@attempt_id} lost its lease: #{e.class}: #{e.message}"
         terminate_worker_group
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => e.message)
         Hive::ExitCodes::TEMPFAIL
@@ -124,9 +167,34 @@ module Hive
         @ready_io&.close unless @ready_io&.closed?
         @claim_io&.close unless @claim_io&.closed?
         log&.close unless log&.closed?
+        release_wrapper_registration
       end
 
       private
+
+      def register_wrapper!
+        registry.register!(
+          @reservation_id, pid: Process.pid,
+          service_identity: "attempt:#{@attempt_id}", proven_child_safe: false
+        )
+        @wrapper_registered = true
+      end
+
+      def release_wrapper_registration
+        return unless @reservation_id && @process_registry && @wrapper_registered
+
+        @process_registry.mark_stopped_by_reservation!(
+          @reservation_id, require_descendant_absence: true
+        )
+      rescue RuntimeControlPlane::Error, Sequel::Error
+        nil
+      end
+
+      def registry
+        @process_registry ||= Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: @store.database, state_home: File.dirname(@store.database.path)
+        )
+      end
 
       def run_worker(record, log)
         stdout_r, stdout_w = IO.pipe
@@ -173,10 +241,12 @@ module Hive
         stderr_w.close
         worker_identity = process_identity(@worker_pid)
         @worker_pgid = worker_identity.fetch("process_group_id")
-        record = @store.checkpoint(
-          record, checkpoint: record.checkpoint,
-          worker: worker_identity, now: @clock.call
-        )
+        record = with_store_retry do
+          @store.checkpoint(
+            record, checkpoint: record.checkpoint,
+            worker: worker_identity, now: @clock.call
+          )
+        end
         if gate_w
           gate_w.write("1")
           gate_w.close
@@ -184,6 +254,7 @@ module Hive
 
         readers = { stdout_r => :stdout, stderr_r => :stderr }
         next_heartbeat = @monotonic.call + @heartbeat_sec
+        busy_deadline = @monotonic.call + @busy_tolerance_sec
         timeout_at = @timeout_sec && (@monotonic.call + @timeout_sec)
         status = nil
         forced_exit = nil
@@ -196,11 +267,23 @@ module Hive
         until status && readers.empty? && !lingering_group
           now_mono = @monotonic.call
           if @cancel_reason && forced_exit.nil?
-            forced_exit = @cancel_reason == :timeout ? 124 : 143
             if status.nil?
-              signal_worker_group("TERM")
-              termination_deadline = now_mono + @kill_grace_sec
+              waited = Process.wait2(@worker_pid, Process::WNOHANG)
+              status = waited&.last
             end
+            if status && !recorded_worker_group_alive?
+              @cancel_reason = nil
+              next
+            end
+
+            capture_quiescence_context(now_mono) if @cancel_reason == :signal
+            forced_exit = @cancel_reason == :timeout ? 124 : 143
+            signalled = status ? signal_recorded_worker_group("TERM") : signal_worker_group("TERM")
+            unless signalled
+              forced_exit = nil
+              next
+            end
+            termination_deadline = now_mono + effective_kill_grace
           elsif timeout_at && now_mono >= timeout_at && @cancel_reason.nil?
             @cancel_reason = :timeout
             next
@@ -213,8 +296,19 @@ module Hive
           end
 
           if now_mono >= next_heartbeat
-            record = @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
-            next_heartbeat = now_mono + @heartbeat_sec
+            unless admission_closed?
+              renewed = renew_lease(record, log, busy_deadline)
+              now_mono = @monotonic.call
+              if renewed
+                record = renewed
+                busy_deadline = now_mono + @busy_tolerance_sec
+                next_heartbeat = now_mono + @heartbeat_sec
+              else
+                next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
+              end
+            else
+              next_heartbeat = now_mono + @heartbeat_sec
+            end
           end
 
           if post_exit_started && post_exit_deadline && now_mono >= post_exit_deadline
@@ -262,7 +356,11 @@ module Hive
 
         exit_status = forced_exit || status_exit(status)
         @worker_signal = signal_name(status.termsig) if status && !status.exited?
-        outcome = @cancel_reason ? "cancelled" : (exit_status.zero? ? "succeeded" : "failed")
+        outcome = if forced_exit
+          @pause_generation ? "interrupted" : "cancelled"
+        else
+          exit_status.zero? ? "succeeded" : "failed"
+        end
         provider_signal = EvidenceChannel.read(
           evidence_r,
           route: record["routing"].fetch("route")
@@ -428,6 +526,37 @@ module Hive
         readers.clear
       end
 
+      # A heartbeat that loses a SQLite lock race rolled back, so the observed
+      # record is still the compare-and-swap base. Defer it for up to the busy
+      # tolerance instead of killing a healthy worker; a lost CAS (another
+      # owner took the lease) or any other store failure still ends the attempt.
+      def renew_lease(record, log, busy_deadline)
+        @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+      rescue CompareAndSwapFailed
+        raise
+      rescue RepositoryError => e
+        raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < busy_deadline
+
+        log.append(:supervisor, "hive attempt supervisor: heartbeat deferred: #{e.message}\n")
+        nil
+      end
+
+      # Retry a one-shot lease write through SQLite lock contention for at most
+      # the busy tolerance; the transaction rolled back, so retrying is safe.
+      def with_store_retry
+        deadline = @monotonic.call + @busy_tolerance_sec
+        begin
+          yield
+        rescue CompareAndSwapFailed
+          raise
+        rescue RepositoryError => e
+          raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < deadline
+
+          sleep STORE_RETRY_SEC
+          retry
+        end
+      end
+
       def terminate_worker_group
         return nil unless @worker_pid
 
@@ -436,9 +565,10 @@ module Hive
         loop do
           waited = Process.wait2(@worker_pid, Process::WNOHANG)
           return waited.last if waited
-          break if @monotonic.call >= deadline
+          now = @monotonic.call
+          break if now >= deadline
 
-          sleep [ 0.01, deadline - @monotonic.call ].min
+          sleep [ 0.01, [ deadline - now, 0.0 ].max ].min
         end
         signal_worker_group("KILL")
         Process.wait2(@worker_pid).last
@@ -454,6 +584,9 @@ module Hive
         end
 
         Process.kill(signal, -pgid)
+        true
+      rescue Errno::ESRCH
+        false
       end
 
       def signal_recorded_worker_group(signal)
@@ -500,7 +633,9 @@ module Hive
         worker_argv = record["worker_argv"]
         return worker_argv unless worker_argv.first == "hive"
 
-        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), *worker_argv.drop(1) ]
+        # Execution belongs to this installation even if its operator uses the
+        # CLI to inspect another server. Keep the recorded logical argv intact.
+        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", *worker_argv.drop(1) ]
       end
 
       def hive_worker?(record)
@@ -527,6 +662,40 @@ module Hive
             @cancel_reason ||= :signal
           end
         end
+      end
+
+      def lifecycle
+        @lifecycle ||= Hive::RuntimeControlPlane::LifecycleRepository.new(database: @store.database)
+      end
+
+      def admission_closed?
+        return true if @admission_closed
+
+        @admission_closed = lifecycle.current.closed?
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+        false
+      end
+
+      def capture_quiescence_context(now_mono)
+        state = lifecycle.current
+        return unless state.phase == "quiescing"
+
+        @admission_closed = true
+        @pause_generation = state.generation
+        escalation = state.shutdown_grace_sec&.to_f
+        finalization_reserve = escalation && (escalation * (15.0 / 25.0))
+        escalation_cutoff = if state.deadline_monotonic && finalization_reserve
+          state.deadline_monotonic - finalization_reserve
+        end
+        remaining = escalation_cutoff && [ escalation_cutoff - now_mono, 0.0 ].max
+        candidates = [ @kill_grace_sec, escalation, remaining ].compact.map(&:to_f)
+        @quiescence_grace_sec = candidates.min
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error, ArgumentError, TypeError
+        nil
+      end
+
+      def effective_kill_grace
+        @quiescence_grace_sec || @kill_grace_sec
       end
 
       def signal_name(number)

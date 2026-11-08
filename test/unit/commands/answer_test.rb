@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "hive/commands/digest"
 require "hive/commands/answer"
 
 class HiveCommandsAnswerTest < Minitest::Test
@@ -355,6 +356,12 @@ class HiveCommandsAnswerTest < Minitest::Test
         assert_equal "task_lock_busy", rejected.fetch("reason")
         assert_nil Hive::BrainstormParser.parse(path).first.answer
         assert_schema(rejected)
+        keyed = Hive::Commands::Answer.new(
+          SLUG, project: "demo", binding: token, idempotency_key: "key"
+        )
+        assert_raises(Hive::ConcurrentRunError) do
+          keyed.send(:mutation_payload, answer_text: "still blocked")
+        end
       ensure
         Hive::Lock.release_task_lock(folder, lock_id: held.fetch("lock_id"))
       end
@@ -564,6 +571,26 @@ class HiveCommandsAnswerTest < Minitest::Test
     end
   end
 
+  def test_post_write_read_failure_does_not_report_the_applied_answer_as_stale
+    with_project do |_project, _folder, path|
+      token = inventory.fetch("slots").first.fetch("binding")
+      command = Hive::Commands::Answer.new(
+        SLUG, project: "demo", binding: token,
+        input: StringIO.new("applied answer"), output: StringIO.new
+      )
+      original = command.method(:read_brainstorm!)
+      reads = 0
+      command.define_singleton_method(:read_brainstorm!) do |task|
+        reads += 1
+        raise Hive::InvalidTaskPath, "post-write read failed" if reads > 1
+        original.call(task)
+      end
+
+      assert_raises(Hive::InvalidTaskPath) { command.call }
+      assert_equal "applied answer", Hive::BrainstormParser.parse(path).first.answer
+    end
+  end
+
   def test_writer_closed_outcomes_are_preserved
     content = "## Round 1\n### Q1. Race?\n### A1.\n<!-- WAITING -->\n"
     with_project(content) do |_project, _folder, path|
@@ -657,6 +684,31 @@ class HiveCommandsAnswerTest < Minitest::Test
     assert_match(/RuntimeError: unexpected/, error.message)
     assert_equal "internal", payload.fetch("error_kind")
     assert_schema(payload)
+  end
+
+  def test_programmatic_inventory_and_write_use_the_bound_slot_without_console_output
+    with_project do |_project, _folder, path|
+      out, err = capture_io do
+        payload = Hive::Commands::Answer.inventory(SLUG, project: "demo")
+        assert_equal "inventory", payload.fetch("operation")
+        assert_equal 3, payload.fetch("unanswered_count")
+        assert_schema(payload)
+
+        written = Hive::Commands::Answer.write(
+          SLUG, project: "demo", binding: payload.dig("slots", 2, "binding"),
+          answer: "Programmatic answer"
+        )
+        assert_equal "written", written.fetch("outcome")
+        assert_schema(written)
+      end
+
+      assert_empty out
+      assert_empty err
+      questions = Hive::BrainstormParser.parse(path)
+      assert_nil questions.fetch(0).answer
+      assert_nil questions.fetch(1).answer
+      assert_equal "Programmatic answer", questions.fetch(2).answer
+    end
   end
 
   def test_programmatic_write_requires_a_nonempty_binding

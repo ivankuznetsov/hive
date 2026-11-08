@@ -5,6 +5,7 @@ require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
 require "hive/workflows/patrol_fix"
+require "hive/recovery/manual_retry"
 
 class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
@@ -991,6 +992,39 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_routing_decision_for_request_projects_capacity_without_admission
+    with_dispatcher do |dispatcher, launcher, task|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      policy = Object.new
+      policy.define_singleton_method(:explicit?) { true }
+      dispatcher.define_singleton_method(:resolve_routing_policy) { |*, **| policy }
+      selection = nil
+      dispatcher.define_singleton_method(:select_provider_route) do |**attributes|
+        selection = attributes
+        :capacity_saturated
+      end
+      capacity = Object.new
+      view = Struct.new(:records) do
+        attr_accessor :capacity_value
+        def capacity(now:) = capacity_value
+      end.new([])
+      view.capacity_value = capacity
+      request = FakeRequest.new(
+        slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "readiness", inherited_outputs: []
+      )
+
+      result = dispatcher.routing_decision_for_request(
+        request, now: NOW, admission_view: view
+      )
+
+      assert_equal :capacity_saturated, result
+      assert_same capacity, selection.fetch(:snapshot)
+      assert_equal [], selection.fetch(:records)
+      assert_empty launcher.launched
+    end
+  end
+
   def test_lost_generation_defers_ordinary_admission_until_recovery
     with_dispatcher do |dispatcher, _launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")
@@ -1364,6 +1398,110 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_repeated_identical_owner_command_failures_back_off_then_stop_until_input_changes
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@id_generator, -> { SecureRandom.uuid })
+      now = NOW
+      Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT.times do |index|
+        accepted = dispatch_plan_review(dispatcher, task, request_id: "tick-#{index}", now: now)
+        assert_equal :accepted, accepted.status
+        assert_equal index, accepted.attempt["retry_charge"]
+        ended = now + 1
+        terminalize_attempt(store, launcher, accepted, outcome: "failed", exit_status: 4, now: ended)
+        delay = Hive::Recovery::RetryPolicy.delay_sec(index)
+        early = dispatch_plan_review(dispatcher, task, request_id: "early-#{index}", now: ended + delay - 1)
+        unless index == Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT - 1
+          assert_equal "transition_retry", early.reason
+        end
+        now = ended + delay
+      end
+
+      held = dispatch_plan_review(dispatcher, task, request_id: "after-limit", now: now + 86_400)
+      assert_equal :deferred, held.status
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON, held.reason
+      assert_equal 4, held.receipt["exit_status"]
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT, launcher.launched.size
+
+      interactive = dispatch_plan_review(
+        dispatcher, task, request_id: "operator-rerun", interactive: true, now: now + 86_401
+      )
+      assert_equal :accepted, interactive.status
+      terminalize_attempt(store, launcher, interactive, outcome: "failed", exit_status: 4, now: now + 86_402)
+
+      File.write(task.state_file, "#{task.slug}\nedited plan\n<!-- WAITING -->\n")
+      edited = dispatch_plan_review(dispatcher, task, request_id: "edited-plan", now: now + 86_403)
+      assert_equal :accepted, edited.status
+      assert_equal 0, edited.attempt["retry_charge"]
+    end
+  end
+
+  def test_manual_retry_dispatch_retains_transition_delay_and_repeated_failure_ceiling
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_) { task })
+      runner = Hive::Recovery::ManualRetry.new(coordinator: nil,
+        attempts: Hive::Attempts::API.new(daemon: dispatcher))
+      request = lambda do |id|
+        FakeRequest.new(project: "demo", slug: task.slug, request_id: id,
+          argv: [ "hive", "plan-review-run", task.slug, "--project", "demo" ],
+          requestor: "action", trigger: "recovery", inherited_outputs: [],
+          recovery: { "variant" => "marker", "phase" => "cleared", "retry_count" => 1 })
+      end
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => false } } }) do
+        now = NOW
+        Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT.times do |index|
+          accepted = runner.send(:dispatch, request.call("manual-#{index}"), now: now)
+          assert_equal :accepted, accepted.status
+          assert_nil accepted.attach_descriptor, "manual admission must remain noninteractive"
+          terminalize_attempt(store, launcher, accepted, outcome: "failed", exit_status: 4, now: now + 1)
+          delay = Hive::Recovery::RetryPolicy.delay_sec(index)
+          early = runner.send(:dispatch, request.call("manual-early-#{index}"), now: now + delay)
+          assert_equal :deferred, early.status
+          expected = index == Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT - 1 ?
+            Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON : "transition_retry"
+          assert_equal expected, early.reason
+          now += delay + 1
+        end
+        held = runner.send(:dispatch, request.call("manual-after-limit"), now: now + 86_400)
+        assert_equal :deferred, held.status
+        assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON, held.reason
+        assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT, launcher.launched.size
+      end
+    end
+  end
+
+  def test_owner_command_failure_limit_resets_on_a_new_hive_build
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@id_generator, -> { SecureRandom.uuid })
+      fail_plan_review_series(dispatcher, launcher, task, store, statuses: [ 4, 4, 4 ])
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON,
+                   dispatch_plan_review(dispatcher, task, request_id: "held", now: NOW + 3600).reason
+
+      dispatcher.instance_variable_set(:@runtime_digest, "d" * 64)
+      redeployed = dispatch_plan_review(dispatcher, task, request_id: "redeployed", now: NOW + 3601)
+      assert_equal :accepted, redeployed.status
+    end
+  end
+
+  def test_owner_command_failure_limit_requires_identical_command_verdicts
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@id_generator, -> { SecureRandom.uuid })
+      fail_plan_review_series(dispatcher, launcher, task, store, statuses: [ 4, 1, 4 ])
+      mixed = dispatch_plan_review(dispatcher, task, request_id: "mixed", now: NOW + 3600)
+      assert_equal :accepted, mixed.status
+      terminalize_attempt(
+        store, launcher, mixed, outcome: "failed", exit_status: Hive::ExitCodes::TEMPFAIL,
+        now: NOW + 3601
+      )
+
+      after_tempfail = dispatch_plan_review(dispatcher, task, request_id: "after-tempfail", now: NOW + 7200)
+      assert_equal :accepted, after_tempfail.status
+      terminalize_attempt(store, launcher, after_tempfail, outcome: "cancelled", exit_status: 4, now: NOW + 7201)
+
+      after_cancel = dispatch_plan_review(dispatcher, task, request_id: "after-cancel", now: NOW + 10_800)
+      assert_equal :accepted, after_cancel.status
+    end
+  end
+
   def test_routing_collaborator_defaults
     with_dispatcher do |dispatcher, _launcher, task, _store|
       assert_match(
@@ -1465,6 +1603,24 @@ class AttemptsDispatcherTest < Minitest::Test
       provider: "codex", interactive: interactive, generation: generation, now: now,
       admission_view: admission_view
     )
+  end
+
+  def dispatch_plan_review(dispatcher, task, request_id:, now:, interactive: false)
+    dispatcher.dispatch(
+      task: task, project: "demo", intended_stage: "4-execute",
+      argv: [ "hive", "plan-review-run", task.slug, "--project", "demo" ],
+      request_id: request_id, provider: "codex", interactive: interactive, now: now
+    )
+  end
+
+  def fail_plan_review_series(dispatcher, launcher, task, store, statuses:)
+    now = NOW
+    statuses.each_with_index do |exit_status, index|
+      accepted = dispatch_plan_review(dispatcher, task, request_id: "series-#{index}", now: now)
+      assert_equal :accepted, accepted.status
+      terminalize_attempt(store, launcher, accepted, outcome: "failed", exit_status: exit_status, now: now + 1)
+      now += 1 + Hive::Recovery::RetryPolicy.delay_sec(index)
+    end
   end
 
   def terminalize_attempt(store, launcher, result, outcome:, exit_status:, now:,

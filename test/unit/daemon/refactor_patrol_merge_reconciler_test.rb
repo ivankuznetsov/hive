@@ -515,6 +515,29 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_project_scope_skips_unowned_intake_without_observing_it
+    with_tmp_dir do |one_dir|
+      with_tmp_dir do |two_dir|
+        clock = FakeMonotonic.new
+        gh = MultiProjectGh.new(
+          identities: { one_dir => "acme/one", two_dir => "acme/two" }, clock: clock
+        )
+        entries = [ entry_for(one_dir, name: "one"), entry_for(two_dir, name: "two") ]
+        intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+          registry: -> { entries }, config_loader: ->(*) { enabled_cfg },
+          gh: gh, github_gateway: gh, poll_interval_sec: 0,
+          monotonic_clock: clock
+        )
+
+        results = intake.tick(now: T0, projects: [ "one" ])
+
+        assert_equal [ "one" ], results.map { |result| result.fetch(:project) }
+        assert_equal [ "acme/one" ], gh.page_calls.map { |call| call.fetch(:repository) }
+        refute File.exist?(state_path(two_dir))
+      end
+    end
+  end
+
   def test_checkpoint_write_before_progress_unlink_is_harmless_on_restart
     with_tmp_dir do |dir|
       gh = FakeGh.new

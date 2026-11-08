@@ -16,8 +16,13 @@ class HiveStagesExecuteTest < Minitest::Test
       FileUtils.mkdir_p(path)
     end
 
+    def resolved_base
+      base = create_calls.last&.fetch(:base_override)
+      base ? "origin/#{base}" : "origin/#{create_calls.last&.fetch(:default_branch)}"
+    end
+
     def write_pointer!(task_folder, branch_name, execute_base_head: nil,
-                       base_branch: nil, base_oid: nil, repository: nil)
+                       base_branch: nil, base_oid: nil, repository: nil, base_ref: nil)
       data = {
         "path" => path,
         "branch" => branch_name,
@@ -25,6 +30,7 @@ class HiveStagesExecuteTest < Minitest::Test
       }
       data["base_branch"] = base_branch if base_branch
       data["base_oid"] = base_oid if base_oid
+      data["base_ref"] = base_ref if base_ref
       data["repository"] = repository if repository
       File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
     end
@@ -378,12 +384,17 @@ class HiveStagesExecuteTest < Minitest::Test
       task = build_task(dir)
       write_plan(task)
       write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
-      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: false)
+      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true)
 
-      result = with_fake_git_and_spawn(git, status: :ok) do
+      launched = false
+      result = with_fake_git_and_spawn(git, status: :ok, on_spawn: lambda {
+        launched = true
+        git.ancestor_result = false
+      }) do
         Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
       end
 
+      assert launched, "must exercise the post-agent ancestry check"
       marker = Hive::Markers.current(task.state_file)
       assert_equal({ commit: "execute_waiting_head_not_descendant", status: :execute_waiting }, result)
       assert_equal :execute_waiting, marker.name
@@ -562,12 +573,17 @@ class HiveStagesExecuteTest < Minitest::Test
       task = build_task(dir)
       write_plan(task)
       write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
-      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true, raise_ancestor: true)
+      git = FakeGit.new(head: "new-head", branch: task.slug, dirty: false, ancestor_result: true)
 
-      result = with_fake_git_and_spawn(git, status: :ok) do
+      launched = false
+      result = with_fake_git_and_spawn(git, status: :ok, on_spawn: lambda {
+        launched = true
+        git.raise_ancestor = true
+      }) do
         Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
       end
 
+      assert launched, "must exercise the post-agent ancestry check"
       marker = Hive::Markers.current(task.state_file)
       assert_equal({ commit: "execute_worktree_git_failed", status: :error }, result)
       assert_equal :error, marker.name
@@ -628,6 +644,40 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "limits_reached", marker.attrs["reason"]
       assert_equal "codex", marker.attrs["provider"]
       assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  # Supersedes #1473: a refused model is operator-owned, never a cooldown.
+  def test_run_pass_marks_model_unsupported_for_typed_and_raw_refusals
+    typed_message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; " \
+                    "#{Hive::ModelUnsupported::CONFIG_HINT}"
+    [
+      [ { status: :error, error_reason: "model_unsupported", error_message: typed_message }, "gpt-6-sol" ],
+      [ { status: :error,
+          error_message: "The 'gpt-6.1-sol' model is not supported when using Codex with a ChatGPT account." },
+        "gpt-6.1-sol" ]
+    ].each do |result, model|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        write_plan(task)
+        write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+        git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+
+        run_result = with_fake_git_and_spawn(git, result: result) do
+          Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+        end
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "model_unsupported", status: :error }, run_result)
+        assert_equal :error, marker.name
+        assert_equal "model_unsupported", marker.attrs["reason"]
+        assert_equal "codex", marker.attrs["provider"]
+        assert_equal model, marker.attrs["model"]
+        assert_equal "model unsupported for codex: '#{model}' is not available to this account; " \
+                     "#{Hive::ModelUnsupported::CONFIG_HINT}", marker.attrs["message"]
+        assert_nil marker.attrs["retry_after"]
+        refute Hive::AgentLimit.held?(marker.name, marker.attrs)
+      end
     end
   end
 
@@ -1399,6 +1449,135 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "base-head", pointer.fetch("execute_base_head")
       assert_equal "master", pointer.fetch("base_branch")
       assert_equal "base-head", pointer.fetch("base_oid")
+      assert_equal "origin/base-task", pointer.fetch("base_ref"),
+                   "the pointer must name the stacked ref base_oid came from"
+    end
+  end
+
+  def test_run_init_pass_uses_default_branch_for_dependency_lists
+    [ [ "base-task" ], %w[base-task other-task] ].each do |declaration|
+      with_tmp_dir do |dir|
+        task = build_task(dir, depends_on: declaration)
+        write_plan(task)
+        Hive::TaskMeta.write(
+          task.folder, id: 2, slug: task.slug, display_name: nil,
+          depends_on: declaration
+        )
+        declaration.each_with_index do |slug, index|
+          folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
+          FileUtils.mkdir_p(folder)
+          Hive::TaskMeta.write(folder, id: index + 1, slug: slug, display_name: nil)
+        end
+
+        fake_wt = FakeWorktree.new(path: File.join(dir, "worktrees", task.slug), create_calls: [])
+        project_git = Struct.new(:default_branch).new("master")
+        worktree_git = Struct.new(:head_sha).new("default-head")
+
+        with_replaced_singleton_method(
+          Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Worktree, :new, ->(_root, _slug, worktree_root:) { fake_wt }
+          ) do
+            with_replaced_singleton_method(
+              Hive::Stages::Execute, :run_pass,
+              ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }
+            ) do
+              Hive::Stages::Execute.run_init_pass(
+                task, { "worktree_root" => File.join(dir, "worktrees") }
+              )
+            end
+          end
+        end
+
+        assert_equal [
+          { branch_name: task.slug, default_branch: "master", base_override: nil }
+        ], fake_wt.create_calls
+      end
+    end
+  end
+
+  def test_run_init_pass_materializes_merged_prerequisite_commits_from_the_updated_default
+    with_tmp_dir do |dir|
+      remote = File.join(dir, "remote.git")
+      seed = File.join(dir, "seed")
+      project = File.join(dir, "project")
+      integrator = File.join(dir, "integrator")
+      worktree_root = File.join(dir, "worktrees")
+      prerequisites = %w[prerequisite-one prerequisite-two]
+
+      run!("git", "init", "--bare", "-b", "master", "--quiet", remote)
+      FileUtils.mkdir_p(seed)
+      run!("git", "-C", seed, "init", "-b", "master", "--quiet")
+      configure_git_identity(seed)
+      File.write(File.join(seed, "README.md"), "initial\n")
+      run!("git", "-C", seed, "add", "README.md")
+      run!("git", "-C", seed, "commit", "-m", "initial", "--quiet")
+      run!("git", "-C", seed, "remote", "add", "origin", remote)
+      run!("git", "-C", seed, "push", "-u", "origin", "master", "--quiet")
+
+      run!("git", "clone", "--quiet", remote, project)
+      run!("git", "clone", "--quiet", remote, integrator)
+      configure_git_identity(integrator)
+      stale_local_default = run!("git", "-C", project, "rev-parse", "master").strip
+
+      prerequisites.each do |slug|
+        run!("git", "-C", integrator, "checkout", "-b", slug, "--quiet")
+        File.write(File.join(integrator, "#{slug}.txt"), "#{slug} landed\n")
+        run!("git", "-C", integrator, "add", "#{slug}.txt")
+        run!("git", "-C", integrator, "commit", "-m", "implement #{slug}", "--quiet")
+        run!("git", "-C", integrator, "checkout", "master", "--quiet")
+        run!(
+          "git", "-C", integrator, "merge", "--no-ff", slug,
+          "-m", "merge #{slug}", "--quiet"
+        )
+      end
+      run!("git", "-C", integrator, "push", "origin", "master", "--quiet")
+      landed_default = run!("git", "-C", integrator, "rev-parse", "master").strip
+      refute_equal stale_local_default, landed_default
+      assert_equal stale_local_default,
+                   run!("git", "-C", project, "rev-parse", "master").strip,
+                   "the execution checkout must prove it refreshes origin, not reuse local master"
+
+      task = build_task(project, depends_on: prerequisites)
+      write_plan(task)
+      Hive::TaskMeta.write(
+        task.folder, id: task.id, slug: task.slug, display_name: nil,
+        depends_on: prerequisites
+      )
+      prerequisites.each_with_index do |slug, index|
+        folder = File.join(project, ".hive-state", "stages", "9-done", slug)
+        FileUtils.mkdir_p(folder)
+        Hive::TaskMeta.write(
+          folder, id: index + 10, slug: slug, display_name: nil,
+          completed_at: Time.utc(2026, 10, 14, 12, index)
+        )
+        File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Execute, :run_pass,
+        ->(_task, _cfg, _path, _identity, **) { { commit: nil, status: :ok } }
+      ) do
+        Hive::Stages::Execute.run_init_pass(
+          task,
+          { "default_branch" => "master", "worktree_root" => worktree_root },
+          nil
+        )
+      end
+
+      worktree = File.join(worktree_root, task.slug)
+      assert_equal({ commit: nil, status: :ok }, result)
+      assert_equal landed_default, run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+      prerequisites.each do |slug|
+        assert_equal "#{slug} landed\n", File.read(File.join(worktree, "#{slug}.txt"))
+      end
+      pointer = YAML.safe_load(File.read(task.worktree_yml_path))
+      assert_equal "master", pointer.fetch("base_branch")
+      assert_equal landed_default, pointer.fetch("base_oid")
+      assert_equal stale_local_default,
+                   run!("git", "-C", project, "rev-parse", "master").strip,
+                   "list execution must not move the developer's local default branch"
     end
   end
 
@@ -1828,9 +2007,16 @@ class HiveStagesExecuteTest < Minitest::Test
     { "execute" => { "agent" => agent } }
   end
 
-  def with_fake_git_and_spawn(git, status: :ok, result: nil)
+  def configure_git_identity(path)
+    run!("git", "-C", path, "config", "user.email", "test@example.com")
+    run!("git", "-C", path, "config", "user.name", "Test")
+    run!("git", "-C", path, "config", "commit.gpgsign", "false")
+  end
+
+  def with_fake_git_and_spawn(git, status: :ok, result: nil, on_spawn: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
       with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path, **_kwargs|
+        on_spawn&.call
         result || { status: status }
       }) do
         yield

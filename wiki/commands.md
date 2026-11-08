@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-08-29
+updated: 2026-11-07
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -18,8 +18,10 @@ semantic `hive task` detail, the
 `hive doctor` / consent-safe setup split for one canonical Hive
 operating skill projected to OpenClaw, Claude, Codex, Pi, and OpenCode, and the single
 ClawHub `hive-cli` listing whose installed slash command is `/hive`.
-The Ruby command/API contract lives in [[cli]] and the
-per-command pages. OpenClaw does not add a second runtime and does not publish
+[[cli]] is the navigation-only command-to-owner index. Each linked command or
+module page is the sole authority for that command's syntax, behavior, schema,
+serialization policy, and exits; the surface summaries below are orientation,
+not competing contracts. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
 
 ## Source Files
@@ -47,11 +49,6 @@ one ClawHub listing per Hive verb.
 - `hive.gemspec`
 - `.github/workflows/release.yml`
 - `.github/workflows/live-agent-skills.yml`
-- `packaging/docker/Dockerfile`
-- `packaging/docker/entrypoint.sh`
-- `packaging/docker/install-box.sh`
-- `packaging/docker/install-box.ps1`
-- `packaging/docker/README.md`
 - `openclaw/skills/hive/SKILL.md`
 - `openclaw/README.md`
 
@@ -68,19 +65,24 @@ lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer,
 the [[commands/pairing]] Telegram pairing approval surface,
-[[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
-its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
-authorized actions), and
+[[commands/refactor-patrol]] as the language-neutral architecture-patrol
+discovery surface (it routes evidence-backed theses but takes no actions), and
 [[commands/doctor]] read-only managed health reporting,
 [[commands/setup-agents]] consent-safe native provisioning,
 [[commands/task]] as the bounded read-only semantic result/usage/diagnostic
 surface for one exact task,
 `--json` envelopes where the command page says they exist.
 Bare `hive status` and `hive status --json` are the bounded current-liveness
-surface. `--operational --json` selects the v4 agent workflow document with a
+surface. `--operational --json` selects the v5 agent workflow document with a
 required nullable exact routing decision; `hive task`, `hive tui`, and
 `hive archive` own task detail, fleet browsing, and terminal history.
 [[commands/watch]] emits bounded semantic JSON Lines without shell polling.
+[[commands/context]] selects a named local or remote installation before project
+discovery. Supported remote task operations use the scoped `/api/v1` JSON API;
+[[commands/token]] administers server-local grants and [[commands/operation]]
+queries durable accepted work. [[remote-access]] owns deployment prerequisites
+and incident response. Local filesystem commands require an effective local
+context.
 `hive act` accepts only a fresh observation token for the one closed routine
 workflow-advance action and recomputes the verb under the task lock.
 The wrapper also normalizes command-local help before Thor dispatch:
@@ -98,9 +100,8 @@ exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
 errors use the last recognized JSON boolean flag, so `--json --no-json` and
 `--json --json=false` choose human prose instead of an error envelope. When the
-final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
-`JSON_USAGE_ERROR_CONTRACTS` emit command-shaped JSON before stderr, including
-unversioned `hive-setup` usage failures and Screenote connect/disconnect
+final recognized JSON flag is truthy, pre-dispatch Thor usage contracts declared in each command boundary emit
+command-shaped JSON before stderr, including versioned `hive-setup.v1` usage failures and Screenote connect/disconnect
 missing-`SERVICE` failures.
 
 After dispatch, commands whose published failures use the common
@@ -209,28 +210,18 @@ runs db:prepare, and execs `bin/rails server`. The web app reuses the same statu
 task-drop, agent-auth, repo, and Telegram setup contracts as the
 CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
-claim on an ownerless box. Production Action Cable accepts same-origin-as-host,
+claim on an ownerless instance. Production Action Cable accepts same-origin-as-host,
 with `web.origin` / `HIVE_WEB_ORIGIN` only as an extra allow for split-origin
 deploys. Task Drop is deliberately not daemon-queued: the web handler calls
 `Task#drop!`, which runs `Commands::Drop` in-process with the
 rendered `from` stage as a stale-page guard. Repo setup clones through `gh`,
-normalizes GitHub SSH origins to https, and relies on the Docker image's
-`gh auth git-credential` helper for GitHub push auth; the Agents page now starts
-the `gh auth login` PTY relay for that credential. Docker packaging adds the
-`hivebox-entrypoint` executable, which creates the `/data` XDG/home/repo
-directories and then runs `Hive::Web::Supervisor` unless custom argv is passed,
-and `packaging/docker/install-box.{sh,ps1}`, the one-command install entrypoints
-for `curl -fsSL https://hivecli.sh/box | sh` and
-`irm https://hivecli.sh/box.ps1 | iex`. Both pull
-`ghcr.io/ivankuznetsov/hivebox:latest` by default, start a named container,
-mount persistent data, and print the local URL; the PowerShell script is the
-native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
-would be the wrong interface. The release workflow publishes versioned and
-`latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
-packages the gem metadata required for the managed app's installed-root path
-dependency; the Rails source remains in the authenticated versioned release
-bundle. The app also ships in the Hivebox image at `/app/web` or runs from a
-source checkout.
+normalizes GitHub SSH origins to https so pushes use `gh`-supplied https
+credentials; the Agents page starts the `gh auth login` PTY relay for that
+credential. The gem packages the gem metadata required for the managed app's
+installed-root path dependency; the Rails source remains in the authenticated
+versioned release bundle, or runs from a source checkout. The Hivebox Docker
+distribution (image, one-command installers, container supervisor) was removed
+by ADR-055.
 
 ### E2E Harness
 
@@ -265,3 +256,11 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[commands/web]]
 - [[commands/setup]]
 - [[commands/screenote]]
+
+Command boundaries own static usage contracts, argv-dependent variants, extras,
+and custom payload builders through `Hive::CliUsageContracts`. The launcher
+resolves once after a usage rejection and reuses the exact contract for error
+classification and rendering. Missing contracts or failed resolution use human
+stderr, empty stdout, and generic usage exit 64. Only resolution failures add the
+bounded `[hive.cli] usage_contract_resolution_failed exception=CLASS` diagnostic;
+there is no second lookup during rendering.

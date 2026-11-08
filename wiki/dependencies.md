@@ -3,13 +3,15 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-08
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
 **TLDR**: Root development/test tooling is declared in `Gemfile`; the Rails
-hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, puma,
-and PRDigest are not `hive-cli` runtime dependencies. The web bundle owns
+Hive web app under `web/` carries its own bundle. Sinatra, rack-protection, and
+puma are not `hive-cli` runtime dependencies. PRDigest 0.4 supplies digest
+evidence and writing instructions; agent-cli-runtime 0.2.4 supplies agent
+execution. The web bundle owns
 Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
@@ -17,12 +19,147 @@ artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 ## Bundled secret detection
 
 Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,
-plus its MIT license. `ruby packaging/betterleaks.rb` downloads the pinned
-upstream archives and checks the per-platform SHA-256 values in
-`lib/hive/betterleaks.rb` before bundling. The release-candidate builder and
-Hivebox build run this step; Homebrew, AUR, and install.sh consume that gem.
-Generated binaries are ignored by Git. Source developers run the same bundling
-step or install Betterleaks locally. Runtime scans never download tools.
+plus its MIT license. `ruby packaging/betterleaks.rb` bundles all four pinned
+archives from `lib/hive/betterleaks.rb`, preserving executable mode 0755 and
+license mode 0644. The release-candidate builder runs this step; Homebrew, AUR,
+and install.sh consume that gem. Generated binaries are ignored by Git.
+Source developers run the bundling step or install Betterleaks locally.
+Runtime scans never download tools.
+
+### Verified archive cache
+
+Persistent caching is opt-in with `HIVE_BETTERLEAKS_CACHE_DIR`. Unset or empty
+values keep temporary-download operation. For local use, choose an absolute
+cache directory outside the repository working tree, specifically outside
+`lib/hive/assets/`: the gem's asset glob could otherwise package the cached
+archives themselves. This path constraint is an operator responsibility,
+without a new code gate. For example, from a checkout outside `$HOME/.cache`:
+
+```sh
+HIVE_BETTERLEAKS_CACHE_DIR="$HOME/.cache/hive/betterleaks-archives" ruby packaging/betterleaks.rb
+```
+
+Entries are `<cache_dir>/<pinned-sha256>.tar.gz`. Every use copies an entry into
+a private build directory and hashes that copy before extracting those same
+bytes. Only absent, corrupt, or inaccessible entries require downloads. Cache
+I/O failures emit concise diagnostics and fall back to verified temporary
+downloads. A verified download is published through a unique temporary file
+and atomic rename; failed publication still permits installation from the
+verified private archive. Invalid bytes never reach extraction or installation.
+Partial cache publications and private build files are cleaned up.
+
+For unchanged pins, all four readable, verified entries make packaging
+independent of release-download availability: it sends zero release requests.
+An incomplete cache, restoration failure, or access failure removes this outage
+guarantee. A cold run or a new-pin rollout can still fail.
+
+### Authentication, redirects, and retry limits
+
+Downloads prefer a nonblank `GITHUB_TOKEN`, then a nonblank `GH_TOKEN`, and
+support neither. CR/LF in a selected token is rejected with a redacted error
+before surrounding whitespace is stripped.
+Authorization is supplied through a private mode-0600 header file, cleaned up
+on success or failure. It is sent only to the HTTPS `github.com` origin on
+effective port 443, including same-origin redirects. A credentialed 401 or 403
+switches once to anonymous mode for the rest of that archive, restarting from
+the original release URL within the original deadline. This recovery rule does
+not assert that every 403 means an invalid token. CDN 403 responses are permanent
+failures; 429 responses are retryable and do not trigger authentication fallback.
+Raw headers, bodies, redirect URLs, curl stderr, and credentials are not logged.
+
+Ruby owns redirects and retries. Every hop requires HTTPS with normal TLS
+certificate verification. Relative redirects are resolved; HTTP downgrades,
+URL userinfo, malformed response chains, and chains exceeding ten redirects
+fail closed. Ambient curlrc files are disabled with `--disable` first;
+proxy and certificate environment settings remain inherited. Curl performs
+neither automatic redirects nor nested retries. The
+[curl manual](https://curl.se/docs/manpage.html) describes the header-file,
+response-header, and timeout options used here.
+
+An anonymous out-of-band capture on 2026-11-08 observed HTTP/2 302 from
+`github.com` to `release-assets.githubusercontent.com`, followed by HTTP/2 200.
+Sanitized fixtures preserve those header blocks, replacing signed/expiring
+values. Tests also cover proxy CONNECT and interim response blocks. This capture
+used a separate curl command, not the rewritten transport. The production
+endpoint limitation remains recorded in [[gaps]].
+
+Each required archive starts one monotonic download deadline set by
+`DOWNLOAD_BUDGET` in `packaging/betterleaks.rb` (currently 300 seconds).
+Requests, redirects, auth fallback, and backoff share it; each curl hop receives
+a total timeout no larger than the remaining time and a connection timeout no
+larger than 15 seconds or that remainder. A parent process deadline kills and
+reaps an overdue subprocess. Transient transport failures, HTTP 408/429/5xx,
+and checksum mismatches retry with delays of 5, 10, 20, then 30 seconds, capped
+by remaining time. Missing/unusable curl, non-transient curl exits, TLS/policy errors, and
+other permanent HTTP failures stop promptly with redacted diagnostics.
+Exhaustion reports the budget and last failure category (HTTP status, transport
+exit code, checksum mismatch, or no prior failure), and stops packaging before a
+later platform starts. Post-transfer hashing may finish after the deadline;
+verified bytes from an in-budget transfer are accepted. Every cache and
+successful-response path retains authoritative digest verification.
+
+A cold four-archive run can approach 4 × 300s = 1200s (20m) if earlier archives
+succeed near their deadlines. The existing `ci.yml` job limits remain:
+
+| Job | Whole-job timeout |
+| --- | --- |
+| `coverage-shards` | 20m |
+| `expensive-test-gates` | 15m |
+| `e2e` | 20m |
+| `web-tests` | 20m |
+| `launchd-macos` | 15m |
+
+These budgets include setup and actual tests. In that worst-case cold run the
+runner cancels packaging before the active archive deadline expires: no deadline
+diagnostic is emitted, and the operator sees an opaque maximum-execution-time
+cancellation. The old `--retry 3 --retry-max-time 60 --max-time 120` settings put
+a simple stalled-transfer four-archive scenario near 8 minutes, versus the new
+near-20-minute allowance. That old estimate was not a strict end-to-end bound:
+retry-max-time limits starting another attempt. There is no whole-invocation
+budget setting and neither 15-minute job timeout is raised. This work does not
+promise that every cold run succeeds or prove execution on all architectures.
+
+### CI cache visibility and pin changes
+
+All eight packaging paths in `ci.yml`, `live-agent-skills.yml`, and
+`release-candidate.yml` restore `actions/cache` at the repository's pinned
+revision. They pass `${{ runner.temp }}/betterleaks-archives`, outside source
+exports. Each cache contains all four target archives and uses:
+
+```text
+key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+restore-keys: betterleaks-archives-v1-${{ runner.os }}-
+```
+
+Packaging always revalidates, including on a cache hit. Only digest-named
+archives are cached, never extracted binaries or authentication files.
+The five dedicated CI packaging steps and the live-agent-skills build step
+receive `GITHUB_TOKEN: ${{ github.token }}`. The latter is a multiline step and
+shares that environment with `gem build` and the live-agent artifact builder.
+Both release-candidate consumers use anonymous downloads; the candidate cache
+step has the same fresh-build condition as its builder. See [[release-candidate]].
+
+An exact-key warm cache needs a prior successful save for that source-file hash
+and runner OS on an accessible ref. GitHub searches the current ref and default
+branch, plus a pull request's base branch; arbitrary sibling refs are not
+visible. PR merge-ref saves do not warm main. The prefix can restore entries
+from another file hash, so an exact-key miss need not mean cold archives.
+These are the [Actions cache matching and scope rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+A full version/pin bump changes the exact key and introduces four digests
+without prior saved entries. All eight paths are fully cold until successful
+jobs save the new archives within accessible ref/OS scopes. PR re-runs remain
+cold until that save. A later push to main is cold again if only PR-scoped
+saves exist, until a main job succeeds and saves. A partial pin bump reuses
+unchanged digests through the prefix; a comment or host-detection-only edit
+can remain fully warm. Stale entries cannot substitute for required pins:
+filenames are digest-specific, and private copies are rehashed before use.
+
+Actions caches are immutable. Local repairs work immediately, but persisting a
+repair to an exact-key corrupt remote cache can require eviction or a cache-key
+namespace bump. Failed jobs might never save new entries, and concurrent jobs
+may race to save the same key. Neither a restore nor a save is an availability
+guarantee.
 
 Detection uses the upstream rules with network validation disabled. Hive turns
 off global path exclusions, supplies a private policy-free Git view, and ignores
@@ -31,6 +168,11 @@ locations, redacted snippets, and exact-match hashes. Missing/failed scanners
 fail closed; they are not a clean scan.
 
 ## GitHub Actions
+
+The main CI workflow pins its Linux jobs to `ubuntu-24.04`. This keeps the
+Ruby coverage, Bubblewrap sandbox, and Playwright system-test environment
+stable while `ubuntu-latest` advances independently; release and installation
+workflows likewise use explicit runner labels where their proof requires them.
 
 Every canonical and generated-mirror workflow pins `actions/checkout` v7.0.1
 to immutable commit `3d3c42e5aac5ba805825da76410c181273ba90b1`.
@@ -41,8 +183,8 @@ the runner floor unchanged. Exact-SHA pins prevent a mutable tag from changing
 the executable workflow dependency between review and execution, while the
 trailing version comments keep Dependabot updates legible.
 
-All seven `actions/upload-artifact` calls likewise pin v7.0.1 to
-`043fb46d1a93c77aae656e7c1c64a875d1fc6a0a`. They retain archive mode and
+All seven `actions/upload-artifact` calls likewise pin v7.0.2 to
+`cf430e030ddbb5b0abf93d22962f4752f3646cd9`. They retain archive mode and
 their existing missing-file, hidden-file, and retention policies; Hive does
 not enable v7's single-file direct-upload mode. Upload jobs run only on
 GitHub-hosted runners, satisfying the Node 24 runner floor introduced in v6.
@@ -53,12 +195,17 @@ The live-agent validation workflow pins `actions/setup-node` v7.0.0 to
 v7 ESM migration does not change Hive's workflow contract. The job runs on a
 GitHub-hosted runner.
 
-All nine paired `actions/download-artifact` calls pin v8.0.1 to
-`3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c`. Existing artifact names,
+The `actions/download-artifact` workflow calls pin v8.0.2 to
+`9000827ccba6bdab643e8b6fd33ac0654aef8333`. Existing artifact names,
 patterns, merge behavior, and destinations remain unchanged. Hive keeps
 archive-mode uploads, while v8's default strict digest verification causes a
 corrupted or substituted artifact to fail the job instead of merely warning.
 The downloads run on GitHub-hosted runners, satisfying the Node 24 floor.
+
+The Linux CI jobs explicitly use `ubuntu-24.04`. This holds the tested runner
+image steady while the pinned Playwright 1.60.0 system-test toolchain remains
+unsupported on Ubuntu 26.04; the pin applies equally to coverage and web jobs
+so their sandbox behavior stays comparable.
 
 The same workflow pins `actions/github-script` v9.0.0 to
 `3a2844b7e9c422d3c10d287c895573f7108da1b3` for its trusted Check Run
@@ -68,9 +215,9 @@ a local `getOctokit`, so the v9 module-loading changes do not alter this script.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The v0.7.2 release-prep checkout is `0.7.2`: `lib/hive/version.rb`, root
+tools. The v0.8.0 release-prep checkout is `0.8.0`: `lib/hive/version.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.7.2)`. The release-prep change keeps both lockfiles synchronized
+`hive-cli (0.8.0)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
 commits also bumped RuboCop to 1.88.2, Brakeman from
 8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
@@ -102,12 +249,20 @@ dying in seconds rather than as a test failure.
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
 | `erb` | `>= 4.0` (locked 6.0.6 in root and web) | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. The 6.0.6 patch fixes ERB's standalone `-h` CLI path; Hive's rendering API is unchanged. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
-| `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
+| `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
-| `sequel` | `~> 5.107` (locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
-| `sqlite3` | `~> 2.0` (locked 2.9.6) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
+| `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
+| `sqlite3` | `~> 2.0` (root and web locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.10.2 or newer to avoid GHSA-4fqr-96q8-xrfx (query truncation for strings of at least 4 GiB), as well as GHSA-mwm8-39rw-8826. |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
+
+The benchmark runner builds and installs `components/agent-cli-runtime` from
+its exact Hive source archive before installing `hive-cli`, then checks that
+provider-error extraction and the OpenCode permission compiler load. This keeps
+Hive's compatible dependency constraint from selecting an older published patch.
+The root-only control bundle contains Hive and its dependencies; the candidate
+bundle excludes `hive-cli` but retains shared dependency gems, including
+`agent-cli-runtime`.
 
 `telegram-bot-ruby` also pulls Faraday and `faraday-multipart`, but
 Hive declares both directly because `Hive::Bot::Transcriber` requires
@@ -116,17 +271,29 @@ OpenAI-compatible audio transcription endpoint. `Gemfile.lock` keeps
 `faraday` at `2.14.2` or newer because `bundler-audit` flags `2.14.1`
 for CVE-2026-33637 / GHSA-5rv5-xj5j-3484.
 
+The root bundle locks transitive Rack at 3.2.8 or newer. The
+`bundler-audit` CI job runs against the current advisory database, which flags
+3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
+change for the compatible patch update.
+
+Both root and packaged-web bundles lock transitive `addressable` at 2.9.2.
+The advisory database flags 2.9.0 for seven 2026 advisories. The 2.9.1
+security floor fixes the November 2026 template regular-expression denial-of-service,
+URI host/path normalization, and misleading display-host advisories reported by
+`bundler-audit`; compatible patch updates preserve the existing dependency
+constraints.
+
 ## Web app bundle
 
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
-execs the Rails app from a source checkout or Docker image, and
+execs the Rails app from the managed bundle or a source checkout, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.
 Managed release bundles authenticate `SHA256SUMS` against the exact release
 workflow identity and expected version tag before dependency installation.
-The Hivebox `ruby:3.4-slim` build installs the `libffi-dev` system package
-because the explicit `fiddle` runtime gem compiles against libffi headers.
+The explicit `fiddle` runtime gem compiles against libffi headers, so hosts
+building it need the libffi development package.
 
-Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3.1),
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.4.1),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
 jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
 image_processing, and `hive-cli` from the parent checkout. Redcarpet
@@ -141,10 +308,17 @@ Direct web development/test dependencies include `debug`,
 `capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
-`Rack::Test::UploadedFile`.
+`Rack::Test::UploadedFile`. The web lock also pins the sanitization chain at
+`nokogiri` 1.19.7, `loofah` 2.25.3, and `rails-html-sanitizer` 1.7.2: the
+2026-11 advisory refresh requires those patch levels for the active
+`bundler-audit` database.
 
-Rails 8.1.3.1 is the minimum locked web release for the
-CVE-2026-66066 Active Storage/libvips security fix. Production images install
+Rails 8.1.4.1 is the minimum locked web release. 8.1.3.1 carried the
+CVE-2026-66066 Active Storage/libvips security fix. 8.1.4.1 adds the
+2026-11-04 Active Support fixes: MessagePack serializer XSS
+(GHSA-2w9f-fxwj-w2qf) and `safe_constantize` DoS (GHSA-8474-xrp6-wh69).
+The root lock's transitive `activesupport`, pulled in by the RuboCop Rails
+plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
 
@@ -160,7 +334,7 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 |-----|---------|---------|
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
-| `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop` | `~> 1.91` (locked 1.91.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 | `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
 | `brakeman` | `~> 8.0` (locked 8.0.5 in the root bundle; 8.0.4 in the web bundle) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
 | `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
@@ -202,17 +376,17 @@ These are not gems but the CLI tools the runtime invokes:
 | Tool | Min version | Used by |
 |------|-------------|---------|
 | `claude` | 2.1.118 | every active stage; verified by `Hive::Agent.check_version!` |
-| `codex` | 0.147.0 for managed capture permissions; Hivebox pins exact 0.147.0 | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
+| `codex` | 0.147.0 for managed capture permissions | outcome-evidence producers use Codex managed limited networking, local binding, and filesystem permissions; earlier builds do not provide the required one-origin isolation contract |
 | `gh` | (any auth-supporting recent) | `Hive::Gh` (`auth status`, `pr list`, `pr view` for PR state checks, secret-scan, dedupe, status rollups, and babysitter context), `Hive::Web::AgentsAuth` (`gh auth status` plus the PTY relay for `gh auth login --web`), `Stages::OpenPr` (agent invokes `gh pr create` from its prompt), `Stages::Finalize` (runner owns `gh pr ready`; agent does `gh pr edit --body-file`), `Stages::Review::GithubPublisher` (`gh pr comment` for review mirroring). |
 | `git` | 2.40+ (worktree, symbolic-ref, etc.) | `Hive::GitOps`, `Hive::Worktree`, `Init`/`New` commands |
-| `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
+| `tmux` | 3.0+ (3.6a verified locally) | not a Hive runtime dependency (Claude launches headless-only; `hive setup` does not check it). Used only by the TUI e2e harness (`bin/hive-e2e` requires it for TUI scenarios; tests run on private sockets) |
 | GNU `timeout` / `gtimeout` | any recent GNU coreutils | hard execution bounds for managed llm-wiki Git-ref, QMD, and provider subprocesses; Linux coreutils normally supplies `timeout`, while GNU coreutils on macOS supplies `gtimeout` |
 | `qmd` | exact `@tobilu/qmd@2.5.3` plus checked-in sha512 integrity | managed llm-wiki semantic search/index maintenance; its one downloaded tarball is locally integrity-checked, installed and native-health-checked in a staging tree, then activated without sacrificing the previous healthy tree on failure |
 | `npm` | any recent npm with Node.js and local Node development headers | bounded downloader for the integrity-checked QMD tarball and locked dependency closure; lifecycle scripts stay disabled, and Hive builds better-sqlite3 from locked source with the locked node-gyp in offline mode |
-| `agent-browser` | exact 0.34.0 native package in `lib/hive/assets/capture-tools/package-lock.json` | the sole web screenshot/video driver for outcome evidence and supervised Hivebox capture; Hive installs a managed Chrome payload and gives producers an exact controller-owned session behind a one-origin proxy |
+| `agent-browser` | exact 0.34.0 native package in `lib/hive/assets/capture-tools/package-lock.json` | the sole web screenshot/video driver for outcome evidence and the supervised built-in web capture; Hive installs a managed Chrome payload and gives producers an exact controller-owned session behind a one-origin proxy |
 | `ffmpeg` / `ffprobe` | any recent | proof media decode/duration checks and manual `web/script/record_box_demo.rb` conversion |
 | Tesseract | any recent | OCR preflight that rejects secret-shaped content in retained screenshots and sampled video frames |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional legacy/e2e failure capture only; outcome evidence uses Hive's native Ruby PTY recorder under controller process custody and Hivebox no longer installs asciinema |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional legacy/e2e failure capture only; outcome evidence uses Hive's native Ruby PTY recorder under controller process custody |
 | `agg` / `vhs` | not shipped | optional terminal-GIF renderers; outcome evidence retains a `.cast` plus bounded text and does not require GIF conversion |
 | Playwright | exact npm metadata 1.60.0 in `web/package-lock.json` | Rails system tests and manual demo scripts only; it is not an outcome-evidence capture interface |
 
@@ -255,7 +429,7 @@ an ambiguous command-not-found failure.
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.7.2)`.
+2.7.2, and the current local path gem as `hive-cli (0.8.0)`.
 
 ## Backlinks
 
@@ -264,3 +438,9 @@ an ambiguous command-not-found failure.
 - [[modules/agent]]
 - [[commands/bot]]
 - [[e2e]]
+
+## Release container builder action
+
+Retired. The release and recovery workflows no longer build container images
+(ADR-055), so `docker/setup-buildx-action`, `docker/login-action`, and
+`docker/build-push-action` are no longer pinned anywhere in `.github/`.

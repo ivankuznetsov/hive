@@ -27,8 +27,8 @@ test:
 #
 # Similarly, if you deploy your application as a Docker container, you must
 # ensure the database is located in a persisted volume.
-# Production sqlite files live under HIVE_WEB_STORAGE_DIR (hive's state
-# home — the /data mount in the container) so image upgrades keep them.
+# Production sqlite files live under HIVE_WEB_STORAGE_DIR (under hive's
+# state home) so web bundle upgrades keep them.
 production:
   primary:
     <<: *default

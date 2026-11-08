@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-08-21
+updated: 2026-09-25
 tags: [command, patrol, review, findings]
 ---
 
@@ -19,6 +19,8 @@ requests, or create review tasks.
 hive patrol my-project
 hive patrol my-project --dry-run
 hive patrol my-project --json
+hive patrol my-project --once --json
+hive patrol my-project --once --dry-run
 hive patrol my-project --list
 hive patrol my-project --list --json
 ```
@@ -27,6 +29,17 @@ The project must be registered, use the `coding` default workflow, and have
 Patrol enabled. `--list` reads the bounded finding projection without starting
 a review. `--dry-run` maps and reviews but does not persist findings, cursors,
 or admission records.
+
+`--once` runs one scheduler admission round for the project under the shared
+project-execution guard and always emits `hive-one-shot.v1`, even when `--json`
+is omitted. It observes all eligible work, but preserves the durable launch
+allowance, post-reservation scan cadence, and failure backoff. An explicit
+one-shot may refresh external observations early; it cannot reserve another
+scan inside an unexpired policy gate. It also restores the daemon controller's
+persisted project-drop hold, which suppresses the scan and reports operator
+action instead of runnable work. `--once --dry-run` admits nothing and reports
+otherwise eligible work as `runnable_now`. `--once` cannot be combined with
+`--list`.
 
 ## Discovery lifecycle
 
@@ -51,6 +64,11 @@ validation, review, and publication. Discovery has no publication policy or
 GitHub mutation capability.
 
 ## Output
+
+Pre-dispatch usage failures, including a missing `PROJECT` or extra
+positionals, use the `hive-patrol.v3` error arm with `error_kind: "error"`.
+When `--once` is present, the same failures use the shared `hive-one-shot.v1`
+error envelope instead.
 
 `--json` emits `hive-patrol.v3`. Its historical delivery fields remain present
 for schema compatibility but are fixed to the discovery-only values:
@@ -93,6 +111,20 @@ capacity admission. Legacy ordinary findings without `target_sha` bind to the
 current default-branch revision, and secret-like evidence is redacted before
 it enters admission state. There is no runtime Patrol Fix migration, cutover,
 or dual-write subsystem.
+
+## Serialization and exit codes
+
+Success and error documents are encoded directly. A `JSON::GeneratorError` is
+not replaced with prose or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Discovery/listing completed, including a dry run or zero findings. |
+| 1 | An ordinary Patrol state or review invariant failed. |
+| 64 | The public argument shape was invalid before dispatch. |
+| 70 | An unexpected exception was wrapped as an internal error. |
+| 75 | A concurrent scan/state lock made the cycle temporarily unavailable. |
+| 78 | The project was unknown, ineligible, or had invalid configuration. |
 
 ## Backlinks
 

@@ -66,7 +66,8 @@ module Hive
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.
           status_mode: stage.status_mode || :state_file_marker,
-          cfg: cfg
+          cfg: cfg,
+          mcp_scope: stage.name
         )
 
         marker = Hive::Markers.current(output_path)
@@ -88,9 +89,7 @@ module Hive
               reason: "limits_reached",
               provider: profile.name,
               message: result[:error_message].to_s[0, 200],
-              retry_after: Hive::AgentLimit.retry_after(
-                text: result[:limit_text] || result[:error_message]
-              )
+              retry_after: Hive::AgentLimit.retry_after(text: limit_error_text(result))
             )
           else
             # A preflight/version failure writes no marker. Replace any stale
@@ -162,10 +161,18 @@ module Hive
         end.join("\n\n")[0, 8000]
       end
 
+      # The runtime's nonempty limit_text is authoritative; formatted and raw
+      # error messages cover results that omit that typed provider-wall signal.
       def limit_error_envelope?(result)
-        Hive::AgentLimit.limit_reached?(result[:limit_text].to_s) ||
+        !result[:limit_text].to_s.empty? ||
           Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
           Hive::AgentLimit.limit_reached?(result[:error_message].to_s)
+      end
+
+      # Prefer provider-wall text because it can carry the reset date.
+      def limit_error_text(result)
+        text = result[:limit_text].to_s
+        text.empty? ? result[:error_message].to_s : text
       end
 
       def action_for(marker_name)

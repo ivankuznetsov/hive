@@ -3,8 +3,6 @@ require "open3"
 
 class PackagingVerifyReleaseTest < Minitest::Test
   SCRIPT = File.expand_path("../../../packaging/verify-release.sh", __dir__).freeze
-  HIVEBOX_SMOKE = File.expand_path("../../../packaging/docker/smoke.sh", __dir__).freeze
-  HIVEBOX_DOCKERFILE = File.expand_path("../../../packaging/docker/Dockerfile", __dir__).freeze
   RELEASE_WORKFLOW = File.expand_path("../../../.github/workflows/release.yml", __dir__).freeze
   INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
   MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
@@ -41,49 +39,14 @@ class PackagingVerifyReleaseTest < Minitest::Test
                     "the fake service manager must be on PATH before install.sh can run Hive"
   end
 
-  def test_hivebox_smoke_requires_daemon_backed_health
-    body = File.read(HIVEBOX_SMOKE)
-
-    assert_includes body, 'smoke_curl -fsS "http://127.0.0.1:${PORT}/health?deep=1"'
-    assert_includes body, "FAIL /health?deep=1 never stayed healthy"
-    assert_includes body, 'while [ "$stable_deep_health" -lt 11 ]'
-    assert_includes body, 'curl --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME"'
-    assert_includes body, "deep_health_deadline=$(($(date +%s) + 120))"
-    assert_operator body.index("/health?deep=1"), :<, body.index('body="$(smoke_curl -fsS')
-    assert_operator body.rindex("/health?deep=1"), :>, body.index("unauthenticated / expected 302")
-    assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
-    assert_includes body, "FAIL baked /app/web assets are incomplete"
-  end
-
-  def test_hivebox_smoke_fetches_every_stylesheet_and_javascript_advertised_by_login
-    body = File.read(HIVEBOX_SMOKE)
-
-    assert_includes body, "stylesheet_path="
-    assert_includes body, "javascript_path="
-    assert_includes body, "asset_paths="
-    assert_includes body, "for asset_path in $asset_paths"
-    assert_includes body, 'smoke_curl -fsS "http://127.0.0.1:${PORT}${asset_path}"'
-    assert_includes body, 'Hive::Web::AppBundle.assets_ready?("/app/web")'
-  end
-
-  def test_hivebox_installs_the_native_fiddle_build_dependency
-    body = File.read(HIVEBOX_DOCKERFILE)
-
-    assert_includes body, "libffi-dev"
-    assert_operator body.index("libffi-dev"), :<, body.index("bundle install")
-  end
-
-  def test_release_promotes_only_the_two_native_smoked_digests
+  def test_release_no_longer_builds_or_publishes_a_hivebox_image
     body = File.read(RELEASE_WORKFLOW)
 
-    assert_equal 2, body.scan("push-by-digest=true").size
-    assert_includes body, "needs: [hivebox-image-amd64, hivebox-image-arm64]"
-    assert_includes body, "AMD64_DIGEST: ${{ needs.hivebox-image-amd64.outputs.digest }}"
-    assert_includes body, "ARM64_DIGEST: ${{ needs.hivebox-image-arm64.outputs.digest }}"
-    assert_includes body, "docker buildx imagetools create"
-    refute_includes body, "platforms: linux/amd64,linux/arm64"
+    refute_match(/hivebox/i, body)
+    refute_includes body, "docker/build-push-action"
+    refute_includes body, "packages: write"
+    refute_path_exists File.expand_path("../../../packaging/docker", __dir__)
   end
-
 
   def test_release_verifier_authenticates_managed_web_before_extraction
     body = File.read(SCRIPT)
@@ -113,6 +76,59 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes setup, 'SERVICE_MANAGER_BIN="$SANDBOX/service-manager-bin"'
   end
 
+  def test_managed_web_systemd_fixture_reports_install_and_reload_transitions
+    [ MANAGED_WEB_SETUP, SCRIPT ].each do |fixture|
+      assert_systemd_fixture_transitions(fixture)
+    end
+  end
+
+  def assert_systemd_fixture_transitions(fixture)
+    assert_includes File.read(fixture), 'cp "$REPO_ROOT/packaging/fixtures/systemctl" "$SERVICE_MANAGER_BIN/systemctl"'
+    body = File.read(File.expand_path("../../../packaging/fixtures/systemctl", __dir__))
+    Dir.mktmpdir do |root|
+      script = File.join(root, "systemctl")
+      File.write(script, body)
+      File.chmod(0o755, script)
+      unit_dir = File.join(root, ".config/systemd/user")
+      FileUtils.mkdir_p(unit_dir)
+      unit = "hive-web.service"
+      query = lambda do
+        output, status = Open3.capture2({ "HOME" => root }, script, "--user", "show", unit.delete_suffix(".service"))
+        assert status.success?
+        output.lines.to_h { |line| line.chomp.split("=", 2) }
+      end
+      action = lambda do |*argv|
+        _output, status = Open3.capture2({ "HOME" => root }, script, "--user", *argv)
+        assert status.success?
+      end
+
+      assert_equal "not-found", query.call.fetch("LoadState")
+      File.write(File.join(unit_dir, unit), "[Service]\nExecStart=/bin/true\n")
+      action.call("daemon-reload")
+      action.call("enable", "--now", unit)
+      installed = query.call
+      assert_equal "loaded", installed.fetch("LoadState")
+      assert_equal File.join(unit_dir, unit), installed.fetch("FragmentPath")
+      assert_equal "enabled", installed.fetch("UnitFileState")
+      assert_equal "active", installed.fetch("ActiveState")
+      assert_equal "no", installed.fetch("NeedDaemonReload")
+
+      File.write(File.join(unit_dir, unit), "[Service]\nExecStart=/bin/false\n")
+      assert_equal "yes", query.call.fetch("NeedDaemonReload")
+      action.call("daemon-reload")
+      assert_equal "no", query.call.fetch("NeedDaemonReload")
+      original_pid = query.call.fetch("MainPID")
+      action.call("restart", unit)
+      refute_equal original_pid, query.call.fetch("MainPID")
+      action.call("disable", "--now", unit)
+      assert_equal "inactive", query.call.fetch("ActiveState")
+      assert_equal "disabled", query.call.fetch("UnitFileState")
+      File.unlink(File.join(unit_dir, unit))
+      action.call("daemon-reload")
+      assert_equal "not-found", query.call.fetch("LoadState")
+    end
+  end
+
   def test_managed_web_verifier_keeps_bundler_available_under_candidate_gem_isolation
     setup = File.read(MANAGED_WEB_SETUP)
 
@@ -135,7 +151,9 @@ class PackagingVerifyReleaseTest < Minitest::Test
         printf 'candidate\n' > "$HIVE_HOME/web/.hive-web-version"
         : > "$HOME/.config/systemd/user/hive-daemon.service"
         : > "$HOME/.config/systemd/user/hive-web.service"
-        printf '%s\n' '{"schema":"hive-setup","mode":"managed_service","ok":false,"phases":[{"name":"agent_skills","ok":false,"classification":"residual_failure"},{"name":"web_bundle","ok":true},{"name":"daemon_service","ok":true},{"name":"web_service","ok":true},{"name":"web","ok":true}]}'
+        url="$(ruby -ryaml -e 'print YAML.load_file(File.join(ENV.fetch("HIVE_HOME"), "config.yml")).fetch("web").fetch("origin")')"
+        curl --fail --silent "$url/health" >/dev/null
+        printf '%s\n' '{"schema":"hive-setup","mode":"managed_service","ok":false,"phases":[{"name":"agent_skills","ok":false,"classification":"residual_failure"},{"name":"web_bundle","ok":true},{"name":"daemon_service","ok":true},{"name":"web_service","ok":true},{"name":"web","ok":true}]}' | jq --arg url "$url" '. + {url: $url}'
         exit 1
       SH
 
@@ -158,48 +176,6 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, "hive-web-${HIVE_VERSION#v}.tar.gz"
     assert_includes body, 'echo "capable=true" >> "$GITHUB_OUTPUT"'
     assert_includes body, "steps.release.outputs.capable == 'true'"
-  end
-
-  def test_hivebox_smoke_rejects_one_transient_deep_health_success
-    Dir.mktmpdir("hivebox-smoke-stubs") do |dir|
-      bin = File.join(dir, "bin")
-      FileUtils.mkdir_p(bin)
-      write_executable(File.join(bin, "docker"), <<~SH)
-        #!/bin/sh
-        case "$1" in
-          port) printf '127.0.0.1:4567\n' ;;
-          *) exit 0 ;;
-        esac
-      SH
-      write_executable(File.join(bin, "sleep"), "#!/bin/sh\nexit 0\n")
-      write_executable(File.join(bin, "curl"), <<~'SH')
-        #!/bin/sh
-        case "$*" in
-          *'/health?deep=1'*)
-            count=0
-            [ ! -f "$FAKE_DEEP_COUNT" ] || count="$(cat "$FAKE_DEEP_COUNT")"
-            count=$((count + 1))
-            printf '%s\n' "$count" >"$FAKE_DEEP_COUNT"
-            [ "$count" -eq 1 ] && exit 0
-            exit 22
-            ;;
-          *'/health'*) exit 0 ;;
-          *'/login'*) printf '%s\n' 'first GitHub sign-in becomes its owner' ;;
-          *) printf '302' ;;
-        esac
-      SH
-
-      count_file = File.join(dir, "deep-count")
-      out, err, status = Open3.capture3(
-        { "PATH" => "#{bin}:#{ENV.fetch('PATH')}", "FAKE_DEEP_COUNT" => count_file },
-        "/bin/sh", HIVEBOX_SMOKE, "fake:hivebox"
-      )
-
-      refute status.success?, "a one-probe deep-health gate would incorrectly pass the transient daemon"
-      assert_includes "#{out}\n#{err}", "FAIL /health?deep=1 never stayed healthy"
-      assert_operator File.read(count_file).to_i, :>, 1,
-                      "the smoke must keep probing after the transient success"
-    end
   end
 
   private

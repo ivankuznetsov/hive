@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest-prune.v1.json",
+  "title": "Hive daily activity digest prune envelope (v1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "before", "dry_run", "eligible", "pruned"],
+      "properties": {
+        "schema": { "const": "hive-digest-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "before": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+        "dry_run": { "type": "boolean" },
+        "eligible": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+        },
+        "pruned": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+        }
+      }
+    },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-digest-prune" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "confirmation_required", "invalid_date", "missing", "immutable", "config", "digest_error", "internal"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

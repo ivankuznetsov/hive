@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/invoked_binary"
+require "hive/one_shot/result"
 
 class HiveCommandsBabysitTest < Minitest::Test
   include HiveTestHelper
@@ -44,6 +45,7 @@ class HiveCommandsBabysitTest < Minitest::Test
   end
 
   def test_start_writes_pid_runs_dispatcher_and_cleans_pid
+    activate_test_control_plane(@home)
     command = babysit("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])
     captured = nil
@@ -62,7 +64,23 @@ class HiveCommandsBabysitTest < Minitest::Test
 
     assert_equal [ :run_forever ], dispatcher.calls
     assert_equal true, captured.fetch(:dry_run)
+    assert captured.fetch(:persistent_admission).call
     refute File.exist?(command.pid_file)
+  end
+
+  def test_once_default_adapter_honors_persistent_installation_admission
+    activate_test_control_plane(@home)
+    entry = { "name" => "proj", "path" => "/tmp/proj", "hive_state_path" => "/tmp/proj/.hive-state" }
+    adapter = babysit(nil, once: true).send(:one_shot_adapter, entry)
+    probe = adapter.instance_variable_get(:@admission_open)
+
+    assert probe.call
+    Hive::RuntimeControlPlane::LifecycleRepository.new(
+      database: Hive::RuntimeControlPlane::Database.new(
+        path: Hive::Paths.runtime_control_plane_path(@home)
+      ).open!
+    ).begin_quiesce!(deadline_monotonic: 700, boot_id: "boot", shutdown_grace_sec: 120)
+    refute probe.call
   end
 
   def test_start_refuses_when_pid_file_points_to_live_babysitter
@@ -128,12 +146,9 @@ class HiveCommandsBabysitTest < Minitest::Test
     assert_includes error, "service restarted"
   end
 
-  def test_install_stops_a_detached_babysitter_before_enabling_service
+  def test_install_passes_the_legacy_process_home_to_the_service_owner
     events = []
     installer = Object.new
-    installer.define_singleton_method(:service_lifecycle_state) do
-      { "service_manager_available" => true, "service_running" => false }
-    end
     installer.define_singleton_method(:install!) do |**_kwargs|
       events << :install
       Struct.new(:kind, :backup_path, :success?, :drifted?, :failed?).new(
@@ -142,43 +157,46 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
     installer.define_singleton_method(:messages) { [] }
     installer.define_singleton_method(:target_path) { "/tmp/hive-babysitter.service" }
+    installer_args = nil
+    command = babysit("install")
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, lambda { |**kwargs|
+        installer_args = kwargs
+        installer
+      }) do
+        capture_io { command.call }
+      end
+    end
+
+    assert_equal @home, installer_args.fetch(:hive_home)
+    assert_equal "/usr/bin/hive", installer_args.fetch(:binary_path)
+    assert_equal [ :install ], events
+  end
+
+  def test_legacy_takeover_reuses_the_babysitter_stop_policy
     FileUtils.mkdir_p(@home)
     File.write(File.join(@home, ".babysitter.pid"), "pid")
-    stopper = Object.new
-    stopper.define_singleton_method(:call) { events << :stop }
+    takeover = Hive::Commands::Babysit::ServiceInstaller::LegacyTakeover.new(hive_home: @home)
     stop_args = nil
-    command = babysit("install")
+    home = @home
+    stopper = Object.new
+    stopper.define_singleton_method(:call) do
+      FileUtils.rm_f(File.join(home, ".babysitter.pid"))
+    end
 
     with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |subcommand, **kwargs|
       stop_args = [ subcommand, kwargs ]
       stopper
     }) do
-      with_replaced_singleton_method(Hive::InvokedBinary, :path, -> { "/usr/bin/hive" }) do
-        with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-          capture_io { command.call }
-        end
-      end
+      assert takeover.pending?
+      assert takeover.stop!
     end
 
     assert_equal "stop", stop_args.first
     assert_equal @home, stop_args.last.fetch(:hive_home)
     assert_equal true, stop_args.last.fetch(:quiet)
-    assert_equal %i[stop install], events
-  end
-
-  def test_service_takeover_leaves_a_manager_owned_babysitter_running
-    installer = Object.new
-    installer.define_singleton_method(:service_lifecycle_state) do
-      { "service_manager_available" => true, "service_running" => true }
-    end
-    FileUtils.mkdir_p(@home)
-    File.write(File.join(@home, ".babysitter.pid"), "pid")
-
-    with_replaced_singleton_method(Hive::Commands::Babysit, :new, lambda { |*|
-      raise "manager-owned service must not be stopped"
-    }) do
-      Hive::Commands::Babysit.prepare_service_takeover!(installer: installer, hive_home: @home)
-    end
+    refute takeover.pending?
   end
 
   def test_status_recommends_restart_when_runtime_predates_source
@@ -202,28 +220,130 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
   end
 
-  def test_once_registered_project_runs_one_dispatcher_pass
+  def test_once_registered_project_emits_one_shot_report
     with_tmp_global_config do |home|
       with_tmp_dir do |project|
         data = YAML.safe_load(File.read(File.join(home, "config.yml")))
-        data["registered_projects"] = [ { "name" => "proj", "path" => project } ]
+        data["registered_projects"] = [ {
+          "name" => "proj", "path" => project,
+          "repository_identity" => "github.com/acme/proj"
+        } ]
         File.write(File.join(home, "config.yml"), data.to_yaml)
 
-        dispatcher = FakeDispatcher.new([])
-        captured = nil
-        config = daemon_config
-        with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { config }) do
-          with_replaced_singleton_method(Hive::Babysitter::Dispatcher, :new, lambda { |**kwargs|
-            captured = kwargs
-            dispatcher
-          }) do
-            Hive::Commands::Babysit.new(nil, "proj", once: true, hive_home: @home).call
-          end
+        report = Hive::OneShot::Result.ok(
+          component: :babysitter, project: "proj", started_at: Time.now,
+          finished_at: Time.now, ran: [], items: [], safe_to_stop: true
+        )
+        selected = nil
+        adapter = Struct.new(:report) { def call = report }.new(report)
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, "proj", once: true, hive_home: @home,
+            one_shot_factory: ->(entry) { selected = entry; adapter }
+          ).call
+          assert_same report, result
         end
 
-        assert_equal [ :run_forever ], dispatcher.calls
-        assert_equal "proj", captured.fetch(:project_name)
-        assert_equal 1, captured.fetch(:max_ticks)
+        assert_equal "proj", selected.fetch("name")
+        assert_equal report.to_h, JSON.parse(out)
+      end
+    end
+  end
+
+  def test_once_converts_adapter_construction_and_call_failures_to_one_document
+    entry = { "name" => "proj", "path" => "/tmp/proj" }
+    factories = [
+      ->(_entry) { raise Errno::EACCES, "cannot construct adapter" },
+      lambda do |_entry|
+        Object.new.tap do |adapter|
+          adapter.define_singleton_method(:call) { raise Errno::ENOENT, "cannot run adapter" }
+        end
+      end
+    ]
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { entry }) do
+      factories.each do |factory|
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, "proj", once: true, one_shot_factory: factory
+          ).call
+          assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_code
+        end
+        lines = out.lines.reject { |line| line.strip.empty? }
+        assert_equal 1, lines.length
+        document = JSON.parse(lines.fetch(0))
+        assert_equal "hive-one-shot", document.fetch("schema")
+        assert_equal "babysitter", document.fetch("component")
+        assert_equal "proj", document.fetch("project")
+        assert_equal "error", document.fetch("status")
+        assert_equal "observation_failed", document.dig("error", "code")
+      end
+    end
+  end
+
+  def test_once_all_retains_malformed_registry_rows_as_project_errors
+    entries = [
+      nil,
+      { "name" => "broken", "path" => 42 },
+      { "path" => "/tmp/missing-name" }
+    ]
+    factory_called = false
+    requested_preservation = nil
+    loader = lambda do |preserve_invalid:|
+      requested_preservation = preserve_invalid
+      entries
+    end
+
+    with_replaced_singleton_method(Hive::Config, :registered_project_entries, loader) do
+      out, = capture_io do
+        result = Hive::Commands::Babysit.new(
+          nil, nil, once: true, all: true,
+          one_shot_factory: ->(_entry) { factory_called = true }
+        ).call
+        assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_code
+      end
+      document = JSON.parse(out)
+      assert_equal true, requested_preservation
+      refute factory_called
+      assert_equal "partial_failure", document.dig("error", "code")
+      assert_equal [ "invalid-registry-entry-1", "broken", "invalid-registry-entry-3" ],
+                   document.fetch("projects").map { |row| row.fetch("project") }
+      assert document.fetch("projects").all? { |row| row.dig("error", "code") == "config" }
+      refute document.fetch("safe_to_stop")
+      refute document.fetch("host_stop_allowed")
+    end
+  end
+
+  def test_once_all_retains_routine_refusal_and_vetoes_host_stop
+    with_tmp_global_config do
+      entries = %w[one two].map { |name| { "name" => name, "path" => "/tmp/#{name}" } }
+      now = Time.now
+      reports = {
+        "one" => Hive::OneShot::Result.ok(
+          component: :babysitter, project: "one", started_at: now,
+          finished_at: now, ran: [], items: [], safe_to_stop: true
+        ),
+        "two" => Hive::OneShot::Result.refused(
+          component: :babysitter, project: "two", started_at: now,
+          finished_at: now, code: "daemon_owned", message: "owned",
+          owner: { "kind" => "daemon", "pid" => 42, "process_identity" => "boot:42" }
+        )
+      }
+      factory = ->(entry) { Struct.new(:report) { def call = report }.new(reports.fetch(entry["name"])) }
+
+      loader = ->(preserve_invalid:) { preserve_invalid ? entries : [] }
+      with_replaced_singleton_method(Hive::Config, :registered_project_entries, loader) do
+        out, = capture_io do
+          result = Hive::Commands::Babysit.new(
+            nil, nil, once: true, all: true, one_shot_factory: factory
+          ).call
+          assert_equal Hive::ExitCodes::SUCCESS, result.exit_code
+        end
+        payload = JSON.parse(out)
+        assert_equal "ok", payload.fetch("status")
+        refute payload.fetch("safe_to_stop")
+        refute payload.fetch("host_stop_allowed")
+        assert_equal [ "two" ], payload.fetch("owning_projects").map { |row| row["project"] }
       end
     end
   end
@@ -284,7 +404,7 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
 
     assert_equal [ :stop ], calls
-    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--dry-run" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--context", "local", "--dry-run" ], exec_args
   end
 
   def test_detached_restart_without_dry_run_omits_dry_run_flag
@@ -301,7 +421,7 @@ class HiveCommandsBabysitTest < Minitest::Test
       end
     end
 
-    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach", "--context", "local" ], exec_args
   end
 
   def test_detached_restart_surfaces_reexec_failure

@@ -1,4 +1,5 @@
 require "json"
+require "digest"
 require "hive/patrol_fix/admission_store"
 
 module Hive
@@ -91,7 +92,8 @@ module Hive
       end
 
       def occurrence_id(aggregate, disposition, snapshot)
-        "architecture:#{aggregate.fetch('job_id')}:#{disposition.fetch('id')}:#{snapshot.evidence_digest[0, 24]}"
+        identity = "architecture:#{aggregate.fetch('job_id')}:#{disposition.fetch('id')}:#{snapshot.evidence_digest[0, 24]}"
+        identity.bytesize <= 128 ? identity : "architecture:#{Digest::SHA256.hexdigest(identity)}"
       end
 
       def bounded_json_text(value)

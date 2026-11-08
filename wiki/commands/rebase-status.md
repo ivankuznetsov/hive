@@ -3,7 +3,7 @@ title: hive rebase-status
 type: command
 source: lib/hive/commands/rebase_status.rb
 created: 2026-05-14
-updated: 2026-08-27
+updated: 2026-09-02
 tags: [command, rebase, read-only, inspector]
 ---
 
@@ -53,7 +53,7 @@ hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 - `would_rebase` is `true` only when `state == "would_rebase"`.
 - `commits_behind` and `default_branch` are present for `no_drift` and `would_rebase`; otherwise omitted.
 
-This envelope is intentionally **not** validated against `hive-run.v1` — it's a sibling read-only schema. The producer is `Hive::Commands::RebaseStatus#emit_json`.
+This envelope is intentionally **not** validated against `hive-run.v1` — it's a sibling read-only schema. The producer is `Hive::Commands::RebaseStatus#emit_json`. A missing `TARGET` or extra positional rejected before dispatch emits the same `hive-rebase-status` error shape on stdout before the human `hive:` stderr line.
 
 ## Why no fetch?
 
@@ -65,6 +65,18 @@ Two reasons:
 ## Relationship to `hive run`
 
 `rebase-status` mirrors `hive run`'s complete auto-rebase guard order, with the fetch + actual rebase removed. Controller workflows and managed draft-PR handoffs are excluded before the generic `Hive::Rebase.perform` ladder. If `rebase-status` reports `would_rebase` with `commits_behind: N`, then `hive run` will start a rebase attempt of N commits (assuming nothing changes between the two invocations). If `rebase-status` reports a skip-state, `hive run` will surface the same state via `Hive::Rebase::Result.reason` in its JSON envelope.
+
+## Serialization and exit codes
+
+The success producer calls `JSON.generate` directly. A serialization failure is
+not replaced with text or a fallback JSON document; it propagates.
+
+| Code | Meaning |
+|---:|---|
+| 0 | A text or JSON status was emitted for the resolved task. |
+| 64 | The target or public argument shape was invalid or ambiguous. |
+| 70 | A Git/worktree software boundary failed. |
+| 78 | Project configuration was invalid. |
 
 ## Backlinks
 

@@ -10,9 +10,14 @@ require "hive/commands/new"
 require "hive/commands/status"
 require "hive/commands/workflow"
 require "hive/task_meta"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class WorkflowCreatorE2ETest < Minitest::Test
   include HiveTestHelper
+
+  TEST_PACKAGE = {
+    version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "8" * 64
+  }.freeze
 
   EDITORIAL_PROMPT =
     "Create a three-stage editorial workflow that researches, drafts, and requires approval before publishing".freeze
@@ -213,9 +218,10 @@ class WorkflowCreatorE2ETest < Minitest::Test
       end
 
       assert_equal true, first.fetch("created")
-      assert_equal false, retry_payload.fetch("created")
+      assert_equal first, retry_payload
+      assert_equal true, retry_payload.fetch("created")
       assert_equal first.fetch("slug"), retry_payload.fetch("slug")
-      assert_equal "2-draft", retry_payload.fetch("current_stage")
+      assert_equal "1-research", retry_payload.fetch("current_stage")
       assert_equal 1, idempotent_task_folders(project_root, key).size
       assert_equal "2-draft", live.dig("position", "stage")
       assert_schema_valid("hive-new", retry_payload)
@@ -244,9 +250,22 @@ class WorkflowCreatorE2ETest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
         capture_io { Hive::Commands::Init.new(project_root, agent_skill_preflight: false).call }
+        enable_command_receipts!(project_root)
         yield project_root, File.basename(project_root)
       end
     end
+  end
+
+  def enable_command_receipts!(project_root)
+    database = Hive::RuntimeControlPlane.database.open!
+    Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+      database: database, package_coordinates: TEST_PACKAGE
+    )
+    path = File.join(project_root, ".hive-state", "config.yml")
+    config = YAML.safe_load_file(path) || {}
+    config["command_receipts"] ||= {}
+    config["command_receipts"]["keyed_intake_enabled"] = true
+    File.write(path, config.to_yaml)
   end
 
   def create_editorial(project_root, commands: nil, installed_version: Hive::VERSION)

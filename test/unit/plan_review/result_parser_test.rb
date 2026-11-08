@@ -74,55 +74,6 @@ class PlanReviewResultParserTest < Minitest::Test
     assert_match(/1-64 characters/, error.message)
   end
 
-  def test_legacy_selected_lenses_recovery_excludes_reviewer_diagnostics_and_verification
-    legacy = {
-      "role" => "primary", "outcome" => "terminal_failure",
-      "diagnostic" => "plan review selected_lenses must contain lowercase names"
-    }
-
-    assert_equal [ legacy ], Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes([ legacy ])
-    assert_empty Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
-      [ legacy.merge("diagnostic_source" => "reviewer") ]
-    )
-    assert_empty Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
-      [ legacy.merge("role" => "verification", "diagnostic_source" => "parser") ]
-    )
-    malformed_current_marker = legacy.merge(
-      "selected_lenses_contract_recovery" => true,
-      "selected_lenses_contract_version" => "not-an-integer"
-    )
-    assert_equal [ malformed_current_marker ],
-                 Hive::PlanReview::ResultParser.recoverable_selected_lenses_routes(
-                   [ malformed_current_marker ]
-                 )
-  end
-
-  def test_legacy_initial_residual_evidence_failure_recovers_once_per_initial_role
-    legacy = {
-      "role" => "primary", "outcome" => "terminal_failure",
-      "diagnostic" => "invalid plan review residual evidence entry",
-      "diagnostic_source" => "parser"
-    }
-    adversarial = legacy.merge("role" => "adversarial")
-
-    assert_equal [ adversarial, legacy ],
-                 Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-                   [ legacy, adversarial ]
-                 )
-    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-      [ legacy, legacy.merge(
-        "residual_evidence_contract_recovery" => true,
-        "residual_evidence_contract_version" => 1
-      ) ]
-    )
-    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-      [ legacy.merge("role" => "verification") ]
-    )
-    assert_empty Hive::PlanReview::ResultParser.recoverable_residual_evidence_routes(
-      [ legacy.merge("diagnostic_source" => "reviewer") ]
-    )
-  end
-
   def test_finding_anchor_must_match_the_immutable_snapshot
     snapshot = "one\ntwo\nthree\n"
     evidence = valid_result.fetch("findings").first.fetch("evidence").merge(
@@ -203,6 +154,7 @@ class PlanReviewResultParserTest < Minitest::Test
       /invalid plan review adapter result envelope/ => { "schema_version" => 2 },
       /result identity is malformed/ => { "attempt_id" => "pr-#{'a' * 64}" },
       /diagnostic must be a String or null/ => { "diagnostic" => 42 },
+      /decision_assessments must be an Array/ => { "decision_assessments" => {} },
       /selected_lenses must contain lowercase names/ => { "selected_lenses" => [ "Security" ] },
       /retry_at must be a timestamp String/ => { "retry_at" => 42 },
       /invalid plan review coverage entry/ => {
@@ -240,6 +192,36 @@ class PlanReviewResultParserTest < Minitest::Test
       )
     end
     assert_match(/line range is outside the immutable plan snapshot/, error.message)
+  end
+
+  # hivedev F4: a reviewer echoing a requested coverage row back carried
+  # Hive's request-only keys and every verification attempt was rejected.
+  def test_echoed_request_only_coverage_keys_are_dropped
+    echoed = valid_result.fetch("coverage").map do |row|
+      row.merge("fingerprint" => "prc-#{'e' * 64}", "decision_id" => nil)
+    end
+    parsed = Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result.merge("coverage" => echoed)))
+
+    assert_equal [ %w[name required status] ], parsed.coverage.map(&:keys).uniq
+  end
+
+  def test_invalid_coverage_entry_names_the_offending_key_or_value
+    {
+      { "name" => "whole_document", "required" => true, "status" => "done", "notes" => "x" } =>
+        /entry 0: unknown keys notes/,
+      { "name" => "whole_document", "required" => true, "status" => "done" } =>
+        /entry 0: status "done" is not one of requested, completed/,
+      { "name" => "Whole Document", "required" => true, "status" => "completed" } =>
+        /entry 0: name "Whole Document" is not a lowercase coverage name/,
+      { "name" => "whole_document", "required" => "yes", "status" => "completed" } =>
+        /entry 0: required "yes" is not a boolean/,
+      "whole_document" => /entry 0: must be an object, got String/
+    }.each do |entry, pattern|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result.merge("coverage" => [ entry ])))
+      end
+      assert_match pattern, error.message
+    end
   end
 
   private

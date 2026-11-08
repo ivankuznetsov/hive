@@ -76,12 +76,12 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     res
   end
 
-  def install_auth(login: "alice", token_body: nil, device_body: nil)
+  def install_auth(login: "alice", github_id: 42, token_body: nil, device_body: nil)
     token_body ||= JSON.generate("access_token" => "gho_test")
     SessionsController.http_client = FakeHttp.new(
       device: http_ok(device_body || DEVICE_BODY),
       token: http_ok(token_body),
-      user: http_ok(JSON.generate("login" => login))
+      user: http_ok(JSON.generate("login" => login, "id" => github_id))
     )
   end
 
@@ -188,9 +188,51 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "firstcomer", config.dig("web", "github", "owner"),
                  "the claim must be persisted — it IS Hive web's auth gate from now on"
+    assert_equal 42, config.dig("web", "github", "owner_id")
+    assert_equal 42, session[:github_id]
 
     get "/"
     assert_response :success, "the claimer is the owner; their session must work"
+  end
+
+  test "a legacy login-only owner enrolls its immutable GitHub id" do
+    configure_owner!(owner: "alice")
+    install_auth(login: "alice", github_id: 42)
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_equal 42, config.dig("web", "github", "owner_id")
+  end
+
+  test "a matching login never overwrites an enrolled different GitHub id" do
+    configure_owner!(owner: "alice")
+    path = File.join(ENV["HIVE_HOME"], "config.yml")
+    config = YAML.safe_load_file(path)
+    config.fetch("web").fetch("github")["owner_id"] = 7
+    File.write(path, config.to_yaml)
+    install_auth(login: "alice", github_id: 42)
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_redirected_to "/"
+    persisted = YAML.safe_load_file(path)
+    assert_equal 7, persisted.dig("web", "github", "owner_id")
+  end
+
+  test "a non-owner login cannot enroll an immutable GitHub id" do
+    configure_owner!(owner: "alice")
+    install_auth(login: "mallory", github_id: 99)
+    begin_device_flow
+
+    get "/auth/github/wait"
+
+    assert_response :forbidden
+    config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
+    assert_nil config.dig("web", "github", "owner_id")
   end
 
   test "optional GitHub connection from local mode does not claim ownership" do
@@ -266,7 +308,7 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "title", text: "Hive web — sign in"
     assert_select "meta[name='application-name'][content='Hive web']", 1
-    assert_select "a.brand", text: "Hive web"
+    assert_select "a.brand", text: "Hive"
     assert_select "h1", text: "Hive web"
     assert_match "first GitHub sign-in becomes its owner", response.body
     refute_match(/hivebox/i, response.body)
@@ -274,16 +316,17 @@ class SessionsFlowTest < ActionDispatch::IntegrationTest
                   "the claim path must be one button, not a config-editing instruction"
   end
 
-  test "the container marker preserves the Hivebox product identity" do
+  test "the retired Hivebox image marker no longer changes the product identity" do
     ENV["HIVEBOX_PRECOMPILED_ASSETS"] = "1"
     configure_owner!(owner: "")
 
     get "/login"
 
     assert_response :success
-    assert_select "title", text: "hivebox — sign in"
-    assert_select "meta[name='application-name'][content='hivebox']", 1
-    assert_select "a.brand", text: "hivebox"
+    assert_select "title", text: "Hive web — sign in"
+    assert_select "meta[name='application-name'][content='Hive web']", 1
+    assert_select "a.brand", text: "Hive"
+    refute_match(/hivebox/i, response.body)
   end
 
   test "local Hive Web presents GitHub as an optional connection, not box ownership" do

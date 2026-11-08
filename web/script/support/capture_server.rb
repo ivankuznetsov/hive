@@ -123,6 +123,10 @@ module HiveDemo
       env["XDG_DATA_HOME"] = File.join(@runtime_root, "supervisor-xdg", "data")
       env["XDG_STATE_HOME"] = File.join(@runtime_root, "supervisor-xdg", "state")
       env["HIVE_HOME"] = File.join(@runtime_root, "hive-home")
+      # The private HOME hides user-installed gems (`gem install --user-install`
+      # lands them under ~/.local/share/gem), so hand the supervisor the exact
+      # gem search path this recorder booted with.
+      env["GEM_PATH"] = Gem.path.join(File::PATH_SEPARATOR)
       env["HIVE_WEB_CAPTURE_CACHE_ROOT"] =
         @environment["HIVE_WEB_CAPTURE_CACHE_ROOT"] ||
         File.join(

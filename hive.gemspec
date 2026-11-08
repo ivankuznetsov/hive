@@ -40,7 +40,6 @@ Gem::Specification.new do |spec|
     "config/honeycomb-security-lint/**/*",
     "skills/**/*",
     "lib/**/*.rb",
-    "lib/hive/scripts/**/*.sh",
     "lib/hive/assets/qmd/*",
     "lib/hive/assets/capture-tools/*",
     "lib/hive/assets/betterleaks/**/*",
@@ -50,6 +49,7 @@ Gem::Specification.new do |spec|
     "examples/systemd/*",
     "examples/launchd/*",
     "install.md",
+    "docs/guides/current-format-migration.md",
     "CHANGELOG.md",
     "LICENSE",
     "README.md",
@@ -63,7 +63,7 @@ Gem::Specification.new do |spec|
   # they have no business being installed for end users.
   # Keep installed Hive on the independently published OpenCode-capable line.
   # Source checkouts still resolve the reviewed component through the Gemfile.
-  spec.add_dependency "agent-cli-runtime", "~> 0.2.0"
+  spec.add_dependency "agent-cli-runtime", "~> 0.2.4"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Usage accounting and pricing math parse token counts with BigDecimal.
@@ -92,8 +92,8 @@ Gem::Specification.new do |spec|
   # Hive packages must carry the runtime dependency explicitly.
   spec.add_dependency "fiddle", ">= 1.1"
   # Architecture-patrol manifests are runtime JSON contracts. The scheduler
-  # loads their validator in daemon/web-supervisor processes, so keeping this
-  # dependency test-only makes installed gems and hivebox crash on daemon boot.
+  # loads their validator in daemon and web processes, so keeping this
+  # dependency test-only makes installed gems crash on daemon boot.
   spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
@@ -101,6 +101,7 @@ Gem::Specification.new do |spec|
   # REXML::Document; without this declaration `hive daemon install/status`
   # and `hive setup` raise LoadError on a stock 3.4 install.
   spec.add_dependency "rexml", "~> 3.2"
+  spec.add_dependency "prdigest", "~> 0.4.1"
   spec.add_dependency "sequel", "~> 5.107"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"

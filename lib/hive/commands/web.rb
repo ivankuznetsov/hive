@@ -10,6 +10,9 @@ require "hive/web/loopback"
 require "hive/web/service_status"
 require "hive/invoked_binary"
 require "hive/runtime_control_plane"
+require "hive/atomic_file"
+require "hive/lock"
+require "hive/pid_file"
 
 module Hive
   module Commands
@@ -45,6 +48,20 @@ module Hive
       def self.status_error_context(environment: ENV)
         error_context(environment: environment).merge(
           "runtime" => Hive::RuntimeIdentity.unknown
+        )
+      end
+
+      # Pre-dispatch usage errors for `hive web install|status` ride the same
+      # native web context the command's own failures carry, so an agent whose
+      # argv Thor rejected still learns why the web surface is unavailable.
+      def self.usage_error_payload(error, schema:, argv: [])
+        extras = if schema == "hive-web-status"
+          status_error_context(environment: ENV)
+        else
+          error_context(environment: ENV)
+        end
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: "invalid_task_path", extras: extras
         )
       end
 
@@ -154,7 +171,9 @@ module Hive
       def capture_control_io
         return $stdin unless @control_fd
 
-        IO.for_fd(Integer(@control_fd, 10), autoclose: false)
+        # Thor's `type: :numeric` hands the CLI value over as an Integer, and
+        # Integer(12, 10) raises; normalize before the strict base-10 parse.
+        IO.for_fd(Integer(@control_fd.to_s, 10), autoclose: false)
       rescue ArgumentError, RangeError, Errno::EBADF
         raise Hive::InvalidTaskPath,
               "hive web capture-server --control-fd must be an open integer file descriptor"
@@ -199,10 +218,8 @@ module Hive
         # Only the MANAGED bundle resolves the hive-cli path gem via
         # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
         # with this same export. A source checkout or a HIVE_WEB_APP_DIR
-        # override (e.g. the Hivebox image's baked /app/web) was
-        # bundle-installed against its own ".."; re-pointing the path source
-        # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
-        # image-smoke db:prepare failure).
+        # override was bundle-installed against its own ".."; re-pointing the
+        # path source at runtime invalidates that prebuilt bundle.
         managed_bundle = app_dir == Hive::Web::AppBundle.app_dir
         if managed_bundle
           env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root
@@ -234,8 +251,7 @@ module Hive
         FileUtils.mkdir_p(env.fetch("HIVE_WEB_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
-          precompiled_assets = managed_bundle || ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
-          if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
+          if env.fetch("RAILS_ENV") == "production" && !managed_bundle
             compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
               asset_env = env.merge("HIVE_WEB_STORAGE_DIR" => asset_storage)
               system(asset_env, *rails_argv, "assets:precompile")
@@ -257,12 +273,38 @@ module Hive
                   "and that the web bundle is installed (cd #{app_dir} && bundle install)"
           end
           puts "hive web: listening on http://#{bind}:#{port}"
+          publish_foreground_writer_identity!
           # Replace this process with the Rails server (array form, env hash;
           # Kernel#exec never touches a shell when given an argv list).
           Hive::RuntimeControlPlane::ProcessGuard.exec(
             env, *rails_argv, "server", "-b", bind, "-p", port.to_s
           )
         end
+      end
+
+      def publish_foreground_writer_identity!
+        path = File.join(Hive::Paths.state_home, ".web.pid")
+        if File.exist?(path) || File.symlink?(path)
+          existing = Hive::PidFile.parse_payload(File.read(path))
+          pid = existing && existing["pid"]
+          classification = Hive::PidFile.death_classification(
+            pid: pid, recorded_start_time: existing && existing["process_start_time"]
+          )
+          unless %i[dead reused].include?(classification)
+            raise Hive::ConcurrentRunError,
+                  "hive web already has a #{classification == :live ? 'live' : 'liveness-unverifiable'} foreground writer"
+          end
+        end
+        start_time = Hive::Lock.process_start_time(Process.pid)
+        raise Hive::ConfigError, "cannot record foreground Hive web process identity" unless start_time
+
+        payload = {
+          "pid" => Process.pid, "process_start_time" => start_time,
+          "started_at" => Time.now.utc.iso8601
+        }
+        Hive::AtomicFile.write(path, payload.to_yaml, mode: 0o600)
+      rescue Psych::Exception, SystemCallError, IOError => error
+        raise Hive::ConfigError, "cannot publish foreground Hive web writer identity: #{error.message}"
       end
 
       def install_command
@@ -361,14 +403,12 @@ module Hive
           environment: @environment,
           config: config
         )
-        was_running = Hive::Web::ServiceStatus.lifecycle_state(installer)["service_running"]
-        outcome = installer.install!(autostart: true, force: @force)
-        restarted = outcome.restarted
-        if bundle_refreshed && was_running && outcome.success? && !restarted
-          installer.restart!
-          restarted = true
-        end
-        envelope = service_envelope(installer, outcome, config: config, restarted: restarted)
+        outcome = installer.install!(
+          autostart: true,
+          force: @force,
+          restart_if_running: bundle_refreshed
+        )
+        envelope = service_envelope(installer, outcome, config: config)
         if @json
           emit_install_json(envelope)
         else
@@ -385,30 +425,17 @@ module Hive
       end
 
       def start_service
-        run_service_action(launchctl: "load", systemctl: "start", verb: "start")
+        run_service_action(:start)
       end
 
       def stop_service
-        run_service_action(launchctl: "unload", systemctl: "stop", verb: "stop")
+        run_service_action(:stop)
       end
 
-      # start/stop differ only in the launchctl (load/unload) and systemctl
-      # (start/stop) verbs, so the platform branch lives here once.
-      def run_service_action(launchctl:, systemctl:, verb:)
+      def run_service_action(verb)
         require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
-        argv =
-          if installer.envelope_platform == "macos"
-            [ "launchctl", launchctl, installer.target_path ]
-          else
-            # A unit written while systemd-user was unavailable stays invisible
-            # until a daemon-reload, so `start` would fail with "unit not found".
-            # Reload before starting so a freshly written unit is picked up.
-            system("systemctl", "--user", "daemon-reload") if verb == "start"
-            [ "systemctl", "--user", systemctl, installer.service_name ]
-          end
-        ok = system(*argv)
-        raise Hive::Error, "hive web: could not #{verb} managed service" unless ok
+        installer.public_send("#{verb}!")
       end
 
       def status_service
@@ -512,4 +539,20 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary: only the
+# install/status surfaces pre-announce a JSON envelope, and their payloads
+# carry the native web context this boundary owns (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("web") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index, value_options: %w[--bind --port])
+  next unless %w[install status].include?(sub)
+
+  {
+    schema: "hive-web-#{sub}",
+    error_kind: "invalid_task_path",
+    payload: ->(error, argv: []) { Hive::Commands::Web.usage_error_payload(error, schema: "hive-web-#{sub}", argv: argv) }
+  }
 end

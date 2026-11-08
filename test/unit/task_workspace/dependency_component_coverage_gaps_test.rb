@@ -162,6 +162,7 @@ class TaskWorkspaceDependencyComponentCoverageGapsTest < Minitest::Test
 
   def task(slug, project: "app", depends_on: nil)
     D::TaskSnapshot.new(
+      cancelled: false,
       project: project, slug: slug, id: nil, stage: "4-execute",
       workflow_stages: Hive::Stages::DIRS, depends_on: depends_on,
       metadata_status: :ok, metadata_error: nil,

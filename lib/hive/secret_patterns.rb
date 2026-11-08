@@ -5,6 +5,8 @@ module Hive
     REDACTION_VERSION = 1
 
     PATTERNS = {
+      url_userinfo: %r{[a-z][a-z0-9+.-]*://[^/\s@]+@}i,
+      hive_bearer: /\b[0-9a-f]{24}\.[0-9a-f]{64}\b/i,
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
       # and secret access key.
       aws_access_key:        /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/,

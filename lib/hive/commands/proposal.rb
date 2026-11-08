@@ -563,3 +563,23 @@ module Hive
     end
   end
 end
+
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("proposal") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(
+    argv, command_index,
+    value_options: %w[
+      --input --project --kind --subject --revision --status --relation
+      --evaluator --method --expected-head-version --expected-head-digest
+      --considered-evaluations --authority --policy-fingerprint --source-ref
+      --output-root
+    ]
+  )
+  schema = case sub
+  when "list", "filter" then "hive-proposal-list"
+  when "show" then "hive-proposal-show"
+  else "hive-proposal-mutation"
+  end
+  { schema: schema, error_kind: "usage" }
+end

@@ -20,7 +20,7 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_missing_gh_reports_auth_install_fix
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
 
       result = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1").run
@@ -33,7 +33,7 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_gh_unauthenticated_reports_login_without_fixing
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = lambda do |argv|
         if argv[1..] == %w[auth status]
           [ "", "not logged in", Status.new(false) ]
@@ -52,25 +52,55 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_version_too_old_is_classified
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = lambda do |argv|
         return [ "", "", Status.new(true) ] if argv[1..] == %w[auth status]
-        return [ "tmux 2.9", "", Status.new(true) ] if File.basename(argv.first) == "tmux"
+        return [ "git version 2.30.0", "", Status.new(true) ] if File.basename(argv.first) == "git"
 
         [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ]
       end
 
       row = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1")
-                                     .run.results.find { |r| r.name == "tmux" }
+                                     .run.results.find { |r| r.name == "git" }
 
       assert_equal "version_too_old", row.status
-      assert_match(/>= 3\.0/, row.detail)
+      assert_match(/>= 2\.40\.0/, row.detail)
+    end
+  end
+
+  # Claude launches headless-only, so setup no longer requires tmux.
+  def test_check_list_does_not_include_tmux
+    refute_includes Hive::Setup::Diagnostics::CHECKS, "tmux"
+    refute Hive::Setup::Diagnostics::REQUIRED.key?("tmux")
+    refute Hive::Setup::Diagnostics.method_defined?(:check_tmux)
+  end
+
+  def test_host_without_tmux_passes_when_other_checks_pass
+    Dir.mktmpdir("hive-diag") do |dir|
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
+      authenticated = Class.new(Hive::Setup::Diagnostics) do
+        private
+
+        def agent_authenticated?(_name)
+          true
+        end
+      end
+
+      result = with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        authenticated.new(path: dir, runner: runner, ruby_version: "3.4.1",
+                          env: { "PATH" => dir, "HOME" => dir }).run
+      end
+
+      refute File.exist?(File.join(dir, "tmux"))
+      refute(result.results.any? { |row| row.name == "tmux" })
+      assert result.ok?, result.results.reject { |row| row.ok? || row.bootstrappable }.map(&:to_h).inspect
     end
   end
 
   def test_qmd_missing_is_bootstrappable
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
 
       # check_qmd falls back to the managed install under Paths.data_home, so
@@ -101,7 +131,7 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_agent_authenticated_via_on_disk_token_without_env_var
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
       # `claude setup-token` persists ~/.claude/.credentials.json with no env
       # var; the diagnostics engine must not report that as unauthenticated.
@@ -119,7 +149,7 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_agent_unauthenticated_when_no_env_and_no_token_file
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
       Dir.mktmpdir("hive-home") do |home|
         env = { "PATH" => dir, "HOME" => home }
@@ -133,7 +163,7 @@ class SetupDiagnosticsTest < Minitest::Test
 
   def test_agent_api_key_does_not_replace_cli_subscription_session
     Dir.mktmpdir("hive-diag") do |dir|
-      %w[git tmux gh claude codex node npm sqlite3].each do |name|
+      %w[git gh claude codex node npm sqlite3].each do |name|
         executable(dir, name)
       end
       runner = ->(argv) {
@@ -311,7 +341,7 @@ class SetupDiagnosticsTest < Minitest::Test
   def test_sqlite_missing_reports_install_fix
     Dir.mktmpdir("hive-diag") do |dir|
       # Seed everything except sqlite3 so check_sqlite hits the missing branch.
-      %w[git tmux gh claude codex node npm].each { |name| executable(dir, name) }
+      %w[git gh claude codex node npm].each { |name| executable(dir, name) }
       diag = Hive::Setup::Diagnostics.new(path: dir, ruby_version: "3.4.1")
 
       row = diag.check_sqlite

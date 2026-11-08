@@ -16,11 +16,69 @@ class TasksTest < ActionDispatch::IntegrationTest
     sign_in!
   end
 
+  test "review publication recovery retains usable commands and escapes hostile paths" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), stage_dir(@project, "6-review").join(@slug))
+    path = stage_dir(@project, "6-review").join(@slug, "task.md")
+    path.write("# Review\n")
+    Hive::Markers.set(path, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1, escalations: 0,
+      **Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending",
+        "worktree" => "/owned/a b<script>alert(1)</script>", "branch" => "fix", "is_draft" => true,
+        "pr_state" => "OPEN", "ready_command" => "gh pr ready 42", "local_head" => "a" * 40))
+    refresh_status_feed!
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_includes response.body, "Review publication and verification"
+    assert_includes response.body, "/owned/a b&lt;script&gt;"
+    assert_includes response.body, "Commit fixes locally"
+    assert_includes response.body, "gh pr ready 42"
+    assert_includes response.body, "successful current secret scan"
+    assert_includes response.body, "normal finalize"
+    assert_select "dd script", 0
+  end
+
   test "status grid lists the task" do
     get "/grid"
     assert_response :success
     assert_match @slug, response.body
     assert_select "#status-grid", 1
+  end
+
+  test "task HTML does not build hidden provenance or timeline panels" do
+    audit_reads = 0
+    audit_reader = lambda do |**|
+      audit_reads += 1
+      Hive::TaskWorkspace.unavailable_panel("provenance")
+    end
+
+    with_replaced_instance_method(Hive::TaskWorkspace::Provenance, :call, audit_reader) do
+      with_replaced_instance_method(Hive::TaskWorkspace::Timeline, :call, audit_reader) do
+        get "/tasks/#{@project}/#{@slug}"
+
+        assert_response :success
+        assert_select "#task-state", 1
+        assert_match "actions probe", response.body
+      end
+    end
+
+    assert_equal 0, audit_reads, "ordinary task navigation must not read hidden audit panels"
+  end
+
+  test "closure blocker renders full retained commit details" do
+    sha = "a" * 40
+    entry = { "code" => "unique_worktree_changes", "message" => "PR already merged; unique commits retained", "owner" => "operator",
+      "details" => { "worktree" => "/owned/path with spaces", "branch" => "task", "reference_head" => "b" * 40,
+        "publication" => "unpublished", "local_fix_shas" => [ sha ], "candidate_shas" => [],
+        "classification" => "ahead", "delivery" => "content_absent_from_default", "guidance" => "Deliver through a new change." } }
+    preview = Hive::TaskClosure::Preview.new(input: { "reason" => "already_delivered", "evidence" => [] }, task: {},
+      task_repository: nil, evidence: [], successor: nil, authority: "remote_merge", evidence_digest: "c" * 64,
+      preview_digest: "d" * 64, errors: [], blockers: [ entry ])
+    with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: { reason: "already_delivered", evidence: [] }
+    end
+    assert_response :unprocessable_entity
+    assert_includes response.body, sha
+    assert_includes response.body, "/owned/path with spaces"
+    assert_includes response.body, "new change"
   end
 
   test "closure entry requires authentication" do
@@ -82,6 +140,22 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "form input[name=preview_digest][value=?]", "d" * 64
     assert_select "a[href='https://github.com/acme/app/pull/42']", text: /42/
     assert_equal input, calls.first.fetch(:input)
+  end
+
+  test "cancellation previews without delivery evidence and offers confirmation" do
+    get "/tasks/#{@project}/#{@slug}/closure"
+    assert_response :success
+    assert_select "option[value=cancelled]", text: "Cancelled"
+    assert_select "textarea[required]", 0
+
+    post "/tasks/#{@project}/#{@slug}/closure", params: {
+      reason: "cancelled", attestation: "No longer wanted", evidence: [ "" ]
+    }
+    assert_response :success
+    assert_select ".closure-preview", text: /cancelled/
+    assert_select "form input[name=preview_digest]", 1
+    assert_select "form input[name=reason][value=cancelled]", 1
+    assert_select ".closure-evidence li", 0
   end
 
   test "closure confirmation uses the authenticated web operator" do
@@ -146,7 +220,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".task-closure", text: /already delivered/
     assert_select ".task-closure a[href='https://github.com/acme/app/pull/42']",
                   text: /42/
-    assert_select ".task-closure code", text: "d" * 64
+    assert_select ".task-closure code", count: 0
   end
 
   test "an archive link resolves a task omitted from the ordinary snapshot" do
@@ -277,7 +351,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "section.plan-review[data-review-id=?]", "pr-#{'a' * 64}", count: 1
     assert_select ".plan-review", text: /mandatory.*awaiting decision/m
     assert_select ".plan-review", text: /2 complete.*1 failed/m
-    assert_select ".plan-review", text: /grok-build.*grok-4.6/m
+    assert_select ".plan-review", text: /grok-build|grok-4\.6/, count: 0
+    assert_select "details[data-workspace-disclosure-key='review-details']:not([open]) .plan-review-summary"
+    assert_select "details[data-workspace-disclosure-key='review-routes']", count: 0
+    assert_select "details[data-workspace-disclosure-key='review-audit']:not([open]) .plan-review-artifact"
     assert_select ".plan-review-findings > li", 2
     assert_select "form[action=?] input[name=expected_artifact_digest][value=?]",
                   "/tasks/#{@project}/#{@slug}/plan-review", "e" * 64, minimum: 4
@@ -306,6 +383,30 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "input[name=review_action][value=approve_finding]", 0
     assert_select "input[name=review_action][value=answer_finding]", 0
     assert_select ".plan-review-required-action", text: /start a new linked plan/
+  end
+
+  test "review retry uses the current attempt identity without historical routes" do
+    move_task_to_plan!
+    details = plan_review_details_fixture
+    details.delete("routes")
+    summary = details.fetch("summary")
+    summary.delete("routes")
+    summary["state"] = "retry_scheduled"
+    summary["retry_attempt_id"] = "pra-#{'9' * 64}"
+
+    with_replaced_instance_method(Task, :plan_review_details, -> { details }) do
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success
+      assert_select "form:has(input[name=review_action][value=retry])" do
+        assert_select "input[name=target_fingerprint][value=?]", summary["retry_attempt_id"], count: 1
+        assert_select "input[name=expected_artifact_digest][value=?]", summary["observation_digest"], count: 1
+      end
+      assert_select "details[data-workspace-disclosure-key='review-routes']", count: 0
+
+      summary["state"] = "blocked"
+      get "/tasks/#{@project}/#{@slug}"
+      assert_select "input[name=review_action][value=retry]", count: 0
+    end
   end
 
   test "plan review action delegates the exact observation to the shared task mutation" do
@@ -633,6 +734,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "a[href='https://developers.openai.com/api/docs/models/gpt-5.6-sol']", 1
     refute_includes response.body, "private-session-id"
     refute_includes response.body, "private-attempt-id"
+    %w[Canonical\ action Action\ availability State\ quality].each { |label| refute_includes response.body, label }
+    assert_select "#workspace-dependencies", 0
     refute_includes response.body, "provider_reported_cost"
   end
 
@@ -1196,13 +1299,10 @@ class TasksTest < ActionDispatch::IntegrationTest
     folder = stage_dir(@project, "2-brainstorm").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\n\n### Q2. Acceptance?\n\n### A2.\n\n")
 
-    get task_path(@project, @slug, format: :json)
-    workspace = response.parsed_body
-    operator_questions = workspace.dig("operator", "questions")
+    operator_questions = Hive::Commands::Answer.inventory(@slug, project: @project)
+                                              .fetch("slots")
+                                              .reject { |slot| slot.fetch("answered") }
     assert_equal [ "Scope?", "Acceptance?" ], operator_questions.map { |row| row.fetch("text") }
-    assert_equal "current", workspace.dig("status", "state")
-    assert_equal "answer", workspace.dig("decision", "posture")
-    assert workspace.dig("decision", "action", "enabled")
 
     get "/tasks/#{@project}/#{@slug}"
 
@@ -1211,7 +1311,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     operator_questions.each do |question|
       assert_select ".qa-question", text: /#{Regexp.escape(question.fetch("text"))}/
       assert_select "textarea[data-question-number=?][name=?]:not([disabled])",
-                    question.fetch("n").to_s, "answers[#{question.fetch('binding')}]", count: 1
+                    question.fetch("question_number").to_s, "answers[#{question.fetch('binding')}]", count: 1
     end
     assert_select "form[id^='qa-form-'] input[type='submit']:not([disabled])", 1
   end
@@ -1426,14 +1526,14 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_equal "application/json", response.media_type
     document = JSON.parse(response.body)
     schemer = JSONSchemer.schema(
-      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 1)))
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace")))
     )
     assert_empty schemer.validate(document).to_a
     assert_equal @project, document.dig("task", "project")
     assert_equal @slug, document.dig("task", "slug")
     assert_equal "hive-task-workspace", document.fetch("schema")
-    assert_equal Hive::TaskWorkspace::PANEL_NAMES.sort,
-                 document.fetch("panels").keys.sort
+    refute document.key?("panels")
+    assert document.key?("headline")
     refute_includes document.to_s, stage_dir(@project, "1-inbox").to_s
     refute document.to_s.include?("suggested_command")
     refute document.to_s.include?("observation_token")
@@ -1443,19 +1543,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/login"
   end
 
-  test "legacy task json does not construct semantic pricing or presentation" do
-    replacement = -> { raise "semantic v2 must not run for the v1 compatibility route" }
 
-    with_replaced_instance_method(Hive::TaskWorkspace::Builder, :semantic, replacement) do
-      get task_path(@project, @slug, format: :json)
-    end
-
-    assert_response :success
-    assert_equal 1, response.parsed_body.fetch("schema_version")
-    assert response.parsed_body.key?("panels")
-  end
-
-  test "explicit semantic workspace route is v2 while the existing JSON route stays v1" do
+  test "both task JSON routes expose the current semantic workspace" do
     get "/tasks/#{@project}/#{@slug}/workspace.json"
 
     assert_response :success
@@ -1479,7 +1568,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     get "/tasks/#{@project}/#{@slug}.json"
     assert_response :success
-    assert_equal 1, response.parsed_body.fetch("schema_version")
+    assert_equal 2, response.parsed_body.fetch("schema_version")
 
     post "/logout"
     get "/tasks/#{@project}/#{@slug}/workspace.json"
@@ -1494,24 +1583,25 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     assert_response :success
     assert_select "#status-stream-owner[data-controller~='task-workspace']", 1
-    assert_select "#workspace-summary-heading",
-                  text: semantic.dig("headline", "label")
-    assert_select "#workspace-usage", 1
+    assert_select "#workspace-summary-heading", text: "Ready"
+    assert_select "#workspace-summary .workspace-eyebrow", text: "Inbox"
+    assert_select "#workspace-summary", text: /Current step/, count: 0
+    assert_select "#workspace-usage", 0
     assert_select "#workspace-primary-result[data-primary-artifact=?]",
                   semantic.dig("result", "primary", "reference")
     %w[attempts provenance timeline artifacts].each do |panel|
       assert_select "#workspace-#{panel}", 0, "#{panel} must stay on v1/audit routes"
     end
-    assert_select "turbo-frame[id^='task-diff-'][data-turbo-permanent]", 1
-    assert_select "turbo-frame[id^='task-publication-'][refresh='morph']", 1
+    assert_select "turbo-frame[id^='task-diff-']", 0
+    assert_select "turbo-frame[id^='task-publication-']", 0
     assert_select "turbo-frame[id^='task-publication-'][data-turbo-permanent]", count: 0
     assert_select "turbo-frame[id^='task-publication-'][src]", count: 0
     assert_select "turbo-frame[id^='task-timeline-inspection-']", 0
     assert_select "#task-workspace-announcement[role='status'][aria-live='polite']", 1
     assert_operator response.body.index('id="workspace-summary"'), :<,
-                    response.body.index('id="workspace-usage"')
-    assert_operator response.body.index('id="workspace-usage"'), :<,
                     response.body.index('id="workspace-primary-result"')
+    %w[Canonical\ action Action\ availability State\ quality].each { |label| refute_includes response.body, label }
+    assert_select "#workspace-dependencies", 0
     refute_includes response.body, "provider_reported_cost"
     refute_includes response.body, "agent_start"
     refute_includes response.body, "agent_end"
@@ -1525,7 +1615,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     get task_path(@project, @slug)
 
     assert_response :success
-    assert_select "#workspace-publication.workspace-state-unavailable", text: /Unavailable/i
+    assert_select "#workspace-publication", 0, "no publication panel without a worktree or PR"
     assert_select "#workspace-primary-result[data-primary-artifact='idea.md']", 1
     assert_select ".advanced form", minimum: 1
   ensure

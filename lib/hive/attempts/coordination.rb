@@ -28,6 +28,17 @@ module Hive
         terminal_for(task_generation, subject)&.fetch(:attempt_id)
       end
 
+      # Newest-first terminal attempts for one semantic generation. Callers
+      # derive failure series from these rows instead of keeping a separate
+      # counter, so the series resets exactly when the task input changes.
+      def recent_terminal_attempt_ids(task_generation:, subject:, limit:)
+        database.read do |db|
+          semantic_attempts(db, task_generation, subject).where(state: "terminal")
+            .reverse_order(:ended_at, :lease_version, :attempt_id)
+            .limit(Integer(limit)).select_map(:attempt_id)
+        end
+      end
+
       def successful_attempt_id(task_generation:, subject:)
         terminal_for(task_generation, subject, outcome: "succeeded")&.fetch(:attempt_id)
       end
@@ -81,7 +92,7 @@ module Hive
         end
         return nil unless row && row[:admission_workflow] == "patrol_fix" &&
                           row[:admission_runtime_digest] == runtime_digest
-        return nil unless row[:state] == "lost" || %w[failed cancelled].include?(row[:outcome])
+        return nil unless row[:state] == "lost" || %w[failed cancelled interrupted].include?(row[:outcome])
 
         retry_at = Time.iso8601(row.fetch(:ended_at)) + Hive::AgentLimit.retry_cooldown_sec
         retry_at if now < retry_at

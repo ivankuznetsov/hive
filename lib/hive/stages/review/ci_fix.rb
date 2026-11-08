@@ -5,6 +5,7 @@ require "digest"
 require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/output_pulse"
+require "hive/project_command_environment"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
@@ -47,7 +48,7 @@ module Hive
         module_function
 
         def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 command: nil, command_runner: nil)
+                 command: nil, command_runner: nil, no_repair: false)
           command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
@@ -101,7 +102,16 @@ module Hive
                 idle_timeout_sec: idle_timeout_sec
               )
             end
-            return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
+            if run_result.is_a?(CommandError)
+              # A timed-out or idle-killed run keeps what it printed so the
+              # operator can see where it stalled.
+              if run_result.output && !run_result.output.empty?
+                run_result = CommandError.new(
+                  run_result.reason, clean_output(run_result.output, tail_lines)
+                )
+              end
+              return run_result.to_result(attempts: attempts)
+            end
 
             output = clean_output(run_result.combined, tail_lines)
             last_output = output
@@ -134,7 +144,7 @@ module Hive
               )
             end
 
-            if attempts >= max_attempts
+            if no_repair || attempts >= max_attempts
               return Result.new(
                 status: :stale,
                 attempts: attempts,
@@ -246,7 +256,12 @@ module Hive
 
           begin
             pipe_r, pipe_w = IO.pipe
-            pid = Process.spawn(*cmd, chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w)
+            # The project's CI must resolve its own Ruby toolchain, never the
+            # load path Hive's attempt worker inherited for itself.
+            pid = Process.spawn(
+              Hive::ProjectCommandEnvironment.overrides, *cmd,
+              chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w
+            )
             pipe_w.close
           rescue Errno::ENOENT, Errno::EACCES => e
             pipe_r&.close unless pipe_r&.closed?
@@ -264,15 +279,21 @@ module Hive
           idle = idle_timeout_sec.to_f
           idle = nil unless idle.positive?
           pulse = idle ? Hive::OutputPulse.new : nil
-          combined = +""
           # Reader keeps draining the pipe so the producer doesn't block
           # or die with SIGPIPE, but appends only up to max_bytes into
           # the captured buffer. Once the cap is hit we read-and-drop
           # remaining bytes — bound memory, clean subprocess exit. The
           # downstream consumer tail-truncates by line count in
-          # clean_output.
+          # clean_output. The buffer is shared (under a mutex) so a
+          # timeout that kills the reader still has the output so far.
+          buf = +""
+          buf_lock = Mutex.new
+          captured = lambda do
+            text = buf_lock.synchronize { buf.dup }
+            text.force_encoding(Encoding::UTF_8)
+            text.scrub("?")
+          end
           reader = Thread.new do
-            buf = +""
             capped = false
             loop do
               chunk = pipe_r.read_nonblock(4096, exception: false)
@@ -288,15 +309,15 @@ module Hive
 
               next if capped
 
-              remaining = max_bytes - buf.bytesize
-              if remaining <= 0
-                capped = true
-                next
+              buf_lock.synchronize do
+                remaining = max_bytes - buf.bytesize
+                if remaining <= 0
+                  capped = true
+                else
+                  buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
+                end
               end
-
-              buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
             end
-            combined.replace(buf)
           rescue EOFError, IOError
             nil
           ensure
@@ -316,14 +337,15 @@ module Hive
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
-              return CommandError.new("CI command timed out after #{timeout_sec}s")
+              return CommandError.new("CI command timed out after #{timeout_sec}s", captured.call)
             end
             if pulse && pulse.idle_for >= idle
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
               return CommandError.new(
-                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)"
+                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)",
+                captured.call
               )
             end
             _, status = Process.wait2(pid, Process::WNOHANG)
@@ -334,10 +356,7 @@ module Hive
           reader.join(2)
           reader.kill if reader.alive?
 
-          combined.force_encoding(Encoding::UTF_8)
-          combined.scrub!("?") # replace invalid UTF-8 sequences
-
-          Run.new(combined, status.exitstatus)
+          Run.new(captured.call, status.exitstatus) # invalid UTF-8 scrubbed
         end
 
         # TERM the process group, give it 3s to drain, then KILL.
@@ -378,12 +397,14 @@ module Hive
         # Wrap a launch failure as a Result :error directly so the
         # caller doesn't have to distinguish "command exited non-zero"
         # from "command couldn't even start."
-        CommandError = Struct.new(:reason) do
+        # +output+ is what a killed run printed before its timeout (nil
+        # when the command never started).
+        CommandError = Struct.new(:reason, :output) do
           def to_result(attempts: 0)
             CiFix::Result.new(
               status: :error,
               attempts: attempts,
-              last_output: nil,
+              last_output: output,
               error_message: reason,
               limit_text: nil
             )
@@ -437,23 +458,19 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: cfg.dig("budget_usd", "review_ci") || 25,
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_ci", profile, default: 25),
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
             implementation_stage: "review.ci",
+            mcp_scope: "review.ci",
             agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only,
             **Hive::Stages::Base.implementation_launch_arguments(identity, profile)
           }
-          if Hive::AgentSupport.supports?(profile, :Interactive)
-            Hive::Stages::Base.spawn_claude!(
-              task,
-              cfg,
-              **kwargs,
-              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
-            )
+          if Hive::AgentSupport.supports?(profile, :Launch)
+            Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
           else
             Hive::Stages::Base.spawn_agent(
               task, **kwargs, cfg: cfg,

@@ -4,6 +4,11 @@ require "hive/daemon/activation_lock"
 class DaemonActivationLockTest < Minitest::Test
   include HiveTestHelper
 
+  def test_shares_the_runtime_control_plane_fence_implementation
+    assert_operator Hive::Daemon::ActivationLock, :<,
+                    Hive::RuntimeControlPlane::FileFence
+  end
+
   class FailingUnlockHandle
     def flock(*)
       raise IOError, "synthetic unlock failure"

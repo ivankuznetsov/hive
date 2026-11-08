@@ -194,6 +194,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_final_findings_stale_without_escalations_never_requests_automatic_recovery
+    with_marker_file do |state_file|
+      Hive::Markers.set(state_file, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1, escalations: 0)
+      row = make_row(state_file, pid_alive: nil, stage: "6-review", marker: "review_stale",
+        marker_attrs: Hive::Markers.current(state_file).attrs, action: "recover_review", live_task_lock: false)
+      3.times { heal([ row ]) }
+      assert_empty @coordinator.requests
+      assert_equal :review_stale, Hive::Markers.current(state_file).name
+    end
+  end
+
   def test_resolved_review_stale_delegates_but_unresolved_review_stale_waits
     with_marker_file do |state_file|
       reviews = File.join(File.dirname(state_file), "reviews")
@@ -635,6 +646,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       "limits_reached" => "limits_reached",
       "timeout" => "stage_timeout",
       "ensure_clean_on_exit_failed" => "clean_exit_residue",
+      "agent_orphaned" => "agent_loss_retry",
       "tmux_session_terminated" => "agent_loss_retry",
       "unknown_failure" => "error_retry"
     }
@@ -661,9 +673,9 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       "review_agent_died" => "review_agent_died",
       "limits_reached" => "reviewer_limits_reached",
       "all_failed" => "reviewer_all_failed",
-      "fix_failed" => "fix_claude_stop_hook",
+      "fix_failed" => "fix_failed",
       "fix_auto_commit_scope_failed" => "fix_auto_commit_retry",
-      "reviewer_partial_failure" => "reviewer_tmux_session_terminated",
+      "reviewer_partial_failure" => "reviewer_partial_failure",
       "unknown_failure" => "review_error_retry"
     }
 
@@ -1269,8 +1281,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       live_task_lock: live_task_lock,
       task_lock_pid: task_lock_pid,
       task_lock_process_start_time: task_lock_process_start_time,
-      task_lock_id: task_lock_id,
-      diagnostic: nil
+      task_lock_id: task_lock_id
     )
   end
 

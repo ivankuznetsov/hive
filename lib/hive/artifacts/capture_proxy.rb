@@ -136,10 +136,12 @@ module Hive
 
       def rewrite_request(head, method, uri, version)
         upgrade = websocket_upgrade?(head)
-        headers = head.lines.drop(1).reject do |line|
+        headers = head.lines.drop(1).filter_map do |line|
           hop_header = line.match?(/\A(?:Host|Proxy-Connection):/i)
           hop_header ||= !upgrade && line.match?(/\A(?:Connection|Upgrade):/i)
-          hop_header || line == "\r\n"
+          next if hop_header || line == "\r\n"
+
+          rewrite_origin_header(line)
         end
         prefix = [
           "#{method} #{uri.request_uri} #{version}\r\n",
@@ -147,6 +149,50 @@ module Hive
         ]
         prefix << "Connection: close\r\n" unless upgrade
         (prefix + headers + [ "\r\n" ]).join
+      end
+
+      # The browser operates on the random controller-issued origin while the
+      # application deliberately receives a loopback Host header. Translate
+      # only that exact origin in request metadata so CSRF/origin checks see
+      # the same endpoint as request.base_url. Foreign Origin and Referer
+      # values pass through unchanged and remain available for the application
+      # to reject.
+      def rewrite_origin_header(line)
+        name, value = line.split(":", 2)
+        return line unless value && %w[Origin Referer].any? { |header| name.casecmp?(header) }
+
+        uri = URI.parse(value.strip)
+        return line unless uri.scheme == "http" && uri.host == hostname &&
+                           uri.port == 80 && uri.userinfo.nil?
+
+        uri.host = "127.0.0.1"
+        uri.port = app_port
+        "#{name}: #{uri}\r\n"
+      rescue URI::InvalidURIError
+        line
+      end
+
+      # The upstream must see a loopback Host header so an arbitrary project
+      # cannot escape its development host allowlist. Frameworks such as Rails
+      # consequently emit absolute redirects back to that loopback host. The
+      # browser is intentionally allowed to visit only the random issued
+      # origin, so translate only that exact controller-owned endpoint at the
+      # proxy boundary. Relative and foreign redirects pass through unchanged.
+      def rewrite_response(head)
+        head.each_line.map do |line|
+          next line unless line.match?(/\ALocation:/i)
+
+          name, value = line.split(":", 2)
+          uri = URI.parse(value.to_s.strip)
+          next line unless uri.scheme == "http" && uri.host == "127.0.0.1" &&
+                           uri.port == app_port && uri.userinfo.nil?
+
+          uri.host = hostname
+          uri.port = 80
+          "#{name}: #{uri}\r\n"
+        rescue URI::InvalidURIError
+          line
+        end.join
       end
 
       def websocket_upgrade?(head)
@@ -165,6 +211,7 @@ module Hive
 
       def relay(client, upstream)
         sockets = [ client, upstream ]
+        response_header = +"".b
         loop do
           ready = IO.select(sockets)&.first
           break unless ready
@@ -172,6 +219,20 @@ module Hive
             chunk = source.read_nonblock(16 * 1024, exception: false)
             return if chunk.nil?
             next if chunk == :wait_readable
+
+            # Keep forwarding uploads while the application prepares its
+            # response. Only upstream headers need buffering for redirects.
+            if source.equal?(upstream) && response_header
+              response_header << chunk
+              boundary = response_header.index("\r\n\r\n")
+              header_size = boundary ? boundary + 4 : response_header.bytesize
+              raise ProxyError, "capture proxy response header is oversized" if header_size > MAX_HEADER_BYTES
+              next unless boundary
+
+              chunk = rewrite_response(response_header.byteslice(0, header_size)) +
+                response_header.byteslice(header_size..)
+              response_header = nil
+            end
 
             (source.equal?(client) ? upstream : client).write(chunk)
           end

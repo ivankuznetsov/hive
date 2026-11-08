@@ -218,6 +218,75 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_unobservable_task_before_commit_is_stale_and_never_commits
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      t = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      committed = false
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| committed = true }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :observe, ->(*) { nil }) do
+        with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+          assert_raises(Hive::TaskMeta::StaleTask) do
+            command.send(:commit_after, t, { commit: "complete" }, config: {})
+          end
+        end
+      end
+
+      assert_includes error.message, "stale before commit"
+      refute committed
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    end
+  end
+
+  def test_stale_terminal_completion_never_commits_or_mutates_a_replacement
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "report.md")
+      File.write(state_file, "# Report\n<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "some-slug", display_name: nil)
+      observation = Hive::TaskMeta.observe(folder)
+      metadata = File.binread(Hive::TaskMeta.path(folder))
+      FileUtils.rm_rf(folder)
+      FileUtils.mkdir_p(folder)
+      File.binwrite(Hive::TaskMeta.path(folder), metadata)
+      File.write(state_file, "replacement\n<!-- COMPLETE -->\n")
+      current = task(
+        folder: folder, state_file: state_file,
+        hive_state_path: File.join(dir, ".hive-state"),
+        stage_name: "publish", stage_index: 1, workflow: active_terminal_workflow
+      )
+      committed = false
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:hive_commit) { |**| committed = true }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::TaskMeta::StaleTask) do
+          command.send(
+            :commit_after, current, { commit: "complete" }, config: {},
+            observation: observation
+          )
+        end
+      end
+
+      refute committed
+      assert_equal "replacement\n<!-- COMPLETE -->\n", File.binread(state_file)
+      refute Hive::TaskMeta.read(folder).key?(:completed_at)
+    ensure
+      observation&.close
+    end
+  end
+
   def test_active_terminal_commit_failure_restores_prior_metadata
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "1-publish", "some-slug")
@@ -1059,16 +1128,45 @@ class CommandsRunTest < Minitest::Test
     ensure
       inside_lock = false
     end
+    observation = Object.new
+    observation.define_singleton_method(:close) { nil }
 
-    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
-      with_replaced_singleton_method(Hive::Lock, :with_task_lock, lock) do
-        with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { true }) do
-          with_replaced_singleton_method(Hive::Config, :load, ->(*) { raise "config loaded before generation gate" }) do
-            assert_raises(Hive::ConcurrentRunError) { run.call }
+    with_replaced_singleton_method(Hive::TaskMeta, :observe, ->(*) { observation }) do
+      with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+        with_replaced_singleton_method(Hive::Lock, :with_task_lock, lock) do
+          with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { true }) do
+            with_replaced_singleton_method(Hive::Config, :load, ->(*) { raise "config loaded before generation gate" }) do
+              assert_raises(Hive::ConcurrentRunError) { run.call }
+            end
           end
         end
       end
     end
+  end
+
+  def test_run_claims_the_observed_lease_under_project_commit_custody
+    resolved = task(folder: "/tmp/task-folder", hive_state_path: "/tmp/project/.hive-state")
+    observation = Object.new
+    closed = false
+    observation.define_singleton_method(:close) { closed = true }
+    claims = []
+    lock = lambda do |folder, **kwargs, &_block|
+      claims << [ folder, kwargs ]
+      raise Hive::ConcurrentRunError, "stop after the claim"
+    end
+
+    with_replaced_singleton_method(Hive::TaskMeta, :observe, ->(*) { observation }) do
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, lock) do
+        assert_raises(Hive::ConcurrentRunError) { command.send(:run_task, resolved) }
+      end
+    end
+
+    folder, kwargs = claims.fetch(0)
+    assert_equal "/tmp/task-folder", folder
+    assert_equal "/tmp/project/.hive-state", kwargs.fetch(:acquire_under_commit_lock)
+    assert_equal false, kwargs.fetch(:create)
+    assert_same observation, kwargs.fetch(:observation)
+    assert closed, "the run observation must be closed when the claim fails"
   end
 
   def test_failed_durable_json_attempt_without_stdout_emits_one_error_document

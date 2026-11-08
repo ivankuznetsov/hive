@@ -7,6 +7,7 @@ require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/convergence"
 
 module Hive
   module Stages
@@ -88,6 +89,10 @@ module Hive
             reviewer_files: reviewer_files,
             escalations_path: escalations
           )
+          # A retried pass finds its previous escalations file still on
+          # disk. Its content is already in the prompt; drop it so only a
+          # file this run writes can satisfy the output check.
+          cleanup_partial_escalations!(escalations)
 
           custody_manifest = Hive::ArtifactFirewall::Manifest.new(
             root: ctx.task_folder,
@@ -105,7 +110,7 @@ module Hive
             prompt: prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
-            max_budget_usd: cfg.dig("budget_usd", "review_triage") || 75,
+            max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_triage", profile, default: 75),
             timeout_sec: cfg.dig("timeout_sec", "review_triage") || 1800,
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
@@ -118,16 +123,12 @@ module Hive
             ),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists,
-            agent_custody: agent_custody
+            agent_custody: agent_custody,
+            mcp_scope: "review.triage"
           }
           spawn_result =
-            if Hive::AgentSupport.supports?(profile, :Interactive)
-              Hive::Stages::Base.spawn_claude!(
-                task,
-                cfg,
-                **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
-              )
+            if Hive::AgentSupport.supports?(profile, :Launch)
+              Hive::Stages::Base.spawn_claude!(task, cfg, **kwargs)
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
             end
@@ -306,6 +307,7 @@ module Hive
             task_context_section: build_task_context_section(ctx, tag),
             prior_escalations_section: build_prior_escalations_context(ctx, tag),
             escalations_path: escalations_path,
+            convergence_section: Hive::Stages::Review::Convergence.triage_section(cfg, ctx.pass),
             user_supplied_tag: tag
           )
           require "erb"

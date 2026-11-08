@@ -102,13 +102,17 @@ module Hive
       # Reconcile every explicitly enabled registered project. Results are
       # structured so Dispatcher can log blocks without treating one project
       # failure as a daemon-wide tick failure.
-      def tick(now: Time.now)
+      def tick(now: Time.now, projects: nil)
         return [] if @next_poll_at && now < @next_poll_at
 
         deadline = begin_tick_budget(now)
         prepared = []
         results = {}
         entries = rotated_entries(Array(@registry.call))
+        if projects
+          allowed = Array(projects).map(&:to_s)
+          entries = entries.select { |entry| allowed.include?(entry.fetch("name").to_s) }
+        end
         entries.each do |entry|
           begin
             cfg = @config_loader.call(entry.fetch("path"))

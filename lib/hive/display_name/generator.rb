@@ -8,6 +8,7 @@ require "hive/agent_support"
 require "hive/config"
 require "hive/display_name/sanitizer"
 require "hive/git_ops"
+require "hive/mcp"
 require "hive/stages/base"
 require "hive/task"
 require "hive/task_meta"
@@ -25,26 +26,53 @@ module Hive
       end
 
       def call
-        name = generate_name
-        return nil unless name
-        # The agent runs detached for ~60s; in the folder-as-agent pipeline the
-        # task may be `mv`'d to the next stage in that window. Bail if the
-        # original folder no longer exists so `update_display_name` (which
-        # mkdir_p's the path) can't resurrect a stale, idea.md-less stub.
-        return nil unless File.directory?(@task.folder)
+        Hive::TaskMeta.with_observation(@task.folder) do |observation|
+          unless observation
+            warn "[hive] display-name: stale task; skipping #{@task.slug}"
+            return nil
+          end
 
-        Hive::Lock.with_task_lock(
-          @task.folder, slug: @task.slug, op: "display-name"
-        ) do
-          Hive::TaskMeta.update_display_name(@task.folder, name)
+          name = generate_name_safely
+          return nil unless name
+
+          Hive::Lock.with_commit_lock(@task.hive_state_path) do
+            Hive::TaskMeta.validate_observation!(@task.folder, observation)
+            Hive::Lock.with_task_lock(
+              @task.folder, slug: @task.slug, op: "display-name",
+              create: false, observation: observation
+            ) do
+              result = Hive::TaskMeta.update_display_name(
+                @task.folder, name, observation: observation
+              )
+              raise Hive::TaskMeta::StaleTask, "display-name update lost task custody" if result.stale?
+            end
+            commit_name if @commit
+          end
+          name
         end
-        commit_name if @commit
-        name
-      rescue StandardError
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        warn "[hive] display-name: stale task; skipping #{@task.slug} (#{bounded_error(error)})"
+        nil
+      rescue Hive::ConcurrentRunError => error
+        warn "[hive] display-name: task lease contention for #{@task.slug} (#{bounded_error(error)})"
+        nil
+      rescue Hive::TaskMeta::InvalidMetadata, SystemCallError, IOError, ArgumentError => error
+        warn "[hive] display-name: metadata update failed for #{@task.slug} (#{bounded_error(error)})"
         nil
       end
 
       private
+
+      def generate_name_safely
+        generate_name
+      rescue Hive::Error, SystemCallError, IOError, ArgumentError => error
+        warn "[hive] display-name: generation failed for #{@task.slug} (#{bounded_error(error)})"
+        nil
+      end
+
+      def bounded_error(error)
+        "#{error.class}: #{error.message.to_s.byteslice(0, 240)}"
+      end
 
       def generate_name
         profile = Hive::Stages::Base.stage_profile(@cfg, "execute")
@@ -54,9 +82,16 @@ module Hive
         Hive::DisplayName::Sanitizer.sanitize(result[:final_message])
       end
 
+      # A display name needs no MCP: the launch is isolated with no grants.
       def run_agent(profile)
+        Hive::Mcp.with_launch(profile: profile, cfg: nil, scope: "display_name", cwd: @task.project_root) do |launch|
+          run_isolated_agent(profile, launch)
+        end
+      end
+
+      def run_isolated_agent(profile, launch)
         prompt = render_prompt
-        invocation = compiled_invocation(profile, prompt)
+        invocation = compiled_invocation(profile, prompt, launch)
         cmd = invocation.argv
         log_path = File.join(@task.log_dir, "display-name-#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}.log")
         FileUtils.mkdir_p(File.dirname(log_path))
@@ -65,7 +100,7 @@ module Hive
         stdin_file = prompt_stdin_file(invocation)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
-        pid = Process.spawn(profile.subscription_environment, *cmd, **spawn_opts)
+        pid = Process.spawn(launch.environment_for(profile.subscription_environment), *cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
         messages = Hive::Agent::MessageExtractor::Accumulator.new(
@@ -112,13 +147,14 @@ module Hive
         file
       end
 
-      def compiled_invocation(profile, prompt)
-        Hive::AgentRuntime.compile(
+      def compiled_invocation(profile, prompt, launch)
+        Hive::Mcp.compile(
           Hive::AgentRuntime::Request.new(
             profile: profile,
             prompt: prompt,
             permission_mode: Hive::Config.claude_permission_mode(@cfg)
-          )
+          ),
+          launch
         )
       end
 

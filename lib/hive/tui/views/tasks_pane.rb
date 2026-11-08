@@ -119,13 +119,6 @@ module Hive
           end
 
           visible = visible_snapshot(model)
-          hidden_count = model.snapshot.hidden_archived_task_count(scope: model.scope)
-          if hidden_count.positive?
-            lines << Styles::HINT.render(
-              truncate(hidden_archived_summary(hidden_count), inner_width)
-            )
-            lines << ""
-          end
           if visible.nil? || visible.projects.all? { |p| p.rows.empty? }
             lines << Styles::HINT.render(EMPTY_PLACEHOLDER)
             return fit_lines(lines, inner_height).join("\n")
@@ -171,11 +164,6 @@ module Hive
           return nil if snap.nil?
 
           snap.visible_projection(scope: model.scope, filter: model.filter)
-        end
-
-        def hidden_archived_summary(count)
-          noun = count == 1 ? "task" : "tasks"
-          "… and #{count} older archived #{noun} (hive archive to view)"
         end
 
         # Below `inner_width = ICON+ID+PR+STAGE+STATUS+AGE+SEPARATORS+NAME_MIN_WIDTH`
@@ -300,7 +288,8 @@ module Hive
           Hive::Dependencies.blocked_label(
             depends_on: row.depends_on,
             blocked_by: row.blocked_by,
-            dependency_stage: row.dependency_stage
+            dependency_stage: row.dependency_stage,
+            unmet_dependencies: row.unmet_dependencies
           )
         end
 

@@ -50,6 +50,18 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
     assert_match(/source_unavailable: Hive::ConfigError/, events.first.reason)
   end
 
+  def test_readiness_preserves_a_future_decision_lease_deadline
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(clock: -> { NOW })
+    item = scheduler.send(
+      :readiness_item,
+      { "status" => "deciding", "occurrence_id" => "occ-1",
+        "decision_reservation" => { "expires_at" => (NOW + 60).iso8601 } }, NOW
+    )
+
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal NOW + 60, item.fetch("next_check_at")
+  end
+
   def test_drains_accepted_source_while_discovery_is_exhausted_without_patrol_budget
     with_tmp_global_config do
       with_tmp_git_repo do |project_root|
@@ -645,6 +657,59 @@ class PatrolFixAdmissionSchedulerTest < Minitest::Test
 
     malformed_retry = Struct.new(:retry_at).new("not-a-time")
     assert_nil scheduler.send(:provider_retry_at, malformed_retry)
+  end
+
+  def test_readiness_exposes_decided_admission_before_next_materialization_tick
+    with_initialized_scheduler_project do |project_root, hive_state, source, entry|
+      admission = Hive::PatrolFix::AdmissionStore.new(
+        root: File.join(hive_state, "patrol-fix", "admissions")
+      )
+      project_source = ProjectSource.new("demo", source.store)
+      scheduler, services = scheduler_for(
+        project_root, project_source, admission,
+        decision_provider: lambda do |_input|
+          {
+            "decision" => "distinct", "candidate_identity" => nil,
+            "rationale" => "Independent repair", "evidence" => [ "Separate root" ],
+            "model_receipt" => "fake-provider:distinct"
+          }
+        end,
+        materializer_factory: ->(**) { flunk "readiness must not materialize" }
+      )
+      dispatch = scheduler.tick(now: NOW).fetch(0)
+      services.fetch(0).run_reserved(
+        occurrence_id: dispatch.occurrence_id,
+        reservation_id: dispatch.dispatch_token.fetch(:reservation_id), now: NOW + 1
+      )
+      assert_equal "decided", admission.fetch(entry.fetch("occurrence_id")).fetch("status")
+      assert_equal [ entry.fetch("occurrence_id") ],
+                   admission.pending(now: NOW + 1).map { |record| record.fetch("occurrence_id") }
+
+      items = scheduler.readiness(project: "demo", now: NOW + 1)
+
+      assert_equal [ "dispatch:patrol-fix:#{entry.fetch('occurrence_id')}" ],
+                   items.map { |item| item.fetch("id") }
+      assert_equal [ "runnable_now" ], items.map { |item| item.fetch("bucket") }
+    end
+  end
+
+  def test_readiness_preserves_future_patrol_fix_retry_wake
+    retry_at = NOW + 300
+    record = {
+      "occurrence_id" => "ordinary:finding-1:v1", "status" => "retry_wait",
+      "retry" => { "retry_at" => retry_at.iso8601(6) }
+    }
+    store = Object.new
+    store.define_singleton_method(:pending) { |**| [ record ] }
+    scheduler = Hive::Daemon::PatrolFixAdmissionScheduler.new(
+      sources: [ ProjectSource.new("demo", store) ]
+    )
+
+    item = scheduler.readiness(project: "demo", now: NOW).fetch(0)
+
+    assert_equal "waiting_external", item.fetch("bucket")
+    assert_equal retry_at, item.fetch("next_check_at")
+    assert_equal "time_due", item.dig("condition", "kind")
   end
 
   private

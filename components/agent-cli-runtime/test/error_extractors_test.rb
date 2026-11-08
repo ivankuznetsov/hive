@@ -159,6 +159,26 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     assert_includes error[:message], "temporarily rate-limited upstream"
   end
 
+  def test_opencode_extractor_reads_opencode_two_flat_error
+    event = {
+      "type" => "error",
+      "sessionID" => "ses_auth",
+      "error" => {
+        "type" => "provider.auth",
+        "message" => "This API key has expired. Create a new API key in OpenCode Console.",
+        "status" => 401
+      }
+    }
+
+    error = AgentCliRuntime.extract_provider_error(:opencode, event)
+
+    assert_equal :opencode, error[:provider]
+    assert_includes error[:message], "This API key has expired"
+    assert_nil AgentCliRuntime.extract_provider_error(
+      :opencode, { "type" => "error", "error" => { "type" => "unknown", "message" => " " } }
+    )
+  end
+
   def test_ordinary_events_are_not_errors
     [
       { "type" => "result", "is_error" => false, "message" => "done" },
@@ -189,5 +209,41 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     error = AgentCliRuntime.extract_provider_error(:claude, event)
 
     refute_includes error[:message], "sk-ant-api03-AAAABBBBCCCCDDDDEEEEFFFFGGGGHHHH"
+  end
+
+  CODEX_RETRY = {
+    "type" => "error",
+    "message" => "Reconnecting... 2/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-x***)"
+  }.freeze
+  CODEX_TERMINAL = {
+    "type" => "turn.failed",
+    "error" => { "message" => "unexpected status 401 Unauthorized: Incorrect API key provided: sk-x***" }
+  }.freeze
+
+  # Codex emits every transport retry as an "error" event before the real
+  # failure; callers keep the first provider error, so retries must not count.
+  def test_codex_retry_notices_are_not_provider_errors
+    assert_nil AgentCliRuntime.extract_provider_error(:codex, CODEX_RETRY)
+    assert_nil AgentCliRuntime.extract_provider_error(
+      :codex, { "type" => "error", "message" => "Reconnecting... 5/5 (stream disconnected before completion)" }
+    )
+  end
+
+  def test_codex_terminal_failure_keeps_its_status_code
+    error = AgentCliRuntime.extract_provider_error(:codex, CODEX_TERMINAL)
+
+    refute_nil error
+    assert_equal :codex, error[:provider]
+    assert_equal 401, error[:status_code]
+    assert_includes error[:message], "401 Unauthorized"
+  end
+
+  def test_codex_rate_limit_status_is_classified
+    error = AgentCliRuntime.extract_provider_error(
+      :codex, { "type" => "error", "message" => "unexpected status 429 Too Many Requests: slow down" }
+    )
+
+    assert_equal 429, error[:status_code]
+    assert_equal :rate_limited, error[:kind]
   end
 end

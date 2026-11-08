@@ -92,11 +92,11 @@ bare `hive web` starts the blocking foreground server and is not a status
 probe.
 
 Prefer this native managed-service path for an ordinary Linux/macOS
-workstation. Choose Hivebox when the user needs container isolation, multiple
-local instances, containment for untrusted agents, or a reproducible
-server/NAS deployment. On Windows, use WSL with systemd for the native path or
-Hivebox through Docker Desktop; do not invent a separate Windows service
-manager.
+workstation; it is the self-hosted route. On Windows, install
+native Hive inside WSL with systemd enabled; do not invent a separate Windows
+service manager or a container install. Hive does not ship a Docker
+distribution; users who do not want to run Hive themselves should use the
+hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) instead.
 
 Initial project enrollment is a separate consent boundary. Explain that a
 non-TTY `hive init` takes defaults that enable medium patrol, architecture

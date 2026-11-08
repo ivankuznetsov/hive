@@ -1,0 +1,149 @@
+require "fileutils"
+require "tempfile"
+require "hive/agent"
+require "hive/agent_runtime"
+require "hive/config"
+require "hive/mcp"
+require "hive/paths"
+require "hive/secret_patterns"
+require "hive/stages/base"
+require "hive/daily_digest/document_prompt"
+
+module Hive
+  module DailyDigest
+    # PRDigest owns the prompt; the host's configured agent supplies prose.
+    class DocumentGenerator
+      OUTPUT_LIMIT = 8 * 1024 * 1024
+
+      def initialize(config_loader: -> { Config.load(Paths.state_home).merge("daily_digest" => Config.load_global_daily_digest) }, timeout_sec: 300)
+        @config_loader, @timeout_sec = config_loader, timeout_sec
+      end
+
+      # Tries the configured digest route, then each `fallback_agents` entry in
+      # order. Every failure is kept so an all-routes failure names each cause
+      # instead of only the last one.
+      def generate(facts)
+        require "prdigest"
+        config = @config_loader.call
+        failures = []
+        routes(config).each do |route|
+          return generate_with(facts, config, route)
+        rescue Hive::AgentError, AgentCliRuntime::Error => error
+          failures << "#{route_label(route)}: #{error.message}"
+        end
+        raise Hive::AgentError, failures.join("; ")[0, 4_000]
+      end
+
+      private
+
+      def routes(config)
+        digest = config.fetch("daily_digest", {}) || {}
+        primary = digest.slice("agent", "model", "effort")
+        [ primary, *Array(digest["fallback_agents"]) ].uniq
+      end
+
+      def route_label(route)
+        [ route["agent"] || "execute agent", route["model"] ].compact.join(" ")
+      end
+
+      def generate_with(facts, config, route)
+        profile = Hive::Stages::Base.stage_profile(config, "execute", explicit_agent: route["agent"])
+        request = Hive::AgentRuntime::Request.new(
+          profile: profile, prompt: DocumentPrompt.build(facts),
+          permission_mode: Hive::Config.claude_permission_mode(config),
+          **Hive::Stages::Base.model_launch_arguments(config, "execute", profile, current: route)
+        )
+        output = Hive::Mcp.with_launch(profile: profile, cfg: config, scope: "daily_digest", cwd: Paths.state_home) do |launch|
+          @mcp_launch = launch
+          capture(Hive::Mcp.compile(request, launch), profile)
+        ensure
+          @mcp_launch = nil
+        end
+        text = final_message(profile, output)
+        if text.to_s.strip.empty?
+          raise Hive::AgentError, "digest agent did not return a complete document"
+        end
+        Hive::SecretPatterns.redact(text)
+      end
+
+      def final_message(profile, output)
+        begin
+          parsed = Hive::AgentRuntime.parse_run(profile, stdout: output)
+          return nil if parsed.final_message_truncated || %w[length content-filter].include?(parsed.terminal_reason)
+
+          return parsed.final_message
+        rescue AgentCliRuntime::UnsupportedCapability
+          # Older adapters use Hive's event extractor rather than the strict
+          # runtime parser. Launcher text still cannot become a document.
+        end
+        messages = Hive::Agent::MessageExtractor::Accumulator.new(
+          max_bytes: 256 * 1024,
+          structured_output_protocol: Hive::AgentSupport.for(profile) ||
+            Hive::AgentSupport.for_protocol(profile.structured_output_protocol)
+        )
+        output.each_line do |line|
+          messages.observe(Hive::Agent::MessageExtractor.parse_json_line(line), raw_line: line)
+        end
+        text = messages.value
+        messages.source == :structured ? text : nil
+      end
+
+      # A failed run is not a document: read the provider's own error event
+      # instead of strictly parsing it as a successful transcript, which would
+      # replace the real cause (for example an expired API key) with a
+      # MalformedOutput about the event shape.
+      def provider_error(profile, output)
+        output.to_s.each_line do |line|
+          event = Hive::Agent::MessageExtractor.parse_json_line(line)
+          error = Hive::AgentRuntime.extract_provider_error(profile, event)
+          return error[:message] if error && !error[:message].to_s.empty?
+        end
+        nil
+      end
+
+      def capture(invocation, profile)
+        files = Array.new(3) { Tempfile.new("hive-digest-agent") }
+        input, output, errors = files
+        input.write(invocation.stdin_data.to_s)
+        input.rewind
+        FileUtils.mkdir_p(Paths.state_home, mode: 0o700)
+        environment = profile.subscription_environment.merge(Hive::Agent::SCRUBBED_CHILD_ENV)
+        environment = @mcp_launch.environment_for(environment) if @mcp_launch
+        pid = Process.spawn(environment, *invocation.argv, chdir: Paths.state_home,
+                            in: input, out: output, err: errors, pgroup: true)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + @timeout_sec
+        loop do
+          waited = Process.waitpid2(pid, Process::WNOHANG)
+          if waited
+            pid = nil
+            unless waited.last.success?
+              errors.rewind
+              output.rewind
+              detail = provider_error(profile, output.read(OUTPUT_LIMIT)) || errors.read(2_000).to_s
+              raise Hive::AgentError, "digest agent failed (exit #{waited.last.exitstatus}): #{Hive::SecretPatterns.redact(detail)[0, 2_000]}"
+            end
+            raise Hive::AgentError, "digest agent output exceeded the limit" if output.size > OUTPUT_LIMIT
+
+            output.rewind
+            return output.read
+          end
+          if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline ||
+             output.size > OUTPUT_LIMIT || errors.size > OUTPUT_LIMIT
+            raise Hive::AgentError, "digest agent exceeded its time or output limit"
+          end
+          sleep 0.1
+        end
+      ensure
+        if pid
+          begin
+            Process.kill("KILL", -pid)
+            Process.waitpid(pid)
+          rescue Errno::ESRCH, Errno::ECHILD
+            nil
+          end
+        end
+        files&.each(&:close!)
+      end
+    end
+  end
+end

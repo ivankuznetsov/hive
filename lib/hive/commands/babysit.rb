@@ -3,12 +3,15 @@ require "time"
 require "yaml"
 require "hive/config"
 require "hive/invoked_binary"
+require "hive/one_shot/babysitter_adapter"
 require "hive/paths"
 require "hive/lock"
 require "hive/pid_file"
 require "hive/babysitter/dispatcher"
 require "hive/babysitter/logger"
 require "hive/commands/service_installer/result_presenter"
+require "hive/runtime_control_plane/database"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 module Hive
   module Commands
@@ -26,7 +29,8 @@ module Hive
 
       def initialize(subcommand = nil, target = nil, detach: false, dry_run: false,
                      once: false, all: false, force: false,
-                     hive_home: Hive::Paths.state_home, quiet: false)
+                     hive_home: Hive::Paths.state_home, quiet: false, json: false,
+                     one_shot_factory: nil)
         @subcommand = subcommand
         @target = target
         @detach = detach
@@ -34,21 +38,10 @@ module Hive
         @once = once
         @all = all
         @force = force
-        @json = false
+        @json = json
+        @one_shot_factory = one_shot_factory
         @hive_home = hive_home
         @quiet = quiet
-      end
-
-      # Move a previously supported detached babysitter under the service
-      # manager before enabling the managed unit. Reuse the normal stop path
-      # so PID ownership and the active-repair drain have one policy.
-      def self.prepare_service_takeover!(installer:, hive_home: Hive::Paths.state_home)
-        state = installer.service_lifecycle_state
-        return unless state["service_manager_available"]
-        return if state["service_running"]
-        return unless File.exist?(File.join(hive_home, ".babysitter.pid"))
-
-        new("stop", hive_home: hive_home, quiet: true).call
       end
 
       def call
@@ -84,9 +77,9 @@ module Hive
       def install_babysitter
         require "hive/commands/babysit/service_installer"
         installer = Hive::Commands::Babysit::ServiceInstaller.new(
-          binary_path: Hive::InvokedBinary.path
+          binary_path: Hive::InvokedBinary.path,
+          hive_home: @hive_home
         )
-        self.class.prepare_service_takeover!(installer: installer, hive_home: @hive_home)
         perform_service_install(installer)
       end
 
@@ -155,14 +148,71 @@ module Hive
       end
 
       def run_once
-        project_name = resolve_once_project_name
-        if @all && Hive::Config.registered_projects.empty?
-          puts "babysitter: 0 enabled projects, nothing to do"
-          return
+        resolve_once_project_name
+        entries = if @all
+          Hive::Config.registered_project_entries(preserve_invalid: true)
+        else
+          [ @once_entry ]
+        end
+        started = Time.now.utc
+        reports = entries.each_with_index.map do |entry, index|
+          one_shot_report(entry, index: index)
+        end
+        result = if @all
+          Hive::OneShot::Result.aggregate(
+            component: :babysitter, reports: reports, started_at: started,
+            finished_at: Time.now.utc
+          )
+        else
+          reports.fetch(0)
+        end
+        puts result.to_json
+        result
+      end
+
+      def one_shot_adapter(entry)
+        return @one_shot_factory.call(entry) if @one_shot_factory
+
+        require "hive/one_shot/babysitter_adapter"
+        Hive::OneShot::BabysitterAdapter.new(
+          entry: entry, dry_run: @dry_run, admission_open: persistent_admission_probe
+        )
+      end
+
+      def one_shot_report(entry, index:)
+        started = Time.now.utc
+        project = one_shot_project_name(entry, index: index)
+        unless one_shot_registry_entry?(entry)
+          return Hive::OneShot::Result.error(
+            component: :babysitter, project: project,
+            started_at: started, finished_at: Time.now.utc,
+            code: "config",
+            message: "registered project entry #{index + 1} is malformed; expected non-empty string name and path",
+            exit_code: Hive::ExitCodes::CONFIG
+          )
         end
 
-        dispatcher = build_dispatcher(project_name: project_name, max_ticks: 1)
-        dispatcher.run_forever
+        one_shot_adapter(entry).call
+      rescue StandardError => error
+        Hive::OneShot::Result.error(
+          component: :babysitter, project: project,
+          started_at: started, finished_at: Time.now.utc,
+          code: error.respond_to?(:code) ? error.code : "observation_failed",
+          message: error.message,
+          exit_code: error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::TEMPFAIL
+        )
+      end
+
+      def one_shot_registry_entry?(entry)
+        entry.is_a?(Hash) && entry["name"].is_a?(String) && !entry["name"].empty? &&
+          entry["path"].is_a?(String) && !entry["path"].empty?
+      end
+
+      def one_shot_project_name(entry, index:)
+        name = entry["name"] if entry.is_a?(Hash)
+        return name if name.is_a?(String) && !name.empty?
+
+        "invalid-registry-entry-#{index + 1}"
       end
 
       def resolve_once_project_name
@@ -182,6 +232,7 @@ module Hive
                 "hive babysit --once: unknown project #{@target.inspect} " \
                 "(see `hive status` for the registered set)"
         end
+        @once_entry = entry
         entry["name"]
       end
 
@@ -200,8 +251,28 @@ module Hive
           logger: logger,
           dry_run: @dry_run,
           project_name: project_name,
-          max_ticks: max_ticks
+          max_ticks: max_ticks,
+          persistent_admission: persistent_admission_probe(runtime_lifecycle_repository)
         )
+      end
+
+      def runtime_lifecycle_repository
+        Hive::RuntimeControlPlane::LifecycleRepository.new(
+          database: Hive::RuntimeControlPlane::Database.new(
+            path: Hive::Paths.runtime_control_plane_path(@hive_home)
+          ).open!
+        )
+      end
+
+      # Durable installation admission (closed by `hive daemon quiesce`),
+      # shared by the resident dispatcher and the `--once` adapter. Without a
+      # repository the runtime database opens lazily on first probe; callers
+      # treat any probe failure as closed admission.
+      def persistent_admission_probe(lifecycle_repository = nil)
+        lambda do
+          lifecycle_repository ||= runtime_lifecycle_repository
+          lifecycle_repository.current.admission_open?
+        end
       end
 
       def stop_daemon
@@ -360,7 +431,7 @@ module Hive
       end
 
       def reexec_detached_start!
-        argv = [ "babysit", "start", "--detach" ]
+        argv = [ "babysit", "start", "--detach", "--context", "local" ]
         argv << "--dry-run" if @dry_run
         binary = Hive::InvokedBinary.path
         unless binary
@@ -480,3 +551,8 @@ module Hive
     end
   end
 end
+
+require "hive/cli_usage_contracts"
+require "hive/one_shot/result"
+
+Hive::OneShot::Result.declare_usage_contract("babysit", component: :babysitter)

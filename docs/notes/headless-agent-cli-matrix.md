@@ -30,7 +30,7 @@ route. `models:` never selects the profile.
 
 | Profile | Routed model | Routed effort | Native placement |
 | --- | --- | --- | --- |
-| Claude | yes; `inherit` omits the flag | `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` / `--effort` in Claude argv; shared by headless and tmux |
+| Claude | yes; `inherit` omits the flag | `default`, `inherit`, `low`, `medium`, `high`, `xhigh`, `max` | `--model` / `--effort` in Claude argv |
 | Codex | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh` | global `--model` / `-c model_reasoning_effort=…` before `exec` or `review` |
 | Grok | yes; `default`/`inherit` omit the flag | `default`, `inherit`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | profile-native `--model` / `--reasoning-effort` flags |
 | Pi | yes; `default`/`inherit` omit the flag | unsupported | profile-native model flag only |
@@ -235,7 +235,7 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 4. **U12 profile defaults locked in (3 profiles ship in v1; opencode dropped per scope decision above):**
    - claude: `add_dir_flag: "--add-dir"` (variadic), `permission_skip_flag: "--dangerously-skip-permissions"`, `headless_flag: "-p"`, `budget_flag: "--max-budget-usd"`, `output_format: "--output-format stream-json"`, `version_flag: "--version"`, `status_detection_mode: :state_file_marker`, `min_version: "2.1.118"`
    - codex: `add_dir_flag: "--add-dir"` (single-arg, repeated), `permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox"`, `headless_flag: ["exec"]` (subcommand-style), `budget_flag: nil`, `output_format: "--json"` plus `-o, --output-last-message <path>`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.125.0"`
-   - pi: `add_dir_flag: nil` (gap), `permission_skip_flag: nil` (gap), `headless_flag: "-p"`, `budget_flag: nil`, `output_format: "--mode json"`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.70.2"`, `headless_supported: true`
+   - pi: `add_dir_flag: nil` (gap), `permission_skip_flag: nil` (gap), `headless_flag: "-p"`, `budget_flag: nil`, `output_format: "--mode json"`, `version_flag: "--version"`, `status_detection_mode: :output_file_exists`, `min_version: "0.70.2"` (Hive now requires 1.0.4 through `agents.pi.min_version` for `--no-mcp`), `headless_supported: true`
 5. **Pi auth precondition:** pi cannot be exercised on this machine until the user runs `pi` interactively and logs into a provider. Document in the Pi profile's `headless_supported` check or add a `Hive::AgentProfile#preflight!` method that raises a friendly error if auth isn't set up.
 6. **CHANGELOG note for v1:** "v1's default reviewer set is claude + codex. Pi and opencode are supported as opt-in agent CLIs per project; users opting in accept the ADR-018 trust-model trade-off documented in `wiki/decisions.md`."
 
@@ -304,15 +304,14 @@ authoritative, while the resolved concrete default is retained for
 audit/status. Every value is a discrete argv element; model and effort never
 ride shell interpolation or credential-bearing environment snapshots.
 
-## Brainstorm Interactive Tmux Addendum
+## Claude Launch Path
 
-The matrix above describes headless `AgentProfile` spawns. Claude now has
-one project-global interactive exception: `claude.mode: tmux`.
-
-That path does not go through `Hive::Agent` and does not use `claude -p`.
-It starts an interactive `claude` process inside a managed tmux session,
-pastes the rendered stage prompt, and waits for the same artifact/marker
-contract as the headless path. The wrapper unsets `ANTHROPIC_API_KEY` and
-`CLAUDE_API_KEY` so billing follows the operator's logged-in Claude
-subscription. Non-Claude profiles remain headless, even when
-`claude.mode: tmux`. See `docs/notes/claude-tmux-launch-mode.md`.
+Every Claude launch from a Hive stage, reviewer, or helper, including
+brainstorm and the Claude reviewers, is a headless `claude -p` spawn; there
+is no interactive exception. The former `claude.mode: tmux` runtime was removed on 2026-10-14
+after Anthropic confirmed that `claude -p` is permitted under a Claude
+subscription. Hive still unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+and `CLAUDE_API_KEY` before launching Claude, and `Stages::Base.spawn_agent` denies
+`AskUserQuestion` on every Claude launch without a workflow `runtime_policy`
+(runtime-policy launches already deny it). `docs/notes/claude-tmux-launch-mode.md` is kept as a
+historical record of the removed runtime.

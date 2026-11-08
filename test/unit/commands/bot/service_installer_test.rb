@@ -24,7 +24,7 @@ class BotServiceInstallerTest < Minitest::Test
       unit = File.join(dir, ".config/systemd/user/hive-bot.service")
       assert File.exist?(unit)
       body = File.read(unit)
-      assert_includes body, "ExecStart=#{hive} bot start --foreground"
+      assert_includes body, "ExecStart=#{hive} bot start --foreground --context local"
       assert_includes body, "Environment=PATH=",
                        "minimal PATH must be rewritten so the bot's bin/hive shebang resolves a Ruby with gem deps"
       refute_includes body, "HIVE_TELEGRAM_BOT_TOKEN",
@@ -89,8 +89,8 @@ class BotServiceInstallerTest < Minitest::Test
 
       result = installer.install!(autostart: true)
       assert_equal :failed, result.kind
-      assert installer.messages.any? { |msg| msg.include?("enable --now hive-bot") },
-             "recovery message should name the manual `enable --now hive-bot` command, got: #{installer.messages.inspect}"
+      assert installer.messages.any? { |msg| msg.include?("previous state was restored") },
+             "recovery message should describe the verified prior-or-pending state, got: #{installer.messages.inspect}"
     end
   end
 
@@ -121,7 +121,8 @@ class BotServiceInstallerTest < Minitest::Test
                    "bot plist KeepAlive must gate on SuccessfulExit:false, not unconditional true")
       refute_includes body, "HIVE_TELEGRAM_BOT_TOKEN",
                        "the bot plist must not embed a token; the bot loads ~/.config/hive/.env itself"
-      assert_equal [ [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
     end
   end
 
@@ -178,7 +179,7 @@ class BotServiceInstallerTest < Minitest::Test
       assert_equal 1, backups.size,
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed"
       assert_equal "previous-stale-content\n", File.read(backups.first)
-      assert_includes File.read(unit), "ExecStart=/tmp/hive bot start --foreground"
+      assert_includes File.read(unit), "ExecStart=/tmp/hive bot start --foreground --context local"
     end
   end
 
@@ -202,7 +203,8 @@ class BotServiceInstallerTest < Minitest::Test
       result = installer.install!(autostart: true, force: true)
 
       assert_equal :upgraded, result.kind
-      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands,
+      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) },
                    "force upgrade must unload before load so launchd refreshes the rewritten plist"
       assert result.restarted,
              "an upgraded macOS install must report restarted so the envelope's `restarted` is truthful"

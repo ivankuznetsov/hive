@@ -54,6 +54,28 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_rejects_inherited_rake_dry_run_clears_stale_default_report
+    root = File.expand_path("../../..", __dir__)
+    default_report = File.join(root, "tmp", "hive-eval-report.json")
+    FileUtils.mkdir_p(File.dirname(default_report))
+    preserve_path(default_report) do
+      File.write(default_report, "stale default report\n")
+
+      [ "-n", "--dry-run", "--bogus" ].each do |rakeopt|
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1", "RAKEOPT" => rakeopt },
+          "bin/hive-eval", "--no-judge"
+        )
+
+        refute status.success?, "RAKEOPT=#{rakeopt.inspect} must not turn a skipped eval into success"
+        assert_match(/RAKEOPT/, err)
+        refute File.exist?(default_report),
+          "RAKEOPT=#{rakeopt.inspect}: a rejected inherited RAKEOPT must invalidate a stale default report"
+        File.write(default_report, "stale default report\n")
+      end
+    end
+  end
+
   def test_cli_clears_inherited_rake_options_from_child
     [ "--trace", "-Iinclude", "-Wno", "-fn" ].each do |rakeopt|
       Dir.mktmpdir("hive-eval-report") do |dir|

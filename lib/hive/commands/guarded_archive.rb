@@ -16,25 +16,27 @@ module Hive
     # receipts — receipt semantics live entirely with their owner.
     class GuardedArchive
       def self.call(task, current_stage:, target_stage:, project: nil,
-                    transition_guard:, observation_guard: nil)
+                    transition_guard:, observation_guard: nil, terminal_outcome: nil)
         new(
           task: task,
           current_stage: current_stage,
           target_stage: target_stage,
           project: project,
           transition_guard: transition_guard,
-          observation_guard: observation_guard
+          observation_guard: observation_guard,
+          terminal_outcome: terminal_outcome
         ).call
       end
 
       def initialize(task:, current_stage:, target_stage:, project: nil,
-                     transition_guard:, observation_guard:)
+                     transition_guard:, observation_guard:, terminal_outcome: nil)
         @task = task
         @current_stage = current_stage
         @target_stage = target_stage
         @project = project
         @transition_guard = transition_guard
         @observation_guard = observation_guard
+        @terminal_outcome = terminal_outcome
       end
 
       def call
@@ -50,6 +52,8 @@ module Hive
       private
 
       def resume_at_terminal
+        return record_terminal_outcome(@task) if @terminal_outcome
+
         marker = Hive::Markers.current(@task.state_file)
         return publish_completion(@task) if marker.name == :complete ||
                                                inert_controller_terminal?(@task)
@@ -72,12 +76,15 @@ module Hive
           force: true,
           json: false,
           quiet: true,
+          dependency_admission: @terminal_outcome.nil?,
           observation_guard: lambda do |locked_task|
             @transition_guard.call(locked_task)
             @observation_guard&.call(locked_task)
           end
         ).call
         closed = Hive::Task.new(new_folder)
+        return record_terminal_outcome(closed) if @terminal_outcome
+
         unless inert_controller_terminal?(closed)
           run_at(new_folder)
           closed = Hive::Task.new(new_folder)
@@ -94,6 +101,13 @@ module Hive
           quiet: true,
           no_rebase: true
         ).call
+      end
+
+      def record_terminal_outcome(task)
+        return task if inert_controller_terminal?(task)
+
+        Hive::Markers.set(task.state_file, :complete, outcome: @terminal_outcome)
+        task
       end
 
       # Agent-owned terminal stages prove completion with :complete. A

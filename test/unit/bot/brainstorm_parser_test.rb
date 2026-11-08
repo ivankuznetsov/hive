@@ -204,6 +204,34 @@ class HiveBotBrainstormParserTest < Minitest::Test
     assert_equal 3, Hive::Bot::BrainstormParser.next_unanswered_question(questions).n
   end
 
+  # Location fields are the parser's source of truth for document
+  # positions. Mutation callers (BrainstormAnswerWriter) use them instead
+  # of re-deriving line indices from raw lines, so parser and writer can
+  # never disagree about where a question block starts, where it ends,
+  # and where its A-header sits.
+  def test_exposes_document_location_fields
+    text = "## Round 1\n\n### Q1. First?\n\n### A1.\n\n### Q2. Second?\n\n<!-- WAITING -->\n"
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    q1, q2 = questions
+    assert_equal 2, q1.question_line_index
+    assert_equal 6, q1.block_end_index
+    assert_equal 4, q1.answer_line_index
+    assert_equal 6, q2.question_line_index
+    assert_equal 8, q2.block_end_index
+    assert_nil q2.answer_line_index
+  end
+
+  def test_block_end_index_points_at_eof_for_a_trailing_question
+    text = "## Round 1\n### Q1. Final?"
+
+    questions = Hive::Bot::BrainstormParser.parse_text(text)
+
+    assert_equal 1, questions.first.question_line_index
+    assert_equal 2, questions.first.block_end_index
+  end
+
   def test_question_fingerprint_normalizes_unicode_and_layout_but_not_wording
     compact = Hive::BrainstormParser.question_fingerprint("Use the café path?")
     reformatted = Hive::BrainstormParser.question_fingerprint("  Use\tthe cafe\u0301\npath?  ")
@@ -234,6 +262,29 @@ class HiveBotBrainstormParserTest < Minitest::Test
     ).first
 
     assert_equal invalid, question.answer
+  end
+
+  def test_encoded_non_ascii_answer_restores_as_utf8
+    text = "Quote <!-- BEGIN LLM WIKI \u2026 --> verbatim, caf\u00e9"
+    line = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{Base64.urlsafe_encode64(text, padding: false)}"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{line}\n"
+    ).first
+
+    assert_equal text, question.answer
+    assert_equal Encoding::UTF_8, question.answer.encoding
+    assert JSON.generate(answer: question.answer)
+  end
+
+  def test_encoded_answer_with_invalid_utf8_falls_back_literally
+    line = "#{Hive::BrainstormParser::ANSWER_ESCAPE_PREFIX}#{Base64.urlsafe_encode64("\xFF\xFE".b, padding: false)}"
+    question = Hive::BrainstormParser.parse_text(
+      "## Round 1\n### Q1. Encoded?\n" \
+      "#{Hive::BrainstormParser.encoded_answer_header(1)}\n#{line}\n"
+    ).first
+
+    assert_equal line, question.answer
   end
 
   def test_legacy_answer_backslashes_and_escaped_text_are_preserved_verbatim

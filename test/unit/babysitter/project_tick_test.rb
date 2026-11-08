@@ -3,6 +3,7 @@ require "json"
 require "set"
 require "hive/babysitter/project_tick"
 require "hive/babysitter/logger"
+require "hive/babysitter/dispatcher"
 
 class BabysitterProjectTickTest < Minitest::Test
   include HiveTestHelper
@@ -41,12 +42,26 @@ class BabysitterProjectTickTest < Minitest::Test
       logger = make_logger(dir)
 
       with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
-        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
-          called << pr["number"]
-          :success
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :observe, lambda { |*|
+          [ :eligible, { "statusCheckRollup" => [ { "status" => "QUEUED" } ] } ]
         }) do
-          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
-          assert_equal({ total: 2, fixed: 2, untouched: 0, needs_human: 0 }, summary)
+          with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **kwargs|
+            called << pr["number"]
+            kwargs[:detail_sink]&.call(
+              "statusCheckRollup" => [ { "status" => "QUEUED" } ]
+            )
+            :success
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project, dry_run: true, logger: logger, inflight: Set.new,
+              detailed: true
+            )
+            assert_equal 2, summary.fetch(:total)
+            assert_equal [ [ 3, :capacity_deferred ], [ 4, :success ], [ 2, :success ] ],
+                         summary.fetch(:prs).map { |row| [ row[:number], row[:outcome] ] }
+            assert_equal %w[checks_pending checks_pending],
+                         summary.fetch(:prs).drop(1).map { |row| row[:wait] }
+          end
         end
       end
 
@@ -79,6 +94,42 @@ class BabysitterProjectTickTest < Minitest::Test
       end
 
       refute listed, "a stopped dispatcher must not load project configuration or query GitHub"
+    end
+  end
+
+  def test_provider_failure_is_retried_by_the_next_project_tick
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true })
+      logger = make_logger(dir)
+      attempts = 0
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, lambda { |_path, **_kwargs|
+        attempts += 1
+        raise Hive::GhError, "offline" if attempts == 1
+
+        []
+      }) do
+        first = Hive::Babysitter::ProjectTick.run(
+          project, dry_run: true, logger: logger, inflight: Set.new
+        )
+        second = Hive::Babysitter::ProjectTick.run(
+          project, dry_run: true, logger: logger, inflight: Set.new
+        )
+
+        assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 0 }, first)
+        assert_equal first, second
+      end
+
+      assert_equal 2, attempts
+      assert_equal 600, Hive::Babysitter::Dispatcher::DEFAULT_INTERVAL_SEC
+      events = File.readlines(
+        File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      ).map { |line| JSON.parse(line) }
+      assert events.any? { |event| event["outcome"] == "gh-error" }
+      assert events.any? { |event| event["outcome"] == "success" }
+    ensure
+      logger&.close
     end
   end
 
@@ -251,6 +302,104 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  # A finalized task only waits for its PR to merge; its red CI must reach the
+  # babysitter. A finalize still in progress keeps its branch protected, and an
+  # unreadable finalize marker fails safe to protected.
+  def test_completed_finalize_releases_its_branch_but_running_finalize_does_not
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 5 })
+      done = write_task_pointer(dir, "8-finalize", "finalized-task", "feature/finalized")
+      File.write(File.join(done, "pr.md"), "# PR\n\n<!-- COMPLETE pr_url=https://example.test/pr/40 -->\n")
+      running = write_task_pointer(dir, "8-finalize", "finalizing-task", "feature/finalizing")
+      File.write(File.join(running, "pr.md"), "# PR\n\n<!-- AGENT_WORKING pid=1 -->\n")
+      write_task_pointer(dir, "8-finalize", "no-state-file", "feature/no-state")
+      prs = %w[feature/finalized feature/finalizing feature/no-state].each_with_index.map do |branch, index|
+        { "number" => 40 + index, "headRefName" => branch, "isDraft" => false, "labels" => [],
+          "updatedAt" => "2026-05-26T10:00:00Z" }
+      end
+      called = []
+      logger = make_logger(dir)
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, _project, _cfg, **_kwargs|
+          called << pr["number"]
+          :success
+        }) do
+          Hive::Babysitter::ProjectTick.run(project, dry_run: true, logger: logger, inflight: Set.new)
+        end
+      end
+
+      assert_equal [ 40 ], called, "only the completed finalize hands its PR to the babysitter"
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_unreadable_finalize_marker_keeps_the_branch_owned
+    with_tmp_dir do |dir|
+      folder = write_task_pointer(dir, "8-finalize", "odd-task", "feature/odd")
+      File.write(File.join(folder, "pr.md"), "<!-- COMPLETE -->\n")
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { raise IOError, "unreadable" }) do
+        assert_includes Hive::Babysitter::ProjectTick.pipeline_owned_branches(project_entry(dir)), "feature/odd"
+      end
+    end
+  end
+
+  # Persistently red PRs must not win every tick: never-attempted PRs go
+  # first, then the least recently attempted, regardless of age or priority.
+  def test_selection_round_robins_by_last_attempt
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, [
+        { "ts" => "2026-05-26T12:00:00Z", "pr" => 1, "action" => "agent-fix", "outcome" => "success" },
+        { "ts" => "2026-05-26T09:00:00Z", "pr" => 2, "action" => "rebase", "outcome" => "success" },
+        { "ts" => "2026-05-26T13:00:00Z", "pr" => 3, "action" => "skipped", "outcome" => "draft_pr" }
+      ].map { |record| JSON.generate(record) }.join("\n") + "\nnot json\n")
+      prs = [
+        { "number" => 1, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-01T00:00:00Z" },
+        { "number" => 2, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-02T00:00:00Z" },
+        { "number" => 3, "mergeStateStatus" => "BEHIND", "updatedAt" => "2026-05-25T00:00:00Z" }
+      ]
+
+      ordered = Hive::Babysitter::ProjectTick.fair_order(prs, project).map { |pr| pr["number"] }
+
+      assert_equal [ 3, 2, 1 ], ordered, "never attempted, then oldest attempt, then most recent"
+    end
+  end
+
+  def test_already_green_noops_count_as_a_turn
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, JSON.generate(
+        "ts" => "2026-05-26T12:00:00Z", "pr" => 1, "action" => "noop", "outcome" => "already-green"
+      ) + "\n")
+      prs = [
+        { "number" => 1, "mergeStateStatus" => "CLEAN", "updatedAt" => "2026-05-01T00:00:00Z" },
+        { "number" => 2, "mergeStateStatus" => "BLOCKED", "updatedAt" => "2026-05-25T00:00:00Z" }
+      ]
+
+      assert_equal [ 2, 1 ], Hive::Babysitter::ProjectTick.fair_order(prs, project).map { |pr| pr["number"] }
+    end
+  end
+
+  def test_missing_or_unreadable_attempt_log_means_no_history
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      events = File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      FileUtils.mkdir_p(File.dirname(events))
+      File.write(events, "")
+      with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES, "denied" }) do
+        assert_equal({}, Hive::Babysitter::ProjectTick.last_attempt_times(project))
+      end
+    end
+  end
+
   # A malformed worktree.yml (non-hash) must not crash the scan; that task
   # simply contributes no owned branch and its PR is processed normally.
   def test_malformed_worktree_pointer_does_not_crash_ownership_scan
@@ -298,6 +447,25 @@ class BabysitterProjectTickTest < Minitest::Test
           assert_equal({ total: 2, fixed: 1, untouched: 0, needs_human: 1 }, summary)
         end
       end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_model_unsupported_outcome_needs_the_operator
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 })
+      logger = make_logger(dir)
+      prs = [ { "number" => 22, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*_args, **_kwargs) { :model_unsupported }) do
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: false, logger: logger, inflight: Set.new)
+          assert_equal({ total: 1, fixed: 0, untouched: 0, needs_human: 1 }, summary)
+        end
+      end
+      assert_equal :operator, Hive::Babysitter::ProjectTick.outcome_class(:model_unsupported)
     ensure
       logger&.close
     end
@@ -467,6 +635,184 @@ class BabysitterProjectTickTest < Minitest::Test
       refute ownership_scanned, "shutdown must stop before the task ownership scan"
     ensure
       logger&.close
+    end
+  end
+
+  def test_observe_only_uses_live_check_state_without_running_repairs
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 }
+      )
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 4, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 5, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, lambda { |_path, number, **_kwargs|
+          if number == 4
+            {
+              "mergeable" => "MERGEABLE", "mergeStateStatus" => "CLEAN",
+              "statusCheckRollup" => [ { "status" => "QUEUED" } ]
+            }
+          else
+            {
+              "mergeable" => "CONFLICTING",
+              "statusCheckRollup" => [ { "conclusion" => "FAILURE", "status" => "QUEUED" } ]
+            }
+          end
+        }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |*|
+          flunk "observe-only ticks must not run the fixer"
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: true, logger: logger, inflight: Set.new,
+            observe_only: true, detailed: true
+          )
+
+          actual = summary.fetch(:prs).map do |row|
+            [ row.fetch(:number), row.fetch(:outcome), row[:wait] ]
+          end
+          assert_equal [ [ 4, :already_green, "checks_pending" ],
+                         [ 5, :eligible, nil ] ], actual
+        end
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_excess_prs_are_observed_before_capacity_is_reported
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+      )
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 2, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(*) { :success }) do
+          with_replaced_singleton_method(Hive::Babysitter::PrFixer, :observe, lambda { |pr, *|
+            [ pr.fetch("number") == 2 ? :already_green : :eligible,
+              { "statusCheckRollup" => [ { "status" => "QUEUED" } ] } ]
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project, dry_run: false, logger: logger, inflight: Set.new,
+              detailed: true
+            )
+
+            excess = summary.fetch(:prs).find { |row| row.fetch(:number) == 2 }
+            assert_equal :already_green, excess.fetch(:outcome)
+            assert_equal "checks_pending", excess.fetch(:wait)
+          end
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_per_pr_github_failure_marks_detailed_summary_as_an_observation_error
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+      )
+      logger = make_logger(dir)
+      prs = [ { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |*|
+          raise Hive::GhError, "status unavailable"
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: false, logger: logger, inflight: Set.new,
+            detailed: true
+          )
+
+          assert_equal "github_observation_failed", summary.dig(:error, :code)
+          assert_equal :failure, summary.fetch(:prs).fetch(0).fetch(:outcome)
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_observe_only_github_failure_is_an_observation_error
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 1 }
+      )
+      logger = make_logger(dir)
+      prs = [ { "number" => 1, "labels" => [], "updatedAt" => "2026-05-26T09:00:00Z" } ]
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :observe, lambda { |*|
+          raise Hive::GhError, "status unavailable"
+        }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: true, observe_only: true,
+            logger: logger, inflight: Set.new, detailed: true
+          )
+
+          assert_equal "github_observation_failed", summary.dig(:error, :code)
+          assert_equal :failure, summary.fetch(:prs).fetch(0).fetch(:outcome)
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_observe_only_does_not_emit_events_or_write_status
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(
+        dir,
+        babysitter: { "enabled" => true, "labels_ignore" => [ "wip" ], "max_concurrent_prs" => 1 }
+      )
+      prs = [
+        { "number" => 1, "labels" => [ { "name" => "wip" } ], "updatedAt" => "2026-05-26T09:00:00Z" },
+        { "number" => 2, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" }
+      ]
+      logger = Object.new
+      logger.define_singleton_method(:event) { |*| raise "observe-only must not log mutable state" }
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::Events, :emit, lambda { |**|
+          raise "observe-only must not append babysitter events"
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::StatusWriter, :append, lambda { |**|
+            raise "observe-only must not append status"
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::PrFixer, :observe, lambda { |*|
+              [ :eligible, {} ]
+            }) do
+              summary = Hive::Babysitter::ProjectTick.run(
+                project, dry_run: true, logger: logger, inflight: Set.new,
+                observe_only: true, detailed: true
+              )
+              assert_equal [ 2 ], summary.fetch(:prs).map { |row| row.fetch(:number) }
+            end
+          end
+        end
+      end
+
+      refute_path_exists File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")
+      refute_path_exists File.join(project.fetch("hive_state_path"), "babysitter", "status.md")
     end
   end
 end

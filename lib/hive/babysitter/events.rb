@@ -24,12 +24,15 @@ module Hive
         conflict
         timeout
         budget_exhausted
+        limits_reached
+        model_unsupported
         gh-error
         already-green
         label_ignored
         draft_pr
         pipeline_owned
         fork_pr
+        ci_blocked
         dry_run
         shutdown
       ].freeze

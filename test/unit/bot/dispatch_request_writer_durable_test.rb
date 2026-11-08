@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/bot/dispatch_request_writer"
+require "hive/command_operation"
 
 class BotDispatchRequestWriterDurableTest < Minitest::Test
   include HiveTestHelper
@@ -9,6 +10,60 @@ class BotDispatchRequestWriterDurableTest < Minitest::Test
     keyword_init: true
   ) do
     def state_file = File.join(project_root, "task.md")
+  end
+
+  def test_same_cycle_bot_handlers_and_failed_successor_redelivery_use_shared_allocator
+    calls = []
+    mutex = Mutex.new
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:allocate_successor!) do |**attributes|
+      mutex.synchronize { calls << attributes }
+      { "allocation_id" => "stable-allocation" }
+    end
+    repository = Struct.new(:database).new(Object.new)
+    attributes = {
+      predecessor_request_id: "command-dispatch:v1:predecessor",
+      intent_id: "intent-1", intent_version: 3, delivery_cycle_id: "cycle-4",
+      repository: repository, command_lifecycle: lifecycle
+    }
+    concurrent = 4.times.map do
+      Thread.new { Hive::Bot::DispatchRequestWriter.allocate_successor!(**attributes) }
+    end.map(&:value)
+    repeated = Hive::Bot::DispatchRequestWriter.allocate_successor!(
+      **attributes
+    )
+
+    assert_equal 1, (concurrent + [ repeated ]).uniq.length
+    assert_equal 5, calls.length
+    assert_equal "command-dispatch:v1:predecessor",
+                 calls.first.fetch(:predecessor_request_id)
+  end
+
+  def test_keyed_bot_write_acquires_pin_before_enqueue
+    context = Hive::CommandOperation::Context.new(
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+      principal_source: "test", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint",
+      transport_request_id: "command-dispatch:v1:#{'c' * 64}",
+      retry_horizon_expires_at: (Time.now.utc + 3600).iso8601
+    )
+    order = []
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:protect_context!) do |received, project:|
+      order << :pin
+      raise "wrong context" unless received == context
+      raise "wrong project" unless project == "demo"
+    end
+    repository = Object.new
+    repository.define_singleton_method(:write_request!) { |**| order << :enqueue }
+
+    Hive::Bot::DispatchRequestWriter.write!(
+      project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+      repository: repository, command_context: context,
+      command_lifecycle: lifecycle
+    )
+
+    assert_equal %i[pin enqueue], order
   end
 
   def test_local_admission_returns_attempt_without_a_second_writer_side_claim

@@ -6,7 +6,18 @@ module Hive
   # Used by `hive run --json`, the internal task graph, and the TUI so every
   # consumer sends the operator or agent to the same repair target.
   module ExecuteWaitingAction
+    TECHNICAL_REASONS = %w[
+      dirty_worktree branch_mismatch head_not_descendant no_worktree_changes
+      missing_research_output attempt_lost attempt_terminal_failed attempt_terminal_cancelled
+      attempt_terminal_interrupted
+      worktree_evidence_unverifiable evidence_unverifiable attempt_state_unverifiable
+    ].freeze
+
     module_function
+
+    def technical_reason?(reason)
+      TECHNICAL_REASONS.include?(reason.to_s)
+    end
 
     def build(task, marker, rerun_with: nil)
       reason = marker.attrs["reason"].to_s
@@ -50,7 +61,8 @@ module Hive
                             "agent/profile/prompt output, then re-run so Hive can capture the final answer " \
                             "under `## Execute Output`"
         }
-      when "attempt_lost", "attempt_terminal_failed", "attempt_terminal_cancelled"
+      when "attempt_lost", "attempt_terminal_failed", "attempt_terminal_cancelled",
+           "attempt_terminal_interrupted"
         {
           "kind" => kind::RUN,
           "target" => task.folder,

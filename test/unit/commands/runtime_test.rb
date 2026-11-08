@@ -1,175 +1,319 @@
 require "test_helper"
 require "hive/commands/runtime"
 require "json_schemer"
+require "open3"
 
 class RuntimeCommandTest < Minitest::Test
   include HiveTestHelper
 
-  def test_status_is_typed_and_does_not_create_a_missing_database
+  def test_status_is_typed_and_returns_nonzero_without_creating_missing_storage
     with_tmp_dir do |root|
       output = StringIO.new
-
-      result = Hive::Commands::Runtime.new(
-        "status", json: true, output: output, state_home: root, projects: []
+      assert_equal 1, Hive::Commands::Runtime.new(
+        "status", json: true, output: output, state_home: root
       ).call
-
-      assert_equal 0, result
       payload = JSON.parse(output.string)
-      assert_equal "hive-runtime-maintenance", payload.fetch("schema")
-      assert_equal 1, payload.fetch("schema_version")
+      assert_equal false, payload.fetch("ok")
       assert_equal "absent", payload.dig("result", "phase")
       assert_equal "missing", payload.dig("result", "database", "status")
+      assert_equal "hive setup", payload.dig("result", "next_action")
+      assert_nil payload.dig("result", "lifecycle")
       assert_empty runtime_schema.validate(payload).to_a
       refute_path_exists Hive::Paths.runtime_control_plane_path(root)
     end
   end
 
-  def test_json_failure_is_versioned_typed_and_actionable
+  def test_executable_reports_absent_runtime_with_nonzero_exit_and_false_ok
     with_tmp_dir do |root|
-      current = File.join(root, ".runtime-cutover", "current")
-      FileUtils.mkdir_p(current)
-      manifest = File.join(current, "active.json")
-      File.binwrite(manifest, "{\n")
-      File.chmod(0o600, manifest)
-      output = StringIO.new
+      [ %w[runtime status --json], %w[runtime --json status], %w[runtime --json] ].each do |argv|
+        output, errors, process = Open3.capture3(
+          { "HIVE_HOME" => root }, RbConfig.ruby,
+          File.expand_path("../../../bin/hive", __dir__), *argv
+        )
+        assert_equal 1, process.exitstatus, errors
+        payload = JSON.parse(output)
+        assert_equal false, payload.fetch("ok")
+        assert_equal "absent", payload.dig("result", "phase")
+        assert_equal "hive setup", payload.dig("result", "next_action")
+        assert_empty runtime_schema.validate(payload).to_a
+        refute runtime_schema.valid?(payload.merge("ok" => true))
+        refute_path_exists Hive::Paths.runtime_control_plane_path(root)
+      end
+    end
+  end
 
-      error = assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) do
-        Hive::Commands::Runtime.new(
-          "status", json: true, output: output, state_home: root, projects: []
-        ).call
+  def test_json_failure_is_typed_and_actionable
+    with_tmp_dir do |root|
+      path = Hive::Paths.runtime_control_plane_path(root)
+      File.write(path, "invalid", perm: 0o600)
+      output = StringIO.new
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::Commands::Runtime.new("status", json: true, output: output, state_home: root).call
       end
       payload = JSON.parse(output.string)
-
-      assert_equal :manifest_corrupt, error.code
       assert_equal false, payload.fetch("ok")
       assert_equal "status", payload.fetch("action")
-      assert_equal "manifest_corrupt", payload.fetch("runtime_code")
       assert_kind_of String, payload.fetch("next_action")
       assert_empty runtime_schema.validate(payload).to_a
     end
   end
 
-  def test_status_fails_closed_on_a_corrupt_active_manifest
-    with_tmp_dir do |root|
-      current = File.join(root, ".runtime-cutover", "current")
-      FileUtils.mkdir_p(current)
-      manifest = File.join(current, "active.json")
-      File.binwrite(manifest, "{\n")
-      File.chmod(0o600, manifest)
+  def test_json_failure_supplies_a_next_action_when_the_runtime_error_has_none
+    output = StringIO.new
+    error = Hive::RuntimeControlPlane::IntegrityError.new(
+      "broken", code: :broken, action: nil
+    )
 
-      error = assert_raises(Hive::RuntimeControlPlane::CutoverManifest::IntegrityError) do
-        Hive::Commands::Runtime.new(
-          "status", output: StringIO.new, state_home: root, projects: []
-        ).call
+    with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :status, ->(**) { raise error }) do
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::Commands::Runtime.new("status", json: true, output: output).call
       end
-
-      assert_equal :manifest_corrupt, error.code
-      refute_path_exists Hive::Paths.runtime_control_plane_path(root)
     end
+
+    assert_equal "repair the reported runtime database, then run hive runtime status",
+                 JSON.parse(output.string).fetch("next_action")
   end
 
-  def test_status_reports_an_intended_cutover_as_forward_resumable
+  def test_status_uses_database_identity_without_manifests
     with_tmp_dir do |root|
-      state = File.join(root, "state")
-      data = File.join(root, "data")
-      services = Struct.new(:activated) do
-        def stop!(**) = true
-        def activate! = self.activated = true
-        def activated? = !!activated
-      end.new(false)
-      crash = Class.new(StandardError)
-      cutover = Hive::RuntimeControlPlane::Cutover.new(
-        state_home: state, data_home: data, projects: [], services: services,
-        fault: ->(point) { raise crash if point == :activation_intent }
-      )
-      assert_raises(crash) { cutover.bootstrap(confirm: true) }
+      status = Hive::RuntimeControlPlane::Installation.setup(state_home: root)
       output = StringIO.new
-
       assert_equal 0, Hive::Commands::Runtime.new(
-        "status", json: true, output: output, state_home: state, projects: []
+        "status", json: true, output: output, state_home: root
       ).call
       payload = JSON.parse(output.string)
-      assert_equal "intended", payload.dig("result", "phase")
-      assert_equal "hive runtime resume", payload.dig("result", "next_action")
+      assert_equal true, payload.fetch("ok")
+      assert_equal status, payload.fetch("result")
+      assert_equal "running", payload.dig("result", "lifecycle", "phase")
+      assert_equal true, payload.dig("result", "lifecycle", "admission_open")
       assert_empty runtime_schema.validate(payload).to_a
+      text = StringIO.new
+      assert_equal 0, Hive::Commands::Runtime.new("status", output: text, state_home: root).call
+      assert_includes text.string, "phase: active"
     end
-  end
-
-  def test_resume_dispatches_the_forward_cutover_and_returns_typed_output
-    result = Hive::RuntimeControlPlane::Cutover::Result.new(
-      "active", "cutover-1", "/tmp/runtime.sqlite3", []
-    )
-    captured = nil
-    output = StringIO.new
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::Cutover, :resume,
-      ->(**options) { captured = options; result }
-    ) do
-      assert_equal 0, Hive::Commands::Runtime.new(
-        "resume", json: true, output: output, state_home: "/tmp/state", projects: [ "project" ]
-      ).call
-    end
-
-    assert_equal "/tmp/state", captured.fetch(:state_home)
-    assert_equal [ "project" ], captured.fetch(:projects)
-    payload = JSON.parse(output.string)
-    assert_equal "resume", payload.fetch("action")
-    assert_equal "active", payload.dig("result", "phase")
-    assert_empty runtime_schema.validate(payload).to_a
   end
 
   def test_removed_recovery_actions_are_rejected_before_any_database_write
     with_tmp_dir do |root|
-      %w[snapshot backup restore downgrade].each do |action|
+      %w[resume snapshot backup restore downgrade].each do |action|
         error = assert_raises(Hive::UsageError) do
-          Hive::Commands::Runtime.new(
-            action, output: StringIO.new, state_home: root, projects: []
-          ).call
+          Hive::Commands::Runtime.new(action, output: StringIO.new, state_home: root).call
         end
-        assert_includes error.message, "status or resume"
+        assert_includes error.message, "expected one of status, projects, payloads"
       end
       refute_path_exists Hive::Paths.runtime_control_plane_path(root)
     end
   end
 
-  def test_human_status_renders_each_runtime_field
-    with_tmp_dir do |root|
+  def test_projects_lists_registry_paths_without_loading_project_config
+    with_tmp_global_config(runtime: false) do |home|
+      root = File.join(home, "workspace", "demo")
+      File.write(Hive::Config.global_config_path, {
+        "registered_projects" => [
+          { "name" => "demo", "path" => root, "hive_state_path" => "state" },
+          { "name" => "broken" }
+        ]
+      }.to_yaml)
       output = StringIO.new
-
-      assert_equal 0, Hive::Commands::Runtime.new(
-        "status", output: output, state_home: root, projects: []
-      ).call
-
-      assert_includes output.string, "phase: absent"
-      assert_includes output.string, "database:"
+      assert_equal 0, Hive::Commands::Runtime.new("projects", json: true, output: output).call
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal Hive::Config.global_config_path, payload.dig("result", "registry_path")
+      assert_equal 1, payload.dig("result", "projects").size
+      project = payload.dig("result", "projects").first
+      assert_equal [ "demo", root, nil, File.join(root, "state") ],
+                   project.values_at("name", "path", "real_path", "hive_state_path")
+      assert_kind_of String, project.fetch("project_id")
+      assert_nil project.fetch("worktree_root")
+      assert_match(/config\.yml at .* is missing/, project.fetch("worktree_root_error"))
+      refute_path_exists root
+      text = StringIO.new
+      assert_equal 0, Hive::Commands::Runtime.new("projects", output: text).call
+      assert_match(/^projects: \[\{.*"name":"demo"/, text.string)
     end
   end
 
-  def test_json_resume_failure_supplies_the_forward_recovery_action
-    output = StringIO.new
-    failure = Hive::RuntimeControlPlane::Unavailable.new(
-      "resume unavailable", code: :runtime_unavailable
-    )
-    with_replaced_singleton_method(
-      Hive::RuntimeControlPlane::Cutover, :resume, ->(**) { raise failure }
-    ) do
-      assert_raises(Hive::RuntimeControlPlane::Unavailable) do
-        Hive::Commands::Runtime.new(
-          "resume", json: true, output: output, state_home: "/tmp/state", projects: []
-        ).call
+  def test_projects_reports_each_effective_worktree_root_without_writing_project_state
+    with_tmp_global_config(runtime: false) do |home|
+      workspace = File.join(home, "workspace")
+      configs = {
+        "default" => "project_name: default\n",
+        "absolute" => { "worktree_root" => File.join(home, "trees") }.to_yaml,
+        "relative" => { "worktree_root" => "../rel-trees" }.to_yaml,
+        "invalid" => "worktree_root: [",
+        "typed" => { "worktree_root" => 5 }.to_yaml,
+        "tilde" => { "worktree_root" => "~hive-no-such-user-261030/trees" }.to_yaml
+      }
+      configs.each do |name, body|
+        FileUtils.mkdir_p(File.join(workspace, name, ".hive-state"))
+        File.write(File.join(workspace, name, ".hive-state", "config.yml"), body)
+      end
+      File.write(Hive::Config.global_config_path, {
+        "registered_projects" => configs.keys.map { |name| { "name" => name, "path" => File.join(workspace, name) } }
+      }.to_yaml)
+      before = Dir.glob(File.join(workspace, "**", "*"), File::FNM_DOTMATCH).sort
+      output = StringIO.new
+
+      Dir.chdir(File.join(workspace, "relative")) do
+        assert_equal 0, Hive::Commands::Runtime.new("projects", json: true, output: output).call
+      end
+
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      rows = payload.dig("result", "projects").to_h { |row| [ row.fetch("name"), row ] }
+      assert_equal File.join(ENV.fetch("HIVE_WORKTREE_BASE"), "default.worktrees"), rows.dig("default", "worktree_root")
+      assert_equal File.join(home, "trees"), rows.dig("absolute", "worktree_root")
+      # Hive expands a relative override against the current directory.
+      assert_equal File.join(workspace, "rel-trees"), rows.dig("relative", "worktree_root")
+      %w[default absolute relative].each { |name| refute rows.fetch(name).key?("worktree_root_error"), name }
+      {
+        "invalid" => /not valid YAML/, "typed" => /worktree_root .* must be a string/,
+        "tilde" => /hive-no-such-user-261030/
+      }.each do |name, reason|
+        assert_nil rows.dig(name, "worktree_root"), name
+        assert_match reason, rows.dig(name, "worktree_root_error"), name
+      end
+      assert_equal before, Dir.glob(File.join(workspace, "**", "*"), File::FNM_DOTMATCH).sort
+
+      # The schema pairs a null root with its reason, and a root with none.
+      [ [ "invalid", ->(row) { row.delete("worktree_root_error") } ],
+        [ "default", ->(row) { row["worktree_root_error"] = "unexpected" } ] ].each do |name, mutate|
+        broken = JSON.parse(output.string)
+        mutate.call(broken.dig("result", "projects").find { |row| row["name"] == name })
+        refute_empty runtime_schema.validate(broken).to_a, name
       end
     end
+  end
 
-    payload = JSON.parse(output.string)
-    assert_equal "run hive runtime status and follow its forward-only recovery action",
-                 payload.fetch("next_action")
+  def test_projects_reports_an_unreadable_registry_with_a_registry_next_action
+    with_tmp_global_config(runtime: false) do
+      File.write(Hive::Config.global_config_path, "registered_projects: [")
+      output = StringIO.new
+      assert_raises(Hive::ConfigError) do
+        Hive::Commands::Runtime.new("projects", json: true, output: output).call
+      end
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal [ "projects", "config", "repair the global Hive registry, then run hive runtime projects" ],
+                   payload.values_at("action", "runtime_code", "next_action")
+    end
+  end
+
+  def test_payloads_reports_absent_storage_without_creating_it
+    with_tmp_dir do |root|
+      output = StringIO.new
+      assert_equal 0, Hive::Commands::Runtime.new("payloads", json: true, output: output, state_home: root).call
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal true, payload.fetch("ok")
+      assert_equal({ "phase" => "absent", "payload_root" => Hive::Paths.runtime_payload_root(root),
+                     "payloads" => [] }, payload.fetch("result"))
+      refute_path_exists Hive::Paths.runtime_control_plane_path(root)
+    end
+  end
+
+  def test_payloads_resolve_references_on_a_read_only_state_root_without_sidecars
+    with_tmp_dir do |root|
+      seed_payload_reference(root)
+      path = Hive::Paths.runtime_control_plane_path(root)
+      before = Dir.children(root).sort
+      File.chmod(0o500, root)
+      output = StringIO.new
+      with_confirmed_read_only_mount do
+        assert_equal 0, Hive::Commands::Runtime.new("payloads", json: true, output: output, state_home: root).call
+      end
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal "active", payload.dig("result", "phase")
+      assert_equal 1, payload.dig("result", "payloads").size
+      reference = payload.dig("result", "payloads").first
+      assert_equal [ "log", "open", "task-1", nil, "open/a1/log" ],
+                   reference.values_at("kind", "state", "task_id", "attempt_id", "relative_path")
+      assert_equal File.join(Hive::Paths.runtime_payload_root(root), "open/a1/log"), reference.fetch("path")
+      text = StringIO.new
+      with_confirmed_read_only_mount do
+        assert_equal 0, Hive::Commands::Runtime.new("payloads", output: text, state_home: root).call
+      end
+      assert_includes text.string, "phase: active"
+      assert_equal before, Dir.children(root).sort
+      refute_path_exists "#{path}-wal"
+      refute_path_exists "#{path}-shm"
+    ensure
+      File.chmod(0o700, root)
+    end
+  end
+
+  def test_payloads_on_an_unconfirmed_read_only_root_fail_with_the_runtime_envelope
+    with_tmp_dir do |root|
+      seed_payload_reference(root)
+      File.chmod(0o500, root)
+      output = StringIO.new
+      error = assert_raises(Hive::RuntimeControlPlane::Unavailable) do
+        Hive::Commands::Runtime.new("payloads", json: true, output: output, state_home: root).call
+      end
+      assert_equal :state_storage_read_only, error.code
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal [ "payloads", "state_storage_read_only" ], payload.values_at("action", "runtime_code")
+      refute_path_exists "#{Hive::Paths.runtime_control_plane_path(root)}-wal"
+    ensure
+      File.chmod(0o700, root)
+    end
+  end
+
+  def test_payloads_raise_unsupported_storage
+    with_tmp_dir do |root|
+      File.write(Hive::Paths.runtime_control_plane_path(root), "invalid", perm: 0o600)
+      output = StringIO.new
+      assert_raises(Hive::RuntimeControlPlane::IntegrityError) do
+        Hive::Commands::Runtime.new("payloads", json: true, output: output, state_home: root).call
+      end
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal [ "payloads", "database_corrupt" ], payload.values_at("action", "runtime_code")
+    end
   end
 
   private
 
+  # Seeds one task-owned reference, then leaves a clean WAL database with no
+  # sidecars, which is what a quiesced, read-only-mounted state root holds.
+  def seed_payload_reference(root)
+    Hive::RuntimeControlPlane::Installation.setup(state_home: root)
+    path = Hive::Paths.runtime_control_plane_path(root)
+    database = Hive::RuntimeControlPlane::Database.new(path: path)
+    now = Time.now.utc.iso8601(6)
+    database.transaction do |db|
+      db[:projects].insert(
+        project_id: "p1", installation_id: db[:installations].get(:installation_id),
+        registration_id: "p1", name: "demo", observed_path: "/w/demo",
+        state_root_path: "/w/demo/.hive-state", active: 1, registered_at: now
+      )
+      db[:task_subjects].insert(
+        task_id: "task-1", project_id: "p1", workflow_id: "coding", task_slug: "t",
+        observed_path: "/w/demo/t", generation: 0, created_at: now, last_observed_at: now
+      )
+      db[:payload_references].insert(
+        payload_id: "pl-1", task_id: "task-1", kind: "log", relative_path: "open/a1/log",
+        state: "open", created_at: now
+      )
+    end
+    database.checkpoint!
+    database.disconnect
+    [ "#{path}-wal", "#{path}-shm" ].each { |sidecar| FileUtils.rm_f(sidecar) }
+  end
+
+  def with_confirmed_read_only_mount
+    klass = Hive::RuntimeControlPlane::Database
+    original = klass.instance_method(:storage_mount_status)
+    klass.define_method(:storage_mount_status) { :read_only }
+    yield
+  ensure
+    klass.define_method(:storage_mount_status, original)
+    klass.send(:private, :storage_mount_status)
+  end
+
   def runtime_schema
-    JSONSchemer.schema(JSON.parse(File.read(
-      Hive::Schemas.schema_path("hive-runtime-maintenance")
-    )))
+    JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-runtime-maintenance"))))
   end
 end

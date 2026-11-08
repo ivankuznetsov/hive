@@ -45,14 +45,16 @@ You may inspect files in the worktree when needed to decide whether a finding is
 
 <%= prior_escalations_section %>
 
+<%= convergence_section %>
 ## What to do
 
 For every `- [ ] <finding>` line in every reviewer file:
 
-1. **Classify** the finding into one of three outcomes. The explicit label is the source of truth; the checkbox is only a legacy routing marker:
+1. **Classify** the finding into one of four outcomes. The explicit label is the source of truth; the checkbox is only a legacy routing marker:
    - **AUTO-FIX** — the fix agent should apply this in the next phase.
    - **RESOLVED/NO-FIX** — plan/brainstorm/prior-decision/project context answers it, the finding is a duplicate, or no code change is needed.
    - **ESCALATE** — only when the remaining decision genuinely cannot be answered from context.
+   - **DEFERRED** — only when the convergence rules above put a Medium, Low or Nit finding behind the severity gate: recorded, not fixed in this review.
 
 2. Apply the **courageous** classification rules:
 
@@ -68,6 +70,11 @@ For every `- [ ] <finding>` line in every reviewer file:
    - Polish that improves readability or maintainability. **Do not postpone polishes.**
 
    ### RESOLVED/NO-FIX
+   - A finding concerns only missing screenshots, recordings, historical captures,
+     or limitations of current outcome-evidence collection. Preserve the exact
+     verification limitation in the triage reason and continue available checks;
+     do not request evidence-tooling work or user input solely for it. This does
+     not resolve demonstrated product failures or missing implementation.
    - The reviewer asked an open question that the plan, brainstorm, prior user decisions, or project context already answers.
    - The finding complains about work explicitly out of scope or deferred by the plan.
    - The finding is a duplicate of another reviewer finding already marked AUTO-FIX.
@@ -85,6 +92,7 @@ For every `- [ ] <finding>` line in every reviewer file:
    - For AUTO-FIX items, rewrite the line as `- [x] AUTO-FIX: <finding> <!-- triage: <one-phrase reason> -->`.
    - For RESOLVED/NO-FIX items, rewrite the line as `- [x] RESOLVED/NO-FIX: <finding> <!-- triage: <context source + one-phrase reason> -->`.
    - For ESCALATE items, rewrite the line as `- [ ] ESCALATE: <finding> <!-- triage: unresolved after checking <sources> -->`.
+   - For DEFERRED items, rewrite the line as `- [x] DEFERRED: <finding> <!-- triage: <one-phrase reason> -->`.
 
 4. **Write the consolidated escalations file** to `<%= escalations_path %>`. It must list ONLY true user questions in the same Q&A style as brainstorm:
 

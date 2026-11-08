@@ -51,7 +51,7 @@ module Hive
               raise InvalidEvidence, "task_closure evidence #{field} must be a SHA-256 hex value"
             end
           end
-          unless %w[already_delivered superseded].include?(evidence["reason"].to_s) &&
+          unless %w[already_delivered superseded cancelled].include?(evidence["reason"].to_s) &&
                  %w[remote_merge operator_attestation].include?(evidence["authority"].to_s)
             raise InvalidEvidence, "task_closure evidence reason or authority is unsupported"
           end

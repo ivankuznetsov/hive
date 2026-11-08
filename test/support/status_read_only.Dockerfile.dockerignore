@@ -1,0 +1,31 @@
+# Build context filter for status_read_only.Dockerfile (BuildKit reads
+# <Dockerfile>.dockerignore next to the Dockerfile). The Dockerfile does
+# `COPY . /app`, so keep VCS metadata, local state, and secrets out of the
+# candidate image.
+.git
+.github
+.hive-state
+coverage
+pkg
+tmp
+log
+node_modules
+vendor/bundle
+*.gem
+
+.env
+.env.*
+*.session_secret
+.web.session_secret
+.pi
+.claude
+.codex
+*.pem
+*.key
+data/
+
+web/log/
+web/tmp/
+web/storage/
+web/node_modules/
+web/test/

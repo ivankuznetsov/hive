@@ -12,6 +12,7 @@ require "hive/commands/doctor"
 require "hive/commands/decide"
 require "hive/commands/plan_review"
 require "hive/commands/forget"
+require "hive/commands/mcp"
 require "hive/commands/init"
 require "hive/commands/patrol"
 require "hive/commands/prune"
@@ -23,6 +24,7 @@ require "hive/agent_skills/inspector"
 require "hive/agent_skills/provisioner"
 require "hive/patrol/reviewer"
 require "hive/commands/setup_agents"
+require "hive/one_shot/result"
 require "hive/tui/snapshot"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/attempts/record"
@@ -100,6 +102,72 @@ class SchemaFilesTest < Minitest::Test
     ))).valid?(status)
   end
 
+  def test_closure_diagnostics_preserve_legacy_shape_and_validate_retained_commit_identifiers
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input")))
+    diagnostic = JSONSchemer.schema({ "$defs" => document.fetch("$defs"), "$ref" => "#/$defs/Diagnostic" })
+    legacy = { "code" => "unique_worktree_changes", "message" => "retained", "owner" => "operator" }
+    assert diagnostic.valid?(legacy)
+    enriched = legacy.merge("details" => { "reference_head" => "a" * 40, "local_fix_shas" => [ "b" * 64 ] })
+    assert diagnostic.valid?(enriched)
+    enriched["details"]["reference_head"] = "short"
+    refute diagnostic.valid?(enriched), "references must remain full commit identifiers"
+  end
+
+  def test_one_shot_schema_is_registered_closed_and_accepts_all_report_arms
+    path = Hive::Schemas.schema_path("hive-one-shot")
+    document = JSON.parse(File.read(path))
+    schemer = JSONSchemer.schema(document)
+    started = Time.utc(2026, 9, 23, 11, 59, 59)
+    finished = Time.utc(2026, 9, 23, 12)
+
+    reports = [
+      Hive::OneShot::Result.ok(
+        component: "dispatch", project: "app", started_at: started, finished_at: finished,
+        ran: [], items: [ {
+          "id" => "task:1", "component" => "dispatch", "bucket" => "waiting_external",
+          "reason" => "capacity", "next_check_at" => finished + 30,
+          "condition" => { "kind" => "time_due", "resource" => "global_cap" }
+        } ], safe_to_stop: true
+      ),
+      Hive::OneShot::Result.refused(
+        component: "patrol", project: "app", started_at: started, finished_at: finished,
+        code: "daemon_owned", message: "owned",
+        owner: { "kind" => "daemon", "pid" => 12, "process_identity" => "boot:12" }
+      ),
+      Hive::OneShot::Result.error(
+        component: "architecture_patrol", project: "app", started_at: started,
+        finished_at: finished, code: "observation_failed", message: "failed"
+      )
+    ]
+    aggregate = Hive::OneShot::Result.aggregate(
+      component: "babysitter", reports: [], started_at: started, finished_at: finished
+    )
+
+    assert_equal false, document.fetch("additionalProperties")
+    assert_equal "hive-one-shot.v1.json", document.fetch("$id")
+    (reports + [ aggregate ]).each do |report|
+      assert_empty schemer.validate(report.to_h).to_a
+    end
+    refute_empty schemer.validate(reports.first.to_h.merge("unknown" => true)).to_a
+  end
+
+  def test_status_projection_enum_matches_the_runtime_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+
+    assert_equal Hive::Schemas::StatusProjectionKind::ALL.sort,
+                 document.dig(
+                   "$defs", "SuccessPayload", "properties", "projection", "enum"
+                 ).sort
+  end
+
+  def test_only_current_schema_revisions_are_published
+    Hive::Schemas::SCHEMA_VERSIONS.each do |name, version|
+      assert_equal [ Hive::Schemas.schema_path(name) ],
+                   Dir.glob(File.join(Hive::Schemas.schema_dir, "#{name}.v*.json")),
+                    "#{name} must publish only current version #{version}"
+    end
+  end
+
   def test_plan_review_schema_is_registered_closed_and_versioned
     path = Hive::Schemas.schema_path("hive-plan-review")
     document = JSON.parse(File.read(path))
@@ -137,7 +205,7 @@ class SchemaFilesTest < Minitest::Test
       "incomplete_attestation_retry" => true
     }
 
-    %w[hive-status.v8.json hive-operational-status.v4.json].each do |name|
+    %w[hive-status.v9.json hive-operational-status.v5.json].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       %w[PlanReviewBlocker PlanReviewRoute].zip([ blocker, route ]).each do |definition, value|
         schemer = JSONSchemer.schema({
@@ -166,7 +234,7 @@ class SchemaFilesTest < Minitest::Test
     expected = Hive::ProviderRouting::EXCLUSION_REASONS.sort
     %w[
       hive-dispatch-request.v5.json
-      hive-operational-status.v4.json
+      hive-operational-status.v5.json
     ].each do |name|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       assert_equal expected,
@@ -175,10 +243,58 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  # The dispatch queue writer guard (`DispatchRepository.valid_argv?`) enforces
+  # argv[0] == "hive" and a closed verb allowlist at argv[1]; the published
+  # schemas must enforce the same positional contract so external validators
+  # reject payloads the writer would raise on (e.g. ["curl", "anything"]).
+  def test_dispatch_request_schemas_enforce_positional_argv_allowlist
+    repository = Hive::RuntimeControlPlane::DispatchRepository
+
+    base = {
+      "schema" => "hive-dispatch-request", "schema_version" => nil,
+      "request_id" => "abc12345", "created_at" => "2026-09-09T00:00:00Z",
+      "project" => "proj", "slug" => "my-task",
+      "requestor" => "bot", "chat_id" => nil, "update_id" => nil,
+      "trigger" => nil, "task_generation" => nil,
+      "inherited_outputs" => [], "recovery" => nil
+    }
+    accepted = {
+      %w[hive run my-task --json] => true,
+      %w[hive markers] => true,
+      %w[hive daemon install --force] => true,
+      %w[hive evidence rework my-task --json] => true,
+      %w[curl anything] => false,
+      %w[not-hive delete-everything] => false,
+      %w[hive status] => false,
+      %w[hive daemon status] => false,
+      %w[hive daemon install --force extra] => false,
+      %w[hive evidence] => false,
+      %w[hive evidence recover my-task] => false
+    }
+    accepted.each { |argv, expected| assert_equal expected, repository.valid_argv?(argv), argv.inspect }
+    [ 5 ].each do |version|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(
+        "hive-dispatch-request", version: version
+      )))
+      argv_schema = document.dig("properties", "argv")
+      assert_equal (repository::ALLOWED_VERBS + [ "evidence" ]).sort,
+                   argv_schema.dig("prefixItems", 1, "enum").sort
+      assert_equal repository::EVIDENCE_VERBS,
+                   [ argv_schema.dig("allOf", 1, "then", "prefixItems", 2, "const") ]
+      schemer = JSONSchemer.schema(document)
+      base["schema_version"] = version
+      accepted.each do |argv, expected|
+        errors = schemer.validate(base.merge("argv" => argv)).to_a
+        assert_equal expected, errors.empty?,
+                     "v#{version} argv #{argv.inspect}: #{errors.map { |e| e["error"] }.inspect}"
+      end
+    end
+  end
+
   def test_provider_routing_public_schemas_bound_candidate_diagnostics
     {
       "hive-dispatch-request.v5.json" => [ "AdmissionCandidate", "AdmissionObservation" ],
-      "hive-operational-status.v4.json" => [ "RoutingCandidate", "RoutingDecision" ]
+      "hive-operational-status.v5.json" => [ "RoutingCandidate", "RoutingDecision" ]
     }.each do |name, (candidate_name, decision_name)|
       document = JSON.parse(File.read(File.join(Hive::Schemas.schema_dir, name)))
       assert_equal 4,
@@ -356,8 +472,7 @@ class SchemaFilesTest < Minitest::Test
     assert errors.any? { |error| error["data_pointer"].start_with?("/warnings/0") }
   end
 
-  def test_doctor_v1_schema_remains_available_and_v2_payload_validates
-    assert File.exist?(Hive::Schemas.schema_path("hive-doctor", version: 1))
+  def test_current_doctor_payload_validates
     target = Hive::AgentSkills::Target.new(
       surfaces: [ "brainstorm" ], kind: "stage", agent: "claude",
       configured_skill: "/ce-brainstorm", invocation: "/ce-brainstorm",
@@ -371,7 +486,7 @@ class SchemaFilesTest < Minitest::Test
     inspector = Struct.new(:rows) { def inspect = rows }.new([ health ])
     output = StringIO.new
     Hive::Commands::Doctor.new(
-      config: { "claude" => { "mode" => "headless" } },
+      config: {},
       project_root: nil,
       json: true,
       output: output,
@@ -408,13 +523,27 @@ class SchemaFilesTest < Minitest::Test
     assert_empty schemer.validate(payload).to_a
   end
 
+  def test_mcp_import_schema_matches_the_command_contract
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-mcp-import")))
+    schemer = JSONSchemer.schema(document)
+
+    assert_equal Hive::Commands::Mcp::ERROR_KINDS.sort,
+                 document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Mcp::Discovery::AGENTS.sort,
+                 document.dig("$defs", "Row", "properties", "sources", "items", "enum").sort
+    error = Hive::Schemas::ErrorEnvelope.build(
+      schema: "hive-mcp-import", error: Hive::UsageError.new("bad"), error_kind: "usage", extras: { "action" => "login" }
+    )
+    assert_empty schemer.validate(error).to_a
+  end
+
   def test_honeycomb_contract_schema_files_are_valid_and_versioned
-    %w[honeycomb-manifest.v1.json honeycomb-catalog.v1.json].each do |name|
+    %w[honeycomb-manifest.v1.json honeycomb-catalog.v3.json].each do |name|
       path = File.join(Hive::Schemas.schema_dir, name)
       assert File.file?(path), "schema file missing: #{path}"
       document = JSON.parse(File.read(path))
       assert_equal "https://json-schema.org/draft/2020-12/schema", document["$schema"]
-      assert_equal 1, document.dig("properties", "schema_version", "const")
+      assert_includes document.fetch("$id"), name
     end
   end
 
@@ -430,25 +559,6 @@ class SchemaFilesTest < Minitest::Test
     assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
                  "SuccessPayload.schema_version.const must pin v2 (current)"
-  end
-
-  # v1 (the original 6-stage schema) is preserved for external validators
-  # pinned to the pre-6-review release. Loading by explicit version: must
-  # still resolve.
-  def test_hive_approve_v1_schema_file_remains_for_back_compat
-    path = Hive::Schemas.schema_path("hive-approve", version: 1)
-    assert File.exist?(path), "v1 schema file missing: #{path}"
-
-    doc = JSON.parse(File.read(path))
-    assert_equal 1,
-                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
-                 "v1 schema must still declare schema_version: 1"
-    # The original v1 enum had no `review` and ended at `6-done`.
-    v1_dirs = doc.dig("$defs", "SuccessPayload", "properties", "from_stage_dir", "enum")
-    assert_includes v1_dirs, "5-pr",
-                    "v1 must keep its original enum (5-pr / 6-done) for pinned consumers"
-    refute_includes v1_dirs, "6-review",
-                    "v1 enum must NOT include the v2-introduced 6-review stage"
   end
 
   # U6: the stage-dir / stage-name / stage-index fields were relaxed from the
@@ -510,14 +620,64 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-approve")))
     schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
 
-    producer_kinds = %w[
+    producer_kinds = (%w[
       ambiguous_slug destination_collision final_stage
       plan_review_blocked wrong_stage rollback_failed invalid_task_path dependency_wait
       admission_error error
-    ].sort
+    ] + Hive::CommandErrorKind::ALL).sort
 
     assert_equal producer_kinds, schema_kinds,
                  "schema/producer error_kind enum drift"
+  end
+
+  def test_all_bounded_command_error_kind_enums_match_their_producers
+    receipt_kinds = Hive::CommandErrorKind::ALL
+    producer_kinds = {
+      "hive-act" => %w[
+        usage stale_observation ambiguous_target concurrent_run dependency_wait
+        admission_error config internal error
+      ] + receipt_kinds,
+      "hive-approve" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds,
+      "hive-new" => %w[usage config concurrent_run internal error] + receipt_kinds,
+      "hive-answer" => %w[
+        invalid_binding invalid_answer wrong_stage stale ambiguous_slug invalid_task_path
+        config usage internal
+      ] + receipt_kinds,
+      "hive-stage-action" => %w[
+        ambiguous_slug destination_collision final_stage plan_review_blocked wrong_stage
+        rollback_failed invalid_task_path dependency_wait admission_error error
+      ] + receipt_kinds
+    }
+
+    producer_kinds.each do |schema, kinds|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(schema)))
+      actual = document.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum")
+      assert_equal kinds.sort, actual.sort, "schema/producer error_kind drift in #{schema}"
+    end
+  end
+
+  def test_each_keyed_command_validates_emitted_conflict_progress_and_unresolved_errors
+    commands = %w[hive-act hive-approve hive-new hive-answer hive-stage-action]
+    errors = [ Hive::CommandConflict.new, Hive::CommandInProgress.new,
+              Hive::CommandUnresolved.new ]
+    commands.each do |name|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      extras = case name
+      when "hive-act" then { "action_id" => "workflow.advance", "target" => "demo:task" }
+      when "hive-stage-action" then { "verb" => "develop" }
+      else {}
+      end
+      errors.each do |error|
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: name, error: error, error_kind: error.reason, extras: extras
+        )
+        assert_empty schemer.validate(payload).to_a,
+                     "#{name} must accept emitted exit #{error.exit_code}"
+      end
+    end
   end
 
   def test_hive_approve_next_action_kinds_match_closed_enum
@@ -526,6 +686,28 @@ class SchemaFilesTest < Minitest::Test
     enum_kinds = Hive::Schemas::NextActionKind::ALL.sort
     assert_equal enum_kinds, schema_kinds,
                  "schema NextAction.kind enum must mirror Hive::Schemas::NextActionKind::ALL"
+  end
+
+  def test_command_receipt_schemas_match_error_envelope_producer
+    kinds = (%w[usage config internal] + Hive::CommandErrorKind::ALL).sort
+
+    %w[hive-command-receipt hive-receipt-prune].each do |name|
+      document = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      error = document.dig("$defs", "ErrorPayload")
+      required = error.fetch("required")
+      properties = error.fetch("properties")
+      assert_empty required - properties.keys,
+                   "#{name} requires undeclared ErrorPayload properties"
+      assert_equal kinds, properties.dig("error_kind", "enum").sort
+
+      payload = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::CommandIntakeDisabled.new("disabled"),
+        error_kind: "command_intake_disabled"
+      )
+      assert JSONSchemer.schema(document).valid?(payload),
+             "#{name} must validate its emitted intake-disabled envelope"
+    end
   end
 
   # ── hive-status ────────────────────────────────────────────────────────
@@ -743,17 +925,17 @@ class SchemaFilesTest < Minitest::Test
           ],
           # Machine-readable recovery hint; siblings legacy_stage_dirs.
           # Issue #94.
-          "legacy_migrate_command" => "hive migrate"
+          "legacy_state_guide" => "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
         },
         {
           # Clean project: explicit empty array still validates, and
-          # legacy_migrate_command is explicitly null.
+          # legacy_state_guide is explicitly null.
           "name" => "beta",
           "path" => "/tmp/beta",
           "hive_state_path" => "/tmp/beta/.hive-state",
           "tasks" => [],
           "legacy_stage_dirs" => [],
-          "legacy_migrate_command" => nil
+          "legacy_state_guide" => nil
         }
       ]
     }
@@ -844,7 +1026,7 @@ class SchemaFilesTest < Minitest::Test
           "hive_state_path" => "/tmp/demo/.hive-state",
           "tasks" => [ task_with_pr, task_without_pr, held_task, held_task_null ],
           "legacy_stage_dirs" => [],
-          "legacy_migrate_command" => nil
+          "legacy_state_guide" => nil
         }
       ]
     }
@@ -866,10 +1048,10 @@ class SchemaFilesTest < Minitest::Test
     }, held_task_null["held"])
   end
 
-  # `legacy_migrate_command` accepts either "hive migrate" (when
+  # `legacy_state_guide` accepts either "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md" (when
   # legacy_stage_dirs is non-empty) or `null` (when clean); any other
   # JSON type (e.g. a boolean or a number) must be rejected. Issue #94.
-  def test_hive_status_legacy_migrate_command_rejects_non_string_non_null
+  def test_hive_status_legacy_state_guide_rejects_non_string_non_null
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
     payload = {
       "schema" => "hive-status",
@@ -883,12 +1065,12 @@ class SchemaFilesTest < Minitest::Test
           "hive_state_path" => "/tmp/alpha/.hive-state",
           "tasks" => [],
           "legacy_stage_dirs" => [],
-          "legacy_migrate_command" => false # not a string and not null
+          "legacy_state_guide" => false # not a string and not null
         }
       ]
     }
     refute schemer.valid?(payload),
-           "legacy_migrate_command must reject values that aren't string-or-null"
+           "legacy_state_guide must reject values that aren't string-or-null"
   end
 
   # Negative case: a legacy_stage_dirs entry missing `stage_dir` or with
@@ -1172,13 +1354,6 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_hive_run_v1_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run", version: 1)))
-    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    assert_includes doc.dig("$defs", "SuccessPayload", "required"), "rebase"
-    assert_includes doc.dig("$defs", "SuccessPayload", "properties", "stage", "enum"), "pr"
-  end
-
   def test_hive_run_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-run")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
@@ -1434,13 +1609,6 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_hive_stage_action_v1_schema_remains_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action", version: 1)))
-    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    assert_includes doc.dig("$defs", "SuccessPayload", "properties", "verb", "enum"), "pr"
-    assert_includes doc.dig("$defs", "NextAction", "properties", "key", "enum"), "ready_for_pr"
-  end
-
   def test_hive_stage_action_success_required_keys_match_producer
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stage-action")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
@@ -1552,16 +1720,12 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-init",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 2,
+    assert_equal 3,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-  end
-
-  def test_hive_init_v1_schema_remains_pinned
-    path = Hive::Schemas.schema_path("hive-init", version: 1)
-    doc = JSON.parse(File.read(path))
-
-    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    refute_includes doc.dig("$defs", "Answers", "required"), "refactor_patrol_enabled"
+    assert_equal "hive-init.v3.json", File.basename(path)
+    assert_equal [ "hive-init.v3.json" ],
+                 Dir.children(File.dirname(path)).grep(/\Ahive-init\.v\d+\.json\z/),
+                 "only the current hive-init revision may live on disk"
   end
 
   def test_hive_init_required_keys_match_producer_emission
@@ -1569,12 +1733,12 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     answers_required = doc.dig("$defs", "Answers", "required").sort
     expected = %w[
-      adhoc_auto_fix answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
+      adhoc_auto_fix answers babysitter_enabled budgets daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
       project refactor_patrol_enabled schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
-                 "schema/producer required-key drift in hive-init.v2.json"
+                 "schema/producer required-key drift in hive-init.v3.json"
 
     # Sandbox the project root: success_payload now drives load_dir against
     # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
@@ -1585,7 +1749,7 @@ class SchemaFilesTest < Minitest::Test
       entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
       answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
       assert_equal answers.keys.sort, answers_required,
-                   "schema/prompt answer-key drift in hive-init.v2.json"
+                   "schema/prompt answer-key drift in hive-init.v3.json"
       producer = Hive::Commands::Init.new(dir, json: true).send(
         :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
       )
@@ -1790,18 +1954,6 @@ class SchemaFilesTest < Minitest::Test
                  "v2 changed pr_closed semantics (true = PR cleanup clean incl. the "                  "no-PR case; false strictly = a recorded PR would not close)"
   end
 
-  # v1 (pr_closed false for the no-PR case too) is preserved for external
-  # validators pinned to pre-v2 releases.
-  def test_hive_drop_v1_schema_file_remains_for_back_compat
-    path = Hive::Schemas.schema_path("hive-drop", version: 1)
-    assert File.exist?(path), "v1 schema file missing: #{path}"
-
-    doc = JSON.parse(File.read(path))
-    assert_equal 1,
-                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const"),
-                 "v1 schema must still declare schema_version: 1"
-  end
-
   def test_hive_drop_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-drop")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
@@ -1903,15 +2055,6 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
-  def test_hive_patrol_v1_remains_pinned_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol", version: 1)))
-
-    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
-    reasons = doc.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
-                      "items", "properties", "reason", "enum")
-    assert_equal %w[dismissed existing_pr similar_to_existing low_confidence low_severity], reasons
-  end
-
   def test_hive_prune_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-prune")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
@@ -1990,7 +2133,7 @@ class SchemaFilesTest < Minitest::Test
       schema schema_version ok runtime running pid uptime_sec pid_file log_file
       service_installed service_enabled unit_path
       installed_binary expected_binary installed_binary_version cli_version binary_drift
-      current_version update_nudge
+      runtime_installation lifecycle quiescence_capability current_version update_nudge
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-status.v1.json"
@@ -2534,54 +2677,6 @@ class SchemaFilesTest < Minitest::Test
     assert_empty legacy_errors, "v3 must continue accepting durable records written before alpha scoring"
   end
 
-  def test_hive_patrol_v2_remains_pinned_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol", version: 2)))
-    properties = doc.dig("$defs", "SuccessPayload", "properties")
-
-    assert_equal "hive patrol output (v2)", doc.fetch("title")
-    assert_equal 2, properties.dig("schema_version", "const")
-    assert_equal %w[
-      validated validation_failed fix_agent_failed fix_agent_rejected
-      missing_fix_proof no_validation_commands invalid_validation_key
-      missing_regression regression_not_reproduced targeted_validation_failed
-      fix_guardrail validation_mutated_worktree fix_error
-    ], properties.dig("fix_results", "items", "properties", "reason", "enum")
-    assert_equal %w[
-      dismissed existing_pr similar_to_existing low_confidence low_severity
-      non_production low_alpha active_feature duplicate_in_run feature_limit
-    ], properties.dig("skipped_findings", "items", "properties", "reason", "enum")
-    refute properties.dig("skipped_findings", "items", "properties").key?("canonical_finding_id")
-  end
-
-  def test_hive_patrol_finding_v2_remains_pinned_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol-finding", version: 2)))
-    properties = doc.fetch("properties")
-
-    assert_equal "hive patrol finding record (v2)", doc.fetch("title")
-    %w[
-      validation_key target_sha lifecycle_state lifecycle_reason
-      lifecycle_updated_at superseded_by
-    ].each do |field|
-      refute properties.key?(field), "v2 must not be rewritten with #{field}"
-    end
-
-    payload = {
-      "id" => "finding-v2", "feature_id" => "route-home", "category" => "bug",
-      "severity" => "high", "confidence" => "medium", "fingerprint" => "fp-v2",
-      "evidence" => [ { "file" => "app.rb", "line" => 12, "snippet" => "user.name" } ]
-    }
-    assert JSONSchemer.schema(doc).valid?(payload), "the historical v2 finding shape must stay valid"
-  end
-
-  def test_hive_patrol_finding_v1_remains_pinned_for_back_compat
-    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol-finding", version: 1)))
-    properties = doc.fetch("properties")
-
-    assert_equal "hive patrol finding record (v1)", doc.fetch("title")
-    refute properties.key?("root_cause"), "v1 must not be rewritten with v2 fields"
-    refute properties.key?("alpha_score"), "v1 must remain the original closed contract"
-  end
-
   # ── hive-answer-digest ───────────────────────────────────────────────────
 
   def answer_digest_command(output: StringIO.new)
@@ -3017,13 +3112,12 @@ class SchemaFilesTest < Minitest::Test
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
   end
 
-
   # ── agent-first operational contracts ─────────────────────────────────
 
   def test_recovery_status_contracts_keep_only_the_current_schema
     {
-      "hive-status" => 8,
-      "hive-operational-status" => 4,
+      "hive-status" => 9,
+      "hive-operational-status" => 5,
       "hive-act" => 2
     }.each do |name, expected_version|
       path = Hive::Schemas.schema_path(name)

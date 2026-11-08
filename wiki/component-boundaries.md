@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-08-30
+updated: 2026-09-26
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
@@ -67,17 +67,26 @@ and the complete target coordination schema. The
 boundary does not activate any legacy runtime consumer or move task/workflow
 authority out of project task folders.
 
-The clean cutover keeps two focused helpers outside the minimal entry point.
+`ProcessGuard` also closes registered non-database fork resources in the child.
+The one-shot project guard uses that hook so a detached attempt cannot inherit
+and accidentally extend a completed parent's project-ownership lock.
+The one-shot process executor is also a direct consumer: it brackets fork/spawn
+with the same process guard and pins Hive child commands to `HIVE_BIN`.
+The dispatch one-shot runner is a second typed composition root for the same
+Attempts internals as the long-lived daemon; it scopes reconciliation and
+admission to one owned project and does not expose those lifecycle classes as
+public APIs. The one-shot project-liveness observer is the corresponding
+read-only Attempts consumer: it checks durable attempts, task leases, and
+Architecture Patrol claims before readiness may declare a project idle.
+
 `PayloadStore` moves retained bytes from stable open paths to immutable SHA-256
-addresses only at terminal publication; and `CutoverManifest` publishes a
-digest-bound, owner-private phase record outside both the legacy roots and the
-candidate database. Attempts, dispatch requests/results, and PR merge
-reconciliation use the activated runtime control plane through typed
-repositories; provider routing remains a pure current-configuration boundary.
-Cutover rejects live legacy owners, discards derived runtime
-rows, and directly imports only validated token-usage history. Fresh bootstrap
-loads no legacy decoder. Normal runtime never creates, imports, or repairs
-legacy state.
+addresses at terminal publication. `Installation.setup` creates the current
+runtime database explicitly; status and startup validate it read-only. The
+installation coordinator and the setup/runtime commands are Hive consumers of
+the database boundary; its catalog includes current initialization tests. Attempts,
+dispatch and PR merge reconciliation use typed repositories. Historical cutover,
+manifest, sealing and token-usage import machinery has been removed. Task/workflow
+file authority and ordinary runtime recovery remain unchanged.
 
 ## Patrol Fix boundary
 

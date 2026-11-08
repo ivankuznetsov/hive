@@ -7,8 +7,9 @@ module Hive::AgentSupport::Codex::Runtime
   PERMISSION_PROFILE = "hive-managed".freeze
   DOCTOR_TIMEOUT_SEC = 30
   PATH_QUALIFIED_READS = true
+  # `--ignore-user-config` (in the flags below) is what keeps personal MCP
+  # servers out; a `-c mcp_servers={}` override would deep-merge into a no-op.
   ISOLATION_ARGUMENTS = [
-    "-c", "mcp_servers={}",
     "-c", "apps._default.enabled=false",
     "-c", "features.apps=false",
     "-c", "features.remote_plugin=false",
@@ -55,7 +56,7 @@ module Hive::AgentSupport::Codex::Runtime
     flags.concat([ "--output-schema", schema_path ]) if schema_path
     host.portable_policy(
       scope, task_root:, directories:, environment:, outputs:, runtime_root:,
-      cli_flags: flags, executable:
+      cli_flags: flags, executable:, mcp_isolated: true
     )
   end
 

@@ -3,25 +3,37 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-08-24
+updated: 2026-11-04
 tags: [agent, runtime, component, gem, cli]
 ---
 
 **TLDR**: `agent-cli-runtime` gives Ruby applications one stable integration
-layer for Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. Its versioned
+layer for Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, and Muse Code. Its versioned
 profiles centralize provider-specific commands, local capability checks,
 environment rules, usage extraction, and result normalization so consumers
 can add, switch, and upgrade agent CLIs behind one request and result
 vocabulary. It is the first independently versioned gem kept in the Hive
 monorepo, with Hive as its primary consumer and orchestration policy owner.
 
+Claude print-mode prompts use the existing `piped_stdin` transport, like Pi
+and OpenCode. Hive supplies the complete prompt through its temporary stdin
+file rather than one process argument, avoiding `E2BIG` for large review diffs.
+The real-process regression sends 256 KiB and verifies byte-for-byte delivery.
+Grok also uses `piped_stdin`, with `--prompt-file=/dev/stdin`: its Unix CLI
+reads the managed stdin file instead of receiving a potentially oversized
+`-p` argument. Grok does not interpret `--prompt-file -` as stdin.
+
 ## Public surface
 
 The package lives at `components/agent-cli-runtime/`, loads with
 `require "agent_cli_runtime"`, and exposes the `AgentCliRuntime` namespace.
-Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`.
-The appended profile leaves the order and behavior of the four legacy profiles
-unchanged. Callers construct immutable requests and receive immutable compiled
+Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`.
+Appended profiles leave the order and behavior of the earlier profiles
+unchanged. The `muse` profile also introduced two generic contract points:
+version output that repeats one version in two forms (Muse prints
+`1.4.14 (1.4.14-R7309.1)`) is unambiguous when every token shares one numeric
+core, and an optional `configuration_directory_probe:` lets a provider own a
+derived config root (Muse resolves `$XDG_CONFIG_HOME/muse`). Callers construct immutable requests and receive immutable compiled
 invocations, capability evidence, probe results, and observable results.
 Each profile also exposes an immutable `credential_environment_keys`
 inventory. This is compatibility metadata for an orchestrator that needs to
@@ -49,8 +61,8 @@ SemVer-governed behavior; orchestration policy stays injectable or outside the
 package.
 
 The prompt transport distinguishes stdin with an argv marker (`:stdin`, used
-by Codex) from a raw non-TTY pipe (`:piped_stdin`, used by Pi and OpenCode).
-Both CLIs construct the initial message from that pipe, so implementation-sized
+by Codex) from unmarked stdin (`:piped_stdin`, used by Claude, Pi, Grok and OpenCode).
+These CLIs read the initial message from stdin, so implementation-sized
 prompts never occupy one operating-system-limited argv element. This matters
 before the total `ARG_MAX` ceiling: Linux rejects one argument at roughly 128
 KiB, which a deeply reviewed plan can exceed on its own.
@@ -81,7 +93,19 @@ requested variant while remote model fetching and ambient project
 configuration are disabled. The probe accepts the caller's already-resolved
 executable on `ProbeRequest.executable` and otherwise falls back to declared
 environment overrides; either way it validates and reports exactly the
-executable the compiled invocation runs. An exact route declared by the selected overlay is
+executable the compiled invocation runs. ProbeRequest environment overrides are
+restricted to the OpenCode overlay keys (`OPENCODE_OVERLAY_ENVIRONMENT_KEYS`);
+any other key is rejected with `ArgumentError`. The probe child environment
+also copies only overlay-contract keys into the scrubbed base rather than
+blanket-merging the request environment, and applies the denylist scrub last
+after every caller-controlled channel, so Ruby and Bundler injection
+variables such as `RUBYOPT` stay removed even when a request is constructed
+outside the validated overlay contract. Credential keys are bound by the
+same rule: `ProbeRequest` and `OpenCodePreparationRequest` reject any
+credential key in `SCRUBBED_RUNTIME_ENVIRONMENT_KEYS` (`RUBYOPT`, `RUBYLIB`,
+`GEM_HOME`, `GEM_PATH`, `BUNDLE_BIN_PATH`, `BUNDLE_GEMFILE`) with
+`ArgumentError`, so a poisoned ambient value cannot be selected back into a
+scrubbed child. An exact route declared by the selected overlay is
 authoritative and skips the large verbose CLI inventory; an undeclared route
 must still exist in that bounded local inventory. Generic `probe(profile)` and
 `prepare!(profile)` remain compatible for legacy profiles. OpenCode's ordinary
@@ -114,7 +138,13 @@ normalized as `timed_out` rather than generic `cli_failure`; Hive projects that
 use marker-owned stages record the ordinary transient `timeout` reason while
 preserving any partial artifact bytes for scheduler-owned retry.
 OpenCode's profile-specific provider-error extractor reads only dedicated
-`error` events and their nested `error.data.message` payload. A structured
+`error` events and their message payload: OpenCode 1.x nests it as
+`error.name` + `error.data.message`, while OpenCode 2.x flattens it to
+`error.type` + `error.message` (+ `error.status`) and may emit a pre-session
+error with an empty `sessionID`. The strict run parser and the nonzero-exit
+classifier accept both shapes (fixtures under
+`test/fixtures/opencode/v2.2.6/`); before that, every 2.x failure surfaced as
+`MalformedOutput: OpenCode error name must be a non-empty string`. A structured
 upstream rate-limit refusal therefore reaches Hive as a typed `rate_limited`
 signal and writes the normal cooldown-retry marker, while identical prose in
 ordinary model output cannot forge a retryable provider wall.
@@ -178,6 +208,15 @@ Hive requires `agent-cli-runtime ~> 0.2.0` and resolves the monorepo component
 path during development. This keeps installed Hive on the independently
 published OpenCode-capable line while allowing compatible 0.2.x patches;
 component publication and Hive dependency cutover remain separate operations.
+OpenCode's prepared invocation keeps its configuration, data, cache, state,
+and temporary roots private, while Hive forwards the operator-selected
+`GEM_HOME` and `GEM_PATH` alongside the existing base process environment. A
+systemd daemon commonly has no explicit `GEM_PATH`; in that case Hive supplies
+the effective `Gem.path` of its own Ruby process. Those paths are runtime
+inputs, like `PATH`: dropping them can make a
+repository's checked-in Ruby binstubs fail to load `bundler/setup` even though
+the exact same binstubs work for the operator. Ruby code-injection options such
+as `RUBYOPT` remain outside the forwarded environment.
 `Hive::AgentRuntime`
 preserves its
 public request, probe, error, and result names as a forwarding facade, while
@@ -190,6 +229,12 @@ Source Web declares the component as an explicit path gem so Rails boots
 against the same reviewed ABI. Managed Web provisioning and server launches
 replace that relative source with the installed component gem root through
 `HIVE_AGENT_CLI_RUNTIME_ROOT`, parallel to the existing `HIVE_CLI_ROOT` seam.
+`Hive::Web::AppBundle.agent_cli_runtime_root` takes that root from the
+activated `agent-cli-runtime` gem spec on packaged installs; source checkouts
+and dogfood deployments load the component through `$LOAD_PATH`/`RUBYLIB`
+without activating a spec, so the root falls back to
+`<hive_cli_root>/components/agent-cli-runtime` (the same default the web
+Gemfile uses) and `bundle_install!` validates its gemspec.
 
 The published 0.2.0 candidate was built from canonical commit
 `c8f62cacefb9d5982ab0e8d2328071763b3736c4`, published by the protected

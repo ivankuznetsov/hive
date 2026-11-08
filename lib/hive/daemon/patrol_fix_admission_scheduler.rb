@@ -17,6 +17,7 @@ module Hive
       )
       RETRY_BACKOFF_SEC = [ 60, 300, 900 ].freeze
       DECISION_LEASE_SEC = 7_200
+      READINESS_HORIZON = Time.utc(9999, 12, 31).freeze
 
       def initialize(sources: [], semantic_admission_factory: nil,
                      task_materializer_factory: nil,
@@ -60,6 +61,20 @@ module Hive
           end
         end
         events.freeze
+      end
+
+      # Bounded projection of admission continuations. In particular, a
+      # semantic child may have persisted `decided` immediately before exiting;
+      # keep that materialization continuation visible until the next admission
+      # tick consumes it.
+      def readiness(project:, now: @clock.call)
+        project_sources.filter_map do |source|
+          next unless source.respond_to?(:project) && source.project.to_s == project.to_s
+
+          store_for(source).pending(now: READINESS_HORIZON, limit: @limit)
+        end.flatten.map do |record|
+          readiness_item(record, now)
+        end
       end
 
       # Existing ChildSupervisor completion hook. The semantic child is the
@@ -118,6 +133,25 @@ module Hive
       end
 
       private
+
+      def readiness_item(record, now)
+        deadline = case record.fetch("status")
+        when "deciding" then record.dig("decision_reservation", "expires_at")
+        when "retry_wait" then record.dig("retry", "retry_at")
+        end
+        due_at = deadline && Time.iso8601(deadline).utc
+        waiting = due_at && due_at > now
+        {
+          "bucket" => waiting ? "waiting_external" : "runnable_now",
+          "id" => "dispatch:patrol-fix:#{record.fetch('occurrence_id')}",
+          "component" => "dispatch", "reason" => "patrol_fix_admission",
+          "next_check_at" => waiting ? due_at : nil,
+          "condition" => waiting ? {
+            "kind" => "time_due", "deadline" => due_at.iso8601(6),
+            "resource" => "patrol_fix_admission"
+          } : nil
+        }
+      end
 
       def process(source, entry, now:)
         occurrence_id = entry.fetch("occurrence_id")

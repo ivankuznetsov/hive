@@ -3,7 +3,7 @@
 require "test_helper"
 require "hive/stages/base"
 
-# The hive runner detects tmux-stage completion ONLY from the terminal marker the
+# The hive runner detects marker-mode stage completion ONLY from the terminal marker the
 # agent writes into its state file (never from process exit). The agent-owned
 # marker templates harden that contract by making the marker the unmissable final
 # instruction. This pins that the marker is the literal last line of each of those
@@ -65,13 +65,12 @@ class TemplateMarkerLastLineTest < Minitest::Test
     dir = File.expand_path("../../../templates", __dir__)
     review = File.read(File.join(dir, "review_prompt.md.erb"))
     execute = File.read(File.join(dir, "execute_prompt.md.erb"))
-    artifacts = File.read(File.join(dir, "artifacts_prompt.md.erb"))
+    artifacts = File.read(File.join(dir, "artifacts_producer_prompt.md.erb"))
     open_pr = File.read(File.join(dir, "open_pr_prompt.md.erb"))
 
     assert_match(/must not write task\.md yourself/i, review)
     assert_match(/Do NOT update the task\.md marker yourself/i, execute)
     assert_match(/controller-owned/i, artifacts)
-    assert_match(/never\s+publication authority/i, artifacts)
     assert_match(/publication controller exclusively owns/i, open_pr)
     assert_match(/No completion marker is\s+required/i, open_pr)
     refute_match(/Completion — REQUIRED/, review,

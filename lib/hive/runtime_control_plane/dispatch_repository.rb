@@ -15,7 +15,7 @@ module Hive
       REQUESTORS = %w[bot healer web tui cli action daemon recorder operator].freeze
       ALLOWED_VERBS = %w[
         run develop brainstorm plan plan-review-run review open-pr artifacts finalize
-        archive markers daemon
+        archive markers daemon act approve
       ].freeze
       GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
       GLOBAL_MAINTENANCE_ARGVS = [ %w[hive daemon install --force] ].freeze
@@ -30,21 +30,21 @@ module Hive
       RECOVERY_PROJECTION_LIMIT = 500
       PROJECT_RE = /\A[A-Za-z0-9_.\-]+\z/
       SLUG_RE = /\A[a-z][a-z0-9-]{0,62}[a-z0-9]\z/
-      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/
+      REQUEST_ID_RE = /\A[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\z/
 
       Request = Data.define(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
         :chat_id, :update_id, :trigger, :task_generation,
         :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
-        :recovery, :schema_version, :state, :revision
+        :recovery, :schema_version, :state, :revision, :remote_authority
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
                        inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
-                       state: "queued", revision: 0)
+                       state: "queued", revision: 0, remote_authority: nil)
           super(
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
@@ -52,7 +52,8 @@ module Hive
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
-            schema_version: schema_version, state: state, revision: revision
+            schema_version: schema_version, state: state, revision: revision,
+            remote_authority: remote_authority
           )
         end
       end
@@ -92,17 +93,19 @@ module Hive
                          task_generation: nil,
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
-                         expected_marker_id: nil, recovery: nil, now: @clock.call, **)
+                         expected_marker_id: nil, recovery: nil, now: @clock.call,
+                         command_context: nil, remote_authority: nil, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
           task_generation: task_generation,
           inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
-          recovery: recovery, now: now
+          recovery: recovery, now: now, remote_authority: remote_authority
         )
         database.transaction do |db|
           insert_request!(db, payload)
+          bind_command_context!(db, request_id, command_context)
         end
         request_id.to_s
       rescue Sequel::UniqueConstraintViolation => error
@@ -119,7 +122,8 @@ module Hive
           end
           [ by_id, current ]
         end
-        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload)
+        return request_id.to_s if existing_by_id && same_request?(existing_by_id, payload) &&
+          rebind_existing_command_context?(request_id, command_context)
         raise IntegrityError.new(
           "dispatch request id is already bound", code: :dispatch_request_conflict
         ) if existing_by_id
@@ -167,18 +171,47 @@ module Hive
         end
       end
 
-      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, **)
+      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, project: nil, slug: nil, **)
         database.read do |db|
-          db[:dispatch_requests]
-            .where(recovery_request: 1)
-            .reverse_order(:updated_at, :request_id).limit(Integer(limit))
+          scope = db[:dispatch_requests].where(recovery_request: 1)
+          scope = scope.where(project_id: db[:projects].where(name: project.to_s).select(:project_id)) if project
+          scope = scope.where(task_slug: slug.to_s) if slug
+          scope.reverse_order(:updated_at, :request_id).limit(Integer(limit))
             .all.reverse.map { |row| request_from(row) }
+        end
+      end
+
+      def recovery_attempt_id(request_id)
+        database.read do |db|
+          db[:attempts].where(request_id: request_id.to_s).get(:attempt_id)
+        end
+      end
+
+      def recovery_requests_by_slug(project:, slugs:, limit: RECOVERY_PROJECTION_LIMIT)
+        return {} if slugs.empty?
+        per_task_limit = Integer(limit)
+        database.read do |db|
+          ranked = db[:dispatch_requests].where(recovery_request: 1, task_slug: slugs,
+            project_id: db[:projects].where(name: project.to_s).select(:project_id))
+            .select_append(Sequel.function(:row_number).over(partition: :task_slug,
+              order: [ Sequel.desc(:updated_at), Sequel.desc(:request_id) ]).as(:recovery_rank))
+          ranked.from_self.where { recovery_rank <= per_task_limit }
+            .order(:task_slug, Sequel.desc(:recovery_rank)).all
+            .map { |row| request_from(row) }.group_by(&:slug)
         end
       end
 
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)
+      end
+
+      def command_context(request_id)
+        database.read do |db|
+          next nil unless db.table_exists?(:command_dispatch_contexts)
+          row = db[:command_dispatch_contexts][request_id: request_id.to_s]
+          row && row.transform_keys(&:to_s)
+        end
       end
 
       def claim(request_id, pid:, process_start_time: nil, now: @clock.call,
@@ -372,8 +405,15 @@ module Hive
       end
 
       def recover_claims(now: @clock.call, alive:, attempt_alive: nil,
-                         expiry_sec: CLAIM_EXPIRY_SEC, handler: nil, **)
-        claimed.each.sum do |delivery|
+                         expiry_sec: CLAIM_EXPIRY_SEC, handler: nil, projects: nil, **)
+        selected_projects = Array(projects).map(&:to_s).to_h { |name| [ name, true ] }
+        deliveries = claimed
+        if projects
+          deliveries = deliveries.select do |delivery|
+            selected_projects.key?(delivery.request.project.to_s)
+          end
+        end
+        deliveries.sum do |delivery|
           request = delivery.request
           next 0 if request.recovery&.fetch("phase", nil) == "terminal"
           claim = delivery.claim
@@ -406,7 +446,7 @@ module Hive
       end
 
       def expired?(request, now: @clock.call, expiry_sec: EXPIRY_SEC)
-        !request.recovery && now.utc - request.created_at.utc > expiry_sec
+        !request.recovery && !request.remote_authority && now.utc - request.created_at.utc > expiry_sec
       end
 
       def write_result!(chat_id:, project:, slug:, request_id:, exit_code:, command:,
@@ -484,30 +524,179 @@ module Hive
         return 0 if ids.empty?
 
         database.transaction do |db|
-          db[:dispatch_requests].where(
+          pending = db[:dispatch_requests].where(
             request_id: ids, result_state: "pending"
-          ).update(
+          )
+          acknowledged = pending.select_map(:request_id)
+          count = pending.update(
             result_state: "delivered", result_delivered_at: now.utc.iso8601(6),
             updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
           )
+          close_acknowledged_command_pins!(db, acknowledged, now: now) unless acknowledged.empty?
+          count
         end
       end
 
       def prune_results(now: @clock.call, **)
         database.transaction do |db|
-          db[:dispatch_requests].where(
+          expired = db[:dispatch_requests].where(
             state: "completed", result_state: "delivered"
-          ).where { retain_until < now.utc.iso8601(6) }.delete
+          ).where { retain_until < now.utc.iso8601(6) }
+          # A recovery request is also the task's failure history: the retry
+          # ladder and identical-failure count read the latest terminal
+          # recovery. Deleting it with its delivered result after an hour reset
+          # every series, so a slow deterministic loop never parked (hivedev
+          # F2). Drop only the result payload; the row then ages out under
+          # TERMINAL_RECOVERY_RETENTION_SEC like any terminal recovery.
+          kept = expired.where(recovery_request: 1).update(
+            result_state: nil, result_json: nil, result_digest: nil,
+            result_available_at: nil, result_delivered_at: nil, retain_until: nil,
+            updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
+          )
+          kept + expired.exclude(recovery_request: 1).delete
         end
       end
 
       private
 
+      def close_acknowledged_command_pins!(db, request_ids, now:)
+        return unless db.table_exists?(:command_dispatch_contexts) &&
+          db.table_exists?(:command_receipt_pins)
+
+        db[:command_dispatch_contexts].where(request_id: request_ids).all.each do |context|
+          db[:command_receipt_pins].where(
+            receipt_id: context.fetch(:receipt_id),
+            principal: context.fetch(:principal),
+            intent_id: context.fetch(:source_identity),
+            intent_generation: context.fetch(:ordinal),
+            lifecycle_status: "active"
+          ).update(
+            lifecycle_status: "closed", generation: Sequel[:generation] + 1,
+            released_at: now.utc.iso8601(6), updated_at: now.utc.iso8601(6)
+          )
+        end
+      end
+
+      def bind_command_context!(db, request_id, context)
+        tagged = request_id.to_s.start_with?("command-dispatch:v1:")
+        if context.nil?
+          raise IntegrityError.new(
+            "tagged dispatch request is missing command context", code: :dispatch_context_missing
+          ) if tagged
+          return
+        end
+        unless db.table_exists?(:command_dispatch_contexts)
+          raise Hive::ConfigError,
+                "command dispatch context requires the installed command receipt schema"
+        end
+        values = normalize_command_context(context).merge(
+          request_id: request_id.to_s, created_at: @clock.call.utc.iso8601(6)
+        )
+        unless tagged && request_id.to_s == values.delete(:transport_request_id)
+          raise IntegrityError.new(
+            "command dispatch transport identity changed", code: :dispatch_context_conflict
+          )
+        end
+        existing = db[:command_dispatch_contexts][request_id: request_id.to_s]
+        if existing
+          comparable = values.except(:created_at)
+          return if comparable.all? { |key, value| existing[key] == value }
+          return if advance_command_context_generation!(
+            db, request_id.to_s, existing, comparable
+          )
+          raise IntegrityError.new(
+            "command dispatch context conflicts", code: :dispatch_context_conflict
+          )
+        end
+        receipt = db[:command_receipts][receipt_id: values.fetch(:receipt_id)]
+        unless receipt && receipt.fetch(:state) == "executing" &&
+               receipt.fetch(:generation) == values.fetch(:receipt_generation) &&
+               receipt.fetch(:principal) == values.fetch(:principal) &&
+               receipt.fetch(:request_fingerprint) == values.fetch(:request_fingerprint)
+          raise IntegrityError.new(
+            "command dispatch context receipt ownership changed",
+            code: :dispatch_context_conflict
+          )
+        end
+        db[:command_dispatch_contexts].insert(values)
+        changed = db[:command_capacity].where(namespace_id: receipt.fetch(:namespace_id)).update(
+          logical_bytes: Sequel[:logical_bytes] + 512,
+          revision: Sequel[:revision] + 1,
+          updated_at: values.fetch(:created_at)
+        )
+        unless changed == 1
+          raise IntegrityError.new(
+            "command dispatch context capacity is unavailable",
+            code: :dispatch_context_conflict
+          )
+        end
+      end
+
+      def normalize_command_context(context)
+        source = context.respond_to?(:to_h) ? context.to_h : context
+        source = source.transform_keys(&:to_sym)
+        required = %i[
+          receipt_id effect_id principal principal_source ordinal receipt_generation
+          request_fingerprint transport_request_id
+        ]
+        missing = required.reject { |key| source.key?(key) }
+        raise ArgumentError, "command context is missing #{missing.join(', ')}" unless missing.empty?
+        {
+          receipt_id: source.fetch(:receipt_id).to_s,
+          effect_id: source.fetch(:effect_id).to_s,
+          principal: source.fetch(:principal).to_s,
+          principal_source: source.fetch(:principal_source).to_s,
+          ordinal: Integer(source.fetch(:ordinal)),
+          receipt_generation: Integer(source.fetch(:receipt_generation)),
+          request_fingerprint: source.fetch(:request_fingerprint).to_s,
+          source_identity: (source[:source_identity] || source.fetch(:transport_request_id)).to_s,
+          retry_horizon_expires_at: source[:retry_horizon_expires_at]&.to_s,
+          transport_request_id: source.fetch(:transport_request_id).to_s
+        }
+      end
+
+      def same_command_context?(request_id, context)
+        existing = command_context(request_id)
+        return existing.nil? if context.nil?
+        expected = normalize_command_context(context).transform_keys(&:to_s)
+          .except("transport_request_id")
+        existing && expected.all? { |key, value| existing[key] == value }
+      end
+
+      def rebind_existing_command_context?(request_id, context)
+        database.transaction do |db|
+          existing = if db.table_exists?(:command_dispatch_contexts)
+            db[:command_dispatch_contexts][request_id: request_id.to_s]
+          end
+          next existing.nil? if context.nil?
+          next false unless existing
+
+          expected = normalize_command_context(context).except(:transport_request_id)
+          next true if expected.all? { |key, value| existing[key] == value }
+          advance_command_context_generation!(db, request_id.to_s, existing, expected)
+        end
+      end
+
+      def advance_command_context_generation!(db, request_id, existing, expected)
+        immutable = expected.except(:receipt_generation)
+        return false unless immutable.all? { |key, value| existing[key] == value }
+        return false unless expected.fetch(:receipt_generation) > existing.fetch(:receipt_generation)
+
+        receipt = db[:command_receipts][receipt_id: expected.fetch(:receipt_id)]
+        return false unless receipt && receipt.fetch(:state) == "executing" &&
+                            receipt.fetch(:generation) == expected.fetch(:receipt_generation) &&
+                            receipt.fetch(:principal) == expected.fetch(:principal) &&
+                            receipt.fetch(:request_fingerprint) == expected.fetch(:request_fingerprint)
+        db[:command_dispatch_contexts].where(
+          request_id: request_id, receipt_generation: existing.fetch(:receipt_generation)
+        ).update(receipt_generation: expected.fetch(:receipt_generation)) == 1
+      end
+
       def request_payload(project:, slug:, argv:, requestor:, request_id:, now:, chat_id: nil,
                           update_id: nil, trigger: nil, task_generation: nil,
                           inherited_outputs: [], task_id: nil,
                           expected_stage: nil, expected_marker_name: nil,
-                          expected_marker_id: nil, recovery: nil, remaining_argvs: [])
+                          expected_marker_id: nil, recovery: nil, remaining_argvs: [], remote_authority: nil)
         validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
         {
           "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
@@ -518,7 +707,7 @@ module Hive
           "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
           "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
           "expected_marker_id" => expected_marker_id, "recovery" => recovery,
-          "remaining_argvs" => Array(remaining_argvs)
+          "remaining_argvs" => Array(remaining_argvs), "remote_authority" => remote_authority
         }
       end
 
@@ -551,7 +740,7 @@ module Hive
           request_id project slug argv requestor chat_id update_id trigger task_generation
           inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
-          remaining_argvs
+          remaining_argvs remote_authority
         ].all? { |key| existing[key] == payload[key] }
       end
 
@@ -577,7 +766,7 @@ module Hive
           expected_marker_name: payload["expected_marker_name"],
           expected_marker_id: payload["expected_marker_id"], recovery: payload["recovery"],
           schema_version: payload.fetch("schema_version"), state: row.fetch(:state),
-          revision: row.fetch(:revision)
+          revision: row.fetch(:revision), remote_authority: payload["remote_authority"]
         )
       rescue KeyError, ArgumentError, TypeError, CodecError => error
         raise IntegrityError.new(

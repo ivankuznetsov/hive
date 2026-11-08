@@ -6,12 +6,15 @@
 #                    override with HIVE_FAKE_CODEX_VERSION, e.g. "0.1.0"
 #                    to simulate a too-old binary below min_version).
 #
-#   [global flags] review [...]
+#   [global flags] [exec] review [...]
 #                    logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
 #                    prints HIVE_FAKE_CODEX_STDOUT (default: a valid
 #                    GFM-checkbox findings block) and exits with
 #                    HIVE_FAKE_CODEX_EXIT (default 0). HIVE_FAKE_CODEX_HANG
 #                    sleeps that many seconds first (timeout tests).
+#                    HIVE_FAKE_CODEX_STDERR, when set, is printed to stderr
+#                    first, the way codex streams its session transcript there
+#                    and only the final message to stdout.
 #
 #                    HIVE_FAKE_CODEX_BIG_MIB, when set, emits valid findings
 #                    headers first, then floods stdout with that many MiB of
@@ -36,7 +39,7 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 
-if has_arg "exec" "$@"; then
+if has_arg "exec" "$@" && ! has_arg "review" "$@"; then
   if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
     mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
     {
@@ -57,6 +60,7 @@ if has_arg "review" "$@"; then
       echo "---"
       echo "cwd=$(pwd)"
       printf 'openai_api_key=%s\n' "${OPENAI_API_KEY-unset}"
+      printf 'stdin=%s\n' "$(readlink /proc/$$/fd/0 2>/dev/null)"
       for a in "$@"; do
         printf 'arg=%s\n' "$a"
       done
@@ -80,6 +84,10 @@ if has_arg "review" "$@"; then
       i=$((i + 1))
     done
     exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+  fi
+
+  if [[ -n "${HIVE_FAKE_CODEX_STDERR:-}" ]]; then
+    printf '%s' "${HIVE_FAKE_CODEX_STDERR}" >&2
   fi
 
   default_out='OpenAI Codex v0.139.0

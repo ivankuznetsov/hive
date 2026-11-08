@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, lib/hive/babysitter/git_policy.rb, lib/hive/babysitter/gh_policy.rb, lib/hive/babysitter/passthrough_runner.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-08-13
+updated: 2026-09-26
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
@@ -23,31 +23,75 @@ hive babysit --once PROJECT [--dry-run]
 hive babysit --once --all [--dry-run]
 ```
 
-The command is bare-text in v1; it does not emit a `--json` envelope.
+Service lifecycle subcommands remain human-readable. Every `--once` invocation
+emits exactly one `hive-one-shot.v1` document, with or without an explicit
+`--json`, including `--all` when no project is enabled.
+The one-shot adapter loads at the adapter construction boundary, so direct
+command-adapter callers do not depend on an earlier `run_once` call.
+
+The one-shot babysitter adapter is loaded with the command itself, so direct
+one-shot construction and the normal command execution path use the same
+adapter and persistent-admission predicate.
 
 `install` writes and starts the supervised per-user service through
 `Hive::UserService`: `hive-babysitter.service` on Linux systemd-user or
-`local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start`
+`local.hive-babysitter.plist` on macOS launchd. It runs `hive babysit start --context local`
 in the foreground; project-level `babysitter.enabled` remains the mutation
 gate. `--force` backs up and replaces a drifted unit. Service definitions keep
 custom `HIVE_HOME`/XDG filesystem roots but never persist provider credentials.
 `hive setup` installs this service by default, while `hive uninstall` removes
 it. When a detached babysitter is already running, install first reuses the
 ownership-aware bounded stop path before the service manager starts its
-replacement. Uninstall uses the same stop path before removing any service or
-data, and aborts without teardown when PID ownership cannot be read or verified.
+replacement under the same service lock. Uninstall uses the same stop path
+before removing any service or data, and aborts without teardown when PID
+ownership cannot be read or verified. Shared contention, replay, backup, and
+recovery behavior is owned by [[modules/user_service]].
 `install --dry-run` is rejected because installing a service is a real host
 mutation.
 
+The managed babysitter may start offline. A provider failure ends only the
+current project tick; that project retries on its next configured dispatch
+interval (600 seconds by default). An active unit therefore does not prove
+GitHub or another provider is healthy.
+
 ## Lifecycle
 
-`start` writes `$HIVE_HOME/.babysitter.pid` and runs `Hive::Babysitter::Dispatcher`. The PID payload mirrors `hive daemon`: YAML with `pid`, `process_start_time`, and `started_at`, guarded against PID reuse through shared `Hive::PidFile` helpers. PID reservation and cleanup are serialized by a bounded sidecar lock so `start` cannot replace the PID file while `stop` is comparing and unlinking it, and lifecycle commands fail with a diagnostic instead of hanging forever on a wedged lock holder. `stop` sends TERM, waits up to 600 seconds, then escalates to KILL when ownership can still be verified; the long drain protects an agent that was already running when shutdown began. TERM/INT close admission immediately, and that same predicate is rechecked between projects, between selected PRs, after blocking status/context reads, and immediately before agent launch. This lets accepted work drain without starting another project, PR, rebase, or agent during shutdown. If ownership becomes reused/unverified, or if the process remains alive after KILL, `stop` leaves the PID file for operator inspection and exits with an error instead of reporting a clean stop. Successful stop cleanup removes the PID file only when it still matches the payload being stopped, so a concurrent replacement `start` cannot lose its freshly-created PID lock. `restart` stops an existing process when the PID file exists and aborts if that stop path deliberately leaves a potentially live PID behind; otherwise it starts a new process. For `restart --detach`, it resolves the stable user-facing Hive wrapper with `Hive::InvokedBinary.path` and re-execs `hive babysit start --detach` before daemonizing so the live process and PID file are not stranded under a stale `restart --detach` argv. `reload` sends HUP, and `status` reports running/not-running plus uptime.
+`start` writes `$HIVE_HOME/.babysitter.pid` and runs `Hive::Babysitter::Dispatcher`. The PID payload mirrors `hive daemon`: YAML with `pid`, `process_start_time`, and `started_at`, guarded against PID reuse through shared `Hive::PidFile` helpers. PID reservation and cleanup are serialized by a bounded sidecar lock so `start` cannot replace the PID file while `stop` is comparing and unlinking it, and lifecycle commands fail with a diagnostic instead of hanging forever on a wedged lock holder. `stop` sends TERM, waits up to 600 seconds, then escalates to KILL when ownership can still be verified; the long drain protects an agent that was already running when shutdown began. TERM/INT close admission immediately, and that same predicate is rechecked between projects, between selected PRs, after blocking status/context reads, and immediately before agent launch. This lets accepted work drain without starting another project, PR, rebase, or agent during shutdown. If ownership becomes reused/unverified, or if the process remains alive after KILL, `stop` leaves the PID file for operator inspection and exits with an error instead of reporting a clean stop. Successful stop cleanup removes the PID file only when it still matches the payload being stopped, so a concurrent replacement `start` cannot lose its freshly-created PID lock. `restart` stops an existing process when the PID file exists and aborts if that stop path deliberately leaves a potentially live PID behind; otherwise it starts a new process. For `restart --detach`, it resolves the stable user-facing Hive wrapper with `Hive::InvokedBinary.path` and re-execs `hive babysit start --detach --context local` before daemonizing so the live process and PID file are not stranded under a stale `restart --detach` argv. `reload` sends HUP, and `status` reports running/not-running plus uptime.
 
 `reload` is only a config/log-settings refresh; it does not reload Ruby code into an already-running detached process. `status` compares the PID-file `started_at` timestamp with the latest mtime under `bin/hive`, `lib/hive.rb`, and `lib/hive/**/*.rb`. When the process predates the current source checkout, `status` prints a restart recommendation and `reload` warns the operator to run `hive babysit restart --detach` instead.
 
 The log file is `$HIVE_HOME/logs/babysitter.log`, written by `Hive::Babysitter::Logger` as rotated JSON lines using the same global log-size knobs as the daemon.
 
-`--once PROJECT` runs one dispatcher tick for the named registered project. `--once --all` runs one tick across every enabled registered project. These paths are intended for smoke tests and manual dry-run checks.
+`--once PROJECT` runs one bounded project pass under both the main project
+guard and babysitter execution guard. It retains each PR outcome and projects
+remaining PRs as immediately runnable, waiting on checks or PR changes, or
+waiting for an operator. PRs beyond the repair capacity are still observed:
+only an actionable repair remains `capacity_deferred`, while green or
+externally waiting PRs retain their observed wait. A GitHub error for any PR
+makes the project result an observation error rather than successful
+readiness. A `BEHIND` PR remains runnable when auto-rebase is enabled even if
+its checks are still pending. It does not poll until those facts change.
+
+`--once --all` returns the per-project envelopes plus combined readiness from
+successful projects. A verified live-owner refusal remains visible in
+`projects` and `owning_projects`, but is not an aggregate failure; it always
+forces `safe_to_stop` and `host_stop_allowed` false. Observation failures make
+the aggregate `partial_failure`, return exit 75, and null its combined
+readiness. Malformed registry rows are retained as synthetic per-project
+configuration errors, so an incomplete project inventory cannot claim that the
+host is safe to stop. A daemon-owned standalone project refuses with
+`daemon_owned` and exit 75; stop the daemon or unenroll that project before
+scheduling its babysitter one-shot. The normal long-lived daemon and
+babysitter services may still coexist because their service loops retain
+separate execution guards.
+
+`--once --dry-run` performs the real read-only observation but starts no repair
+and reports no `ran` entries. It does not append babysitter event or status
+state. Eligible unadmitted repairs remain
+`runnable_now`; green PRs and queued checks retain their external-wait state,
+and observed live workers keep `safe_to_stop` false. Project configuration
+`babysitter.dry_run: true` enforces the same observation-only behavior for a
+one-shot even when the CLI omits `--dry-run`.
 
 ## Project Contract
 
@@ -94,6 +138,13 @@ administrative state is then pruned immediately with `--expire now`. Failure to
 quarantine or prune aborts the pass explicitly; it cannot leave the same opaque
 `worktree add` error repeating on every tick.
 
+When every failed job explicitly reports a GitHub Actions account-payment or
+spending-limit hold, a mergeable PR records `noop` / `ci_blocked` with reason
+`github_actions_billing` and does not launch a repair agent. Later ticks
+recheck the diagnostics without consuming agent tokens. A separate code
+failure or merge conflict still admits repair. The blocked observation counts
+as a scheduling turn so it cannot starve other PRs.
+
 On success, the babysitter is silent on the PR. On failure, timeout, or budget
 exhaustion it applies `babysitter/needs-human` and posts one give-up comment per
 PR per UTC hour. The first label application idempotently provisions the
@@ -103,7 +154,26 @@ the repository catalogue. A concurrent creation is accepted only after Hive
 verifies that the label now exists, without overwriting its metadata. If
 provisioning is denied, label application fails closed, records the reason in
 the babysitter event, and lets the independent give-up comment preserve the
-repair blocker.
+repair blocker. The comment leads with the classified `Error:` line before the
+agent tail, because the tail is often provider startup noise (for example MCP
+connection errors from the operator's own Codex config).
+
+A provider usage limit (`error_reason: "limits_reached"` from `Hive::Agent`) is
+not a give-up: no label, no comment. `PrFixer` records the provider in
+`.hive-state/babysitter/agent-limit-hold.json` (`limited_at`, the provider's
+`retry_after` estimate, and the message) and emits `agent-fix` with outcome
+`limits_reached`. Until `AgentLimit.retry_due?` says the hourly cooldown from
+`limited_at` has passed, later ticks skip that provider's spawns with a
+`skipped`/`limits_reached` event; the next real spawn that does not hit the
+limit clears the hold. `limits_reached` is a `:retry` outcome class, so the
+one-shot projection reports it as `waiting_external` until the next poll.
+
+A refused babysitter model (`error_reason: "model_unsupported"`, ADR-057) is
+not a limit: no hold is recorded. `PrFixer` returns `:model_unsupported`, emits
+`agent-fix` and `give-up` events with outcome `model_unsupported`, applies the
+give-up label, and posts a comment whose `Error:` line names the model and the
+config fix. `ProjectTick` counts it as `needs_human` (outcome class
+`:operator`).
 
 ## Dry Run
 
@@ -135,6 +205,15 @@ Existing skip logs must already be private: both the pre-open and post-open
 checks reject any file with group or world permission bits. The blocked command
 still returns synthetic success and emits the stderr marker plus an audit-write
 warning, but the permissive file is left untouched and receives no new argv.
+
+## Output, errors, serialization, and exit codes
+
+Service lifecycle subcommands remain human-readable. Every `--once` operation
+emits exactly one `hive-one-shot.v1` JSON document, including usage,
+configuration, ownership, observation, and adapter-construction failures.
+Successful lifecycle and one-shot operations exit `0`; failed one-shot reports
+use their typed exit code, ordinary lifecycle failures exit `1`, invalid
+command shapes exit `64`, and software failures exit `70`.
 
 ## Tests
 

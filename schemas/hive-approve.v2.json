@@ -4,8 +4,12 @@
   "title": "hive approve output (v2)",
   "description": "Stable contract emitted by `hive approve --json`. v2 widens the stage-name enums to include the new 6-review stage and the renumbered 7-artifacts / 8-finalize / 9-done. CONSUMER AUDIT (U6): the `from_stage`/`to_stage` (bare name), `from_stage_dir`/`to_stage_dir` (N-name dir), and `*_stage_index` fields were relaxed from the closed coding enums to patterns so runtime-registered (generic) workflow stages validate — generic `hive approve` now emits descriptor stages such as `gather` / `3-report`. The producer only emits dirs that pass `validate_workflow_stage!`; the real valid set is the runtime union `Hive::Workflows.all_stage_dirs`, so downstream readers must close-default on an unknown stage dir (e.g. `Stages::DIRS.index(dir) || -1`) rather than assume any `N-name` is meaningful. Backward-compatible widening, no version bump. Successful invocations and every failure path produce a single-line JSON document on stdout.",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" },
-    { "$ref": "#/$defs/ErrorPayload" }
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
   ],
   "$defs": {
     "SuccessPayload": {
@@ -32,20 +36,31 @@
         "next_action"
       ],
       "properties": {
-        "schema": { "const": "hive-approve" },
-        "schema_version": { "const": 2 },
-        "ok": { "const": true },
+        "schema": {
+          "const": "hive-approve"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": true
+        },
         "noop": {
           "type": "boolean",
           "description": "true when --to <current-stage> resulted in no move and no commit."
         },
-        "slug": { "type": "string" },
+        "slug": {
+          "type": "string"
+        },
         "from_stage": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]*$",
           "description": "Bare stage name, mirrors hive-run.stage. Pattern relaxed from the closed coding enum so generic workflow stage names validate; the real valid set is the runtime union Hive::Workflows.all_stage_names."
         },
-        "from_stage_index": { "type": "integer", "minimum": 1 },
+        "from_stage_index": {
+          "type": "integer",
+          "minimum": 1
+        },
         "from_stage_dir": {
           "type": "string",
           "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$",
@@ -55,37 +70,78 @@
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]*$"
         },
-        "to_stage_index": { "type": "integer", "minimum": 1 },
+        "to_stage_index": {
+          "type": "integer",
+          "minimum": 1
+        },
         "to_stage_dir": {
           "type": "string",
           "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
         },
-        "direction": { "type": "string", "enum": ["forward", "backward", "same"] },
+        "direction": {
+          "type": "string",
+          "enum": [
+            "forward",
+            "backward",
+            "same"
+          ]
+        },
         "forced": {
           "type": "boolean",
           "description": "True when --force was passed."
         },
-        "from_folder": { "type": "string", "description": "Absolute path of the source folder before the move." },
-        "to_folder": { "type": "string", "description": "Absolute path of the destination folder after the move (or noop target)." },
+        "from_folder": {
+          "type": "string",
+          "description": "Absolute path of the source folder before the move."
+        },
+        "to_folder": {
+          "type": "string",
+          "description": "Absolute path of the destination folder after the move (or noop target)."
+        },
         "from_marker": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The marker that gated the move (e.g. \"complete\", \"execute_complete\", \"review_complete\"); null on noop."
         },
         "commit_action": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "The body of the hive/state commit message (e.g. \"approve 2-brainstorm -> 3-plan\"). null on noop."
         },
-        "next_action": { "$ref": "#/$defs/NextAction" }
+        "next_action": {
+          "$ref": "#/$defs/NextAction"
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
+        }
       }
     },
     "ErrorPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
       "properties": {
-        "schema": { "const": "hive-approve" },
-        "schema_version": { "const": 2 },
-        "ok": { "const": false },
+        "schema": {
+          "const": "hive-approve"
+        },
+        "schema_version": {
+          "const": 2
+        },
+        "ok": {
+          "const": false
+        },
         "error_class": {
           "type": "string",
           "description": "The Hive::Error subclass without the Hive:: prefix (e.g. \"AmbiguousSlug\")."
@@ -102,25 +158,60 @@
             "invalid_task_path",
             "dependency_wait",
             "admission_error",
-            "error"
+            "error",
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
           ]
         },
         "exit_code": {
           "type": "integer",
-          "enum": [1, 4, 64, 70, 75, 78],
+          "enum": [
+            1,
+            4,
+            20,
+            21,
+            22,
+            64,
+            70,
+            75,
+            78
+          ],
           "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 75=TEMPFAIL."
         },
-        "message": { "type": "string" },
+        "message": {
+          "type": "string"
+        },
         "candidates": {
           "type": "array",
           "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
           "items": {
             "type": "object",
-            "required": ["project", "stage", "folder"],
+            "required": [
+              "project",
+              "stage",
+              "folder"
+            ],
             "properties": {
-              "project": { "type": "string" },
-              "stage": { "type": "string" },
-              "folder": { "type": "string" }
+              "project": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
             }
           }
         },
@@ -181,22 +272,99 @@
         },
         "next_action": {
           "$ref": "#/$defs/NextAction"
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "namespace",
+            "installation"
+          ]
+        },
+        "command_receipt": {
+          "$ref": "#/$defs/CommandReceipt"
         }
       }
     },
     "NextAction": {
       "type": "object",
-      "required": ["kind"],
+      "required": [
+        "kind"
+      ],
       "additionalProperties": true,
       "properties": {
         "kind": {
           "type": "string",
-          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"],
+          "enum": [
+            "edit",
+            "mv",
+            "approve",
+            "run",
+            "recover_stale",
+            "no_op"
+          ],
           "description": "Closed enum from Hive::Schemas::NextActionKind."
         },
-        "folder": { "type": "string" },
-        "command": { "type": "string" },
-        "reason": { "type": "string" }
+        "folder": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "generation",
+        "state"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "prepared",
+            "executing",
+            "unresolved",
+            "succeeded",
+            "failed",
+            "settled",
+            "aborted"
+          ]
+        }
       }
     }
   }

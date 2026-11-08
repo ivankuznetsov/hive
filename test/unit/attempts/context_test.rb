@@ -67,6 +67,38 @@ class AttemptsContextTest < Minitest::Test
     assert_nil legacy.admitted_route
   end
 
+  def test_admitted_billing_evidence_and_nested_collections_are_immutable
+    routing = explicit_routing
+    routing.fetch("route").merge!("billing_route" => "api", "billing_evidence_source" => "provider_account_config")
+    routing["exclusions"] = [ { "reason" => "hard_pin_mismatch" } ]
+    context = Hive::Attempts::Context.send(:new, attempt_id: "billing-evidence", task_generation: 0, routing: routing)
+    assert_equal "provider_account_config", context.billing_evidence_source
+    assert_equal "api", context.billing_route
+    routing.fetch("exclusions").first["reason"] = "changed-after-admission"
+    assert_equal "hard_pin_mismatch", context.routing.fetch("exclusions").first.fetch("reason")
+    assert_raises(FrozenError) { context.routing.fetch("exclusions") << "forged" }
+    assert_raises(FrozenError) { context.routing.fetch("exclusions").first["reason"].replace("forged") }
+    legacy = Hive::Attempts::Context.send(:new, attempt_id: "legacy-billing", task_generation: 0)
+    assert_equal "unavailable", legacy.billing_evidence_source
+  end
+
+  def test_qualified_operational_worker_binding_requires_its_admitted_project_and_stage
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = { "project" => "demo", "task_id" => "42", "task_slug" => "task", "intended_stage" => "4-execute" }
+    argv = %w[hive act workflow.retry demo:task --observation observation]
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_, **_) { resolver }) do
+      assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record, argv.take(3) + [ "foreign:task" ])
+      end
+      assert_includes error.message, "project does not match admission"
+      assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record.merge("intended_stage" => "3-plan"), argv)
+      end
+    end
+  end
+
   def test_context_exposes_only_the_immutable_proposal_binding_from_the_attempt_record
     binding = {
       "schema_version" => 1,
@@ -113,6 +145,90 @@ class AttemptsContextTest < Minitest::Test
           assert_equal "4-execute", context.intended_stage
           assert_empty ENV.keys.grep(/\AHIVE_ATTEMPT_/)
         end
+      end
+    end
+  end
+
+  def test_environment_context_restores_the_originating_command_context
+    with_running_attempt do |store, _record|
+      resolver = Struct.new(:task) { def resolve = task }.new(
+        FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+      )
+      row = {
+        receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+        principal_source: "local_cli", ordinal: 3, receipt_generation: 4,
+        request_fingerprint: "fingerprint",
+        source_identity: "request-1", retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+      }
+      command_contexts = Object.new
+      command_contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+      real_database = store.database
+      database = Object.new
+      database.define_singleton_method(:read) do |&block|
+        real_database.read do |real_connection|
+          connection = Object.new
+          connection.define_singleton_method(:table_exists?) do |name|
+            name == :command_dispatch_contexts || real_connection.table_exists?(name)
+          end
+          connection.define_singleton_method(:[]) do |name|
+            name == :command_dispatch_contexts ? command_contexts : real_connection[name]
+          end
+          block.call(connection)
+        end
+      end
+      store.define_singleton_method(:database) { database }
+
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+        with_context_environment(store, capability: CLAIM_CAPABILITY) do
+          context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
+
+          assert_equal "receipt-1", context.command_context.receipt_id
+          assert_equal "effect-1", context.command_context.effect_id
+          assert_equal "owner", context.command_context.principal
+          assert_same context.command_context, Hive::CommandOperation.current_context
+        end
+      end
+    end
+  end
+
+  def test_command_context_rejects_a_mismatched_source_identity
+    row = {
+      receipt_id: "receipt-1", effect_id: "effect-1", principal: "owner",
+      principal_source: "local_cli", ordinal: 0, receipt_generation: 1,
+      request_fingerprint: "fingerprint", source_identity: "different-request",
+      retry_horizon_expires_at: "2030-01-01T00:00:00Z"
+    }
+    contexts = Object.new
+    contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+    connection = Object.new
+    connection.define_singleton_method(:table_exists?) { |_name| true }
+    connection.define_singleton_method(:[]) { |_name| contexts }
+    database = Object.new
+    database.define_singleton_method(:read) { |&block| block.call(connection) }
+    repository = Struct.new(:database).new(database)
+    record = { "request_id" => "request-1" }
+
+    error = assert_raises(Hive::Attempts::RepositoryError) do
+      Hive::Attempts::Context.send(:load_command_context, repository, record)
+    end
+    assert_includes error.message, "source identity mismatch"
+  end
+
+  def test_tagged_command_context_fails_closed_when_schema_or_row_is_missing
+    request_id = "command-dispatch:v1:#{'f' * 64}"
+    record = { "request_id" => request_id }
+    [ false, true ].each do |table_exists|
+      contexts = Object.new
+      contexts.define_singleton_method(:[]) { |**| nil }
+      connection = Object.new
+      connection.define_singleton_method(:table_exists?) { |_name| table_exists }
+      connection.define_singleton_method(:[]) { |_name| contexts }
+      database = Object.new
+      database.define_singleton_method(:read) { |&block| block.call(connection) }
+      repository = Struct.new(:database).new(database)
+
+      assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:load_command_context, repository, record)
       end
     end
   end

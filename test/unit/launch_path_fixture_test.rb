@@ -74,7 +74,7 @@ class LaunchPathFixtureTest < Minitest::Test
       normalized_source = producer_by_key.fetch(key).downcase.tr("_", " ")
       assert_includes normalized_source, label.downcase, "#{key} must match its native producer"
     end
-    assert_includes helper, 'task["action_label"]'
+    assert_includes helper, "TaskDisplay.new"
   end
 
   def test_clean_startup_installs_the_web_service_and_build_claims_match_the_patch

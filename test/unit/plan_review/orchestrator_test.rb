@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/config"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/decision_service"
 
 require "tmpdir"
 
@@ -30,7 +31,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
   Workflow = Struct.new(:id, keyword_init: true)
   Task = Struct.new(
-    :folder, :project_root, :slug, :id, :workflow, :meta_yml_path,
+    :folder, :project_root, :slug, :id, :workflow, :meta_yml_path, :project_name,
     keyword_init: true
   )
 
@@ -148,7 +149,62 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal 1, revision.calls.length
       assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
       assert_equal 4, projection.record["attempt_ids"].length
-      assert_equal "verified", projection.record["findings"].first.fetch("lifecycle")
+      assert_equal "verified", projection.record["findings"].last.fetch("lifecycle")
+    end
+  end
+
+  def test_shipped_defaults_skip_the_adversarial_leg_at_standard_level
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      projection = orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal %w[primary verification], adapter.calls.map(&:kind)
+      refute(projection.record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" })
+    end
+  end
+
+  def test_adversarial_min_level_off_skips_the_adversarial_leg_even_when_mandatory
+    revised = mandatory_plan.sub("# Plan", "# Revised plan")
+    with_task(mandatory_plan, shipped_defaults: true) do |task, cfg|
+      cfg["plan_review"]["adversarial_min_level"] = "off"
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      refute_includes adapter.calls.map(&:kind), "adversarial"
+    end
+  end
+
+  def test_adversarial_min_level_standard_restores_the_adversarial_leg
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      cfg["plan_review"]["adversarial_min_level"] = "standard"
+      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
+      orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(revised)).advance!
+
+      assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+    end
+  end
+
+  def test_shipped_defaults_allow_one_standard_revision_round
+    with_task(standard_plan, shipped_defaults: true) do |task, cfg|
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ?
+          [ finding("safe_auto", "Clarify tests") ] : [])
+        if request.kind == "verification"
+          verification_calls += 1
+          result = successful_result(request, findings: [ finding("safe_auto", "Another edge", line: verification_calls + 1) ])
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      record = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+
+      assert_equal "blocked", record.state
+      assert_equal 1, revision.calls.size
+      assert_equal [ { "owner" => "planner", "reason" => "revision_round_limit" } ], record["blockers"]
     end
   end
 
@@ -315,82 +371,6 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_legacy_cross_provider_planner_model_recovers_once_with_the_same_provider
-    revised = standard_plan.sub("# Plan", "# Revised plan")
-    with_task(standard_plan) do |task, cfg|
-      revision = TransientRevision.new(revised)
-      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
-      legacy = {
-        "provider" => "codex", "model" => "claude-opus-4-8",
-        "family" => "openai", "effort" => "default", "route" => "codex-cli/v1"
-      }
-      first = Hive::PlanReview::Orchestrator.new(
-        task:, cfg:, planner_identity: legacy, adapter:, planner_revision: revision,
-        route_resolver: method(:resolve_route), clock: -> { Time.utc(2026, 8, 12, 12) }
-      ).advance!
-
-      assert_equal "retry_scheduled", first.record.state
-
-      repaired = legacy.merge("model" => "default", "reconstructed" => true)
-      cleared = Hive::PlanReview::Orchestrator.new(
-        task:, cfg:, planner_identity: repaired, adapter:, planner_revision: revision,
-        route_resolver: method(:resolve_route), clock: -> { Time.utc(2026, 8, 12, 13) }
-      ).advance!
-
-      assert_equal "cleared", cleared.record.state
-      models = revision.calls.map { |call| call.fetch(:planner_identity).fetch("model") }
-      assert_equal %w[claude-opus-4-8 default], models
-      recovered = cleared.record["routes"].select do |route|
-        route["planner_identity_contract_recovery"] == true
-      end
-      assert_equal 2, recovered.length
-      assert_equal 1, recovered.count { |route| route["role"] == "planner" }
-      assert_equal 1, recovered.count { |route| route["role"] == "planner_revision" }
-    end
-  end
-
-  def test_exhausted_planner_revision_retries_after_result_contract_upgrade
-    revised = standard_plan.sub("# Plan", "# Revised plan")
-    with_task(standard_plan) do |task, cfg|
-      cfg["plan_review"]["attempts"]["max_transient"] = 0
-      revision = TransientRevision.new(revised)
-      adapter = success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ])
-      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
-
-      scheduled = runner.advance!
-      assert_equal "retry_scheduled", scheduled.record.state
-
-      routes = scheduled.record["routes"].reject do |route|
-        route["transient_series_recovery"]
-      end.map(&:dup)
-      routes.last.delete("planner_revision_contract_version")
-      legacy = Hive::PlanReview::Record.new(
-        scheduled.record.to_h.merge(
-          "version" => scheduled.record.version + 1,
-          "state" => "blocked", "outcome" => "blocked",
-          "routes" => routes,
-          "blockers" => [
-            { "owner" => "planner", "reason" => "planner_revision_retryable_failure" }
-          ],
-          "required_action" => "repair the planner route and start a linked plan generation",
-          "retry_at" => nil,
-          "updated_at" => "2026-08-12T12:01:00.000000Z"
-        )
-      )
-      store = runner.instance_variable_get(:@store)
-      store.publish_current!(legacy, expected_version: scheduled.record.version)
-
-      cleared = runner.advance!
-
-      assert_equal "cleared", cleared.record.state
-      assert_equal 2, revision.calls.length
-      reset = cleared.record["routes"].find { |route| route["contract_upgrade_recovery"] }
-      assert_equal true, reset.fetch("recovery_reset")
-      assert_equal Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION,
-                   reset.fetch("planner_revision_contract_version")
-    end
-  end
-
   def test_current_contract_blocked_planner_revision_enters_cooled_recovery
     revised = standard_plan.sub("# Plan", "# Revised plan")
     with_task(standard_plan) do |task, cfg|
@@ -431,23 +411,6 @@ class PlanReviewOrchestratorTest < Minitest::Test
   # route carrying either is unreadable adjudication evidence, so the series
   # must re-run under the current contract instead of trusting a version the
   # orchestrator never compared.
-  def test_unreadable_planner_revision_contract_version_reads_as_stale
-    orchestrator = Hive::PlanReview::Orchestrator.allocate
-    current = Hive::PlanReview::PlannerRevision::RESULT_CONTRACT_VERSION
-
-    assert orchestrator.send(
-      :stale_planner_revision_contract?,
-      { "planner_revision_contract_version" => "v1" }
-    )
-    assert orchestrator.send(
-      :stale_planner_revision_contract?,
-      { "planner_revision_contract_version" => { "major" => current } }
-    )
-    refute orchestrator.send(
-      :stale_planner_revision_contract?,
-      { "planner_revision_contract_version" => current }
-    )
-  end
 
   def test_selected_fallback_keeps_the_preferred_request_and_probe_history
     with_task(standard_plan) do |task, cfg|
@@ -503,6 +466,64 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # hivedev f2-follow-up: the dependency first appeared in a plan-review
+  # revision, after the planner-run adoption point, so meta.yml never learned
+  # it and admission parked the cleared task on plan_dependency_missing. The
+  # operator's hand copy then staled the review and restarted critique.
+  # Promotion now adopts it, and the cleared review stays current.
+  def test_candidate_promotion_adopts_a_dependency_added_by_the_revision
+    revised = standard_plan.sub("files:", "depends_on: hivedev:base-task\nfiles:")
+    with_task(standard_plan) do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
+      assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection:, config: cfg
+      ).fetch("status")
+    end
+  end
+
+  # hivedev c5: meta.yml already carried one dependency and the revision added
+  # a second, spelled with the project qualifier.
+  def test_candidate_promotion_adopts_a_strict_superset_of_meta_dependencies
+    revised = standard_plan.sub(
+      "files:", "depends_on:\n  - hivedev:base-task\n  - other-task\nfiles:"
+    )
+    with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal %w[hivedev:base-task other-task],
+                   YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+    end
+  end
+
+  def test_candidate_promotion_never_replaces_an_existing_meta_dependency
+    revised = standard_plan.sub("files:", "depends_on: other-task\nfiles:")
+    with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
+      projection = orchestrator(
+        task, cfg,
+        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+        planner_revision: FakeRevision.new(revised)
+      ).advance!
+
+      assert_equal "cleared", projection.record.state
+      assert_equal "base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+    end
+  end
+
   def test_resolution_publication_reuses_an_orphaned_immutable_artifact
     with_task(standard_plan) do |task, cfg|
       runner = orchestrator(task, cfg, adapter: success_adapter)
@@ -538,9 +559,298 @@ class PlanReviewOrchestratorTest < Minitest::Test
       projection = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
 
       assert_equal "awaiting_decision", projection.record.state
-      assert_equal %w[primary adversarial], adapter.calls.map(&:kind)
+      assert_equal %w[primary adversarial decision_triage], adapter.calls.map(&:kind)
       assert_empty revision.calls
       assert_equal 1, projection.summary.dig("finding_counts", "open_manual")
+    end
+  end
+
+  def test_legacy_decisions_are_reassessed_and_routine_fixes_proceed_without_answering_real_choices
+    with_task(standard_plan) do |task, cfg|
+      correction = finding("gated_auto", "Add successful delivery test")
+      duplicate = Hive::PlanReview::Finding.new(correction.to_h.except("fingerprint").merge("source" => "adversarial"))
+      choice = finding("manual", "Choose refresh replay behavior", line: 2)
+      initial = success_adapter(primary_findings: [ correction, duplicate, choice ])
+      old = with_replaced_singleton_method(Hive::PlanReview::DecisionTriage, :pending, ->(*) { [] }) do
+        orchestrator(task, cfg, adapter: initial).advance!
+      end
+      assert_equal "awaiting_decision", old.record.state
+      original_attempts = old.record["attempt_ids"]
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request)
+        if request.kind == "decision_triage"
+          rows = [
+            { "sources" => [ correction.fingerprint, duplicate.fingerprint ], "classification" => "safe_auto",
+              "title" => "Add success-path test", "disposition" => "Test the existing delivery requirement",
+              "rationale" => "The contract already requires successful delivery", "boundary" => nil },
+            { "sources" => [ choice.fingerprint ], "classification" => "manual", "title" => choice["title"],
+              "disposition" => "Keep the replay choice unresolved", "rationale" => "The plan explicitly asks the operator",
+              "boundary" => { "requirement" => "Replay behavior is unanswered", "change" => "Retries can revoke access",
+                              "alternatives" => [ "Strict revocation", "Bounded grace" ] } }
+          ]
+          result = result.with(decision_assessments: rows)
+        end
+        result
+      end
+      repaired = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "awaiting_decision", repaired.record.state
+      refute repaired.record.execution_allowed?
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task:, projection: repaired, config: cfg
+      ).fetch("status")
+      assert_equal %w[decision_triage verification], adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal 1, revision.calls.first[:findings].size
+      assert_equal 1, revision.calls.first[:pending_findings].size
+      assert_equal 1, adapter.calls.last.pending_findings.size
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md")), "pending choices must prevent promotion"
+      assert_equal original_attempts, repaired.record["attempt_ids"].take(original_attempts.size)
+      assert_empty repaired.record["decisions"]
+      assert_equal 1, repaired.summary.dig("finding_counts", "open_manual")
+      assert_equal 0, repaired.summary.dig("finding_counts", "open_gated")
+      assert_equal 1, repaired.summary.dig("finding_counts", "verified")
+      assert_empty Hive::PlanReview::DecisionTriage.pending(repaired.record)
+      orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal 2, adapter.calls.size, "settled triage must not run again on daemon re-entry"
+    end
+  end
+
+  def test_pending_choice_does_not_interrupt_verification_retry_after_revision
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 1
+      initial_findings = [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ]
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ? initial_findings : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal 1, first.summary.dig("finding_counts", "incorporated")
+      retry_at = Time.parse(first.record["retry_at"])
+      held = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { retry_at - 1 }).advance!
+      assert_equal "retry_scheduled", held.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+
+      # Reproduce a record parked by the older build after the retry was saved.
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      parked = held.record.to_h.merge("state" => "awaiting_decision", "retry_at" => nil,
+                                     "version" => held.record.version + 1)
+      store.publish_current!(Hive::PlanReview::Record.new(parked), expected_version: held.record.version)
+
+      recovered_adapter = success_adapter
+      recovered = orchestrator(task, cfg, adapter: recovered_adapter, planner_revision: revision,
+                               clock: -> { retry_at + 1 }).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal [ "verification" ], recovered_adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal 1, recovered.summary.dig("finding_counts", "verified")
+      assert_equal 1, recovered.summary.dig("finding_counts", "open_manual")
+      assert_empty recovered.record["decisions"]
+      refute recovered.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_degraded_coverage_does_not_clear_pending_choice_or_unverified_candidate
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 1
+      initial_findings = [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ]
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "adversarial"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
+        elsif request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ? initial_findings : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal 1, first.summary.dig("finding_counts", "incorporated")
+      retry_at = Time.parse(first.record["retry_at"])
+      held = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { retry_at - 1 }).advance!
+      assert_equal "retry_scheduled", held.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+
+      # Reproduce a record parked by the older build after the retry was saved.
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      parked = held.record.to_h.merge("state" => "awaiting_decision", "retry_at" => nil,
+                                     "version" => held.record.version + 1)
+      store.publish_current!(Hive::PlanReview::Record.new(parked), expected_version: held.record.version)
+
+      recovered_adapter = success_adapter
+      recovered = orchestrator(task, cfg, adapter: recovered_adapter, planner_revision: revision,
+                               clock: -> { retry_at + 1 }).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal [ "verification" ], recovered_adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal 1, recovered.summary.dig("finding_counts", "verified")
+      assert_equal 1, recovered.summary.dig("finding_counts", "open_manual")
+      assert_empty recovered.record["decisions"]
+      refute recovered.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  def test_pending_choice_does_not_hide_exhausted_verification
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ?
+            [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
+        end
+      end
+      runner = orchestrator(task, cfg, adapter:,
+                            planner_revision: FakeRevision.new(standard_plan.sub("# Plan", "# Revised")))
+      blocked = runner.advance!
+      assert_equal "blocked", blocked.record.state
+      assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
+      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_provider_limit" }
+      assert_match(/plan-review retry/, blocked.record["required_action"],
+                   "a quota-only block points at retry, not a new linked plan")
+      refute blocked.record.execution_allowed?
+      calls = adapter.calls.size
+      assert_equal "blocked", runner.advance!.record.state
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
+  def test_verifier_conflict_reconciles_automatic_disposition_without_answering_manual_choice
+    with_task(standard_plan) do |task, cfg|
+      automatic = finding("safe_auto", "Default to strict revocation")
+      gate = finding("manual", "Choose replay policy", line: 2)
+      conflict = finding("manual", "Automatic default contradicts unanswered policy", line: 3)
+      triage_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ? [ automatic, gate ] : [])
+        if request.kind == "decision_triage" && (triage_calls += 1) > 1
+          result = result.with(decision_assessments: [ {
+            "sources" => request.pending_findings.map { |entry| entry.fetch("fingerprint") },
+            "classification" => "manual", "title" => "Choose replay policy",
+            "disposition" => "Preserve the unresolved policy; retire the contradictory default instruction",
+            "rationale" => "The plan explicitly reserves the policy choice",
+            "boundary" => { "requirement" => "Replay behavior remains unanswered", "change" => "Revocation semantics",
+                            "alternatives" => [ "Strict revocation", "Bounded grace" ] }
+          } ])
+        elsif request.kind == "verification"
+          result = successful_result(request, findings: [ conflict ]).with(residual_evidence: [])
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      result = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "awaiting_decision", result.record.state
+      assert_equal 1, result.summary.dig("finding_counts", "open_manual")
+      assert_equal 0, result.summary.dig("finding_counts", "incorporated")
+      assert_equal [ "manual_answer_required" ], result.record["blockers"].map { |entry| entry["reason"] }
+      assert_empty result.record["decisions"]
+      refute result.record.execution_allowed?
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+      calls = adapter.calls.size
+      orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
+  def test_decision_triage_provider_outage_retries_without_approving_or_dropping_findings
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "decision_triage"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+        else
+          successful_result(request, findings: request.kind == "primary" ? [ finding("manual", "Choose replay") ] : [])
+        end
+      end
+      first = orchestrator(task, cfg, adapter:).advance!
+      assert_equal "retry_scheduled", first.record.state
+      assert_equal 1, first.summary.dig("finding_counts", "open_manual")
+      assert_empty first.record["decisions"]
+      assert first.record["retry_at"]
+      adapter = success_adapter
+      recovered = orchestrator(task, cfg, adapter:, clock: -> { Time.parse(first.record["retry_at"]) + 1 }).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal [ "decision_triage" ], adapter.calls.map(&:kind)
+      assert_equal 1, recovered.summary.dig("finding_counts", "open_manual")
+      assert_empty recovered.record["decisions"]
+    end
+  end
+
+  def test_malformed_triage_output_stops_after_the_bounded_attempts_with_original_findings_intact
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      original = finding("manual", "Choose replay")
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "decision_triage"
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "retryable_failure", diagnostic: "invalid decision triage disposition",
+            route_receipt: { "diagnostic_source" => "parser" })
+        else
+          successful_result(request, findings: request.kind == "primary" ? [ original ] : [])
+        end
+      end
+      runner = orchestrator(task, cfg, adapter:)
+      result = runner.advance!
+      assert_equal "blocked", result.record.state
+      assert_equal "terminal_failure", result.record["routes"].last["outcome"]
+      assert_equal [ original.to_h ], result.record["findings"]
+      assert_empty result.record["decisions"]
+      runner.advance!
+      assert_equal 1, adapter.calls.count { |request| request.kind == "decision_triage" }
+    end
+  end
+
+  def test_decision_after_a_triage_crash_invalidates_the_saved_source_set_without_erasing_authority
+    with_task(standard_plan) do |task, cfg|
+      approved = finding("gated_auto", "Compatibility decision")
+      pending = finding("manual", "Replay decision", line: 2)
+      adapter = success_adapter(primary_findings: [ approved, pending ])
+      assert_raises(IOError) do
+        with_replaced_singleton_method(Hive::PlanReview::DecisionTriage, :apply, ->(*, **) { raise IOError, "crash" }) do
+          orchestrator(task, cfg, adapter:).advance!
+        end
+      end
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      record = store.current_validated
+      service = Hive::PlanReview::DecisionService.new(
+        task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+        committer: ->(*) { }, freshness_checker: ->(*) { }
+      )
+      service.apply(action: "approve_finding", review_id: record.review_id,
+                    task_generation: record.task_generation, policy_fingerprint: record.policy_fingerprint,
+                    expected_artifact_digest: Hive::PlanReview::Projection.new(record).observation_digest,
+                    target_fingerprint: approved.fingerprint, origin: "cli", operator: "test", authorized: true)
+      result = orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan)).advance!
+      assert_equal "awaiting_decision", result.record.state
+      assert_equal 2, adapter.calls.count { |request| request.kind == "decision_triage" }
+      assert_equal [ pending.fingerprint ], adapter.calls.select { |request| request.kind == "decision_triage" }.last.pending_findings.map { |f| f.fetch("fingerprint") }
+      assert_equal 1, result.record["decisions"].size
+      assert_equal approved.fingerprint, result.record["decisions"].first["target_fingerprint"]
+      assert_equal "verified", result.record["findings"].find { |f| f["fingerprint"] == approved.fingerprint }["lifecycle"]
+    end
+  end
+
+  def test_completed_triage_result_is_replayed_after_crash_before_application
+    with_task(standard_plan) do |task, cfg|
+      adapter = success_adapter(primary_findings: [ finding("manual", "Choose replay") ])
+      assert_raises(IOError) do
+        with_replaced_singleton_method(Hive::PlanReview::DecisionTriage, :apply, ->(*, **) { raise IOError, "crash" }) do
+          orchestrator(task, cfg, adapter:).advance!
+        end
+      end
+      recovered = orchestrator(task, cfg, adapter:).advance!
+      assert_equal "awaiting_decision", recovered.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "decision_triage" }
+      assert_empty recovered.record["decisions"]
     end
   end
 
@@ -566,6 +876,36 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal "policy", decision.fetch("origin")
       assert_equal "plan_wording", decision.dig("policy_receipt", "policy_id")
       assert_equal 1, revision.calls.length
+    end
+  end
+
+  def test_approval_policy_cannot_skip_duplicate_decision_reassessment
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["approval_policies"] = [ {
+        "id" => "routine", "version" => 1, "action" => "approve_finding", "risk" => "low",
+        "paths" => [ "plan.md" ], "valid_from" => "2026-08-12T00:00:00Z",
+        "valid_until" => "2026-08-13T00:00:00Z", "revoked" => false
+      } ]
+      first = finding("gated_auto", "Add successful delivery test")
+      second = Hive::PlanReview::Finding.new(first.to_h.except("fingerprint").merge("source" => "adversarial"))
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ? [ first, second ] : [])
+        if request.kind == "decision_triage"
+          result = result.with(decision_assessments: [ {
+            "sources" => request.pending_findings.map { |f| f.fetch("fingerprint") },
+            "classification" => "safe_auto", "title" => "Test successful delivery",
+            "disposition" => "Add the acceptance test", "rationale" => "Already required by the contract",
+            "boundary" => nil
+          } ])
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan)
+      result = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "cleared", result.record.state
+      assert_equal 1, adapter.calls.count { |request| request.kind == "decision_triage" }
+      assert_equal 1, revision.calls.first[:findings].size
+      assert_empty result.record["decisions"], "routine correction must not acquire unnecessary policy approvals"
     end
   end
 
@@ -639,244 +979,6 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
       assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
       assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
-    end
-  end
-
-  def test_legacy_grok_success_retries_once_under_the_current_identity_contract
-    with_task(mandatory_plan) do |task, cfg|
-      adversarial_calls = 0
-      adapter = FakeAdapter.new do |request|
-        unless request.kind == "adversarial" && (adversarial_calls += 1) == 1
-          next successful_result(request)
-        end
-
-        successful = successful_result(request)
-        Hive::PlanReview::Adapters::Base::Result.new(
-          outcome: successful.outcome,
-          findings: successful.findings,
-          coverage: successful.coverage,
-          residual_evidence: successful.residual_evidence,
-          route_receipt: {
-            "role" => "adversarial", "requested" => request.reviewer,
-            "actual" => {
-              "provider" => "grok", "model" => "grok-4.6-build",
-              "effort" => "high", "route" => "native_grok_build"
-            },
-            "capability_result" => "present", "independence_verified" => false,
-            "independence_reason" => "reviewer_family_unknown"
-          }
-        )
-      end
-
-      blocked = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "blocked", blocked.state
-      assert_equal [ "coverage_failed" ], blocked["blockers"].map { |row| row.fetch("reason") }
-      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
-      assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
-
-      cleared = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "cleared", cleared.state
-      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
-      assert_equal 2, adapter.calls.count { |request| request.kind == "adversarial" }
-      reset = cleared["routes"].find { |route| route["identity_contract_recovery"] }
-      assert_equal true, reset.fetch("recovery_reset")
-      assert_equal Hive::PlanReview::RouteResolver::IDENTITY_CONTRACT_VERSION,
-                   reset.fetch("identity_contract_version")
-    end
-  end
-
-  def test_legacy_selected_lenses_parser_failure_retries_once_under_the_current_contract
-    with_task(mandatory_plan) do |task, cfg|
-      primary_calls = 0
-      adapter = FakeAdapter.new do |request|
-        if request.kind == "primary" && (primary_calls += 1) == 1
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure",
-            diagnostic: "plan review selected_lenses must contain lowercase names"
-          )
-        end
-
-        successful_result(request)
-      end
-
-      blocked = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "blocked", blocked.state
-      assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
-
-      cleared = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "cleared", cleared.state
-      assert_equal 2, adapter.calls.count { |request| request.kind == "primary" }
-      reset = cleared["routes"].find { |route| route["selected_lenses_contract_recovery"] }
-      assert_equal true, reset.fetch("recovery_reset")
-      assert_equal 2, reset.fetch("selected_lenses_contract_version")
-
-      orchestrator(task, cfg, adapter:).advance!
-      assert_equal 2, adapter.calls.count { |request| request.kind == "primary" }
-    end
-  end
-
-  def test_legacy_selected_lenses_parser_failure_recovers_every_affected_role_once
-    with_task(mandatory_plan) do |task, cfg|
-      calls = Hash.new(0)
-      adapter = FakeAdapter.new do |request|
-        calls[request.kind] += 1
-        if %w[primary adversarial].include?(request.kind) && calls.fetch(request.kind) == 1
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure",
-            diagnostic: "plan review selected_lenses must contain lowercase names"
-          )
-        end
-
-        successful_result(request)
-      end
-
-      blocked = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "blocked", blocked.state
-      assert_equal({ "primary" => 1, "adversarial" => 1 }, calls)
-
-      cleared = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "cleared", cleared.state
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
-      resets = cleared["routes"].select { |route| route["selected_lenses_contract_recovery"] }
-      assert_equal %w[adversarial primary], resets.map { |route| route.fetch("role") }.sort
-
-      orchestrator(task, cfg, adapter:).advance!
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
-    end
-  end
-
-  def test_current_selected_lenses_failure_after_recovery_remains_terminal
-    with_task(mandatory_plan) do |task, cfg|
-      primary_calls = 0
-      adapter = FakeAdapter.new do |request|
-        if request.kind == "primary"
-          primary_calls += 1
-          diagnostic = if primary_calls == 1
-            "plan review selected_lenses must contain lowercase names"
-          else
-            "plan review selected_lenses must contain lowercase names of 1-64 characters that " \
-              "start with a letter and use only lowercase letters, digits, hyphens, or underscores"
-          end
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure", diagnostic:,
-            route_receipt: { "diagnostic_source" => "parser" }
-          )
-        end
-
-        successful_result(request)
-      end
-
-      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
-      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
-      assert_equal 2, primary_calls
-
-      orchestrator(task, cfg, adapter:).advance!
-      assert_equal 2, primary_calls
-    end
-  end
-
-  def test_reviewer_authored_legacy_diagnostic_does_not_trigger_contract_recovery
-    with_task(mandatory_plan) do |task, cfg|
-      primary_calls = 0
-      adapter = FakeAdapter.new do |request|
-        if request.kind == "primary"
-          primary_calls += 1
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure",
-            diagnostic: "plan review selected_lenses must contain lowercase names",
-            route_receipt: { "diagnostic_source" => "reviewer" }
-          )
-        end
-
-        successful_result(request)
-      end
-
-      blocked = orchestrator(task, cfg, adapter:).advance!.record
-      replay = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "blocked", blocked.state
-      assert_equal "blocked", replay.state
-      assert_equal 1, primary_calls
-      refute replay["routes"].any? { |route| route["selected_lenses_contract_recovery"] }
-    end
-  end
-
-  def test_initial_residual_evidence_prompt_contract_recovers_once
-    with_task(mandatory_plan) do |task, cfg|
-      primary_calls = 0
-      adapter = FakeAdapter.new do |request|
-        if request.kind == "primary" && (primary_calls += 1) <= 2
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure",
-            diagnostic: "invalid plan review residual evidence entry",
-            route_receipt: { "diagnostic_source" => "parser" }
-          )
-        end
-
-        successful_result(request)
-      end
-
-      assert_equal "blocked", orchestrator(task, cfg, adapter:).advance!.record.state
-      retried = orchestrator(task, cfg, adapter:).advance!.record
-
-      assert_equal "blocked", retried.state
-      assert_equal 2, primary_calls
-      reset = retried["routes"].find { |route| route["residual_evidence_contract_recovery"] }
-      assert_equal true, reset.fetch("recovery_reset")
-      assert_equal 1, reset.fetch("residual_evidence_contract_version")
-
-      orchestrator(task, cfg, adapter:).advance!
-      assert_equal 2, primary_calls
-    end
-  end
-
-  def test_checkpoint_custody_false_positive_recovers_every_affected_role_once
-    with_task(mandatory_plan) do |task, cfg|
-      calls = Hash.new(0)
-      revision = FakeRevision.new(mandatory_plan.sub("# Plan", "# Revised"))
-      adapter = FakeAdapter.new do |request|
-        calls[request.kind] += 1
-        if calls.fetch(request.kind) == 1
-          next Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "terminal_failure",
-            diagnostic: "reviewer modified protected artifacts: task-projection.checkpoint.json",
-            route_receipt: { "diagnostic_source" => "runner" }
-          )
-        end
-
-        successful_result(
-          request,
-          findings: request.kind == "primary" ? [ finding("safe_auto", "Clarify tests") ] : []
-        )
-      end
-      runner = -> { orchestrator(task, cfg, adapter:, planner_revision: revision) }
-
-      blocked = runner.call.advance!.record
-
-      assert_equal "blocked", blocked.state
-      assert_equal({ "primary" => 1, "adversarial" => 1 }, calls)
-
-      verification_blocked = runner.call.advance!.record
-
-      assert_equal "blocked", verification_blocked.state
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 1 }, calls)
-      cleared = runner.call.advance!.record
-
-      assert_equal "cleared", cleared.state
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 2 }, calls)
-      resets = cleared["routes"].select { |route| route["checkpoint_custody_recovery"] }
-      assert_equal %w[adversarial primary verification],
-                   resets.map { |route| route.fetch("role") }.sort
-      assert resets.all? { |route| route.fetch("checkpoint_custody_contract_version") == 1 }
-
-      runner.call.advance!
-      assert_equal({ "primary" => 2, "adversarial" => 2, "verification" => 2 }, calls)
     end
   end
 
@@ -1000,6 +1102,38 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_reclassified_verifier_gates_cannot_clear_an_exhausted_revision_budget
+    with_task(standard_plan) do |task, cfg|
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request, findings: request.kind == "primary" ?
+          [ finding("safe_auto", "Clarify tests") ] : [])
+        if request.kind == "verification"
+          verification_calls += 1
+          result = successful_result(request, findings: [ finding("manual", "Routine correction", line: verification_calls + 1) ])
+        elsif request.kind == "decision_triage"
+          result = result.with(decision_assessments: request.pending_findings.map { |entry|
+            { "sources" => [ entry.fetch("fingerprint") ], "classification" => "safe_auto",
+              "title" => "Implement the existing requirement", "disposition" => "Correct the test instructions",
+              "rationale" => "No product choice is needed", "boundary" => nil }
+          })
+        end
+        result
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      runner = orchestrator(task, cfg, adapter:, planner_revision: revision)
+      2.times { assert_equal "revising", runner.advance!.record.state }
+      capped = runner.advance!.record
+      assert_equal "blocked", capped.state
+      refute capped.execution_allowed?
+      assert_equal 3, revision.calls.size
+      assert_equal standard_plan, File.read(File.join(task.folder, "plan.md"))
+      calls = adapter.calls.size
+      assert_equal capped.to_h, runner.advance!.record.to_h
+      assert_equal calls, adapter.calls.size
+    end
+  end
+
   def test_capped_verification_revision_is_a_noop_on_external_reentry
     candidates = 4.times.map do |index|
       standard_plan.sub("# Plan", "# Revision #{index + 1}")
@@ -1033,6 +1167,45 @@ class PlanReviewOrchestratorTest < Minitest::Test
                    revision.calls.length
       assert_equal verification_calls,
                    adapter.calls.count { |request| request.kind == "verification" }
+
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      legacy = Hive::PlanReview::Record.new(replay.to_h.merge(
+        "version" => replay.version + 1, "state" => "awaiting_decision", "outcome" => nil
+      ))
+      store.publish_current!(legacy, expected_version: replay.version)
+      recovered = runner.advance!.record
+      assert_equal "blocked", recovered.state
+      assert_equal "revision_round_limit", recovered["blockers"].first.fetch("reason")
+      assert_equal Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS,
+                   revision.calls.length
+    end
+  end
+
+  # Safe fixes can spend the whole revision budget before an operator decides a
+  # gated or manual finding. Those late decisions earn exactly one integration
+  # round past the cap; safe-only residue does not, and the ceiling is fixed.
+  def test_operator_decisions_earn_one_integration_round_past_the_cap
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: FakeAdapter.new { |request| successful_result(request) })
+      max = Hive::PlanReview::Orchestrator::MAX_VERIFICATION_REVISION_ROUNDS
+      extra = Hive::PlanReview::Orchestrator::OPERATOR_DECISION_ROUNDS
+      outcome = Hive::PlanReview::Orchestrator::SUCCESS_OUTCOMES.first
+      record = lambda do |rounds|
+        { "routes" => Array.new(rounds) { { "role" => "planner_revision", "outcome" => outcome } } }
+      end
+      decided = ->(classification, lifecycle) do
+        Hive::PlanReview::Finding.new(finding(classification, "Decided").to_h.merge("lifecycle" => lifecycle))
+      end
+      safe = [ finding("safe_auto", "Safe residue") ]
+      approved = [ decided.call("gated_auto", "approved") ]
+      answered = [ decided.call("manual", "answered") ]
+
+      refute runner.send(:revision_round_limit_reached?, record.call(max - 1), safe)
+      assert runner.send(:revision_round_limit_reached?, record.call(max), safe)
+      refute runner.send(:revision_round_limit_reached?, record.call(max), approved)
+      refute runner.send(:revision_round_limit_reached?, record.call(max), answered)
+      assert runner.send(:revision_round_limit_reached?, record.call(max + extra), approved),
+             "the integration round is bounded"
     end
   end
 
@@ -1055,10 +1228,19 @@ class PlanReviewOrchestratorTest < Minitest::Test
     safe = finding("safe_auto", "Safe residual", line: 2)
     manual = finding("manual", "Manual residual", line: 3)
     fyi = finding("fyi", "FYI residual", line: 4)
-    reopened = [ safe, manual, fyi ].map do |finding|
+    gated = finding("gated_auto", "Undecided residual", line: 5)
+    reopened = [ safe, manual, fyi, gated ].map do |finding|
       runner.send(:reopen_verification_finding, finding, finding)
     end
-    assert_equal %w[open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+    assert_equal %w[open open open open], reopened.map { |finding| finding.fetch("lifecycle") }
+
+    declined = Hive::PlanReview::Finding.new(existing.to_h.merge(
+      "lifecycle" => "incorporated", "decision_id" => "prd-#{'b' * 64}",
+      "answer" => "Decline; keep the hold."
+    ))
+    reopened = runner.send(:reopen_verification_finding, declined, existing)
+    assert_equal "answered", reopened.fetch("lifecycle")
+    assert_equal "Decline; keep the hold.", reopened.fetch("answer")
   end
 
   def test_legacy_policy_approval_resets_terminal_verification_before_revising
@@ -1235,6 +1417,8 @@ class PlanReviewOrchestratorTest < Minitest::Test
       adapter = FakeAdapter.new do |request|
         if request.kind == "primary"
           successful_result(request, findings: [ finding("manual", "Choose rollback") ])
+        elsif request.kind == "decision_triage"
+          successful_result(request)
         else
           Hive::PlanReview::Adapters::Base::Result.new(outcome: "unsupported")
         end
@@ -1275,7 +1459,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
 
       assert_equal "degraded_cleared", projection.record.state
       assert_equal 1, revision.calls.length
-      assert_equal "verified", projection.record["findings"].first.fetch("lifecycle")
+      assert_equal "verified", projection.record["findings"].last.fetch("lifecycle")
       assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
     end
   end
@@ -1403,26 +1587,31 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_concurrent_entries_coalesce_under_the_orchestration_lock
+  def test_concurrent_entries_serialize_through_lifecycle_custody
     with_task(standard_plan) do |task, cfg|
+      entered = Queue.new
+      release = Queue.new
       adapter = FakeAdapter.new do |request|
-        sleep 0.03 if request.kind == "primary"
+        if request.kind == "primary"
+          entered << true
+          release.pop
+        end
         successful_result(request)
       end
-      ready = Queue.new
-      release = Queue.new
-      threads = 2.times.map do
-        Thread.new do
-          ready << true
-          release.pop
-          orchestrator(task, cfg, adapter:).advance!
-        end
+      first = Thread.new do
+        orchestrator(task, cfg, adapter:).advance!
       end
-      2.times { ready.pop }
-      2.times { release << true }
-      projections = threads.map(&:value)
+      entered.pop
 
-      assert_equal 1, projections.map { |projection| projection.record.review_id }.uniq.length
+      assert_raises(Hive::ConcurrentRunError) do
+        orchestrator(task, cfg, adapter:).advance!
+      end
+
+      release << true
+      first_projection = first.value
+      retried_projection = orchestrator(task, cfg, adapter: success_adapter).advance!
+
+      assert_equal first_projection.record.review_id, retried_projection.record.review_id
       assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
     end
   end
@@ -1685,22 +1874,325 @@ class PlanReviewOrchestratorTest < Minitest::Test
       runner = orchestrator(task, cfg, adapter: success_adapter)
       task.meta_yml_path && File.write(task.meta_yml_path, "plan_review_required: false\n")
       error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.advance!
+      end
+      assert_includes error.message, "metadata is invalid"
+    end
+  end
+
+  def test_advance_rejects_a_task_missing_before_observation
+    with_task(standard_plan) do |task, cfg|
+      FileUtils.rm_rf(task.folder)
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        orchestrator(task, cfg, adapter: success_adapter).advance!
+      end
+
+      assert_includes error.message, "stale or missing"
+    end
+  end
+
+  def test_advance_translates_stale_observation_errors
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) { runner.advance! }
+
+      assert_includes error.message, "plan review task is stale"
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_a_same_path_replacement_even_when_already_true
+    with_task(standard_plan) do |task, cfg|
+      Hive::TaskMeta.rewrite(task.folder, plan_review_required: true)
+      copied = Dir.children(task.folder).to_h do |name|
+        path = File.join(task.folder, name)
+        [ name, File.file?(path) ? File.binread(path) : nil ]
+      end
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      FileUtils.mkdir_p(task.folder)
+      copied.each do |name, bytes|
+        File.binwrite(File.join(task.folder, name), bytes) if bytes
+      end
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
         runner.send(:ensure_review_requirement!)
       end
-      assert_includes error.message, "could not be persisted"
+
+      assert_includes error.message, "stale task"
+      assert_equal true, Hive::TaskMeta.read(task.folder)[:plan_review_required]
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_a_task_deleted_before_update_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      FileUtils.rm_rf(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_rejects_deletion_after_metadata_read
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+      boundary_reached = false
+      original = Hive::TaskMeta.method(:read_for_update!)
+      delete_after_read = lambda do |folder|
+        result = original.call(folder)
+        boundary_reached = true
+        FileUtils.rm_rf(folder)
+        result
+      end
+
+      error = with_replaced_singleton_method(
+        Hive::TaskMeta, :read_for_update!, delete_after_read
+      ) do
+        with_runner_custody(runner, task, observation: observation) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert boundary_reached, "metadata-read boundary must be exercised"
+      assert_includes error.message, "stale task"
+      refute File.exist?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_stale_review_requirement_rewrite_fails_closed
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      stale = ->(*, **) { Hive::TaskMeta::UpdateResult.new(status: :stale, value: nil) }
+
+      error = with_replaced_singleton_method(Hive::TaskMeta, :rewrite, stale) do
+        with_runner_custody(runner, task) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert_includes error.message, "stale task"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    end
+  end
+
+  def test_advance_claims_the_observed_lease_under_project_commit_custody
+    with_task(standard_plan) do |task, cfg|
+      claims = []
+      claim = lambda do |folder, *, **kwargs|
+        claims << [ folder, kwargs ]
+        raise Hive::ConcurrentRunError.new("stop after the claim")
+      end
+
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, claim) do
+        assert_raises(Hive::ConcurrentRunError) do
+          orchestrator(task, cfg, adapter: success_adapter).advance!
+        end
+      end
+
+      folder, kwargs = claims.fetch(0)
+      assert_equal task.folder, folder
+      assert_equal File.dirname(File.dirname(File.dirname(task.folder))),
+                   kwargs.fetch(:acquire_under_commit_lock)
+      assert_equal false, kwargs.fetch(:create)
+      assert_kind_of Hive::TaskMeta::Observation, kwargs.fetch(:observation)
+    end
+  end
+
+  def test_review_requirement_refuses_mutation_without_lifecycle_custody
+    with_task(standard_plan) do |task, cfg|
+      observation = Hive::TaskMeta.observe(task.folder)
+      runner = orchestrator(
+        task, cfg, adapter: success_adapter, task_observation: observation
+      )
+
+      error = assert_raises(Hive::ConcurrentRunError) do
+        runner.send(:ensure_review_requirement!)
+      end
+
+      assert_includes error.message, "requires lifecycle custody"
+      refute Hive::TaskMeta.plan_review_required?(task.folder)
+    ensure
+      observation&.close
+    end
+  end
+
+  def test_review_requirement_reports_invalid_metadata_under_custody
+    with_task(standard_plan) do |task, cfg|
+      runner = orchestrator(task, cfg, adapter: success_adapter)
+      invalid = ->(*) { raise Hive::TaskMeta::InvalidMetadata, "corrupt" }
+
+      error = with_runner_custody(runner, task) do
+        with_replaced_singleton_method(Hive::TaskMeta, :plan_review_required?, invalid) do
+          assert_raises(Hive::PlanReview::InvalidRecord) do
+            runner.send(:ensure_review_requirement!)
+          end
+        end
+      end
+
+      assert_includes error.message, "could not be persisted: corrupt"
+    end
+  end
+
+  # hivedev F4: a reviewer whose output the parser refuses the same way every
+  # time used to retry forever (mandatory initial legs recover their transient
+  # series automatically) with nothing kept to diagnose it.
+  def test_identical_parser_rejections_stop_retrying_and_name_the_kept_output
+    with_task(mandatory_plan) do |task, cfg|
+      now = Time.utc(2026, 8, 12, 12)
+      clock = -> { now }
+      diagnostic = "invalid plan review coverage entry 0: unknown keys notes"
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "primary"
+          rejected_result(diagnostic, "{\"coverage\":[{\"notes\":\"x\"}]}")
+        else
+          successful_result(request)
+        end
+      end
+
+      states = 3.times.map do
+        now += 3600
+        orchestrator(task, cfg, adapter:, clock:).advance!.record.state
+      end
+
+      assert_equal %w[retry_scheduled retry_scheduled blocked], states
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      blocker = record["blockers"].first
+      assert_equal "reviewer_output_rejected", blocker.fetch("reason")
+      assert_equal "operator", blocker.fetch("owner")
+      assert_includes blocker.fetch("diagnostic"), "primary output was rejected 3 times in a row: #{diagnostic}"
+      latest = record["routes"].reverse.find { |route| route["role"] == "primary" }.fetch("attempt_id")
+      reference = record["artifacts"].fetch("primary_rejected_output_#{latest}")
+      assert_includes blocker.fetch("diagnostic"), "raw output: plan-review/#{reference.fetch('path')}"
+      assert_includes File.read(File.join(task.folder, "plan-review", reference.fetch("path"))), "notes"
+      assert_match(/repair the primary reviewer output contract/, record.required_action)
+
+      now += 86_400
+      replay = orchestrator(task, cfg, adapter:, clock:).advance!.record
+      assert_equal 3, adapter.calls.count { |request| request.kind == "primary" }, "no further paid attempt"
+      assert_equal record.version, replay.version, "an unchanged block is not republished"
+
+      # An operator retry is a plain reset: it starts a fresh rejection run.
+      service = Hive::PlanReview::DecisionService.new(
+        task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+        committer: ->(*) { }, freshness_checker: ->(*) { }
+      )
+      service.apply(action: "retry", review_id: record.review_id, task_generation: record.task_generation,
+                    policy_fingerprint: record.policy_fingerprint,
+                    expected_artifact_digest: Hive::PlanReview::Projection.new(record).observation_digest,
+                    origin: "cli", operator: "test", authorized: true)
+      resumed = orchestrator(task, cfg, adapter:, clock:).advance!.record
+      assert_equal 4, adapter.calls.count { |request| request.kind == "primary" }
+      assert_equal "retry_scheduled", resumed.state
+    end
+  end
+
+  def test_different_parser_rejections_do_not_trip_the_identical_rejection_limit
+    with_task(mandatory_plan) do |task, cfg|
+      now = Time.utc(2026, 8, 12, 12)
+      count = 0
+      adapter = FakeAdapter.new do |request|
+        next successful_result(request) unless request.kind == "primary"
+
+        count += 1
+        rejected_result("invalid plan review coverage entry #{count}: unknown keys notes", nil)
+      end
+
+      3.times do
+        now += 3600
+        orchestrator(task, cfg, adapter:, clock: -> { now }).advance!
+      end
+
+      record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
+      assert_equal 3, count
+      refute_equal "blocked", record.state
+      refute record["artifacts"].keys.any? { |key| key.include?("rejected_output") }
+    end
+  end
+
+  # An operator restart of a review that went stale only through policy
+  # configuration drift must still supersede it; resuming the same record
+  # would leave it stale and every action rejected.
+  def test_restart_decision_supersedes_the_review_even_when_its_identity_still_matches
+    with_task(standard_plan) do |task, cfg|
+      first = orchestrator(task, cfg, adapter: success_adapter).advance!.record
+      service = Hive::PlanReview::DecisionService.new(
+        task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+        committer: ->(*) { }, freshness_reader: ->(*) { { "status" => "stale", "reason" => "policy drift" } }
+      )
+      result = service.apply(
+        action: "restart", review_id: first.review_id, task_generation: first.task_generation,
+        policy_fingerprint: first.policy_fingerprint,
+        expected_artifact_digest: Hive::PlanReview::Projection.new(first).observation_digest,
+        origin: "cli", operator: "test", authorized: true
+      )
+      assert_equal "restart-#{first.review_id}", result.decision.target_fingerprint
+
+      second = orchestrator(task, cfg, adapter: success_adapter).advance!.record
+
+      refute_equal first.review_id, second.review_id
+      assert_equal first.review_id, second.prior_review_id
+      assert_empty second["decisions"]
+      assert_equal "cleared", second.state
     end
   end
 
   private
 
+  def with_runner_custody(runner, task, observation: nil)
+    owned = observation.nil?
+    current = observation || Hive::TaskMeta.observe(task.folder)
+    previous = runner.instance_variable_get(:@task_observation)
+    runner.instance_variable_set(:@task_observation, current)
+    Hive::Lock.with_task_lock(
+      task.folder, slug: task.slug, op: "plan-review-test",
+      create: false, observation: current
+    ) { yield }
+  ensure
+    runner.instance_variable_set(:@task_observation, previous) if runner
+    current&.close if owned
+  end
+
   def orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan),
                    route_resolver: method(:resolve_route),
-                   clock: -> { Time.utc(2026, 8, 12, 12) })
-    Hive::PlanReview::Orchestrator.new(
+                   clock: -> { Time.utc(2026, 8, 12, 12) }, task_observation: nil)
+    options = {
       task:, cfg:, planner_identity: planner_identity, adapter:,
       planner_revision:, route_resolver:,
       clock:
-    )
+    }
+    options[:task_observation] = task_observation if task_observation
+    Hive::PlanReview::Orchestrator.new(**options)
   end
 
   def resolve_route(role:, **)
@@ -1737,6 +2229,13 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def rejected_result(diagnostic, bytes)
+    Hive::PlanReview::Adapters::Base::Result.new(
+      outcome: "retryable_failure", diagnostic:, rejected_output: bytes,
+      route_receipt: { "diagnostic_source" => "parser" }
+    )
+  end
+
   def successful_result(request, findings: [])
     residual_evidence = if request.kind == "verification"
       request.verification_findings.map do |finding|
@@ -1752,6 +2251,14 @@ class PlanReviewOrchestratorTest < Minitest::Test
         coverage: request.required_coverage.map do |name|
           { "name" => name, "required" => true, "status" => "completed" }
         end,
+        decision_assessments: request.kind == "decision_triage" ? request.pending_findings.map { |f|
+          { "sources" => [ f.fetch("fingerprint") ], "classification" => f.fetch("classification"),
+            "title" => f.fetch("title"), "disposition" => f.fetch("description"),
+            "rationale" => "The requirement explicitly leaves this material choice unresolved.",
+            "boundary" => f.fetch("classification") == "safe_auto" ? nil :
+              { "requirement" => "Unanswered requirement", "change" => "Change authorized behavior",
+                "alternatives" => [ "Keep existing behavior", "Change behavior" ] } }
+        } : [],
         residual_evidence:,
         route_receipt: {
           "role" => request.kind, "requested" => request.reviewer,
@@ -1774,20 +2281,26 @@ class PlanReviewOrchestratorTest < Minitest::Test
     )
   end
 
-  def with_task(plan)
+  def with_task(plan, meta_depends_on: nil, shipped_defaults: false)
     Dir.mktmpdir("hive-plan-orchestrator") do |project|
       folder = File.join(project, ".hive-state", "stages", "3-plan", "demo-task")
       FileUtils.mkdir_p(folder)
       meta = File.join(folder, "meta.yml")
-      File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n")
+      dependency = meta_depends_on ? "depends_on: #{meta_depends_on}\n" : ""
+      File.write(meta, "id: task-1\nslug: demo-task\nworkflow: coding\n#{dependency}")
       prepare_test_task_lease_repository(folder)
       File.write(File.join(folder, "plan.md"), plan)
       task = Task.new(
         folder:, project_root: project, slug: "demo-task", id: "task-1",
-        workflow: Workflow.new(id: :coding), meta_yml_path: meta
+        workflow: Workflow.new(id: :coding), meta_yml_path: meta, project_name: "hivedev"
       )
       cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
       cfg["project_root"] = project
+      # These scenarios exercise the adversarial leg and the three-round
+      # revision budget at standard level; the shipped defaults gate both
+      # (see the convergence-default tests below).
+      cfg["plan_review"]["adversarial_min_level"] = "standard" unless shipped_defaults
+      cfg["plan_review"]["max_revision_rounds"] = { "standard" => 3, "mandatory" => 3 } unless shipped_defaults
       yield task, cfg
     end
   end

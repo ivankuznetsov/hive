@@ -13,7 +13,6 @@ module HiveBench
   # solely responsible for compiling provider-native model and effort flags.
   #
   # Hive specifics baked in from the Stage A/B bring-up:
-  #   - mode: headless         (no tmux in the container)
   #   - default_branch: main   (the target clone's local main is reset to the
   #                             task's base_commit and origin is removed, so the
   #                             execute worktree branches off base_commit)
@@ -57,7 +56,7 @@ module HiveBench
     #   reviewers (Array), ci_command (String or nil).
     def to_h(candidate, worktree_root: DEFAULT_WORKTREE_ROOT, default_branch: DEFAULT_BRANCH)
       config = {
-        "claude" => { "mode" => "headless", "model" => candidate.claude_model,
+        "claude" => { "model" => candidate.claude_model,
                       "effort" => candidate.claude_effort }.compact,
         "default_branch" => default_branch,
         "worktree_root" => worktree_root,

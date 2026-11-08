@@ -49,7 +49,6 @@ class RunFinalizeTest < Minitest::Test
 
   def setup_finalize_task(dir)
     capture_io { Hive::Commands::Init.new(dir).call }
-    set_project_claude_mode(dir, "headless")
     cfg_path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(cfg_path))
     worktree_root = Dir.mktmpdir("finalize-wt-root-")
@@ -146,6 +145,48 @@ class RunFinalizeTest < Minitest::Test
         # would silently leave the PR in draft state after finalize.
         assert_match(/arg=ready\n.*arg=https:\/\/github\.com\/acme\/app\/pull\/9/m, gh_argv_log,
                      "finalize runner must invoke `gh pr ready <pr_url>`")
+      end
+    end
+  end
+
+  # Project clones are allowed to fetch only the default branch. A feature
+  # branch can still be configured with origin as its upstream and be fully
+  # published, but `branch@{u}` is then undefined because the fetch refspec
+  # does not map that branch. Finalize must observe the exact remote ref and
+  # complete instead of retrying an already-pushed branch forever.
+  def test_finalize_accepts_published_branch_outside_fetch_refspec
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        slug = "fix-bug-260424-aaaa"
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        run!("git", "-C", worktree_path, "config", "--unset-all", "remote.origin.fetch")
+        run!("git", "-C", worktree_path, "config", "--add", "remote.origin.fetch",
+             "+refs/heads/main:refs/remotes/origin/main")
+
+        _out, _err, upstream_status = Open3.capture3(
+          "git", "-C", worktree_path, "rev-parse", "#{slug}@{u}"
+        )
+        refute upstream_status.success?,
+               "fixture must reproduce the narrow-refspec branch@{u} failure"
+
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://github.com/acme/app/pull/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+        MD
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name,
+                     "an exact remote HEAD match must not be reported as unpushed_commits"
       end
     end
   end
@@ -315,6 +356,85 @@ class RunFinalizeTest < Minitest::Test
         assert_includes marker.attrs["residue_paths"].to_s, "dirty"
       end
     end
+  end
+
+  # A runner killed under the retired tmux launch mode could leave its
+  # Stop-hook stub in the worktree. Finalize repairs it before the
+  # clean-worktree gate instead of failing on (or committing) it.
+  def test_finalize_removes_legacy_stop_hook_stub_before_worktree_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        # Start from a project without its own settings, so the stub has
+        # no backup and is the only thing to clean up.
+        run!("git", "-C", worktree_path, "rm", "--quiet", ".claude/settings.json")
+        run!("git", "-C", worktree_path, "commit", "-m", "drop settings", "--quiet")
+        run!("git", "-C", worktree_path, "push", "--quiet", "origin", "HEAD")
+        settings = File.join(worktree_path, ".claude", "settings.json")
+        write_legacy_stop_hook_stub(settings, task_dir)
+        write_final_pr_body(pr_md)
+        head_before = git_head(worktree_path)
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+        refute File.exist?(settings)
+        assert_equal head_before, git_head(worktree_path), "the stub must not be committed"
+      end
+    end
+  end
+
+  # `hive init` tracks .claude/settings.json, so the tmux installer backed
+  # it up before writing the stub. Finalize puts the project file back.
+  def test_finalize_restores_tracked_settings_from_legacy_backup_before_worktree_gate
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        settings = File.join(worktree_path, ".claude", "settings.json")
+        project_settings = File.read(settings)
+        File.rename(settings, "#{settings}.hive-pre-install")
+        write_legacy_stop_hook_stub(settings, task_dir)
+        write_final_pr_body(pr_md)
+        head_before = git_head(worktree_path)
+
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+        assert_equal project_settings, File.read(settings)
+        refute File.exist?("#{settings}.hive-pre-install")
+        assert_equal head_before, git_head(worktree_path)
+      end
+    end
+  end
+
+  def write_legacy_stop_hook_stub(settings, task_dir)
+    FileUtils.mkdir_p(File.dirname(settings))
+    command = "HIVE_TASK_STAGE_DIR=#{task_dir} /opt/hive/lib/hive/scripts/stop_hook.sh"
+    File.write(settings, JSON.generate(
+      "hooks" => { "Stop" => [ { "hooks" => [ { "type" => "command", "command" => command } ] } ] }
+    ))
+    File.chmod(0o444, settings)
+  end
+
+  def write_final_pr_body(pr_md)
+    ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+    ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+      ---
+      pr_url: https://github.com/acme/app/pull/9
+      pr_number: 9
+      ---
+
+      ## Summary
+      final
+
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+    MD
+  end
+
+  def git_head(worktree_path)
+    out, _err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", "HEAD")
+    assert status.success?
+    out.strip
   end
 
   # Defense-in-depth backstop: in-scope residue at finalize entry must
@@ -819,7 +939,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "b" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(
           Hive::Stages::Finalize,
@@ -889,7 +1009,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "a" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
           result = Hive::Stages::Finalize.validate_pr_reference!(

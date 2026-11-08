@@ -6,6 +6,14 @@ module AgentCliRuntime
     OPENCODE_DISABLE_AUTOUPDATE OPENCODE_PURE
   ].freeze
 
+  # Environment keys that Ruby, Bundler, and RubyGems honor at startup to
+  # inject load paths. The OpenCode probe scrubs them from every child
+  # environment, so request constructors must refuse to select them back as
+  # credential keys.
+  SCRUBBED_RUNTIME_ENVIRONMENT_KEYS = %w[
+    BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
+  ].freeze
+
   module Immutable
     module_function
 
@@ -301,6 +309,11 @@ module AgentCliRuntime
         raise ArgumentError,
               "credential environment keys cannot override the OpenCode overlay: #{reserved.join(', ')}"
       end
+      scrubbed = keys & SCRUBBED_RUNTIME_ENVIRONMENT_KEYS
+      unless scrubbed.empty?
+        raise ArgumentError,
+              "credential environment keys cannot restore scrubbed runtime injection keys: #{scrubbed.join(', ')}"
+      end
       normalized_bash_patterns = Immutable.strings(bash_patterns)
       if normalized_bash_patterns.any?(&:empty?)
         raise ArgumentError, "OpenCode bash patterns must be non-empty"
@@ -339,13 +352,24 @@ module AgentCliRuntime
                    configured_variants: nil,
                    executable: nil)
       parsed_route = route.is_a?(Route) ? route : Route.parse(route)
+      normalized_environment = Immutable.hash(environment)
+      unallowed = normalized_environment.keys - OPENCODE_OVERLAY_ENVIRONMENT_KEYS
+      unless unallowed.empty?
+        raise ArgumentError,
+              "ProbeRequest environment keys must be OpenCode overlay keys: #{unallowed.join(', ')}"
+      end
+      normalized_credential_keys = Immutable.strings(credential_environment_keys)
+      scrubbed = normalized_credential_keys & SCRUBBED_RUNTIME_ENVIRONMENT_KEYS
+      unless scrubbed.empty?
+        raise ArgumentError,
+              "ProbeRequest credential environment keys cannot restore scrubbed runtime injection keys: #{scrubbed.join(', ')}"
+      end
       super(
         profile: profile,
         route: parsed_route,
         variant: variant.nil? ? nil : Immutable.string(variant),
-        environment: Immutable.hash(environment),
-        credential_environment_keys:
-          Immutable.strings(credential_environment_keys),
+        environment: normalized_environment,
+        credential_environment_keys: normalized_credential_keys,
         credential_file_staged: credential_file_staged == true,
         configured_variants:
           configured_variants.nil? ? nil : Immutable.strings(configured_variants),

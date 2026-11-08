@@ -3,6 +3,7 @@ require "hive/agent/message_extractor"
 require "json"
 
 module Hive::AgentSupport::Pi
+  autoload :Mcp, "hive/agent_support/pi/mcp"
   autoload :Runtime, "hive/agent_support/pi/runtime"
   autoload :Skills, "hive/agent_support/pi/skills"
   autoload :SetupAdapter, "hive/agent_support/pi/setup_adapter"
@@ -15,12 +16,18 @@ module Hive::AgentSupport::Pi
     value.include?("/") ? value.split("/", 2) : [ nil, value ]
   end
   def capture_interface_required? = true
+  def requires_project_runtime_root? = true
+  def controller_environment_scrub = {
+    "DBUS_SESSION_BUS_ADDRESS" => nil,
+    "SSH_AUTH_SOCK" => nil
+  }.freeze
   def validate_capture_profile!(profile:, unsupported:) = true
   def producer_interface(required_kinds:, browser:)
     {
       "document" => "evidence_write",
       "terminal" => required_kinds.include?("terminal") ? "evidence_terminal" : nil,
-      "browser" => browser ? "evidence_browser" : nil
+      "browser" => browser ? "evidence_browser" : nil,
+      "server" => browser ? "evidence_server" : nil
     }.compact
   end
   def prepare_capture(host:, profile:, task_folder:, package_root:, environment:,

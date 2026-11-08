@@ -1,14 +1,22 @@
 <aside id="project-nav" class="project-nav" aria-label="Project filter">
-  <%= link_to "All projects", status_project_filter_path(nil),
+  <%= link_to "All projects", status_filter_path(project: nil),
         class: class_names("project-nav-item", "active": selected_project.blank?),
         aria: { current: ("page" if selected_project.blank?) },
         data: { action: "project-filter#choose", project_filter_name_param: "" } %>
   <% projects.each do |project| %>
     <% name = project.name %>
-    <%= link_to name, status_project_filter_path(name),
+    <%= link_to name, status_filter_path(project: name),
           class: class_names("project-nav-item", "active": selected_project == name),
           aria: { current: ("page" if selected_project == name) },
           data: { action: "project-filter#choose", project_filter_name_param: name } %>
   <% end %>
   <%= link_to "+ Add project", repos_path, class: "project-nav-item project-nav-add" %>
+  <div class="project-nav-mobile" data-controller="project-filter">
+    <% options = [["All projects", "", { "data-url" => status_filter_path(project: nil) }]] +
+         projects.map { |project| [project.name, project.name, { "data-url" => status_filter_path(project: project.name) }] } %>
+    <%= select_tag :project, options_for_select(options, selected_project.to_s),
+          id: "mobile-project-filter", aria: { label: "Filter projects" },
+          data: { action: "change->project-filter#chooseFromSelect" } %>
+    <%= link_to "+ Add project", repos_path, class: "btn btn-ghost project-nav-add" %>
+  </div>
 </aside>

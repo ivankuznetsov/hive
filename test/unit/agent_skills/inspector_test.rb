@@ -91,7 +91,7 @@ class AgentSkillsInspectorTest < Minitest::Test
 
     targets = resolver.resolve
 
-    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive hive].sort,
+    assert_equal %w[ce-brainstorm wiki-plan ce-code-review ce-test-browser hive hive hive hive hive].sort,
                  targets.select(&:managed).map(&:capability_id).sort
     assert_equal "/ce-code-review", targets.find { |t| t.capability_id == "ce-code-review" }.invocation
   end
@@ -156,6 +156,29 @@ class AgentSkillsInspectorTest < Minitest::Test
         ))
         row = inspect_rows(cfg: config(bin: bin), project: dir, runner: runner).find { |r| r.capability_id == "ce-brainstorm" }
         assert_equal(version.start_with?("2") ? "stale" : "incompatible", row.health)
+      end
+    end
+  end
+
+  def test_unconstrained_package_accepts_commit_sha_version
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      install = File.join(dir, "claude", "plugins", "cache", "claude-plugins-official", "pr-review-toolkit", "fa59bc903774")
+      write(File.join(install, "commands", "review-pr.md"))
+      reviewer = { "name" => "toolkit", "kind" => "agent", "agent" => "claude", "skill" => "pr-review-toolkit:review-pr" }
+      %w[fa59bc903774 unknown].each do |version|
+        runner = FakeRunner.new(claude_responses(
+          bin: bin,
+          plugins: [ { "id" => "pr-review-toolkit@claude-plugins-official", "version" => version, "enabled" => true, "installPath" => install } ],
+          marketplaces: [ { "name" => "claude-plugins-official", "repo" => "anthropics/claude-plugins-official" } ]
+        ))
+
+        row = inspect_rows(cfg: config(bin: bin, reviewers: [ reviewer ]), project: dir, runner: runner,
+                           environment: { "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") })
+              .find { |r| r.capability_id == "pr-review-toolkit:review-pr" }
+
+        assert_equal "healthy", row.health, "#{version}: #{row.explanation}"
       end
     end
   end
@@ -1130,7 +1153,7 @@ class AgentSkillsInspectorTest < Minitest::Test
       pi_install = File.join(dir, "pi", "git", "compound-engineering")
       write(File.join(pi_install, "package.json"), JSON.generate("version" => "3.19.0"))
       pi_runner = FakeRunner.new(
-        [ pi_bin, "--version" ] => result(stdout: "0.80.6"),
+        [ pi_bin, "--version" ] => result(stdout: "1.0.4"),
         [ pi_bin, "list" ] => result(
           status: 1,
           stdout: "User packages:\n  #{pi_native.source}\n    #{pi_install}\n"

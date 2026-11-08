@@ -6,11 +6,12 @@ require "tmpdir"
 require "hive/atomic_file"
 require "hive/canonical_json"
 require "hive/lock"
+require "hive/plan_dependency_adoption"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
-require "hive/plan_review/checkpoint_custody"
 require "hive/plan_review/clearance"
+require "hive/plan_review/decision_triage"
 require "hive/plan_review/decision"
 require "hive/plan_review/identity"
 require "hive/plan_review/planner_revision"
@@ -29,10 +30,26 @@ module Hive
       SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
       TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
       MAX_VERIFICATION_REVISION_ROUNDS = 3
+      # One extra planner round reserved for integrating operator decisions.
+      # Safe fixes can spend the whole budget before an operator approves a
+      # gated finding or answers a manual one; without this round every late
+      # decision forced a new linked plan whose fresh review restarted the
+      # cycle. The ceiling stays fixed, so the loop remains bounded.
+      OPERATOR_DECISION_ROUNDS = 1
       CAPABILITY_STABLE_PROBE_LIMIT = 3
       CAPABILITY_RETRY_COOLDOWN_SEC = 5 * 60
       TRANSIENT_SERIES_RETRY_BASE_SEC = 5 * 60
       TRANSIENT_SERIES_RETRY_CAP_SEC = 24 * 60 * 60
+      # Identical parser rejections of one reviewer role after which Hive stops
+      # paying for another attempt and hands the review to the operator. It
+      # matches Attempts::Dispatcher::REPEATED_FAILURE_LIMIT, the same-input
+      # failure limit for owner commands.
+      REJECTED_OUTPUT_LIMIT = 3
+      # Route flags Hive itself sets on resets it schedules. A reset without
+      # one came from an operator retry or request-review.
+      AUTOMATIC_RESET_KEYS = %w[
+        transient_series_recovery verification_followup incomplete_attestation_retry
+      ].freeze
 
       class << self
         def run!(task:, cfg:, planner_identity:, **options)
@@ -41,7 +58,7 @@ module Hive
       end
 
       def initialize(task:, cfg:, planner_identity:, adapter: nil, route_resolver: nil,
-                     planner_revision: nil, clock: -> { Time.now.utc })
+                     planner_revision: nil, clock: -> { Time.now.utc }, task_observation: nil)
         @task = task
         @cfg = cfg
         @planner_identity = stringify(planner_identity)
@@ -54,13 +71,38 @@ module Hive
         end
         @planner_revision = planner_revision || PlannerRevision.new(task:, cfg:)
         @clock = clock
+        @task_observation = task_observation
       end
 
       def advance!
-        @store.with_orchestration_lock { advance_unlocked! }
+        supplied_observation = @task_observation
+        Hive::TaskMeta.with_observation(@task.folder, supplied_observation) do |observation|
+          raise InvalidRecord, "plan review task is stale or missing" unless observation
+
+          @task_observation = observation
+          Hive::Lock.with_task_lock(
+            @task.folder, slug: @task.slug, op: "plan-review",
+            create: false, observation: observation,
+            acquire_under_commit_lock: task_hive_state_path
+          ) do
+            @store.with_orchestration_lock(observation: observation) { advance_unlocked! }
+          end
+        end
+      rescue Hive::TaskMeta::StaleTask => error
+        raise InvalidRecord, "plan review task is stale: #{error.message}"
+      rescue Hive::TaskMeta::InvalidMetadata => error
+        raise InvalidRecord, "plan review task metadata is invalid: #{error.message}"
+      ensure
+        @task_observation = supplied_observation
       end
 
       private
+
+      def task_hive_state_path
+        return @task.hive_state_path if @task.respond_to?(:hive_state_path)
+
+        File.dirname(File.dirname(File.dirname(@task.folder)))
+      end
 
       def advance_unlocked!
         plan_path = File.join(@task.folder, "plan.md")
@@ -70,7 +112,7 @@ module Hive
 
         current = @store.current_validated(optional: true)
         if current && current["candidate_plan_digest"] == canonical_digest &&
-           current.task_generation.to_s == task_generation.to_s &&
+           Identity.task_generation_current?(@task, current.task_generation) &&
            policy_configuration_fresh?(current)
           return Projection.new(current) if current.execution_allowed?
 
@@ -92,9 +134,9 @@ module Hive
         return nil unless policy.applicable?
 
         generation = task_generation
-        if current && current.task_generation.to_s == generation.to_s &&
+        if current && Identity.task_generation_current?(@task, current.task_generation) &&
            current.plan_digest == signals.plan_digest &&
-           current.policy_fingerprint == policy.policy_fingerprint
+           current.policy_fingerprint == policy.policy_fingerprint && !restart_requested?(current)
           return Projection.new(current) if current.execution_allowed?
 
           return resume_review(current, plan_text(plan_path))
@@ -115,6 +157,13 @@ module Hive
         Projection.load(task_folder: @task.folder)
       end
 
+      # An operator `restart` on a stale review always supersedes it, even
+      # when only configuration drift (not the identity compared above) made
+      # it stale; resuming the same record would leave it stale forever.
+      def restart_requested?(record)
+        record["decisions"].last&.fetch("action", nil) == "restart"
+      end
+
       # plan.md is a UTF-8 document, but binread hands back ASCII-8BIT. The
       # bytes flow into reviewer prompt construction, so the first plan
       # containing any non-ASCII character — an em dash, an arrow, a curly
@@ -130,15 +179,10 @@ module Hive
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
-        record = refresh_planner_identity_contract(record)
         record, capability_pending = refresh_capability_probes(record)
         return Projection.new(record) if capability_pending
-        record = refresh_checkpoint_custody_contract(record)
-        record = refresh_adversarial_identity_contract(record)
-        record = refresh_selected_lenses_contract(record)
-        record = refresh_residual_evidence_contract(record)
 
-        %w[primary adversarial].each do |role|
+        initial_roles(record).each do |role|
           record, pending = ensure_leg(record, role, original_plan_bytes)
           return Projection.new(record) if pending
         end
@@ -158,9 +202,14 @@ module Hive
             required_action: "waive named coverage or restore required reviewer capability"
           )
         end
+        candidate_bytes = candidate_bytes(record)
+        record, triage_pending = ensure_decision_triage(record, candidate_bytes || original_plan_bytes)
+        return Projection.new(record) if triage_pending
         record = consume_approval_policies(record)
+
         pending = pending_decision_findings(record)
-        unless pending.empty?
+        accepted = accepted_findings(record)
+        if !pending.empty? && accepted.empty? && verification_targets(record).empty?
           blockers = pending.map { |finding| Clearance.send(:finding_blocker, finding) }
           action = pending.first.classification == "manual" ?
             "answer manual plan finding #{pending.first.fingerprint}" :
@@ -172,23 +221,26 @@ module Hive
         end
         if record.effective_level == "standard" && initial_coverage.degraded? &&
            initial_coverage.degradation_reason != "partial_coverage" &&
-           accepted_findings(record).empty?
+           accepted.empty? && pending.empty? && verification_targets(record).empty?
           return terminal(
             record, state: "degraded_cleared", outcome: "degraded_cleared",
             degradation_reason: initial_coverage.degradation_reason
           )
         end
 
-        accepted = accepted_findings(record)
-        candidate_bytes = candidate_bytes(record)
         unless accepted.empty?
           # The follow-up limit must fence external re-entry as well as the
           # automatic continuation below. A capped terminal record otherwise
           # retained enough accepted evidence to launch revision N+1 on every
           # later advance! call.
-          if record.state == "blocked" &&
-             verification_revision_rounds(record) >= MAX_VERIFICATION_REVISION_ROUNDS
-            return Projection.new(record)
+          if revision_round_limit_reached?(record, accepted)
+            return Projection.new(record) if record.state == "blocked"
+
+            return terminal(
+              record, state: "blocked", outcome: "blocked",
+              blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+              required_action: "resolve remaining findings with a new linked plan"
+            )
           end
 
           verification_route = latest_route(record, "verification")
@@ -269,13 +321,25 @@ module Hive
           )
         end
         record, findings, followup = prepare_verification_followup(
-          record, findings, verification_findings, verification_outcome
+          record, findings, verification_findings, verification_outcome, plan_bytes: candidate_bytes
         )
         return followup if followup
+        resolved_ids = findings.filter_map do |entry|
+          finding = Finding.new(entry)
+          finding.fingerprint if finding.resolved?
+        end
+        verification_blockers.reject! { |blocker| resolved_ids.include?(blocker["finding_fingerprint"]) }
         if record["candidate_plan_digest"] && !SUCCESS_OUTCOMES.include?(verification_outcome)
           verification_blockers << {
             "owner" => "reviewer", "reason" => "candidate_verification_#{verification_outcome}"
           }
+        end
+        if verification_blockers.any? { |blocker| blocker["reason"] != "verification_finding" }
+          return terminal(
+            record, state: "blocked", outcome: "blocked", findings:,
+            blockers: verification_blockers,
+            required_action: verification_blocked_action(verification_blockers)
+          )
         end
         clearance = Clearance.evaluate(
           level: record.effective_level, coverage: record["coverage"], findings:,
@@ -293,6 +357,10 @@ module Hive
         if clearance.execution_allowed && record["candidate_plan_digest"]
           with_task_mutation_lock do
             promote_candidate!(record, candidate_bytes)
+            # The revision can add a prerequisite the initial plan lacked;
+            # without this meta.yml never learns it and admission parks the
+            # task on plan_dependency_missing/mismatch after clearance.
+            Hive::PlanDependencyAdoption.adopt!(@task, observation: @task_observation)
             terminal(record, **terminal_args)
           end
         else
@@ -326,7 +394,8 @@ module Hive
             "kind" => "projection", "version" => version,
             "candidate_plan_digest" => nil, "state" => "uninitialized", "outcome" => nil,
             "attempt_ids" => [], "current_attempt_id" => nil,
-            "coverage" => requested_coverage(review_id, policy.policy_fingerprint),
+            "coverage" => requested_coverage(review_id, policy.policy_fingerprint,
+                                             level: policy.effective_level),
             "findings" => [], "decisions" => [],
             "routes" => [ planner_route(@planner_identity) ],
             "artifacts" => { "policy" => policy_ref }, "blockers" => [],
@@ -356,129 +425,10 @@ module Hive
       # unsupported initial leg independently, then evaluate any remaining
       # non-capability blockers after that reviewer returns.
       def unsupported_initial_routes(record)
-        %w[primary adversarial].filter_map do |role|
+        initial_roles(record).filter_map do |role|
           route = latest_route(record, role)
           route if route && route["outcome"] == "unsupported"
         end
-      end
-
-      # Grok reports the served alias `grok-4.6-build`. Reviews completed
-      # before Hive learned that exact alias were retained as successful
-      # attempts but denied adversarial coverage because their family was
-      # unknown. Re-run one such leg under the current identity contract so
-      # the immutable attempt evidence, not a projection rewrite, earns the
-      # missing coverage. The versioned reset makes this a one-time migration.
-      def refresh_adversarial_identity_contract(record)
-        route = RouteResolver.recoverable_identity_route(
-          routes: record["routes"], planner_identity: planner_identity(record)
-        )
-        return record unless route
-
-        reset = Hive::PlanReview.recovery_reset_route(
-          route,
-          "identity_contract_recovery" => true,
-          "identity_contract_version" => RouteResolver::IDENTITY_CONTRACT_VERSION,
-          "diagnostic" => "retry reviewer under the current served-model identity contract"
-        )
-        publish_transition(
-          record, state: "reviewing",
-          required_action: "retry adversarial review under the current identity contract",
-          routes: record["routes"] + [ reset ]
-        )
-      end
-
-      def refresh_planner_identity_contract(record)
-        route = latest_route(record, "planner")
-        captured = route&.fetch("actual", nil) || route&.fetch("requested", nil)
-        return record unless PlannerIdentity.recoverable?(captured)
-        return record if PlannerIdentity.recoverable?(@planner_identity)
-        return record unless captured["provider"].to_s == @planner_identity["provider"].to_s
-
-        recovered = planner_route(@planner_identity).merge(
-          "recovery_reset" => true,
-          "planner_identity_contract_recovery" => true,
-          "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
-          "diagnostic" => "recovered a legacy cross-provider planner model"
-        )
-        routes = record["routes"] + [ recovered ]
-        revision = latest_route(record, "planner_revision")
-        if revision && !SUCCESS_OUTCOMES.include?(revision["outcome"])
-          routes << Hive::PlanReview.recovery_reset_route(
-            revision,
-            "planner_identity_contract_recovery" => true,
-            "planner_identity_contract_version" => PlannerIdentity::CONTRACT_VERSION,
-            "diagnostic" => "retry planner revision with the recovered planner identity"
-          )
-        end
-        publish_transition(
-          record, state: "reviewing",
-          required_action: "retry plan review under the current planner identity contract",
-          routes:
-        )
-      end
-
-      # A projection-checkpoint rollout briefly placed Hive's own
-      # review-session write inside reviewer custody. Retry each exact,
-      # runner-authored false positive once after the custody exclusion ships.
-      def refresh_checkpoint_custody_contract(record)
-        routes = CheckpointCustody.recoverable_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "checkpoint_custody_recovery" => true,
-            "checkpoint_custody_contract_version" =>
-              CheckpointCustody::CONTRACT_VERSION
-          },
-          diagnostic: "retry reviewer after repairing review-session checkpoint custody"
-        )
-      end
-
-      # Older parsers rejected lowercase specialist names such as
-      # `product-lens` and persisted the otherwise valid reviewer response as a
-      # terminal failure. Re-run that exact legacy diagnostic once under the
-      # widened contract; the versioned reset prevents repeated retries for a
-      # genuinely malformed result produced by the current parser.
-      def refresh_selected_lenses_contract(record)
-        routes = ResultParser.recoverable_selected_lenses_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "selected_lenses_contract_recovery" => true,
-            "selected_lenses_contract_version" => ResultParser::SELECTED_LENSES_CONTRACT_VERSION
-          },
-          diagnostic: "retry reviewer under the current selected_lenses contract"
-        )
-      end
-
-      # Initial review prompts historically showed only an empty
-      # residual_evidence example without saying that the field is reserved
-      # for disposition verification. Natural-language notes were therefore
-      # rejected by the stricter machine contract. Re-run each affected
-      # initial role once under the explicit empty-array contract.
-      def refresh_residual_evidence_contract(record)
-        routes = ResultParser.recoverable_residual_evidence_routes(record["routes"])
-        refresh_route_contract(
-          record, routes:,
-          recovery_attributes: {
-            "residual_evidence_contract_recovery" => true,
-            "residual_evidence_contract_version" => ResultParser::RESIDUAL_EVIDENCE_CONTRACT_VERSION
-          },
-          diagnostic: "retry initial reviewer under the residual_evidence contract"
-        )
-      end
-
-      def refresh_route_contract(record, routes:, recovery_attributes:, diagnostic:)
-        return record if routes.empty?
-
-        resets = routes.map do |route|
-          Hive::PlanReview.recovery_reset_route(
-            route, recovery_attributes.merge("diagnostic" => diagnostic)
-          )
-        end
-        publish_transition(
-          record, state: "reviewing", required_action: diagnostic,
-          routes: record["routes"] + resets
-        )
       end
 
       # Capability retries are cheap probes, not repeated reviewer launches.
@@ -506,7 +456,7 @@ module Hive
       # every missing capability is present, the normal attempt path resumes.
       def refresh_capability_probes(record)
         routes = record["routes"].dup
-        entries = %w[primary adversarial].filter_map do |role|
+        entries = initial_roles(record).filter_map do |role|
           index = routes.rindex { |route| route["role"] == role }
           route = routes.fetch(index) if index
           [ role, index, route ] if route && route["capability_probe_fingerprint"]
@@ -527,7 +477,7 @@ module Hive
           end
         end
 
-        probes = %w[primary adversarial].filter_map do |role|
+        probes = initial_roles(record).filter_map do |role|
           route = routes.reverse.find { |entry| entry["role"] == role }
           route if route && route["capability_probe_fingerprint"]
         end
@@ -657,14 +607,68 @@ module Hive
         end
       end
 
+      def ensure_decision_triage(record, plan_bytes)
+        entries = DecisionTriage.pending(record)
+        return [ record, false ] if entries.empty?
+
+        previous = latest_route(record, "decision_triage")
+        input_ids = entries.map { |entry| entry.fetch("fingerprint") }.sort
+        if previous && (previous["triage_version"] == DecisionTriage::VERSION ||
+           SUCCESS_OUTCOMES.include?(previous["outcome"]) && previous["triage_input_fingerprints"] != input_ids)
+          reset = Hive::PlanReview.recovery_reset_route(previous)
+          record = publish(record, "routes" => record["routes"] + [ reset ])
+        end
+        record, pending = ensure_leg(
+          record, "decision_triage", plan_bytes,
+          requested: [ { "name" => "decision_triage", "required" => true } ],
+          merge_coverage: false, merge_findings: false, pending_findings: entries
+        )
+        return [ record, true ] if pending
+
+        route = latest_route(record, "decision_triage")
+        unless SUCCESS_OUTCOMES.include?(route["outcome"])
+          if TRANSIENT_OUTCOMES.include?(route["outcome"])
+            route = route.merge("outcome" => "terminal_failure", "triage_output_exhausted" => true)
+            record = publish(record, "routes" => record["routes"] + [ route ])
+          end
+          terminal(
+            record, state: "blocked", outcome: "blocked",
+            blockers: [ { "owner" => "reviewer", "reason" => "decision_triage_#{route['outcome']}" } ],
+            required_action: "restore decision triage reviewer and request review"
+          )
+          return [ @store.current_validated, true ]
+        end
+        rows = persisted_result(record, "decision_triage").fetch("decision_assessments", [])
+        reconciled = DecisionTriage.apply(entries, rows, display_order: record["findings"].map { |entry| entry.fetch("display_order") }.max.to_i)
+        ids = entries.map { |entry| entry.fetch("fingerprint") }
+        findings = record["findings"].reject { |entry| ids.include?(entry["fingerprint"]) } + reconciled
+        receipt = route.merge(
+          "triage_version" => DecisionTriage::VERSION,
+          "assessed_fingerprints" => reconciled.map { |entry| entry.fetch("fingerprint") }
+        )
+        reference = @store.write_review_artifact!(
+          review_id: record.review_id, basename: "decision-triage-#{route.fetch('attempt_id')}.json",
+          content: JSON.generate(receipt)
+        )
+        updated = publish_transition(
+          record, state: "reviewing", required_action: nil, findings:,
+          routes: record["routes"] + [ receipt ],
+          artifacts: record["artifacts"].merge("decision_triage_applied_#{route.fetch('attempt_id')}" => reference)
+        )
+        [ updated, false ]
+      end
+
       def ensure_leg(record, role, plan_bytes, requested: nil, merge_coverage: true,
-                     merge_findings: true, verification_findings: [])
+                     merge_findings: true, verification_findings: [], pending_findings: [])
         max_attempts = 1 + Integer(@cfg.dig("plan_review", "attempts", "max_transient"))
         loop do
           route = latest_route(record, role)
           return [ record, false ] if route && TERMINAL_OUTCOMES.include?(route["outcome"])
 
           if route
+            rejection = repeated_output_rejection(record, role)
+            return [ block_repeated_output_rejection(record, role, rejection), true ] if rejection
+
             attempts = attempts_in_current_run(record, role)
             if attempts >= max_attempts
               unless automatic_transient_series_recovery?(record, role, route)
@@ -688,14 +692,67 @@ module Hive
           record, = dispatch_attempt(
             record, role, plan_bytes,
             requested || coverage_for(role, record.review_id, record.policy_fingerprint),
-            merge_coverage:, merge_findings:, verification_findings:
+            merge_coverage:, merge_findings:, verification_findings:, pending_findings:
           )
         end
       end
 
+      # The newest REJECTED_OUTPUT_LIMIT attempts of one role whose output the
+      # result parser refused with the same error. A model that keeps
+      # emitting the same malformed field is deterministic: retrying it only
+      # spends paid attempts. Automatic series resets do not break the run;
+      # an operator retry or request-review (a plain reset) does.
+      def repeated_output_rejection(record, role)
+        streak = []
+        record["routes"].reverse_each do |entry|
+          next unless entry["role"] == role
+
+          if entry["attempt_id"].to_s.empty?
+            next if AUTOMATIC_RESET_KEYS.any? { |key| entry[key] }
+
+            break
+          end
+          break unless output_rejected?(entry) &&
+                       (streak.empty? || entry["diagnostic"] == streak.first["diagnostic"])
+
+          streak << entry
+          return streak.first if streak.length >= REJECTED_OUTPUT_LIMIT
+        end
+        nil
+      end
+
+      def output_rejected?(route)
+        route["diagnostic_source"] == "parser" && route["outcome"] == "retryable_failure"
+      end
+
+      def block_repeated_output_rejection(record, role, rejection)
+        blocker = rejected_output_blocker(record, role, rejection)
+        return record if record.state == "blocked" && record["blockers"] == [ blocker ]
+
+        terminal(
+          record, state: "blocked", outcome: "blocked", blockers: [ blocker ],
+          required_action: "repair the #{role} reviewer output contract (#{rejection['diagnostic']}), " \
+                           "then retry the plan review"
+        ).record
+      end
+
+      def rejected_output_blocker(record, role, rejection)
+        attempt_id = rejection.fetch("attempt_id")
+        reference = record["artifacts"]["#{role}_rejected_output_#{attempt_id}"]
+        location = reference ? "#{Store::ROOT_BASENAME}/#{reference.fetch('path')}" : "not captured"
+        {
+          "owner" => "operator", "reason" => "reviewer_output_rejected",
+          "diagnostic" => "#{role} output was rejected #{REJECTED_OUTPUT_LIMIT} times in a row: " \
+                          "#{rejection['diagnostic']}; latest attempt #{attempt_id}; raw output: #{location}"
+        }
+      end
+
       def dispatch_attempt(record, role, plan_bytes, requested, merge_coverage: true,
-                           merge_findings: true, verification_findings: [])
-        resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
+                           merge_findings: true, verification_findings: [], pending_findings: [])
+        resolution = @route_resolver.call(
+          role: role == "decision_triage" ? "verification" : role,
+          planner_identity: planner_identity(record)
+        )
         attempt_id = Identity.attempt(record.review_id)
         if resolution.resolved?
           adapter_result = Dir.mktmpdir("hive-plan-review-#{attempt_id}-") do |attempt_dir|
@@ -711,7 +768,8 @@ module Hive
               output_directory: attempt_dir,
               timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec"),
               attempt_id:, kind: role, project_root: @task.project_root,
-              verification_findings:
+              verification_findings:,
+              pending_findings: role == "verification" ? pending_decision_findings(record).map(&:to_h) : pending_findings
             )
             @adapter.call(request)
           end
@@ -733,10 +791,14 @@ module Hive
           role:, attempt_id:, outcome: adapter_result.outcome,
           retry_at:, diagnostic: adapter_result.diagnostic
         )
+        if role == "decision_triage"
+          route["triage_input_fingerprints"] = pending_findings.map { |entry| entry.fetch("fingerprint") }.sort
+        end
         coverage = reject_unverified_adversarial_coverage(coverage, role:, route:)
         refs = @store.write_attempt!(
           review_id: record.review_id, attempt_id:, plan_bytes:,
-          result: adapter_result.to_h, coverage:, route_receipt: route
+          result: adapter_result.to_h, coverage:, route_receipt: route,
+          rejected_output: adapter_result.rejected_output
         )
         artifacts = record["artifacts"].merge(
           "#{role}_input" => refs.fetch("input_plan"),
@@ -744,6 +806,7 @@ module Hive
           "#{role}_coverage" => refs.fetch("coverage"),
           "#{role}_route" => refs.fetch("route_receipt")
         )
+        artifacts["#{role}_rejected_output_#{attempt_id}"] = refs["rejected_output"] if refs["rejected_output"]
         findings = merge_findings ? merge_findings(record["findings"], adapter_result.findings) :
           record["findings"]
         combined_coverage = merge_coverage ? CoverageEvaluator.combine(record["coverage"], coverage) :
@@ -769,20 +832,6 @@ module Hive
         loop do
           route = latest_route(record, role)
           if route && TRANSIENT_OUTCOMES.include?(route["outcome"])
-            if stale_planner_revision_contract?(route)
-              reset = Hive::PlanReview.recovery_reset_route(
-                route,
-                "planner_revision_contract_version" => PlannerRevision::RESULT_CONTRACT_VERSION,
-                "contract_upgrade_recovery" => true,
-                "diagnostic" => "planner result adjudication changed; retrying under the current contract"
-              )
-              record = publish_transition(
-                record, state: "revising",
-                required_action: "retry planner revision under the current result contract",
-                routes: record["routes"] + [ reset ]
-              )
-              route = reset
-            end
             if attempts_in_current_run(record, role) >= max_attempts
               record, pending = schedule_transient_series_recovery(record, role, route)
               return [ record, nil, true ] if pending
@@ -798,6 +847,7 @@ module Hive
             review_id: record.review_id, plan_bytes:, findings:,
             planner_identity: revision_identity,
             planner_authority: planner_identity(record),
+            pending_findings: pending_decision_findings(record).map(&:to_h),
             timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
           )
           retry_at = if TRANSIENT_OUTCOMES.include?(revision.outcome)
@@ -891,9 +941,13 @@ module Hive
         )
       end
 
-      def requested_coverage(review_id, policy_fingerprint)
+      def requested_coverage(review_id, policy_fingerprint, level: nil)
         required = Array(@cfg.dig("plan_review", "coverage", "required"))
         optional = Array(@cfg.dig("plan_review", "coverage", "optional"))
+        unless level.nil? || adversarial_lens?(level)
+          required -= [ "adversarial" ]
+          optional -= [ "adversarial" ]
+        end
         (required.map { |name| [ name, true ] } + optional.map { |name| [ name, false ] })
           .uniq { |name, _required| name }
           .map do |name, required_value|
@@ -1055,7 +1109,7 @@ module Hive
       # decision when the same fingerprint recurs, consume any matching
       # approval policy immediately, and hand the daemon a runnable `revising`
       # state instead of parking on an operator-owned `awaiting_decision` row.
-      def prepare_verification_followup(record, findings, observed, outcome)
+      def prepare_verification_followup(record, findings, observed, outcome, plan_bytes:)
         actionable = Array(observed).map do |entry|
           entry.is_a?(Finding) ? entry : Finding.new(entry)
         end.reject { |finding| finding.classification == "fyi" || finding.resolved? }
@@ -1065,12 +1119,21 @@ module Hive
         record = publish_transition(
           record, state: "reviewing", required_action: nil, findings: findings
         )
+        record, pending = ensure_decision_triage(record, plan_bytes)
+        return [ record, record["findings"], Projection.new(record) ] if pending
+
         record = consume_approval_policies(record)
         findings = record["findings"]
-        return [ record, findings, nil ] unless pending_decision_findings(record).empty?
-        return [ record, findings, nil ] if accepted_findings(record).empty?
-        return [ record, findings, nil ] if verification_revision_rounds(record) >=
-                                                   MAX_VERIFICATION_REVISION_ROUNDS
+        accepted = accepted_findings(record)
+        return [ record, findings, nil ] if accepted.empty?
+        if revision_round_limit_reached?(record, accepted)
+          blocked = terminal(
+            record, state: "blocked", outcome: "blocked", findings:,
+            blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+            required_action: "resolve remaining findings with a new linked plan"
+          )
+          return [ blocked.record, findings, blocked ]
+        end
 
         reset = Hive::PlanReview.recovery_reset_route(
           latest_route(record, "verification"),
@@ -1088,7 +1151,11 @@ module Hive
       def reopen_verification_finding(existing, observed)
         lifecycle = case existing.classification
         when "safe_auto" then "open"
-        when "gated_auto" then existing["decision_id"] ? "approved" : "open"
+        when "gated_auto"
+          if existing["answer"] then "answered"
+          elsif existing["decision_id"] then "approved"
+          else "open"
+          end
         when "manual" then existing["answer"] ? "answered" : "open"
         else existing.lifecycle
         end
@@ -1099,6 +1166,47 @@ module Hive
           "lifecycle" => lifecycle,
           "verified_at" => nil
         )
+      end
+
+      def revision_round_limit_reached?(record, accepted)
+        rounds = verification_revision_rounds(record)
+        limit = max_revision_rounds(record)
+        return false if rounds < limit
+        return true if rounds >= limit + OPERATOR_DECISION_ROUNDS
+
+        accepted.none? { |finding| operator_decision?(finding) }
+      end
+
+      # Planner revision rounds allowed for the record's effective level. A
+      # review whose level has no configured value keeps the historical cap.
+      def max_revision_rounds(record)
+        value = @cfg.dig("plan_review", "max_revision_rounds", record["effective_level"].to_s)
+        value.is_a?(Integer) && value.positive? ? value : MAX_VERIFICATION_REVISION_ROUNDS
+      end
+
+      # Initial review legs. The adversarial leg runs only when the record
+      # requested adversarial coverage, so a review created before the
+      # adversarial lens became level-gated keeps the coverage it asked for.
+      def initial_roles(record)
+        if record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" }
+          %w[primary adversarial]
+        else
+          %w[primary]
+        end
+      end
+
+      # "off" disables the adversarial leg at every level for projects whose
+      # plans are always mandatory but do not want the extra lens.
+      def adversarial_lens?(level)
+        minimum = @cfg.dig("plan_review", "adversarial_min_level") || "mandatory"
+        return false if minimum == "off"
+
+        Hive::PlanReview.higher_level(level, minimum) == level
+      end
+
+      def operator_decision?(finding)
+        %w[gated_auto manual].include?(finding.classification) &&
+          %w[approved answered].include?(finding.lifecycle)
       end
 
       def verification_revision_rounds(record)
@@ -1152,9 +1260,22 @@ module Hive
       # widening cooldown. Standard reviews retain their degraded fallback;
       # verification retries and successful planner-revision rounds retain
       # their separate caps.
+      # A provider quota is the only blocker: the plan itself is fine and the
+      # operator `retry` action resumes verification once the quota resets.
+      # "New linked plan" sent operators to a needless replan.
+      def verification_blocked_action(blockers)
+        quota_only = blockers.reject { |blocker| blocker["reason"] == "verification_finding" }
+                             .all? { |blocker| blocker["reason"] == "candidate_verification_provider_limit" }
+        return "retry plan review after the provider limit resets (plan-review retry)" if quota_only
+
+        "resolve verification blockers with a new linked plan"
+      end
+
       def automatic_transient_series_recovery?(record, role, route)
-        record.effective_level == "mandatory" &&
-          %w[primary adversarial].include?(role) &&
+        return false if role == "decision_triage" && route["diagnostic_source"] == "parser"
+
+        (role == "decision_triage" ||
+          record.effective_level == "mandatory" && %w[primary adversarial].include?(role)) &&
           TRANSIENT_OUTCOMES.include?(route["outcome"]) &&
           !route["attempt_id"].to_s.empty?
       end
@@ -1220,7 +1341,7 @@ module Hive
       end
 
       def latest_initial_outcomes(record)
-        %w[primary adversarial].map { |role| latest_route(record, role)&.fetch("outcome") }
+        initial_roles(record).map { |role| latest_route(record, role)&.fetch("outcome") }
       end
 
       def latest_route(record, role)
@@ -1315,13 +1436,6 @@ module Hive
         end
       end
 
-      def stale_planner_revision_contract?(route)
-        Integer(route["planner_revision_contract_version"] || 0) <
-          PlannerRevision::RESULT_CONTRACT_VERSION
-      rescue ArgumentError, TypeError
-        true
-      end
-
       def planner_identity(record)
         route = latest_route(record, "planner")
         stringify(route&.fetch("actual", nil) || @planner_identity)
@@ -1342,12 +1456,14 @@ module Hive
         File.chmod(mode, path)
       end
 
-      def with_task_mutation_lock(&block)
-        return block.call if Hive::Lock.task_lock_held?(@task.folder)
-
-        Hive::Lock.with_task_lock(
-          @task.folder, slug: @task.slug, op: "plan-review-promote", &block
-        )
+      def with_task_mutation_lock
+        raise Hive::TaskMeta::StaleTask, "plan review task is missing" unless @task_observation
+        Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
+        unless Hive::Lock.task_lock_held?(@task.folder)
+          raise Hive::ConcurrentRunError,
+                "plan review task mutation requires lifecycle custody"
+        end
+        yield
       end
 
       def persisted_run_level
@@ -1364,9 +1480,21 @@ module Hive
       def task_id = (@task.id || @task.slug).to_s
 
       def ensure_review_requirement!
-        return if Hive::TaskMeta.plan_review_required?(@task.folder)
+        with_task_mutation_lock do
+          Hive::TaskMeta.validate_observation!(@task.folder, @task_observation)
+          next if Hive::TaskMeta.plan_review_required?(@task.folder)
 
-        Hive::TaskMeta.rewrite(@task.folder, plan_review_required: true)
+          result = Hive::TaskMeta.rewrite(
+            @task.folder, { plan_review_required: true },
+            observation: @task_observation
+          )
+          if result.stale?
+            raise Hive::TaskMeta::StaleTask,
+                  "plan review requirement lost task custody"
+          end
+        end
+      rescue Hive::TaskMeta::StaleTask, Errno::ENOENT, Errno::ENOTDIR => error
+        raise InvalidRecord, "plan review requirement rejected stale task: #{error.message}"
       rescue Hive::TaskMeta::InvalidMetadata => error
         raise InvalidRecord, "plan review requirement could not be persisted: #{error.message}"
       end

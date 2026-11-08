@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-08-24
+updated: 2026-11-07
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -130,12 +130,22 @@ Local `<default>` is never modified — any unpushed commits there are preserved
 ### Dependency base override
 
 `base_override` is used by [[modules/task_dependencies]] when a dependent task
-enters `4-execute`. Hive tries to fetch and branch from
+enters `4-execute`; `DependencySnapshot` supplies it only for an undelivered
+prerequisite (a `9-done` or PR-merged prerequisite yields no override, so the
+dependent bases on the default branch). Hive tries to fetch and branch from
 `origin/<base_override>` so stacked tasks start from their prerequisite branch.
 If there is no origin, the fetch fails, or the remote branch is unavailable,
 Hive next checks local `refs/heads/<base_override>` and stacks on that local
-branch when present. It warns and falls back through `freshest_base(default_branch)`
+branch when present, with a loud warning (`stacking on local <prereq>
+(undelivered prerequisite with no remote branch; the local branch is unverified
+and may be stale ...)`). It warns and falls back through `freshest_base(default_branch)`
 only when neither the remote nor local prerequisite branch is available.
+
+`create!` exposes the start-point it branched from as `#resolved_base`
+(`origin/<default>`, `refs/heads/<default>`, `origin/<prereq>`, or
+`refs/heads/<prereq>`; nil when it attached an existing branch). Execute
+records it as `base_ref` in `worktree.yml`, so `base_oid` is always traceable to
+the ref it came from.
 
 ## `remove!`
 
@@ -196,8 +206,9 @@ path: /home/asterio/Dev/<project>.worktrees/<slug>
 branch: <slug>
 created_at: 2026-04-25T10:23:45Z
 execute_base_head: <sha>   # optional; set by 4-execute for commit-baseline checks
-base_branch: main          # strict draft-PR path only
-base_oid: <sha>            # strict draft-PR path only
+base_branch: main          # integration/PR-target branch (4-execute and strict draft-PR path)
+base_oid: <sha>            # commit the task branch started from (4-execute and strict draft-PR path)
+base_ref: origin/main      # optional; 4-execute only — exact start ref of base_oid (origin/<prereq> or refs/heads/<prereq> when stacked)
 repository: github.com/owner/name # strict draft-PR path only
 ```
 
@@ -228,8 +239,24 @@ credentials or agent output.
 `hive worktree status <slug> [--json]` exposes the owned worktree's porcelain
 entries, residue paths, branch, HEAD, and untracked count. Paths remain exact
 for internal recovery operations, while every JSON, text, and diagnostic
-surface bounds and redacts secret-shaped path text. The
-mutating verbs are admitted only while the task carries `ERROR
+surface bounds and redacts secret-shaped path text.
+
+`status` is a pure observation: task resolution, raw project config, the
+`worktree.yml` pointer, and read-only Git (`worktree list`, `branch
+--show-current`, `rev-parse`, and `--no-optional-locks status`). It takes no
+task lock, writes no marker, opens no runtime transaction, and never prunes.
+Plain `git status` opportunistically rewrites the index stat cache, which is
+why the porcelain read passes `--no-optional-locks` (for every subcommand).
+Because of that, `worktree status` is the second route eligible for the
+read-only [[commands/status]] operational-inspection fallback: on a
+procfs-confirmed read-only state root, startup's typed
+`state_storage_read_only` failure activates the one-shot inspection authority
+instead of exiting 69. The route matcher fails closed on any switch other
+than `--json`, `--project`, and `--stage`, so `commit-residue`,
+`discard-residue`, and `repair` stay ineligible. The consumer is hivedev's
+read-only workspace audit.
+
+The mutating verbs are admitted only while the task carries `ERROR
 reason=ensure_clean_on_exit_failed`, the current execute contract's `ERROR
 reason=dirty_worktree`, or the historical `EXECUTE_WAITING
 reason=dirty_worktree`, and they run under the task lock:
@@ -306,6 +333,32 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 - `Hive::Commands::Worktree` — inspects and repairs residue only through a strictly owned coding worktree pointer.
+
+## CLI serialization and exit codes
+
+`hive worktree --json` uses the shared envelope emitter with serialization
+policy `raise`: `JSON::GeneratorError` is raised and no fallback JSON document
+is emitted.
+
+| Code | Meaning |
+|---:|---|
+| 0 | Status or the guarded repair completed. |
+| 1 | A recovery-state invariant failed outside the typed categories below. |
+| 64 | The subcommand, target, strategy, path list, or message was invalid. |
+| 70 | Worktree ownership, Git, or clean-exit repair failed. |
+| 75 | The task lock was busy or freshness changed concurrently. |
+| 78 | Project/workflow configuration was invalid. |
+
+## Examples
+
+Use `hive worktree status TASK --json` to inspect owned residue. A guarded
+repair is explicit, for example
+`hive worktree repair TASK --strategy commit --json`.
+
+## JSON schema
+
+All machine-readable status and repair results use `hive-worktree.v1`, with
+`schema: "hive-worktree"` and `schema_version: 1` on success and error arms.
 
 ## Tests
 

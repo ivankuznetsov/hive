@@ -173,16 +173,26 @@ module AgentCliRuntime
             selected[key] = value.to_s
           end
         end
-        %w[
-          BUNDLE_BIN_PATH BUNDLE_GEMFILE GEM_HOME GEM_PATH RUBYLIB RUBYOPT
-        ].each { |key| selected[key] = nil }
         profile.env_bin_override_keys.each do |key|
           selected[key] = env[key].to_s unless env[key].to_s.empty?
         end
         request.credential_environment_keys.each do |key|
           selected[key] = env[key].to_s unless env[key].to_s.empty?
         end
-        selected.merge(request.environment).freeze
+        # The overlay is the only caller-supplied channel into the child
+        # environment. Filtering here keeps the denylist cleanup final even if
+        # a request is built with keys outside the validated overlay contract.
+        request.environment.each do |key, value|
+          next unless OPENCODE_OVERLAY_ENVIRONMENT_KEYS.include?(key)
+
+          selected[key] = value.to_s
+        end
+        # The denylist scrub must stay last: every caller-controlled channel
+        # above (credential keys, executable overrides, the overlay) copies
+        # selected values into the child environment, so no selection may
+        # reintroduce a scrubbed runtime injection key.
+        SCRUBBED_RUNTIME_ENVIRONMENT_KEYS.each { |key| selected[key] = nil }
+        selected.freeze
       end
       private_class_method :child_environment
 

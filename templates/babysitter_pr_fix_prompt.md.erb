@@ -14,23 +14,30 @@ Operate only inside the worktree above. Decide whether to rebase, merge,
 or leave the PR alone. Resolve conflicts, fix red CI, and when you push,
 use:
 
+Copy the commands below verbatim. The head branch name is interpolated
+shell-escaped and fully qualified (`refs/heads/…` for remote-side refs and
+`refs/remotes/origin/…` for the local tracking ref); never substitute the
+raw, unqualified name from above.
+
 ```sh
-git fetch origin <%= head_ref %>
-expected_sha=$(git rev-parse origin/<%= head_ref %>)
+set -e
+git fetch origin <%= head_ref_fetch_sh %>
+expected_sha=$(git rev-parse <%= head_ref_remote_sh %>)
 # … work on the PR …
-git fetch origin <%= head_ref %>
-current_sha=$(git rev-parse origin/<%= head_ref %>)
+git fetch origin <%= head_ref_fetch_sh %>
+current_sha=$(git rev-parse <%= head_ref_remote_sh %>)
 if [ "$expected_sha" != "$current_sha" ]; then
   echo "remote moved while we were working ($expected_sha -> $current_sha); aborting push" >&2
   exit 1
 fi
-git push --force-with-lease origin HEAD:<%= head_ref %>
+git push --force-with-lease=<%= head_ref_branch_sh %>:"$expected_sha" origin HEAD:<%= head_ref_branch_sh %>
 ```
 
-Abort instead of pushing if the `git rev-parse origin/<%= head_ref %>`
+Abort instead of pushing if the `git rev-parse <%= head_ref_remote_sh %>`
 SHA from your second fetch differs from the one captured immediately
 after the first fetch — that comparison is the authoritative
-remote-changed check; do not rely on judgement alone.
+remote-changed check. The explicit push lease also rejects a remote move
+after that comparison, even if a background fetch updates the tracking ref.
 
 <% if dry_run -%>
 Dry-run mode is active. Do not run git push, gh pr comment, gh pr edit,

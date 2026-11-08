@@ -42,7 +42,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     configure_owner!(owner: "") # claimable Hive web instance
     speed_up_daemon!
     @project = create_hive_project!("golden-app")
-    force_headless_claude!(@project)
+    configure_fake_claude_project!(@project)
     install_github_stub(login: "goldenpath")
     spawn_daemon!
   end
@@ -111,11 +111,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
     assert_selector "#status-grid"
 
     # --- Sample idea -------------------------------------------------------
-    fill_in "New idea", with: "Golden path sample idea"
+    idea_title = "Golden path sample idea"
+    fill_in "New idea", with: idea_title
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    slug_prefix = "golden-path-sample-idea-"
-    assert_selector ".task-row .task-slug", text: slug_prefix, wait: 10
+    assert_selector ".task-row a", text: idea_title, wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
@@ -125,7 +125,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Turbo may replace the grid row while the daemon advances the task. Read
     # the slug from the current DOM, then navigate directly instead of holding
     # a row element across live updates.
-    slug = task_slug_from_grid!(slug_prefix)
+    slug = task_slug_from_grid!(idea_title)
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[data-question-number='1']", wait: 45)
     assert_text "Ship the sample feature?"
@@ -150,7 +150,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
     # Wait for the durable PR-gate stage rather than its transient action
     # label: after promotion a fast daemon may immediately dispatch open-pr,
     # replacing "Ready to open PR" while the task remains at the same gate.
-    assert_selector ".stage-badge.stage-5", text: "open-pr", wait: 90
+    # The task page leads with a readable stage summary rather than a
+    # duplicate stage badge.
+    assert_selector "#workspace-summary .workspace-eyebrow", text: /\AOpen[- ]pr\z/i, wait: 90
 
     # The fake agent must satisfy the same bounded authoring contract as a real
     # open-PR agent. Otherwise the daemon immediately enters authoring recovery
@@ -175,7 +177,9 @@ class GoldenPathE2E < ApplicationSystemTestCase
   private
 
   # The status grid is Turbo-replaced while the daemon advances tasks. Read the
-  # slug from a single current-DOM query instead of retaining a Capybara element.
+  # slug from the task link in a single current-DOM query instead of retaining
+  # a Capybara element. The status grid intentionally shows task titles rather
+  # than duplicate slug metadata.
   def task_slug_from_grid!(identity, timeout: 10)
     identity_json = identity.to_json
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
@@ -184,7 +188,8 @@ class GoldenPathE2E < ApplicationSystemTestCase
         (() => {
           const rows = Array.from(document.querySelectorAll(".task-row"));
           const row = rows.find((node) => node.textContent.includes(#{identity_json}));
-          return row?.querySelector(".task-slug")?.textContent?.trim();
+          const link = row?.querySelector("a[href*='/tasks/']");
+          return link?.getAttribute("href")?.split("/").pop();
         })()
       JS
       return slug if slug && !slug.empty?
@@ -292,7 +297,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
                        "expires_in" => 900, "interval" => 2
                      ))
     token = http_ok(JSON.generate("access_token" => "gho_e2e"))
-    user = http_ok(JSON.generate("login" => login))
+    user = http_ok(JSON.generate("login" => login, "id" => 42))
     SessionsController.http_client = FakeGithubHttp.new(device: device, token: token, user: user)
   end
 
@@ -313,11 +318,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     File.write(path, data.to_yaml)
   end
 
-  def force_headless_claude!(project)
+  def configure_fake_claude_project!(project)
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "config.yml")
     data = YAML.safe_load_file(path)
     data["claude"] = (data["claude"] || {}).merge(
-      "mode" => "headless",
       # The fake CLI has no provider-owned settings file for identity
       # discovery. Pin the model so implementation ownership can be captured
       # before execute launches, just as a real explicit Claude selection is.

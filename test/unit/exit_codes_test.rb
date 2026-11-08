@@ -79,7 +79,7 @@ class ExitCodesTest < Minitest::Test
       needs_input recover_draft_pr recover_execute recover_review agent_running archived manual_steering error
       review_parked admission_error plan_reviewing plan_review_retry plan_review_decision
       plan_review_degraded plan_review_unsupported plan_review_blocked
-      patrol_fix_blocked patrol_fix_escalated patrol_fix_rejected
+      patrol_fix_blocked patrol_fix_escalated patrol_fix_rejected patrol_fix_publication_blocked
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort
   end

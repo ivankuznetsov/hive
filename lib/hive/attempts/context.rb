@@ -15,7 +15,7 @@ module Hive
       ENV_PREFIX = "HIVE_ATTEMPT_"
       attr_reader :attempt_id, :task_generation, :ownership_generation,
                   :project, :task_slug, :intended_stage, :routing,
-                  :progress_token, :proposal_binding
+                  :progress_token, :command_context, :remote_authority, :proposal_binding
 
       class << self
         def current
@@ -57,8 +57,12 @@ module Hive
           # not by a dedicated attempt-context override. This prevents supported
           # launch/inheritance paths from redirecting context installation; it
           # is not privilege separation from hostile same-UID process state.
-          record = Repository.open_default.fetch(attempt_id)
+          repository = Repository.open_default
+          record = repository.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
+          command_context = load_command_context(repository, record)
+          remote_authority = load_remote_authority(repository, record, command_context)
+          writable_command_context = writable_command_context(repository, command_context, remote_authority)
           evidence_writer = if record["routing"]["mode"] == "explicit"
             EvidenceChannel::Writer.for_fd(
               values["HIVE_ATTEMPT_EVIDENCE_FD"],
@@ -78,6 +82,8 @@ module Hive
             progress_token: record["progress_token"],
             proposal_binding: record.proposal_binding,
             routing: record["routing"],
+            command_context: writable_command_context,
+            remote_authority: remote_authority,
             evidence_writer: evidence_writer,
             diagnostic_writer: diagnostic_writer
           )
@@ -94,6 +100,67 @@ module Hive
         end
 
         private
+
+        def writable_command_context(repository, command_context, remote_authority)
+          return command_context unless remote_authority
+          receipt = repository.database.read do |db|
+            db[:command_receipts][receipt_id: command_context.receipt_id]
+          end
+          unless receipt && receipt.fetch(:principal) == command_context.principal &&
+                 receipt.fetch(:request_fingerprint) == command_context.request_fingerprint &&
+                 receipt.fetch(:state) == "succeeded" && receipt.fetch(:mode) == "remote"
+            raise RepositoryError, "remote admission receipt is not complete"
+          end
+          # The caller receipt completed durable admission. Its closed effect
+          # cannot become the later workflow's writable command boundary; the
+          # attempt journal owns execution and its persisted dispatch context
+          # remains the immutable receipt/principal reference.
+          nil
+        end
+
+        def load_remote_authority(repository, record, command_context)
+          require "hive/runtime_control_plane/dispatch_repository"
+          request = Hive::RuntimeControlPlane::DispatchRepository.new(database: repository.database).fetch(record["request_id"])
+          authority = request&.remote_authority
+          return nil unless authority
+          unless command_context && command_context.principal_source == "api_token" &&
+                 authority.is_a?(Hash) && authority["principal"] == command_context.principal &&
+                 authority["project"] == record["project"] && authority["slug"] == record["task_slug"] &&
+                 authority["task_id"].to_s == record["task_id"].to_s && authority["effect"].is_a?(Hash) &&
+                 authority.dig("effect", "force") == false
+            raise RepositoryError, "remote dispatch authority does not match the admitted command"
+          end
+          authority
+        end
+
+        def load_command_context(repository, record)
+          request_id = record["request_id"].to_s
+          return nil if request_id.empty?
+          tagged = request_id.start_with?("command-dispatch:v1:")
+          row = repository.respond_to?(:database) && repository.database.read do |db|
+            unless db.table_exists?(:command_dispatch_contexts)
+              raise RepositoryError, "tagged command dispatch context schema is unavailable" if tagged
+              next nil
+            end
+            db[:command_dispatch_contexts][request_id: request_id]
+          end
+          unless row
+            raise RepositoryError, "tagged command dispatch is missing authenticated context" if tagged
+            return nil
+          end
+          unless row.fetch(:source_identity) == request_id
+            raise RepositoryError, "command dispatch context source identity mismatch"
+          end
+          require "hive/command_operation"
+          Hive::CommandOperation::Context.new(
+            receipt_id: row.fetch(:receipt_id), effect_id: row.fetch(:effect_id),
+            principal: row.fetch(:principal), principal_source: row.fetch(:principal_source),
+            ordinal: row.fetch(:ordinal), receipt_generation: row.fetch(:receipt_generation),
+            request_fingerprint: row.fetch(:request_fingerprint),
+            transport_request_id: row.fetch(:source_identity),
+            retry_horizon_expires_at: row[:retry_horizon_expires_at]
+          )
+        end
 
         def validate_record!(record, attempt_id:, argv:, claim_capability:)
           raise RepositoryError, "attempt #{attempt_id} is unavailable" unless record
@@ -130,11 +197,18 @@ module Hive
           require "hive/workflows"
           verb = argv[1].to_s
           evidence_rework = verb == "evidence" && argv[2].to_s == "rework"
-          target = argv[evidence_rework ? 3 : 2].to_s
+          target = argv[evidence_rework || verb == "act" ? 3 : 2].to_s
+          if verb == "act"
+            project, target = target.split(":", 2)
+            raise RepositoryError, "remote action project does not match admission" unless project == record["project"]
+          end
           raise RepositoryError, "attempt worker command has no task target" if verb.empty? || target.empty?
 
           task = Hive::TaskResolver.new(target, project_filter: record["project"]).resolve
-          intended_stage = if evidence_rework || %w[run approve plan-review-run].include?(verb)
+          intended_stage = if verb == "act"
+            require "hive/operational_action"
+            Hive::OperationalAction.intended_stage_for(task, action_id: argv[2])
+          elsif evidence_rework || %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
             Hive::Workflows.for_verb(verb).fetch(:target)
@@ -184,7 +258,8 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil,
                      routing: { "mode" => "legacy" }, evidence_writer: nil,
                      diagnostic_writer: nil,
-                     progress_token: nil, proposal_binding: nil)
+                     progress_token: nil, command_context: nil, remote_authority: nil,
+                     proposal_binding: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = Integer(task_generation)
         @ownership_generation = ownership_generation&.to_s
@@ -193,6 +268,8 @@ module Hive
         @intended_stage = intended_stage&.to_s
         @progress_token = progress_token&.to_s
         @routing = deep_freeze(Hive::StringifyKeys.call(routing))
+        @command_context = command_context
+        @remote_authority = remote_authority && deep_freeze(Hive::StringifyKeys.call(remote_authority))
         @proposal_binding = if proposal_binding
           deep_freeze(Hive::StringifyKeys.call(proposal_binding))
         end

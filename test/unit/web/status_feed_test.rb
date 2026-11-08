@@ -8,6 +8,91 @@ require "hive/web/status_feed"
 class StatusFeedTest < Minitest::Test
   include HiveTestHelper
 
+  def test_feed_drops_plan_review_route_history_but_keeps_retry_target
+    review = { "state" => "retry_scheduled", "observation_digest" => "current",
+      "routes" => [ { "role" => "primary", "outcome" => "timeout", "attempt_id" => "retry-this" } ] }
+    payload = { "projects" => [ { "name" => "demo", "tasks" => [ { "plan_review" => review } ] } ] }
+    feed = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([ payload ]))
+
+    actual = feed.snapshot_state.payload.dig("projects", 0, "tasks", 0, "plan_review")
+
+    refute actual.key?("routes")
+    assert_equal "retry-this", actual["retry_attempt_id"]
+    assert_equal "current", actual["observation_digest"]
+    assert_equal 1, review.fetch("routes").length, "the native producer must remain unchanged"
+  end
+
+  def test_saved_snapshot_is_available_without_scan_and_refreshes_immediately_in_background
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      old = { "projects" => [ { "name" => "old", "path" => "/old", "tasks" => [] } ] }
+      fresh = old.merge("refreshed" => true)
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ { "name" => "old", "path" => "/old" } ] }) do
+        first = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([ old ]), snapshot_store: store)
+        saved = first.snapshot_state
+        producer = ControlledStatus.new
+        feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store, interval: 60)
+        assert_equal old, feed.current_state.payload
+        assert_equal "cached", feed.current_state.availability
+        assert_equal saved.last_success_at, feed.current_state.last_success_at
+        assert_equal 0, feed.scan_count
+        states = Queue.new
+        subscriber = Thread.new { feed.each_state { |state| states << state } }
+        begin
+          assert_equal "cached", Timeout.timeout(2) { states.pop }.availability
+          producer.wait_until_started
+          assert_equal old, feed.current_state.payload, "slow refresh must not block cached reads"
+          producer.release(fresh)
+          updated = Timeout.timeout(2) { states.pop }
+          assert_equal "fresh", updated.availability
+          assert_equal fresh, updated.payload
+          assert_equal fresh, store.read.fetch("payload")
+        ensure
+          subscriber&.kill
+          subscriber&.join
+          stop_controlled_feed(feed, producer)
+        end
+      end
+    end
+  end
+
+  def test_refresh_failure_keeps_saved_data_and_a_later_refresh_recovers
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      payload = { "projects" => [] }
+      saved_at = "2026-07-25T12:00:00Z"
+      store.write(payload, last_success_at: saved_at)
+      producer = CountingStatus.new([ payload ])
+      feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store)
+      with_replaced_singleton_method(producer, :json_payload, ->(*) { raise IOError, "offline" }) do
+        capture_io { feed.snapshot_state }
+      end
+      assert_equal "degraded", feed.current_state.availability
+      assert_equal payload, feed.current_state.payload
+      assert_equal saved_at, store.read.fetch("last_success_at")
+      assert_equal "fresh", feed.snapshot_state.availability
+      refute_equal saved_at, store.read.fetch("last_success_at")
+    end
+  end
+
+  def test_registry_change_during_scan_cannot_label_old_rows_with_new_registry
+    Dir.mktmpdir do |dir|
+      store = Hive::Web::StatusSnapshotStore.new(path: File.join(dir, "status.json"))
+      registry = [ { "name" => "old", "path" => "/old" } ]
+      producer = CountingStatus.new([ { "projects" => [ { "name" => "old", "path" => "/old", "tasks" => [] } ] } ])
+      original = producer.method(:json_payload)
+      producer.define_singleton_method(:json_payload) do |projects|
+        registry = []
+        original.call(projects)
+      end
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { registry }) do
+        feed = Hive::Web::StatusFeed.new(status_command: producer, snapshot_store: store)
+        feed.snapshot_state
+        assert_nil store.read, "rows scanned before removal must not match the new registry"
+      end
+    end
+  end
+
   # Counts json_payload invocations and serves a script of snapshots so a
   # test can prove the shared poller scans ONCE per tick regardless of how
   # many subscribers are attached. `json_payload` is the single seam through
@@ -150,6 +235,30 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_default_source_keeps_archive_out_of_routine_transport
+    with_tmp_global_config do |home|
+      root = File.join(home, "demo")
+      hive_state = File.join(root, ".hive-state")
+      folder = File.join(hive_state, "stages", "9-done", "completed-task")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(hive_state, "config.yml"), Hive::Config::DEFAULTS.to_yaml)
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: "completed-task", display_name: nil, completed_at: Time.now.utc)
+      project = { "name" => "demo", "path" => root, "hive_state_path" => hive_state }
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [ project ] }.to_yaml)
+      feed = Hive::Web::StatusFeed.new
+
+      ordinary = feed.snapshot.fetch("projects").fetch(0)
+      assert_empty ordinary.fetch("tasks")
+      assert_equal 0, ordinary.fetch("hidden_archived_task_count", 0)
+      archive = feed.archive_snapshot.fetch("projects").fetch(0)
+      assert_equal [ "completed-task" ], archive.fetch("tasks").map { |row| row.fetch("slug") }
+      assert_empty feed.snapshot.fetch("projects").fetch(0).fetch("tasks")
+    ensure
+      feed&.stop
+    end
+  end
+
   def test_default_feed_uses_the_bounded_status_command
     feed = Hive::Web::StatusFeed.new
 
@@ -225,6 +334,39 @@ class StatusFeedTest < Minitest::Test
     assert_equal 0, source.calls
   ensure
     feed&.stop
+  end
+
+  def test_dependency_context_reads_do_not_wait_for_a_fleet_refresh
+    [ nil, { context: Object.new, fingerprint: "previous" }.freeze ].each do |previous|
+      started = Queue.new
+      release = Queue.new
+      source = RecordingSource.new
+      source.instance_variable_set(:@dependency_snapshot, previous)
+      source.define_singleton_method(:refresh_payload_now) do
+        started << true
+        @dependency_snapshot = release.pop
+        { "projects" => [] }
+      end
+      command = Hive::Web::CachedStatusCommand.new(source: source)
+      feed = Hive::Web::StatusFeed.new(status_command: command)
+      refresh = Thread.new { command.json_payload([]) }
+      Timeout.timeout(2) { started.pop }
+
+      observed = Timeout.timeout(2) { feed.dependency_context_snapshot }
+      if previous
+        assert_same previous, observed, "readers must see the last completed publication"
+      else
+        assert_nil observed, "first refresh must not block readers either"
+      end
+      current = { context: Object.new, fingerprint: "current" }.freeze
+      release << current
+      Timeout.timeout(2) { refresh.value }
+      assert_same current, feed.dependency_context_snapshot
+    ensure
+      refresh&.kill
+      refresh&.join
+      feed&.stop
+    end
   end
 
   def test_cached_status_command_delegates_recovery_join_with_the_cached_payload
@@ -528,7 +670,7 @@ class StatusFeedTest < Minitest::Test
     ensure
       threads&.each(&:kill)
       threads&.each { |thread| thread.join(2) }
-      feed&.stop
+      stop_controlled_feed(feed, status)
     end
   end
 
@@ -710,21 +852,22 @@ class StatusFeedTest < Minitest::Test
         interval: 5.0,
         status_command: CountingStatus.new([ { "projects" => [] } ])
       )
+      feed.prime({ "projects" => [] })
       feed.each_snapshot { break }
       poller = feed.instance_variable_get(:@poller)
-      kill_requested = Queue.new
-      release_kill = Queue.new
-      original_kill = poller.method(:kill)
-      poller.define_singleton_method(:kill) do
-        kill_requested << true
-        release_kill.pop
-        original_kill.call
+      join_requested = Queue.new
+      release_join = Queue.new
+      original_join = poller.method(:join)
+      poller.define_singleton_method(:join) do
+        join_requested << true
+        release_join.pop
+        original_join.call
       end
 
       stopper = Thread.new { feed.stop }
-      Timeout.timeout(2) { kill_requested.pop }
+      Timeout.timeout(2) { join_requested.pop }
       claimed_token = feed.prime({ "projects" => [ { "name" => "new lifecycle" } ] })
-      release_kill << true
+      release_join << true
       stopper.join(2)
 
       refute stopper.alive?
@@ -734,7 +877,7 @@ class StatusFeedTest < Minitest::Test
       refute feed.current_version?(competing_token),
              "a competing render must not replace that preserved claim"
     ensure
-      release_kill << true if release_kill&.empty?
+      release_join << true if release_join&.empty?
       stopper&.join(2)
       feed&.stop
     end
@@ -984,6 +1127,210 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_restarting_after_stop_refreshes_immediately_without_blocking_the_saved_state
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      first = Thread.new { feed.each_state { |state| break state } }
+      assert_equal previous, Timeout.timeout(2) { first.value }.payload
+      feed.stop
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      assert_equal previous, feed.current_state.payload, "returning pages can read the saved frame while refreshing"
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+
+      another = Thread.new { feed.each_state { |state| break state } }
+      assert_equal updated, Timeout.timeout(2) { another.value }.payload
+      assert_equal 1, producer.calls, "additional visible subscribers share the resumed refresh"
+      assert_equal 1, producer.max_active
+    ensure
+      [ first, subscriber, another ].compact.each do |thread|
+        thread.kill
+        thread.join
+      end
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_repeated_stop_and_resume_share_the_in_flight_refresh_which_can_publish_while_paused
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      feed.each_state { break }
+      feed.stop
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      poller = feed.instance_variable_get(:@poller)
+
+      3.times do
+        subscriber.kill
+        subscriber.join
+        Timeout.timeout(2) { feed.stop }
+        assert poller.alive?, "hiding the last page must let its active refresh finish"
+
+        subscriber = Thread.new { feed.each_state { |state| states << state } }
+        assert_equal previous, Timeout.timeout(2) { states.pop }.payload,
+                     "returning pages receive retained data while sharing the unfinished scan"
+        assert_equal 1, feed.scan_count
+      end
+
+      subscriber.kill
+      subscriber.join
+      Timeout.timeout(2) { feed.stop }
+      producer.release(updated)
+      poller.join(2)
+
+      refute poller.alive?, "a paused feed must stop after publishing its active scan"
+      assert_equal updated, feed.current_state.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 1, feed.scan_count, "stopping must prevent another recurring scan"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_cold_refresh_survives_losing_its_subscriber_and_finishes_while_paused
+    with_tmp_global_config do
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      subscriber = Thread.new { feed.each_state { break } }
+      producer.wait_until_started
+      poller = feed.instance_variable_get(:@poller)
+
+      subscriber.kill
+      subscriber.join
+      Timeout.timeout(2) { feed.stop }
+      producer.release(updated)
+      poller&.join(2)
+
+      refute_nil feed.current_state, "the first scan must outlive the broadcaster that requested it"
+      assert_equal updated, feed.current_state.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 1, feed.scan_count
+      refute poller.alive?, "finishing the initial scan must not start hidden-page polling"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+    end
+  end
+
+  def test_resuming_during_poller_retirement_preserves_a_new_prime_and_starts_refreshing
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      primed = { "projects" => [ { "name" => "new lifecycle" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 60, status_command: producer)
+      feed.prime(previous)
+      feed.each_state { break }
+      feed.stop
+      feed.each_state { break }
+      producer.wait_until_started
+      retiring = feed.instance_variable_get(:@poller)
+      feed.stop
+
+      retired = Queue.new
+      release_retirement = Queue.new
+      original_wait = feed.method(:wait_for_next_poll)
+      feed.define_singleton_method(:wait_for_next_poll) do
+        keep_polling = original_wait.call
+        if Thread.current.equal?(retiring) && !keep_polling
+          retired << true
+          release_retirement.pop
+        end
+        keep_polling
+      end
+      producer.release(previous)
+      Timeout.timeout(2) { retired.pop }
+
+      claimed_token = feed.prime(primed)
+      assert feed.current_version?(claimed_token),
+             "a finishing poller must release its ownership before leaving the monitor"
+      release_retirement << true
+      retiring.join(2)
+      refute retiring.alive?
+      competing_token = feed.prime({ "projects" => [] })
+      refute feed.current_version?(competing_token), "retirement must not clear the new page's claim"
+
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal primed, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+      assert_equal 2, producer.calls
+      assert_equal 1, producer.max_active
+    ensure
+      release_retirement << true if release_retirement&.empty?
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+      retiring&.join(2)
+      retiring&.kill
+      retiring&.join
+    end
+  end
+
+  def test_unexpected_poller_exit_releases_its_page_claim_and_allows_a_replacement_subscription
+    with_tmp_global_config do
+      previous = { "projects" => [ { "name" => "previous" } ] }
+      primed = { "projects" => [ { "name" => "replacement page" } ] }
+      updated = { "projects" => [ { "name" => "updated" } ] }
+      producer = ControlledStatus.new
+      feed = Hive::Web::StatusFeed.new(interval: 0.01, status_command: producer)
+      feed.prime(previous)
+      states = Queue.new
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal previous, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+
+      lost_poller = feed.instance_variable_get(:@poller)
+      lost_poller.kill
+      lost_poller.join
+      subscriber.kill
+      subscriber.join
+      assert_equal previous, feed.current_state.payload, "worker loss must retain the latest complete snapshot"
+      assert_equal 0, producer.calls, "the interrupted producer did not publish a result"
+      page_token = feed.prime(primed)
+      assert feed.current_version?(page_token), "the failed lifecycle must release its page's baseline claim"
+
+      subscriber = Thread.new { feed.each_state { |state| states << state } }
+      assert_equal primed, Timeout.timeout(2) { states.pop }.payload
+      producer.wait_until_started
+      feed.stop
+      producer.release(updated)
+      assert_equal updated, Timeout.timeout(2) { states.pop }.payload
+      assert_equal 1, producer.calls
+      assert_equal 1, producer.max_active
+      assert_equal 2, feed.scan_count, "one replacement scan must recover from the aborted scan"
+    ensure
+      subscriber&.kill
+      subscriber&.join
+      stop_controlled_feed(feed, producer)
+      lost_poller&.kill
+      lost_poller&.join
+    end
+  end
+
   def test_state_serializes_every_public_field
     state = Hive::Web::StatusFeed::State.new(
       payload: { "projects" => [] },
@@ -1041,6 +1388,19 @@ class StatusFeedTest < Minitest::Test
   end
 
   private
+
+  # Production stop lets an in-flight scan finish. Test producers can block
+  # indefinitely, so release their barrier and drain the worker before the
+  # temporary Hive home is removed, including when an assertion fails.
+  def stop_controlled_feed(feed, producer)
+    poller = feed&.instance_variable_get(:@poller)
+    feed&.stop
+    producer&.release({ "projects" => [] })
+    poller&.join(2)
+  ensure
+    poller&.kill
+    poller&.join
+  end
 
   def status_token_in_fresh_process(payload)
     lib = File.expand_path("../../../lib", __dir__)

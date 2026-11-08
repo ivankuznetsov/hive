@@ -1,10 +1,10 @@
 ---
 title: hive setup
 type: command
-source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
+source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/runtime_control_plane/dogfood_rollback_deployment.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-08-30
-tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter]
+updated: 2026-11-07
+tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter, receipts]
 ---
 
 **TLDR**: `hive setup` is the normal native Linux/macOS first run. It checks
@@ -19,7 +19,43 @@ non-TTY setup requires `--yes` and otherwise performs no mutation. Human and
 
 ## Surface
 
-`hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes]`
+`hive setup [--json] [--service|--no-service] [--no-bootstrap] [--no-init] [--yes] [--install-command-receipts]`
+
+Ordinary setup creates or validates the current base schema v2 only. The default-false
+`--install-command-receipts` flag separately requests the additive command
+receipt extension. `--yes` never implies it, and enabling a namespace intake
+gate never implies it. Release-channel builds have no pinned published
+rollback package yet (issue #1550) and refuse this opt-in with CONFIG before
+any setup mutation; use `hive setup` or `hive setup --yes` without the flag for
+base-only installation or service refresh until the compatibility package is
+published.
+
+On the dogfood channel (`HIVE_RUNTIME_CHANNEL=dogfood` with a valid
+`HIVE_RUNTIME_BUILD_SHA` and `HIVE_RUNTIME_DEPLOYMENT_ID`, as exported by
+`hive-dogfood-entrypoint`) the rollback target is instead the previous retained
+dogfood deployment, resolved by
+`Hive::RuntimeControlPlane::DogfoodRollbackDeployment`. Setup scans the
+directory that holds the running deployment (`~/.local/state/hive/deployments/`)
+for `hive-dogfood-<sha9>` checkouts and picks the newest one by commit time
+that:
+
+- is a different build: its `HEAD` is a readable commit matching its directory
+  name and is not the running build, and it is not newer than the running build;
+- is clean (no modified tracked files) and has an executable `bin/hive`;
+- is receipt-aware: its source pins the same command receipt schema
+  (`CommandSchema::VERSION` and `EXPECTED_SCHEMA_SHA256` in
+  `command_schema.rb`, plus `002_add_command_receipts.rb`, introduced by #1494)
+  and the same base runtime schema (`RuntimeControlPlane::SCHEMA_VERSION`,
+  `EXPECTED_SCHEMA_SHA256` in `database.rb`), so it opens the database this
+  installation produces.
+
+The chosen deployment is pinned by a `bin/hive+lib` digest: sha256 over a
+sorted manifest of `<file sha256> <relative path>` lines for `bin/hive` and
+every file under `lib/` (symlinks hash their target). The digest is recomputed
+before the transaction; a drifted or deleted deployment refuses. With no
+eligible deployment, setup refuses with CONFIG and names every rejected
+deployment by reason (same build, pre-receipt, different schema, modified,
+newer, no executable, unreadable). The release channel is unchanged.
 
 `--yes` accepts the revalidated plan for unattended operation. It does not
 bypass conflicts or let Hive replace user-owned agent skills. Without
@@ -31,7 +67,7 @@ project mutation. Its diagnostics phase is explicitly marked `skipped: true`
 with reason `consent_required`.
 
 On consented runs and explicit `--no-bootstrap` diagnosis, the diagnostic phase
-checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm, QMD, the managed web
+checks Ruby 3.4, git, `gh`, Claude, Codex, Node/npm, QMD, the managed web
 bundle, and SQLite through `Hive::Setup::Diagnostics`. Missing QMD and
 missing/stale managed web bundles are bootstrappable; hard failures still make
 the command fail even when all provisioning phases succeed.
@@ -58,12 +94,24 @@ Without `--no-bootstrap`, setup provisions in this order:
    `Hive::Web::AppBundle.ensure!`.
 4. Initialize or enroll the current project unless `--no-init` is passed. If
    the project is already initialized, setup enables it for daemon dispatch.
-5. Explicitly activate a verified empty SQLite runtime control plane through
-   the same manifest/candidate protocol as fleet cutover, but only when the
-   installation is genuinely fresh. An existing healthy database is observed;
-   legacy state directs to `hive migrate --all`, while a corrupt, partial, or
-   wrong-identity database fails the phase. No ordinary runtime open creates or
-   migrates the database.
+5. Explicitly initialize the current SQLite runtime through `Installation.setup`.
+   Setup publishes a complete private database once; an existing healthy database
+   is validated and retained. Unsupported, corrupt or wrong-identity storage is
+   refused. There are no cutover manifests or automatic historical imports.
+   When and only when `--install-command-receipts` was explicitly accepted,
+   setup first proves daemon, babysitter, and web writers stopped under the
+   activation lock, validates the pinned published compatibility package (or,
+   on dogfood, re-verifies the resolved rollback deployment digest), and adds
+   the receipt tables/indexes in one transaction. Failure stops all later
+   daemon/babysitter/web provisioning. The `runtime_control_plane` phase
+   reports the coordinates under `rollback_package` (release:
+   `version`/`location`/`sha256`; dogfood: `kind: dogfood_deployment`,
+   `deployment_id`, `path`, `build_sha`, `committed_at`, `digest_scope`,
+   `sha256`) and the install result under `command_receipts`. A fresh install
+   writes `command-receipts-installation.json` (mode 0600,
+   `hive-command-receipts-installation.v1`) beside the runtime database with
+   the same rollback coordinates, the runtime identity, and the receipt schema
+   digest; later runs report that original record back unchanged.
 6. Run `hive daemon install` semantics through
    `Hive::Commands::Daemon::ServiceInstaller` with autostart, forced template
    refresh, and the same `Hive::InvokedBinary.path` used to invoke setup. The
@@ -81,7 +129,8 @@ Without `--no-bootstrap`, setup provisions in this order:
 
 `--no-service` performs no web-service mutation: it may report a pre-existing
 unit read-only but never installs, enables, starts, stops, or disables it.
-`--no-bootstrap` is diagnose-only and wins over service flags: it skips agent
+`--no-bootstrap` is diagnose-only and wins over service and receipt-install
+flags: it skips agent
 skills, QMD/web-bundle provisioning, daemon/babysitter/web service installation, and
 project enrollment. It still appends the informational `web` phase with the
 configured URL. `--no-init` only suppresses project enrollment. Default
@@ -164,6 +213,10 @@ schema rather than a separate pre-dispatch contract. These pre-dispatch errors
 also carry `mode`, effective `url`, migration `warnings`, and the observed
 service lifecycle so automation does not lose semantic context on failures.
 
+The final setup document is encoded directly. A serialization failure is not
+replaced with prose or a fallback JSON document; it propagates rather than
+reporting a successful setup without its contract.
+
 ## Web Bundle
 
 The managed web app lives under `Hive::Paths.web_app_home` and is version-stamped with `.hive-web-version`. `Hive::Web::AppBundle.ensure!` refreshes when the bundle is missing, when the stamp differs from `Hive::VERSION`, or when the compiled asset manifest is missing/broken; this keeps a CLI upgrade from continuing to serve an old or assetless Rails app. `HIVE_WEB_APP_DIR` is the canonical operator-managed override. The deprecated `HIVEBOX_WEB_APP_DIR` alias still works through the next major release and emits migration guidance.
@@ -180,12 +233,33 @@ service. That process is drained through the normal ownership-aware stop path;
 an unverified or failed stop makes the `babysitter_service` phase fail instead
 of reporting supervision while two processes compete for the same PID file.
 
-The web service is separate from the daemon. `hive web install` writes `~/.config/systemd/user/hive-web.service` on Linux or `~/Library/LaunchAgents/local.hive-web.plist` on macOS and pins all six resolved `HIVE_WEB_*` values into the unit; unsupported platforms report a platform exception instead of constructing invalid service-manager argv. When setup receives the installer's successful `unsupported` outcome (including Linux without systemd-user), its service fields remain observationally exact (`enabled`, `running`, and `ready` stay false with `readiness: manager_unavailable`), but the platform-exception phases and process exit remain successful and report foreground `hive web`, WSL-systemd, and Hivebox recovery paths. A genuine install failure, drifted unit, or active-but-not-ready service remains nonzero. Ordinary setup preserves a drifted user-customized unit and points to explicit `hive web install --force` repair. Repeated macOS setup skips `launchctl load` when an unchanged plist is already loaded. Shared installers expose read-only enabled/running probes; mutating setup/install resamples asynchronous launchd lifecycle state before Hive web probes the manager-owned local bind for bounded `/health` readiness, while read-only status stays immediate and reports the separately advertised effective origin. Windows has no separate native service manager in this contract: use WSL with systemd or Hivebox.
+The web service is separate from the daemon. `hive web install` writes `~/.config/systemd/user/hive-web.service` on Linux or `~/Library/LaunchAgents/local.hive-web.plist` on macOS and pins all six resolved `HIVE_WEB_*` values into the unit; unsupported platforms report a platform exception instead of constructing invalid service-manager argv. When setup receives the installer's successful `unsupported` outcome (including Linux without systemd-user), its service fields remain observationally exact (`enabled`, `running`, and `ready` stay false with `readiness: manager_unavailable`), but the platform-exception phases and process exit remain successful and report foreground `hive web` and WSL-systemd recovery paths. A genuine install failure, drifted unit, or active-but-not-ready service remains nonzero. Ordinary setup preserves a drifted user-customized unit and points to explicit `hive web install --force` repair. Repeated macOS setup skips `launchctl load` when an unchanged plist is already loaded. Shared installers expose read-only enabled/running probes; mutating setup/install resamples asynchronous launchd lifecycle state before Hive web probes the manager-owned local bind for bounded `/health` readiness, while read-only status stays immediate and reports the separately advertised effective origin. Windows has no separate native service manager in this contract: run native Hive inside WSL with systemd.
 
 The mutating web-install readiness window uses 40 samples at 250 ms intervals,
 so a cold packaged Rails boot can take roughly ten seconds without producing a
 false `active_not_ready` install failure. This longer window does not make
 `hive web status` block; status retains its single immediate health sample.
+
+## Examples
+
+Use `hive setup --yes --json` for an unattended managed setup, or
+`hive setup --no-bootstrap --json` for a read-only diagnostic pass.
+
+After a compatibility package is published and pinned by the build (or, on
+dogfood, while a previous receipt-aware deployment is retained),
+`hive setup --yes --install-command-receipts` explicitly changes the shared
+installation database. Even with all namespace intake gates disabled, every
+project/service using that database sees the added objects, and unmodified
+pre-compatibility binaries refuse it. Omitting the flag later retains both the
+extension and that compatibility consequence. See [[commands/receipt]] before
+enabling any project intake gate.
+
+## Output exceptions and exit codes
+
+`hive-setup.v1` records phase failures inside one document; pre-dispatch usage
+errors retain that schema. Success exits `0`, incomplete or failed setup exits
+`1`, invalid arguments or missing non-interactive consent exit `64`, and an
+invalid global/project configuration exits `78`.
 
 ## Backlinks
 

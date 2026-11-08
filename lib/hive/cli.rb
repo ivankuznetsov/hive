@@ -1,14 +1,31 @@
 require "json"
+require "digest"
 require "thor"
 require "hive/plan_review"
 require "hive/stages"
 require "hive/workflows/registry"
 require "hive/task_closure_contract"
+require "hive/cli_receipt_options"
 
 module Hive
   class CLI < Thor
     def self.exit_on_failure?
       true
+    end
+
+    # Programmatic callers get the same target boundary as the executable.
+    # bin/hive performs it earlier, before runtime registration and repair.
+    def self.start(given_args = ARGV, config = {})
+      require "hive/remote/command_policy"
+      require "hive/remote/dispatcher"
+      return super if Hive::Remote::CommandPolicy.current_invocation
+
+      contexts = Hive::Remote::Dispatcher.contexts
+      invocation = Hive::Remote::CommandPolicy.preflight!(given_args, contexts: contexts,
+        dispatcher: Hive::Remote::Dispatcher.new(contexts: contexts))
+      return invocation.result if invocation.handled?
+
+      Hive::Remote::CommandPolicy.with_invocation(invocation) { super(invocation.argv, config) }
     end
 
     # Stage vocabulary embedded in `--from`/`--to`/`--stage` option help so
@@ -46,8 +63,50 @@ module Hive
     # document mode because it is a stream; use its --json-lines option.
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
+    class_option :context, type: :string, desc: "use named installation context for this invocation"
 
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
+
+    desc "context [ACTION] [NAME]", "Add, list, select, or inspect installation contexts"
+    long_desc <<~DESC
+      Add a verified HTTPS installation with:
+        hive context add NAME --url https://hive.example --token-stdin
+
+      Use `hive context list`, `hive context show [NAME]`, and
+      `hive context use NAME` to inspect or select a target. Show/use display
+      fresh scopes, project limits and expiry. The reserved local target uses
+      unrestricted local operator authority. `--context NAME` overrides the
+      saved selection for one invocation. Context configuration works before
+      local Hive setup and never accepts a bearer as a literal argument.
+    DESC
+    option :url, type: :string, desc: "HTTPS installation URL (context add only)"
+    option :token_stdin, type: :boolean, default: false, desc: "read the bearer from stdin (context add only)"
+    def context(action = "list", name = nil)
+      require "hive/commands/context"
+      require "hive/remote/dispatcher"
+      Hive::Commands::Context.new(action, name, url: options[:url], token_stdin: options[:token_stdin],
+        json: options[:json], contexts: Hive::Remote::Dispatcher.contexts).call
+    end
+
+    desc "token [ACTION] [ID]", "Create, list, or revoke server-local API tokens"
+    option :scopes, type: :string, desc: "comma-separated independent read,create,act,answer scopes"
+    option :projects, type: :string, desc: "comma-separated exact registered project names"
+    option :all_projects, type: :boolean, default: false, desc: "explicitly grant every registered project"
+    option :name, type: :string, desc: "token display name"
+    option :expires_at, type: :string, desc: "absolute expiry timestamp"
+    def token(action = "list", id = nil)
+      require "hive/commands/token"
+      Hive::Commands::Token.new(action, id, scopes: options[:scopes], projects: options[:projects],
+        all_projects: options[:all_projects], name: options[:name] || "personal",
+        expires_at: options[:expires_at], json: options[:json]).call
+    end
+
+    desc "operation ID --project PROJECT", "Inspect a durable remote command and linked task progress"
+    option :project, type: :string, desc: "exact authorized project name"
+    def operation(id)
+      require "hive/commands/operation"
+      Hive::Commands::Operation.new(id, project: options[:project], json: options[:json]).call
+    end
 
     desc "version", "Print hive version"
     def version
@@ -78,17 +137,16 @@ module Hive
 
         0. Workflow (when >1 workflow is registered)             — default coding
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
-        2. Claude launch mode (project-global, tmux/headless)    — default tmux
-        3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
+        2. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
            (one of bypassPermissions/auto/default/acceptEdits/dontAsk/plan)
-        4. Development agent (drives 4-execute)                  — default codex
-        5. Review agents (multi-select over 3 default reviewers) — default all
-        6. Patrol PR review agents                               — default codex only
-        7. Triage bias (courageous / safetyist)                  — default courageous
-        8. Per-stage budget+timeout (10 stage/role pairs)        — default generous
-        9. Daemon enrollment                                     — default enabled
-       10. Hive babysitter enrollment                            — default enabled
-       11. Daemon autostart                                      — default disabled
+        3. Development agent (drives 4-execute)                  — default codex
+        4. Review agents (multi-select over 3 default reviewers) — default all
+        5. Patrol PR review agents                               — default codex only
+        6. Triage bias (courageous / safetyist)                  — default courageous
+        7. Per-stage budget+timeout (10 stage/role pairs)        — default generous
+        8. Daemon enrollment                                     — default enabled
+        9. Hive babysitter enrollment                            — default enabled
+       10. Daemon autostart                                      — default disabled
 
       Each prompt accepts a name (e.g. `codex`, `claude-ce-code-review`)
       OR a 1-based index. Blank input takes the default. Answer `n` at
@@ -107,7 +165,7 @@ module Hive
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
 
-        hive: using defaults — planning=claude, claude_mode=tmux,
+        hive: using defaults — planning=claude,
         claude_permission_mode=bypassPermissions, dev=codex, reviewers=all3,
         patrol_reviewers=codex-native-review, triage=courageous, limits=defaults,
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled
@@ -253,6 +311,40 @@ module Hive
       Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
     end
 
+    desc "receipt SUBCOMMAND [IDENTIFIER]", "Preview or perform durable command-receipt maintenance"
+    long_desc <<~DESC
+      Inspects or maintains durable idempotency receipts. Public prune previews
+      are read-only; destructive actions require --confirm plus the operation's
+      generation, evidence, force, or reason guard.
+
+      Subcommands: prune, retire, release-pin, abandon-batch, and enroll.
+      Orphaned-owner recovery is selected with `receipt retire --orphaned-owner`.
+      Receipt failures use exit 20 for conflicts, 21 for work
+      still in progress, 22 for unresolved outcomes, 75 for transient prune
+      contention or storage pressure, and 78 for configuration failures.
+
+      Examples:
+
+        hive receipt prune --project demo --json
+        hive receipt prune --namespace-id UUID --confirm --reason "capacity cleanup"
+        hive receipt retire RECEIPT --expected-generation 3 --settle-without-result --confirm --reason "operator reconciliation"
+        hive receipt release-pin PIN --expected-generation 1 --force --confirm --reason "caller intent closed"
+        hive receipt enroll --project demo --new-identity --previous-identity UUID --expected-generation 4 --confirm
+    DESC
+    Hive::CLIReceiptOptions.apply(self)
+    def receipt(subcommand, identifier = nil)
+      require "hive/commands/receipt"
+      Hive::Commands::Receipt.new(
+        subcommand, identifier, project: options[:project], namespace_id: options[:namespace_id],
+        expected_generation: options[:expected_generation], confirm: options[:confirm],
+        limit: options[:limit], cursor: options[:cursor], idempotency_key: options[:idempotency_key],
+        settle_without_result: options[:settle_without_result], orphaned_owner: options[:orphaned_owner],
+        evidence: options[:evidence], force: options[:force], reason: options[:reason],
+        new_identity: options[:new_identity], previous_identity: options[:previous_identity],
+        json: options[:json]
+      ).call
+    end
+
     desc "doctor", "Inspect managed agent skill health without changing agent state"
     long_desc <<~DESC
       Resolves the effective enabled stages, named reviewers, browser hooks,
@@ -314,7 +406,7 @@ module Hive
       ).call
     end
 
-    desc "setup-agents", "Provision managed skills for configured Claude, Codex, Pi, Grok, and OpenCode agents"
+    desc "setup-agents", "Provision managed skills for configured Claude, Codex, Pi, Grok, OpenCode, and Muse agents"
     long_desc <<~DESC
       Inspects every enabled, manifest-managed coding workflow capability,
       prints one aggregate plan of native commands and Hive-owned files, and
@@ -355,6 +447,8 @@ module Hive
                      desc: "install and start the managed Hive web service (use --no-service to opt out)"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
+    option :install_command_receipts, type: :boolean, default: false,
+              desc: "explicitly install the shared command-receipt schema; requires a published rollback package (dogfood: a retained previous receipt-aware deployment)"
     def setup
       require "hive/commands/setup"
       exit Hive::Commands::Setup.new(
@@ -362,6 +456,7 @@ module Hive
         service: options[:service],
         no_bootstrap: options[:no_bootstrap],
         no_init: options[:no_init],
+        install_command_receipts: options[:install_command_receipts],
         yes: options[:yes]
       ).call
     end
@@ -374,19 +469,16 @@ module Hive
         brew  → brew upgrade ivankuznetsov/hive/hive
         aur   → yay -Syu hive-bin (or paru when yay is unavailable)
         bash  → download the pinned install.sh to a tempfile, then run it
-        dev   → prints git pull && bundle install && hive migrate --all guidance
+        dev   → prints git pull && bundle install && hive runtime status guidance
 
-      Hive never guesses across channels. The package manager publishes the
-      candidate normally, then that installed binary runs the confirmed
-      `hive migrate --all --yes`. Once legacy authority is sealed the transition
-      is irreversible; an interrupted activation resumes forward with
-      `hive runtime resume`.
+      Hive never guesses across channels. After the package manager finishes,
+      the installed binary validates the current runtime with `hive runtime status`.
+      Historical formats require the standalone agent migration guide.
     DESC
     option :dry_run, type: :boolean, default: false, desc: "print the selected updater command without executing it"
-    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
     def update
       require "hive/commands/update"
-      Hive::Commands::Update.new(dry_run: options[:dry_run], confirm: options[:yes]).call
+      Hive::Commands::Update.new(dry_run: options[:dry_run]).call
     end
 
     desc "connect SERVICE", "Connect an external service (screenote)"
@@ -435,6 +527,44 @@ module Hive
       Hive::Commands::Disconnect.new(service, json: options[:json]).call
     end
 
+    desc "mcp SUBCOMMAND [SERVER]", "Import personal MCP servers into Hive's catalog, or sign an agent in to one"
+    long_desc <<~DESC
+      Hive-launched agents use only the MCP servers Hive grants them. `hive mcp
+      import` reads the servers configured in Codex, Claude, OpenCode, Pi and
+      Grok (names, transports, URLs and argv; credential values are never
+      copied) and writes the chosen ones to the global catalog
+      (`mcp.servers` in ~/.config/hive/config.yml). Grant them per project or
+      stage with `mcp: { use: [name] }`.
+
+        hive mcp import                    # interactive table and selection
+        hive mcp import --dry-run --json   # plan only, machine-readable
+        hive mcp import --all --yes        # every new server
+        hive mcp import --only linear,docs --yes
+        hive mcp import --all --update --yes   # also replace drifted entries
+        hive mcp login linear --agent codex    # sign Codex in for Hive launches
+
+      Without a terminal a write needs --all or --only plus --yes. Literal
+      credentials become environment-variable names the command lists for
+      export. `login` is interactive and supports codex and claude.
+
+      Exit codes: 0 success; 1 sign-in failed; 64 usage or consent required;
+      78 malformed global config.
+    DESC
+    option :all, type: :boolean, default: false, desc: "import every new server"
+    option :only, type: :string, desc: "comma-separated server names or row ids to import"
+    option :dry_run, type: :boolean, default: false, desc: "preview without writing"
+    option :yes, type: :boolean, default: false, desc: "write without asking"
+    option :update, type: :boolean, default: false, desc: "replace catalog entries whose source changed"
+    option :agent, type: :string, desc: "agent to sign in (login): codex or claude"
+    def mcp(subcommand = nil, server = nil)
+      require "hive/commands/mcp"
+      exit Hive::Commands::Mcp.new(
+        subcommand, server,
+        json: options[:json], all: options[:all], only: options[:only], dry_run: options[:dry_run],
+        yes: options[:yes], update: options[:update], agent: options[:agent]
+      ).call
+    end
+
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
     long_desc <<~DESC
       Stops and deregisters the per-user daemon service, removes hive config
@@ -456,32 +586,21 @@ module Hive
       ).call
     end
 
-    desc "migrate [PROJECT_PATH]", "Migrate legacy project config, task folders, and metadata"
-    option :all, type: :boolean, default: false,
-                 desc: "migrate global state and every registered project"
-    option :yes, type: :boolean, default: false, desc: "confirm the one-way runtime cutover"
-    option :exclude_project, type: :array, default: [],
-                             desc: "explicitly exclude a missing or retired registered project"
-    def migrate(project_path = nil)
-      if options[:all]
-        if project_path
-          raise Hive::UsageError, "hive migrate: PROJECT_PATH and --all are mutually exclusive"
-        end
+    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads)"
+    long_desc <<~DESC
+      Actions (all read-only; nothing is created, migrated, or repaired):
+        status      Validate the current runtime database (exit 1 when absent).
+        projects    List registered projects with their path, real_path and
+                    hive_state_path from the global registry.
+        payloads    List runtime payload references (kind, state, task/attempt
+                    id, relative_path and the absolute path resolved under the
+                    payload root). Missing storage reports phase "absent".
 
-        require "hive/commands/migrate_all"
-        Hive::Commands::MigrateAll.new(
-          confirm: options[:yes], exclusions: options[:exclude_project]
-        ).call
-      else
-        require "hive/commands/migrate"
-        Hive::Commands::Migrate.new(project_path || Dir.pwd).call
-      end
-    end
-
-    desc "runtime ACTION", "Inspect or resume an irreversible runtime cutover"
+      --json emits the hive-runtime-maintenance envelope.
+    DESC
     def runtime(action = "status")
       require "hive/commands/runtime"
-      Hive::Commands::Runtime.new(action, json: options[:json]).call
+      exit Hive::Commands::Runtime.new(action, json: options[:json]).call
     end
 
     desc "wiki SUBCOMMAND", "Manage generated wiki artifacts (compile-log)"
@@ -583,6 +702,7 @@ module Hive
         validate ID  Read and validate the normalized workflow graph without writes.
         commit ID    Commit a validated owner-authored graph under Hive's state lock.
         install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
+        install ID --from REPOSITORY      Import an owner-selected authored workflow from Git.
         list                              Inspect built-in, authored, and managed workflows.
         update NAME                       Diff and advance a managed package.
         remove NAME                       Disable a managed package for new tasks.
@@ -609,6 +729,8 @@ module Hive
                      desc: "for `publish`: semantic package version"
     option :expected_release_digest, type: :string,
                                          desc: "for `publish`: require the exact confirmed dry-run release digest"
+    option :from, type: :string, desc: "for `install ID`: import an authored workflow from a private or public Git repository"
+    option :ref, type: :string, desc: "for `install --from`: Git ref to resolve and record (default HEAD)"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -623,7 +745,8 @@ module Hive
         mapping_overrides: options[:mapping],
         input_bindings: options[:input_binding],
         version: options[:version],
-        expected_release_digest: options[:expected_release_digest]
+        expected_release_digest: options[:expected_release_digest],
+        from: options[:from], ref: options[:ref]
       ).call
     end
 
@@ -715,11 +838,13 @@ module Hive
       returns the original task after it moves stages, and rejects reuse for
       different input. Pair it with --json for the hive-new.v1 result.
 
-      --depends-on stacks this task on a prerequisite: the daemon holds
-      auto-advance until the prerequisite reaches the project's dependency
-      gate stage (8-finalize by default, configurable via
-      `dependency_gate_stage`). Use a prerequisite task id or slug for the
-      same project, or project:slug for an explicit cross-project dependency.
+      One --depends-on stacks this task on a prerequisite: the daemon holds
+      auto-advance until it reaches the project's configured dependency gate.
+      Repeat --depends-on to require every prerequisite. A repeated declaration
+      is scheduling-only, branches from the project default branch instead of
+      stacking, and requires every prerequisite to reach 9-done. Adding a
+      second occurrence changes the first edge to that list policy too. Use a
+      task id or slug, or project:slug for an explicit cross-project dependency.
 
       --base selects the GitHub base branch for a workflow whose terminal agent
       declares workspace: worktree and handoff: draft_pr. When omitted, Hive
@@ -736,12 +861,13 @@ module Hive
 
         hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
 
+        hive new myproj --depends-on api-task --depends-on ui-task "release export"
+
         hive new myproj --workflow content --idempotency-key creator:launch:v1 --json "write the launch post"
     DESC
-    option :depends_on, type: :string,
-                        desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
-                              "auto-advance until it reaches the dependency gate stage " \
-                              "(8-finalize by default)"
+    option :depends_on, type: :string, repeatable: true,
+                        desc: "repeat for scheduling-only prerequisites at 9-done; one occurrence " \
+                              "retains scalar stacking and the configured gate"
     option :base, type: :string,
                   desc: "base branch for a worktree/draft-PR workflow"
     option :workflow, type: :string, desc: workflow_option_desc
@@ -752,15 +878,23 @@ module Hive
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(
+      occurrences = Array(options[:depends_on])
+      declaration = occurrences.length == 1 ? occurrences.first : occurrences
+      declaration = nil if occurrences.empty?
+      result = Hive::Commands::New.new(
         project,
         text,
         base: options[:base],
-        depends_on: options[:depends_on],
+        depends_on: declaration,
         workflow: options[:workflow],
         idempotency_key: options[:idempotency_key],
         json: options[:json]
       ).call
+      if occurrences.length >= 2
+        warn "hive: note: multiple --depends-on values are scheduling-only, require 9-done, " \
+             "and this task branches from the project default without stacking on a prerequisite"
+      end
+      result
     end
     map "new" => :new_task
 
@@ -812,6 +946,18 @@ module Hive
     end
     map "rebase-status" => :rebase_status
 
+    desc "publication-reconcile TARGET", "Adopt an inspected PR revision into the local publication record (no push)"
+    option :project, type: :string, desc: "scope lookup to one registered project"
+    option :pr, type: :string, required: true, desc: "verified task PR URL"
+    option :head, type: :string, required: true, desc: "full inspected current PR HEAD"
+    def publication_reconcile(target)
+      require "hive/commands/publication_reconcile"
+      Hive::Commands::PublicationReconcile.new(
+        target, project: options[:project], pr: options[:pr], head: options[:head], json: options[:json]
+      ).call
+    end
+    map "publication-reconcile" => :publication_reconcile
+
     desc "worktree SUBCOMMAND TARGET", "Inspect or repair task-owned worktree residue"
     long_desc <<~DESC
       Subcommands:
@@ -857,6 +1003,7 @@ module Hive
         recover TARGET --generation SHA256 --recovery-digest SHA256
         rework TARGET --generation SHA256 --recovery-digest SHA256
         terminal NAME -- COMMAND...
+        server COMMAND -- ARGS...
         browser COMMAND [ARG...]
 
       Recovery is admitted only when both values match the current immutable
@@ -875,6 +1022,10 @@ module Hive
       `browser` is the controller-scoped agent-browser gateway. It exposes the
       issued origin and a closed interaction vocabulary while Hive confines
       screenshot and recording output to the current attempt.
+
+      `server` starts one repository executable on the issued application port
+      inside an attempt-owned credential-free sandbox and tears it down with
+      the capture session.
     DESC
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string,
@@ -897,6 +1048,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def brainstorm(target)
       run_stage_action("brainstorm", target)
     end
@@ -907,7 +1061,15 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :review_level, type: :string, enum: %w[standard mandatory],
                           desc: "raise this plan's minimum critique level (raise-only)"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def plan(target)
+      validate_retry_horizon_key!
+      if options[:review_level] && options[:idempotency_key]
+        raise Hive::UsageError,
+              "--review-level is a separate policy mutation and cannot be combined with --idempotency-key"
+      end
       if options[:review_level]
         require "hive/commands/plan_review"
         Hive::Commands::PlanReview.persist_raise_for_target!(
@@ -921,11 +1083,16 @@ module Hive
     desc "plan-review TARGET ACTION", "Apply a freshness-bound plan critique action"
     long_desc <<~DESC
       Applies one typed action to the current plan critique. Copy the review,
-      generation, policy, target, and observation identities from `hive status
-      --json`; stale or conflicting actions are rejected without mutation.
+      generation, policy, target, and observation identities from
+      `hive plan-review TARGET show --json` (read live from the task; `hive
+      status` may serve a daemon-cached snapshot); stale or conflicting actions
+      are rejected without mutation. Each successful action returns the next
+      observation digest.
 
-      Actions: approve-finding, answer-finding, waive-coverage,
-      downgrade-level, raise-level, retry, request-review.
+      Actions: show (read-only), approve-finding, answer-finding, waive-coverage,
+      downgrade-level, raise-level, retry, request-review, restart. `restart`
+      applies only to a stale review (its task generation, plan, or policy
+      changed) and starts a linked review for the current generation.
     DESC
     option :review_id, type: :string, desc: "current logical review id"
     option :task_generation, type: :string, desc: "current task/plan generation"
@@ -934,13 +1101,20 @@ module Hive
                                       desc: "current plan-review observation digest"
     option :target_fingerprint, type: :string,
                                 desc: "exact finding or coverage fingerprint"
-    option :answer, type: :string, desc: "answer for a manual finding"
+    option :answer, type: :string, desc: "answer for a manual finding, or the chosen alternative for a gated one"
     option :coverage, type: :string, desc: "named coverage item being waived"
     option :level, type: :string, enum: Hive::PlanReview::LEVELS,
                    desc: "new level for raise or audited downgrade"
     option :reason, type: :string, desc: "required reason for waiver or downgrade"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def plan_review(target, action)
+      if action.to_s == "show"
+        require "hive/commands/plan_review_show"
+        return Hive::Commands::PlanReviewShow.new(
+          target, project: options[:project], json: options[:json]
+        ).call
+      end
+
       require "hive/commands/plan_review"
       Hive::Commands::PlanReview.new(
         target, action, review_id: options[:review_id],
@@ -966,6 +1140,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def develop(target)
       run_stage_action("develop", target)
     end
@@ -974,6 +1151,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def open_pr(target)
       run_stage_action("open-pr", target)
     end
@@ -985,6 +1165,9 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def review(target = nil)
       if options[:pr]
         emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
@@ -993,6 +1176,12 @@ module Hive
         # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
         # rather than silently dropping the flag.
         emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
+        emit_review_usage_error(
+          "hive review: --idempotency-key is not valid with --pr; key the resulting task stage action"
+        ) if options[:idempotency_key]
+        emit_review_usage_error(
+          "hive review: --retry-horizon-expires-at is not valid with --pr"
+        ) if options[:retry_horizon_expires_at]
 
         require "hive/commands/adhoc_review"
         require "hive/commands/stage_action"
@@ -1024,6 +1213,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def artifacts(target)
       run_stage_action("artifacts", target)
     end
@@ -1032,6 +1224,9 @@ module Hive
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical stage action"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def finalize(target)
       run_stage_action("finalize", target)
     end
@@ -1048,15 +1243,27 @@ module Hive
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
-                    desc: "operator closure reason: already_delivered or superseded"
+                    desc: "operator closure reason: already_delivered, superseded or cancelled"
     option :evidence, type: :array,
                       desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
     option :successor, type: :string,
                        desc: "registered project:slug that supersedes this task"
     option :attestation, type: :string,
-                         desc: "operator statement for superseded/cross-repository delivery"
+                         desc: "operator reason for cancellation or superseded/cross-repository delivery"
+    option :yes, type: :boolean, default: false,
+                 desc: "confirm an evidence closure without the y/N prompt"
+    option :idempotency_key, type: :string,
+                             desc: "durably replay an identical targeted archive; invalid for listing"
+    option :retry_horizon_expires_at, type: :string,
+                                      desc: "absolute UTC retry horizon for keyed durable dispatch"
     def archive(target = nil)
       if target.nil?
+        if options[:idempotency_key]
+          raise Hive::UsageError, "--idempotency-key requires an archive TARGET"
+        end
+        if options[:retry_horizon_expires_at]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires an archive TARGET"
+        end
         if closure_options?
           raise Hive::InvalidTaskPath,
                 "closure options require an archive TARGET"
@@ -1068,7 +1275,12 @@ module Hive
         return Hive::Commands::Status.new(json: options[:json], project: options[:project], archive: true).call
       end
 
-      return close_task_interactively(target) if closure_options?
+      if closure_options?
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
+        return close_task_interactively(target)
+      end
 
       run_stage_action("archive", target)
     end
@@ -1134,14 +1346,22 @@ module Hive
                      desc: "map and review without persisting findings"
     option :list, type: :boolean, default: false,
                   desc: "list bounded recorded finding health without running Patrol"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
     def patrol(project)
       require "hive/commands/patrol"
-      Hive::Commands::Patrol.new(
+      if options[:once] && options[:list]
+        raise Hive::InvalidTaskPath, "hive patrol: --once cannot be combined with --list"
+      end
+      result = Hive::Commands::Patrol.new(
         project,
         json: options[:json],
         dry_run: options[:dry_run],
-        list: options[:list]
+        list: options[:list],
+        once: options[:once]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
     end
 
     desc "refactor-patrol PROJECT", "Discover routed refactor theses for a registered project"
@@ -1197,9 +1417,22 @@ module Hive
                     desc: "continue a --list query from an opaque cursor"
     option :full, type: :boolean, default: false,
                   desc: "include complete unbounded histories with --show"
+    option :once, type: :boolean, default: false,
+                  desc: "run one scheduler pass and emit hive-one-shot.v1"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
-      Hive::Commands::RefactorPatrol.new(
+      if options[:once] && [ options[:feature], options[:entrypoint], options[:path],
+                            options[:changed_since], options[:pr], options[:job_manifest],
+                            options[:result_file], options[:show], options[:archive],
+                            options[:limit], options[:cursor] ].any?
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with manual selectors"
+      end
+      if options[:once] && (options[:list] || options[:full])
+        raise Hive::InvalidTaskPath,
+              "hive refactor-patrol: --once cannot be combined with query selectors"
+      end
+      result = Hive::Commands::RefactorPatrol.new(
         project,
         json: options[:json],
         dry_run: options[:dry_run],
@@ -1215,8 +1448,22 @@ module Hive
         archive: options[:archive],
         limit: options[:limit],
         cursor: options[:cursor],
-        full: options[:full]
+        full: options[:full],
+        once: options[:once]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
+    end
+
+    desc "refactor-patrol-scheduled PROJECT",
+         "Review one periodic current-main architecture slice (daemon/internal)", hide: true
+    option :result_file, type: :string, required: true
+    def refactor_patrol_scheduled(project)
+      require "hive/commands/refactor_patrol_scheduled"
+      result = Hive::Commands::RefactorPatrolScheduled.new(
+        project, result_file: options[:result_file]
+      ).call
+      exit 1 unless result.fetch("ok")
     end
 
     desc "refactor-patrol-classify PROJECT",
@@ -1270,14 +1517,13 @@ module Hive
     DESC
     option :project, type: :string, desc: "scope task lookup to one registered project"
     option :binding, type: :string, desc: "opaque slot binding returned by a fresh inventory"
+    option :idempotency_key, type: :string,
+                             desc: "durably replay an identical answer write; valid only with --binding"
     def answer(target)
       require "hive/commands/answer"
-      Hive::Commands::Answer.new(
-        target,
-        project: options[:project],
-        binding: options[:binding],
-        json: options[:json]
-      ).call
+      kwargs = { project: options[:project], binding: options[:binding], json: options[:json] }
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Answer.new(target, **kwargs).call
     end
 
     desc "answer-digest", "Send a daily digest of tasks waiting on human input"
@@ -1334,6 +1580,67 @@ module Hive
       ).call
     end
 
+    desc "digest [ACTION]", "Read or explicitly manage Hive's durable daily activity digest"
+    long_desc <<~DESC, wrap: false
+      Reads today's persisted host-global activity record without refreshing it
+      or sending Telegram. Use --date and --project for a filtered historical
+      view, --json for the stable hive-digest.v1 agent contract, or --open-web
+      to explicitly open the same selected record in Hive Web.
+
+      Mutations are separate explicit actions:
+        hive digest refresh [--date DATE]
+        hive digest send --date DATE [--retry]
+        hive digest prune --before DATE (--dry-run | --yes)
+
+      `hive digest` never calls Telegram, advances delivery state, or repairs a
+      stale record. The existing `hive answer-digest` is a different, sendful
+      pending-answer command.
+    DESC
+    option :date, type: :string, desc: "persisted digest identity (YYYY-MM-DD)"
+    option :project, type: :string, desc: "filter the selected global record by historical project"
+    option :open_web, type: :boolean, default: false, desc: "open the selected digest in Hive Web"
+    option :before, type: :string, desc: "for prune: select closed records before DATE"
+    option :dry_run, type: :boolean, default: false, desc: "for prune: preview without deleting projection bytes"
+    option :yes, type: :boolean, default: false, desc: "for prune: explicitly confirm projection deletion"
+    option :retry, type: :boolean, default: false, desc: "for send: explicitly retry a failed or unknown delivery"
+    def digest(action = nil)
+      validate_digest_action_options!(action) if [ nil, "refresh", "send", "prune" ].include?(action)
+      case action
+      when nil
+        require "hive/commands/digest"
+        Hive::Commands::Digest.new(
+          date: options[:date], project: options[:project], json: options[:json],
+          open_web: options[:open_web]
+        ).call
+      when "refresh"
+        require "hive/commands/digest_refresh"
+        Hive::Commands::DigestRefresh.new(date: options[:date], json: options[:json]).call
+      when "send"
+        require "hive/commands/digest_send"
+        Hive::Commands::DigestSend.new(
+          date: options[:date], retry: options[:retry], json: options[:json]
+        ).call
+      when "prune"
+        require "hive/commands/digest_prune"
+        Hive::Commands::DigestPrune.new(
+          before: options[:before], dry_run: options[:dry_run],
+          confirm: options[:yes], json: options[:json]
+        ).call
+      else
+        error = Hive::UsageError.new(
+          "unknown digest action #{action.inspect} (expected: refresh, send, prune)"
+        )
+        if options[:json]
+          puts JSON.generate(
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: "hive-digest", error: error, error_kind: "usage"
+            )
+          )
+        end
+        raise error
+      end
+    end
+
     desc "status", "Show daemon health and currently running tasks"
     long_desc <<~DESC
       Default: prints a bounded daemon-health and currently-running-task
@@ -1344,6 +1651,11 @@ module Hive
       Use --operational for the broader active-work snapshot with blocker
       ownership and recovery actions. Inspect one task in depth with
       `hive task TARGET --json`; use `hive archive --json` for terminal history.
+
+      With --context REMOTE, status returns a bounded authorized task page.
+      Use --cursor HANDLE from data.continuation for the next page, retaining
+      the same --project filter. Remote status does not support --operational;
+      select --context local for the local operational view.
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v2) and emit the diagnostic for a single task. Useful
@@ -1367,7 +1679,7 @@ module Hive
       that idempotency check. Empty --diagnose values are rejected.
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
-    option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
+    option :project, type: :string, desc: "scope diagnosis or remote status to one registered project"
     option :stage, type: :string,
                    desc: "scope --diagnose slug lookup to one stage (#{STAGE_VOCABULARY})"
     option :write, type: :boolean, default: false,
@@ -1375,7 +1687,7 @@ module Hive
     option :force, type: :boolean, default: false,
                    desc: "with --diagnose --write, re-spawn the agent even when a fresh agent-written artifact already exists"
     option :operational, type: :boolean, default: false,
-                         desc: "emit the agent-first operational status view (combine with --json for its v4 envelope)"
+                         desc: "emit the agent-first operational status view (combine with --json for its v5 envelope)"
     option :internal_task_graph, type: :boolean, default: false, hide: true,
                                  desc: "internal: emit the scheduler task graph"
     option :daemon_task, type: :array,
@@ -1410,6 +1722,10 @@ module Hive
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :log, type: :boolean, default: false,
                  desc: "read the current receipt-correlated diagnostic log tail"
+    option :diff, type: :boolean, default: false, desc: "remote context: retrieve the bounded task diff"
+    option :artifacts, type: :boolean, default: false, desc: "remote context: list the bounded artifact manifest"
+    option :artifact, type: :string, desc: "remote context: retrieve an opaque artifact ID from the manifest"
+    option :output, type: :string, desc: "remote content: write to this explicit local destination"
     def task(target)
       require "hive/commands/task"
       Hive::Commands::Task.new(
@@ -1432,8 +1748,8 @@ module Hive
 
       --until settled returns when every selected task needs operator attention,
       needs repair, or is ready for completion. --until completion is stricter:
-      every task must be observed in the full status graph as archived. A task
-      disappearing from status is never treated as completion.
+      every task must be observed by its exact task projection as archived. A
+      task disappearing from status is never treated as completion.
 
       The observer is bounded by --timeout and --max-events. Three consecutive
       source failures or unexplained task absences fail with exit 69. SIGINT and
@@ -1483,14 +1799,14 @@ module Hive
     # row enough to truncate unrelated command summaries.
     option :observation, type: :string,
                          desc: "opaque observation token from operational status"
+    option :project, type: :string, desc: "scope target lookup to one registered project"
+    option :idempotency_key, type: :string, desc: "durably replay an identical operational action"
     def act(action_id, target)
       require "hive/commands/act"
-      Hive::Commands::Act.new(
-        action_id,
-        target,
-        observation: options[:observation],
-        json: options[:json]
-      ).call
+      kwargs = { observation: options[:observation], json: options[:json] }
+      kwargs[:project] = options[:project] if options[:project]
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Act.new(action_id, target, **kwargs).call
     end
 
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"
@@ -1515,16 +1831,19 @@ module Hive
                   desc: "expected current stage; raises WRONG_STAGE on mismatch, idempotency (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
+    option :generation, type: :string, desc: "remote approval: fresh approval_generation from task details"
+    option :idempotency_key, type: :string, desc: "durably replay an identical approval"
     def approve(target)
       require "hive/commands/approve"
-      Hive::Commands::Approve.new(
-        target,
+      kwargs = {
         to: options[:to],
         from: options[:from],
         project: options[:project],
         force: options[:force],
         json: options[:json]
-      ).call
+      }
+      kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+      Hive::Commands::Approve.new(target, **kwargs).call
     end
 
     desc "decide TARGET OUTCOME", "Apply a named outcome to a durable human workflow stage"
@@ -1723,20 +2042,27 @@ module Hive
         raise Hive::InvalidTaskPath,
               "hive babysit install: --dry-run does not apply to service installation"
       end
+      if options[:once] && (options[:detach] || options[:force])
+        raise Hive::InvalidTaskPath,
+              "hive babysit --once: --detach and --force are service-only options"
+      end
 
       target = options[:once] ? (targets.first || subcommand) : targets.first
-      Hive::Commands::Babysit.new(
+      result = Hive::Commands::Babysit.new(
         options[:once] ? nil : subcommand,
         target,
         detach: options[:detach],
         dry_run: options[:dry_run],
         once: options[:once],
         all: options[:all],
-        force: options[:force]
+        force: options[:force],
+        json: options[:json]
       ).call
+      finish_one_shot(result) if options[:once]
+      result
     end
 
-    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / reload / tail / install / enable / disable / queue)"
+    desc "daemon SUBCOMMAND [PROJECT]", "Manage the hive daemon (start / stop / status / quiesce / resume / reload / tail / install / enable / disable / queue / clear-hold)"
     long_desc <<~DESC
       Subcommands:
         start [--detach] [--dry-run]      Run the dispatcher loop. Without
@@ -1744,6 +2070,12 @@ module Hive
         stop [--json]                     Send SIGTERM to the running daemon.
                                           --json emits hive-daemon-stop.v1.
         status [--json]                   Show running / not-running.
+        quiesce [--timeout SECONDS]       Close admission, drain owned work,
+                                          flush SQLite, and acknowledge only
+                                          a verified paused generation.
+        resume [--timeout SECONDS]        Reconcile the closed generation,
+                                          reopen admission, then restore
+                                          previously running managed services.
         reload [--json]                   Send SIGHUP to reload config.
                                           --json emits hive-daemon-reload.v1.
         tail                              Stream daemon.log.
@@ -1762,6 +2094,9 @@ module Hive
                                           --all = every registered project;
                                           --json emits hive-daemon-enroll.v1.
         disable PROJECT|--all [--json]    Set daemon.enabled: false there.
+        clear-hold PROJECT [SLUG]         Clear the persisted dropped-project
+                                          hold, or only SLUG's quarantine.
+                                          The daemon must be stopped first.
         queue [list|show <id>|prune]      Inspect the dispatch-request queue
                                           the bot writes and the daemon
                                           consumes. `list` (default) shows
@@ -1807,8 +2142,32 @@ module Hive
                  desc: "for enable/disable: apply to every registered project"
     option :force, type: :boolean, default: false,
                    desc: "for install: overwrite an existing unit (saves <path>.bak)"
+    option :timeout, type: :numeric,
+                     desc: "for quiesce/resume: finite positive overall deadline (default 600s)"
+    option :once, type: :boolean, default: false,
+                  desc: "run one project-scoped dispatch pass and emit hive-one-shot.v1"
     def daemon(subcommand = nil, *targets)
       require "hive/commands/daemon"
+      if options[:once]
+        if Hive::Commands::Daemon::VALID_SUBCOMMANDS.include?(subcommand.to_s)
+          raise Hive::InvalidTaskPath,
+                "hive daemon: --once is a mode, not a modifier for #{subcommand.inspect}"
+        end
+        if targets.length > 1 || (subcommand && targets.any?)
+          raise Hive::InvalidTaskPath,
+                "hive daemon --once: expected exactly one PROJECT"
+        end
+        if options[:detach] || options[:all] || options[:force] || options[:timeout]
+          raise Hive::InvalidTaskPath,
+                "hive daemon --once: --detach, --all, --force, and --timeout are incompatible"
+        end
+        target = targets.first || subcommand
+        result = Hive::Commands::Daemon.new(
+          nil, target, dry_run: options[:dry_run], json: options[:json], once: true
+        ).call
+        finish_one_shot(result)
+        return result
+      end
       # Argv-shape errors raise BEFORE Hive::Commands::Daemon.new, so
       # call_with_envelope inside the command can't catch them. Emit
       # the hive-daemon-enroll ErrorPayload inline under --json so
@@ -1821,20 +2180,34 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::MISSING_PROJECT
         )
       end
-      # `queue` takes up to two positionals (ACTION + optional REQUEST_ID,
-      # e.g. `queue show <id>`); every other subcommand takes at most one
-      # (PROJECT or --all).
-      max_targets = subcommand == "queue" ? 2 : 1
+      # `queue` and `clear-hold` take up to two positionals (e.g.
+      # `queue show <id>`, `clear-hold PROJECT SLUG`); `quiesce` and `resume`
+      # take none; every other subcommand takes at most one (PROJECT or --all).
+      max_targets = if %w[queue clear-hold].include?(subcommand)
+        2
+      elsif %w[quiesce resume].include?(subcommand)
+        0
+      else
+        1
+      end
       if targets.length > max_targets
         message = if subcommand == "queue"
           "hive daemon queue: too many positional arguments #{targets.inspect}; " \
             "expected `queue [list|show <id>|prune]`"
+        elsif %w[quiesce resume].include?(subcommand)
+          "hive daemon #{subcommand}: unexpected positional arguments " \
+            "#{targets.inspect}; this command takes no PROJECT"
+        elsif subcommand == "clear-hold"
+          "hive daemon clear-hold: too many positional arguments #{targets.inspect}; " \
+            "expected `clear-hold PROJECT [SLUG]`"
         else
           "hive daemon #{subcommand}: too many positional arguments " \
             "#{targets.inspect}; expected exactly one PROJECT (or --all)"
         end
         if subcommand == "queue"
           emit_daemon_queue_argv_error(action: targets.first, message: message)
+        elsif %w[quiesce resume].include?(subcommand)
+          emit_daemon_lifecycle_argv_error(action: subcommand, message: message)
         else
           emit_daemon_argv_error(
             subcommand: subcommand,
@@ -1851,6 +2224,13 @@ module Hive
           error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
         )
       end
+      if options[:timeout] && !%w[quiesce resume].include?(subcommand)
+        emit_daemon_argv_error(
+          subcommand: subcommand,
+          message: "hive daemon #{subcommand}: --timeout only applies to `quiesce` or `resume`",
+          error_kind: Hive::Schemas::EnrollErrorKind::WRONG_SUBCOMMAND_FLAG
+        )
+      end
       Hive::Commands::Daemon.new(
         subcommand, targets.first,
         detach: options[:detach],
@@ -1858,11 +2238,18 @@ module Hive
         all: options[:all],
         json: options[:json],
         force: options[:force],
+        timeout: options[:timeout],
         queue_args: targets
       ).call
     end
 
     no_commands do
+      def finish_one_shot(result)
+        return result unless result.respond_to?(:exit_code) && result.exit_code != Hive::ExitCodes::SUCCESS
+
+        raise Hive::OneShot::Result::ReportedError, result
+      end
+
       # Emit a hive-daemon-enroll ErrorPayload to stdout when --json is
       # set, then raise so the bin/hive top-level rescue maps to the
       # right exit code. UsageError carries the closed error_kind so
@@ -1883,6 +2270,23 @@ module Hive
             # caller went away or payload not serialisable — fall
             # through to the bare-text rescue path below.
           end
+        else
+          warn message
+        end
+        raise error
+      end
+
+      def emit_daemon_lifecycle_argv_error(action:, message:)
+        require "hive/commands/daemon"
+        error = Hive::UsageError.new(message)
+        if options[:json]
+          puts JSON.generate(Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-daemon-#{action}", error: error, error_kind: "usage",
+            extras: {
+              "action" => action, "runtime_code" => "usage",
+              "next_action" => nil, "details" => {}
+            }
+          ))
         else
           warn message
         end
@@ -2219,20 +2623,85 @@ module Hive
     end
 
     no_commands do
+      def validate_digest_action_options!(action)
+        allowed = {
+          nil => %i[date project open_web],
+          "refresh" => %i[date],
+          "send" => %i[date retry],
+          "prune" => %i[before dry_run yes]
+        }.fetch(action)
+        supplied = %i[date project open_web before dry_run yes retry].select do |key|
+          value = options[key]
+          value == true || (!value.nil? && value != false && !value.to_s.empty?)
+        end
+        invalid = supplied - allowed
+        return if invalid.empty?
+
+        label = action || "read"
+        error = Hive::UsageError.new(
+          "hive digest #{label} does not accept #{invalid.map { |key| "--#{key.to_s.tr('_', '-')}" }.join(', ')}"
+        )
+        if options[:json]
+          schema = {
+            nil => "hive-digest", "refresh" => "hive-digest-refresh",
+            "send" => "hive-digest-send", "prune" => "hive-digest-prune"
+          }.fetch(action)
+          puts JSON.generate(
+            Hive::Schemas::ErrorEnvelope.build(
+              schema: schema, error: error, error_kind: "usage"
+            )
+          )
+        end
+        raise error
+      end
+
       def closure_options?
         options[:reason] || options[:evidence] || options[:successor] || options[:attestation]
       end
 
       def close_task_interactively(target)
+        if options[:idempotency_key]
+          if options[:json]
+            raise Hive::UsageError,
+                  "--idempotency-key applies to confirmed archive closure, not read-only JSON preview"
+          end
+          require "hive/command_operation"
+          result = Hive::CommandOperation.new(
+            key: options[:idempotency_key], command: "archive", mode: "target",
+            target: target,
+            request: {
+              "from" => options[:from], "project" => options[:project],
+              "reason" => options[:reason],
+              "evidence_sha256" => Array(options[:evidence]).map {
+                |value| ::Digest::SHA256.hexdigest(value.to_s)
+              },
+              "successor" => options[:successor],
+              "attestation_sha256" => options[:attestation] &&
+                ::Digest::SHA256.hexdigest(options[:attestation].to_s)
+            },
+            project_roots: lambda {
+              Hive::CommandOperation.registered_project_roots(
+                target: target, project: options[:project]
+              )
+            },
+            project_root: -> { resolve_closure_task(target).project_root },
+            json: true, structured: true, display_json: false,
+            retry_horizon_expires_at: options[:retry_horizon_expires_at]
+          ).call { close_task_interactively_unwrapped(target, emit_success: false) }
+          emit_closure_success(result)
+          return result
+        end
+        close_task_interactively_unwrapped(target, emit_success: true)
+      end
+
+      def close_task_interactively_unwrapped(target, emit_success:)
         require "hive/task_closure"
         require "hive/task_resolver"
-        unless options[:json] || $stdin.tty?
+        unless options[:json] || options[:yes] || $stdin.tty?
           raise Hive::TaskClosure::Unauthorized,
-                "evidence closure requires an interactive terminal and explicit confirmation"
+                "evidence closure needs confirmation: answer the y/N prompt or pass --yes"
         end
-        task = Hive::TaskResolver.new(
-          target, project_filter: options[:project], stage_filter: options[:from]
-        ).resolve
+        task = resolve_closure_task(target)
         project = options[:project] || Hive::Config.registered_projects.find do |entry|
           File.expand_path(entry.fetch("path")) == task.project_root
         end&.fetch("name")
@@ -2253,16 +2722,18 @@ module Hive
         end
         preview = Hive::TaskClosure.preview(task: task, project: project, input: input)
         puts JSON.pretty_generate(preview.to_h)
+        preview.blockers.each { |entry| puts Hive::TaskClosure.format_diagnostic(entry) }
         unless preview.valid?
           raise Hive::TaskClosure::VerificationFailed,
                 "closure preview failed; correct its field errors and blockers"
         end
 
-        $stdout.print "Type CLOSE #{preview.preview_digest[0, 12]} to archive this task: "
-        $stdout.flush
-        confirmation = $stdin.gets.to_s.strip
-        unless confirmation == "CLOSE #{preview.preview_digest[0, 12]}"
-          raise Hive::TaskClosure::Unauthorized, "closure confirmation did not match; task left active"
+        unless options[:yes]
+          $stdout.print "Archive #{task.slug} as #{options[:reason]}? [y/N] "
+          $stdout.flush
+          unless %w[y yes].include?($stdin.gets.to_s.strip.downcase)
+            raise Hive::TaskClosure::Unauthorized, "closure not confirmed; task left active"
+          end
         end
         operator = ENV["USER"].to_s.strip
         operator = "local-operator" if operator.empty?
@@ -2271,9 +2742,25 @@ module Hive
           preview_digest: preview.preview_digest,
           operator: operator, channel: "cli", authorized: true
         )
-        puts "hive: archived #{task.slug} as #{receipt.fetch('reason')}"
-        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        emit_closure_success(receipt, slug: task.slug) if emit_success
         receipt
+      end
+
+      def resolve_closure_task(target)
+        require "hive/task_resolver"
+        Hive::TaskResolver.new(
+          target, project_filter: options[:project], stage_filter: options[:from]
+        ).resolve
+      end
+
+      def emit_closure_success(receipt, slug: nil)
+        slug ||= receipt.dig("task", "slug") || receipt["task_slug"] || "task"
+        puts "hive: archived #{slug} as #{receipt.fetch('reason')}"
+        puts "  receipt: #{receipt.fetch('receipt_digest')}"
+        if (command_receipt = receipt["command_receipt"])
+          puts "  command receipt: #{command_receipt.fetch('id')} generation " \
+               "#{command_receipt.fetch('generation')} (#{command_receipt.fetch('state')})"
+        end
       end
 
       def run_stage_action(verb, target)
@@ -2283,6 +2770,8 @@ module Hive
           from: options[:from],
           json: options[:json]
         }
+        kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
+        kwargs[:retry_horizon_expires_at] = options[:retry_horizon_expires_at] if options[:retry_horizon_expires_at]
 
         Hive::Commands::StageAction.new(
           verb,
@@ -2290,6 +2779,12 @@ module Hive
           **kwargs,
           durable: true
         ).call
+      end
+
+      def validate_retry_horizon_key!
+        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        end
       end
     end
   end

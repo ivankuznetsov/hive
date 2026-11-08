@@ -5,6 +5,7 @@ require "digest"
 require "time"
 require "pathname"
 require "set"
+require "json"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
@@ -18,6 +19,7 @@ require "hive/screenote/oauth_client"
 require "hive/conditions/migration"
 require "hive/warnings"
 require "hive/proposals/config_validator"
+require "tzinfo"
 
 module Hive
   module Config
@@ -42,8 +44,27 @@ module Hive
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
       "permissions" => Hive::PermissionScope::YOLO,
+      # Hive-owned MCP grants (plan 2026-10-15-001). Servers are defined only
+      # in the global catalog (`mcp.servers` in the XDG config.yml); a project
+      # grants catalog names with `mcp.use` and a stage block's own `mcp.use`
+      # replaces that grant. `inherit_user: true` restores each agent CLI's
+      # personal MCP config. Hive::Mcp::Settings resolves the effective policy.
+      "mcp" => {
+        "inherit_user" => false,
+        "use" => []
+      },
+      "command_receipts" => {
+        "keyed_intake_enabled" => false,
+        "nonterminal_limit" => 1_000,
+        "concurrency_limit" => 32,
+        "byte_admission_limit" => 67_108_864,
+        "staffing" => {
+          "operator_count" => 1,
+          "response_business_days" => 1,
+          "minutes_per_namespace_per_day" => nil
+        }
+      },
       "claude" => {
-        "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
         # Model + reasoning effort for hive-launched claude sessions.
         # "default" is a live Claude Code alias tracking ITS recommended
@@ -105,8 +126,7 @@ module Hive
       # CLI's installed skill names.
       "brainstorm" => {
         "agent" => "claude",
-        "skill" => "/ce-brainstorm",
-        "runtime" => "headless"
+        "skill" => "/ce-brainstorm"
       },
       "plan" => {
         "agent" => "claude",
@@ -115,6 +135,7 @@ module Hive
           "codex" => "/llm-wiki:wiki-plan",
           "pi" => "/llm-wiki:wiki-plan",
           "opencode" => "/ce-plan",
+          "muse" => "/ce-plan",
           "default" => "/llm-wiki:wiki-plan"
         }
       },
@@ -134,6 +155,13 @@ module Hive
         # runaway agent, not to bound how long legitimate review may take.
         "attempts" => { "max_transient" => 2, "timeout_sec" => 1800 },
         "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        # The adversarial plan lens runs only at or above this effective
+        # level (standard|mandatory). At lower levels the review needs only
+        # whole-document coverage; adversarial plan findings mostly grew
+        # plans without changing code-review outcomes.
+        "adversarial_min_level" => "mandatory",
+        # Planner revision rounds after verification, per effective level.
+        "max_revision_rounds" => { "standard" => 1, "mandatory" => 3 },
         "adapter" => "ce_doc_review",
         "reviewers" => {
           "primary" => "plan_review",
@@ -200,7 +228,8 @@ module Hive
         "pi" => {
           "bin" => "pi",
           "env_override" => "HIVE_PI_BIN",
-          "min_version" => "0.70.2"
+          # 1.0.4 added `--no-mcp`, which Hive passes on every Pi launch.
+          "min_version" => "1.0.4"
         },
         "grok" => {
           "bin" => "grok",
@@ -213,6 +242,11 @@ module Hive
           "min_version" => "1.18.16",
           "credential_env" => [],
           "plugins" => []
+        },
+        "muse" => {
+          "bin" => "muse",
+          "env_override" => "HIVE_MUSE_BIN",
+          "min_version" => "1.4.14"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -272,13 +306,22 @@ module Hive
                 "docs/**/*",
                 "wiki/**",
                 "wiki/**/*",
+                # Framework configuration and database definitions are
+                # executable product source, not controller configuration.
+                # Review findings routinely require routes, initializers,
+                # environment policy, migrations, and schema updates. Keep
+                # credential-bearing config paths denied below and let the
+                # post-fix guardrail inspect the resulting code diff.
+                "config/**",
+                "config/**/*",
+                "db/**",
+                "db/**/*",
                 # Nested project roots (monorepo layout): a Rails/JS app under
                 # `web/` keeps its source in `web/app`, `web/lib`, `web/test`,
                 # etc. Mirror the top-level source/test/docs categories under
                 # `web/` so the fix-phase auto-commit can land legitimate web
-                # changes. Sensitive nested dirs (`web/config`, `web/bin`,
-                # `web/db`) are intentionally NOT listed, so they stay outside
-                # the allowlist exactly like their top-level counterparts.
+                # changes. Nested framework config/database roots remain an
+                # explicit project override rather than a recursive wildcard.
                 "web/app/**",
                 "web/app/**/*",
                 "web/lib/**",
@@ -317,8 +360,9 @@ module Hive
                 ".git/**/*",
                 "bin/**",
                 "bin/**/*",
-                "config/**",
-                "config/**/*",
+                "config/master.key",
+                "config/credentials/**",
+                "config/credentials/**/*",
                 ".github/**",
                 ".github/**/*",
                 ".gitlab-ci.yml",
@@ -337,6 +381,8 @@ module Hive
                 "**/.env.*",
                 "**/secrets.yml",
                 "**/secrets.yaml",
+                "**/secret.yml",
+                "**/secret.yaml",
                 "**/credentials.yml",
                 "**/credentials.yaml",
                 "**/credentials.yml.enc",
@@ -385,9 +431,16 @@ module Hive
         "github_checks" => {
           "enabled" => true
         },
+        # Two fix passes plus one verify-only pass. Later passes mostly
+        # surfaced new adjacent edge cases rather than real defects, and
+        # each fix commit became fresh review surface.
         "max_passes" => 2,
+        # From this pass on, only High-severity findings with concrete
+        # evidence are fixed; Medium/Low/Nit findings are DEFERRED (see
+        # Hive::Stages::Review::Convergence). nil disables the gate.
+        "severity_gate_from_pass" => 2,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
-        # fit a couple of claude-tmux reviewers each running up to their
+        # fit a couple of Claude reviewers each running up to their
         # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
         # review legitimately takes 1-2h. Each reviewer is bounded by its
         # own timeout, NOT by an even split of this budget, so this only
@@ -436,15 +489,19 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # `answer-digest` ships a non-zero DEFAULT cap (every other verb stays
-        # at `child_timeout_sec`=0/disabled) because it holds the single global
-        # digest slot (can_dispatch_digest?). A black-holed Telegram socket
-        # would otherwise pin that slot and leave the scheduler pending until
-        # restart. A reaped child exits non-zero, so the scheduler retries the
-        # date on backoff.
+        # The daemon-owned digest command families ship non-zero DEFAULT caps
+        # (every other verb stays at child_timeout_sec=0/disabled). A
+        # black-holed Telegram socket must not pin answer, daily-record, or
+        # daily-delivery capacity until a restart; the ledger turns an
+        # interrupted daily recap into `unknown`.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "answer-digest" => 3600 },
+        "child_verb_timeouts" => { "answer-digest" => 3600, "digest" => 3600 },
+        "child_stage_timeouts" => {
+          "daily_digest_refresh" => 900,
+          "daily_digest_close" => 3600,
+          "daily_digest_delivery" => 300
+        },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -464,7 +521,8 @@ module Hive
         "local_loopback" => true,
         "github" => {
           "owner" => nil,
-          # The shared hivebox OAuth app (device flow only — public by
+          "owner_id" => nil,
+          # The shared Hive web OAuth app (device flow only — public by
           # design, no client secret exists). Operators can override with
           # their own app's client_id; "Enable Device Flow" must be checked.
           "client_id" => "Ov23liYChIkP5PU4bvo1"
@@ -621,6 +679,18 @@ module Hive
         "enabled" => false,
         "hour" => 9
       },
+      # Hive-owned local activity record. The daemon initializes coverage before
+      # generating records; external delivery requires a separate opt-in.
+      "daily_digest" => {
+        "enabled" => true,
+        "time_zone" => nil,
+        "coverage_started_at" => nil,
+        "initial_membership" => nil,
+        "first_interval" => nil,
+        "materialization_interval_sec" => 300,
+        "freshness_budget_sec" => 900,
+        "telegram" => { "enabled" => false, "hour" => 9 }
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
@@ -737,7 +807,6 @@ module Hive
     # and Pi receive llm-wiki's canonical skill name unless a project chooses
     # a non-legacy override.
     LEGACY_WIKI_PLAN_ALIAS = "/plan"
-    CLAUDE_MODES = %w[headless tmux].freeze
     CLAUDE_PERMISSION_MODES = %w[acceptEdits auto bypassPermissions default dontAsk plan].freeze
     AUTO_COMMIT_SIGN_POLICIES = %w[inherit bypass fail].freeze
     # Accepted reviewer `kind` values in config. "agent" (default) and
@@ -751,7 +820,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode muse].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
@@ -769,10 +838,13 @@ module Hive
     # deliberate review point here, not a silent propagation — if DIRS
     # changes, update this list to match.
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
-    EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
-    EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
+    OBSOLETE_CLAUDE_MODE_KEY = :__hive_obsolete_claude_mode
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
     IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
+    # The project's raw `mcp.inherit_user` (nil when unset), so resolution can
+    # let an explicit project value beat the global one without mistaking the
+    # merged default for a project choice.
+    MCP_INHERIT_USER_PROVENANCE_KEY = :__hive_mcp_inherit_user
     IMPLEMENTATION_IDENTITY_PATHS = {
       "execute" => %w[execute],
       "open_pr" => %w[open_pr],
@@ -786,8 +858,6 @@ module Hive
     # DEFAULTS. Keep this list explicit so a newly rendered section cannot
     # silently become an unvalidated extension namespace.
     PROJECT_KEYS_WITHOUT_DEFAULTS = Set.new(%w[gh models]).freeze
-    @legacy_project_config_warning_lock = Mutex.new
-    @legacy_project_config_warned_paths = Set.new
 
     module_function
 
@@ -850,8 +920,6 @@ module Hive
 
     def build_project_config(project_root, source_path, data, stage_names: nil)
       project_root = File.expand_path(project_root)
-      legacy_reviewers = data.key?("reviewers")
-      data = normalize_legacy_project_config(data, source_path, emit_warning: false)
       validate_project_top_level_keys!(data, source_path, project_root, stage_names: stage_names)
       data = normalize_models_config(data, source_path)
       # Nested review actors execute inside one durable review/patrol attempt.
@@ -861,16 +929,17 @@ module Hive
       reject_nested_provider_routing!(data, source_path)
       resolve_patrol_mode!(data)
       merged = merge_defaults(data).merge("project_root" => project_root)
-      merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
-      merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
+      merged[OBSOLETE_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
+      merged[MCP_INHERIT_USER_PROVENANCE_KEY] =
+        nested_key?(data, "mcp", "inherit_user") ? data["mcp"]["inherit_user"] : nil
       if provider_routing_configured?(data)
         merged[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = load_global_provider_accounts
       end
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, source_path)
-      warn_legacy_root_reviewers_once!(source_path) if legacy_reviewers
+      validate_mcp_grants_against_catalog!(merged, source_path)
       merged
     end
 
@@ -882,49 +951,6 @@ module Hive
         data["models"], source: describe_source(source_path)
       )
       normalized
-    end
-
-    # `reviewers` was never a supported project-root key, but older Hive
-    # versions silently deep-merged and ignored it. The strict root-key
-    # boundary therefore turned an existing typo into an upgrade outage.
-    # Keep one narrow read-through compatibility window while `hive migrate`
-    # provides the durable rewrite; do not extend this to arbitrary typos.
-    def normalize_legacy_project_config(data, source_path, emit_warning: true)
-      return data unless data.key?("reviewers")
-
-      review_present = data.key?("review")
-      review = data["review"]
-      if review_present && !review.is_a?(Hash)
-        raise UnsupportedProjectConfigError,
-              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
-              "- Top-level `reviewers` cannot be migrated because `review` is #{review.class}; " \
-              "make `review` a mapping and move the value to `review.reviewers`."
-      end
-      if review&.key?("reviewers")
-        raise UnsupportedProjectConfigError,
-              "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
-              "- The config defines both top-level `reviewers` and `review.reviewers`; " \
-              "choose which value to keep, then remove the top-level key."
-      end
-
-      normalized = deep_dup(data)
-      normalized_review = review_present ? deep_dup(review) : {}
-      normalized_review["reviewers"] = normalized.delete("reviewers")
-      normalized["review"] = normalized_review
-      warn_legacy_root_reviewers_once!(source_path) if emit_warning
-      normalized
-    end
-
-    def warn_legacy_root_reviewers_once!(source_path)
-      should_warn = @legacy_project_config_warning_lock.synchronize do
-        @legacy_project_config_warned_paths.add?(source_path.to_s)
-      end
-      return unless should_warn
-
-      message = "hive: top-level `reviewers` in #{describe_source(source_path)} is deprecated; " \
-                "using it as `review.reviewers` for upgrade compatibility; run `hive migrate` " \
-                "in the project to rewrite the config"
-      Hive::Warnings.emit(message)
     end
 
     def validate_project_top_level_keys!(data, source_path, project_root, stage_names: nil)
@@ -999,32 +1025,31 @@ module Hive
       bot["alert_state_file"] ||= File.join(Hive::Paths.state_home, ".bot.alert_state.json")
     end
 
-    def claude_mode(cfg)
-      raw = cfg.dig("claude", "mode")
-      raw = DEFAULTS.dig("claude", "mode") if raw.nil?
-      case raw
-      when "tmux" then :tmux
-      when "headless" then :headless
-      else
-        raise ConfigError, "claude.mode must be one of #{CLAUDE_MODES.inspect}; got #{raw.inspect}"
-      end
-    end
-
     # argv fragment for hive-launched claude: ["--model", m, "--effort", e].
-    # Shared by the tmux wrapper and the headless Agent path. Semantics:
-    # model "inherit"/blank omits the flag (operator's interactive default
-    # applies); anything else — including the live alias "default" — passes
+    # Semantics: model "inherit"/blank omits the flag (operator's interactive
+    # default applies); anything else — including the live alias "default" — passes
     # through. effort "default"/"inherit"/blank omits the flag (Claude
     # Code's own tier applies); any other tier Claude Code accepts passes
     # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init
     # questionnaire offers the common three, the config key is open).
     def claude_cli_flags(cfg, model: nil, effort: nil)
+      model, effort = claude_identity(cfg, model: model, effort: effort)
       flags = []
+      flags.concat([ "--model", model ]) if model
+      flags.concat([ "--effort", effort ]) if effort
+      flags
+    end
+
+    # The model and effort a Claude launch passes, after per-stage values
+    # override the project-wide claude.* pins. nil means the flag is
+    # omitted and Claude picks its own.
+    def claude_identity(cfg, model: nil, effort: nil)
       model = (model || cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
       effort = (effort || cfg.dig("claude", "effort") || DEFAULTS.dig("claude", "effort")).to_s.strip
-      flags.concat([ "--model", model ]) unless model.empty? || model == "inherit"
-      flags.concat([ "--effort", effort ]) unless effort.empty? || [ "default", "inherit" ].include?(effort)
-      flags
+      [
+        (model unless model.empty? || model == "inherit"),
+        (effort unless effort.empty? || [ "default", "inherit" ].include?(effort))
+      ]
     end
 
     def claude_permission_mode(cfg)
@@ -1124,6 +1149,17 @@ module Hive
       ).freeze
     end
 
+    # The stage budget the project's own config sets, or nil when only the
+    # built-in default applies. A config without load provenance (a plain
+    # Hash) counts every value it carries as set.
+    def configured_budget_usd(cfg, stage_name)
+      value = cfg.dig("budget_usd", stage_name)
+      provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
+      return value unless provenance.is_a?(Hash)
+
+      Array(provenance["budget_usd"]).include?(stage_name) ? value : nil
+    end
+
     def explicit_resource_limits(data)
       RESOURCE_LIMIT_FIELDS.to_h do |field|
         values = data[field]
@@ -1162,30 +1198,13 @@ module Hive
       patrol["mode"] = mode
     end
 
-    # Only `Config.load` knows whether the user actually wrote
-    # `claude.mode` in config.yml; merge_defaults inserts the
-    # DEFAULTS value so the merged cfg always carries a non-nil
-    # `claude.mode`. After load, the EXPLICIT_CLAUDE_MODE_KEY flag is
-    # the single source of truth. Callers that synthesise a cfg
-    # in-process (tests, daemon helpers) must set the flag themselves;
-    # the default below is `false` so an unset flag is treated as
-    # "default kicked in", not "user wrote it".
-    def explicit_claude_mode?(cfg)
-      cfg[EXPLICIT_CLAUDE_MODE_KEY] == true
-    end
-
-    # Pairs with `explicit_claude_mode?` but kept on the legacy
-    # explicit-via-cfg.dig fallback intentionally: synthesised cfgs
-    # under tests / daemon helpers that carry `brainstorm.runtime`
-    # without going through `Config.load` still need to opt into the
-    # one-release legacy 2-brainstorm branch. The DEFAULTS path does
-    # NOT seed `brainstorm.runtime`, so the dig-based fallback is
-    # unambiguous here — distinct from claude.mode, which IS seeded
-    # by DEFAULTS and needs the strict flag.
-    def explicit_brainstorm_runtime?(cfg)
-      return cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY] unless cfg[EXPLICIT_BRAINSTORM_RUNTIME_KEY].nil?
-
-      cfg.dig("brainstorm", "runtime") != nil
+    # `claude.mode` is a retired key: Claude launches headless-only. A config
+    # that still sets it (any value) loads and the value is ignored. Only
+    # `Config.load` sees the raw YAML, so it records whether the key was
+    # present; `hive doctor` reads this flag to suggest deleting it. A cfg
+    # synthesised in-process without the flag reads as "absent".
+    def obsolete_claude_mode_key?(cfg)
+      cfg[OBSOLETE_CLAUDE_MODE_KEY] == true
     end
 
     def stage_skill(cfg, stage)
@@ -1237,7 +1256,6 @@ module Hive
     end
 
     def registered_project_entries(preserve_invalid:)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       return [] unless File.exist?(path)
@@ -1245,6 +1263,10 @@ module Hive
       data = load_global_config(path)
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
 
+      registered_project_entries_from_data(data, preserve_invalid: preserve_invalid)
+    end
+
+    def registered_project_entries_from_data(data, preserve_invalid: false)
       # Tolerate hand-edit accidents: a non-Hash row, a row missing
       # `name`, or a row whose `path` isn't a String would previously
       # raise here and brick every command (status / forget / prune /
@@ -1278,7 +1300,6 @@ module Hive
     # event: historical projects did not have a durable registration
     # occurrence and must not receive a synthetic bootstrap replay.
     def ensure_project_identities!(now: Time.now.utc)
-      Hive::Paths.ensure_migrated!
       return false unless File.exist?(global_config_path)
 
       changed = false
@@ -1286,25 +1307,38 @@ module Hive
         data = load_global_config(global_config_path)
         raise ConfigError, "global config at #{global_config_path} must be a hash" unless data.is_a?(Hash)
 
-        Array(data["registered_projects"]).each do |entry|
-          next unless valid_registry_entry?(entry)
+        changed = normalize_project_identities!(data, now: now)
+        write_global_config_atomic!(data) if changed
+      end
+      changed
+    end
 
-          unless valid_project_id?(entry["project_id"])
-            project_id = registry_project_id(entry)
-            entry["project_id"] = project_id
-            entry["registration_id"] ||= "legacy:#{project_id}"
-            entry["registered_at"] ||= now.utc.iso8601(6)
+    # Mutates only the supplied config, so callers can persist identities and
+    # dependent snapshots together under their existing global config lock.
+    def normalize_project_identities!(data, now:)
+      changed = false
+      Array(data["registered_projects"]).each do |entry|
+        next unless valid_registry_entry?(entry)
+
+        unless valid_project_id?(entry["project_id"])
+          entry["project_id"] = registry_project_id(entry)
+          changed = true
+        end
+        if entry["registration_id"].nil?
+          entry["registration_id"] = "legacy:#{entry.fetch('project_id')}"
+          changed = true
+        end
+        if entry["registered_at"].nil?
+          entry["registered_at"] = now.utc.iso8601(6)
+          changed = true
+        end
+        if entry["real_path"].nil?
+          real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
+          if real_path
+            entry["real_path"] = real_path
             changed = true
           end
-          if entry["real_path"].nil?
-            real_path = realpath_or_nil(File.expand_path(entry.fetch("path")))
-            if real_path
-              entry["real_path"] = real_path
-              changed = true
-            end
-          end
         end
-        write_global_config_atomic!(data) if changed
       end
       changed
     end
@@ -1314,7 +1348,6 @@ module Hive
     # intentionally called only after a project declares routing.pool; a
     # legacy project never consults or validates this opt-in registry.
     def load_global_provider_accounts
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1375,7 +1408,6 @@ module Hive
     # locking config.yml itself whose inode changes on every atomic
     # replace.
     def update_global_config!
-      Hive::Paths.ensure_migrated!
       FileUtils.mkdir_p(hive_home)
       with_global_config_lock do
         path = global_config_path
@@ -1393,7 +1425,6 @@ module Hive
     # methods that already hold the lock call write_global_config_atomic!
     # directly to keep the whole mutation in one critical section.
     def write_global_config!(data)
-      Hive::Paths.ensure_migrated!
       FileUtils.mkdir_p(hive_home)
       with_global_config_lock { write_global_config_atomic!(data) }
     end
@@ -1513,7 +1544,6 @@ module Hive
     # Returns the bare DEFAULTS["daemon"] when no global config is
     # present (first-run scenario, no projects registered yet).
     def load_global_daemon
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1539,7 +1569,6 @@ module Hive
     # so an operator's opt-out actually takes effect at runtime. Returns
     # the bare defaults when no global config exists.
     def load_global_update
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1557,12 +1586,11 @@ module Hive
     end
 
     # Shared loader for a single named global config block such as
-    # `answer_digest`: runs the ensure_migrated!/validate_hive_home!/path +
+    # `answer_digest`: runs the validate_hive_home!/path +
     # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
     # block's own validator, and returns the merged hash. An optional block
     # receives (merged, data, override) and returns the merged hash to validate.
     def load_global_block(key, validator:)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1580,12 +1608,41 @@ module Hive
       merged
     end
 
+    # The global MCP server catalog. `servers` lives only here; the project
+    # default `use` list is not a global field, so the block merges over its
+    # own base instead of DEFAULTS["mcp"].
+    def load_global_mcp
+      load_global_block("mcp", validator: :validate_global_mcp!) do |_merged, _data, override|
+        deep_merge({ "inherit_user" => false, "servers" => {} }, override)
+      end
+    end
+
+    # An unreadable global config is a doctor warning plus a launch notice
+    # for MCP, not a load failure: the catalog is optional until a grant
+    # needs it.
+    def global_mcp_catalog_readable?
+      path = global_config_path
+      !File.exist?(path) || File.readable?(path)
+    end
+
     def load_global_answer_digest_block
       load_global_block("answer_digest", validator: :validate_answer_digest!)
     end
 
+    def load_global_daily_digest
+      load_global_block("daily_digest", validator: :validate_daily_digest!)
+    end
+
+    def load_global_project_membership_history
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      Array(data["project_membership_history"])
+    end
+
     def load_global_web
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1603,7 +1660,6 @@ module Hive
     end
 
     def load_global_screenote
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1657,7 +1713,6 @@ module Hive
     # credentials fail loudly there without making read-only commands like
     # `hive status` require a Telegram token.
     def load_global_bot(require_runtime: false)
-      Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
@@ -1710,7 +1765,8 @@ module Hive
       def exit_code = Hive::ExitCodes::USAGE
     end
 
-    def register_project(name:, path:, repository_identity: :detect, replace_existing: true)
+    def register_project(name:, path:, repository_identity: :detect, replace_existing: true,
+                         now: Time.now.utc)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
@@ -1723,13 +1779,22 @@ module Hive
         else
           retired&.fetch(:project_id) || SecureRandom.uuid
         end
+        timestamp = normalize_membership_time(now)
+        existing_path = File.expand_path(existing.fetch("path")) if existing
+        replacing_registration = existing && existing_path != abs_path
+        retired_same_path = retired &&
+          File.expand_path(retired.fetch(:state_root_path).to_s) == File.expand_path(hive_state_path)
+        registration_id, registered_at = if existing && !replacing_registration
+          [ existing["registration_id"] || SecureRandom.uuid, existing["registered_at"] || timestamp ]
+        elsif retired_same_path
+          [ retired[:registration_id] || SecureRandom.uuid, retired[:registered_at] || timestamp ]
+        else
+          [ SecureRandom.uuid, timestamp ]
+        end
         entry = {
           "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path,
           "project_id" => project_id,
-          "registration_id" => existing&.fetch("registration_id", nil) ||
-            retired&.fetch(:registration_id) || SecureRandom.uuid,
-          "registered_at" => existing&.fetch("registered_at", nil) ||
-            retired&.fetch(:registered_at) || Time.now.utc.iso8601(6)
+          "registration_id" => registration_id, "registered_at" => registered_at
         }
         identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
         entry["repository_identity"] = identity if identity
@@ -1741,16 +1806,25 @@ module Hive
           replacing: existing
         )
         if existing
-          existing_path = File.expand_path(existing.fetch("path"))
           if !replace_existing && existing_path != abs_path
             raise ProjectRegistrationCollision.new(
               "project #{name.inspect} is already registered at #{existing.fetch('path')}",
               name: name, existing_path: existing.fetch("path")
             )
           end
+          before = membership_snapshot(existing)
+          changed = membership_snapshot(entry) != before
           existing.replace(entry)
+          append_membership_history!(
+            data, kind: "replaced", occurred_at: timestamp,
+            before: before, after: membership_snapshot(entry)
+          ) if changed
         else
           data["registered_projects"] << entry
+          append_membership_history!(
+            data, kind: "registered", occurred_at: timestamp,
+            before: nil, after: membership_snapshot(entry)
+          )
         end
       end
       sync_runtime_projects!
@@ -1908,8 +1982,7 @@ module Hive
     # with the same name and content are equal under `Hash#==`, so
     # `entries - [removed]` would clear BOTH. delete_at on the matched
     # index removes exactly the row the operator named.
-    def unregister_project(name:)
-      Hive::Paths.ensure_migrated!
+    def unregister_project(name:, now: Time.now.utc)
       validate_hive_home!
       return nil unless File.exist?(global_config_path)
 
@@ -1931,6 +2004,10 @@ module Hive
             remaining = entries.dup
             remaining.delete_at(idx)
             data["registered_projects"] = remaining
+            append_membership_history!(
+              data, kind: "unregistered", occurred_at: normalize_membership_time(now),
+              before: membership_snapshot(removed), after: nil
+            )
             write_global_config_atomic!(data)
           end
         end
@@ -1958,8 +2035,7 @@ module Hive
     # than re-reading via `registered_projects.size`) closes the
     # consistency window where a concurrent register/forget between the
     # two reads produced inconsistent counts.
-    def prune_missing_projects!(dry_run: false)
-      Hive::Paths.ensure_migrated!
+    def prune_missing_projects!(dry_run: false, now: Time.now.utc)
       validate_hive_home!
       return { removed: [], kept_count: 0 } unless File.exist?(global_config_path)
 
@@ -1974,6 +2050,13 @@ module Hive
           result = { removed: removed, kept_count: kept.size }
           if removed.any? && !dry_run
             data["registered_projects"] = kept
+            occurred_at = normalize_membership_time(now)
+            removed.each do |entry|
+              append_membership_history!(
+                data, kind: "pruned", occurred_at: occurred_at,
+                before: membership_snapshot(entry), after: nil
+              )
+            end
             write_global_config_atomic!(data)
           end
         end
@@ -2014,6 +2097,66 @@ module Hive
       expanded == value ? expanded : nil
     rescue ArgumentError
       nil
+    end
+
+    MEMBERSHIP_FIELDS = %w[
+      name project_id registration_id path real_path hive_state_path
+      repository_identity registered_at
+    ].freeze
+
+    def membership_snapshot(entry)
+      return {} unless entry.is_a?(Hash)
+
+      MEMBERSHIP_FIELDS.each_with_object({}) do |key, out|
+        value = entry[key]
+        out[key] = value if value.is_a?(String) || value.is_a?(Numeric) ||
+                            value == true || value == false
+      end
+    end
+
+    def append_membership_history!(data, kind:, occurred_at:, before:, after:)
+      event = {
+        "schema" => "hive-project-membership",
+        "schema_version" => 1,
+        "kind" => kind,
+        "occurred_at" => occurred_at,
+        "before" => before,
+        "after" => after
+      }
+      event["event_id"] = Digest::SHA256.hexdigest(
+        JSON.generate(canonical_membership_value(event))
+      )
+      data["project_membership_history"] = Array(data["project_membership_history"])
+      ids = data["project_membership_event_ids"]
+      unless ids.is_a?(Hash)
+        ids = data["project_membership_history"].each_with_object({}) do |row, index|
+          index[row["event_id"]] = true if row.is_a?(Hash) && row["event_id"].is_a?(String)
+        end
+      end
+      unless ids[event["event_id"]]
+        data["project_membership_history"] << event
+        ids[event["event_id"]] = true
+      end
+      data["project_membership_event_ids"] = ids
+      event
+    end
+
+    def canonical_membership_value(value)
+      case value
+      when Hash
+        value.keys.map(&:to_s).sort.to_h do |key|
+          source = value.key?(key) ? key : value.keys.find { |candidate| candidate.to_s == key }
+          [ key, canonical_membership_value(value.fetch(source)) ]
+        end
+      when Array then value.map { |child| canonical_membership_value(child) }
+      else value
+      end
+    end
+
+    def normalize_membership_time(value)
+      (value.is_a?(Time) ? value : Time.iso8601(value.to_s)).utc.iso8601(6)
+    rescue ArgumentError, TypeError
+      raise ConfigError, "project membership time must be an ISO-8601 timestamp"
     end
 
     def realpath_or_nil(path)
@@ -2074,9 +2217,9 @@ module Hive
       validate_role_agent_names!(cfg, source_path)
       validate_agent_overrides!(cfg, source_path)
       validate_provider_routing!(cfg, source_path)
-      validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
+      validate_mcp!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
@@ -2092,9 +2235,11 @@ module Hive
       validate_refactor_patrol!(cfg, source_path)
       validate_removed_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
+      validate_daily_digest!(cfg, source_path)
       validate_model_routing_capabilities!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
+      validate_command_receipts!(cfg, source_path)
     end
 
     # Top-level keys that MUST be Hashes when present. A scalar override
@@ -2107,6 +2252,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      mcp
       models
       plan
       plan_review
@@ -2126,10 +2272,51 @@ module Hive
       patrol
       refactor_patrol
       answer_digest
+      daily_digest
       bot
       proposals
       rebase
+      command_receipts
     ].freeze
+
+    COMMAND_RECEIPT_KEYS = %w[
+      keyed_intake_enabled nonterminal_limit concurrency_limit byte_admission_limit staffing
+    ].freeze
+    COMMAND_RECEIPT_STAFFING_KEYS = %w[
+      operator_count response_business_days minutes_per_namespace_per_day
+    ].freeze
+
+    def validate_command_receipts!(cfg, source_path)
+      receipts = cfg.fetch("command_receipts")
+      validate_closed_mapping!(receipts, COMMAND_RECEIPT_KEYS, "command_receipts", source_path)
+      unless [ true, false ].include?(receipts["keyed_intake_enabled"])
+        raise ConfigError,
+              "command_receipts.keyed_intake_enabled in #{describe_source(source_path)} must be true or false"
+      end
+      %w[nonterminal_limit concurrency_limit byte_admission_limit].each do |key|
+        validate_bounded_integer!(
+          receipts[key], "command_receipts.#{key}", 1, 1_000_000_000_000, source_path
+        )
+      end
+      staffing = receipts["staffing"]
+      unless staffing.is_a?(Hash)
+        raise ConfigError, "command_receipts.staffing in #{describe_source(source_path)} must be a Hash"
+      end
+      validate_closed_mapping!(
+        staffing, COMMAND_RECEIPT_STAFFING_KEYS, "command_receipts.staffing", source_path
+      )
+      %w[operator_count response_business_days].each do |key|
+        validate_bounded_integer!(
+          staffing[key], "command_receipts.staffing.#{key}", 1, 100_000, source_path
+        )
+      end
+      minutes = staffing["minutes_per_namespace_per_day"]
+      unless minutes.nil? || (minutes.is_a?(Numeric) && minutes >= 0 && minutes.finite?)
+        raise ConfigError,
+              "command_receipts.staffing.minutes_per_namespace_per_day in " \
+              "#{describe_source(source_path)} must be a nonnegative number or null"
+      end
+    end
 
     def validate_hash_shaped_keys!(cfg, source_path)
       HASH_SHAPED_KEYS.each do |key|
@@ -2156,13 +2343,15 @@ module Hive
 
     PLAN_REVIEW_KEYS = %w[
       enabled classifier_version minimum_level coding skip protected_paths attempts
-      coverage adapter reviewers routes approval_policies
+      coverage adapter reviewers routes approval_policies mcp adversarial_min_level
+      max_revision_rounds
     ].freeze
     PLAN_REVIEW_NESTED_KEYS = {
       "coding" => %w[minimum_level],
       "skip" => %w[max_files max_bytes],
       "attempts" => %w[max_transient timeout_sec],
       "coverage" => %w[required optional],
+      "max_revision_rounds" => %w[standard mandatory],
       "reviewers" => %w[primary adversarial verification],
       "routes" => %w[
         primary adversarial verification fallbacks planner_revision_fallback
@@ -2199,6 +2388,17 @@ module Hive
       end
       validate_plan_review_level!(review.dig("coding", "minimum_level"),
                                   "plan_review.coding.minimum_level", source_path)
+      # YAML 1.1 parses a bare `off` as false; accept it as the "off" level.
+      review["adversarial_min_level"] = "off" if review["adversarial_min_level"] == false
+      unless %w[standard mandatory off].include?(review["adversarial_min_level"])
+        raise ConfigError,
+              "plan_review.adversarial_min_level in #{describe_source(source_path)} must be " \
+              "\"standard\", \"mandatory\" or \"off\"; got #{review['adversarial_min_level'].inspect}"
+      end
+      %w[standard mandatory].each do |level|
+        validate_bounded_integer!(review.dig("max_revision_rounds", level),
+                                  "plan_review.max_revision_rounds.#{level}", 1, 10, source_path)
+      end
       validate_bounded_integer!(review.dig("skip", "max_files"),
                                 "plan_review.skip.max_files", 1, 100, source_path)
       validate_bounded_integer!(review.dig("skip", "max_bytes"),
@@ -2832,6 +3032,7 @@ module Hive
       [ %w[review triage max_attempts], "review.triage.max_attempts" ],
       [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
       [ %w[review max_passes], "review.max_passes" ],
+      [ %w[review severity_gate_from_pass], "review.severity_gate_from_pass" ],
       [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]
     ].freeze
 
@@ -3147,16 +3348,6 @@ module Hive
       end
     end
 
-    BRAINSTORM_RUNTIMES = %w[headless tmux_interactive].freeze
-
-    def validate_claude_mode!(cfg, source_path)
-      mode = cfg.dig("claude", "mode")
-      return if CLAUDE_MODES.include?(mode)
-
-      raise ConfigError,
-            "claude.mode in #{describe_source(source_path)} must be one of " \
-            "#{CLAUDE_MODES.inspect}; got #{mode.inspect} (#{mode.class})"
-    end
 
     def validate_claude_permission_mode!(cfg, source_path)
       permission_mode = cfg.dig("claude", "permission_mode")
@@ -3291,6 +3482,245 @@ module Hive
       raise ConfigError, "#{e.message} in #{describe_source(source_path)}"
     end
 
+    # MCP server names keep their case because Claude and Codex key saved
+    # OAuth logins by the exact name (for example `openaiDeveloperDocs`).
+    MCP_SERVER_NAME = /\A[A-Za-z0-9][A-Za-z0-9_-]{0,63}\z/
+    MCP_ENV_NAME = /\A[A-Za-z_][A-Za-z0-9_]*\z/
+    MCP_HEADER_NAME = /\A[A-Za-z0-9!#$%&'*+.^_`|~-]+\z/
+    MCP_URL = %r{\Ahttps?://[^\s]+\z}
+    # Literal env keys and header names that look like credentials. Secrets
+    # reach a server only by env-var NAME (`env_from`, `bearer_token_env`,
+    # `headers_env`), never as a value written into Hive config.
+    MCP_SECRET_NAME = /(TOKEN|SECRET|PASSWORD|API_?KEY)/i
+    MCP_PROJECT_KEYS = %w[inherit_user use].freeze
+    MCP_STAGE_KEYS = %w[use].freeze
+    # `import_offered` records that `hive setup`/`hive init` already asked
+    # once to run `hive mcp import`.
+    MCP_GLOBAL_KEYS = %w[inherit_user servers import_offered].freeze
+    MCP_STDIO_KEYS = %w[command args env env_from cwd].freeze
+    MCP_HTTP_KEYS = %w[
+      url bearer_token_env headers headers_env oauth_resource oauth_client_id oauth_scopes
+      oauth_logins
+    ].freeze
+    MCP_COMMON_KEYS = %w[imported_from enabled].freeze
+    # Nested role blocks that resolve their own grant, beyond the shallow
+    # top-level scan (the permission_entries precedent).
+    MCP_NESTED_GRANT_PATHS = [
+      %w[review ci], %w[review triage], %w[review fix], %w[review browser_test], %w[patrol fix]
+    ].freeze
+
+    # Shape-check the project `mcp` block and every `<block>.mcp` grant. Like
+    # permission_entries, the top-level scan is a deliberate superset: generic
+    # workflow stage names are not known here, so any top-level Hash may
+    # carry a grant and a malformed one fails the load.
+    def validate_mcp!(cfg, source_path)
+      project = cfg.fetch("mcp")
+      reject_project_mcp_servers!(project, "mcp", source_path)
+      validate_closed_mapping!(project, MCP_PROJECT_KEYS, "mcp", source_path)
+      unless [ true, false ].include?(project["inherit_user"])
+        raise ConfigError,
+              "mcp.inherit_user in #{describe_source(source_path)} must be true or false; " \
+              "got #{project['inherit_user'].inspect}"
+      end
+      validate_mcp_use!(project["use"], "mcp.use", source_path)
+
+      mcp_grant_blocks(cfg).each do |label, grant|
+        unless grant.is_a?(Hash)
+          raise ConfigError,
+                "#{label} in #{describe_source(source_path)} must be a Hash like `{ use: [names] }`; " \
+                "got #{grant.inspect} (#{grant.class})"
+        end
+        reject_project_mcp_servers!(grant, label, source_path)
+        validate_closed_mapping!(grant, MCP_STAGE_KEYS, label, source_path)
+        validate_mcp_use!(grant["use"], "#{label}.use", source_path) unless grant["use"].nil?
+      end
+    end
+
+    def mcp_grant_blocks(cfg)
+      blocks = cfg.filter_map do |key, value|
+        next if key == "mcp"
+
+        [ "#{key}.mcp", value["mcp"] ] if value.is_a?(Hash) && value.key?("mcp")
+      end
+      MCP_NESTED_GRANT_PATHS.each do |path|
+        block = path.reduce(cfg) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+        blocks << [ "#{path.join('.')}.mcp", block["mcp"] ] if block.is_a?(Hash) && block.key?("mcp")
+      end
+      blocks
+    end
+
+    def reject_project_mcp_servers!(block, label, source_path)
+      return unless block.key?("servers")
+
+      raise ConfigError,
+            "#{label}.servers in #{describe_source(source_path)} is not supported: MCP servers " \
+            "are defined only in the global catalog (#{global_config_path}). Run `hive mcp import` " \
+            "to copy personal servers there, then grant them here with `mcp.use`."
+    end
+
+    def validate_mcp_use!(value, label, source_path)
+      return if value.is_a?(Array) && value.all? { |name| name.is_a?(String) && name.match?(MCP_SERVER_NAME) }
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be a list of MCP server names " \
+            "matching #{MCP_SERVER_NAME.inspect}; got #{value.inspect}"
+    end
+
+    def mcp_grant_names(cfg)
+      grants = mcp_grant_blocks(cfg).map { |_label, grant| Array(grant["use"]) }
+      (Array(cfg.dig("mcp", "use")) + grants.flatten).uniq
+    end
+
+    # A granted name missing from a readable catalog is a load error naming
+    # the project file. The catalog is read only when something is granted.
+    def validate_mcp_grants_against_catalog!(cfg, source_path)
+      names = mcp_grant_names(cfg)
+      return if names.empty? || !global_mcp_catalog_readable?
+
+      missing = names - load_global_mcp.fetch("servers").keys
+      return if missing.empty?
+
+      raise ConfigError, mcp_missing_servers_message(missing, "MCP grants in #{describe_source(source_path)}")
+    end
+
+    def mcp_missing_servers_message(missing, subject)
+      "#{subject} name server(s) missing from the global MCP catalog " \
+        "#{global_config_path}: #{missing.join(', ')}. Run `hive mcp import` or define them " \
+        "under mcp.servers there."
+    end
+
+    def validate_global_mcp!(cfg, source_path)
+      block = cfg.fetch("mcp")
+      validate_closed_mapping!(block, MCP_GLOBAL_KEYS, "mcp", source_path)
+      validate_boolean!(block["import_offered"], "mcp.import_offered", source_path)
+      unless [ true, false ].include?(block["inherit_user"])
+        raise ConfigError,
+              "mcp.inherit_user in #{describe_source(source_path)} must be true or false; " \
+              "got #{block['inherit_user'].inspect}"
+      end
+      servers = block["servers"]
+      unless servers.is_a?(Hash)
+        raise ConfigError,
+              "mcp.servers in #{describe_source(source_path)} must be a Hash of name => server; " \
+              "got #{servers.inspect} (#{servers.class})"
+      end
+      servers.each { |name, spec| validate_mcp_server!(name, spec, source_path) }
+    end
+
+    def validate_mcp_server!(name, spec, source_path)
+      unless name.is_a?(String) && name.match?(MCP_SERVER_NAME)
+        raise ConfigError,
+              "mcp.servers in #{describe_source(source_path)} has invalid server name #{name.inspect}; " \
+              "names must match #{MCP_SERVER_NAME.inspect}"
+      end
+      label = "mcp.servers.#{name}"
+      unless spec.is_a?(Hash)
+        raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash; got #{spec.inspect}"
+      end
+      http = spec.key?("url")
+      unless http ^ spec.key?("command")
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} must set exactly one of `url` (HTTP) " \
+              "or `command` (stdio)"
+      end
+      allowed = (http ? MCP_HTTP_KEYS : MCP_STDIO_KEYS) + MCP_COMMON_KEYS
+      validate_closed_mapping!(spec, allowed, label, source_path)
+      http ? validate_mcp_http_server!(spec, label, source_path) : validate_mcp_stdio_server!(spec, label, source_path)
+      if spec.key?("imported_from") && !GLOBAL_AGENT_BACKENDS.include?(spec["imported_from"])
+        raise ConfigError,
+              "#{label}.imported_from in #{describe_source(source_path)} must be one of " \
+              "#{GLOBAL_AGENT_BACKENDS.inspect}; got #{spec['imported_from'].inspect}"
+      end
+      validate_boolean!(spec["enabled"], "#{label}.enabled", source_path)
+    end
+
+    def validate_mcp_stdio_server!(spec, label, source_path)
+      validate_mcp_string!(spec["command"], "#{label}.command", source_path)
+      validate_mcp_string_list!(spec["args"], "#{label}.args", source_path, allow_empty: true) if spec.key?("args")
+      validate_mcp_string!(spec["cwd"], "#{label}.cwd", source_path) if spec.key?("cwd")
+      validate_mcp_map!(spec["env"], "#{label}.env", source_path, key: MCP_ENV_NAME) if spec.key?("env")
+      Hash(spec["env"]).each_key do |key|
+        next unless key.match?(MCP_SECRET_NAME)
+
+        raise ConfigError,
+              "#{label}.env.#{key} in #{describe_source(source_path)} looks like a secret; " \
+              "Hive config holds no secret values. Use `env_from: { #{key}: HOST_VAR }` to pass it " \
+              "from the environment."
+      end
+      return unless spec.key?("env_from")
+
+      validate_mcp_map!(spec["env_from"], "#{label}.env_from", source_path, key: MCP_ENV_NAME, value: MCP_ENV_NAME)
+    end
+
+    def validate_mcp_http_server!(spec, label, source_path)
+      validate_mcp_string!(spec["url"], "#{label}.url", source_path, pattern: MCP_URL)
+      if spec.key?("oauth_resource")
+        validate_mcp_string!(spec["oauth_resource"], "#{label}.oauth_resource", source_path, pattern: MCP_URL)
+      end
+      validate_mcp_string!(spec["oauth_client_id"], "#{label}.oauth_client_id", source_path) if spec.key?("oauth_client_id")
+      validate_mcp_string_list!(spec["oauth_scopes"], "#{label}.oauth_scopes", source_path) if spec.key?("oauth_scopes")
+      # Agents holding a saved OAuth login for this server (presence only,
+      # recorded by `hive mcp import`/`hive mcp login`).
+      if spec.key?("oauth_logins")
+        logins = spec["oauth_logins"]
+        unless logins.is_a?(Array) && logins.all? { |agent| GLOBAL_AGENT_BACKENDS.include?(agent) }
+          raise ConfigError,
+                "#{label}.oauth_logins in #{describe_source(source_path)} must be a list of agents from " \
+                "#{GLOBAL_AGENT_BACKENDS.inspect}; got #{logins.inspect}"
+        end
+      end
+      if spec.key?("bearer_token_env")
+        validate_mcp_string!(spec["bearer_token_env"], "#{label}.bearer_token_env", source_path, pattern: MCP_ENV_NAME)
+      end
+      if spec.key?("headers_env")
+        validate_mcp_map!(spec["headers_env"], "#{label}.headers_env", source_path,
+                          key: MCP_HEADER_NAME, value: MCP_ENV_NAME)
+      end
+      return unless spec.key?("headers")
+
+      validate_mcp_map!(spec["headers"], "#{label}.headers", source_path, key: MCP_HEADER_NAME)
+      spec["headers"].each_key do |header|
+        next unless header.casecmp?("authorization") || mcp_secret_header?(header)
+
+        raise ConfigError,
+              "#{label}.headers.#{header} in #{describe_source(source_path)} is a literal credential; " \
+              "Hive config holds no secret values. Use `bearer_token_env` or " \
+              "`headers_env: { #{header}: HOST_VAR }` instead."
+      end
+    end
+
+    # Header names hyphenate (`X-Api-Key`), so compare them as env names.
+    def mcp_secret_header?(header) = header.tr("-", "_").match?(MCP_SECRET_NAME)
+
+    def validate_mcp_string!(value, label, source_path, pattern: nil)
+      return if value.is_a?(String) && !value.strip.empty? && (pattern.nil? || value.match?(pattern))
+
+      expected = pattern ? "a String matching #{pattern.inspect}" : "a non-empty String"
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be #{expected}; got #{value.inspect}"
+    end
+
+    def validate_mcp_string_list!(value, label, source_path, allow_empty: false)
+      valid = value.is_a?(Array) && (allow_empty || !value.empty?) &&
+        value.all? { |item| item.is_a?(String) && !item.empty? }
+      return if valid
+
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be a list of non-empty Strings; " \
+                         "got #{value.inspect}"
+    end
+
+    def validate_mcp_map!(map, label, source_path, key:, value: nil)
+      raise ConfigError, "#{label} in #{describe_source(source_path)} must be a Hash" unless map.is_a?(Hash)
+
+      map.each do |name, item|
+        valid_value = item.is_a?(String) && (value.nil? || item.match?(value))
+        next if name.is_a?(String) && name.match?(key) && valid_value
+
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} has an invalid entry " \
+              "#{name.inspect} => #{item.inspect}"
+      end
+    end
+
     # Sentinel distinguishing "stage declared no permissions key" from a
     # stage that explicitly declared `permissions: nil`. permission_spec and
     # permission_at — its only collaborators — live alongside it here.
@@ -3327,11 +3757,8 @@ module Hive
     def validate_brainstorm_runtime!(cfg, source_path)
       runtime = cfg.dig("brainstorm", "runtime")
       return if runtime.nil?
-      return if BRAINSTORM_RUNTIMES.include?(runtime)
-
-      raise ConfigError,
-            "brainstorm.runtime in #{describe_source(source_path)} must be one of " \
-            "#{BRAINSTORM_RUNTIMES.inspect}; got #{runtime.inspect} (#{runtime.class})"
+      raise ConfigError, "brainstorm.runtime in #{describe_source(source_path)} is unsupported; remove it " \
+                         "(brainstorm.agent selects the brainstorm agent)"
     end
 
     # Shared check used by both validate_reviewers! and
@@ -3375,7 +3802,7 @@ module Hive
     #   poll_interval_sec >= 5         — anything tighter starves CPU on
     #                                    `hive status` subprocesses
     #   fast_poll_sec >= 1             — cheap reap/stat cadence between
-    #                                    full status polls
+    #                                    active status polls
     #   edit_debounce_sec >= 0         — 0 means "no debounce, dispatch
     #                                    on first mtime move"; valid choice
     #   pr_merge_poll_interval_sec >= 60 — `gh pr view` is rate-limited
@@ -3476,6 +3903,7 @@ module Hive
       end
 
       validate_daemon_verb_timeouts!(daemon, source_path)
+      validate_daemon_stage_timeouts!(daemon, source_path)
     end
 
     def validate_web_config!(cfg, source_path)
@@ -3518,6 +3946,12 @@ module Hive
 
         raise ConfigError,
               "web.github.#{key} in #{describe_source(source_path)} must be a non-empty String when set"
+      end
+
+      owner_id = github["owner_id"]
+      unless owner_id.nil? || (owner_id.is_a?(Integer) && owner_id.positive?)
+        raise ConfigError,
+              "web.github.owner_id in #{describe_source(source_path)} must be a positive integer when set"
       end
 
       secret_file = web["session_secret_file"]
@@ -3576,6 +4010,34 @@ module Hive
                 "daemon.child_verb_timeouts[#{verb.inspect}] in #{describe_source(source_path)} " \
                 "must be an integer >= 0; got #{secs.inspect} (#{secs.class})"
         end
+      end
+    end
+
+    DAILY_DIGEST_TIMEOUT_STAGES = %w[
+      daily_digest_refresh daily_digest_close daily_digest_delivery
+    ].freeze
+
+    def validate_daemon_stage_timeouts!(daemon, source_path)
+      overrides = daemon["child_stage_timeouts"]
+      unless overrides.is_a?(Hash)
+        raise ConfigError,
+              "daemon.child_stage_timeouts in #{describe_source(source_path)} must be a Hash " \
+              "of stage => seconds; got #{overrides.class}"
+      end
+
+      overrides.each do |stage, seconds|
+        unless seconds.is_a?(Integer) && seconds >= 0
+          raise ConfigError,
+                "daemon.child_stage_timeouts[#{stage.inspect}] in #{describe_source(source_path)} " \
+                "must be an integer >= 0; got #{seconds.inspect} (#{seconds.class})"
+        end
+      end
+      DAILY_DIGEST_TIMEOUT_STAGES.each do |stage|
+        next if overrides[stage].is_a?(Integer) && overrides[stage].positive?
+
+        raise ConfigError,
+              "daemon.child_stage_timeouts[#{stage.inspect}] in #{describe_source(source_path)} " \
+              "must be a positive integer for daemon-owned digest work"
       end
     end
 
@@ -3992,6 +4454,135 @@ module Hive
       raise ConfigError,
             "answer_digest.hour in #{describe_source(source_path)} must be an integer between 0 and 23; " \
             "got #{hour.inspect} (#{hour.class})"
+    end
+
+    def validate_daily_digest!(cfg, source_path)
+      daily = cfg["daily_digest"]
+      return if daily.nil?
+
+      unless daily.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest in #{describe_source(source_path)} must be a Hash; got #{daily.class}"
+      end
+      validate_boolean!(daily["enabled"], "daily_digest.enabled", source_path)
+      %w[materialization_interval_sec freshness_budget_sec].each do |key|
+        value = daily[key]
+        unless value.is_a?(Integer) && value >= 1
+          raise ConfigError,
+                "daily_digest.#{key} in #{describe_source(source_path)} must be an integer >= 1; " \
+                "got #{value.inspect} (#{value.class})"
+        end
+      end
+
+      telegram = daily["telegram"]
+      unless telegram.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest.telegram in #{describe_source(source_path)} must be a Hash; " \
+              "got #{telegram.inspect} (#{telegram.class})"
+      end
+      validate_boolean!(telegram["enabled"], "daily_digest.telegram.enabled", source_path)
+      hour = telegram["hour"]
+      unless hour.is_a?(Integer) && hour.between?(0, 23)
+        raise ConfigError,
+              "daily_digest.telegram.hour in #{describe_source(source_path)} must be an integer " \
+              "between 0 and 23; got #{hour.inspect} (#{hour.class})"
+      end
+
+      validate_daily_digest_route!(daily, "daily_digest", source_path)
+      fallbacks = daily["fallback_agents"]
+      unless fallbacks.nil?
+        unless fallbacks.is_a?(Array) && fallbacks.all? { |entry| entry.is_a?(Hash) && entry["agent"] }
+          raise ConfigError,
+                "daily_digest.fallback_agents in #{describe_source(source_path)} must be an Array " \
+                "of objects with an agent"
+        end
+        fallbacks.each_with_index do |entry, index|
+          validate_daily_digest_route!(entry, "daily_digest.fallback_agents[#{index}]", source_path)
+        end
+      end
+
+      zone = daily["time_zone"]
+      validate_daily_digest_zone!(zone, source_path) unless zone.nil?
+      coverage = daily["coverage_started_at"]
+      unless coverage.nil?
+        validate_digest_timestamp!(coverage, "daily_digest.coverage_started_at", source_path)
+      end
+      membership = daily["initial_membership"]
+      unless membership.nil? || (membership.is_a?(Array) && membership.all? { |entry| entry.is_a?(Hash) })
+        raise ConfigError,
+              "daily_digest.initial_membership in #{describe_source(source_path)} must be an Array of objects"
+      end
+      interval = daily["first_interval"]
+      validate_digest_interval!(interval, source_path) unless interval.nil?
+      return unless daily["enabled"]
+      # A new installation is valid before the daemon initializes coverage.
+      # Partial persisted identities remain invalid. Readers never initialize.
+      return if coverage.nil? && membership.nil? && interval.nil?
+
+      if zone.nil?
+        raise ConfigError,
+              "daily_digest.time_zone is required when daily_digest.enabled is true in " \
+              "#{describe_source(source_path)}; run `hive setup`"
+      end
+      if coverage.nil? || membership.nil? || interval.nil?
+        raise ConfigError,
+              "daily_digest coverage frontier, initial_membership, and first_interval are required " \
+              "before enablement in #{describe_source(source_path)}; run `hive setup`"
+      end
+    end
+
+    # Any registered agent and any model string it accepts may write the
+    # digest; the model itself is validated by the agent CLI at launch.
+    def validate_daily_digest_route!(route, label, source_path)
+      validate_agent_name!(route["agent"], "#{label}.agent", source_path)
+      model = route["model"]
+      unless model.nil? || (model.is_a?(String) && !model.strip.empty?)
+        raise ConfigError,
+              "#{label}.model in #{describe_source(source_path)} must be a non-empty String"
+      end
+      effort = route["effort"]
+      return if effort.nil? || Hive::ModelRouting::EFFORT_VALUES.include?(effort)
+
+      raise ConfigError,
+            "#{label}.effort in #{describe_source(source_path)} must be one of " \
+            "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
+    end
+
+    def validate_daily_digest_zone!(zone, source_path)
+      unless zone.is_a?(String) && !zone.strip.empty?
+        raise ConfigError,
+              "daily_digest.time_zone in #{describe_source(source_path)} must be a non-empty IANA zone"
+      end
+      TZInfo::Timezone.get(zone)
+    rescue TZInfo::InvalidTimezoneIdentifier
+      raise ConfigError,
+            "daily_digest.time_zone in #{describe_source(source_path)} is an unknown IANA time zone " \
+            "#{zone.inspect}"
+    end
+
+    def validate_digest_timestamp!(value, label, source_path)
+      Time.iso8601(value.to_s)
+    rescue ArgumentError, TypeError
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be an ISO-8601 timestamp"
+    end
+
+    def validate_digest_interval!(interval, source_path)
+      unless interval.is_a?(Hash)
+        raise ConfigError,
+              "daily_digest.first_interval in #{describe_source(source_path)} must be a Hash"
+      end
+      required = %w[local_date time_zone starts_at ends_at]
+      missing = required.reject { |key| interval.key?(key) }
+      raise ArgumentError, "missing #{missing.join(', ')}" unless missing.empty?
+      Date.iso8601(interval.fetch("local_date").to_s)
+      starts_at = Time.iso8601(interval.fetch("starts_at").to_s)
+      ends_at = Time.iso8601(interval.fetch("ends_at").to_s)
+      raise ArgumentError, "ends_at must be after starts_at" unless ends_at > starts_at
+      validate_daily_digest_zone!(interval.fetch("time_zone"), source_path)
+    rescue Date::Error, ArgumentError, TypeError, KeyError => error
+      raise ConfigError,
+            "daily_digest.first_interval in #{describe_source(source_path)} is invalid: #{error.message}"
     end
 
     BOT_NUMERIC_BOUNDS = [

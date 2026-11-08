@@ -17,7 +17,7 @@ class ReleaseContractTest < Minitest::Test
   COLLECT_EVIDENCE = File.join(ROOT, "packaging/release_candidate/workflows/collect_evidence.sh")
   LIVE_AGENT_WORKFLOW = File.join(ROOT, ".github/workflows/live-agent-skills.yml")
   RELEASE_SELECTOR = File.join(ROOT, "packaging/live_agent_skills/select_release_proof.rb")
-  SETUP_NODE_ACTION = "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020"
+  SETUP_NODE_ACTION = "actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1"
   GITHUB_SCRIPT_ACTION = "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"
   CANDIDATE_SHA = "a" * 40
   WORKFLOW_SHA = "b" * 40
@@ -35,11 +35,103 @@ class ReleaseContractTest < Minitest::Test
     releasing = read("docs/RELEASING.md")
     dependencies = read("wiki/dependencies.md")
     assert_includes releasing, "the source version is #{Hive::VERSION}"
-    assert_includes releasing, "latest-stable baseline remains v0.7.1"
+    assert_includes releasing, "latest-stable baseline is v0.7.4"
     assert_includes releasing, "must not report\n`candidate_not_newer`"
     assert_includes dependencies,
                     "The v#{Hive::VERSION} release-prep checkout is `#{Hive::VERSION}`"
     assert_equal 2, dependencies.scan("hive-cli (#{Hive::VERSION})").size
+  end
+
+  def test_release_e2e_prepares_its_scanner_and_retains_failure_reports
+    workflow = YAML.safe_load_file(CANDIDATE_WORKFLOW, aliases: true)
+    steps = workflow.fetch("jobs").fetch("release-e2e").fetch("steps")
+    scanner = steps.index { |step| step["run"] == "ruby packaging/betterleaks.rb" }
+    scenarios = steps.index { |step| step["run"] == "bundle exec ruby bin/hive-e2e run --profile release" }
+    refute_nil scanner
+    refute_nil scenarios
+    assert_operator scanner, :<, scenarios
+    reports = steps.find { |step| step["name"] == "Retain release E2E reports" }
+    assert_equal "always()", reports.fetch("if")
+    assert_equal "${{ runner.temp }}/release-e2e", reports.fetch("with").fetch("path")
+  end
+
+  def test_every_betterleaks_packaging_consumer_restores_verified_archive_cache
+    expected = {
+      "ci.yml" => %w[coverage-shards expensive-test-gates e2e web-tests launchd-macos],
+      "live-agent-skills.yml" => %w[build],
+      "release-candidate.yml" => %w[candidate release-e2e]
+    }
+    path = "${{ runner.temp }}/betterleaks-archives"
+    key = "betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}"
+    expected.each do |filename, jobs|
+      workflow = YAML.safe_load_file(File.join(ROOT, ".github/workflows", filename), aliases: true)
+      consumers = workflow.fetch("jobs").filter_map do |name, job|
+        steps = job.fetch("steps", [])
+        indexes = steps.each_index.select do |index|
+          body = steps[index]["run"].to_s
+          body.include?("ruby packaging/betterleaks.rb") || body.match?(/HiveReleaseCandidate::Artifacts\.new\(.*?\)\.call\b/m)
+        end
+        next if indexes.empty?
+        assert_equal 1, indexes.size, "#{filename}:#{name}"
+        consumer_index = indexes.first
+        consumer = steps[consumer_index]
+        cache_index = steps.index { |step| step.dig("with", "path") == path }
+        refute_nil cache_index, "#{filename}:#{name}"
+        cache = steps[cache_index]
+        assert_equal "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", cache.fetch("uses")
+        assert_equal key, cache.fetch("with").fetch("key")
+        assert_equal "betterleaks-archives-v1-${{ runner.os }}-", cache.fetch("with").fetch("restore-keys").strip
+        assert_operator cache_index, :<, consumer_index
+        checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+        assert_operator checkout_index, :<, cache_index
+        assert_equal path, consumer.fetch("env").fetch("HIVE_BETTERLEAKS_CACHE_DIR")
+        refute consumer["if"].to_s.include?("cache-hit")
+        if filename == "release-candidate.yml"
+          refute consumer.fetch("env").key?("GITHUB_TOKEN")
+          refute consumer.fetch("env").key?("GH_TOKEN")
+        else
+          assert_equal "${{ github.token }}", consumer.fetch("env").fetch("GITHUB_TOKEN")
+        end
+        %w[GITHUB_TOKEN GH_TOKEN HIVE_BETTERLEAKS_CACHE_DIR].each do |variable|
+          refute workflow.fetch("env", {}).key?(variable)
+          refute job.fetch("env", {}).key?(variable)
+        end
+        gh_token_steps = steps.each_with_index.filter_map do |step, index|
+          (step["name"] || "step #{index}") if step.fetch("env", {}).key?("GH_TOKEN")
+        end
+        expected_gh_token_steps = if filename == "release-candidate.yml" && name == "release-e2e"
+          [ "Attest exact producer before release E2E" ]
+        else
+          []
+        end
+        assert_equal expected_gh_token_steps, gh_token_steps,
+                     "#{filename}:#{name}: GH_TOKEN is restricted to the existing producer attestation step"
+        assert_equal ".", consumer.fetch("working-directory") if name == "web-tests"
+        if filename == "ci.yml"
+          minutes = %w[expensive-test-gates launchd-macos].include?(name) ? 15 : 20
+          assert_equal minutes, job.fetch("timeout-minutes")
+        end
+        if filename == "release-candidate.yml" && name == "candidate"
+          assert_equal "inputs.source_run_id == ''", cache.fetch("if")
+          assert_equal cache.fetch("if"), consumer.fetch("if")
+          assert_equal false, steps[checkout_index].fetch("with").fetch("persist-credentials")
+        else
+          refute cache.key?("if")
+        end
+        name
+      end
+      assert_equal jobs.sort, consumers.sort
+      token_steps = workflow.fetch("jobs").flat_map do |name, job|
+        job.fetch("steps", []).filter_map { |step| name if step.fetch("env", {}).key?("GITHUB_TOKEN") }
+      end
+      assert_equal(filename == "release-candidate.yml" ? [] : jobs.sort, token_steps.sort,
+                   "#{filename}: GITHUB_TOKEN is restricted to the Betterleaks packaging consumer steps")
+    end
+  end
+
+  def test_agent_conversion_guide_is_packaged_for_installed_users
+    spec = Gem::Specification.load(File.join(ROOT, "hive.gemspec"))
+    assert_includes spec.files, "docs/guides/current-format-migration.md"
   end
 
   def test_public_credibility_copy_matches_current_capabilities
@@ -93,9 +185,9 @@ class ReleaseContractTest < Minitest::Test
     release_docs = read("docs/RELEASING.md")
 
     assert_equal "0.1.5", canonical.version
-    assert_equal 17, canonical.reference_paths.size
-    assert_equal 17, projection.fetch("files").keys.grep(%r{\Areferences/}).size
-    assert_equal 17,
+    assert_equal 20, canonical.reference_paths.size
+    assert_equal 20, projection.fetch("files").keys.grep(%r{\Areferences/}).size
+    assert_equal 20,
                  Dir.glob(File.join(ROOT, "openclaw/skills/hive/references/*.md")).size
     assert_equal canonical.version, openclaw.fetch("version")
     assert_equal canonical.version, projection.fetch("skill_version")
@@ -308,11 +400,7 @@ class ReleaseContractTest < Minitest::Test
     assert_includes body, "source_run_attempt"
     assert_includes body, "source_artifact_id"
     assert_includes body, "source_artifact_digest"
-    assert_includes body, "packaging/release_candidate/hosted_upgrade_lane.rb"
-    assert_includes body, "$HIVE_RC_RUN_ROOT/candidate/manifest.json"
-    assert_includes body, "/run/sandbox-attestation.json"
-    assert_includes body, "/run/baseline-cache-attestation.json"
-    assert_includes body, "/run/targets/"
+    refute jobs.key?("upgrade"), "historical conversion is outside the supported runtime"
 
     external_uses = body.scan(/^\s*(?:-\s*)?uses:\s+([^@\s]+)@([^#\s]+)/).reject do |action, _revision|
       action.start_with?("./")
@@ -343,10 +431,6 @@ class ReleaseContractTest < Minitest::Test
     verifier = read("packaging/release_candidate/verify_hosted_gate.sh")
     assert_includes verifier, "candidate-controlled harness drift"
     assert_includes body, ".trusted-control/packaging/release_candidate/verify_hosted_gate.sh"
-    assert_includes body, "--cap-drop=ALL"
-    assert_includes body, "--security-opt=no-new-privileges"
-    assert_includes body, "--network=none"
-    assert_match(/ruby@sha256:[0-9a-f]{64}/, body)
     refute_includes body, "sudo unshare"
   end
 
@@ -366,30 +450,6 @@ class ReleaseContractTest < Minitest::Test
     assert_includes managed_web, '--sha256="$web_sha"'
     assert_includes managed_web, '--prefix="$RUNNER_TEMP/managed"'
     refute_match(/--(?:hive-bin|archive|sha256|prefix)\s+"/, managed_web)
-
-    upgrade = jobs.fetch("upgrade").fetch("steps").find do |step|
-      step["name"] == "Run installed historical producer and candidate without network"
-    end.fetch("run")
-    profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
-      '(allow file-write* (literal \"/dev/null\")) ' \
-      '(allow file-write* (subpath \"$HIVE_RC_RUN_ROOT\")) (deny network*)'
-    assert_includes upgrade, %(profile="#{profile}")
-    assert_equal 1, upgrade.scan('sandbox-exec -p "$profile"').size
-    assert_includes upgrade, "checkpoint=sandbox-run"
-    assert_includes upgrade, "checkpoint=ruby-smoke"
-    assert_includes upgrade, '"LANG=en_US.UTF-8"'
-    assert_includes upgrade, '"LC_ALL=en_US.UTF-8"'
-    assert_includes upgrade, "Encoding.default_external == Encoding::UTF_8"
-    assert_includes upgrade, 'File.open(\"/dev/null\", \"w\")'
-    assert_includes upgrade, "checkpoint=sandbox-shell"
-    assert_includes upgrade, "failure phase=%s status=%s"
-    %w[
-      ruby-smoke hosted-stage-install sandbox-attestation baseline-cache-attestation
-      baseline-target-attestation candidate-target-attestation hosted-upgrade-lane
-    ].each do |phase|
-      assert_includes upgrade, "run_phase #{phase}"
-    end
-    refute_includes upgrade, "allow mach-lookup"
 
     install_smoke = read(".github/workflows/install-smoke.yml")
     smoke_profile = "(version 1) (deny default) (allow process*) (allow file-read*) (allow sysctl-read) " \
@@ -498,7 +558,7 @@ class ReleaseContractTest < Minitest::Test
       assert_includes job.fetch("if"), "selected_gates"
       assert_gate_receipt_precedes_execution(job, job_name)
     end
-    %w[native upgrade].each do |job_name|
+    %w[native].each do |job_name|
       job = jobs.fetch(job_name)
       executable = job.fetch("steps").reject do |step|
         step["name"].to_s.start_with?("Retain ")

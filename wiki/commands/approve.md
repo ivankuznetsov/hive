@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-07
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -22,6 +22,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
 ```
 
 `<stage>` accepts either the full directory name (`3-plan`) or the short suffix (`plan`). Both `--to` and `--from` are validated against the closed enum at parse time (Thor `enum:` constraint).
+
+Remote approval requires `answer` authority and full stage/generation guards.
+When omitted by a token with `read`, the CLI resolves them and prints the exact
+`--from`, `--generation` and retry key to stderr before submission. Reuse those
+values for a lost-response retry after advancement. Retained remote verification
+composes with caller observation guards and always refuses force/destination
+overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
+[[remote-access]].
 
 ## Steps performed (`Commands::Approve#call`)
 
@@ -45,8 +53,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
 10. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
-11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
-12. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
+11. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. The source is revalidated against the task observation immediately before the rename, so a same-path replacement is never carried into the destination stage. Cross-device fallback uses `Hive::TaskMeta.relocate_across_devices!` (exclusive `Dir.mkdir`, handle-held copy, identity validation, then source removal); a destination that already exists surfaces as `Hive::DestinationCollision`, and a failed or rejected copy is removed only while the destination still has the copy's identity.
+12. Record the slug-scoped commit and roll the move back if commit fails.
+    Terminal completion and automatic rollback use the original task
+    observation. Rollback validates it before undoing a move or restoring
+    metadata, so a dropped task is not recreated and a copied replacement is
+    not moved or overwritten. A caller-supplied observation lets composed
+    Decide transitions retain that same identity through the move and any
+    later sibling-file rollback.
 13. Report human prose or one `hive-approve` JSON document.
 
 ## JSON contract (`schema = "hive-approve"`, version 2)
@@ -113,6 +127,12 @@ The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hi
 `Hive::Commands::Approve.error_kind_for` is the shared transition-error
 classifier. Workflow stage actions delegate to it because their outer envelope
 exposes the same closed error-kind enum while composing this command.
+
+Pre-dispatch usage failures, including missing or extra arguments rejected by
+Thor before command dispatch, use the same `hive-approve.v2` error contract
+with `error_kind: "invalid_task_path"`. For command-level error emission,
+`JSON::GeneratorError` is deliberately propagated rather than suppressed or
+replaced with a second document.
 
 Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schema suites. The current artifact is `schemas/hive-approve.v2.json`; v1 remains available for historical validation.
 
@@ -189,6 +209,19 @@ and holds invalid dependency state. Agent callers use `approve` for:
 - an audit-trail commit on `hive/state` recording the approval
 
 `hive approve` adds all of that without removing the manual `mv` path — the two coexist.
+
+## Remote context
+
+Remote approval requires the independent `answer` scope and an expected stage
+and generation. `--from STAGE --generation GENERATION` lets an answer-only token
+submit the binding without obtaining general read access. With `read`, the
+native transport can obtain the task's current `approval_generation`. Admission
+is durable and the daemon performs the guarded transition later. Remote
+`--force`, destination overrides and effects that derive force are refused with
+guidance to advance locally, even when the token has every scope. A workflow
+action that performs approval needs both `act` and `answer`; the explicit
+approval endpoint needs `answer`. See [[remote-access]] for operation recovery
+and authority boundaries. Remote JSON uses the bounded `hive-remote.v1` contract.
 
 ## Backlinks
 

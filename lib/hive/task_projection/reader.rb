@@ -16,6 +16,27 @@ module Hive
       ROUTINE_CACHE = {}
       ROUTINE_CACHE_MUTEX = Mutex.new
 
+      # Routine consumers need projected state and evidence of an empty
+      # journal, not the replay's raw records or its working object graph.
+      RoutineRead = Data.define(
+        :projection, :state, :diagnostics, :truncated, :journal_cursor,
+        :journal_record_count
+      ) do
+        def initialize(projection:, state:, diagnostics:, truncated:, journal_cursor:,
+                       journal_record_count:)
+          super(
+            projection: projection && Hive::TaskProjection.from_data(projection.data),
+            state: state.to_s.freeze,
+            diagnostics: JSON.parse(JSON.generate(diagnostics), freeze: true),
+            truncated: truncated == true,
+            journal_cursor: Integer(journal_cursor || 0),
+            journal_record_count: Integer(journal_record_count)
+          )
+        end
+
+        def current? = state == "current"
+      end
+
       BoundedRead = Data.define(
         :projection, :state, :diagnostics, :truncated, :journal_cursor,
         :journal_records
@@ -73,7 +94,8 @@ module Hive
                 "task journal has #{records} events (limit #{event_limit})"
         end
         receipt = Hive::TaskProjection.replay_journal(bytes)
-        result = BoundedRead.new(
+        result = read_result(
+          routine: memoize,
           projection: replay(receipt, marker: marker),
           state: "current",
           diagnostics: [], truncated: false,
@@ -83,7 +105,8 @@ module Hive
         routine_cache_store(cache_key, result) if cache_key
         result
       rescue Hive::TaskProjection::JournalLockBusy => error
-        BoundedRead.new(
+        read_result(
+          routine: memoize,
           projection: nil, state: "busy",
           diagnostics: [ {
             "source" => "task_journal",
@@ -94,15 +117,24 @@ module Hive
           truncated: false, journal_cursor: 0, journal_records: []
         )
       rescue Hive::TaskProjection::JournalTooLarge => error
-        invalid_read(error, truncated: true, cache_key: cache_key)
+        invalid_read(error, truncated: true, cache_key: cache_key, routine: memoize)
       rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
              JSON::ParserError, KeyError, TypeError, ArgumentError,
              SystemCallError, IOError => error
-        invalid_read(error, truncated: false, cache_key: cache_key)
+        invalid_read(error, truncated: false, cache_key: cache_key, routine: memoize)
       end
 
-      def invalid_read(error, truncated:, cache_key: nil)
-        result = BoundedRead.new(
+      def read_result(routine:, journal_records:, **attributes)
+        if routine
+          RoutineRead.new(**attributes, journal_record_count: journal_records.size)
+        else
+          BoundedRead.new(**attributes, journal_records: journal_records)
+        end
+      end
+
+      def invalid_read(error, truncated:, cache_key: nil, routine: false)
+        result = read_result(
+          routine: routine,
           projection: nil, state: "invalid",
           diagnostics: [ {
             "source" => "task_journal",

@@ -162,7 +162,6 @@ File.write(File.join(hive_home, "config.yml"), {
 run!(env_base, "bundle", "exec", "ruby", "-Ilib", "bin/hive", "init", project_dir, chdir: REPO_ROOT)
 project_cfg = File.join(project_dir, ".hive-state", "config.yml")
 cfg = YAML.safe_load_file(project_cfg)
-cfg["claude"] = (cfg["claude"] || {}).merge("mode" => "headless")
 cfg["execute"] = (cfg["execute"] || {}).merge("agent" => "claude")
 cfg["worktree_root"] = File.join(sandbox, "worktrees")
 File.write(project_cfg, cfg.to_yaml)

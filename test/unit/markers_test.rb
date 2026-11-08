@@ -5,6 +5,25 @@ require "timeout"
 class MarkersTest < Minitest::Test
   include HiveTestHelper
 
+  def test_binary_scan_returns_unicode_marker_text_for_json_and_generation_consumers
+    source = "\xFF body\n<!-- WAITING reason=\"£7,500 — café\" -->".b.freeze
+    state = Hive::Markers.current_from_content(source)
+
+    assert_equal :waiting, state.name
+    assert_equal "£7,500 — café", state.attrs.fetch("reason")
+    assert_equal Encoding::UTF_8, state.attrs.fetch("reason").encoding
+    assert_equal Encoding::UTF_8, state.raw.encoding
+    assert_equal({ "reason" => "£7,500 — café" }, JSON.parse(JSON.generate(state.attrs)))
+    assert_equal Encoding::BINARY, source.encoding
+  end
+
+  def test_invalid_marker_attribute_bytes_are_preserved_not_scrubbed
+    state = Hive::Markers.current_from_content("<!-- WAITING reason=\"\xFF\" -->".b)
+
+    assert_equal [ 255 ], state.attrs.fetch("reason").bytes
+    refute state.attrs.fetch("reason").valid_encoding?
+  end
+
   def test_returns_none_for_missing_file
     with_tmp_dir do |dir|
       state = Hive::Markers.current(File.join(dir, "nope.md"))
@@ -56,6 +75,32 @@ class MarkersTest < Minitest::Test
 
       assert states.all?(&:none?)
       assert_equal "<!-- COMPLETE -->\n", File.read(target)
+    end
+  end
+
+  def test_seed_body_if_empty_replaces_marker_only_artifact_once
+    with_tmp_dir do |dir|
+      file = File.join(dir, "plan.md")
+      File.write(file, "<!-- ERROR reason=provider_error -->\n")
+
+      assert Hive::Markers.seed_body_if_empty(file, "# Checkpoint\n")
+      assert_equal "# Checkpoint\n", File.binread(file)
+      refute Hive::Markers.seed_body_if_empty(file, "# Replacement\n")
+      assert_equal "# Checkpoint\n", File.binread(file)
+    end
+  end
+
+  def test_seed_body_if_empty_does_not_follow_symlink
+    with_tmp_dir do |dir|
+      outside = File.join(dir, "outside.md")
+      state = File.join(dir, "plan.md")
+      File.write(outside, "do not replace\n")
+      File.symlink(outside, state)
+
+      assert Hive::Markers.seed_body_if_empty(state, "# Checkpoint\n")
+      assert_equal "do not replace\n", File.read(outside)
+      refute File.symlink?(state)
+      assert_equal "# Checkpoint\n", File.read(state)
     end
   end
 

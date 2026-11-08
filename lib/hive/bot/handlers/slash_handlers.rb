@@ -305,7 +305,7 @@ module Hive
 
         # Telegram's automatic first-contact command. A welcome with the
         # next concrete step beats the bare command list: the operator just
-        # connected the bot from hivebox and wants proof it works.
+        # connected the bot from Hive web and wants proof it works.
         def start(_update)
           @result_class.new(
             action: :reply,
@@ -433,14 +433,14 @@ module Hive
                   "--reason must be one of #{Hive::TaskClosureContract::REASONS.join(', ')}"
           end
           raise ArgumentError, "at least one --evidence reference is required" if
-            input["evidence"].empty?
+            input["evidence"].empty? && input["reason"] != "cancelled"
 
           [ target, input ]
         end
 
         def closure_usage
-          "Use /close <id|slug> --reason <already_delivered|superseded> " \
-            "--evidence <PR-or-commit> [--evidence <ref>] " \
+          "Use /close <id|slug> --reason <already_delivered|superseded|cancelled> " \
+            "[--evidence <PR-or-commit>] " \
             "[--successor project:slug --attestation \"statement\"]."
         end
 

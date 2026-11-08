@@ -135,6 +135,23 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_nil result.reply_markup
   end
 
+  def test_close_accepts_cancellation_without_delivery_evidence
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+    result = handlers.closure(Update.new(
+      text: '/close 9281 --reason cancelled --attestation "No longer wanted"',
+      chat_id: 1
+    ))
+    token = result.reply_markup.dig(0, 0, :callback_data)
+    callback = Hive::Bot::NotificationBuilders.resolve_callback(token)
+    prefix, encoded = callback.split(":", 2)
+    payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+
+    assert_equal "closure_preview", prefix
+    assert_equal "cancelled", payload.dig("input", "reason")
+    assert_equal "No longer wanted", payload.dig("input", "attestation")
+    assert_empty payload.dig("input", "evidence")
+  end
+
   def test_close_rejects_duplicate_and_unknown_options
     commands = [
       "/close task --reason superseded --evidence acme/app#42 " \

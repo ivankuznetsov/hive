@@ -1,8 +1,15 @@
 require "test_helper"
 require "json_schemer"
 require "hive/commands/act"
+require "hive/runtime_control_plane/command_schema_installation"
 
 class CommandsActTest < Minitest::Test
+  include HiveTestHelper
+
+  TEST_PACKAGE = {
+    version: "0.0.0-test", location: "https://example.invalid/compat.gem", sha256: "a" * 64
+  }.freeze
+
   class FakeExecutor
     attr_reader :calls
 
@@ -42,6 +49,48 @@ class CommandsActTest < Minitest::Test
     assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_inner_stage_stdout_cannot_become_a_second_act_json_document
+    executor = FakeExecutor.new
+    executor.define_singleton_method(:execute) do |**|
+      puts '{"schema":"inner-stage"}'
+      { "task_state" => "idle", "stage" => "3-plan", "marker" => "complete" }
+    end
+    stdout, = capture_io do
+      Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64,
+        json: true, executor: executor).call
+    end
+    assert_equal "hive-act", JSON.parse(stdout).fetch("schema")
+  end
+
+  def test_keyed_json_success_is_not_marked_emitted_before_receipt_finalization
+    command = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "a" * 64, json: true,
+      idempotency_key: "key", executor: FakeExecutor.new
+    )
+    capture_io { command.send(:emit_success, FakeExecutor.new.execute) }
+    refute command.instance_variable_get(:@stdout_written)
+  end
+
+  def test_failed_attached_stage_emits_one_success_envelope_and_exits_nonzero
+    result = { "task_state" => "error", "stage" => "6-review", "marker" => "error",
+      "recovery" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "terminal", "phase" => "terminal", "owner" => "none",
+        "request_id" => "request-1", "attempt_id" => "attempt-1",
+        "terminal_outcome" => "failed", "terminal_at" => Time.now.utc.iso8601
+      }).to_h }
+    stdout, = capture_io do
+      assert_raises(Hive::TaskInErrorState) do
+        Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+          json: true, executor: FakeExecutor.new(result: result)).call
+      end
+    end
+    payload = JSON.parse(stdout)
+    assert_equal true, payload.fetch("ok")
+    assert_equal "failed", payload.dig("result", "recovery", "terminal_outcome")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+    assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+  end
+
   def test_human_success_is_concise
     stdout, = capture_io do
       Hive::Commands::Act.new(
@@ -50,6 +99,119 @@ class CommandsActTest < Minitest::Test
     end
 
     assert_equal "advanced demo:task — idle at 3-plan (complete)\n", stdout
+  end
+
+  def test_structured_call_returns_the_payload_without_output
+    payload = nil
+    stdout, stderr = capture_io do
+      payload = Hive::Commands::Act.new(
+        "workflow.advance", "demo:task", observation: "a" * 64,
+        structured: true, executor: FakeExecutor.new
+      ).call
+    end
+
+    assert_empty stdout
+    assert_empty stderr
+    assert_equal true, payload.fetch("ok")
+    assert_equal "idle", payload.dig("result", "task_state")
+  end
+
+  def test_keyed_replay_after_task_move_preserves_payload_without_reexecuting_act
+    with_command_receipts do |project, store|
+      source = File.join(project, ".hive-state", "stages", "1-inbox", "task")
+      destination = File.join(project, ".hive-state", "stages", "2-brainstorm", "task")
+      FileUtils.mkdir_p(source)
+      executor = FakeExecutor.new
+      token = "d" * 64
+      command = Hive::Commands::Act.new(
+        "workflow.advance", "demo:task", observation: token, json: true,
+        idempotency_key: "act-move", executor: executor, command_receipt_store: store
+      )
+      operation = Hive::CommandOperation.new(
+        key: "act-move", command: "act", target: "demo:task",
+        request: { "action_id" => "workflow.advance", "observation" => token, "project" => nil },
+        project_root: project, principal: "owner", json: true, structured: true,
+        failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
+        text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
+        store: store
+      )
+      command.define_singleton_method(:command_operation) { operation }
+
+      first, = capture_io { command.call }
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mv(source, destination)
+      replay, = capture_io { command.call }
+
+      assert_equal 1, executor.calls.length
+      assert_equal JSON.parse(first), JSON.parse(replay)
+    end
+  end
+
+  def test_post_effect_persistence_failure_emits_typed_unresolved_envelope
+    with_command_receipts do |project, store|
+      original_succeed = store.method(:succeed)
+      fail_once = true
+      store.define_singleton_method(:succeed) do |claim, result:, status: 0|
+        if fail_once
+          fail_once = false
+          raise Sequel::DatabaseError, "simulated final receipt failure"
+        end
+        original_succeed.call(claim, result: result, status: status)
+      end
+      command = Hive::Commands::Act.new(
+        "workflow.advance", "demo:task", observation: "e" * 64, json: true,
+        idempotency_key: "act-persistence", executor: FakeExecutor.new,
+        command_receipt_store: store
+      )
+      operation = Hive::CommandOperation.new(
+        key: "act-persistence", command: "act", target: "demo:task",
+        request: {
+          "action_id" => "workflow.advance", "observation" => "e" * 64, "project" => nil
+        },
+        project_root: project, principal: "owner", json: true, structured: true,
+        failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
+        text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
+        store: store
+      )
+      command.define_singleton_method(:command_operation) { operation }
+
+      output, = capture_io do
+        assert_raises(Hive::CommandUnresolved) { command.call }
+      end
+      envelope = JSON.parse(output)
+      assert_equal false, envelope.fetch("ok")
+      assert_equal "command_unresolved_pending", envelope.fetch("error_kind")
+      assert_equal Hive::ExitCodes::COMMAND_UNRESOLVED, envelope.fetch("exit_code")
+      assert_equal "unresolved", envelope.dig("command_receipt", "state")
+    end
+  end
+
+  def test_keyed_rejected_action_replays_the_typed_envelope_and_original_status_once
+    with_command_receipts do |project, store|
+      executor = FakeExecutor.new(error: Hive::WrongStage.new("stage changed"))
+      resolver = Struct.new(:resolve).new(Struct.new(:project_root).new(project))
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+        with_replaced_singleton_method(Hive::CommandOperation, :registered_project_roots, ->(**) { [ project ] }) do
+          outputs = [ Hive::WrongStage, Hive::CommandReplayFailure ].map do |error_class|
+            stdout, = capture_io do
+              error = assert_raises(error_class) do
+                Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+                  json: true, executor: executor, idempotency_key: "rejected-action",
+                  command_receipt_store: store, principal: "owner").call
+              end
+              assert_equal Hive::ExitCodes::WRONG_STAGE, error.exit_code
+            end
+            payload = JSON.parse(stdout)
+            assert_equal "stale_observation", payload.fetch("error_kind")
+            assert_equal "workflow.retry", payload.fetch("action_id")
+            assert_equal "demo:task", payload.fetch("target")
+            stdout
+          end
+          assert_equal outputs.first, outputs.last
+          assert_equal 1, executor.calls.length
+        end
+      end
+    end
   end
 
   def test_retry_renders_and_validates_the_canonical_recovery_receipt
@@ -158,6 +320,27 @@ class CommandsActTest < Minitest::Test
     assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
   end
 
+  def test_error_envelope_serialization_failure_is_raised
+    executor = FakeExecutor.new(error: Hive::ConfigError.new("bad config"))
+    command = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "b" * 64,
+      json: true, executor: executor
+    )
+
+    out, err = capture_io do
+      with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+        raise JSON::GeneratorError, "forced generator failure"
+      }) do
+        error = assert_raises(JSON::GeneratorError) { command.call }
+        assert_equal "forced generator failure", error.message
+      end
+    end
+
+    assert_empty out
+    assert_empty err
+    assert_equal 1, executor.calls.length
+  end
+
   def test_missing_observation_is_a_usage_error_before_executor_call
     executor = FakeExecutor.new
 
@@ -182,6 +365,25 @@ class CommandsActTest < Minitest::Test
     end
   end
 
+  def test_keyed_target_must_be_an_exact_project_slug_and_match_the_project_filter
+    invalid = Hive::Commands::Act.new(
+      "workflow.advance", "task", observation: "a" * 64, idempotency_key: "key"
+    )
+    error = assert_raises(Hive::OperationalActionUsageError) do
+      invalid.send(:qualified_target)
+    end
+    assert_includes error.message, "exact project:slug"
+
+    mismatched = Hive::Commands::Act.new(
+      "workflow.advance", "demo:task", observation: "a" * 64,
+      project: "other", idempotency_key: "key"
+    )
+    error = assert_raises(Hive::OperationalActionUsageError) do
+      mismatched.send(:qualified_target)
+    end
+    assert_includes error.message, "--project must match"
+  end
+
   def test_error_kinds_cover_the_closed_operational_failure_vocabulary
     command = Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64)
     errors = {
@@ -202,6 +404,29 @@ class CommandsActTest < Minitest::Test
 
     errors.each do |error, kind|
       assert_equal kind, command.envelope_error_kind(error), error.class.name
+    end
+  end
+
+  private
+
+  def with_command_receipts
+    Dir.mktmpdir("act-command-receipts") do |dir|
+      project = File.join(dir, "project")
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        { "command_receipts" => { "keyed_intake_enabled" => true } }.to_yaml
+      )
+      system("git", "init", "--quiet", project, exception: true)
+      database = Hive::RuntimeControlPlane::Database.new(
+        path: File.join(dir, "runtime.sqlite3")
+      ).migrate!
+      Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(
+        database: database, package_coordinates: TEST_PACKAGE
+      )
+      yield project, Hive::CommandReceiptStore.new(database: database)
+    ensure
+      database&.disconnect
     end
   end
 end

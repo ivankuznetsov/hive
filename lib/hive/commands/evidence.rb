@@ -1,3 +1,4 @@
+require "fileutils"
 require "json"
 require "securerandom"
 require "hive/artifacts/capture_mailbox"
@@ -18,14 +19,15 @@ module Hive
     # it advances a separate epoch and leaves ordinary workflow.retry admission
     # to the existing status/action boundary.
     class Evidence
-      SUBCOMMANDS = %w[browser recover rework terminal].freeze
+      SUBCOMMANDS = %w[browser recover rework server terminal].freeze
       GATEWAY_TIMEOUT_SECONDS = 65
+      SERVER_GATEWAY_TIMEOUT_SECONDS = 95
       CAPTURE_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/
 
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
                      generation: nil, recovery_digest: nil, task_resolver: nil,
                      command: [], environment: ENV, approve_factory: nil,
-                     quiet: false)
+                     quiet: false, observation_guard: nil)
         @subcommand = subcommand.to_s
         @target = target.to_s
         @project_filter = project
@@ -40,12 +42,14 @@ module Hive
           Hive::Commands::Approve.new(target, **options)
         end
         @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
         validate_arguments!
         return capture_terminal if @subcommand == "terminal"
         return run_browser if @subcommand == "browser"
+        return start_server if @subcommand == "server"
 
         task = resolve_task
         project = task.respond_to?(:project_name) ? task.project_name.to_s : @project_filter.to_s
@@ -75,7 +79,7 @@ module Hive
         unless SUBCOMMANDS.include?(@subcommand)
           raise Hive::UsageError,
                 "unknown evidence subcommand #{@subcommand.inspect} " \
-                "(expected: browser, recover, rework, or terminal)"
+                "(expected: browser, recover, rework, server, or terminal)"
         end
         if @subcommand == "browser"
           raise Hive::UsageError, "hive evidence browser requires COMMAND" if @target.empty?
@@ -86,6 +90,10 @@ module Hive
             raise Hive::UsageError, "hive evidence terminal requires a safe capture NAME"
           end
           raise Hive::UsageError, "hive evidence terminal requires COMMAND after --" if @command.empty?
+          return
+        end
+        if @subcommand == "server"
+          raise Hive::UsageError, "hive evidence server requires COMMAND after --" if @target.empty?
           return
         end
         verb = @subcommand == "rework" ? "rework" : "recover"
@@ -127,6 +135,19 @@ module Hive
         raise Hive::UsageError, "browser gateway is unavailable: #{e.message}"
       end
 
+      def start_server
+        response = gateway_request(
+          "operation" => "server", "argv" => [ @target, *@command ]
+        )
+        payload = response.fetch("payload")
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts "hive: project evidence server ready at #{payload.fetch('app_endpoint')}"
+        end
+        payload
+      end
+
       def gateway_request(payload)
         root = @environment["HIVE_EVIDENCE_CAPTURE_MAILBOX"].to_s
         unless File.absolute_path?(root) && File.directory?(root)
@@ -156,7 +177,8 @@ module Hive
           end
           write_gateway_request(writer, source)
         end
-        response = read_gateway_response(reader)
+        timeout = @subcommand == "server" ? SERVER_GATEWAY_TIMEOUT_SECONDS : GATEWAY_TIMEOUT_SECONDS
+        response = read_gateway_response(reader, timeout_seconds: timeout)
         unless response.fetch("ok")
           detail = response["error"] || response["stderr"] || "capture gateway command failed"
           raise Hive::UsageError, detail
@@ -188,8 +210,8 @@ module Hive
         end
       end
 
-      def read_gateway_response(reader)
-        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + GATEWAY_TIMEOUT_SECONDS
+      def read_gateway_response(reader, timeout_seconds: GATEWAY_TIMEOUT_SECONDS)
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout_seconds
         buffer = +"".b
         loop do
           remaining = deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -261,6 +283,7 @@ module Hive
         package = nil
         receipt = nil
         observation_guard = lambda do |locked_task|
+          @observation_guard&.call(locked_task)
           marker = Hive::Markers.current(locked_task.state_file)
           unless marker.name == :error &&
                  Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs) &&
@@ -287,6 +310,7 @@ module Hive
             expected_generation: @generation,
             expected_digest: @recovery_digest
           )
+          archive_review_passes!(locked_task, receipt.fetch("sequence"))
         end
         @approve_factory.call(
           task.folder,
@@ -305,6 +329,23 @@ module Hive
           "reviewed_generation" => receipt.fetch("generation"),
           "rework_sequence" => receipt.fetch("sequence")
         }
+      end
+
+      REVIEW_PASS_FILE = /-\d{2}\.md\z/
+
+      # A rework sends the task back through execute and a fresh review of the
+      # reworked code. Review numbers passes from the pass-numbered files at the
+      # top of reviews/ and refuses once they exceed review.max_passes, so
+      # without this a task that needed rework could never be reviewed again.
+      # Keep the earlier passes for provenance under reviews/archive/.
+      def archive_review_passes!(locked_task, sequence)
+        reviews = File.join(locked_task.folder, "reviews")
+        passes = Dir[File.join(reviews, "*.md")].select { |path| File.basename(path).match?(REVIEW_PASS_FILE) }
+        return if passes.empty?
+
+        archive = File.join(reviews, "archive", format("rework-%02d", sequence.to_i))
+        FileUtils.mkdir_p(archive)
+        passes.each { |path| FileUtils.mv(path, File.join(archive, File.basename(path))) }
       end
 
       def emit_rework(payload)

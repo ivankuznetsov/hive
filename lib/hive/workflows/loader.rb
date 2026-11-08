@@ -61,7 +61,14 @@ module Hive
         locks = Dir.glob(File.join(workflows_dir, "*", Hive::WorkflowPackage::ManagedStore::LOCK_FILE))
         return {} if store.is_a?(Hive::WorkflowPackage::ManagedStore) && locks.empty?
 
-        store.selections.each_with_object({}) do |lock, workflows|
+        inspection = defined?(Hive::RuntimeControlPlane::OperationalInspection) &&
+          Hive::RuntimeControlPlane::OperationalInspection.active?
+        selections = if inspection
+          store.inspect_selections
+        else
+          store.selections
+        end
+        selections.each_with_object({}) do |lock, workflows|
           name = lock.fetch("name")
           workflow = store.workflow(
             name, lock.fetch("source_commit"), lock.fetch("manifest_digest"),

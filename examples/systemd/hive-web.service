@@ -33,7 +33,8 @@
 
 [Unit]
 Description=Hive web UI
-After=network.target
+# Do not order a user unit on system-manager network targets. The local UI can
+# start offline; individual remote operations surface their own failures.
 StartLimitBurst=3
 StartLimitIntervalSec=300
 
@@ -48,7 +49,7 @@ Type=simple
 #      system-Ruby installs.
 Environment=HIVE_BIN=%h/.local/bin/hive
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive web
+ExecStart=%h/.local/bin/hive web --context local
 Restart=on-failure
 RestartSec=10
 

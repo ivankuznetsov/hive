@@ -3,6 +3,7 @@ require "base64"
 require "digest"
 require "json"
 require "hive/commands/worktree"
+require "hive/runtime_control_plane/operational_inspection"
 
 class HiveCommandsWorktreeTest < Minitest::Test
   include HiveTestHelper
@@ -152,6 +153,70 @@ class HiveCommandsWorktreeTest < Minitest::Test
 
       assert_equal worktree_path, payload.fetch("worktree_path")
       refute_includes payload.fetch("worktree_path"), ".worktrees.worktrees"
+    end
+  end
+
+  # hivedev's read-only workspace audit: on a confirmed read-only state root
+  # bin/hive activates operational inspection for `worktree status`, which
+  # must then leave the runtime database, task folder, and git index untouched.
+  def test_status_under_read_only_inspection_writes_nothing
+    with_tmp_global_config do |state_home|
+      project_root = File.join(@root, "audited-project")
+      worktree_root = File.join(@root, "audited-worktrees")
+      slug = "audited-261030-abcd"
+      task_folder = File.join(project_root, ".hive-state", "stages", "6-review", slug)
+      FileUtils.mkdir_p(task_folder)
+      run!("git", "-C", project_root, "init", "-b", "main", "--quiet")
+      run!("git", "-C", project_root, "config", "user.email", "t@example.com")
+      run!("git", "-C", project_root, "config", "user.name", "T")
+      File.write(File.join(project_root, "seed.txt"), "seed\n")
+      run!("git", "-C", project_root, "add", ".")
+      run!("git", "-C", project_root, "commit", "-m", "seed", "--quiet")
+      File.write(File.join(project_root, ".hive-state", "config.yml"), { "worktree_root" => worktree_root }.to_yaml)
+      run!("git", "-C", project_root, "worktree", "add", "--quiet", "-b", slug, File.join(worktree_root, slug), "main")
+      Hive::Worktree.new(project_root, slug, worktree_root: worktree_root).write_pointer!(task_folder, slug)
+      Hive::Markers.set(File.join(task_folder, "task.md"), :review_error, reason: "probe")
+      Hive::Config.register_project(name: "audited", path: project_root, repository_identity: nil)
+      File.write(File.join(worktree_root, slug, "residue.txt"), "residue\n")
+      # A stat-only change makes plain `git status` rewrite the index.
+      FileUtils.touch(File.join(worktree_root, slug, "seed.txt"), mtime: Time.now + 5)
+
+      database_path = Hive::Paths.runtime_control_plane_path(state_home)
+      database = Hive::RuntimeControlPlane::Database.new(path: database_path)
+      database.checkpoint!
+      database.disconnect
+      %w[-wal -shm].each { |suffix| FileUtils.rm_f("#{database_path}#{suffix}") }
+      inventory = lambda do
+        [ state_home, project_root, worktree_root ].flat_map do |root|
+          Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).map do |path|
+            [ path, File.lstat(path).then { |stat| [ stat.size, stat.mtime.to_r ] } ]
+          end
+        end.to_h
+      end
+      before = inventory.call
+
+      failure = Hive::RuntimeControlPlane::Unavailable.new(
+        "Hive state is mounted read-only", code: :state_storage_read_only,
+        action: Hive::RuntimeControlPlane::Database::STORAGE_ACTION
+      )
+      confirmed = Struct.new(:path) { def confirmed_read_only_storage? = true }.new(database_path)
+      assert Hive::RuntimeControlPlane::OperationalInspection.activate_from_failure(
+        error: failure, argv: [ "worktree", "status", slug, "--project", "audited", "--json" ],
+        state_home: state_home, database: confirmed
+      )
+
+      out, = capture_io do
+        Hive::Commands::Worktree.new("status", slug, project: "audited", json: true).call
+      end
+      payload = JSON.parse(out)
+
+      assert_equal [ true, "status", File.join(worktree_root, slug), [ "residue.txt" ] ],
+                   payload.values_at("ok", "action", "worktree_path", "residue_paths")
+      %w[-wal -shm].each { |suffix| refute_path_exists "#{database_path}#{suffix}" }
+      after = inventory.call
+      assert_empty (before.keys | after.keys).reject { |path| before[path] == after[path] }
+    ensure
+      Hive::RuntimeControlPlane::OperationalInspection.clear!
     end
   end
 
@@ -733,6 +798,7 @@ class HiveCommandsWorktreeTest < Minitest::Test
       assert_match(/malformed porcelain data/, error.message)
     end
     assert_includes captured_argv, "status"
+    assert_operator captured_argv.index("--no-optional-locks"), :<, captured_argv.index("status")
   end
 
   private

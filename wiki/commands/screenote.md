@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-07-18
+updated: 2026-10-15
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -83,21 +83,44 @@ not prevent local credential removal. Under `--json`, the envelope carries
 (`no_token`, `unreadable_credential`, or the revoke error) so automation can
 tell the cases apart.
 
+Connect's JSON Lines and disconnect's final JSON document are encoded directly.
+A serialization failure is not replaced with text or a fallback JSON document;
+it propagates.
+
+## Output, schema, serialization, and exit codes
+
+`hive connect screenote --json` streams a schema-less JSON Lines authorize
+event followed by its terminal result; `hive disconnect screenote --json`
+emits one schema-less JSON result. Usage errors use the same Screenote error
+family. Both commands encode JSON directly: a `JSON::GeneratorError` propagates
+and no fallback document is emitted. Success exits `0`; invalid arguments exit
+`64`, configuration failures exit `78`, and connect OAuth/discovery or local
+filesystem errors exit non-zero. A disconnect revocation failure remains a
+warning and does not prevent exit `0` after local credential removal.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive connect` | Options: `--base-url`, `--json`; service must be `screenote`. | Discovers metadata, completes OAuth with PKCE, selects a project, and stores the credential. | JSON is explicitly schema-less JSON Lines. | Usage, configuration, OAuth/discovery, and filesystem failures use the Screenote error family. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero OAuth/filesystem failure. |
+| `hive disconnect` | Options: `--json`; service must be `screenote`. | Attempts revocation and always clears a readable or corrupt local credential; missing credentials are a no-op. | JSON is an explicitly schema-less result. | Usage/configuration failures are typed; revocation failure is a warning after local removal. | `JSON::GeneratorError` propagates; no fallback JSON is emitted. | Exit codes `0`, `64`, `78`, or another non-zero local failure. |
+
 ## Runtime Use
 
 Connected credentials are not placed in YAML config and are not exposed through
-environment variables. For Claude-backed `7-artifacts`, hive writes an ephemeral
-strict MCP config under `Hive::Paths.cache_home`, points Claude at it with
-`--mcp-config` / `--strict-mcp-config`, and adds the Screenote MCP tools to
-`--allowedTools`. The prompt supplies the selected project id and instructs the
-agent to call `create_screenshot_upload`, PUT local PNG/JPEG bytes to the signed
-upload URL, and write the resulting `screenote_url` into
+environment variables. `Hive::Screenote::McpConfig#write!` can render a strict
+Screenote MCP config, but no launch path calls it: the Claude-only
+`mcp_config_path:` / `strict_mcp_config:` launch keywords were removed when Hive
+took ownership of agent MCP (plan 2026-10-15-001, [[modules/mcp]]). Agents now
+receive only catalog servers granted with `mcp.use`, so `7-artifacts` does not
+inject Screenote today; wiring it through the catalog is an open item in
+[[gaps]]. When wired, the prompt is meant to supply the selected project id and
+instruct the agent to call `create_screenshot_upload`, PUT local PNG/JPEG bytes
+to the signed upload URL, and write the resulting `screenote_url` into
 `media/manifest.json`.
 
-If the credential is missing, expired, incomplete, invalid, or lacks a default
-project, no MCP server is injected. The artifacts prompt records that Screenote
-is unavailable and tells the agent to keep local media plus
-`screenote_skipped_reason` entries.
+No stage prompt mentions Screenote today. The finalize prompt adds a `## Demo`
+section only when `media/manifest.json` already holds `screenote_url` values.
 
 ## Backlinks
 

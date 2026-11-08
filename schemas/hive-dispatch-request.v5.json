@@ -15,12 +15,36 @@
     "schema_version": { "const": 5 },
     "request_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
     },
     "created_at": { "type": "string", "format": "date-time" },
     "project": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+$", "minLength": 1 },
     "slug": { "type": "string", "pattern": "^[a-z][a-z0-9-]{0,62}[a-z0-9]$" },
-    "argv": { "type": "array", "minItems": 2, "items": { "type": "string", "minLength": 1 } },
+    "argv": {
+      "type": "array",
+      "minItems": 2,
+      "items": { "type": "string", "minLength": 1 },
+      "prefixItems": [
+        { "const": "hive" },
+        {
+          "enum": [
+            "run", "develop", "brainstorm", "plan", "plan-review-run",
+            "review", "open-pr", "artifacts", "finalize", "archive",
+            "markers", "daemon", "evidence", "act", "approve"
+          ]
+        }
+      ],
+      "allOf": [
+        {
+          "if": { "prefixItems": [ {}, { "const": "daemon" } ] },
+          "then": { "const": [ "hive", "daemon", "install", "--force" ] }
+        },
+        {
+          "if": { "prefixItems": [ {}, { "const": "evidence" } ] },
+          "then": { "minItems": 3, "prefixItems": [ {}, {}, { "const": "rework" } ] }
+        }
+      ]
+    },
     "requestor": {
       "type": "string",
       "enum": ["bot", "healer", "web", "tui", "cli", "action", "daemon", "recorder", "operator"]
@@ -36,6 +60,9 @@
       "enum": ["error", "review_error", "review_stale", "review_ci_stale", null]
     },
     "expected_marker_id": { "type": ["string", "null"] },
+    "remote_authority": {
+      "oneOf": [ { "type": "null" }, { "$ref": "#/$defs/RemoteAuthority" } ]
+    },
     "inherited_outputs": {
       "type": "array",
       "items": { "$ref": "#/$defs/OutputReference" }
@@ -48,6 +75,47 @@
     }
   },
   "$defs": {
+    "RemoteAuthority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["principal", "project", "task_id", "slug", "effect"],
+      "properties": {
+        "principal": { "type": "string", "minLength": 1 },
+        "project": { "type": "string", "minLength": 1 },
+        "task_id": { "type": ["integer", "string"] },
+        "slug": { "type": "string", "minLength": 1 },
+        "action_id": { "enum": ["workflow.advance", "workflow.retry"] },
+        "observation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "stage": { "type": "string", "minLength": 1 },
+        "generation": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "execution_observation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "workflow", "marker", "attrs", "mtime", "action", "state_sha256", "task_input_epoch"],
+          "properties": {
+            "stage": { "type": "string" },
+            "workflow": { "type": "string" },
+            "marker": { "type": "string" },
+            "attrs": { "type": "object" },
+            "mtime": { "type": "string" },
+            "action": { "type": "string" },
+            "state_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "task_input_epoch": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "effect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "force"],
+          "properties": {
+            "kind": { "enum": ["stage_action", "evidence_rework", "run", "approve", "retry"] },
+            "force": { "const": false },
+            "verb": { "enum": ["run", "brainstorm", "plan", "develop", "open-pr", "review", "artifacts", "finalize", "archive"] },
+            "stage": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
     "OutputReference": {
       "type": "object",
       "additionalProperties": false,

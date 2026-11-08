@@ -44,7 +44,7 @@ module Hive::AgentSupport::Grok::Runtime
     host.portable_policy(
       scope, task_root:, directories:, environment: child_environment, outputs:,
       runtime_root: runtime_home, cli_flags: flags, executable: "/usr/local/bin/grok",
-      command_prefix: prefix
+      command_prefix: prefix, mcp_isolated: true
     )
   end
 

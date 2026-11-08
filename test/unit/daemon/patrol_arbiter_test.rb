@@ -9,12 +9,15 @@ class HiveDaemonPatrolArbiterTest < Minitest::Test
 
   class CandidateSource
     attr_accessor :items
+    attr_reader :calls
 
     def initialize(items)
       @items = items
+      @calls = []
     end
 
-    def candidates(now:)
+    def candidates(**arguments)
+      @calls << arguments
       @items
     end
   end
@@ -63,6 +66,23 @@ class HiveDaemonPatrolArbiterTest < Minitest::Test
       selected = arbiter.candidates(now: T0)
       assert_equal %w[old], selected.select { |item| item[:project] == "p1" }.map { |item| item[:job_id] }
       assert_equal [ :ordinary ], selected.select { |item| item[:project] == "p2" }.map { |item| item[:patrol_kind] }
+    end
+  end
+
+  def test_scopes_both_candidate_sources_before_they_evaluate_projects
+    with_tmp_dir do |dir|
+      ordinary = CandidateSource.new([ { project: "owned", patrol_kind: :ordinary } ])
+      architecture = CandidateSource.new([])
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: ordinary,
+        architecture_scheduler: architecture,
+        state_path: File.join(dir, "arbiter.json")
+      )
+
+      arbiter.candidates(now: T0, projects: [ "owned" ])
+
+      assert_equal [ "owned" ], ordinary.calls.first.fetch(:projects)
+      assert_equal [ "owned" ], architecture.calls.first.fetch(:projects)
     end
   end
 
@@ -168,6 +188,25 @@ class HiveDaemonPatrolArbiterTest < Minitest::Test
       end
 
       assert File.file?(path), "the durable write succeeds even where directory fsync is unsupported"
+    end
+  end
+
+  def test_separate_instances_merge_project_cursors_under_lock
+    with_tmp_dir do |dir|
+      path = File.join(dir, "arbiter.json")
+      first = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: nil, state_path: path
+      )
+      second = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil, architecture_scheduler: nil, state_path: path
+      )
+
+      first.commit({ project: "p1", patrol_kind: :ordinary }, now: T0)
+      second.commit({ project: "p2", patrol_kind: :architecture }, now: T0 + 1)
+
+      state = JSON.parse(File.binread(path))
+      assert_equal %w[p1 p2], state.fetch("projects").keys.sort
+      assert_path_exists "#{path}.lock"
     end
   end
 end

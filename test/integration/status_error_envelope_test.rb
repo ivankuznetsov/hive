@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "hive/commands/status"
+require "open3"
 
 # Pin the agent-callable error contract emitted by `hive status --json`.
 # Status's producer surface is narrow: ConfigError (e.g., HIVE_HOME unreadable)
@@ -132,6 +133,70 @@ class StatusErrorEnvelopeTest < Minitest::Test
         Hive::Config.singleton_class.alias_method(:registered_projects, :__orig_registered_projects)
         Hive::Config.singleton_class.send(:remove_method, :__orig_registered_projects)
       end
+    end
+  end
+
+  def test_bin_hive_clears_inspection_even_when_registration_finish_raises
+    result = run_bootstrap_bin(%w[status --operational], scenario: "finish_failure")
+
+    assert result.fetch(:status).success?, result.fetch(:stderr)
+    assert_equal %w[finish clear], result.fetch(:events)
+  end
+
+  def test_bin_hive_refuses_inherited_and_unconfirmed_operational_fallbacks
+    inherited = run_bootstrap_bin(
+      %w[status --operational --json], scenario: "activation_failure",
+      confirmed: true,
+      extra_env: { "HIVE_RUNTIME_CHILD_RESERVATION_ID" => "reservation" }
+    )
+    refute inherited.fetch(:status).success?
+    assert_equal "state_storage_read_only", JSON.parse(inherited.fetch(:stdout)).fetch("runtime_code")
+    assert inherited.fetch(:events).first.include?(":true:/state:state_storage_read_only")
+
+    unconfirmed = run_bootstrap_bin(
+      %w[status --operational --json], scenario: "activation_failure", confirmed: false
+    )
+    refute unconfirmed.fetch(:status).success?
+    assert unconfirmed.fetch(:events).first.include?("activate:true:false:false")
+  end
+
+  def test_bin_hive_mutating_commands_report_registration_storage_failure
+    %w[list run].each do |route|
+      result = run_bootstrap_bin(
+        [ route, "project", "--json" ], scenario: "registration_failure", confirmed: true
+      )
+
+      refute result.fetch(:status).success?, route
+      payload = JSON.parse(result.fetch(:stdout))
+      assert_equal "state_storage_read_only", payload.fetch("runtime_code")
+      assert_equal route, payload.fetch("action")
+      refute result.fetch(:events).any? { |event| event.start_with?("activate:true") }
+    end
+  end
+
+  private
+
+  def run_bootstrap_bin(argv, scenario:, confirmed: false, extra_env: {})
+    with_tmp_dir do |root|
+      bin_dir = File.join(root, "bin")
+      lib_dir = File.join(root, "lib")
+      FileUtils.mkdir_p(bin_dir)
+      FileUtils.mkdir_p(lib_dir)
+      FileUtils.cp(File.expand_path("../../bin/hive", __dir__), File.join(bin_dir, "hive"))
+      FileUtils.cp(
+        File.expand_path("../support/runtime_bootstrap_hive.rb", __dir__),
+        File.join(lib_dir, "hive.rb")
+      )
+      events = File.join(root, "events")
+      env = {
+        "HIVE_HOME" => "/state", "BOOTSTRAP_SCENARIO" => scenario,
+        "BOOTSTRAP_CONFIRMED" => confirmed ? "1" : "0", "BOOTSTRAP_EVENTS" => events
+      }.merge(extra_env)
+      stdout, stderr, status = Open3.capture3(env, RbConfig.ruby, File.join(bin_dir, "hive"), *argv)
+      {
+        stdout: stdout, stderr: stderr, status: status,
+        events: File.file?(events) ? File.readlines(events, chomp: true) : []
+      }
     end
   end
 end

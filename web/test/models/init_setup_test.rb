@@ -41,4 +41,11 @@ class InitSetupTest < ActiveSupport::TestCase
   ensure
     Hive::Workflows::Project.reset!
   end
+
+  test "collect returns exactly the TTY answer keys, with no Claude launch mode" do
+    tty_answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+
+    assert_equal tty_answers.keys.sort, InitSetup.new({}).collect.keys.sort
+    assert_equal tty_answers.keys.sort, InitSetup.defaults.keys.sort
+  end
 end

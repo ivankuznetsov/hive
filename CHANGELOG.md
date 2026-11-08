@@ -2,6 +2,136 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.8.0
+
+Claude no longer runs in tmux: every Claude stage is now a plain `claude -p` process. Hive also controls which MCP servers its agents get: none unless you grant them in Hive config. Review now checks its own final fixes before finishing, and the Hivebox Docker image is gone; install Hive natively or use [hivedev.sh](https://hivedev.sh).
+
+### Claude without tmux
+
+- Claude-backed stages and reviewers run headless only. Anthropic has confirmed that `claude -p` is permitted with a Claude subscription, and Hive still unsets `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude, so Claude keeps billing your subscription.
+- You can no longer `tmux attach` to a running Claude stage. Follow it through its stage log under `.hive-state/logs/<slug>/`.
+- `hive setup` no longer requires tmux; tmux is only needed for the TUI end-to-end tests.
+- The `claude.mode` setting is gone and `hive init` no longer asks for a Claude launch mode. An existing `claude.mode` line is ignored, and `hive doctor` warns you to delete it. Doctor also warns when your shell exports `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`.
+
+### Agents use only the MCP servers you grant
+
+- Agents Hive launches no longer load the MCP servers from your personal or project Claude, Codex, OpenCode, or Pi configuration. They get only the servers granted in Hive config, which by default is none.
+- To give Hive agents a server, run `hive mcp import` to copy it from your agent configs into Hive's catalog (`mcp.servers` in `~/.config/hive/config.yml`), then grant it per project or stage with `mcp: { use: [name] }`. Tokens are referenced by environment-variable name, never stored. `hive setup` and `hive init` offer the import once.
+- OAuth servers reach an agent only when that agent has a saved login for it; sign in with `hive mcp login SERVER --agent codex|claude`. `hive doctor` lists servers you have not imported and missing logins.
+- Codex runs now ignore `~/.codex/config.toml`, except for the settings Hive carries over: model, reasoning effort, service tier, personality, model providers and profiles, OpenAI base URL, the OAuth credential store, and the managed-skill plugins you have enabled.
+- Grok has no way to switch MCP off, so Grok runs keep their own servers and `hive doctor` warns.
+- To keep the old behaviour, set `mcp: { inherit_user: true }` in `~/.config/hive/config.yml`.
+
+### Review checks its own last fixes
+
+- When the last allowed review pass applies fixes, Hive now runs one more review-only pass before finishing. If it is clean, CI runs on that exact commit and review completes; if it finds more work, the task stops at `REVIEW_STALE reason=final_fix_unverified` for you to decide. Previously those final fixes were never reviewed or tested before the PR was marked ready.
+- Every route to review completion now runs CI on the latest commit, including approving a guardrail-blocked fix and resuming after a restart, and a pass where a reviewer failed no longer counts as clean.
+
+### Budgets are opt-in
+
+- A Claude stage or reviewer is capped only by a `budget_usd` your project config sets; Hive's built-in defaults no longer cap Claude.
+- `hive init` no longer sets budgets. It writes the suggested caps as commented-out lines, and a blank answer at the limits prompt means no cap. Configs from an earlier `hive init` still set every stage budget and stay capped until you edit them.
+
+### Fixes
+
+- Fixed `hive new --idempotency-key` failing on every host with "command receipts are not installed". Without the optional receipt extension it uses per-project idempotency again, so retrying the same key returns the existing task.
+- The PR babysitter no longer gives up on a PR when the agent hits its provider usage limit. It waits for the limit to clear instead of adding `babysitter/needs-human`, and its give-up comments now lead with the actual error.
+
+### Hivebox is discontinued
+
+- Install Hive natively (Homebrew on macOS arm64, AUR on Arch, `install.sh` on glibc Linux), or use the hosted product at [hivedev.sh](https://hivedev.sh). On Windows, run native Hive inside WSL with systemd enabled.
+- Existing `ghcr.io/ivankuznetsov/hivebox` images keep working but get no new builds, and the PowerShell Hivebox installer is no longer maintained.
+- To move from Hivebox to native Hive: install Hive and run `hive setup`; copy or re-clone your projects from the box's `/data/repos` (`~/hivebox-data/repos` with the old installer defaults); register each with `hive init` (add `--workflow NAME` for existing Hive state); sign your agents and `gh` in again; then remove the container with `docker rm -f hivebox`.
+
+### Breaking changes
+
+- Agents no longer inherit your personal MCP servers (see above).
+- Pi 1.0.4 or newer is required.
+- `hive init --json` now emits `hive-init.v3`: the `claude_mode` field is gone, and an unset budget is reported as `null`.
+- Scripted `hive init` answer lists lose the Claude launch-mode slot; drop that answer.
+
+### Upgrading
+
+- Let running Claude stages finish before you upgrade: the new version cannot see or stop a Claude session started in tmux by the old one. After upgrading, run `tmux ls` and stop any leftover Hive Claude session with `tmux kill-session -t <name>`.
+- If your stages relied on MCP servers from your personal agent configs, run `hive mcp import` and grant the ones you want.
+
+[Full technical changelog](https://github.com/ivankuznetsov/hive/blob/v0.8.0/docs/releases/0.8.0-technical.md) · [All changes since 0.7.4](https://github.com/ivankuznetsov/hive/compare/v0.7.4...v0.8.0)
+
+## 0.7.4
+
+Hive's daily digest now tells you what changed across your projects in one readable document, with source PR links and project totals.
+
+### A digest worth reading
+
+- Get a concise summary of recent merged changes, written from PR descriptions and relevant diffs using your configured agent. Hive reuses the independent PRDigest engine.
+- Read the same saved document in Web or with `hive digest`. Automatic generation is enabled by default; an explicit disabled setting is respected. Telegram delivery remains opt-in.
+- Revisit earlier days or preview today. Failed generation preserves the previous digest, and repeated refreshes keep closed documents unchanged.
+- Receive formatted Telegram messages with working PR links, or a text attachment for longer digests. Delivery receipts prevent automatic duplicates.
+
+### Clearer project summaries
+
+- Read a wider article with less empty space, smaller section headings, and one date heading.
+- Open each project's repository from its heading and see merged PR counts, commits in those PRs, and LOC changed. Added lines are green; deleted lines are red. Counts describe merged PRs, not direct commits outside them.
+- Existing saved digests gain project statistics on refresh without rewriting their text.
+
+### Completed work and installation
+
+- Fixed completed workflow tasks disappearing from the board. The Done view groups completed tasks by workflow while retaining filters and task links.
+- Fixed release distribution and verification, and updated the agent runtime dependency to 0.2.4.
+
+[Full technical changelog](https://github.com/ivankuznetsov/hive/blob/v0.7.4/docs/releases/0.7.4-technical.md) · [All changes since 0.7.3](https://github.com/ivankuznetsov/hive/compare/v0.7.3...v0.7.4)
+
+## 0.7.3
+
+Hive 0.7.3 makes it easier to see what your agents are doing, review their work, and keep tasks moving when a provider or process fails.
+
+### A clearer, faster web workspace
+
+- Open a task workspace with its progress, conversation, artifacts, and review context in one place. Running work, waiting decisions, and final outcomes are easier to distinguish.
+- See the last saved board immediately after a web restart while Hive refreshes it in the background. A dated loading notice explains what is happening; task actions become available once the status is fresh.
+- Navigate more comfortably on phones, keep Kanban columns readable, and collapse board clutter without losing the current task state.
+- Find installable workflows and modules together under **Honeycombs**.
+- Answer waiting brainstorm questions reliably, including after status updates and reconnects.
+
+### A daily record of your work
+
+- Read a daily digest in Hive web or with `hive digest`, with project activity, task and PR outcomes, and items needing attention.
+- Filter by project or revisit a recorded day. Late updates and gaps remain visible instead of silently rewriting the day's history.
+- Enable scheduled collection and optional Telegram delivery when you want them. Digests are opt-in; installing this release does not turn them on or backfill days before collection began.
+
+### More reliable unattended work
+
+- Recover more reliably after interrupted agents, daemon restarts, rewritten PRs, stale reviews, and provider limits. Valid review progress is preserved across retries.
+- Keep queued work moving fairly as capacity changes, without repeated dispatches or stale recovery records occupying available slots.
+- Get fresher status with less scanning of completed tasks and historical attempt data. Numeric task lookup goes directly to the task's folder.
+- Cancel unwanted tasks through the cancellation flow, so removing a task does not mark it as successfully delivered.
+- Keep execution pauses actionable. Missing optional screenshots or other best-effort evidence no longer stalls otherwise valid work.
+
+### Planning, review, and Patrol
+
+- Have coding plans critiqued before execution, with automatic recovery for failed or interrupted reviews and clearer escalation when your input is needed.
+- Check completed work against outcome evidence, returning implementation defects to execution while keeping optional capture failures nonblocking.
+- Route ordinary and architecture Patrol findings through the same fix workflow. Resume interrupted fixes and retire rejected, obsolete, or externally completed work more reliably.
+- Park publications blocked by detected secrets for attention instead of repeatedly trying to publish them. Secret scanning is bundled, and publication diagnostics omit URL credentials.
+- Stop silent validation and CI processes at their idle deadline, and handle hosted CI account limits without repeatedly hammering the service.
+
+### Agents and benchmarks
+
+- Use OpenCode as a first-class agent, with runtime discovery, permissions, session output, and provider-limit recovery integrated into Hive.
+- Run Pi workflows more reliably through rate limits and review stages. Claude quota detection and Grok provider-limit handling also improve.
+- Trusted workflow agents retain their ordinary environment; workflow restrictions are opt-in.
+- Run benchmarks with stronger checks before paid execution and judging. A failed planner stops the run, command arguments are preserved, and judges receive the correct candidate output.
+
+### Installation and upgrading
+
+- Repeating a systemd user-service installation is safer. Managed QMD installation and packaged web dependencies also receive fixes.
+- Runtime status identifies the exact active dogfood build, making it easier to confirm which version the CLI, daemon, and web are using.
+- **Older installations need attention before upgrading.** Hive now supports current state formats only. Automatic historical migrations, `hive migrate`, and `hive runtime resume` have been removed. Back up retained state and follow the [current-format conversion guide](https://github.com/ivankuznetsov/hive/blob/v0.7.3/docs/guides/current-format-migration.md) before using an older installation with this release. Healthy databases already using the current format need no conversion.
+
+[Full technical changelog](https://github.com/ivankuznetsov/hive/blob/v0.7.3/docs/releases/0.7.3-technical.md) · [All changes since 0.7.2](https://github.com/ivankuznetsov/hive/compare/v0.7.2...v0.7.3)
+
+**Known limitation:** Built-in browser-based task capture is unavailable on Linux ARM64 because Chrome for Testing has no payload for that platform. Hivebox web and agent workflows remain available.
+
 ## 0.7.2
 
 - Migrated retained tasks onto their selected workflow generation during

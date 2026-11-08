@@ -55,7 +55,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["kind", "receipt_id", "rationale", "blocker_owner"],
       "properties": {
-        "kind": {"enum": ["rejected", "blocked", "escalated"]},
+        "kind": {"enum": ["rejected", "blocked", "escalated", "publication_blocked"]},
         "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
         "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
         "blocker_owner": {"type": "string", "minLength": 1, "maxLength": 128}
@@ -64,7 +64,7 @@
     "diagnostic": {
       "type": "object", "additionalProperties": false, "required": ["summary"],
       "properties": {
-        "code": {"enum": ["cleanup_failed"]},
+        "code": {"enum": ["cleanup_failed", "secret_detected"]},
         "summary": {"type": "string", "maxLength": 512}
       }
     },

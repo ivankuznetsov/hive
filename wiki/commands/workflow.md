@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-08-16
+updated: 2026-09-26
 tags: [command, workflow, authoring, validation, human-stage, honeycomb, registry, archive, retention]
 ---
 
@@ -32,6 +32,47 @@ hive workflow publish my-flow --version 1.0.0 \
   --expected-release-digest <confirmed-release-digest> --json
 ```
 
+## Usage and examples: decide
+
+`hive decide TASK OUTCOME --from STAGE --decision-id DECISION_ID [--note TEXT]
+[--json]` records one waiting human-stage decision. For example,
+`hive decide demo:task approve --from research --decision-id visit-7 --json`
+accepts only the current visit-specific identifier returned by `hive run`.
+
+## Private and direct Git sources
+
+This feature is unreleased. Check the installed `hive workflow --help` for
+`--from` and `--ref` before giving these commands to a user. The agent procedure
+is `skills/hive/references/workflow-installation.md`; the public guide lives at
+`/docs/private-workflows/` in hive-site.
+
+`hive workflow install ID --from REPOSITORY [--ref REF]` imports an owner-selected
+workflow as an editable project-authored workflow. SSH, HTTPS with Git's
+configured credential helper, and absolute local Git repositories are supported.
+Credentials must stay in SSH/Git configuration, never in the URL. For GitHub
+HTTPS, `gh auth setup-git` can configure the existing authenticated `gh` helper.
+
+The repository must contain `workflows/ID.yml` and its assets under
+`workflows/ID/`. Hive resolves HEAD (or the supplied branch, tag or commit) to an
+immutable commit, reads Git objects without checkout/hooks, validates the graph,
+and commits the imported files to project state. `ID/hive-source.json` records
+the repository, requested ref, resolved commit and imported file hashes/modes.
+The descriptor is activated only after its assets exist. A failed state commit
+rolls back the owned files. Existing authored or managed IDs are never replaced.
+
+```sh
+hive workflow install company-news --from git@github.com:owner/private-workflows.git --dry-run --json
+hive workflow install company-news --from git@github.com:owner/private-workflows.git --ref FULL_COMMIT
+```
+
+The optional preview writes no project state. Repeat its `source_commit` as
+`--ref` to install the exact previewed revision. This route uses authored-workflow
+permissions and accepts no managed mapping/input overrides. Review the source
+before starting tasks. It does not install packages, run scripts, register
+schedules, configure companion services, or claim Honeycomb review. Edit and
+commit subsequent authored changes using `hive workflow commit ID`; catalogue
+`update`/`remove` continue to address managed Honeycomb packages.
+
 ## Honeycomb Lifecycle
 
 `install`, `list`, `update`, and `remove` are the 0.x command-compatible
@@ -41,7 +82,7 @@ resolution, task provenance, disclosure versus exact runtime enforcement, and
 publication recovery. This command page owns only the operator-visible CLI
 contract.
 
-The accepted source forms are `honeycomb/NAME`, a catalog semantic version, or
+For managed Honeycomb installation, the accepted source forms are `honeycomb/NAME`, a catalog semantic version, or
 a catalog-listed full upstream source SHA. Mutable refs, abbreviated or
 unlisted commits, arbitrary namespaces, and arbitrary repositories fail
 resolution. Exact soft-hidden or yanked versions remain addressable; revoked
@@ -145,12 +186,30 @@ containing `ok`, `id`, `descriptor_path`, `instruction_path`, and `next`. Typed
 usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
 document with `ok: false`, `error_class`, `exit_code`, and `message`.
 
+Pre-dispatch argument errors for `install`, `list`, `remove`, `update`, and
+`publish` use the selected lifecycle schema with `error_kind: usage` and exit
+64. The published schemas accept this existing wrapper envelope. Publish has
+a separate closed usage arm without `retryable` or publication recovery fields,
+because its handler has not started; its specialized handler error arms retain
+their retryability and recovery requirements.
+
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
 lists the closed `new, install, list, update, remove, publish` verb set. With
 `--json`, those subcommand-shape errors carry a structured `expected` array
 such as `["new", "install", "list", "update", "remove", "publish"]`;
 unknown subcommands also carry `value` with the rejected
 token.
+
+Pre-dispatch argv-shape failures select the requested subcommand's schema:
+`hive-workflow-install.v2`, `hive-workflow-list.v2`,
+`hive-workflow-remove.v1`, `hive-workflow-update.v2`,
+`hive-workflow-publish.v2`, or `hive-workflow-validate.v1` (with
+`valid: false` and the rejected `id`), defaulting to
+`hive-workflow-new.v1`. All use `error_kind: "usage"`. Pre-dispatch failures
+of `hive decide` use `hive-decide.v1` with
+`error_kind: "invalid_task_path"`. The `hive-workflow-publish.v1` schema file
+remains in tree for pinned readers; the current producer and pre-dispatch error
+surface both use v2.
 
 ## Generated Descriptor
 
@@ -262,14 +321,33 @@ edits only returned new paths, validates here, commits the populated descriptor
 and instruction directory with `hive workflow commit ID`, reports all defaults, and creates no
 task unless the original request explicitly asks for one. The populated-graph
 commit is required because `workflow new` commits only the initial scaffold.
-Both `workflow validate` and minimal-init preview bypass startup scheduler
-reconciliation, preserving their strict no-write contract. Scaffold collision
+Both `workflow validate` and minimal-init preview bypass activation admission,
+top-level command registration, and startup scheduler reconciliation. They
+therefore preserve their byte-for-byte strict no-write contract and remain
+available while runtime admission is paused. Scaffold collision
 checks treat dangling descriptor or instruction symlinks as occupied paths.
 Creation claims the instruction directory and descriptor with exclusive
 filesystem operations; rollback removes only paths claimed by that invocation,
 so a concurrent or raced scaffold is never overwritten or deleted.
 If a scaffold commit fails after staging, Hive resets those exact index
 pathspecs under the commit lock before removing the generated files.
+
+Workflow JSON success and error documents are encoded directly. A
+`JSON::GeneratorError` is not replaced with prose or a fallback JSON document;
+it propagates from the owning subcommand.
+
+## Serialization fallback
+
+Workflow and decide success/error documents are encoded directly. If
+`JSON.generate` raises `JSON::GeneratorError`, Hive emits no prose or fallback
+JSON document and lets that serialization failure propagate.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive workflow` | Options: subcommand-specific authoring, lifecycle, validation, consent, mapping, publication, and `--json` flags described above. | Scaffolds/validates project workflows or manages reviewed Honeycomb generations and publication review. | JSON schemas are `hive-workflow-new.v1`, `hive-workflow-install.v2`, `hive-workflow-list.v2`, `hive-workflow-remove.v1`, `hive-workflow-update.v2`, `hive-workflow-publish.v2`, and `hive-workflow-validate.v1`. | Usage, consent, configuration, Git, validation, and lifecycle failures use the selected subcommand error surface. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
+| `hive decide` | Options: required `--from` and `--decision-id`, with optional `--note` and `--json`. | Applies or idempotently replays one current human-stage outcome and rejects stale/conflicting decisions. | JSON schema `hive-decide.v1`. | Invalid paths/outcomes, stale decisions, lock contention, configuration, and write failures use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes include `0`, `64`, `70`, `75`, `78`, plus a selected typed Hive failure code. |
 
 ## Backlinks
 

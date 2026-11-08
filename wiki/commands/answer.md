@@ -3,7 +3,7 @@ title: hive answer
 type: command
 source: lib/hive/commands/answer.rb, lib/hive/brainstorm_parser.rb, lib/hive/bot/brainstorm_answer_writer.rb, schemas/hive-answer.v1.json
 created: 2026-08-10
-updated: 2026-08-11
+updated: 2026-11-07
 tags: [command, brainstorm, answers, bindings, concurrency, json, agents]
 ---
 
@@ -66,6 +66,16 @@ same-user local trust model plus the live under-lock identity, generation, and
 slot re-observation below. It must not cross a trust boundary. If bindings are
 ever accepted from a mutually untrusted process or remote principal, the
 format must gain an HMAC (or equivalent authenticated envelope) first.
+
+The remote API accepts a separate opaque server-issued question handle, never
+this native binding. The owner-only handle registry retains the original
+binding on the server. Fresh writes recheck the handle against current question
+inventory, then inject the bounded no-follow state reader into the shared
+writer under its mutation lock. Answers retain the 64 KiB decoded limit. A
+receipt replay uses the original binding retained with the durable receipt,
+verified against the submitted handle digest before fresh inventory checks.
+Read-handle eviction and task advancement do not invalidate that replay; see
+[[commands/token]] for the scoped endpoint.
 
 Before mutation, Hive re-resolves the exact registered project and task. It
 then acquires the existing task folder with `create: false` and rechecks:
@@ -138,6 +148,12 @@ equivalent Unicode spellings match, while compatibility forms such as `①`/`1`,
 `x²`/`x2`, full-width text, and ligatures remain distinct so a compatibility-
 equivalent rewording fails closed.
 
+## Serialization fallback
+
+Both success and error arms are encoded directly as `hive-answer.v1`. If JSON
+serialization raises, Hive emits no prose or fallback JSON document; the
+serialization exception propagates through the command boundary.
+
 ## Lifecycle boundary
 
 Completing the final slot changes only `brainstorm.md`. The command does not
@@ -157,6 +173,7 @@ recommendation policy merely because the shared boundary is used.
 
 ## Backlinks
 
+- [[remote-access]] — remote context selection, opaque handles, independent `answer` scope and retry keys.
 - [[cli]]
 - [[commands/status]]
 - [[stages/brainstorm]]

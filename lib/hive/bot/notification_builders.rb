@@ -92,25 +92,16 @@ module Hive
       end
 
       def legacy_stage_dirs(row)
-        command = legacy_migrate_command(row)
+        guide = row.legacy_state_guide.to_s
+        guide = "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md" if guide.empty?
         total = row.total_task_count
         noun = total == 1 ? "task" : "tasks"
         dirs = row.stage_dir_names.join(", ")
         Notification.new(
           text: "Project #{row.project} has #{total} #{noun} hidden in legacy stage dirs (#{dirs}) - " \
-                "run `#{command}`",
+                "read #{guide} with your agent for #{row.project_path}",
           keyboard: nil
         )
-      end
-
-      def legacy_migrate_command(row)
-        command = row.legacy_migrate_command.to_s
-        project_path = row.project_path.to_s
-        argv = command.empty? ? %w[hive migrate] : Shellwords.split(command)
-        argv << project_path unless project_path.empty?
-        Shellwords.join(argv)
-      rescue ArgumentError
-        [ "hive migrate", Shellwords.escape(project_path) ].reject(&:empty?).join(" ")
       end
 
       def fingerprint(row)

@@ -1,18 +1,13 @@
 # Recovery
 
-## Runtime cutover recovery
+## Current runtime storage
 
-A `fleet_cutover_required` error is a controller-wide maintenance fence, not a
-task retry. Run the read-only `hive runtime status --json` first and report its
-`phase`, database status, `runtime_code`, and `next_action`. Do not run ordinary
-workflow commands while the fence is active.
-
-The SQLite cutover is irreversible. `hive migrate --all --yes` starts it and
-`hive runtime resume` advances an interrupted cutover; both change controller
-state and require explicit operator approval. There is no rollback, restore, or
-downgrade path. Never invent one or remove cutover evidence. After an approved
-resume, re-run `hive runtime status --json` and require `phase: active` with an
-`ok` database before returning to task operations.
+Run `hive runtime status --json` and report phase, database status and any typed
+error. A healthy current database needs no conversion. Missing storage points to
+explicit `hive setup`; unsupported historical storage uses
+`https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md` with the operator's agent and verified
+backups. Startup and update never import old state. Do not invent a migrate or
+resume command, erase evidence, or change schema versions to bypass validation.
 
 ## Diagnose before changing state
 
@@ -71,16 +66,17 @@ continues unrelated work automatically.
 - If the daemon is not running and background automation is expected,
   `hive daemon start --detach` is the normal start form.
 - `recovery_migration_required` means the current failure predates marker IDs.
-  Run `hive migrate PROJECT_PATH` once; do not synthesize an identity from
-  reason, mtime, or another marker attr.
+  Use `https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md` for an offline conversion; do not
+  synthesize an identity from reason, mtime, or another marker attr.
 
 Keep these commonly confused cases separate:
 
 - `REVIEW_ERROR phase=fix reason=fix_failed` with a Claude stop-hook completion
   failure uses the same universal retry path as other review errors. The stage
   re-runs its ordinary completion and integrity checks.
-- `limits_reached` is scheduler-owned even when `retry_after` is missing or
-  malformed; the shared marker-age cooldown remains authoritative.
+- With daemon dispatch enabled, `limits_reached` is scheduler-owned even when
+  `retry_after` is missing or malformed; the shared marker-age cooldown remains
+  authoritative. Manual projects expose a fresh local operator retry.
 - Stale `agent_working` with a verified live PID/lock is still running. An
   orphan may be healer-managed; a dead worker rewritten to
   `ERROR reason=agent_died` enters the universal cooled retry path.
@@ -100,11 +96,36 @@ For an operational row with a fresh routine `workflow.retry` descriptor, use
 the exact action and observation token from that same snapshot:
 
 ```bash
-hive act workflow.retry PROJECT:SLUG --observation TOKEN --json
+hive act workflow.retry PROJECT:SLUG --observation TOKEN --project PROJECT --json
 ```
 
+The project's effective `daemon.enabled` selects caller behavior. When false
+(including the legacy default when the key is absent), local CLI retry stays
+attached to the durable attempt and reports its terminal outcome. When true,
+retry retains queued admission even during a daemon outage. Do not choose the
+mode from a PID probe. A live daemon can still consume action recovery for a
+disabled project; shared request admission prevents a duplicate attempt.
+
 The receipt is canonical queued, cooldown, running, blocked, terminal, or
-unavailable truth. Re-snapshot immediately. If the observed generation,
+unavailable truth. Manual unlaunched work reports blocked/unavailable with its
+owner, reason and next command. JSON emits one `hive-act` v2 envelope; `ok: true`
+means the action was evaluated, while a failed terminal stage exits nonzero.
+Keyed replay preserves that outcome without relaunching. Re-snapshot afterward.
+
+A fresh retry can consume an identity-matched stranded admitted/cleared request,
+including an unchanged markerless task. Its token binds request revision/phase
+and task identity, stage, generation and post-clear progress. After caller loss,
+a fresh local action reconciles canonical attempt outcomes and invokes guarded
+terminal/failure repair. There is no automatic manual-request reaper without a
+daemon; status only observes. Never repair this state by deleting markers.
+Remote retry on a daemon-disabled project returns HTTP 503
+`dispatcher_unavailable`, with the exact local attached action command, and
+persists no recovery request. Enabled-project remote retries remain queued.
+Web/TUI retry-button execution retains its existing limitations.
+
+For stale observations run `hive status --operational --json`; use its new token.
+For live work inspect `hive task SLUG --project PROJECT --json`.
+If the observed generation,
 marker, or ownership changed, stop and diagnose the new state rather than
 applying the old remedy.
 

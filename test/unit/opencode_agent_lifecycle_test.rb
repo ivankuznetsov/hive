@@ -2,12 +2,31 @@ require "test_helper"
 require "hive/agent"
 require "hive/agent_profile"
 require "hive/agent_support/opencode"
+require "hive/invocation_process_custody"
 require "hive/task"
 
 class OpenCodeAgentLifecycleTest < Minitest::Test
   include HiveTestHelper
 
   ROUTE = "anthropic/claude-sonnet-4-5"
+
+  def test_escaped_native_child_is_cleaned_before_its_output_is_drained
+    skip "native descendant custody requires Linux procfs" unless RUBY_PLATFORM.include?("linux")
+
+    with_fixture(mode: :escaped_child) do |fixture|
+      agent = build_agent(make_task(fixture.fetch(:dir)), fixture)
+      original_capture = agent.method(:capture_process)
+      agent.define_singleton_method(:capture_process) do |**kwargs|
+        original_capture.call(**kwargs.merge(drain_timeout: 0.1))
+      end
+
+      result = agent.run!
+
+      assert_equal :ok, result.fetch(:status), result.inspect
+      assert result.fetch(:process_cleanup_completed)
+      assert_includes File.read(result.fetch(:log_file)), "escaped child cleaned"
+    end
+  end
 
   def test_native_login_is_used_in_place_without_staging_credentials
     with_fixture do |fixture|
@@ -147,12 +166,14 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
   end
 
   def test_oversized_sanitized_export_is_rejected_with_a_bounded_diagnostic
+    export_capture_bytes = Hive::AgentSupport::OpenCode::Execution::EXPORT_CAPTURE_BYTES
+
     with_fixture(mode: :oversized_export) do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "inspection-oversized-260822-aaaa")
-      result = with_runtime_constant(
-        AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
-      ) do
-        with_execution_constant(:EXPORT_CAPTURE_BYTES, 4096) do
+      result = with_execution_constant(:EXPORT_CAPTURE_BYTES, 4096) do
+        with_runtime_constant(
+          AgentCliRuntime::OpenCode::ResultParser, :MAX_EXPORT_BYTES, 4095
+        ) do
           with_execution_constant(:INSPECTION_RETRY_DELAY_SECONDS, 0) do
             with_env("ANTHROPIC_API_KEY" => "secret-canary") do
               build_agent(task, fixture).run!
@@ -166,6 +187,9 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       assert_match(/sanitized export inspection stdout exceeded 4095 bytes/,
                    result.fetch(:inspection_diagnostic))
     end
+
+    assert_equal export_capture_bytes,
+                 Hive::AgentSupport::OpenCode::Execution::EXPORT_CAPTURE_BYTES
   end
 
   def test_implementation_sized_prompt_is_piped_without_crossing_exec_argument_limit
@@ -429,6 +453,31 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
 
       assert_equal :ok, result.fetch(:status)
       assert_equal result.fetch(:pid), result.fetch(:pgid)
+    end
+  end
+
+  def test_process_cleanup_failure_is_returned_and_warned_during_unwind
+    with_fixture do |fixture|
+      custody = Object.new
+      custody.define_singleton_method(:environment) { {} }
+      custody.define_singleton_method(:cleanup!) do
+        raise Hive::InvocationProcessCustody::CleanupError, "synthetic cleanup failure"
+      end
+
+      stderr = with_replaced_singleton_method(
+        Hive::InvocationProcessCustody, :new, -> { custody }
+      ) do
+        capture_io do
+          @result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+            build_agent(make_task(fixture.fetch(:dir)), fixture).run!
+          end
+        end.last
+      end
+
+      assert_equal :error, @result.fetch(:status)
+      assert_equal "process_cleanup_failed", @result.fetch(:error_reason)
+      assert_match(/synthetic cleanup failure/, @result.fetch(:process_cleanup_error))
+      assert_match(/OpenCode process cleanup failed/, stderr)
     end
   end
 
@@ -867,6 +916,24 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
             "native_credential_mode" =>
               (File.stat(credential_path).mode & 0777 if File.file?(credential_path))
           }))
+          if #{mode == :escaped_child}
+            ready_reader, ready_writer = IO.pipe
+            fork do
+              ready_reader.close
+              Process.setsid
+              trap("TERM") do
+                STDERR.puts "escaped child cleaned"
+                exit! 0
+              end
+              ready_writer.write("ready")
+              ready_writer.close
+              sleep 15
+              exit! 0
+            end
+            ready_writer.close
+            ready_reader.read
+            ready_reader.close
+          end
           sleep 10 if #{%i[timeout cancelled].include?(mode)}
           sleep 0.3 if #{mode == :drain}
           print #{run_output.dump}

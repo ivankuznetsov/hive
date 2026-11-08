@@ -370,6 +370,54 @@ class ManagedDirectoryTest < Minitest::Test
     end
   end
 
+  def test_atomic_write_can_require_exact_prior_identity_or_absence
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      path = File.join(root, "record")
+
+      directory.atomic_write("record", "first", expected_missing: true)
+      first_snapshot = managed_file_snapshot(path)
+      directory.atomic_write(
+        "record",
+        "second",
+        expected_snapshot: first_snapshot,
+        expected_digest: Digest::SHA256.hexdigest("first"),
+        max_existing_bytes: 5
+      )
+      assert_equal "second", File.binread(path)
+
+      stale_snapshot = managed_file_snapshot(path)
+      replacement = File.join(root, "replacement")
+      File.write(replacement, "second")
+      File.rename(replacement, path)
+      assert_raises(Hive::ConfigError) do
+        directory.atomic_write(
+          "record",
+          "third",
+          expected_snapshot: stale_snapshot,
+          expected_digest: Digest::SHA256.hexdigest("second"),
+          max_existing_bytes: 6
+        )
+      end
+      assert_equal "second", File.binread(path)
+
+      assert_raises(Hive::ConfigError) do
+        directory.atomic_write("record", "third", expected_missing: true)
+      end
+      assert_raises(Hive::ConfigError) do
+        directory.atomic_write(
+          "missing",
+          "third",
+          expected_missing: true,
+          expected_digest: Digest::SHA256.hexdigest("")
+        )
+      end
+      refute_path_exists File.join(root, "missing")
+    end
+  end
+
   def test_atomic_write_does_not_follow_a_substituted_parent
     with_tmp_dir do |anchor|
       root = File.join(anchor, "state")
@@ -730,6 +778,38 @@ class ManagedDirectoryTest < Minitest::Test
       assert_raises(Hive::ConfigError) do
         directory.unlink("record")
       end
+    end
+  end
+
+  def test_unlink_can_require_the_exact_observed_identity
+    with_tmp_dir do |root|
+      directory = Hive::ManagedDirectory.new(
+        root: root, label: "test state"
+      )
+      path = File.join(root, "record")
+      File.write(path, "retire")
+      stale_snapshot = managed_file_snapshot(path)
+      replacement = File.join(root, "replacement")
+      File.write(replacement, "retire")
+      File.rename(replacement, path)
+
+      assert_raises(Hive::ConfigError) do
+        directory.unlink(
+          "record",
+          expected_snapshot: stale_snapshot,
+          expected_digest: Digest::SHA256.hexdigest("retire"),
+          max_bytes: 6
+        )
+      end
+      assert_equal "retire", File.binread(path)
+
+      assert directory.unlink(
+        "record",
+        expected_snapshot: managed_file_snapshot(path),
+        expected_digest: Digest::SHA256.hexdigest("retire"),
+        max_bytes: 6
+      )
+      refute_path_exists path
     end
   end
 
@@ -1319,6 +1399,19 @@ class ManagedDirectoryTest < Minitest::Test
       stat.ino,
       stat.size,
       Digest::SHA256.file(path).hexdigest
+    ]
+  end
+
+  def managed_file_snapshot(path)
+    stat = File.stat(path)
+    [
+      stat.dev,
+      stat.ino,
+      stat.mode,
+      stat.size,
+      (stat.mtime.to_i * 1_000_000_000) + stat.mtime.nsec,
+      (stat.ctime.to_i * 1_000_000_000) + stat.ctime.nsec,
+      stat.nlink
     ]
   end
 end

@@ -77,10 +77,11 @@ require_bench_judge_runtime() {
     return 1
   fi
 
-  if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -rlib/deliberation -e '
+  if ! ruby -I"$BENCH_ROOT/harness" -rrejudge -rlib/deliberation -rlib/campaign_contract -e '
     supported = HiveBench::Rejudge::FAILURE_EVENT_VERSION == 1 &&
                 HiveBench::Deliberation::FAILURE_EVENT_VERSION == 1 &&
-                HiveBench::CodexJudge::PROVIDER_ROUTE_VERSION == 1
+                HiveBench::CodexJudge::PROVIDER_ROUTE_VERSION == 1 &&
+                HiveBench::CampaignContract::VERSION == 1
     exit(supported ? 0 : 1)
   ' >/dev/null 2>&1; then
     write_waiting "ERROR: the installed bench runtime at $BENCH_ROOT predates automatic judge retries or explicit Codex provider routing. Re-run hive init . --workflow bench to refresh it, then touch $STATE_FILE."
@@ -102,46 +103,20 @@ fi
 # extraction below: a multi-line source would silently feed a fragment into
 # SEEDS (surfacing only as a cryptic OptionParser error).
 ruby -ryaml -e '
+  repo = ARGV.fetch(0)
+  runtime = ARGV.fetch(1)
+  require File.join(runtime, "harness/lib/campaign_contract")
   data = YAML.safe_load_file("campaign.yml")
-  id = data.fetch("campaign_id").to_s
-  abort("campaign_id must be a slug matching /\\A[a-z0-9][a-z0-9-]{0,63}\\z/; got #{id.inspect}") unless id.match?(/\A[a-z0-9][a-z0-9-]{0,63}\z/)
-  abort("campaign_id v3-example is the unedited example id; pick a real campaign id") if id == "v3-example"
-  source = data.fetch("source")
-  abort("source must be a non-empty single-line string; got #{source.inspect}") unless source.is_a?(String) && !source.include?("\n") && !source.strip.empty?
+  HiveBench::CampaignContract.validate_judging!(data)
+  id = data.fetch("campaign_id")
+  source = HiveBench::CampaignContract.source(data, repo_root: repo)
   seeds = data.fetch("seeds")
-  abort("seeds must be a positive integer; got #{seeds.inspect}") unless seeds.is_a?(Integer) && seeds.positive?
   judges = data.fetch("judges")
-  abort("judges must be a mapping") unless judges.is_a?(Hash)
-  unknown_judges = judges.keys.map(&:to_s) - %w[claude codex openrouter]
-  abort("unknown judge backend(s): #{unknown_judges.join(", ")}") unless unknown_judges.empty?
-  enabled = judges.reject { |_backend, config| config.nil? || config == false }
-  abort("at least two judge backends must be enabled") if enabled.size < 2
-  enabled.each do |backend, config|
-    abort("judges.#{backend} must be a mapping or null") unless config.is_a?(Hash)
-    model = config["model"]
-    abort("judges.#{backend}.model must be a non-empty single-line string") unless model.is_a?(String) && !model.include?("\n") && !model.strip.empty?
-  end
-  judge_names = enabled.map do |backend, config|
-    backend.to_s == "claude" ? config.fetch("model").sub(/\Aclaude-/, "") : config.fetch("model").split("/").last
-  end
-  abort("enabled judges must produce unique result keys; got #{judge_names.inspect}") unless judge_names.uniq.size == judge_names.size
-  if enabled.key?("codex")
-    effort = enabled.dig("codex", "reasoning_effort")
-    abort("judges.codex.reasoning_effort must be a non-empty single-line string") unless effort.is_a?(String) && !effort.include?("\n") && !effort.strip.empty?
-    provider = enabled.fetch("codex").fetch("provider", "chatgpt").to_s
-    abort("judges.codex.provider must be chatgpt or openrouter") unless %w[chatgpt openrouter].include?(provider)
-    if provider == "openrouter"
-      provider_model = enabled.dig("codex", "provider_model")
-      unless provider_model.is_a?(String) && !provider_model.include?("\n") && !provider_model.strip.empty?
-        abort("judges.codex.provider_model must be a non-empty single-line string for provider openrouter")
-      end
-    end
-  end
   puts id
   puts source
   puts seeds
-  puts enabled.key?("openrouter") || enabled.dig("codex", "provider") == "openrouter"
-' >.judge-campaign.out 2>.judge-campaign.err || {
+  puts HiveBench::CampaignContract.judges_require_openrouter?(judges)
+' "$REPO_ROOT" "$BENCH_ROOT" >.judge-campaign.out 2>.judge-campaign.err || {
   write_waiting "$(cat .judge-campaign.err .judge-campaign.out)"
   exit 0
 }
@@ -157,30 +132,13 @@ if [ ! -f "$REPO_ROOT/$RESULTS" ]; then
 fi
 
 ruby -ryaml -e '
+  runtime = ARGV.fetch(0)
+  require File.join(runtime, "harness/lib/campaign_contract")
   judges = YAML.safe_load_file("campaign.yml").fetch("judges")
-  args = []
-  if (claude = judges["claude"]).is_a?(Hash)
-    args += ["--claude-judge", "--judge-model", claude.fetch("model").to_s]
-  else
-    args << "--no-claude-judge"
-  end
-  if (codex = judges["codex"]).is_a?(Hash)
-    args += ["--codex-judge", "--codex-judge-model", codex.fetch("model").to_s,
-             "--codex-judge-effort", codex.fetch("reasoning_effort").to_s,
-             "--codex-judge-provider", codex.fetch("provider", "chatgpt").to_s]
-    if codex.fetch("provider", "chatgpt").to_s == "openrouter"
-      args += ["--codex-judge-provider-model", codex.fetch("provider_model").to_s]
-    end
-  else
-    args << "--no-codex-judge"
-  end
-  if (openrouter = judges["openrouter"]).is_a?(Hash)
-    args += ["--openrouter-judge", "--openrouter-model", openrouter.fetch("model").to_s]
-  else
-    args << "--no-openrouter-judge"
-  end
-  puts args
-' >.judge-args.out 2>.judge-args.err || {
+  puts HiveBench::CampaignContract.judge_arguments(
+    judges, openrouter_model_flag: "--openrouter-model"
+  )
+' "$BENCH_ROOT" >.judge-args.out 2>.judge-args.err || {
   write_waiting "$(cat .judge-args.err .judge-args.out)"
   exit 0
 }

@@ -1,87 +1,111 @@
 ---
 title: hive runtime
 type: command
-source: lib/hive/commands/runtime.rb, lib/hive/runtime_control_plane/cutover.rb
-created: 2026-08-30
-updated: 2026-08-30
-tags: [command, sqlite, runtime-control-plane, status, resume, recovery]
+source: lib/hive/commands/runtime.rb, lib/hive/worktree.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
+updated: 2026-10-30
+tags: [command, sqlite, status, read-only, audit]
 ---
 
-**TLDR**: `hive runtime` diagnoses the SQLite activation state and resumes an
-interrupted one-way cutover. It never creates, migrates, restores, or
-downgrades implicitly.
+`hive runtime status [--json]` validates the current SQLite database read-only.
+Healthy storage reports `active`; missing storage reports `absent`, exits 1 and
+points to `hive setup`. Unsupported or corrupt storage returns a typed error.
+The JSON contract is `hive-runtime-maintenance.v1`. `resume` is not supported.
+For a current database, the result also includes a distinct read-only
+`lifecycle` object (`phase`, `generation`, `revision`, and `admission_open`).
+This does not replace installation health: storage remains `active` while work
+is quiescing or paused. Missing storage reports `lifecycle: null`.
+`hive runtime status` is not a backup acknowledgement. The increment-1 backup
+contract requires a successful `hive daemon quiesce --json` followed
+immediately by `hive daemon status --json` reporting the same paused generation
+with valid proof and clear liveness.
 
-## Usage
+On Linux, runtime status can inspect a read-only state root through this policy
+only when the actual path has available, unambiguous `/proc/self/mountinfo`
+metadata confirming the read-only mount. No sidecars uses an immutable
+read-only connection; a readable WAL/SHM pair uses plain read-only inspection;
+and either sidecar alone is refused. The command never
+checkpoints, removes, repairs, or creates sidecars. A pair that needs forbidden
+WAL-index recovery returns a read-only storage error instead of retrying with
+immutable access.
 
-```bash
-hive runtime status [--json]
-hive runtime resume [--json]
-```
+`state_storage_read_only` normally directs the caller to `Use a writable,
+accessible state root (HIVE_HOME).` An unpaired sidecar instead uses `Use a
+writable state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or
+remove the stray sidecar after verifying no committed data will be lost.`
+`state_storage_inaccessible` uses the general writable, accessible state-root
+action. These access failures never recommend backup recovery. Confirmed
+corruption and custody violations retain their existing codes and backup
+action; in particular, a different-uid audit remains
+`database_custody_invalid`. Auditing as another uid is unsupported.
 
-Every JSON call emits the strict `hive-runtime-maintenance.v1` envelope with
-`schema_version`, action, and a typed result or error. Errors retain the runtime
-code, next action, and structured details. The early activation gate emits this
-same contract before the normal CLI loads, so `--json` callers never receive a
-prose-only maintenance refusal.
+Non-Linux platforms, including macOS, and Linux hosts with missing or ambiguous
+procfs mount metadata cannot authorize immutable inspection. A typed read-only
+failure there returns `state_storage_read_only` and the general action rather
+than a successful status document. JSON storage failures use the
+`hive-runtime-maintenance.v1` fields `runtime_code` and `next_action`. Because
+runtime status shares this policy, it should not be recommended as a recovery
+step for a path where the same inspection has already failed.
 
-## Status
+## Audit listings: `projects` and `payloads`
 
-`status` is read-only. It validates the immutable cutover manifest, the exact
-SQLite schema and application identity when a database exists, installation
-identity, and activation epoch. A healthy database beside a missing, corrupt, or
-identity-mismatched manifest is an error rather than an inferred active
-installation.
+Two more read-only actions exist for external audits. The consumer is
+hivedev's read-only workspace audit, which mounts the state root read-only
+after booting Hive in a container. `hive status --json` refuses that root and
+`hive status --operational --json` lists only tasks.
 
-The durable phases are:
+- `hive runtime projects [--json]` reads the global registry
+  (`Hive::Config.registered_projects`, `HIVE_HOME/config.yml` or the XDG
+  config home) without loading project config or writing. Result:
+  `registry_path` and `projects[]` with `name`, `project_id`, `path`,
+  `real_path` (null unless the registry recorded one), the resolved
+  `hive_state_path`, and the effective `worktree_root`. Rows the loader
+  treats as invalid are omitted. A missing registry yields `projects: []`.
+  An unreadable one fails with `runtime_code: "config"` and a registry
+  `next_action`.
+- `worktree_root` (added 2026-10-30) comes from a raw read of
+  `<path>/.hive-state/config.yml` (`Config.read_project_config`: no
+  validation, workflow loading or managed-store reconciliation) resolved
+  through `Hive::Worktree.canonical_root`, the resolver `hive worktree` uses:
+  the config's `worktree_root`, else `<HIVE_WORKTREE_BASE or
+  ~/Dev>/<basename(path)>.worktrees`, then `File.expand_path`. A relative
+  override therefore expands against the caller's current directory, exactly
+  as Hive itself does. A missing, unreadable or invalid-YAML config.yml, a
+  non-string `worktree_root`, or an unexpandable value (unknown `~user`)
+  yields `worktree_root: null` plus a short `worktree_root_error` for that
+  project only; the listing still succeeds. Auditors should treat a null root
+  as incomplete evidence.
+- `hive runtime payloads [--json]` reads every `payload_references` row
+  through `Database#payload_references_snapshot`. That method uses the same
+  diagnostics and inspection policy as status: readonly, immutable only on a
+  confirmed read-only mount, and no WAL, migration or sidecar creation.
+  Result: `phase` (`active`/`absent`), `payload_root`
+  (`Hive::Paths.runtime_payload_root`) and `payloads[]` with `payload_id`,
+  `kind`, `state`, `task_id`, `attempt_id`, `relative_path`, `sha256`,
+  `bytes` and `path`. `path` is `File.expand_path(relative_path,
+  payload_root)`. It is reported, not validated, so the auditor can do its
+  own containment check. Missing storage is `phase: "absent"` with
+  `ok: true`, exit 0 and an empty list. Corrupt, unsupported or
+  unconfirmed-read-only storage fails with the usual runtime error envelope.
 
-- `preparing`: the exact prior service state is journaled and services are
-  being stopped. A retry reuses that journal rather than observing a new state.
-- `ready`: services and live owners are quiesced and task authority is
-  fingerprinted; no legacy writer has been fenced yet.
-- `intended`: retired writers are fenced and the rebuilt SQLite database is
-  installed; activation must converge forward.
-- `active`: the database identity is authoritative and the ordinary-command
-  gate is open. Service replay then converges idempotently from the private
-  service journal, whose `activated` checkpoint prevents duplicate launchctl
-  starts after a crash.
+Both actions return `ok: true` and are listed in
+`ActivationGate.strict_no_write_route?`, so process bootstrap does no
+scheduler reconciliation or other writes for them. The schema change is
+additive: new `ProjectsPayload`/`PayloadsPayload` branches, still v1. The
+optional per-project `worktree_root`/`worktree_root_error` pair is also
+additive; the schema requires the error exactly when the root is null.
 
-An incomplete result reports `hive runtime resume` as the action. Hive offers
-no rollback, restore, or downgrade command for this irreversible transition.
+`Installation.setup` serializes explicit setup, builds a complete current database
+privately and publishes without replacing an existing destination. Repeated setup
+validates the existing database and preserves identity and data. Startup validates
+existing storage without creating or migrating it; fresh commands that do not
+require runtime storage remain available before setup.
 
-## Resume
+No cutover manifests, historical import, retired-writer sealing, service replay or
+activation phase state machine remains. Current schema/application identity,
+installation identity, private storage custody and integrity validation remain.
+Historical activation columns remain inert in the current schema so existing
+current databases do not require another conversion.
 
-`resume` reopens the recorded manifest and continues from its durable phase. It
-revalidates task fingerprints, holds an exclusive legacy-usage transaction from
-snapshot comparison through fencing, installs the fully validated candidate
-database idempotently, publishes `active`, and then replays only services that
-were running at cutover start. Once fencing begins, evidence and tombstones
-remain in place so another process cannot silently revive a legacy writer.
-
-The live database directory is private (`0700`), and the main database, WAL,
-and SHM files must be owned single-link regular files with no group/world mode
-bits. Exact schema validation hashes the normalized SQLite table/index DDL,
-rather than accepting a database merely because expected names exist.
-
-## Early activation gate
-
-The installed candidate runs a read-only gate in `bin/hive` before LLM-wiki
-reconciliation or any other startup mutation. With legacy state and no active
-control plane, ordinary commands fail with `fleet_cutover_required`. The gate
-permits only fleet migration, runtime status/resume, doctor, version inspection,
-and genuinely fresh setup. It never creates or migrates the database.
-
-## Tests
-
-- `test/unit/commands/runtime_test.rb` covers typed status/resume output and
-  corrupt-manifest refusal.
-- `test/unit/runtime_control_plane/activation_gate_test.rb` covers inactive,
-  incomplete, active, and pre-wiki gate ordering.
-- `test/unit/runtime_control_plane/cutover_test.rb` covers validated token-usage
-  import, disposable runtime reset, custom state roots, and crash-forward
-  convergence across fencing, database, intent, and service boundaries.
-- `test/unit/runtime_control_plane/maintenance_test.rb` covers idempotent
-  service quiescence and restart intent without launcher mutation.
-
-## Backlinks
-
-- [[commands/migrate]] · [[commands/update]] · [[commands/doctor]] · [[state-model]]
+Tests: `test/unit/runtime_control_plane/installation_test.rb`,
+`activation_gate_test.rb`, `database_test.rb`, `test/unit/commands/runtime_test.rb`,
+and the real-mount `test/integration/status_read_only_test.rb` gate.

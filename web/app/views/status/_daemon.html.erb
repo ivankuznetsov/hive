@@ -1,3 +1,8 @@
+<% if !daemon_status.key?("running") %>
+  <section class="daemon-panel" aria-label="Daemon status" role="status">
+    <span class="muted">Checking daemon status…</span>
+  </section>
+<% else %>
 <% running = daemon_status["running"] %>
 <% drift = daemon_status["binary_drift"].to_s %>
 <% actionable_drift = Hive::Daemon::StatusReport::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
@@ -33,3 +38,4 @@
     </span>
   <% end %>
 </section>
+<% end %>

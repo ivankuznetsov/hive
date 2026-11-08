@@ -303,7 +303,7 @@ class HiveBotSupervisorTest < Minitest::Test
       project_path: project_path,
       hive_state_path: File.join(project_path, ".hive-state"),
       legacy_stage_dirs: [ { "stage_dir" => "6-pr", "task_count" => 1 } ],
-      legacy_migrate_command: "hive migrate"
+      legacy_state_guide: "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     )
   end
 
@@ -1162,6 +1162,31 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_match(/Send the idea text/, @telegram.messages.last.fetch(:text))
   ensure
     @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_commit_idea_replies_when_draft_expires_between_validation_and_snapshot
+    @idea_draft_store.start(chat_id: 42, phase: :collecting_files, text: "fix", token: "tok")
+    @idea_draft_store.set_project(chat_id: 42, project: "hive")
+    @idea_draft_store.define_singleton_method(:commit_snapshot) { |chat_id:| nil }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/idea draft expired/, @telegram.messages.last.fetch(:text))
+  ensure
+    @idea_draft_store.clear(chat_id: 42) if @idea_draft_store
+  end
+
+  def test_commit_idea_replies_when_draft_is_already_expired
+    @idea_draft_store.define_singleton_method(:commit_blocker) { |chat_id:| :draft_expired }
+    @idea_draft_store.define_singleton_method(:commit_snapshot) { |chat_id:| flunk "must not snapshot an expired draft" }
+
+    @supervisor.send(:execute_result,
+                     FakeRouter::Result.new(action: :commit_idea, attachment: { chat_id: 42 }),
+                     Update.new(chat_id: 42, update_id: 1))
+
+    assert_match(/idea draft expired/, @telegram.messages.last.fetch(:text))
   end
 
   def test_commit_idea_handles_command_failure_without_clearing_draft
@@ -2084,7 +2109,7 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_empty @child_supervisor.dispatched
     message = @telegram.messages.last
     assert_includes message.fetch(:text),
-                    "Project hive has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/hive`"
+                    "Project hive has 1 task hidden in legacy stage dirs (6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/hive"
     assert_includes message.fetch(:text), "No active Hive tasks."
     assert_nil message[:reply_markup]
   end
@@ -2106,7 +2131,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
     message = @telegram.messages.last
     assert_includes message.fetch(:text),
-                    "Project other has 1 task hidden in legacy stage dirs (6-pr) - run `hive migrate /tmp/other`"
+                    "Project other has 1 task hidden in legacy stage dirs (6-pr) - read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent for /tmp/other"
     assert_includes message.fetch(:text), "No active Hive tasks."
     refute_includes message.fetch(:text), "Alpha"
     assert_nil message[:reply_markup]
@@ -3345,6 +3370,26 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:poll_loop)
 
     assert_equal [ Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC ], slept
+  end
+
+  def test_poll_loop_retries_after_the_transport_recovers_without_restarting
+    supervisor = @supervisor
+    @supervisor.instance_variable_get(:@config)["long_poll_timeout_sec"] = 0
+    attempts = 0
+    slept = []
+    @telegram.define_singleton_method(:poll_updates) do |timeout:, since_update_id:|
+      attempts += 1
+      supervisor.request_shutdown! if attempts == 2
+      []
+    end
+    @telegram.define_singleton_method(:last_poll_failed?) { attempts == 1 }
+    @supervisor.define_singleton_method(:interruptible_sleep) { |seconds| slept << seconds }
+
+    @supervisor.send(:poll_loop)
+
+    assert_equal 2, attempts
+    assert_equal [ Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC ], slept
+    assert_equal 1, Hive::Bot::Supervisor::POLL_FAILURE_BACKOFF_SEC
   end
 
   def test_status_loop_logs_tick_failures

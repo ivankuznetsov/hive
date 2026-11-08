@@ -1,6 +1,6 @@
 module Hive
   # Shared vocabulary for the `media/manifest.json` contract that the
-  # 7-artifacts stage writes and hivebox reads. The schema int lives here, in
+  # 7-artifacts stage writes and Hive web reads. The schema int lives here, in
   # one gem module both tiers reference, so a version bump can't leave the
   # stage (lib/hive/stages/artifacts.rb) and the web reader
   # (web/app/controllers/tasks_controller.rb) silently disagreeing — one

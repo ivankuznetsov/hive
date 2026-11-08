@@ -129,6 +129,31 @@ class PlanReviewPlanSignalsTest < Minitest::Test
     end
   end
 
+  # Match offsets are character offsets; slicing them as byte offsets lands
+  # inside a multibyte character and used to invalidate the whole plan.
+  def test_multibyte_text_before_a_match_keeps_the_plan_valid
+    [ 50, 51 ].each do |count|
+      with_plan(<<~PLAN) do |path, task_folder|
+        # Local wording change
+
+        ## Files
+        - `lib/hive/parser.rb`
+
+        #{"é" * count}
+        The recovery path changes; no authentication changes.
+      PLAN
+        result = Hive::PlanReview::PlanSignals.analyze(
+          plan_path: path, task_folder:, max_files: 5
+        )
+
+        assert result.valid?, "#{count}: #{result.uncertainties.inspect}"
+        categories = result.mandatory_reasons.map { |reason| reason.fetch("category") }
+        assert_includes categories, "concurrency_recovery_ownership"
+        refute_includes categories, "auth_secrets_permissions"
+      end
+    end
+  end
+
   def test_literal_credential_pattern_requires_mandatory_review
     token = "ghp_#{"aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"}"
     with_plan(<<~PLAN) do |path, task_folder|

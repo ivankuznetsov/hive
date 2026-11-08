@@ -10,7 +10,8 @@ module Hive
   module AgentSkills
     RUNNER_ENVIRONMENT_KEYS = %w[
       HOME PATH CLAUDE_CONFIG_DIR CODEX_HOME PI_CODING_AGENT_DIR GROK_HOME
-      OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_DATA_HOME
+      OPENCODE_CONFIG OPENCODE_CONFIG_DIR XDG_CACHE_HOME XDG_CONFIG_HOME
+      XDG_DATA_HOME
     ].freeze
 
     autoload :Adapter, "hive/agent_skills/adapters/base"
@@ -143,6 +144,16 @@ module Hive
     def capability(id, agent)
       require "hive/agent_skills/manifest"
       Manifest.load.capability(id).agent(agent)
+    end
+
+    # Native plugin package ids the managed capabilities install for one
+    # agent, such as the Codex plugins a launch must keep enabled.
+    def native_packages(agent)
+      require "hive/agent_skills/manifest"
+      Manifest.load.packages.filter_map do |package|
+        native = package.agents[agent.to_s]
+        native.package if native.is_a?(Manifest::NativePackage)
+      end
     end
 
     def publisher(root:, trusted_root:, projection:)

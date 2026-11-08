@@ -23,6 +23,19 @@ module Hive
       SCHEMA = "hive-workflow-new".freeze
       SUBCOMMANDS = %w[new validate commit install list update remove publish].freeze
 
+      # Pre-dispatch usage errors for `hive workflow validate` own the
+      # diagnostics arm: an arity rejection is still a validate document, so
+      # agent callers get the same schema they would from an in-command
+      # validation failure.
+      def self.usage_error_payload(error, schema:, argv: [], id: nil)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: schema, error: error, error_kind: "usage",
+          extras: id ? { "valid" => false, "id" => id } : {}
+        )
+        payload["diagnostics"] = [ { "message" => error.message } ] if schema == "hive-workflow-validate"
+        payload
+      end
+
       class UsageError < Hive::Error
         attr_reader :value, :expected, :suggested_id
 
@@ -356,7 +369,9 @@ module Hive
 
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE,
                      yes: false, dry_run: false, allow_escalation: false, version: nil,
-                     expected_release_digest: nil, mapping_overrides: [], input_bindings: [])
+                     expected_release_digest: nil, mapping_overrides: [], input_bindings: [], from: nil, ref: nil)
+        @from = from
+        @ref = ref
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
@@ -410,6 +425,12 @@ module Hive
           )
         end
 
+        if (@from && @subcommand != "install") || (@ref && !@from)
+          raise UsageError, "--from and --ref are only supported together with workflow install ID --from REPOSITORY"
+        end
+        if @from && (@mapping_overrides.any? || @input_bindings.any? || @allow_escalation)
+          raise UsageError, "Git sources use authored descriptor settings; mapping and input overrides belong to managed packages"
+        end
         return commit_authored_workflow! if @subcommand == "commit"
         return lifecycle_command.call unless @subcommand == "new"
 
@@ -494,6 +515,13 @@ module Hive
             @id, project_root: @project_root, json: @json, stdout: @stdout
           )
         when "install"
+          if @from
+            require "hive/commands/workflow/git_install"
+            return Hive::Commands::Workflow::GitInstall.new(
+              @id, repository: @from, ref: @ref || "HEAD", project_root: @project_root,
+              json: @json, dry_run: @dry_run, stdout: @stdout
+            )
+          end
           require "hive/commands/workflow/install"
           Hive::Commands::Workflow::Install.new(
             @id, project_root: @project_root, json: @json, yes: @yes,
@@ -581,6 +609,8 @@ module Hive
       # agents do not need to regex `message`. Passed through the local seam to
       # avoid changing the gem-wide ErrorEnvelope.build.
       def error_extras(error)
+        return {} if @subcommand == "install" && (@from || @ref)
+
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
         extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
@@ -597,6 +627,8 @@ module Hive
       end
 
       def response_schema
+        return "hive-workflow-install" if @subcommand == "install" && (@from || @ref)
+
         @subcommand == "validate" ? "hive-workflow-validate" : SCHEMA
       end
 
@@ -613,4 +645,32 @@ module Hive
       end
     end
   end
+end
+
+# The pre-dispatch JSON usage contract for this command boundary follows the
+# workflow subcommand; `validate` additionally owns its diagnostics arm so
+# arity rejections still produce a validate document (see
+# Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("workflow") do |argv, command_index:, option_argv:|
+  sub = Hive::CliUsageContracts.subcommand(argv, command_index)
+  schema = case sub
+  when "install" then "hive-workflow-install"
+  when "list" then "hive-workflow-list"
+  when "remove" then "hive-workflow-remove"
+  when "update" then "hive-workflow-update"
+  when "publish" then "hive-workflow-publish"
+  when "validate" then "hive-workflow-validate"
+  else "hive-workflow-new"
+  end
+  next unless Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+
+  next { schema: schema, error_kind: "usage", extras: {} } unless sub == "validate"
+
+  id = Hive::CliUsageContracts.positionals(argv, command_index).fetch(1, "")
+  {
+    schema: schema, error_kind: "usage", extras: { "valid" => false, "id" => id },
+    payload: ->(error, argv: []) { Hive::Commands::Workflow.usage_error_payload(error, schema: schema, argv: argv, id: id) }
+  }
 end

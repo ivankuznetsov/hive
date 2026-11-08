@@ -1,6 +1,36 @@
 require "test_helper"
 
 class BoardTest < ActiveSupport::TestCase
+  test "saved history metadata includes the default workflow for the empty fleet board" do
+    name = create_hive_project!("saved-default-workflow")
+    project = Project.find!(name)
+    history = project.attributes.merge("tasks" => [ { "slug" => "finished", "stage" => "6-done",
+      "workflow" => "content", "action" => "archived" } ])
+    metadata = Board.new([ project.with_history(history) ]).metadata
+
+    band = Board.new([ project ], metadata: metadata).bands.sole
+
+    assert_nil band.error
+    assert_equal "coding", band.workflow_id
+    assert_equal Hive::Workflows::Registry.fetch(:coding).stage_dirs, band.columns.map(&:stage)
+  end
+
+  test "completed deliverables appear in Done while unfinished delivery stays in its stage" do
+    workflow = Hive::Workflow.new(id: :writing, stages: [
+      Hive::Workflow::Stage.new(name: "deliver", index: 1, kind: :agent,
+                               state_file: "delivery.md", deliverable: "article.md")
+    ])
+    completed = { "stage" => "1-deliver", "action" => "archived", "slug" => "finished" }
+    pending = { "stage" => "1-deliver", "action" => "ready_to_run", "slug" => "unfinished" }
+
+    columns = Board.allocate.send(:columns_for, workflow, [ completed, pending ])
+
+    assert_equal [ "Deliver", "Done" ], columns.map(&:label)
+    assert_equal [ pending ], columns.first.tasks
+    assert_equal [ completed ], columns.last.tasks
+    assert_equal "1-deliver", completed["stage"]
+  end
+
   test "groups tasks into project workflow bands and descriptor ordered columns" do
     project_name = create_hive_project!("kanban-model-app")
     project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
@@ -25,26 +55,6 @@ class BoardTest < ActiveSupport::TestCase
     assert_equal Hive::Workflows::Registry.fetch(:content).stage_dirs, content.columns.map(&:stage)
     assert_equal [ "coding-task" ], coding.columns.find { |column| column.stage == "3-plan" }.tasks.map(&:slug)
     assert_equal [ "content-task" ], content.columns.find { |column| column.stage == "2-research" }.tasks.map(&:slug)
-  end
-
-  test "attaches a project hidden count to exactly one workflow band" do
-    project_name = create_hive_project!("kanban-hidden-archive-app")
-    project_path = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", project_name)
-    project = Project.new(
-      "name" => project_name,
-      "path" => project_path,
-      "hive_state_path" => File.join(project_path, ".hive-state"),
-      "hidden_archived_task_count" => 3,
-      "tasks" => [
-        { "slug" => "coding-task", "stage" => "3-plan", "workflow" => "coding" },
-        { "slug" => "content-task", "stage" => "2-research", "workflow" => "content" }
-      ]
-    )
-
-    bands = Board.new([ project ]).bands
-
-    assert_equal [ 3, 0 ], bands.map(&:hidden_archived_task_count)
-    assert_equal 3, bands.sum(&:hidden_archived_task_count)
   end
 
   test "keeps unknown stages visible after the configured workflow columns" do

@@ -301,11 +301,17 @@ module Hive
           next false unless %w[queued blocked].include?(aggregate.fetch("state"))
           next false if aggregate.fetch("actions").any?
 
-          deadline = aggregate.fetch("attempts").reverse_each.filter_map { |attempt| attempt["next_eligible_at"] }.first
-          deadline.nil? || Time.iso8601(deadline) <= now
+          discovery_retry_eligible?(aggregate, now)
         end
       end
-      private :eligible_from
+
+      def discovery_retry_eligible?(aggregate, now)
+        deadline = aggregate.fetch("attempts").reverse_each.filter_map do |attempt|
+          attempt["next_eligible_at"]
+        end.first
+        deadline.nil? || Time.iso8601(deadline) <= now
+      end
+      private :eligible_from, :discovery_retry_eligible?
 
       # Includes an expired analyzing claim, plus an unexpired claim whose
       # recorded process identity is already provably gone, so a restarted
@@ -329,6 +335,47 @@ module Hive
           .sort_by { |aggregate| scheduling_key(aggregate) }
       rescue ArgumentError, KeyError => e
         raise InconsistentRecord, "refactor patrol claim has invalid scheduling evidence (#{e.message})"
+      end
+
+      # Settle abandoned discovery authority without acquiring replacement work.
+      # A dispatch-only one-shot uses this before its liveness drain so an expired
+      # claim from a dead Architecture Patrol process cannot hold the project guard
+      # forever. Unexpired claims are recovered only with positive proof that their
+      # recorded owner is gone.
+      def recover_stale_discovery_claims!(now: Time.now, claim_resolver: nil,
+                                          claim_liveness_resolver: nil)
+        jobs.each_with_object({ recovered: [], unresolved: [] }) do |snapshot, result|
+          next unless snapshot.fetch("state") == "analyzing"
+          next unless active_discovery_attempt(snapshot)
+
+          outcome = mutate_job(snapshot.fetch("job_id")) do |aggregate, _path|
+            active = active_discovery_attempt(aggregate)
+            next [ aggregate, :inactive ] unless active
+
+            expired = Time.iso8601(active.fetch("expires_at")) <= now
+            resolver = expired ? claim_resolver : claim_liveness_resolver
+            unless claim_resolved?(active, resolver)
+              next [ aggregate, expired ? :unresolved : :active ]
+            end
+
+            @claim_transitions.finish!(
+              active,
+              state: "superseded",
+              outcome: expired ? "expired_claim_resolved" : "inactive_claim_resolved",
+              now: now,
+              touch_heartbeat: false
+            )
+            aggregate["state"] = "blocked"
+            aggregate["complete"] = false
+            aggregate["updated_at"] = now.utc.iso8601
+            [ aggregate, :recovered ]
+          end
+          result.fetch(:recovered) << snapshot.fetch("job_id") if outcome == :recovered
+          result.fetch(:unresolved) << snapshot.fetch("job_id") if outcome == :unresolved
+        end
+      rescue ArgumentError, KeyError => error
+        raise InconsistentRecord,
+              "refactor patrol claim has invalid recovery evidence (#{error.message})"
       end
 
       # Action scheduling is intentionally separate from discovery scheduling:
@@ -431,6 +478,7 @@ module Hive
           return nil if aggregate.fetch("actions").any?
 
           active = active_discovery_attempt(aggregate)
+          return nil unless active || discovery_retry_eligible?(aggregate, now)
           if active
             expired = Time.iso8601(active.fetch("expires_at")) <= now
             return nil unless expired || allow_unexpired_recovery
@@ -559,9 +607,15 @@ module Hive
       # and retry throttling; otherwise the daemon would repeat shell/network
       # probes and identical log lines on every fast tick.
       def block_discovery!(job_id, reason:, evidence: {}, now: Time.now,
-                           backoff_sec: 60, episode: nil, transition: nil)
-        mutate_job(job_id) do |aggregate, _path|
+                           backoff_sec: 60, episode: nil, transition: nil,
+                           expected_record: nil)
+        mutate_job(job_id) do |aggregate, path|
           next aggregate if aggregate.fetch("complete")
+          if expected_record && aggregate != expected_record
+            raise StaleClaim.new(
+              "refactor patrol discovery observation is stale", path: path
+            )
+          end
 
           timestamp = now.utc.iso8601
           generation = diagnostic_episode!(

@@ -30,7 +30,7 @@ module Hive
         RESOLVED_NO_FIX_LINE_RE = /\A\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:\s+(.*?)(?:\r?\n)?\z/i.freeze
         FP_RE = /\bfp=([0-9a-f]{16})\b/i.freeze
         FIRST_PASS_RE = /\bfirst-pass=(\d+)\b/.freeze
-        DISPOSITION_PREFIX_RE = /\A(?:AUTO-FIX|RESOLVED\/NO-FIX|RESOLVED|NO-FIX|ESCALATE|SUPPRESSED):\s*/i.freeze
+        DISPOSITION_PREFIX_RE = /\A(?:AUTO-FIX|RESOLVED\/NO-FIX|RESOLVED|NO-FIX|ESCALATE|SUPPRESSED|DEFERRED):\s*/i.freeze
         # Matches a single HTML comment anywhere in the text (non-greedy,
         # multiline-dotall). clean_finding_text strips ALL comments with a
         # global sub, not just a trailing one: an anchored `...-->\z` match

@@ -9,6 +9,10 @@ class RuntimeControlPlaneCodecTest < Minitest::Test
     assert_raises(Hive::RuntimeControlPlane::CodecError) do
       Hive::RuntimeControlPlane::Codec.dump_json("e\u0301" => 1, "é" => 2)
     end
+    assert_raises(Hive::RuntimeControlPlane::CodecError) do
+      Hive::RuntimeControlPlane::Codec.dump_json(Float::INFINITY)
+    end
+    assert_equal "1.5", Hive::RuntimeControlPlane::Codec.dump_json(1.5)
   end
 
   def test_invalid_and_noncanonical_times_are_typed

@@ -7,12 +7,15 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_limit"
+require "hive/model_unsupported"
 require "hive/agent/message_extractor"
 require "hive/agent_support"
 require "hive/artifact_firewall"
 require "hive/events"
 require "hive/lock"
+require "hive/mcp"
 require "hive/permission_scope"
+require "hive/project_command_environment"
 require "hive/secret_patterns"
 
 module Hive
@@ -26,23 +29,19 @@ module Hive
 
     CapturedProcess = Data.define(
       :pid, :pgid, :stdout, :stderr, :stdout_truncated, :stderr_truncated,
-      :termination
+      :termination, :output_completed
     )
 
-    # Hive runs under its own bundle, while native agent launches inherit the
-    # operator's environment. Unset Hive's Ruby toolchain so a child `ruby`,
-    # `gem`, or `bundle` resolves against the task repository instead.
-    SCRUBBED_TOOLCHAIN_ENV_KEYS = %w[
-      RUBYOPT RUBYLIB GEM_HOME GEM_PATH
-      BUNDLE_GEMFILE BUNDLE_BIN_PATH BUNDLER_VERSION BUNDLER_SETUP
-    ].freeze
+    # Hive runs under its own load path, while native agent launches inherit
+    # the operator's environment. Unset Hive's Ruby toolchain so a child
+    # `ruby`, `gem`, or `bundle` resolves against the task repository instead.
+    SCRUBBED_TOOLCHAIN_ENV_KEYS = Hive::ProjectCommandEnvironment::TOOLCHAIN_KEYS
 
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
     # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
     # redundant, unvalidated second source that overrides hive's chosen
-    # base_url. Mirrors the tmux path's blanking in
-    # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
+    # base_url.
     SCRUBBED_CHILD_ENV = {
       "HIVE_SCREENOTE_BASE_URL" => nil,
       **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
@@ -55,7 +54,7 @@ module Hive
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode,
-                :runtime_policy, :child_environment, :observable_result
+                :runtime_policy, :observable_result
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
@@ -68,7 +67,8 @@ module Hive
                    permission_policy: nil,
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
-                   isolate_environment: false, terminate_on_parent_signal: true)
+                   completion_probe: nil, isolate_environment: false,
+                   terminate_on_parent_signal: true, mcp_launch: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -87,6 +87,10 @@ module Hive
       @additional_write_roots = Array(additional_write_roots).map(&:to_s).freeze
       @edit_patterns = Array(edit_patterns).map(&:to_s).freeze
       @bash_patterns = Array(bash_patterns).map(&:to_s).freeze
+      unless completion_probe.nil? || completion_probe.respond_to?(:call)
+        raise ArgumentError, "completion_probe must be callable"
+      end
+      @completion_probe = completion_probe
       @runtime_policy = runtime_policy
       if runtime_policy && permission_arguments
         raise ArgumentError, "permission_arguments cannot be combined with runtime_policy"
@@ -131,10 +135,22 @@ module Hive
           SCRUBBED_CHILD_ENV
         end
       end
-      @child_environment = @child_environment
+      support = Hive::AgentSupport.for(@profile)
+      @controller_environment_scrub = if support&.respond_to?(:controller_environment_scrub)
+        support.controller_environment_scrub
+      else
+        {}
+      end
+      @base_child_environment = @child_environment
         .merge(@launch_environment)
         .merge(@profile.subscription_environment)
         .freeze
+      @child_environment = nil
+      # Hive-owned MCP: a caller-supplied launch is the caller's to clean up.
+      # Without one the agent renders the empty grant itself on first use and
+      # removes it after run!; a managed policy that isolates MCP needs none.
+      @mcp_launch = mcp_launch
+      @owns_mcp_launch = false
       @launch_arguments = normalize_launch_arguments(launch_arguments)
       supplied_identity_arguments =
         Hive::ImplementationIdentity.validate_native_arguments(identity_arguments)
@@ -153,6 +169,46 @@ module Hive
       @identity_arguments = supplied_identity_arguments.freeze
       @routing_arguments =
         routing_arguments && @profile.validate_routing_arguments!(routing_arguments)
+    end
+
+    # The child env: the base env, then the MCP launch env and the host vars
+    # its servers read (so they survive `unsetenv_others`), then the
+    # provider's controller scrub.
+    def child_environment
+      @child_environment ||= begin
+        launch = mcp_launch
+        base = launch ? launch.environment_for(@base_child_environment) : @base_child_environment
+        base.merge(@controller_environment_scrub).freeze
+      end
+    end
+
+    # nil when the managed runtime policy already isolates MCP.
+    def mcp_launch
+      return @mcp_launch if @mcp_launch || @runtime_policy&.mcp_isolated
+
+      @owns_mcp_launch = true
+      @mcp_launch = Hive::Mcp.prepare(
+        profile: @profile, policy: Hive::Mcp.policy(nil, scope: @log_label), cwd: @cwd
+      )
+    end
+
+    def mcp_arguments
+      launch = mcp_launch
+      return [] unless launch
+
+      launch.arguments_for(
+        [ *@identity_arguments, *@routing_arguments&.native_arguments, *@cli_flags ].map(&:to_s)
+      )
+    end
+
+    def cleanup_mcp_launch!
+      return unless @owns_mcp_launch
+
+      @mcp_launch.cleanup!
+      @owns_mcp_launch = false
+      @mcp_launch = nil
+      @child_environment = nil
+      @compiled_invocation = nil
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -218,6 +274,7 @@ module Hive
       @observable_result = Hive::AgentRuntime.observe(@profile, result)
       result
     ensure
+      cleanup_mcp_launch!
       emit_agent_event(:agent_end, message: agent_end_message(result, $!))
     end
 
@@ -240,12 +297,14 @@ module Hive
         require_terminal_structured_output: @runtime_policy&.host_outputs? == true
       )
       limit_text = nil
+      model_unsupported_text = nil
       structured_failure = nil
       last_usage = nil
       stream = support::Stream if support&.const_defined?(:Stream, false)
       meter_class = stream&.const_defined?(:TokenMeter, false) ?
         stream::TokenMeter : Hive::AgentSupport::StreamMeter
       token_meter = meter_class.new
+      model_identity = stream::ModelIdentity.new if stream&.const_defined?(:ModelIdentity, false)
       resource_exhaustion = nil
       provider_signal = nil
       provider_error = nil
@@ -265,12 +324,13 @@ module Hive
                  "cwd=#{Hive::SecretPatterns.redact(@cwd)} " \
                  "profile=#{@profile.name} executable=#{File.basename(cmd.first.to_s)} argc=#{cmd.length}" \
                  "#{launch_identity_log_fields}"
+        write_mcp_log(log)
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
       spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(@child_environment, *cmd, **spawn_opts)
+      pid = Process.spawn(child_environment, *cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)
@@ -293,6 +353,7 @@ module Hive
             # logical message can span multiple newline-delimited JSON events,
             # so per-line regex redaction cannot safely retain their payloads.
             json = parse_json_line(line)
+            model_identity&.observe(json)
             provider_signal ||= Hive::AgentProfiles::ErrorNormalizers.normalize(
               adapter: @profile.name,
               event: json,
@@ -338,6 +399,13 @@ module Hive
                 detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
                 limit_text = (detail || line).to_s.strip
               end
+            end
+            # Same error-event gate as the limit scan: a model refusal printed
+            # as a bare line (or an error event) is captured raw so handle_exit
+            # can classify it as operator-owned model configuration.
+            if model_unsupported_text.nil? && !sensitive_payload &&
+               provider_limit_candidate?(json) && Hive::ModelUnsupported.detected?(line)
+              model_unsupported_text = line.to_s.strip
             end
             turn_started = stream&.turn_started?(json)
             if turn_started
@@ -485,6 +553,7 @@ module Hive
       else
         last_usage
       end
+      reported_usage = reported_usage&.merge(model: model_identity.model) if model_identity
       result = {
         pid: pid,
         pgid: pgid,
@@ -496,13 +565,14 @@ module Hive
         final_message_truncated: messages.truncated?,
         limit_text: limit_text,
         usage: reported_usage,
-        model: reported_usage&.dig(:model),
+        model: model_identity ? model_identity.model : reported_usage&.dig(:model),
         resource_exhaustion: resource_exhaustion,
         output_completed: output_completed,
         provider_signal: provider_signal,
         provider_error: provider_error,
         status: nil
       }
+      result[:model_unsupported_text] = model_unsupported_text if model_unsupported_text
       if structured_failure
         result[:failure_origin] = structured_failure.fetch(:origin)
         result[:failure_details] = failure_details
@@ -624,7 +694,8 @@ module Hive
     def capture_process(argv:, environment:, stdout_limit:, stderr_limit:,
                         stdin_data: nil, timeout_sec: @timeout_sec,
                         record_spawn: false, forward_signals: false,
-                        drain_timeout: 2)
+                        drain_timeout: 2, completion_probe: nil,
+                        completion_grace_seconds: 5, after_exit: nil)
       pid = nil
       child_start_time = nil
       child_finished = false
@@ -656,8 +727,11 @@ module Hive
         old_term = install_chained_signal_trap("TERM", &handler)
         signals_installed = true
       end
-      timed_out, status = wait_for_process(pid, pgid, timeout_sec)
+      timed_out, status, output_completed = wait_for_process(
+        pid, pgid, timeout_sec, completion_probe:, completion_grace_seconds:
+      )
       child_finished = !status.nil?
+      after_exit&.call
       finish_capture_thread(
         stdout_thread, stdout_reader, timeout: drain_timeout, capture: stdout
       )
@@ -671,7 +745,7 @@ module Hive
         termination: Hive::AgentRuntime::TerminationEvidence.new(
           exit_code: process_exit_code(status), timed_out:,
           cancelled: cancellation.fetch(:cancelled), signal: process_signal(status)
-        )
+        ), output_completed:
       )
     ensure
       trap("INT", old_int || "DEFAULT") if signals_installed
@@ -717,7 +791,7 @@ module Hive
             termination: Hive::AgentRuntime::TerminationEvidence.new(
               exit_code: process_exit_code(status), timed_out:, cancelled: false,
               signal: process_signal(status)
-            )
+            ), output_completed: false
           )
         end
       end
@@ -753,8 +827,10 @@ module Hive
       thread.kill if thread&.alive?
     end
 
-    def wait_for_process(pid, pgid, timeout_sec)
+    def wait_for_process(pid, pgid, timeout_sec, completion_probe: nil,
+                         completion_grace_seconds: 5)
       deadline = Time.now + timeout_sec
+      completion_deadline = nil
       loop do
         remaining = deadline - Time.now
         if remaining <= 0
@@ -765,15 +841,31 @@ module Hive
           rescue Errno::ECHILD
             nil
           end
-          return [ true, status ]
+          return [ true, status, false ]
         end
         captured = Process.wait2(pid, Process::WNOHANG)
-        return [ false, captured.last ] if captured
+        return [ false, captured.last, false ] if captured
+
+        if completion_probe&.call
+          completion_deadline ||= Time.now + completion_grace_seconds
+          if Time.now >= completion_deadline
+            kill_group(pgid)
+            sleep_grace_then_kill(pgid, pid)
+            status = begin
+              Process.wait2(pid).last
+            rescue Errno::ECHILD
+              nil
+            end
+            return [ false, status, true ]
+          end
+        else
+          completion_deadline = nil
+        end
 
         sleep [ remaining, 0.1 ].min
       end
     rescue Errno::ECHILD
-      [ false, nil ]
+      [ false, nil, false ]
     end
 
     def process_exit_code(status)
@@ -798,7 +890,7 @@ module Hive
     end
 
     def compiled_invocation
-      @compiled_invocation ||= Hive::AgentRuntime.compile(
+      @compiled_invocation ||= Hive::Mcp.collapse_repeated_flags(Hive::AgentRuntime.compile(
         Hive::AgentRuntime::Request.new(
           profile: @profile,
           prompt: @prompt,
@@ -811,11 +903,11 @@ module Hive
           identity_arguments: @identity_arguments,
           routing_arguments: @routing_arguments,
           raw_cli_arguments: @cli_flags,
-          trusted_cli_arguments: @runtime_cli_flags,
+          trusted_cli_arguments: @runtime_cli_flags + mcp_arguments,
           executable: @runtime_policy&.executable,
           command_prefix: @runtime_policy&.command_prefix
         )
-      )
+      ))
     end
 
     def kill_group(pgid)
@@ -857,6 +949,18 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if result[:process_cleanup_completed] == false
+        if effective_status_mode == :state_file_marker
+          Hive::Markers.set(
+            @task.state_file, :error, reason: "process_cleanup_failed"
+          )
+        end
+        result[:status] = :error
+        result[:error_reason] = "process_cleanup_failed"
+        result[:error_message] = result[:process_cleanup_error]
+        return
+      end
+
       if result[:provider_signal]
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(
@@ -919,6 +1023,13 @@ module Hive
 
       if result[:resource_exhaustion]
         handle_resource_exhaustion(result)
+        return
+      end
+
+      # Checked before the quota wall: a refused model is operator-owned
+      # configuration, and must never be parked on the provider cooldown.
+      if (unsupported_text = detected_model_unsupported_text(result))
+        handle_model_unsupported(result, unsupported_text)
         return
       end
 
@@ -1144,6 +1255,36 @@ module Hive
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
       limit
+    end
+
+    # Provider event text is trusted on any exit; free-form output only on a
+    # failed exit, matching detected_limit_text's healthy-output rule.
+    def detected_model_unsupported_text(result)
+      provider_message = result[:provider_error] && result[:provider_error][:message].to_s
+      return provider_message if Hive::ModelUnsupported.detected?(provider_message)
+      return nil if result[:exit_code] == 0 && !result[:timed_out]
+
+      [ result[:model_unsupported_text], result[:final_message] ].map(&:to_s).find do |text|
+        Hive::ModelUnsupported.detected?(text)
+      end
+    end
+
+    def handle_model_unsupported(result, text)
+      message = Hive::ModelUnsupported.error_message(text, agent: @profile.name)
+      if effective_status_mode == :state_file_marker
+        Hive::Markers.set(
+          @task.state_file, :error,
+          {
+            reason: Hive::ModelUnsupported::REASON,
+            provider: @profile.name,
+            model: Hive::ModelUnsupported.model_name(text),
+            message: message
+          }.compact
+        )
+      end
+      result[:status] = :error
+      result[:error_reason] = Hive::ModelUnsupported::REASON
+      result[:error_message] = message
     end
 
     def recovered_provider_error?(result)
@@ -1397,6 +1538,13 @@ module Hive
       return value if value.is_a?(Hive::ImplementationIdentity::LaunchArguments)
 
       raise ArgumentError, "launch_arguments must be a Hive::ImplementationIdentity::LaunchArguments"
+    end
+
+    # MCP isolation state and notices; names and reasons only, never values.
+    def write_mcp_log(log)
+      launch = mcp_launch
+      log.puts "[hive] mcp isolation=#{launch ? launch.isolation : 'managed'}"
+      Array(launch&.notices).each { |notice| log.puts "[hive] mcp notice: #{notice}" }
     end
 
     def launch_identity_log_fields

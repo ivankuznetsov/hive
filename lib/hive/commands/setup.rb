@@ -2,6 +2,7 @@ require "json"
 require "open3"
 
 require "hive/config"
+require "hive/daily_digest/migration"
 require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
@@ -10,17 +11,55 @@ require "hive/web/app_bundle"
 require "hive/commands/setup_agents"
 require "hive/web/environment"
 require "hive/web/service_status"
+require "hive/runtime_control_plane/command_schema_installation"
+require "hive/runtime_control_plane/command_schema_writer_guard"
+require "hive/runtime_control_plane/dogfood_rollback_deployment"
+require "hive/runtime_identity"
 
 module Hive
   module Commands
     class Setup
+      # Pre-dispatch usage errors for `hive setup` ride the versioned
+      # hive-setup envelope with the native web bootstrap context: the mode
+      # reflects how the requested argv opted in or out of bootstrap and
+      # service installation.
+      def self.usage_error_payload(error, argv: [])
+        require "hive/commands/web"
+        context = Hive::Commands::Web.error_context(environment: ENV)
+        mode = if argv.any? { |arg| %w[--no-bootstrap --skip-bootstrap --bootstrap=false].include?(arg) }
+          "diagnose_only"
+        elsif argv.any? { |arg| %w[--no-service --skip-service --service=false].include?(arg) }
+          "service_opt_out"
+        else
+          "managed_service"
+        end
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-setup", error: error, error_kind: "usage",
+          extras: {
+            "mode" => mode,
+            "url" => context.fetch("url"),
+            "service" => context.slice(
+              "platform", "unit_path", "service_installed", "service_enabled",
+              "service_running", "service_manager_available", "url", "ready", "readiness"
+            ),
+            "warnings" => context.fetch("warnings")
+          }
+        )
+      end
+
       def initialize(json: false, service: true, no_bootstrap: false,
-                     no_init: false, yes: false, input: $stdin, output: $stdout,
-                     error: $stderr, environment: ENV, setup_agents_factory: nil)
+                     no_init: false, install_command_receipts: false,
+                     yes: false, input: $stdin, output: $stdout,
+                     error: $stderr, environment: ENV, setup_agents_factory: nil,
+                     rollback_package: Hive::RuntimeControlPlane::CommandSchemaInstallation::PUBLISHED_ROLLBACK_PACKAGE,
+                     command_schema_writer_guard: Hive::RuntimeControlPlane::CommandSchemaWriterGuard,
+                     dogfood_rollback_resolver: Hive::RuntimeControlPlane::DogfoodRollbackDeployment,
+                     mcp_import_offer: !defined?(Minitest))
         @json = json
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
+        @install_command_receipts = install_command_receipts
         @yes = yes
         @input = input
         @output = output
@@ -30,10 +69,29 @@ module Hive
         @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
           Hive::Commands::SetupAgents.new(**kwargs)
         end
+        @rollback_package = rollback_package
+        @command_schema_writer_guard = command_schema_writer_guard
+        @dogfood_rollback_resolver = dogfood_rollback_resolver
+        @mcp_import_offer = mcp_import_offer == true
         @phases = []
       end
 
       def call
+        if @install_command_receipts && !@no_bootstrap
+          begin
+            validate_receipt_installation_preconditions!
+            add_phase("command_receipts_preconditions", true, "status" => "ready")
+          rescue Hive::ConfigError => error
+            add_phase(
+              "command_receipts_preconditions", false,
+              "message" => "#{error.class}: #{error.message}"
+            )
+            diagnostics = Hive::Setup::Diagnostics::Aggregate.new(results: [])
+            add_web_phase
+            emit(diagnostics)
+            return error.exit_code
+          end
+        end
         Hive::Web::Environment.emit_warnings(
           environment: @environment,
           output: @error || $stderr,
@@ -49,35 +107,40 @@ module Hive
         # enrollment either. Otherwise a "diagnose" run silently force-installs
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
+          emit_receipt_installation_disclosure if @install_command_receipts
           setup_agent_skills
+          offer_mcp_import
           unless agent_setup_refused?
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
             enroll_project unless @no_init
-            bootstrap_runtime_control_plane
-            install_daemon
-            install_babysitter
-            if @service
-              if web_config_error
-                # A malformed global `web` block must never be silently
-                # replaced by defaults for a real mutation: leave the service
-                # untouched and record why; add_web_phase fails the run below.
-                observe_web_service(
-                  mutation: "blocked",
-                  ok: false,
-                  message: "web service not installed because #{web_config_error.message}"
-                )
-              elsif web_bundle["ok"]
-                install_web_service
+            runtime_phase = bootstrap_runtime_control_plane
+            if runtime_phase["ok"]
+              install_daemon
+              install_babysitter
+              if @service
+                if web_config_error
+                  # A malformed global `web` block must never be silently
+                  # replaced by defaults for a real mutation: leave the service
+                  # untouched and record why; add_web_phase fails the run below.
+                  observe_web_service(
+                    mutation: "blocked",
+                    ok: false,
+                    message: "web service not installed because #{web_config_error.message}"
+                  )
+                elsif web_bundle["ok"]
+                  install_web_service
+                else
+                  observe_web_service(
+                    mutation: "blocked",
+                    ok: false,
+                    message: "web service not installed because web_bundle failed"
+                  )
+                end
               else
-                observe_web_service(
-                  mutation: "blocked",
-                  ok: false,
-                  message: "web service not installed because web_bundle failed"
-                )
+                observe_web_service
               end
-            else
-              observe_web_service
+              initialize_daily_digest
             end
           end
         end
@@ -88,6 +151,49 @@ module Hive
       end
 
       private
+
+      def validate_receipt_installation_preconditions!
+        require "hive/runtime_control_plane/command_schema_installation"
+        require "hive/runtime_control_plane/command_schema_writer_guard"
+require "hive/runtime_control_plane/dogfood_rollback_deployment"
+require "hive/runtime_identity"
+        # The dogfood channel has no published release to fall back to; its
+        # rollback target is the newest retained receipt-aware deployment.
+        identity = Hive::RuntimeIdentity.new(environment: @environment).to_h
+        @rollback_package = @dogfood_rollback_resolver.resolve!(identity: identity) if
+          identity.fetch("channel") == "dogfood"
+        Hive::RuntimeControlPlane::CommandSchemaInstallation.validate_coordinates!(@rollback_package)
+        @command_schema_writer_guard.verify!(
+          state_home: Hive::Paths.state_home, web_running: method(:managed_web_running?)
+        )
+      end
+
+      def emit_receipt_installation_disclosure
+        coordinates = @rollback_package.transform_keys(&:to_sym)
+        target = if Hive::RuntimeControlPlane::DogfoodRollbackDeployment.dogfood?(coordinates)
+          "Rollback target: dogfood deployment #{coordinates.fetch(:deployment_id)} at " \
+            "#{coordinates.fetch(:path)} (build #{coordinates.fetch(:build_sha)}, " \
+            "#{coordinates.fetch(:digest_scope)} sha256 #{coordinates.fetch(:sha256)})."
+        else
+          "Rollback package: #{coordinates.fetch(:version)} at #{coordinates.fetch(:location)} " \
+            "(sha256 #{coordinates.fetch(:sha256)})."
+        end
+        message = "hive setup: command receipt installation changes the shared host control-plane " \
+          "database for every project/service, even while namespace intake gates are disabled; " \
+          "unmodified pre-compatibility builds will refuse it. #{target}"
+        @error.puts(message) unless @json
+      end
+
+      # Digest initialization is advisory to setup: failure keeps the feature
+      # disabled and must not undo unrelated daemon/Web provisioning. The
+      # explicit migrate command surfaces the same typed failure as a hard
+      # remediation gate when the operator chooses to enable the feature.
+      def initialize_daily_digest
+        Hive::DailyDigest::Migration.ensure!
+      rescue Hive::DailyDigest::Migration::InitializationError => error
+        @error.puts("hive setup: daily digest remains disabled: #{error.message}") if @error
+        nil
+      end
 
       # Refuse before diagnostics or agent discovery. Even version/list probes
       # can make upstream CLIs or version managers initialize state, so the
@@ -208,25 +314,30 @@ module Hive
 
       def bootstrap_runtime_control_plane
         phase("runtime_control_plane") do
-          require "hive/runtime_control_plane"
-          database = Hive::RuntimeControlPlane::Database.new(
-            path: Hive::Paths.runtime_control_plane_path
+          require "hive/runtime_control_plane/installation"
+          status = Hive::RuntimeControlPlane::Installation.setup(
+            install_command_receipts: @install_command_receipts,
+            rollback_package: @rollback_package,
+            writer_guard: @command_schema_writer_guard,
+            web_running: method(:managed_web_running?)
           )
-          diagnosis = database.diagnostics
-          if diagnosis.ok?
-            require "hive/runtime_control_plane/cutover"
-            status = Hive::RuntimeControlPlane::Cutover.inspect_status(
-              state_home: Hive::Paths.state_home, database: database
-            )
-            next [ true, { "phase" => status.fetch("phase"), "database" => database.path } ]
+          details = {
+            "phase" => status.fetch("phase"),
+            "database" => status.fetch("database").fetch("path"),
+            "command_receipts_requested" => @install_command_receipts
+          }
+          if @install_command_receipts
+            details["shared_installation_impact"] = true
+            details["namespace_intake_default"] = "disabled"
+            details["rollback_package"] = @rollback_package.transform_keys(&:to_s)
+            receipts = status["command_receipts"]
+            details["command_receipts"] = receipts if receipts
+            if receipts && receipts["record_error"] && !@json
+              @error&.puts("hive setup: command receipts installed but the rollback record was not written: " \
+                          "#{receipts['record_error']}")
+            end
           end
-          raise diagnosis.error unless diagnosis.status == :missing
-
-          require "hive/runtime_control_plane/cutover"
-          result = Hive::RuntimeControlPlane::Cutover.bootstrap(
-            confirm: true, projects: Hive::Config.registered_projects
-          )
-          [ true, { "phase" => result.phase, "database" => result.database_path } ]
+          [ true, details ]
         end
       end
 
@@ -237,7 +348,6 @@ module Hive
           installer = Hive::Commands::Babysit::ServiceInstaller.new(
             binary_path: Hive::InvokedBinary.path
           )
-          Hive::Commands::Babysit.prepare_service_takeover!(installer: installer)
           outcome = installer.install!(autostart: true, force: true)
           [ outcome.success?, {
             "outcome" => outcome.wire_outcome,
@@ -287,6 +397,15 @@ module Hive
         end
       end
 
+      # Ask once, in a terminal without --yes, to import personal MCP servers
+      # (plan 2026-10-15-001). Not a setup phase: declining changes nothing.
+      def offer_mcp_import
+        return if !@mcp_import_offer || unattended_without_yes? || @yes
+
+        require "hive/mcp/import_offer"
+        Hive::Mcp::ImportOffer.run(cwd: Dir.pwd, input: @input, output: @output, error: @error)
+      end
+
       def unattended_without_yes?
         return false if @yes
         return true if @json
@@ -332,13 +451,15 @@ module Hive
             environment: @environment,
             config: web_config
           )
-          lifecycle = Hive::Web::ServiceStatus.lifecycle_state(installer)
-          was_running = lifecycle["service_running"]
           # Ordinary setup is intentionally drift-safe. A customized unit is
           # observed and preserved; explicit `hive web install --force` owns
           # the backup-producing repair path.
-          outcome = installer.install!(autostart: true, force: false)
-          restarted = @web_bundle_refreshed && was_running && outcome.success? ? installer.restart! : false
+          outcome = installer.install!(
+            autostart: true,
+            force: false,
+            restart_if_running: @web_bundle_refreshed
+          )
+          restarted = outcome.restarted
           state = setup_web_service_snapshot(installer: installer, wait_for_running: true)
           @web_service = state
           @web_service_platform_exception = outcome.success? &&
@@ -360,7 +481,7 @@ module Hive
             end
           else
             data["message"] = "managed Hive web autostart is unavailable on this host; " \
-                              "use foreground `hive web`, enable systemd in WSL, or choose Hivebox" \
+                              "use foreground `hive web` or enable systemd in WSL" \
                               if web_service_platform_exception?
           end
           add_phase("web_service", ok, data)
@@ -377,6 +498,24 @@ module Hive
             }.merge(state)
           )
         end
+      end
+
+      def managed_web_running?
+        require "hive/commands/web/service_installer"
+        installer = Hive::Commands::Web::ServiceInstaller.new(
+          binary_path: Hive::InvokedBinary.path,
+          environment: @environment,
+          config: web_config
+        )
+        state = if installer.respond_to?(:service_lifecycle_state)
+          installer.service_lifecycle_state
+        else
+          installer.service_state
+        end
+        state["service_running"] == true
+      rescue Hive::Error, SystemCallError, IOError => error
+        raise Hive::ConfigError,
+              "cannot verify managed Hive web writer liveness: #{error.message}"
       end
 
       def observe_web_service(mutation: "opted_out", ok: true, message: nil)
@@ -538,7 +677,7 @@ module Hive
             @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"
           elsif @service && web_service_platform_exception?
             @output.puts "hive setup: Hive web autostart is unavailable on this host; " \
-                         "foreground command: `hive web`; enable systemd in WSL or choose Hivebox"
+                         "foreground command: `hive web`, or enable systemd in WSL"
           elsif @service && !@no_bootstrap
             @output.puts "hive setup: Hive web is not ready at #{web_url}; inspect `hive web status`"
           else
@@ -549,3 +688,14 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections ride the versioned hive-setup envelope with the native web
+# bootstrap context this boundary owns (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare(
+  "setup",
+  { schema: "hive-setup", error_kind: "usage",
+    payload: ->(error, argv: []) { Hive::Commands::Setup.usage_error_payload(error, argv: argv) } }
+)

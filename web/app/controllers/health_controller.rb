@@ -14,11 +14,9 @@ class HealthController < ApplicationController
     end
   end
 
-  # `/health` is web liveness (also the supervisor/installer smoke), while
-  # `/health?deep=1` is the Hivebox readiness probe: the container is only
-  # useful when the daemon child is running too — a crashlooping daemon
-  # must turn the container unhealthy, not sit invisible behind a green
-  # web tier.
+  # `/health` is web liveness (also the installer smoke), while
+  # `/health?deep=1` is a readiness probe that also requires a live daemon —
+  # a crashlooping daemon must not sit invisible behind a green web tier.
   def show
     runtime = Hive::RuntimeIdentity.new.to_h
     return render json: { ok: true, runtime: runtime } unless params[:deep].present?

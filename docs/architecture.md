@@ -85,13 +85,14 @@ decision uses the literal `HTTP_HOST` authority and ignores
 `X-Forwarded-Host`. A proxy or TCP forwarder that lets an untrusted client send
 `Host: localhost` enters the local trust boundary and must authenticate or
 restrict its clients. An ownerless instance reached through an owner-gated
-hostname is claimed by its first successful GitHub login. Hivebox is the
-separate container deployment of the same Rails application.
+hostname is claimed by its first successful GitHub login.
 
 Normal `hive setup` installs, enables, starts, and probes the per-user service
 on supported Linux/macOS while preserving drifted units. Bare `hive web` is the
 blocking foreground path. The default URL is loopback-only and setup never
-creates exposure; Windows uses WSL with systemd or the Hivebox container path.
+creates exposure; Windows runs native Hive inside WSL with systemd. Hive no
+longer ships a container distribution; the Hivebox Docker image is
+discontinued.
 
 The canonical shared-app environment settings are `HIVE_WEB_APP_DIR`,
 `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
@@ -101,15 +102,13 @@ legacy aliases use the same suffix under `HIVEBOX_*` (with
 Blank values are unset; a canonical value wins over its alias, including when
 the canonical value is invalid, and a migration warning names the replacement.
 Warnings appear on stderr, in setup/web JSON, and as `kind: warning` doctor
-rows. Container-only variables such as `HIVEBOX_IMAGE`, `HIVEBOX_NAME`,
-`HIVEBOX_BIND`, `HIVEBOX_PORT`, `HIVEBOX_DATA`, `HIVEBOX_REPOS_DIR`,
-`HIVEBOX_SESSION_SECRET`, and `HIVEBOX_SUPERVISOR_PID` remain canonical and do
-not warn.
+rows. The former container-only Hivebox variables are no longer read; the web
+session secret always comes from the persisted session-secret file.
 
 ## Agents
 
-Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`, and
-`opencode`. The
+Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`,
+`opencode`, and `muse`. The
 published `agent-cli-runtime` gem owns each CLI's compatibility facts; Hive's
 profile wrapper adds workflow policy such as skills, routing, and status
 detection. Stage runners use CLI-managed subscription/session state and scrub
@@ -117,6 +116,15 @@ ambient provider API credentials before spawning. Grok runs headlessly with
 `grok -p <prompt> --always-approve --output-format streaming-json`, honors an
 absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the session
 file directly with higher precedence.
+
+Muse is likewise selected nowhere by default. It runs headlessly with
+`muse exec --json`, keeps its credentials and settings under
+`$XDG_CONFIG_HOME/muse` (default `~/.config/muse`), and scrubs
+`META_API_KEY` so launches use the CLI's subscription session. Compound
+Engineering installs as a native Muse plugin from a Hive-staged,
+symlink-free copy of the upstream repository, because Muse refuses plugin
+bundles containing symlinks. See the agent support notes in the wiki for its
+permission-mode mapping.
 
 OpenCode is selected nowhere by default. When opted in, Hive requires
 OpenCode 1.18.16 or newer, an exact nested `provider/model`, and a non-yolo
@@ -203,17 +211,19 @@ open_pr:
 finalize:
   agent: claude
 
-budget_usd:
-  brainstorm: 50
-  plan: 100
-  execute_implementation: 500
-  open_pr: 50
-  finalize: 50
-  review_ci: 100
-  review_triage: 75
-  review_fix: 500
-  review_browser: 100
-  patrol: 100
+# Spend caps (USD) are opt-in: init writes them commented out as
+# suggestions. A Claude stage is capped only by a value set here.
+# budget_usd:
+#   brainstorm: 50
+#   plan: 100
+#   execute_implementation: 500
+#   open_pr: 50
+#   finalize: 50
+#   review_ci: 100
+#   review_triage: 75
+#   review_fix: 500
+#   review_browser: 100
+#   patrol: 100
 
 timeout_sec:
   brainstorm: 1800
@@ -362,7 +372,7 @@ projects stay on `markers`; operators may set only `stages.4-execute` to
 [condition rollout runbook](condition-rollout.md). Other stages remain
 marker-authoritative in this increment.
 
-`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
+`hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. `hive archive` reads project state and operates on stage folders. Historical conversion is outside runtime; see `docs/guides/current-format-migration.md`.
 
 `HIVE_HOME` changes where Hive reads the global registry. `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, and `HIVE_PI_BIN` override agent binaries for tests or local shims.
 

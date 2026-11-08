@@ -1,6 +1,8 @@
 # Claude Tmux Launch Mode
 
-**Status:** project-global Claude launch mode
+> **Historical (2026-10-14).** This mode no longer exists. Anthropic confirmed that `claude -p` is permitted under a Claude subscription, so Hive deleted the tmux launch runtime and the `claude.mode` setting; every Claude launch now goes through headless `claude -p`. ADR-030 is superseded (see `docs/adrs/030-global-claude-launch-mode.md` and ADR-053 in `wiki/decisions.md`). This note is kept as a record of how the removed runtime worked; nothing below describes current behavior.
+
+**Status:** historical — removed 2026-10-14 (was the project-global Claude launch mode)
 **Config:** `claude.mode: tmux`, `claude.permission_mode: bypassPermissions` by default
 
 ## Why this exists

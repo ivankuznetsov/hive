@@ -16,7 +16,7 @@ require "hive/commands/daemon/service_installer"
 require "hive/commands/babysit"
 require "hive/commands/babysit/service_installer"
 require "hive/commands/web/service_installer"
-require "hive/runtime_control_plane/cutover"
+require "hive/runtime_control_plane/installation"
 
 # End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
 # #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
@@ -40,6 +40,20 @@ class SetupOrchestratorTest < Minitest::Test
     refute Hive::Commands::Setup.new(input: interactive).send(:unattended_without_yes?)
     assert Hive::Commands::Setup.new(input: noninteractive).send(:unattended_without_yes?)
     assert Hive::Commands::Setup.new(input: closed).send(:unattended_without_yes?)
+  end
+
+  def test_daily_digest_initialization_failure_is_advisory
+    error = StringIO.new
+    setup = Hive::Commands::Setup.new(error: error)
+    with_replaced_singleton_method(
+      Hive::DailyDigest::Migration,
+      :ensure!,
+      -> { raise Hive::DailyDigest::Migration::InitializationError, "zone unavailable" }
+    ) do
+      assert_nil setup.send(:initialize_daily_digest)
+    end
+
+    assert_match(/daily digest remains disabled: zone unavailable/, error.string)
   end
 
   # ── diagnostics fakes ────────────────────────────────────────────────
@@ -78,7 +92,7 @@ class SetupOrchestratorTest < Minitest::Test
 
   # ── installer / init fakes ───────────────────────────────────────────
 
-  FakeOutcome = Struct.new(:success, :wire) do
+  FakeOutcome = Struct.new(:success, :wire, :restarted) do
     def success?
       success
     end
@@ -91,7 +105,7 @@ class SetupOrchestratorTest < Minitest::Test
   def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ],
                      state: nil)
     installer = Object.new
-    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire) }
+    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire, false) }
     installer.define_singleton_method(:target_path) { target_path }
     installer.define_singleton_method(:messages) { messages }
     observed = state || {
@@ -164,8 +178,8 @@ class SetupOrchestratorTest < Minitest::Test
                     )
                     with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
                       ->(**_kw) { status }) do
-                      runtime = Struct.new(:phase, :database_path).new("active", "/runtime.sqlite3")
-                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Cutover, :bootstrap,
+                      runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+                      with_replaced_singleton_method(Hive::RuntimeControlPlane::Installation, :setup,
                         ->(**) { runtime }) do
                         stub_web_config { yield }
                       end
@@ -324,6 +338,32 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 0, exit_code, "clean diagnostics with no provisioning still exits via successful?"
   end
 
+  def test_no_bootstrap_with_receipt_installation_stays_diagnose_only
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    exit_code = with_replaced_singleton_method(
+      Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }
+    ) do
+      with_replaced_singleton_method(
+        Hive::RuntimeControlPlane::Installation, :setup,
+        ->(**) { flunk "receipt schema must not be installed in --no-bootstrap mode" }
+      ) do
+        stub_web_config do
+          Hive::Commands::Setup.new(
+            json: true, no_bootstrap: true, install_command_receipts: true,
+            output: output
+          ).call
+        end
+      end
+    end
+
+    assert_equal 0, exit_code
+    assert_equal "diagnose_only", JSON.parse(output.string).fetch("mode")
+  end
+
   def test_no_bootstrap_exit_reflects_hard_diagnostic_failure
     output = StringIO.new
     hard = result(name: "git", status: "missing", fix_command: "brew install git", bootstrappable: false)
@@ -443,7 +483,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal %w[diagnostics agent_skills web_bundle runtime_control_plane daemon_service babysitter_service web_service web], names
   end
 
-  def test_setup_does_not_accept_a_healthy_but_unactivated_runtime_database
+  def test_setup_accepts_a_healthy_runtime_database_without_a_manifest
     with_tmp_dir do |root|
       path = File.join(root, "runtime-control-plane.sqlite3")
       Hive::RuntimeControlPlane::Database.new(path: path).migrate!.disconnect
@@ -456,9 +496,27 @@ class SetupOrchestratorTest < Minitest::Test
       end
 
       phase = setup.instance_variable_get(:@phases).last
-      refute phase.fetch("ok")
-      assert_includes phase.fetch("message"), "active cutover manifest"
+      assert phase.fetch("ok")
+      assert_equal "active", phase.fetch("phase")
+      database = Hive::RuntimeControlPlane::Database.new(path: path)
+      refute Hive::RuntimeControlPlane::CommandSchema.installed?(database)
+      database.disconnect
     end
+  end
+
+  def test_yes_does_not_imply_command_receipt_installation
+    setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+    received = nil
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup,
+      ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal false, received.fetch(:install_command_receipts)
   end
 
   def test_setup_reuses_an_active_runtime_control_plane
@@ -477,6 +535,173 @@ class SetupOrchestratorTest < Minitest::Test
       assert phase.fetch("ok")
       assert_equal "active", phase.fetch("phase")
     end
+  end
+
+  def test_opt_in_receipt_installation_is_propagated_explicitly
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, output: StringIO.new
+    )
+    received = nil
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" } }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup,
+      ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal true, received.fetch(:install_command_receipts)
+  end
+
+  def test_failed_receipt_extension_phase_stops_downstream_service_provisioning
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+
+    exit_code = with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        with_replaced_singleton_method(
+          Hive::RuntimeControlPlane::Installation, :setup,
+          ->(**) { raise Hive::ConfigError, "no published rollback package" }
+        ) do
+          with_replaced_singleton_method(
+            Hive::Commands::Daemon::ServiceInstaller, :new,
+            ->(**) { flunk "daemon provisioning must stop after receipt extension failure" }
+          ) do
+            Hive::Commands::Setup.new(
+              json: true, yes: true, install_command_receipts: true, output: output,
+              rollback_package: {
+                version: "0.0.0-test", location: "https://example.invalid/compat.gem",
+                sha256: "f" * 64
+              },
+              command_schema_writer_guard: Struct.new(:unused) do
+                def verify!(**) = true
+              end.new
+            ).call
+          end
+        end
+      end
+    end
+
+    assert_equal 1, exit_code
+    phases = JSON.parse(output.string).fetch("phases")
+    runtime = phases.find { |phase| phase.fetch("name") == "runtime_control_plane" }
+    assert_equal false, runtime.fetch("ok")
+    refute_includes phases.map { |phase| phase.fetch("name") }, "daemon_service"
+  end
+
+  def test_receipt_installation_precondition_refusal_returns_config_status
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true,
+      rollback_package: nil, output: output
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    payload = JSON.parse(output.string)
+    phase = payload.fetch("phases").find {
+      |entry| entry.fetch("name") == "command_receipts_preconditions"
+    }
+    assert_equal false, phase.fetch("ok")
+  end
+
+  # ── --install-command-receipts on the dogfood channel ───────────────
+
+  DOGFOOD_ENVIRONMENT = {
+    "HIVE_RUNTIME_CHANNEL" => "dogfood",
+    "HIVE_RUNTIME_BUILD_SHA" => "a" * 40,
+    "HIVE_RUNTIME_DEPLOYMENT_ID" => "hive-dogfood-#{'a' * 9}"
+  }.freeze
+  DOGFOOD_ROLLBACK = {
+    kind: "dogfood_deployment", deployment_id: "hive-dogfood-#{'b' * 9}",
+    path: "/state/deployments/hive-dogfood-#{'b' * 9}", build_sha: "b" * 40,
+    committed_at: "2026-11-07T00:00:00Z", digest_scope: "bin/hive+lib", sha256: "c" * 64
+  }.freeze
+
+  def receipt_guard
+    Struct.new(:unused) { def verify!(**) = true }.new
+  end
+
+  def test_dogfood_receipt_installation_resolves_and_reports_the_previous_deployment
+    resolver = Object.new
+    seen = []
+    resolver.define_singleton_method(:resolve!) { |identity:| seen << identity; DOGFOOD_ROLLBACK }
+    error = StringIO.new
+    setup = Hive::Commands::Setup.new(
+      yes: true, install_command_receipts: true, environment: DOGFOOD_ENVIRONMENT,
+      error: error, output: StringIO.new, command_schema_writer_guard: receipt_guard,
+      dogfood_rollback_resolver: resolver
+    )
+    received = nil
+    receipts = { "status" => "installed", "rollback" => DOGFOOD_ROLLBACK.transform_keys(&:to_s),
+                 "record_path" => "/state/command-receipts-installation.json", "record" => nil,
+                 "record_error" => "Errno::EACCES: denied" }
+    runtime = { "phase" => "active", "database" => { "path" => "/runtime.sqlite3" },
+                "command_receipts" => receipts }
+
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::CommandSchemaInstallation, :validate_coordinates!, ->(coordinates) { coordinates }
+    ) do
+      setup.send(:validate_receipt_installation_preconditions!)
+    end
+    setup.send(:emit_receipt_installation_disclosure)
+    with_replaced_singleton_method(
+      Hive::RuntimeControlPlane::Installation, :setup, ->(**kwargs) { received = kwargs; runtime }
+    ) do
+      setup.send(:bootstrap_runtime_control_plane)
+    end
+
+    assert_equal "dogfood", seen.fetch(0).fetch("channel")
+    assert_equal "hive-dogfood-#{'a' * 9}", seen.fetch(0).fetch("deployment_id")
+    assert_equal DOGFOOD_ROLLBACK, received.fetch(:rollback_package)
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal DOGFOOD_ROLLBACK.transform_keys(&:to_s), phase.fetch("rollback_package")
+    assert_equal receipts, phase.fetch("command_receipts")
+    assert_includes error.string, "Rollback target: dogfood deployment hive-dogfood-#{'b' * 9} at " \
+                                  "/state/deployments/hive-dogfood-#{'b' * 9}"
+    assert_includes error.string, "bin/hive+lib sha256 #{'c' * 64}"
+    assert_includes error.string, "rollback record was not written: Errno::EACCES: denied"
+  end
+
+  def test_dogfood_receipt_installation_refuses_without_an_eligible_previous_deployment
+    output = StringIO.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve!) do |identity:|
+      raise Hive::ConfigError, "dogfood channel: no eligible previous dogfood deployment (#{identity['channel']})"
+    end
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, environment: DOGFOOD_ENVIRONMENT,
+      output: output, command_schema_writer_guard: receipt_guard, dogfood_rollback_resolver: resolver
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    phase = JSON.parse(output.string).fetch("phases").find do |entry|
+      entry.fetch("name") == "command_receipts_preconditions"
+    end
+    assert_equal false, phase.fetch("ok")
+    assert_includes phase.fetch("message"), "no eligible previous dogfood deployment (dogfood)"
+  end
+
+  def test_release_channel_receipt_installation_keeps_the_published_package_path
+    output = StringIO.new
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve!) { |**| flunk "release channel must not resolve dogfood rollback" }
+    setup = Hive::Commands::Setup.new(
+      json: true, yes: true, install_command_receipts: true, environment: {},
+      output: output, command_schema_writer_guard: receipt_guard, dogfood_rollback_resolver: resolver
+    )
+
+    assert_equal Hive::ExitCodes::CONFIG, setup.call
+    phase = JSON.parse(output.string).fetch("phases").find do |entry|
+      entry.fetch("name") == "command_receipts_preconditions"
+    end
+    assert_includes phase.fetch("message"), "no published rollback package"
+    published = Hive::Commands::Setup.new(
+      install_command_receipts: true, environment: {}, error: (error = StringIO.new),
+      rollback_package: { version: "1.0.0", location: "https://example.invalid/p.gem", sha256: "d" * 64 }
+    )
+    published.send(:emit_receipt_installation_disclosure)
+    assert_includes error.string, "Rollback package: 1.0.0 at https://example.invalid/p.gem"
   end
 
   # ── --service: web service installed ─────────────────────────────────
@@ -524,7 +749,8 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal true, web_service["ok"]
     assert_equal "unsupported", web_service["outcome"]
     assert_match(/foreground/, web_service["message"])
-    assert_match(/Hivebox/, web_service["message"])
+    assert_match(/systemd in WSL/, web_service["message"])
+    refute_match(/Hivebox/, web_service["message"])
 
     web = payload.fetch("phases").find { |phase| phase.fetch("name") == "web" }
     assert_equal true, web["ok"]
@@ -536,7 +762,7 @@ class SetupOrchestratorTest < Minitest::Test
                  "manager-unavailable setup success must validate against hive-setup.v1"
   end
 
-  def test_manager_unavailable_human_output_reports_foreground_and_hivebox_recovery
+  def test_manager_unavailable_human_output_reports_foreground_and_wsl_recovery
     output = StringIO.new
 
     exit_code = with_manager_unavailable_web(diagnostics: diag(ok_row)) do
@@ -549,7 +775,7 @@ class SetupOrchestratorTest < Minitest::Test
                     "manager_available=false installed=true enabled=false running=false ready=false"
     assert_includes output.string, "foreground command: `hive web`"
     assert_includes output.string, "enable systemd in WSL"
-    assert_includes output.string, "Hivebox"
+    refute_includes output.string, "Hivebox"
   end
 
   def test_manager_unavailable_does_not_hide_a_failed_install
@@ -739,8 +965,11 @@ class SetupOrchestratorTest < Minitest::Test
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     setup.instance_variable_set(:@web_bundle_refreshed, true)
     installer = fake_installer(success: true, wire: "unchanged")
-    restart_calls = 0
-    installer.define_singleton_method(:restart!) { restart_calls += 1; true }
+    install_calls = []
+    installer.define_singleton_method(:install!) do |**kwargs|
+      install_calls << kwargs
+      FakeOutcome.new(true, "unchanged", true)
+    end
     state = installer.service_state.merge(
       "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
     )
@@ -753,7 +982,11 @@ class SetupOrchestratorTest < Minitest::Test
       end
     end
 
-    assert_equal 1, restart_calls
+    assert_equal [ {
+      autostart: true,
+      force: false,
+      restart_if_running: true
+    } ], install_calls
     assert_equal true, setup.instance_variable_get(:@phases).last["restarted"]
   end
 
@@ -1025,19 +1258,15 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal [ "enabled" ], phase["messages"]
   end
 
-  def test_install_babysitter_records_a_failed_takeover_without_installing_unit
+  def test_install_babysitter_records_a_failed_owned_transition
     setup = Hive::Commands::Setup.new(output: StringIO.new)
     installer = fake_installer
     installer.define_singleton_method(:install!) do |**|
-      raise "service install must not run after takeover failure"
+      raise Hive::Error, "ownership could not be verified"
     end
 
     with_replaced_singleton_method(Hive::Commands::Babysit::ServiceInstaller, :new, ->(**) { installer }) do
-      with_replaced_singleton_method(Hive::Commands::Babysit, :prepare_service_takeover!, lambda { |**|
-        raise Hive::Error, "ownership could not be verified"
-      }) do
-        setup.send(:install_babysitter)
-      end
+      setup.send(:install_babysitter)
     end
 
     phase = setup.instance_variable_get(:@phases).last

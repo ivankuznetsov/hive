@@ -46,9 +46,7 @@ module Hive
 
         edges, placeholders, edge_diagnostics = build_edges(nodes_by_id)
         diagnostics.concat(edge_diagnostics)
-        truncated ||= edge_diagnostics.any? do |row|
-          row["cap"] == "dependency_deadline_seconds"
-        end
+        truncated ||= edge_diagnostics.any? { |row| row["cap"] }
         nodes_by_id = nodes_by_id.merge(placeholders)
         selection = connected_selection(target_id, nodes_by_id, edges, diagnostics)
         truncated ||= selection.fetch(:truncated)
@@ -175,32 +173,53 @@ module Hive
         edges = []
         nodes.values.each do |node|
           break if deadline_exhausted!(diagnostics)
+          break if diagnostics.any? { |row| row["cap"] == "dependency_edges" }
 
           reference_value = node["depends_on"]
           next if reference_value.nil?
 
           begin
-            reference = Hive::Dependencies.parse_reference(reference_value)
-            target_project = reference.explicit_project ? reference.project : node.fetch("project")
-            target = resolve_target(nodes, numeric_targets, target_project, reference.task)
-            unless target
-              target_id = "missing:#{Digest::SHA256.hexdigest("#{target_project}:#{reference.task}")[0, 20]}"
-              placeholders[target_id] ||= missing_node(
-                target_id, reason: "dependency_task_missing",
-                project: target_project, slug: reference.task
+            references = Hive::Dependencies.declaration_references(reference_value)
+            references.each do |reference|
+              break if deadline_exhausted!(diagnostics)
+              if edges.length >= @limits.fetch(:dependency_edges)
+                diagnostics << cap_diagnostic(
+                  "dependency_edges", @limits.fetch(:dependency_edges), edges.length + 1
+                ) unless diagnostics.any? { |row| row["cap"] == "dependency_edges" }
+                break
+              end
+
+              target_project = reference.explicit_project ? reference.project : node.fetch("project")
+              target = resolve_target(nodes, numeric_targets, target_project, reference.task)
+              unless target
+                target_id = "missing:#{Digest::SHA256.hexdigest("#{target_project}:#{reference.task}")[0, 20]}"
+                placeholders[target_id] ||= missing_node(
+                  target_id, reason: "dependency_task_missing",
+                  project: target_project, slug: reference.task
+                )
+                diagnostics << diagnostic("dependency_task_missing", reference.to_s)
+                target = placeholders.fetch(target_id)
+              end
+              edges << edge(
+                node, target, reference,
+                scheduling_only: Hive::Dependencies.list_declaration?(reference_value)
               )
-              diagnostics << diagnostic("dependency_task_missing", reference.to_s)
-              target = placeholders.fetch(target_id)
             end
-            edges << edge(node, target, reference)
           rescue Hive::Dependencies::InvalidReference
-            target_id = "missing:#{Digest::SHA256.hexdigest(reference_value.to_s)[0, 20]}"
+            if edges.length >= @limits.fetch(:dependency_edges)
+              diagnostics << cap_diagnostic(
+                "dependency_edges", @limits.fetch(:dependency_edges), edges.length + 1
+              ) unless diagnostics.any? { |row| row["cap"] == "dependency_edges" }
+              next
+            end
+            invalid_label = "invalid dependency declaration"
+            target_id = "missing:#{Digest::SHA256.hexdigest("invalid:#{node.fetch('id')}")[0, 20]}"
             placeholders[target_id] ||= missing_node(
-              target_id, reason: "dependency_reference_invalid", slug: reference_value.to_s
+              target_id, reason: "dependency_reference_invalid", slug: invalid_label
             )
-            diagnostics << diagnostic("dependency_reference_invalid", reference_value.to_s)
+            diagnostics << diagnostic("dependency_reference_invalid", node.fetch("id"))
             edges << edge(
-              node, placeholders.fetch(target_id), nil, invalid_reference: reference_value.to_s
+              node, placeholders.fetch(target_id), nil, invalid_reference: invalid_label
             )
           end
         end
@@ -215,12 +234,19 @@ module Hive
         end
       end
 
-      def edge(source, target, reference, invalid_reference: nil)
-        relationship = source["project"] == target["project"] ? "stacked" : "scheduling"
+      def edge(source, target, reference, invalid_reference: nil, scheduling_only: false)
+        relationship = !scheduling_only && source["project"] == target["project"] ?
+          "stacked" : "scheduling"
         error = source.dig("admission", "error")
+        unmet = Array(source.dig("admission", "unmet_dependencies")).find do |entry|
+          entry["reference"] == reference&.to_s ||
+            entry["blocked_by"] == target["id"] ||
+            (source["project"] == target["project"] &&
+             entry["blocked_by"] == target["slug"])
+        end
         state = if error
           "error"
-        elsif source.dig("admission", "state") == "wait"
+        elsif unmet
           "blocking"
         elsif target["kind"] == "missing"
           "missing"
@@ -235,8 +261,9 @@ module Hive
           "direction" => "depends_on", "relationship" => relationship,
           "reference" => reference&.to_s || invalid_reference,
           "state" => state, "cycle" => false,
-          "blocked_by" => source.dig("admission", "blocked_by"),
-          "dependency_stage" => source.dig("admission", "dependency_stage"),
+          "blocked_by" => unmet && unmet["blocked_by"],
+          "dependency_stage" => unmet && unmet["dependency_stage"],
+          "required_gate" => unmet && unmet["required_gate"],
           "stack_divergence" => relationship == "stacked" ?
             source.dig("stack", "divergence") : "not_applicable"
         }
@@ -502,6 +529,7 @@ module Hive
           "state" => verdict.state.to_s,
           "blocked_by" => verdict.blocked_by,
           "dependency_stage" => verdict.dependency_stage,
+          "unmet_dependencies" => verdict.unmet_dependencies.map(&:to_h),
           "error" => error && {
             "reason_code" => error.reason_code,
             "offending_ref" => safe_offending_ref(error.offending_ref)

@@ -53,5 +53,8 @@ module Hive::AgentSupport::Codex::ArtifactPolicy
   rescue Hive::AgentError => error
     raise Hive::ConfigError,
           "managed capture evidence requires Codex #{MINIMUM_VERSION}+: #{error.message}"
+  rescue Errno::ENOENT, Errno::EACCES
+    raise Hive::ConfigError,
+          "managed capture evidence could not resolve the Codex native runtime"
   end
 end

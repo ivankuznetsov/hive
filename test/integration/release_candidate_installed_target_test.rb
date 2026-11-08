@@ -2,7 +2,6 @@ require "test_helper"
 require "digest"
 require "fileutils"
 require_relative "../../packaging/release_candidate/installed_target"
-require_relative "../../packaging/release_candidate/sandbox"
 
 class ReleaseCandidateInstalledTargetTest < Minitest::Test
   include HiveTestHelper
@@ -68,52 +67,6 @@ class ReleaseCandidateInstalledTargetTest < Minitest::Test
     end
   end
 
-  def test_sandbox_contract_denies_network_credentials_devices_and_host_sockets
-    with_tmp_dir do |dir|
-      repo = File.join(dir, "repo")
-      cache = File.join(dir, "cache")
-      run = File.join(dir, "run")
-      [ repo, cache, run ].each { |path| FileUtils.mkdir_p(path) }
-      sandbox = HiveReleaseCandidate::Sandbox.new(
-        command_probe: ->(_command) { nil }
-      )
-
-      unavailable = sandbox.capability(candidate_sha: "a" * 40)
-      assert_equal "unavailable", unavailable.fetch("status")
-      assert_equal(
-        [ "bin/hive-release-candidate", "dispatch", "--sha", "a" * 40 ],
-        unavailable.fetch("next_action_argv")
-      )
-
-      contract = sandbox.container_contract(
-        engine: "podman", image: "ruby@sha256:#{'b' * 64}",
-        repo_root: repo, cache_root: cache, run_root: run,
-        command: [ "/runner/upgrade-survivor", "--baseline", "latest-stable" ]
-      )
-      assert_includes contract, "--network=none"
-      assert_includes contract, "--read-only"
-      assert_includes contract, "--cap-drop=ALL"
-      assert_includes contract, "#{repo}:/repo:ro"
-      assert_includes contract, "#{cache}:/cache:ro"
-      assert_includes contract, "#{run}:/run:rw"
-      %w[
-        /var/run/docker.sock /run/podman/podman.sock /dev/kvm /dev/dri
-        GH_TOKEN GITHUB_TOKEN SSH_AUTH_SOCK OPENAI_API_KEY
-      ].each do |forbidden|
-        refute contract.any? { |arg| arg.include?(forbidden) }, forbidden
-      end
-
-      docker = sandbox.container_contract(
-        engine: "docker", image: "ruby@sha256:#{'b' * 64}",
-        repo_root: repo, cache_root: cache, run_root: run,
-        command: [ "/runner/upgrade-survivor" ]
-      )
-      assert_includes docker, "--user=#{Process.uid}:#{Process.gid}"
-      refute_includes docker, "--userns=keep-id"
-    end
-  end
-
-  private
 
   def target(dir, role, bytes)
     root = File.join(dir, role)

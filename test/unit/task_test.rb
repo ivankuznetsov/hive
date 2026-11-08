@@ -23,7 +23,7 @@ class TaskTest < Minitest::Test
       YAML
       error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
       assert_includes error.message, "not selected"
-      assert_includes error.message, "hive migrate"
+      assert_includes error.message, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
     end
   end
 
@@ -81,7 +81,7 @@ class TaskTest < Minitest::Test
       with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
         error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
         assert_includes error.message, "requires migration"
-        assert_includes error.message, "hive migrate"
+        assert_includes error.message, "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
       end
     end
   end
@@ -622,6 +622,19 @@ class TaskTest < Minitest::Test
       task = Hive::Task.new(folder)
 
       assert_equal "base-task", task.depends_on
+    end
+  end
+
+  def test_depends_on_reader_preserves_array_shape
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "add-foo")
+      FileUtils.mkdir_p(folder)
+      File.write(
+        File.join(folder, "meta.yml"),
+        { "id" => 42, "slug" => "add-foo", "depends_on" => [ "base-task" ] }.to_yaml
+      )
+
+      assert_equal [ "base-task" ], Hive::Task.new(folder).depends_on
     end
   end
 

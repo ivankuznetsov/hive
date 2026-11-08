@@ -2,17 +2,96 @@ require "hive/stages/base"
 require "hive/claude_launcher"
 require "hive/plan_review/marker_sync"
 require "hive/plan_review/orchestrator"
+require "hive/plan_review/projection"
+require "hive/plan_review/transition_guard"
+require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/planner_identity"
+require "hive/plan_dependency_adoption"
 require "hive/plan_frontmatter"
 require "hive/dependencies"
+require "hive/dependency_snapshot"
 require "hive/task_meta"
 
 module Hive
   module Stages
     module Plan
+      DURABLE_CHECKPOINT = <<~MARKDOWN.freeze
+        # Plan checkpoint
+
+        > Hive created this non-terminal checkpoint before starting the planner.
+        > Replace the placeholders with the researched plan as work progresses.
+
+        ## Overview
+
+        _Planner checkpoint: pending._
+
+        ## Requirements Trace
+
+        _Planner checkpoint: pending._
+
+        ## Scope Boundaries
+
+        _Planner checkpoint: pending._
+
+        ## Implementation Units
+
+        _Planner checkpoint: pending._
+
+        ## Risks
+
+        _Planner checkpoint: pending._
+      MARKDOWN
+
       module_function
 
       def run!(task, cfg)
+        observation = Hive::DependencySnapshot.observe_for_admission!(
+          task, missing_message: "plan task is missing before execution"
+        )
+
+        if cleared_plan_ready?(task, cfg)
+          return { commit: action_for(:complete), status: :complete, plan_review: nil }
+        end
+
+        with_source_checkout(task) do |source|
+          run_with_source!(task, cfg, source, observation: observation)
+        end
+      ensure
+        observation&.close
+      end
+
+      # A complete plan whose review cleared and is still current is ready to
+      # develop. Re-running the planner here edited plan.md, staled the cleared
+      # review and opened a fresh review cycle, discarding the convergence the
+      # operator had just reached. Leave it untouched; `hive develop` moves it on.
+      def cleared_plan_ready?(task, cfg)
+        return false unless Hive::Markers.current(task.state_file).name == :complete
+
+        projection = Hive::PlanReview::Projection.load(task_folder: task.folder)
+        return false unless projection.record.execution_allowed?
+
+        Hive::PlanReview::TransitionGuard.freshness(
+          task: task, projection: projection, config: cfg
+        ).fetch("status") == "current"
+      rescue Hive::PlanReview::InvalidRecord, Hive::PlanReview::InvalidPlan, SystemCallError, IOError
+        false
+      end
+
+      # The planner must inspect the revision execution will start from.
+      # Reading the project checkout directly can show an unrelated branch far
+      # behind the default (plans then cite code that main has removed), so
+      # give it a disposable detached checkout of the execution base. Planning
+      # still proceeds without one if the checkout cannot be created.
+      def with_source_checkout(task)
+        Hive::PlanReview::DisposableWorktree.open(
+          project_root: task.project_root, prefix: "hive-plan-source-"
+        ) { |path| yield path }
+      rescue Hive::PlanReview::InvalidRecord => e
+        warn "[hive] plan: source checkout unavailable (#{e.message}); planning against the project checkout"
+        yield nil
+      end
+
+      def run_with_source!(task, cfg, source_checkout, observation:)
         brainstorm_path = File.join(task.folder, "brainstorm.md")
         brainstorm_text = File.exist?(brainstorm_path) ? File.read(brainstorm_path) : ""
         profile = Hive::Stages::Base.stage_profile(cfg, "plan")
@@ -23,6 +102,8 @@ module Hive
             project_name: File.basename(task.project_root),
             task_folder: task.folder,
             brainstorm_text: brainstorm_text,
+            carried_decisions_text: carried_decisions_text(task),
+            source_checkout: source_checkout,
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
             skill_invocation: Hive::Stages::Base.format_verified_skill_invocation(
               profile, skill, project_root: task.project_root
@@ -31,10 +112,13 @@ module Hive
         )
         # See brainstorm.rb: add-dir narrowed to the task folder so a
         # prompt-injected brainstorm.md cannot reach the project source.
-        result = spawn_plan_agent(task, cfg, prompt, profile)
+        ensure_durable_checkpoint!(task)
+        result = spawn_plan_agent(task, cfg, prompt, profile, source_checkout: source_checkout)
         marker = Hive::Markers.current(task.state_file)
-        adopt_plan_dependency!(task, marker)
-        review = start_plan_review(task, cfg, profile, result, marker)
+        adopt_plan_dependency!(task, marker, observation: observation)
+        review = start_plan_review(
+          task, cfg, profile, result, marker, observation: observation
+        )
         Hive::PlanReview::MarkerSync.hold_until_cleared!(task:, projection: review)
         marker = Hive::Markers.current(task.state_file)
         {
@@ -43,52 +127,78 @@ module Hive
         }
       end
 
-      # A plan that declares `depends_on` in its frontmatter is stating a real
-      # scheduling constraint, but only meta.yml gates dispatch. Leaving the two
-      # out of step parked the task on an admission error whose only remedy was
-      # an operator copying one string between two files — toil that reviews
-      # nothing, since nobody re-derives whether the dependency is right before
-      # pasting it.
-      #
-      # So absence is adopted and conflict still blocks: when meta.yml has no
-      # dependency we persist the plan's, and when it has a different one the
-      # `plan_dependency_mismatch` gate still stops everything for a human. A
-      # dependency adopted here is not trusted blindly either — admission still
-      # resolves the target and still reports `dependency_cycle` with the
-      # offending path, which is a far better error than a copy instruction.
-      def adopt_plan_dependency!(task, marker)
-        return unless marker.name == :complete
+      CARRIED_DESCRIPTION_BYTES = 2_000
+      CARRIED_ANSWER_BYTES = 4_000
+      CARRIED_ACTIONS = %w[approve_finding answer_finding].freeze
 
-        plan = Hive::PlanFrontmatter.read(File.join(task.folder, "plan.md"))
-        return unless plan.valid?
+      # A review that ends blocked (for example at its revision-round limit)
+      # asks for a new linked plan. Its operator decisions may exist only in
+      # candidate plans that were never promoted to plan.md, and the planner
+      # prompt otherwise carries only brainstorm.md and plan.md, so those
+      # decisions were silently dropped and the next review re-raised the same
+      # questions. Hand every operator approval and answer from that review to
+      # the planner as data to integrate.
+      def carried_decisions_text(task)
+        record = Hive::PlanReview::Projection.load(task_folder: task.folder).record
+        return "" unless record.state == "blocked"
 
-        declared = plan.depends_on
-        return if declared.nil? || declared.to_s.strip.empty?
-        return unless Hive::TaskMeta.read(task.folder)[:depends_on].nil?
+        findings = record["findings"].to_h { |finding| [ finding["fingerprint"], finding ] }
+        decisions = record["decisions"].select { |decision| CARRIED_ACTIONS.include?(decision["action"]) }
+        entries = decisions.filter_map do |decision|
+          finding = findings[decision["target_fingerprint"]]
+          next unless finding
 
-        # PlanFrontmatter already parsed and validated this into a Reference;
-        # a malformed one never reaches here as :ok.
-        reference = declared.to_s
-        return if reference == task.slug
+          [ finding, decision ]
+        end
+        return "" if entries.empty?
 
-        Hive::TaskMeta.rewrite(task.folder, depends_on: reference)
-      rescue StandardError
-        # Adoption is a convenience over an existing admission check. If it
-        # fails we must not fail the plan stage: admission still catches the
-        # mismatch and tells the operator exactly what to do.
-        nil
+        entries.sort_by { |finding, _| finding["display_order"].to_i }.map do |finding, decision|
+          outcome = if decision["action"] == "answer_finding"
+            answer = decision["value"].is_a?(Hash) ? decision["value"]["answer"] : decision["value"]
+            "Operator answer (follow exactly): #{answer.to_s.byteslice(0, CARRIED_ANSWER_BYTES).scrub}"
+          else
+            "Operator decision: approved; apply the reviewer's recommendation."
+          end
+          <<~ENTRY
+            - #{finding['title']} (#{finding['classification']}, #{finding['risk']} risk; #{finding['fingerprint']})
+              Reviewer finding: #{finding['description'].to_s.byteslice(0, CARRIED_DESCRIPTION_BYTES).scrub}
+              #{outcome}
+          ENTRY
+        end.join("\n")
+      rescue Hive::PlanReview::Error, SystemCallError, IOError
+        ""
       end
 
-      def spawn_plan_agent(task, cfg, prompt, profile)
+      # Seed before Agent.run! appends AGENT_WORKING. Provider errors then
+      # replace only that trailing marker, so the next autonomous attempt sees
+      # a structured artifact instead of another empty file. Existing plan or
+      # feedback bytes always win; this helper is deliberately idempotent.
+      def ensure_durable_checkpoint!(task)
+        Hive::Markers.seed_body_if_empty(task.state_file, DURABLE_CHECKPOINT)
+      end
+
+      # Adopt the plan's frontmatter `depends_on` into meta.yml after the
+      # initial planner run, for a complete plan only. The rule (absence or a
+      # strict superset is adopted; anything that would drop or replace an
+      # existing meta dependency is left for `plan_dependency_mismatch`) lives
+      # in Hive::PlanDependencyAdoption, which plan-review candidate promotion
+      # reuses.
+      def adopt_plan_dependency!(task, marker, observation:)
+        return unless marker.name == :complete
+
+        Hive::PlanDependencyAdoption.adopt!(task, observation: observation)
+      end
+
+      def spawn_plan_agent(task, cfg, prompt, profile, source_checkout: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "plan", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::PLANNER_ALLOWED_TOOLS
         )
         kwargs = {
           prompt: prompt,
-          add_dirs: scope.fetch(:add_dirs),
+          add_dirs: (scope.fetch(:add_dirs) + [ source_checkout ].compact).uniq,
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", "plan"),
+          max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "plan", profile),
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
@@ -99,13 +209,8 @@ module Hive
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
-        if Hive::AgentSupport.supports?(profile, :Interactive)
-          Hive::Stages::Base.spawn_claude_with_tmux_marker!(
-            task,
-            cfg,
-            **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task) # coding-scoped: coding plan stage tmux session
-          )
+        if Hive::AgentSupport.supports?(profile, :Launch)
+          Hive::Stages::Base.spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
@@ -120,12 +225,13 @@ module Hive
         end
       end
 
-      def start_plan_review(task, cfg, profile, result, marker)
+      def start_plan_review(task, cfg, profile, result, marker, observation:)
         return nil unless %i[waiting complete].include?(marker.name)
         return nil unless task.respond_to?(:workflow) && task.respond_to?(:meta_yml_path)
 
         Hive::PlanReview::Orchestrator.run!(
-          task:, cfg:, planner_identity: planner_identity(profile, cfg, result)
+          task:, cfg:, planner_identity: planner_identity(profile, cfg, result),
+          task_observation: observation
         )
       end
 

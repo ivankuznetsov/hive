@@ -37,6 +37,25 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_gated_finding_answer_selects_an_alternative_instead_of_approving
+    with_service(finding: finding("gated_auto")) do |service, store, record|
+      target = record["findings"].first.fetch("fingerprint")
+      result = service.apply(**decision_arguments(
+        record, action: "answer_finding", target:,
+        value: { "answer" => "Decline; keep the hold for the owning task." }
+      ))
+
+      assert result.applied
+      answered = store.current["findings"].first
+      assert_equal "answered", answered.fetch("lifecycle")
+      assert_equal "Decline; keep the hold for the owning task.", answered.fetch("answer")
+      refute store.current.execution_allowed?
+      assert_raises(Hive::PlanReview::ConflictingDecision) do
+        service.apply(**decision_arguments(store.current, action: "approve_finding", target:))
+      end
+    end
+  end
+
   def test_conflicting_and_stale_decisions_are_rejected
     with_service(finding: finding("manual")) do |service, _store, record|
       target = record["findings"].first.fetch("fingerprint")
@@ -165,6 +184,41 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_request_review_can_rerun_successful_adversarial_output_with_unknown_identity
+    primary = route("success")
+    adversarial = route("success").merge(
+      "role" => "adversarial", "attempt_id" => "pra-#{'f' * 64}",
+      "independence_verified" => false, "independence_reason" => "reviewer_family_unknown"
+    )
+    with_service(routes: [ primary, adversarial ]) do |service, store, record|
+      arguments = decision_arguments(record, action: "request_review", authorized: false)
+      assert service.apply(**arguments).applied
+      assert_equal primary, store.current["routes"].first
+      assert_equal adversarial, store.current["routes"][1]
+      reset = store.current["routes"].last
+      assert_equal "adversarial", reset["role"]
+      assert reset["recovery_reset"]
+      refute store.current.execution_allowed?
+      assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(store.current, action: "request_review", authorized: false))
+      end
+    end
+  end
+
+  def test_request_review_does_not_reset_successful_independent_or_same_family_reviews
+    [ "different_model_family", "same_model_family" ].each do |reason|
+      adversarial = route("success").merge(
+        "role" => "adversarial", "independence_reason" => reason,
+        "independence_verified" => reason == "different_model_family"
+      )
+      with_service(routes: [ adversarial ]) do |service, _store, record|
+        assert_raises(Hive::PlanReview::InvalidAction) do
+          service.apply(**decision_arguments(record, action: "request_review", authorized: false))
+        end
+      end
+    end
+  end
+
   def test_request_review_resets_each_current_terminal_reviewer_route
     primary = route("terminal_failure")
     adversarial = route("unsupported").merge(
@@ -265,13 +319,15 @@ class PlanReviewDecisionServiceTest < Minitest::Test
         ))
       end
     end
-    with_service(finding: finding("gated_auto")) do |service, _store, record|
-      target = record["findings"].first.fetch("fingerprint")
+    with_service(finding: finding("safe_auto")) do |service, _store, record|
       assert_raises(Hive::PlanReview::ConflictingDecision) do
         service.apply(**decision_arguments(
-          record, action: "answer_finding", target:, value: { "answer" => "no" }
+          record, action: "answer_finding",
+          target: record["findings"].first.fetch("fingerprint"), value: { "answer" => "no" }
         ))
       end
+    end
+    with_service(finding: finding("gated_auto")) do |service, _store, record|
       assert_raises(Hive::PlanReview::InvalidAction) do
         service.apply(**decision_arguments(record, action: "answer_finding"))
       end
@@ -334,9 +390,27 @@ class PlanReviewDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_invalid_review_rejects_decisions_and_restart_with_its_reason
+    invalid = ->(*) { { "status" => "invalid", "reason" => "plan.md is missing" } }
+    with_service(finding: finding("gated_auto"), freshness_reader: invalid) do |service, _store, record|
+      target = record["findings"].first.fetch("fingerprint")
+
+      stale = assert_raises(Hive::PlanReview::StaleDecision) do
+        service.apply(**decision_arguments(record, action: "approve_finding", target:))
+      end
+      assert_equal "plan review changed; refresh the current observation", stale.message
+      restart = assert_raises(Hive::PlanReview::InvalidAction) do
+        service.apply(**decision_arguments(record, action: "restart"))
+      end
+      assert_equal "restart applies only to a stale plan review; this review is invalid (plan.md is missing); " \
+                   "use retry or request-review", restart.message
+    end
+  end
+
   private
 
-  def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false)
+  def with_service(level: "standard", finding: nil, routes: [], blockers: [], real_task_lock: false,
+                   freshness_reader: nil)
     with_task do |task|
       store = Hive::PlanReview::Store.new(task_folder: task.folder)
       manifest = manifest_record(level:)
@@ -345,9 +419,13 @@ class PlanReviewDecisionServiceTest < Minitest::Test
       store.publish_current!(record, expected_version: nil)
       options = {
         task:, clock: -> { Time.utc(2026, 8, 12, 12) },
-        commit_locker: ->(&block) { block.call }, committer: ->(*) { },
-        freshness_checker: ->(_current) { }
+        commit_locker: ->(&block) { block.call }, committer: ->(*) { }
       }
+      if freshness_reader
+        options[:freshness_reader] = freshness_reader
+      else
+        options[:freshness_checker] = ->(_current) { }
+      end
       options[:task_locker] = ->(&block) { block.call } unless real_task_lock
       service = Hive::PlanReview::DecisionService.new(**options)
       yield service, store, store.current

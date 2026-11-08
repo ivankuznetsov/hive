@@ -11,12 +11,70 @@ module Hive
   module CliArgvPolicy
     module_function
 
+    # Internal Hive children execute in the parent's local installation even
+    # when a saved client context points elsewhere. Other executables and an
+    # explicit caller context keep their argv. Return a copy so telemetry can
+    # retain the original command/verb without launcher options.
+    def local_child_argv(argv)
+      launch = argv.dup
+      binary = launch.first
+      return launch unless binary.is_a?(String) && %w[hive hv].include?(File.basename(binary))
+
+      _arguments, selected = extract_context(launch.drop(1))
+      return launch if selected
+
+      launch.insert(1, "--context", "local")
+    end
+
+    # Context is a launcher option, including before the command. Never scan
+    # past `--`, where new-task prose and other literal arguments are owned by
+    # the command instead.
+    def extract_context(argv)
+      result = []
+      selected = nil
+      index = 0
+      while index < argv.length
+        arg = argv[index]
+        if arg == "--"
+          result.concat(argv.drop(index))
+          break
+        elsif arg == "--context" || arg.start_with?("--context=")
+          if selected
+            raise Hive::UsageError, "specify --context only once"
+          end
+          if arg == "--context"
+            index += 1
+            selected = argv[index]
+          else
+            selected = arg.split("=", 2).last
+          end
+          if selected.nil? || selected.empty? || selected.start_with?("-")
+            raise Hive::UsageError, "--context requires a context name"
+          end
+        else
+          result << arg
+        end
+        index += 1
+      end
+      [ result, selected ]
+    end
+
+    def command_name(argv)
+      clean, = extract_context(argv)
+      options = option_argv(clean)
+      options.find { |arg| !arg.start_with?("-") || %w[--help -h -? -D -t --tree --version -v].include?(arg) }
+    end
+
     def option_argv(argv)
       Hive::CliJsonOptions.option_argv(argv)
     end
 
     def json_requested?(argv)
-      Hive::CliJsonOptions.requested?(argv)
+      Hive::CliJsonOptions.requested?(argv) || one_shot_requested?(argv)
+    end
+
+    def one_shot_requested?(argv)
+      option_argv(argv).any? { |arg| arg == "--once" || arg.match?(/\A--once=(?:true|t)\z/i) }
     end
 
     def validate_encoding(argv)

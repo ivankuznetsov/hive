@@ -42,6 +42,37 @@ class TestParallelTest < Minitest::Test
     end
   end
 
+  # A reaped worker's process-group id is free for reuse once its group
+  # empties. The runner used to signal every worker group only when the whole
+  # run ended, long after early workers were reaped, which killed an unrelated
+  # agent whose process group had reused a worker's id. A reaped group must be
+  # signalled promptly and never again.
+  def test_reaped_worker_groups_are_signalled_promptly_not_at_run_end
+    Dir.mktmpdir("parallel-groups") do |root|
+      exit_mark = File.join(root, "fast-exit")
+      File.write(File.join(root, "fast_test.rb"), <<~RUBY)
+        class Fast < Minitest::Test; def test_ok = assert(true); end
+        Minitest.after_run { File.write(#{exit_mark.inspect}, [Process.pid, Process.clock_gettime(Process::CLOCK_MONOTONIC)].join(" ")) }
+      RUBY
+      File.write(File.join(root, "slow_test.rb"), "class Slow < Minitest::Test; def test_ok = (sleep 3; assert(true)); end\n")
+      system("git", "init", "-q", root, exception: true)
+      calls = []
+      recorder = ->(signal, pid) { calls << [ signal, pid, Process.clock_gettime(Process::CLOCK_MONOTONIC) ] }
+      with_replaced_singleton_method(HiveTestParallel, :signal_group, recorder) do
+        assert run_parallel(files: %w[fast_test.rb slow_test.rb], root: root, workers: 2,
+          lock_path: File.join(root, "lock"), output: StringIO.new)
+      end
+
+      fast_pid, fast_exit = File.read(exit_mark).split.then { |pid, at| [ Integer(pid), Float(at) ] }
+      fast_signals = calls.select { |_, pid, _| pid == fast_pid }
+      refute_empty fast_signals
+      assert_equal "TERM", fast_signals.first.first
+      assert_operator fast_signals.first.last - fast_exit, :<, 1.5,
+                      "the fast worker's group must be signalled when it is reaped, not when the run ends"
+      assert_operator fast_signals.length, :<=, 2, "a reaped group gets at most TERM then one KILL"
+    end
+  end
+
   def test_component_suite_is_a_separate_successful_process
     Dir.mktmpdir("parallel-component") do |root|
       File.write(File.join(root, "root_test.rb"), "COMPONENT_CONFLICT = 'root'\nclass RootTest < Minitest::Test; def test_root = assert true; end\n")

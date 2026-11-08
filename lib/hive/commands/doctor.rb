@@ -6,7 +6,6 @@ require "hive"
 require "hive/config"
 require "hive/invoked_binary"
 require "hive/agent_profiles"
-require "hive/claude_launcher"
 require "hive/agent_skills"
 require "hive/web/environment"
 
@@ -14,7 +13,7 @@ module Hive
   module Commands
     # `hive doctor` is the read-only renderer for AgentSkills::Inspector.
     # Managed skill rows combine filesystem-only native inventory with the
-    # exact filesystem resolver used at runtime; legacy tmux/QMD/config advisories
+    # exact filesystem resolver used at runtime; legacy auth/QMD/config advisories
     # remain separate. `--json` emits the typed hive-doctor.v2 envelope.
     class Doctor
       EXIT_SUCCESS = 0
@@ -29,20 +28,24 @@ module Hive
       # JSON encoder. Returns `nil` before `#call` has populated it.
       attr_reader :rows
 
+      # `mcp_discover` compares personal agent MCP configs with Hive's catalog
+      # by running each agent's read-only listing; in-process tests skip it.
       def initialize(config:, project_root:, json: false, output: $stdout,
-                     inspector: nil, environment: ENV)
+                     inspector: nil, environment: ENV,
+                     mcp_discover: defined?(Minitest) ? nil : :default)
         @config = config
         @project_root = project_root
         @json = json
         @output = output
         @inspector = inspector
         @environment = environment
+        @mcp_discover = mcp_discover
         @rows = nil
       end
 
       def call
-        legacy_rows = check_tmux + check_llm_wiki_qmd + check_legacy_brainstorm_runtime +
-                      check_web_environment_aliases + check_runtime_control_plane
+        legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
+                      check_web_environment_aliases + check_runtime_control_plane + check_mcp
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -63,17 +66,25 @@ module Hive
 
       private
 
+      def check_mcp
+        require "hive/mcp/doctor_check"
+        discover = @mcp_discover
+        if discover == :default
+          require "hive/mcp/discovery"
+          discover = ->(root) { Hive::Mcp::Discovery.discover(cwd: root || Dir.pwd) }
+        end
+        Hive::Mcp::DoctorCheck.rows(
+          config: @config, environment: @environment, project_root: @project_root, discover: discover
+        )
+      end
+
       def check_runtime_control_plane
         require "hive/runtime_control_plane"
-        require "hive/runtime_control_plane/cutover"
+        require "hive/runtime_control_plane/installation"
         path = Hive::Paths.runtime_control_plane_path
-        cutover = File.join(Hive::Paths.state_home, ".runtime-cutover", "current")
-        return [] unless File.exist?(path) || File.exist?(cutover)
+        return [] unless File.exist?(path)
 
-        status = Hive::RuntimeControlPlane::Cutover.inspect_status(
-          state_home: Hive::Paths.state_home,
-          database: Hive::RuntimeControlPlane::Database.new(path: path)
-        )
+        status = Hive::RuntimeControlPlane::Installation.status(state_home: Hive::Paths.state_home)
         diagnosis = status.fetch("database")
         healthy = status.fetch("phase") == "active" && diagnosis.fetch("status") == "ok"
         [ {
@@ -83,7 +94,7 @@ module Hive
           message: healthy ? "runtime control plane is healthy" :
             "runtime control plane is #{status.fetch('phase')} (#{diagnosis.fetch('status')})",
           remediation: healthy ? nil :
-            "run hive runtime status, then hive runtime resume when its forward action is approved"
+            "run hive runtime status; use hive setup for a new installation"
         } ]
       rescue Hive::RuntimeControlPlane::Error => error
         [ {
@@ -138,26 +149,6 @@ module Hive
         }
         row[:name] = label.delete_prefix("6-review/") if label.start_with?("6-review/")
         row
-      end
-
-      def check_tmux
-        return [] unless Hive::Config.claude_mode(@config) == :tmux
-
-        status, message = Hive::ClaudeLauncher.tmux_status
-        rows = [
-          {
-            kind: "dependency",
-            stage: "claude",
-            label: "claude/tmux",
-            agent: "tmux",
-            configured_skill: "tmux >= #{Hive::ClaudeLauncher::MIN_TMUX_VERSION}",
-            skill: "tmux",
-            status: status.to_s,
-            message: message
-          }
-        ]
-        rows.concat(tmux_runtime_warnings)
-        rows
       end
 
       def check_llm_wiki_qmd
@@ -250,35 +241,14 @@ module Hive
         parts.join("\n").lines.map(&:strip).find { |line| !line.empty? }.to_s
       end
 
-      def check_legacy_brainstorm_runtime
-        rows = []
-        if config_yml_unreadable?
-          rows << warning_row(
-            stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
-            label: ".hive-state/config.yml",
-            agent: "config",
-            configured_skill: "config.yml",
-            skill: ".hive-state/config.yml",
-            message: "could not parse .hive-state/config.yml (#{@config_yml_error}); " \
-                     "any brainstorm.runtime → claude.mode migration warning is suppressed " \
-                     "until the file parses cleanly"
-          )
-          return rows
-        end
+      def check_project_config
+        return [] unless config_yml_unreadable?
 
-        return rows unless legacy_brainstorm_runtime_present?
-
-        rows << warning_row(
-          stage: "2-brainstorm", # coding-scoped: doctor probes coding brainstorm config
-          label: "2-brainstorm/brainstorm.runtime",
-          agent: "claude",
-          configured_skill: "brainstorm.runtime",
-          skill: "claude.mode",
-          message: "brainstorm.runtime is superseded by claude.mode (project-global); " \
-                   "migrate by adding the following YAML and removing the brainstorm.runtime key:\n" \
-                   "  claude:\n    mode: tmux"
-        )
-        rows
+        [ warning_row(
+          stage: "config", label: ".hive-state/config.yml", agent: "config",
+          configured_skill: "config.yml", skill: ".hive-state/config.yml",
+          message: "could not parse .hive-state/config.yml (#{@config_yml_error})"
+        ) ]
       end
 
       def check_web_environment_aliases
@@ -298,26 +268,6 @@ module Hive
         end
       end
 
-      def legacy_brainstorm_runtime_present?
-        return true if Hive::Config.explicit_brainstorm_runtime?(@config)
-
-        return false unless @project_root
-
-        path = File.join(@project_root, ".hive-state", "config.yml")
-        return false unless File.exist?(path)
-
-        raw = YAML.safe_load(File.read(path)) || {}
-        Hive::Config.nested_key?(raw, "brainstorm", "runtime")
-      rescue Psych::SyntaxError, Errno::ENOENT
-        false
-      end
-
-      # Detect a config.yml that cannot be loaded (corrupt YAML, perms,
-      # etc.) and remember the underlying error message so the operator
-      # sees a row explaining why doctor cannot evaluate the migration
-      # warning. Without this, a corrupt config.yml silently hid the
-      # legacy_brainstorm_runtime warning AND any other config-derived
-      # check that depends on the file.
       def config_yml_unreadable?
         return @config_yml_unreadable unless @config_yml_unreadable.nil?
 
@@ -340,38 +290,45 @@ module Hive
           end
       end
 
-      # Operator-visible warnings for the tmux runtime. Each warning is a
-      # `kind: "warning"` row — it does NOT contribute to the missing-skill
+      # Emits a `kind: "warning"` row — it does NOT contribute to the missing-skill
       # exit code, but renders in the human table with a "!" marker and in
       # the JSON envelope under `summary.warning`.
       #
-      # Currently surfaces a single check: when the parent shell exports
-      # `ANTHROPIC_API_KEY` or `CLAUDE_API_KEY`. The tmux wrapper unsets
-      # both before exec'ing claude, but an exported value at this scope
-      # hints the operator may be confused about the billing-auth
-      # boundary — flag it loudly so OAuth/subscription vs API-key
-      # billing intent is explicit.
-      def tmux_runtime_warnings
-        warnings = []
+      # Hive unsets `ANTHROPIC_API_KEY` and `CLAUDE_API_KEY` before launching
+      # Claude, but an exported value hints the operator may be confused about
+      # the billing-auth boundary — flag it so subscription vs API-key billing
+      # intent is explicit.
+      def check_claude_auth
+        leaked = %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].select { |key| !@environment[key].to_s.empty? }
+        return [] if leaked.empty?
 
-        leaked = %w[ANTHROPIC_API_KEY CLAUDE_API_KEY].select { |k| ENV[k] && !ENV[k].empty? }
-        unless leaked.empty?
-          # `agent: "claude"` because the API keys named here are
-          # claude/anthropic billing inputs — the warning is about the
-          # billing-auth boundary, not tmux itself. Labelling this as a
-          # "tmux warning" misreads the actual subject.
-          warnings << warning_row(
-            stage: "claude",
-            label: "claude/tmux",
-            agent: "claude",
-            configured_skill: "billing-auth",
-            skill: leaked.join(","),
-            message: "#{leaked.join(' and ')} is exported in this shell; the tmux wrapper unsets it before exec, " \
-                     "but the export hints at parent-shell intent — confirm you want OAuth/subscription billing, not API-key billing"
-          )
-        end
+        [ warning_row(
+          stage: "claude",
+          label: "claude/auth",
+          agent: "claude",
+          configured_skill: "billing-auth",
+          skill: leaked.join(","),
+          message: "#{leaked.join(' and ')} is exported in this shell; Hive unsets it before launching Claude, " \
+                   "so Claude bills your subscription, not the API key"
+        ) ]
+      end
 
-        warnings
+      # `claude.mode` is retired (Claude always launches headless). Config
+      # loading tolerates and ignores the key, so a leftover line is harmless
+      # but misleading — nudge the operator to delete it. Warning only: it
+      # never changes doctor's exit code.
+      def check_claude_config
+        return [] unless Hive::Config.obsolete_claude_mode_key?(@config)
+
+        [ warning_row(
+          stage: "claude",
+          label: "claude/config",
+          agent: "claude",
+          configured_skill: "claude.mode",
+          skill: ".hive-state/config.yml",
+          message: "claude.mode is obsolete and ignored (Claude always runs headless); " \
+                   "delete the claude.mode line from .hive-state/config.yml"
+        ) ]
       end
 
       def warning_row(label:, agent:, configured_skill:, skill:, message:, stage: "claude")

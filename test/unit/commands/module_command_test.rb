@@ -93,6 +93,42 @@ class ModuleCommandTest < Minitest::Test
     assert_equal :routed, routed.call!
   end
 
+  def test_json_usage_failure_emits_lifecycle_envelope_and_matching_exit
+    output = StringIO.new
+    command = Hive::Commands::Module.new("install", nil, json: true, stdout: output)
+
+    _out, err = capture_io do
+      error = assert_raises(SystemExit) { command.call }
+      payload = JSON.parse(output.string)
+      assert_equal "hive-module-lifecycle", payload.fetch("schema")
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "usage", payload.fetch("error_kind")
+      assert_equal "module install requires a source or name", payload.fetch("message")
+      assert_equal Hive::ExitCodes::USAGE, error.status
+      assert_equal error.status, payload.fetch("exit_code")
+    end
+    assert_empty err
+  end
+
+  def test_json_io_failure_keeps_the_selected_schema_and_generic_exit
+    output = StringIO.new
+    command = Hive::Commands::Module.new("status", "demo", json: true, stdout: output)
+    command.define_singleton_method(:call!) { raise IOError, "cannot read module state" }
+
+    _out, err = capture_io do
+      error = assert_raises(SystemExit) { command.call }
+      payload = JSON.parse(output.string)
+      assert_equal "hive-module-status", payload.fetch("schema")
+      assert_equal false, payload.fetch("ok")
+      assert_equal "error", payload.fetch("error_kind")
+      assert_equal "cannot read module state", payload.fetch("message")
+      assert_equal Hive::ExitCodes::GENERIC, error.status
+      assert_equal error.status, payload.fetch("exit_code")
+    end
+    assert_empty err
+  end
+
   def test_error_schema_mapping_and_human_usage_failure
     mappings = {
       [ "list", nil ] => "hive-module-list",

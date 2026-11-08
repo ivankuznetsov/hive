@@ -3,11 +3,40 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-08-30
-tags: [decisions, adr, plan-review]
+updated: 2026-10-16
+tags: [decisions, adr, plan-review, daily-digest]
 ---
 
-**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — producers now submit SQLite dispatch rows that the daemon consumes, making it the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision.
+**TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups (the tmux launch mode is superseded by ADR-053, which makes Claude headless-only); **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — producers now submit SQLite dispatch rows that the daemon consumes, making it the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records Hive web's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records Hive web's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit); ADR-038 keeps reusable components in the Hive monorepo, establishes Hive-first internal boundaries before packaging, and makes standalone gem publication conditional on real external demand and an explicit release decision; ADR-055 drops the Hivebox Docker distribution, leaving native Hive and the hosted cloud product (hivedev.sh) as the two supported routes; ADR-057 makes a provider-refused model (`model_unsupported`) an operator-owned stop instead of a `limits_reached` cooldown, superseding PR #1473.
+
+## ADR-056: Dependency declaration shape selects stacking policy
+
+**Status:** Active
+
+**Context:** One prerequisite serves two coupled purposes: scheduling and a
+same-project stacked Git base. Fan-in needs multiple scheduling edges, but no
+single prerequisite is a truthful branch base. Collapsing a singleton array to
+a scalar would also make a retry or generated declaration silently change
+policy.
+
+**Decision:** `depends_on` accepts either one reference or a nonempty flat list
+of references and preserves that declaration shape. A scalar keeps the
+depending project's configured `8-finalize`/`9-done` gate and, when it is a
+resolvable same-project task, stacked branch/PR behavior. Every list—including
+a singleton array—is scheduling-only, branches from the project default, and
+requires every edge to reach `9-done`. Repeating `hive new --depends-on`
+constructs the list; the second occurrence changes the first edge to list
+policy and emits a stderr notice. Creation rejects resolvable cycles, and the
+shared admission walk rechecks cycles plus unreachable workflow gates at every
+status/dispatch boundary. Status v9 and operational status v5 publish the full
+ordered `unmet_dependencies` set, per-edge `required_gate`, null list
+singulars, and `dependency_base_mode`.
+
+**Consequences:** Upgrade all CLIs, daemon/Web readers, validators, and skills,
+restart long-lived processes and clear their superseded caches through normal
+startup, then create list metadata. Array metadata is a no-downgrade boundary:
+older processes must fail closed and operators preserve every listed edge
+rather than rewriting it to a scalar for compatibility.
 
 ## ADR-038: Reusable components stay in the monorepo and earn packaging after Hive-first boundaries
 
@@ -62,7 +91,7 @@ Future package work uses a package-first, publish-first, Hive-cutover-last seque
 
 ## ADR-037: Hive web is the shared vanilla Rails 8 + Turbo app for native Hive and Hivebox
 
-**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10; amended for the managed local runtime during PR #622 and for proxy-host authentication on 2026-07-23).
+**Status:** Active (replaced the Sinatra/Puma tier during PR #300, 2026-06-10; amended for the managed local runtime during PR #622 and for proxy-host authentication on 2026-07-23). The Hivebox container deployment mode below is superseded by ADR-055 (2026-10-15); native `hive web` is the only shipped deployment. Retained for history.
 
 **Context:** The first web tier was Sinatra + hand-rolled SSE + hand-written
 DOM-reconciliation JS. It worked, but live updates needed a bespoke
@@ -109,7 +138,7 @@ restrict clients.
 
 ## ADR-036: Hive web operator sign-in uses GitHub OAuth device flow, not the callback web flow
 
-**Status:** Active (replaced the authorization-code web flow during PR #300, 2026-06-10; amended on 2026-06-12 so ownerless boxes are first-login claimable).
+**Status:** Active (replaced the authorization-code web flow during PR #300, 2026-06-10; amended on 2026-06-12 so ownerless boxes are first-login claimable). ADR-055 removed the Hivebox container; the device flow and owner claim remain in force for native Hive web reached through a non-loopback Host.
 
 **Context:** The web gate originally shipped as the OAuth authorization-code
 web flow: a per-operator GitHub OAuth app whose callback URL had to match
@@ -192,6 +221,8 @@ then use that `gh` auth for daemon-owned https pushes, removing the previous
 docker-exec setup step. Callback proxying to a localhost listener remains
 intentionally unimplemented until an agent CLI documents a supported
 callback-host override.
+ADR-055 removed the Docker image; on native Hive web the same credentials live
+in the Hive OS user's home and survive upgrades there.
 The local design note is `docs/notes/hive-web-agent-oauth-relay.md`; route-level
 behavior is covered in [[commands/web]].
 
@@ -205,7 +236,7 @@ behavior is covered in [[commands/web]].
 
 The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). Current producers emit `hive-dispatch-request.v5`. V5 carries generation intent for ordinary delivery and, for recovery, canonical task/stage identity plus marker-bound failures, markerless provider-admission observations, or markerless controller failures, all on the crash-restartable `admitted → cleared → dispatched → terminal` lifecycle. Runtime readers accept v5 SQL rows only; the irreversible fleet cutover discards pending v1-v4 file deliveries rather than importing them. Recovery requests never use a sequence sidecar or adapter-owned clear/run pair.
 
-The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
+The allowlist is closed: `run develop brainstorm plan plan-review-run review open-pr artifacts finalize archive markers daemon`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the positional `argv` constraint (`prefixItems` verb enum plus the `daemon`/`evidence` `allOf` branches) in `schemas/hive-dispatch-request.v4.json` and `hive-dispatch-request.v5.json` in lockstep — `SchemaFilesTest#test_dispatch_request_schemas_enforce_positional_argv_allowlist` asserts the cross-list equality and that both schemas reject non-`hive` argv.
 
 **Relationship to ADR-026:** ADR-026's "subprocess caller" model still holds for the **non-queue-routable** verbs that don't bump task-state mtime: `hive status`, `hive doctor`, `hive new`, `hive approve`, `hive accept-finding`, `hive reject-finding`. The bot's `ChildSupervisor#dispatch` continues to spawn those directly via `Process.spawn`. The line is drawn at "does this verb's child write to the task state file?" — if yes, queue-route; if no, direct-spawn.
 
@@ -252,7 +283,7 @@ unchanged.
 
 ## ADR-030: Global Claude launch mode
 
-**Status:** Active
+**Status:** Superseded by ADR-053 (2026-10-14) — the tmux launch mode and `claude.mode` were removed; Claude launches only as headless `claude -p`. The `claude.permission_mode`, `claude.model`, and `claude.effort` follow-ups below remain in force. Retained for history.
 **Context:** Hive's first interactive Claude runtime was scoped to `2-brainstorm` via `brainstorm.runtime: tmux_interactive`. That solved OAuth/subscription billing for brainstorm, but left plan, execute, open-pr, review sub-spawns, artifacts, and finalize on the headless `claude -p` path. A per-stage runtime matrix would make operator intent harder to reason about and would not help the common case: "use my logged-in Claude session for every Claude-backed stage on this project."
 **Decision:** Add top-level `claude.mode` with values `tmux` and `headless`, defaulting to `tmux`. Every stage whose resolved `AgentProfile` is Claude calls `Hive::Stages::Base.spawn_claude!`, which routes through `Hive::ClaudeLauncher` and honors the global setting; non-Claude profiles remain on the normal `spawn_agent` path. `brainstorm.runtime` is deprecated and read only as a brainstorm fallback when `claude.mode` is absent. In 6-review, Claude reviewers run sequentially inside one shared tmux session per pass; Codex/Pi reviewers remain headless. The follow-up `claude.permission_mode` key controls Claude Code's interactive permission mode for tmux sessions, defaults fresh projects to `bypassPermissions`, and lets operators choose `auto`, `default`, `acceptEdits`, `dontAsk`, or `plan` at `hive init`. The later `claude.model` and `claude.effort` keys pin hive-launched Claude sessions without splitting stage behavior again: `Hive::Config.claude_cli_flags` builds the shared argv fragment used by both headless `Hive::Agent` and tmux `Hive::ClaudeLauncher`. Fresh projects write `claude.model: default`, which passes Claude Code's live recommended-model alias instead of inheriting the operator's interactive selection; `model: inherit` omits `--model`. Fresh projects keep `claude.effort: default`, which omits `--effort`; explicit `low`, `medium`, or `high` passes through.
 **Consequences:** `tmux >= 3.0` is a runtime dependency when `claude.mode: tmux`, and missing tmux is a hard error (`ERROR reason=tmux_unavailable` or `REVIEW_ERROR reason=tmux_unavailable`) rather than a silent fallback. Mode, permission-mode, model, or effort switching is an edit to `.hive-state/config.yml` plus a stage restart. Daemon/service-only hosts that cannot run tmux should set `claude.mode: headless`, but the model/effort pins still apply to the headless Claude path. A longer standalone note lives at `docs/adrs/030-global-claude-launch-mode.md`, with the permission-mode behavior also reflected in `docs/notes/claude-tmux-launch-mode.md`; model/effort wiring is covered in [[modules/config]], [[modules/agent]], and [[commands/init]].
@@ -423,7 +454,7 @@ authority too; privilege-separated deployments must restrict agent OS access.
 **Status:** Active (amended 2026-08-25; supersedes the Hive overlay decision)
 **Context:** The April 2026 OpenCode spike used `1.14.25`, found no native Compound Engineering integration, and noted that config-level permissions would require temporary configuration for per-spawn filesystem confinement. The August first-class-support task promoted that option into a user-selected private XDG/config/data/cache/state overlay, but no authenticated live run or reproduced ambient-config defect required it. In dogfood the overlay instead hid a valid native login and required credential copying. OpenCode `1.18.16+` can merge a per-process `OPENCODE_PERMISSION` document after native config while retaining its normal login, plugins, project discovery, and session state.
 **Decision:** Keep OpenCode opt-in with minimum version `1.18.16`, exact nested route evidence, bounded JSON capture, and sanitized-export correlation. Hive launches it against native OpenCode state, scrubs provider API-key variables unless the project explicitly names `credential_env`, and injects only the workflow's deny-first permission document through `OPENCODE_PERMISSION`. Hive does not redirect XDG homes, copy auth files, disable native config/project discovery, or own OpenCode-specific cleanup. The standalone `agent-cli-runtime` component retains its prepared-overlay API for compatibility and independent consumers, but Hive no longer uses it.
-**Consequences:** OpenCode now follows the same operator-owned setup principle as Claude, Codex, Pi, and Grok. Native plugins, MCPs, agents, and project configuration can affect a Hive run; the per-run permission document limits modeled tool actions but is not an OS sandbox. `agents.opencode.isolation` and `credential_file` are no longer accepted Hive configuration. Completion still requires terminal-message correlation with sanitized export, and requested versus observed nested routes remain separate durable evidence.
+**Consequences:** OpenCode now follows the same operator-owned setup principle as Claude, Codex, Pi, and Grok. Native plugins, MCPs (until ADR-054, which removes ungranted MCP servers from every Hive launch), agents, and project configuration can affect a Hive run; the per-run permission document limits modeled tool actions but is not an OS sandbox. `agents.opencode.isolation` and `credential_file` are no longer accepted Hive configuration. Completion still requires terminal-message correlation with sanitized export, and requested versus observed nested routes remain separate durable evidence.
 
 ## ADR-018: Amended trust model when isolation flag varies per CLI; supersedes part of ADR-008
 
@@ -615,7 +646,7 @@ Historical schemas (`schemas/hive-status.v1.json`, `schemas/hive-stage-action.v1
 
 **Context:** Review completion now needs a stable artifact-collection slot before PR finalization. Without a real `artifacts` runner, the workflow metadata could advertise `hive artifacts` while Thor rejected the command, and markerless `7-artifacts` rows could be shown as ready to finalize even though `StageAction` correctly refuses to advance rows without a terminal marker.
 
-**Decision:** Insert `7-artifacts` between `6-review` and `8-finalize`, making the current stage order `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-artifacts → 8-finalize → 9-done`. The `hive artifacts` workflow verb is a first-class Thor command. `Hive::Stages::Artifacts` now runs the configured `artifacts.agent` to write `artifact.md` and stamp `COMPLETE`; Claude-backed artifact collection uses the project-global `claude.mode` launcher. The existing terminal-marker gate remains intact before `hive finalize` can promote to `8-finalize`.
+**Decision:** Insert `7-artifacts` between `6-review` and `8-finalize`, making the current stage order `1-inbox → 2-brainstorm → 3-plan → 4-execute → 5-open-pr → 6-review → 7-artifacts → 8-finalize → 9-done`. The `hive artifacts` workflow verb is a first-class Thor command. `Hive::Stages::Artifacts` now runs the configured `artifacts.agent` to write `artifact.md` and stamp `COMPLETE`; Claude-backed artifact collection uses the shared Claude launcher (`spawn_claude!`). The existing terminal-marker gate remains intact before `hive finalize` can promote to `8-finalize`.
 
 **Consequences:** Daemon, bot, TUI, status JSON, and humans see `ready_to_artifacts` after `REVIEW_COMPLETE`, then `ready_to_finalize` only after `artifact.md` carries `COMPLETE`. `hive migrate` maps both the pre-open-pr layout and the previous canonical `7-finalize` / `8-done` directories to the current names. Artifact packaging and handoff work has a dedicated agent-backed stage without overloading finalize.
 
@@ -665,9 +696,11 @@ shapes. The universal recovery and evidence-closure rollout needs one truthful
 projection, not another compatibility layer beside the earlier mechanisms.
 
 **Decision:** Migrate every in-repository producer and consumer in one change,
-then publish only the current `hive-status.v8`,
-`hive-operational-status.v4`, and `hive-act.v2` contracts. Operational-status
-v4 adds the coordinated required nullable exact-routing projection. Remove their
+then publish only the current `hive-status.v9`,
+`hive-operational-status.v5`, and `hive-act.v2` contracts. Status v9 and
+operational-status v5 add scalar-or-array dependency declarations, complete
+`unmet_dependencies`, and `dependency_base_mode` while retaining the
+coordinated required nullable exact-routing projection. Remove their
 superseded schema files and compatibility assertions instead of accepting or
 translating older recovery/status documents. Older persisted task state is
 migrated at the task/state layer; wire-schema compatibility is not a second
@@ -681,7 +714,7 @@ that earlier decision remains useful history but is no longer current policy.
 
 ## ADR-040: PR digests live outside Hive
 
-**Status:** Active
+**Status:** Partially superseded by ADR-052
 
 **Context:** PRDigest now has two purposeful surfaces: canonical JSON facts for
 agents and provider-written prose for standalone delivery. Hive's adapter and
@@ -698,6 +731,10 @@ rejected when the Hive daemon starts, with those migration commands.
 **Consequences:** Hive has no PR-digest command, cursor, catch-up policy, result
 envelope, or runtime coupling. The unrelated Hive answer digest remains. ADR-030
 and ADR-031 describe removed behavior and are superseded by this decision.
+ADR-052 later reuses the `hive digest` command name for a broader Hive-owned
+activity record, while preserving this decision's absence of a PRDigest runtime
+dependency, its authority boundaries, and its rejection of the retired
+`digest:` block.
 
 ## ADR-041: Released JobStore v2 is an explicit opaque fresh start
 
@@ -875,6 +912,96 @@ Web consume one projection. Existing coding tasks already in execute are
 adopted with an explicit compatibility receipt rather than retroactively
 blocked. See [[modules/plan_review]], [[stages/plan]], and [[stages/execute]].
 
+## ADR-052: Hive owns one durable host-global daily activity record
+
+**Status:** Superseded by the readable PRDigest document integration described in [[modules/daily-digest]]. The following records the earlier workflow-event design.
+
+**Context:** Current status is intentionally present-focused, while project
+task folders, PR observations, CI outcomes, and logs have different scopes and
+retention. Reconstructing a day from those surfaces is lossy and makes an
+external prose generator look authoritative. ADR-040 correctly removed the
+PRDigest runtime adapter, but its blanket removal of a Hive digest also left no
+durable cross-project answer to what advanced, completed, failed, recovered,
+or still needs operator input.
+
+**Decision:** Hive owns one versioned host-global daily activity projection
+under its state home. A newly initialized `daily_digest:` global block persists
+an IANA zone, coverage frontier, initial registry membership, and first
+half-open UTC interval before enablement; the retired top-level `digest:` block
+remains rejected. Open bases may be atomically refreshed. The first
+materialization after the persisted boundary closes the base permanently, and
+all late facts, corrections, and gap recoveries are immutable idempotent
+amendments. Zone changes begin exactly at the previous fixed boundary and use
+monotonic interval identity, so history never moves.
+
+One materiality classifier consumes Hive-owned task, journal, publication,
+operational-transition, and registry-history evidence. Per-source failures
+produce bounded gaps while healthy sources continue. GitHub is fail-soft only
+when required PR evidence cannot be established locally; PRDigest is never
+called and has no authority. Any future PRDigest integration must remain
+optional, provenance-tagged enrichment and non-authoritative; V1 exposes no
+adapter or runtime hook. A single pure reader supplies CLI JSON/text,
+authenticated Web, Telegram rendering, and canonical agent guidance. Project
+filters are views, not new records. Question text and answer bindings are
+excluded at serialization.
+
+The authenticated surface remains private and single-operator: this decision
+adds no team identity, team ACL, or per-project reader ACL. Agent-managed
+schedule/destination/delivery-status policy and an MCP-specific wrapper are
+deferred beyond V1; agents consume the CLI JSON contract. This feature grants
+no release, publication, deployment, or version-selection authority.
+
+The daemon owns open refresh, chronological catch-up, close, and recovery on an
+independent capacity identity. Telegram recap delivery is separately opt-in,
+uses its own scheduler and intent/outcome ledger, targets the preceding closed
+interval, suppresses complete empty days, and cannot gate publication. Reads
+never deliver or materialize. Explicit pruning removes only closed projection
+bytes, retaining tombstone, delivery, and underlying task/attempt/PR evidence.
+
+**Consequences:** `hive digest` once again exists, but it is not the removed
+PR-only adapter described by ADR-030/031/040. Historical completeness and
+content are explicit, partial days remain useful, late knowledge is auditable,
+and zone reconfiguration cannot rewrite history. Durable coverage begins only
+after initialization; pre-feature days are typed missing rather than invented.
+Telegram ambiguity requires an explicit operator retry. See
+[[modules/daily-digest]] and [[commands/digest]].
+
+## ADR-055: Drop the Hivebox Docker distribution
+
+**Status:** Active (2026-10-15; supersedes ADR-037's Hivebox container deployment mode and the Hivebox-specific consequences of ADR-035 and ADR-036)
+
+**Context:** Hivebox packaged the shared Rails app, the CLI, the daemon, and the agent CLIs into one `ghcr.io/ivankuznetsov/hivebox` multi-arch image with one-command `install-box.sh`/`install-box.ps1` installers, a container-only PID 1 supervisor (`Hive::Web::Supervisor`), container-only environment variables, per-release image build/smoke/promotion jobs, a Windows PowerShell installer CI job, and a recovery workflow. It was meant as the simple install for non-technical users. The hosted Hive cloud product now covers that audience, while the native channels (Homebrew, AUR, `install.sh`, and WSL on Windows) already serve people who want to run Hive themselves, so the container carried a second release, test, and documentation surface without a distinct audience.
+
+**Decision:** Hive has two supported routes: install native Hive (Homebrew on macOS arm64, AUR on Arch, the bash installer on glibc Linux, WSL with systemd on Windows) for people who want to tinker, or the cloud product for everyone else. The repository no longer contains `packaging/docker/`, the root `.dockerignore`, `.github/workflows/hivebox-recover.yml`, the release image jobs, the Windows installer CI job, `Hive::Web::Supervisor`, `Hive::Paths.hivebox_supervisor_pid_path`, the `hivebox_supervisor` launch-coverage row, or the container-only `HIVEBOX_SUPERVISOR_PID`, `HIVEBOX_SESSION_SECRET`, `HIVEBOX_REPOS_DIR`, and `HIVEBOX_PRECOMPILED_ASSETS` reads. Already published images and installer URLs are left in place but receive no new builds and are documented only in a migration note.
+
+The following stay because they serve native Hive: GitHub device-flow sign-in and first-login owner claim (ADR-036) for any non-loopback Host; `/health?deep=1`; the six deprecated native-web `HIVEBOX_*` aliases with their migration warnings until the next major release; and the built-in artifact capture recorder, whose closed `hive-artifact-capture.v2` evidence type keeps the literal value `hivebox` because removing it would break readers of existing manifests. The bench runner's `Dockerfile.runner` is benchmark tooling, not a distribution, and is unaffected.
+
+**Consequences:** Releases publish only the gem, skill, and managed web bundle, so a release no longer needs `packages: write` or Docker builders. The Telegram settings page cannot signal a supervisor and always asks the operator to restart the bot. Existing Hivebox users keep a working but frozen image; migrating means installing native Hive, running `hive setup`, copying or recloning projects from the box's `/data/repos` mount, registering them with `hive init`, signing agents in on the host, and removing the container. Windows users run native Hive inside WSL. Hostile-code containment is now an OS-user or VM decision for the operator rather than a shipped container boundary. See [[commands/web]] and [[operating]].
+
+## ADR-057: A refused model stops the task for the operator instead of riding the limit cooldown
+
+**Status:** Active (2026-10-16; supersedes PR #1473's classification of Codex's `model is not supported when using Codex with a ChatGPT account` response as a provider limit)
+
+**Context:** PR #1473 added that Codex response to `Hive::AgentLimit::LIMIT_PATTERNS`, on the theory that ChatGPT plans answer an exhausted per-model allowance with it. Every surface then wrote `limits_reached`, and the daemon replayed it on the hourly provider cooldown forever (quota markers never enter the deterministic-failure park). In October 2026 four review tasks retried pass 1 roughly 240 times over about 11 days because triage was configured with a model the account could not use (`gpt-6-sol`, later `gpt-6.1-sol`). The fault was configuration, which no retry can fix.
+
+**Decision:** The project owner decided that a "model not supported" response is an operator-owned configuration error. `Hive::ModelUnsupported` (`lib/hive/model_unsupported.rb`) owns the pattern, extracts the model name, and formats one message: `model unsupported for <agent>: '<model>' is not available to this account; set a supported model for this stage/role in .hive-state/config.yml (models routing), then retry the task`. `AgentLimit` no longer matches the text. `Hive::Agent#handle_exit` checks it before the quota wall and returns `error_reason=model_unsupported` (writing `ERROR reason=model_unsupported provider= model= message=` in `:state_file_marker` mode). Execute, open-PR, and review (reviewers all-failed, triage, fix) write the same reason; review markers prefix the phase. Reviewer adapters and triage stop retrying inline on it. `RecoveryCoordinator#assessment` marks such markers `operator_required` and never due, so the healer does not request recovery; a `healer` request gets a `blocked`/`owner=operator`/`reason=model_unsupported` receipt. Human retries (`action`, `cli`, `bot`, `web`, `tui`) still go through after the operator fixes the config. The dispatcher publishes disposition `model_unsupported` (owner `operator`, waiting_operator pending item), which `hive status --operational` maps to `needs_repair`/`operator`; the daily digest records it as an `authority` hold. The babysitter never takes a limit hold for it: it labels the PR with the give-up label and posts a comment that leads with the message.
+
+**Consequences:** No closed schema enum changed: marker reasons, `failure_origin`, scheduler `decision`, and one-shot pending `reason` are free strings; only the babysitter's in-code `Events::OUTCOMES` and `ProjectTick::OUTCOME_CLASSES` gained `model_unsupported`. If Codex really does return this text for a temporarily exhausted model allowance, Hive now stops the task instead of waiting; the operator retries it, or switches model, once the allowance returns. Genuine quota/usage/rate texts still classify as `limits_reached`. See [[modules/agent]], [[modules/daemon]], [[stages/review]], and [[commands/babysit]].
+
+## ADR-053: Claude launches only as headless `claude -p`; the tmux launch mode is removed
+
+**Status:** Active (supersedes ADR-030's tmux launch mode; 2026-10-14)
+**Context:** ADR-030 made an interactive tmux runtime the default Claude launch path because a headless `claude -p` invocation could bill API-token usage instead of the operator's subscription. Anthropic has since confirmed that `claude -p` is permitted under a Claude subscription, so the workaround no longer buys anything. It cost a large runtime surface (pane scraping for ready/busy/trust/limit menus, a Stop-hook completion protocol and fallback, stranded-menu detection, orphan sweeps, session-loss healing), and `hive setup` required tmux on every host. A complete headless Claude path already served `claude.mode: headless` and explicitly routed launches.
+**Decision:** Every Claude launch from a stage, reviewer, or helper is a headless `claude -p` spawn through `Hive::Stages::Base.spawn_agent` → `Hive::Agent` (prompt on stdin): stages reach it via `spawn_claude!` → `Hive::ClaudeLauncher.launch!`, and reviewers and helpers call `spawn_agent` directly. `Hive::TmuxRunner`, the interactive wrapper and Stop-hook scripts, `Hive::StopHookInstaller`, `Hive::ClaudeCompletionFallback`, and the `:Interactive` facet are deleted; the `Hive::AgentSupport::Claude::Launch` facet carries the shared tool scopes, `DENIED_TOOLS`, MCP flags, and the Claude profile guard, and `AgentSupport.supports?(profile, :Launch)` is the "is this Claude" check. `spawn_agent` denies `AskUserQuestion` on every Claude launch without a workflow `runtime_policy` (runtime-policy launches already deny it). Claude reviewers run as independent headless reviewers instead of sharing one tmux session. The `claude.mode` key is removed: a config that still sets it loads, the value is ignored, and `hive doctor` reports it as a `claude/config` warning. `hive init` no longer asks for a launch mode, and its JSON output moves to `hive-init.v3` without `claude_mode`. Hive keeps unsetting `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, and `CLAUDE_API_KEY` before launching Claude, so Claude bills the subscription; no API-key opt-in is added.
+**Consequences:** `hive setup` no longer requires tmux, and doctor drops its tmux dependency row; the exported-API-key warning stays as a `claude/auth` warning row. tmux remains a dependency only of the TUI e2e harness (the Docker image's `hive tui` session went away with ADR-055). Operators can no longer `tmux attach` to a live Claude stage; the stage log under `.hive-state/logs/<slug>/` is the live view. Independent headless reviewers lose the shared session's prompt-cache reuse within a review pass, so review token use may rise slightly. `hive init --json` consumers must move to `hive-init.v3`. Task records and journals written before the change keep rendering: legacy reasons such as `tmux_session_terminated` and the `claude_completion_fallback` event type stay read-side only, and `ClaudeLauncher` repairs a leftover tmux-era Stop-hook `.claude/settings.json` stub or its `.hive-pre-install` backup before the next launch. A tmux Claude still running from before an upgrade is invisible to the new code, so the upgrade step is to let running Claude stages finish and then kill leftover Hive Claude tmux sessions. Claude stages and reviewers that used to run in tmux never received `--max-budget-usd`; to keep built-in defaults from newly capping them, those launches pass a budget only when the project config sets it (`Config.configured_budget_usd`, `Stages::Base.stage_budget_usd`, or a reviewer spec's own `budget_usd`). `hive init` writes stage and reviewer budgets only as commented suggestions, so a fresh project is uncapped; projects initialized earlier keep the budgets their config sets. Other agents keep the merged default, and launches that were always headless (generic workflow stages, plan review, patrol, babysitter) are unchanged. Scripted `hive init` answer lists lose the launch-mode slot. See [[modules/agent]], [[modules/config]], [[commands/doctor]], and [[commands/init]].
+
+## ADR-054: Hive owns agent MCP and Codex config
+
+**Status:** Active (amends ADR-051; 2026-10-15)
+**Context:** Every agent Hive launched inherited the operator's personal and project MCP servers. Background Codex runs (babysitter, patrol) loaded all of `~/.codex/config.toml` and logged OAuth `AuthRequired` errors for servers they never needed. `-c mcp_servers={}` could not help because Codex deep-merges overrides. ADR-051 had accepted that native MCPs "can affect a Hive run".
+**Decision:** Hive config is the source of truth for launched-agent MCP. Servers live in one global catalog (`mcp.servers`), filled by an explicit `hive mcp import`; projects and stages grant names with `mcp.use`, and background roles never inherit the project grant. Claude always runs with `--strict-mcp-config` and a per-launch file; Codex always runs with `--ignore-user-config` and `-c` entries, and Hive carries over the personal Codex settings it needs (model, effort, service tier, personality, providers, profiles, base URL, OAuth store, enabled managed plugins); OpenCode disables every discovered server in its config overlay; Pi runs with `--no-mcp` (Hive's Pi floor is 1.0.4); Grok is reported as unisolated by `hive doctor`. Secrets are referenced by env-var name only. OAuth logins are per agent and recorded by presence; `hive mcp login` signs an agent in against the exact entry Hive renders. Discovery failures warn and launch. `mcp.inherit_user: true` restores the old behaviour.
+**Consequences:** Native MCPs no longer affect a Hive run unless granted (the ADR-051 sentence no longer holds for MCP). Codex launches lose any `config.toml` setting outside the carried-over list, and project `.codex/config.toml` layers. The native `codex review` reviewer stays unisolated until `codex exec review` output is verified (closed 2026-10-16: it now runs `codex exec review` with the same launch; see [[modules/reviewers]]). See [[modules/mcp]], [[commands/mcp]] and [[gaps]].
+
 ## Source
 
 Once `git log` accumulates real history, future updates should add ADRs from substantive merge commits or refactor messages.
@@ -887,3 +1014,36 @@ Once `git log` accumulates real history, future updates should add ADRs from sub
 - [[stages/execute]]
 - [[commands/bot]] · [[modules/bot]]
 - [[commands/findings]] · [[modules/task_action]]
+
+## Current-format-only runtime (2026-09-09)
+
+Hive supports only current formats. This supersedes historical requirements for
+automatic project migration, fleet cutover, old wire-schema compatibility and
+historical upgrade survivor lanes. Current setup, database integrity, task journal
+recovery, workflow-package upgrades and source-state visibility remain required.
+Old installations use the external agent conversion guide with verified backups.
+Current release artifact authenticity and native install checks remain required.
+
+## Additive command-receipt extension (2026-09-27)
+
+The base runtime control-plane remains schema version 2 with its existing
+checksum. Durable command receipts are an independently checksummed, purely
+additive extension installed only by explicit
+`hive setup --install-command-receipts`. Ordinary startup and ordinary setup do
+not install it. Exact validation partitions known base and extension objects;
+partial or unknown additions fail closed. Migration 002 creates new tables,
+indexes, and aggregate-maintenance triggers only and changes no existing table,
+row, or `schema_info` value.
+
+Operator decision (2026-09-28, project owner): triggers that fire only on the
+extension's own new tables and maintain extension-owned aggregates are allowed
+under the additive rule for migration 002 (KTD2). The rule forbids altering,
+triggering on, or rewriting any base-schema object.
+
+The supported rollback target is a compatibility-patched prior runtime that
+validates the unchanged base separately and recognizes the exact extension
+manifest while otherwise ignoring its retained rows. Production opt-in remains
+disabled until a maintainer publishes, retains, and pins that package's version,
+authenticated HTTPS location, and SHA-256. This is schema compatibility, not a
+consumer-adoption gate. Namespace keyed intake is separately disabled by
+default.

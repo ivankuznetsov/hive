@@ -93,6 +93,12 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_codex_does_not_treat_current_models_as_recoverable_legacy_planners
+    require "hive/agent_support/codex"
+
+    refute Hive::AgentSupport::Codex.recoverable_planner_identity?("model" => "gpt-5.6")
+  end
+
   def test_grok_loads_only_after_selection_and_keeps_facets_lazy
     script = <<~RUBY
       require "hive/agent_profiles"
@@ -123,7 +129,7 @@ class AgentSupportTest < Minitest::Test
       puts defined?(Hive::AgentSupport::Claude) || "unloaded"
       support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:claude))
       puts support.name
-      puts support.autoload?(:Interactive) || "interactive-loaded"
+      puts support.autoload?(:Launch) || "launch-loaded"
       puts support.autoload?(:Runtime) || "runtime-loaded"
       puts support.autoload?(:Skills) || "skills-loaded"
       puts support.autoload?(:SetupAdapter) || "setup-loaded"
@@ -137,7 +143,7 @@ class AgentSupportTest < Minitest::Test
     assert status.success?, stderr
     assert_equal [
       "unloaded", "Hive::AgentSupport::Claude",
-      "hive/agent_support/claude/interactive",
+      "hive/agent_support/claude/launch",
       "hive/agent_support/claude/runtime",
       "hive/agent_support/claude/skills",
       "hive/agent_support/claude/setup_adapter",

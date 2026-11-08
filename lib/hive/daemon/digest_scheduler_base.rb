@@ -18,16 +18,24 @@ module Hive
         @clock = clock
         @enabled = enabled == true
         @logger = logger
-        @pending = {}
-        @failure = nil
+        @pending = Hash.new { |hash, stage| hash[stage] = {} }
+        @failures = {}
       end
 
-      def cancel(date:)
-        @pending.delete(digest_date(date))
+      def cancel(date:, stage: nil)
+        local_date = digest_date(date)
+        if stage
+          pending_for(stage).delete(local_date)
+        else
+          @pending.each_value { |dates| dates.delete(local_date) }
+        end
       end
 
-      def pending?(date)
-        @pending.key?(digest_date(date))
+      def pending?(date, stage: nil)
+        local_date = digest_date(date)
+        return pending_for(stage).key?(local_date) if stage
+
+        @pending.any? { |_identity, dates| dates.key?(local_date) }
       end
 
       private
@@ -37,20 +45,47 @@ module Hive
       end
 
       def backed_off?(now)
-        @failure && now < @failure[:next_eligible_at]
+        stage_backed_off?(nil, now)
       end
 
       def record_failure(now)
-        count = (@failure&.fetch(:count, 0)).to_i + 1
+        record_stage_failure(nil, now)
+      end
+
+      def stage_backed_off?(stage, now)
+        failure = @failures[stage_identity(stage)]
+        failure && now < failure.fetch(:next_eligible_at)
+      end
+
+      def record_stage_failure(stage, now)
+        identity = stage_identity(stage)
+        count = @failures.dig(identity, :count).to_i + 1
         interval = FAILURE_BACKOFF_SCHEDULE[[ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min]
         next_eligible_at = now + interval
-        @failure = { count: count, next_eligible_at: next_eligible_at }
+        @failures[identity] = { count: count, next_eligible_at: next_eligible_at }
         @logger&.event(
           scheduler_contract.fetch(:failure_event),
+          stage: identity,
           failures: count,
           retry_after_sec: interval,
           next_eligible_at: next_eligible_at.utc.iso8601
         )
+      end
+
+      def clear_stage_failure(stage)
+        @failures.delete(stage_identity(stage))
+      end
+
+      def pending_for(stage)
+        @pending[stage_identity(stage)]
+      end
+
+      def pending_any?
+        @pending.any? { |_stage, dates| dates.any? }
+      end
+
+      def stage_identity(stage)
+        (stage || scheduler_contract.fetch(:stage)).to_s
       end
 
       def dispatch_for(date)

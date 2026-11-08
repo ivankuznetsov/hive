@@ -9,8 +9,12 @@ class RuntimeControlPlaneSchemaTest < Minitest::Test
     daemon_runtime
     dispatch_requests
     installations
+    launch_reservations
+    owned_processes
     payload_references
     projects
+    quiescence_cleanup_writes
+    runtime_lifecycle
     schema_info
     task_leases
     task_subjects

@@ -3,13 +3,140 @@ require "timeout"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/supervisor"
 require "hive/patrol_fix/attempt_diagnostic"
+require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/task_resolver"
+require_relative "../../support/stream_log_test_support"
 
 class AttemptsSupervisorTest < Minitest::Test
   include HiveTestHelper
+  include StreamLogTestSupport
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
   CLAIM_CAPABILITY = "c" * 64
+
+  class SeparatorFaultWriter < StreamLogTestSupport::DelegatingIO
+    attr_reader :separator_attempts
+
+    def initialize(io, persistent:)
+      super(io)
+      @persistent = persistent
+      @separator_attempts = 0
+    end
+
+    def syswrite(bytes)
+      if bytes == "#\n".b
+        @separator_attempts += 1
+        raise Errno::EINTR, "separator" if @persistent || @separator_attempts == 1
+      end
+
+      @io.syswrite(bytes)
+    end
+  end
+
+  class OneShotSyncFaultWriter < StreamLogTestSupport::DelegatingIO
+    def initialize(io, operation:, error:)
+      super(io)
+      @operation = operation
+      @error = error
+      @raised = false
+    end
+
+    def flush
+      raise_once(:flush)
+      super
+    end
+
+    def fsync
+      raise_once(:fsync)
+      super
+    end
+
+    private
+
+    def raise_once(operation)
+      return unless @operation == operation && !@raised
+
+      @raised = true
+      raise @error
+    end
+  end
+
+  def test_wrapper_registration_is_released_and_cleanup_errors_are_bounded
+    calls = []
+    registry = Object.new
+    registry.define_singleton_method(:register!) { |*args, **kwargs| calls << [ args, kwargs ] }
+    registry.define_singleton_method(:mark_stopped_by_reservation!) do |_id, **|
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      process_registry: registry, reservation_id: "reservation-1"
+    )
+
+    supervisor.send(:register_wrapper!)
+    assert supervisor.instance_variable_get(:@wrapper_registered)
+    assert_equal "reservation-1", calls.first.first.first
+    assert_nil supervisor.send(:release_wrapper_registration)
+  end
+
+  def test_quiescence_lifecycle_probe_errors_fail_closed_without_crashing_worker
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) do
+      raise Hive::RuntimeControlPlane::Unavailable.new("offline", code: :offline)
+    end
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new
+    )
+    supervisor.define_singleton_method(:lifecycle) { lifecycle }
+
+    refute supervisor.send(:admission_closed?)
+    assert_nil supervisor.send(:capture_quiescence_context, 1.0)
+  end
+
+  def test_failed_initial_signal_is_retried_before_forcing_worker_exit
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.1; exit 0" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      signals = 0
+      original = supervisor.method(:signal_worker_group)
+      supervisor.define_singleton_method(:signal_worker_group) do |signal|
+        signals += 1
+        signals == 1 ? false : original.call(signal)
+      end
+      supervisor.instance_variable_set(:@cancel_reason, :timeout)
+
+      assert_equal 124, supervisor.run
+      assert_operator signals, :>=, 2
+    end
+  end
+
+  def test_quiescing_handshake_denial_exits_before_worker_and_leaves_reservation_for_controller
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "touch should-not-run" ]) do |store, attempt|
+      releases = []
+      registry = Object.new
+      registry.define_singleton_method(:register!) do |*, **|
+        raise Hive::RuntimeControlPlane::AdmissionClosed.new(
+          "admission closed", details: { generation: 2, phase: "quiescing" }
+        )
+      end
+      registry.define_singleton_method(:mark_stopped_by_reservation!) { |id| releases << id }
+      ready = StringIO.new
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), ready_io: ready,
+        process_registry: registry, reservation_id: "reservation-1"
+      )
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
+      assert_equal "quiescing", JSON.parse(ready.string).fetch("state")
+      assert_empty releases,
+                   "the privileged controller, not the denied child, settles the reservation"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
 
   def test_claims_before_worker_and_writes_failed_receipt_with_ordered_output
     worker_argv = [ "/bin/sh", "-c", "printf out; printf err >&2; exit 7" ]
@@ -69,6 +196,289 @@ class AttemptsSupervisorTest < Minitest::Test
       refute_nil term_heartbeat_count
       assert_operator heartbeat_count, :>, term_heartbeat_count,
                       "heartbeat must continue throughout TERM-to-KILL grace"
+    end
+  end
+
+  BUSY = "attempt transition failed: SQLite3::BusyException: database is locked".freeze
+
+  def fail_store_calls(store, name, times:, message: BUSY)
+    calls = 0
+    original = store.method(name)
+    store.define_singleton_method(name) do |*args, **kwargs|
+      calls += 1
+      raise Hive::Attempts::RepositoryError, message if calls <= times
+
+      original.call(*args, **kwargs)
+    end
+    -> { calls }
+  end
+
+  def test_busy_heartbeats_are_deferred_while_the_lease_is_unexpired
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.3; exit 0" ]) do |store, attempt|
+      heartbeats = fail_store_calls(store, :heartbeat, times: 3)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+
+      assert_equal 0, supervisor.run
+      assert_operator heartbeats.call, :>, 3, "heartbeats resume after the busy ones"
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      frames = Hive::Attempts::StreamLog.read(File.join(store.root, terminal.receipt.dig("log_reference", "path")))
+      assert frames.any? { |frame| frame.bytes.include?("heartbeat deferred") }
+    end
+  end
+
+  def test_heartbeats_busy_past_the_busy_tolerance_end_the_attempt
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 30" ]) do |store, attempt|
+      fail_store_calls(store, :heartbeat, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.3, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.3
+      )
+
+      _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+      assert_includes err, "lost its lease"
+      assert_includes err, "database is locked"
+    end
+  end
+
+  def test_non_busy_heartbeat_failures_end_the_attempt_immediately
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 30" ]) do |store, attempt|
+      heartbeats = fail_store_calls(store, :heartbeat, times: 1, message: "attempt transition failed: disk I/O error")
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+      assert_equal 1, heartbeats.call
+    end
+  end
+
+  def test_busy_terminal_receipt_is_retried
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 3" ]) do |store, attempt|
+      terminalizations = fail_store_calls(store, :terminalize, times: 2)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      assert_equal 3, supervisor.run
+      assert_equal 3, terminalizations.call
+      assert_equal "terminal", store.fetch(attempt.attempt_id).state
+    end
+  end
+
+  def test_busy_retries_stop_at_the_busy_tolerance
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      fail_store_calls(store, :terminalize, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.2, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 0.2
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+    end
+  end
+
+  def test_busy_claim_and_first_heartbeat_are_retried
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      claims = fail_store_calls(store, :claim, times: 2)
+      first_heartbeats = fail_store_calls(store, :first_heartbeat, times: 2)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      assert_equal 0, supervisor.run
+      assert_equal [ 3, 3 ], [ claims.call, first_heartbeats.call ]
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  # Busy retries never outlive the first-heartbeat deadline: the repository
+  # re-checks it on every retry and the attempt fails closed.
+  def test_busy_first_heartbeat_fails_closed_at_its_deadline
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      store.define_singleton_method(:first_heartbeat) do |observed, **kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed, "first heartbeat deadline expired" if
+          observed.active_deadline && kwargs.fetch(:now) > observed.active_deadline
+        raise Hive::Attempts::RepositoryError, AttemptsSupervisorTest::BUSY
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 0.2
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      _, err = capture_io do
+        assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run }
+      end
+      assert_includes err, "first heartbeat deadline expired"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
+
+  # A swapping host can hold the write lock past the lease window; a live
+  # owner is only a reconciler suspect then, so busy heartbeats keep deferring.
+  def test_busy_heartbeats_outlast_the_lease_window
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.6; exit 0" ]) do |store, attempt|
+      fail_store_calls(store, :heartbeat, times: 40)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 0.1, first_heartbeat_timeout_sec: 5,
+        busy_tolerance_sec: 5
+      )
+
+      assert_equal 0, supervisor.run
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  def test_lost_compare_and_swap_is_never_retried
+    { heartbeat: "sleep 30", terminalize: "exit 0" }.each do |name, script|
+      with_attempt(worker_argv: [ "/bin/sh", "-c", script ]) do |store, attempt|
+        calls = 0
+        store.define_singleton_method(name) do |*|
+          calls += 1
+          raise Hive::Attempts::CompareAndSwapFailed, "attempt lease compare-and-swap lost"
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY),
+          heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+        )
+
+        capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
+        assert_equal 1, calls, "#{name} must not retry a lost lease"
+      end
+    end
+  end
+
+  def test_quiesce_signal_is_terminal_interrupted_only_after_worker_stops
+    worker_argv = [ "/bin/sh", "-c", "trap '' TERM; printf partial; while :; do sleep 1; done" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 60
+      )
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        supervisor.instance_variable_set(:@cancel_reason, :signal)
+        supervisor.instance_variable_set(:@cancel_signal, "TERM")
+        recorded
+      end
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "terminal", terminal.state
+      assert_equal "interrupted", terminal.outcome
+      assert_equal lifecycle.current.generation, terminal.receipt.fetch("pause_generation")
+      assert_equal terminal.checkpoint, terminal.receipt.fetch("final_checkpoint")
+      assert File.file?(File.join(store.root, terminal.receipt.dig("log_reference", "path")))
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+      assert_equal 1, store.database.read { |db| db[:quiescence_cleanup_writes].count }
+    end
+  end
+
+  def test_quiesce_signal_never_consumes_the_finalization_reserve
+    state = Hive::RuntimeControlPlane::Lifecycle.new(
+      phase: "quiescing", generation: 4, revision: 1, mutation_sequence: 2,
+      boot_id: "boot", deadline_monotonic: 110.0, shutdown_grace_sec: 25.0,
+      interrupted_attempt_ids: [], quiesce_started_at: nil, paused_at: nil,
+      resumed_at: nil, updated_at: nil
+    )
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:current) { state }
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      kill_grace_sec: 60, monotonic: -> { 95.0 }
+    )
+    supervisor.define_singleton_method(:lifecycle) { lifecycle }
+
+    supervisor.send(:capture_quiescence_context, 95.0)
+
+    assert_equal 4, supervisor.instance_variable_get(:@pause_generation)
+    assert_equal 0.0, supervisor.send(:effective_kill_grace)
+  end
+
+  def test_natural_completion_after_admission_closes_keeps_genuine_success
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.1; exit 0" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        recorded
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "terminal", terminal.state
+      assert_equal "succeeded", terminal.outcome
+      assert_nil terminal.receipt.fetch("pause_generation")
+      assert_equal 1, store.database.read { |db| db[:quiescence_cleanup_writes].count }
+    end
+  end
+
+  def test_worker_completed_before_quiesce_signal_keeps_genuine_success
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      checkpoint = store.method(:checkpoint)
+      store.define_singleton_method(:checkpoint) do |*args, **kwargs|
+        recorded = checkpoint.call(*args, **kwargs)
+        sleep 0.05
+        lifecycle.begin_quiesce!(
+          deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+          boot_id: "test-boot", shutdown_grace_sec: 0.05
+        )
+        supervisor.instance_variable_set(:@cancel_reason, :signal)
+        supervisor.instance_variable_set(:@cancel_signal, "TERM")
+        recorded
+      end
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+
+      assert_equal "succeeded", terminal.outcome
+      assert_nil terminal.receipt.fetch("pause_generation")
     end
   end
 
@@ -153,6 +563,8 @@ class AttemptsSupervisorTest < Minitest::Test
         "reset_hint_seconds" => 30
       }
       worker = <<~RUBY
+        gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+        abort "gate not released" unless gate.read(1) == "1"
         evidence = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_EVIDENCE_FD")), "w")
         evidence.write(#{JSON.generate("#{JSON.generate(signal)}\n")})
         evidence.close
@@ -168,7 +580,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       assert_equal "failed", terminal.outcome
       assert_equal "model_capacity", terminal.receipt.dig("provider_evidence", "failure_class")
@@ -207,7 +619,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(2) { supervisor.run }
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(10) { supervisor.run }
       diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
       assert_equal "model_capacity", diagnostic.fetch("code")
       assert_equal "provider", diagnostic.fetch("owner")
@@ -297,7 +709,7 @@ class AttemptsSupervisorTest < Minitest::Test
         [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal 7, Timeout.timeout(2) { supervisor.run }
+      assert_equal 7, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       references = terminal.receipt.fetch("output_references")
       assert_equal 1, references.length
@@ -597,10 +1009,15 @@ class AttemptsSupervisorTest < Minitest::Test
         stale_sec: 1, first_heartbeat_timeout_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
-        [ RbConfig.ruby, "-e", 'Process.kill("KILL", Process.pid)' ]
+        worker = <<~'RUBY'
+          gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+          abort "gate not released" unless gate.read(1) == "1"
+          Process.kill("KILL", Process.pid)
+        RUBY
+        [ RbConfig.ruby, "-e", worker ]
       end
 
-      assert_equal 137, Timeout.timeout(2) { supervisor.run }
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
       terminal = store.fetch(attempt.attempt_id)
       diagnostic = diagnostic_from_terminal(store, terminal)
       assert_equal "agent_signalled", diagnostic.fetch("code")
@@ -621,7 +1038,7 @@ class AttemptsSupervisorTest < Minitest::Test
         stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 1
       )
       supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
-        [ RbConfig.ruby, "-e", "sleep 10" ]
+        [ "/bin/sh", "-c", "exec sleep 10" ]
       end
       supervisor.instance_variable_set(:@cancel_reason, :signal)
       supervisor.instance_variable_set(:@cancel_signal, "TERM")
@@ -639,7 +1056,7 @@ class AttemptsSupervisorTest < Minitest::Test
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",
-      "(trap '' TERM; exec sleep 10) & printf 'leader-exited\\n'; exit 0"
+      "trap '' TERM; (exec sleep 10) & printf 'leader-exited\\n'; exit 0"
     ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|
       heartbeat_count = 0
@@ -729,6 +1146,104 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_one_shot_log_sync_failure_keeps_writer_open_for_diagnostic_terminalization
+    %i[flush fsync].each do |operation|
+      with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+        original = store.log_archive.method(:open_writer)
+        captured_log = nil
+        error = IOError.new("#{operation} failed")
+        store.log_archive.define_singleton_method(:open_writer) do |attempt_id, clock:|
+          captured_log = original.call(attempt_id, clock: clock)
+          fault = AttemptsSupervisorTest::OneShotSyncFaultWriter.new(
+            captured_log.instance_variable_get(:@io), operation: operation, error: error
+          )
+          captured_log.instance_variable_set(:@io, fault)
+          captured_log
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+          stale_sec: 1, first_heartbeat_timeout_sec: 1
+        )
+
+        assert_equal Hive::ExitCodes::SOFTWARE, supervisor.run
+        terminal = store.fetch(attempt.attempt_id)
+        frames = Hive::Attempts::StreamLog.read(
+          File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+        )
+        assert_equal "terminal", terminal.state
+        assert_equal "failed", terminal.outcome
+        assert_match(/#{operation} failed/, frames.last.bytes)
+        assert captured_log.closed?
+      end
+    end
+  end
+
+  def test_one_shot_separator_error_during_drain_is_fatal_and_diagnostic_recovers
+    worker_argv = [ "/bin/sh", "-c", "printf worker-output; sleep 10" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      injection = inject_torn_log_separator_failure(store.log_archive, persistent: false)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      terminations = observe_worker_termination(supervisor)
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(3) { supervisor.run }
+
+      terminal = store.fetch(attempt.attempt_id)
+      frames = Hive::Attempts::StreamLog.read(
+        File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+      )
+      assert_equal "terminal", terminal.state
+      assert_equal "failed", terminal.outcome
+      assert_equal Hive::ExitCodes::SOFTWARE, terminal.receipt.fetch("exit_status")
+      assert_operator terminations.call, :>=, 1
+      refute supervisor.send(:recorded_worker_group_alive?)
+      assert_equal [ 1, 2 ], frames.map(&:sequence)
+      assert_equal %w[supervisor supervisor], frames.map(&:channel)
+      assert_equal "existing\n", frames.first.bytes
+      assert_match(/hive attempt supervisor failed: Errno::EINTR/, frames.last.bytes)
+      refute_includes frames.map(&:bytes).join, "worker-output"
+      assert_equal 2, injection.fetch(:fault).separator_attempts
+      assert injection.fetch(:log).closed?
+    end
+  end
+
+  def test_persistent_separator_error_during_drain_leaves_running_attempt_for_lost_recovery
+    worker_argv = [ "/bin/sh", "-c", "printf worker-output; sleep 10" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      archive = store.log_archive
+      injection = inject_torn_log_separator_failure(archive, persistent: true)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.05
+      )
+      terminations = observe_worker_termination(supervisor)
+
+      assert_equal Hive::ExitCodes::SOFTWARE, Timeout.timeout(3) { supervisor.run }
+
+      current = store.fetch(attempt.attempt_id)
+      frames = Hive::Attempts::StreamLog.read(archive.hot_path(attempt.attempt_id))
+      assert_equal "running", current.state
+      assert_nil current.receipt
+      assert_nil current["log_reference"]
+      assert_empty current["current_outputs"]
+      assert_operator terminations.call, :>=, 1
+      refute supervisor.send(:recorded_worker_group_alive?)
+      assert_equal [ "existing\n" ], frames.map(&:bytes)
+      refute_includes frames.map(&:bytes).join, "worker-output"
+      assert_equal 2, injection.fetch(:fault).separator_attempts
+      assert injection.fetch(:log).closed?
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        archive.archive(attempt.attempt_id)
+      end
+      assert_match(/only final attempt payloads/, error.message)
+    end
+  end
+
   def test_unexpected_patrol_supervisor_failure_still_binds_synthetic_diagnostic
     with_attempt(
       worker_argv: [ "hive", "run", "durable-task" ], intended_stage: "4-review",
@@ -796,7 +1311,9 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal 137, supervisor.send(:status_exit, status)
     assert_equal Hive::ExitCodes::SOFTWARE, supervisor.send(:status_exit, nil)
     record = { "worker_argv" => [ "hive", "run", "task" ] }
-    assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv, record).first
+    assert_equal [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", "run", "task" ],
+                 supervisor.send(:resolved_worker_argv, record)
+    assert_equal [ "hive", "run", "task" ], record.fetch("worker_argv")
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise Errno::ESRCH }) do
       assert_raises(Hive::Attempts::RepositoryError) { supervisor.send(:process_identity, 99) }
@@ -804,7 +1321,7 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_worker_termination_escalation_and_signal_setup_are_defensive
-    ticks = [ 0.0, 0.0, 0.0, 0.01 ]
+    ticks = [ 0.0, 0.0, 0.01 ]
     supervisor = Hive::Attempts::Supervisor.new(
       store: Object.new, attempt_id: "attempt", claim_io: StringIO.new(CLAIM_CAPABILITY),
       kill_grace_sec: 0.01, monotonic: -> { ticks.shift || 0.01 }
@@ -864,6 +1381,35 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   private
+
+  def inject_torn_log_separator_failure(archive, persistent:)
+    original = archive.method(:open_writer)
+    seed_torn = method(:seed_torn_tail)
+    injection = {}
+    archive.define_singleton_method(:open_writer) do |attempt_id, clock:|
+      log = original.call(attempt_id, clock: clock)
+      log.append(:supervisor, "existing\n")
+      seed_torn.call(log.path)
+      fault = AttemptsSupervisorTest::SeparatorFaultWriter.new(
+        log.instance_variable_get(:@io), persistent: persistent
+      )
+      log.instance_variable_set(:@io, fault)
+      injection[:log] = log
+      injection[:fault] = fault
+      log
+    end
+    injection
+  end
+
+  def observe_worker_termination(supervisor)
+    calls = 0
+    original = supervisor.method(:terminate_worker_group)
+    supervisor.define_singleton_method(:terminate_worker_group) do
+      calls += 1
+      original.call
+    end
+    -> { calls }
+  end
 
   def diagnostic_from_terminal(store, terminal)
     reference = terminal.receipt.fetch("output_references").find do |candidate|

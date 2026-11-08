@@ -74,7 +74,7 @@ module Hive
       State.new(
         name: last[:name].downcase.to_sym,
         attrs: parse_attrs(last[:attrs]),
-        raw: last[0]
+        raw: last[0].dup.force_encoding(Encoding::UTF_8)
       )
     end
 
@@ -103,6 +103,22 @@ module Hive
         write_marker_locked(state_file_path, new_marker, at_end: false)
       end
       new_marker
+    end
+
+    # Install a controller-owned body only while the artifact has no useful
+    # non-marker bytes. This gives a stage a durable starting checkpoint
+    # without racing the agent's AGENT_WORKING write or replacing feedback
+    # left by a previous attempt. Non-regular entries are treated the same as
+    # Markers.set: never follow them; atomically replace the directory entry.
+    def seed_body_if_empty(state_file_path, seed)
+      ensure_dir(state_file_path)
+      with_markers_lock(state_file_path) do
+        body = read_regular_body(state_file_path) || "".b
+        return false unless without_markers(body).strip.empty?
+
+        write_atomic(state_file_path, seed.to_s)
+        true
+      end
     end
 
     # One-off recovery migration compare-and-swap. The caller supplies the
@@ -323,7 +339,11 @@ module Hive
     def parse_attrs(raw_attrs)
       attrs = {}
       raw_attrs.to_s.scan(/(\w[\w-]*)=("[^"]*"|\S+)/).each do |k, v|
-        attrs[k] = v.start_with?('"') ? v[1..-2] : v
+        # Scanning stays binary so malformed artifact bodies cannot hide the
+        # marker. Expose text with its original UTF-8 encoding to JSON and
+        # generation consumers; do not transcode, scrub, or mutate source bytes.
+        text = v.start_with?('"') ? v[1..-2] : v
+        attrs[k.dup.force_encoding(Encoding::UTF_8)] = text.dup.force_encoding(Encoding::UTF_8)
       end
       attrs
     end

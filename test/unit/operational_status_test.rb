@@ -1,6 +1,7 @@
 require "test_helper"
 require "json_schemer"
 require "hive/operational_status"
+require "hive/review_publication_recovery"
 
 class OperationalStatusTest < Minitest::Test
   STATES = %w[
@@ -10,6 +11,21 @@ class OperationalStatusTest < Minitest::Test
 
   def setup
     Hive::RuntimeControlPlane.database.migrate!
+  end
+
+  def test_review_publication_evidence_is_projected_without_remote_or_git_reads
+    evidence = { "publication" => "published", "verification" => "pending", "worktree" => "/owned/path with spaces",
+      "branch" => "task", "local_head" => "a" * 40, "remote_head" => "a" * 40,
+      "is_draft" => true, "pr_state" => "OPEN", "ready_command" => "gh pr ready 42" }
+    attrs = Hive::ReviewPublicationRecovery.encode(evidence).merge("reason" => "final_fix_unverified", "pass" => "3", "accepted" => "1")
+    result = project(status_payload(task(action: "recover_review", slug: "fix", marker: "review_stale", attrs: attrs))).fetch("tasks").first
+    assert_nil result["action"]
+    diagnostic = result.fetch("review_publication")
+    assert_equal "published", diagnostic["publication"]
+    assert_equal evidence["worktree"], diagnostic["worktree"]
+    assert_nil diagnostic["retry_command"]
+    assert_includes diagnostic["remediation"], "Commit fixes locally"
+    assert_includes diagnostic["readiness_guidance"], "normal finalize"
   end
 
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts
@@ -70,6 +86,50 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
+  def test_projects_all_unmet_dependencies_and_base_mode_with_complete_reason
+    unmet = [
+      { "reference" => "first", "blocked_by" => "first",
+        "dependency_stage" => "7-artifacts", "required_gate" => "9-done" },
+      { "reference" => "other:second", "blocked_by" => "other:second",
+        "dependency_stage" => "8-finalize", "required_gate" => "9-done" }
+    ]
+    row = task(
+      action: "ready_to_run", slug: "fan-in", blocked: true,
+      depends_on: %w[first other:second], unmet_dependencies: unmet,
+      dependency_base_mode: "default"
+    )
+
+    projected = project(status_payload(row)).fetch("tasks").first
+
+    assert_nil projected.dig("dependency", "blocked_by")
+    assert_nil projected.dig("dependency", "dependency_stage")
+    assert_equal unmet, projected.dig("dependency", "unmet_dependencies")
+    assert_equal "default", projected.dig("dependency", "dependency_base_mode")
+    assert_equal "blocked by first (7-artifacts, needs 9-done), " \
+                 "other:second (8-finalize, needs 9-done)",
+                 projected.fetch("reason")
+  end
+
+  def test_publication_secret_park_remains_operator_owned_without_action_when_daemon_enabled
+    row = task(
+      action: "patrol_fix_publication_blocked", slug: "publication-block",
+      stage: "5-publish", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "action_label" => "Publication blocked by secret policy",
+      "suggested_command" => nil
+    )
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_you", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal "secret_detected", projected.dig("reasons", 0, "code")
+    assert_nil projected["action"]
+  end
+
   def test_operational_snapshot_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     result = Hive::OperationalStatus.new(
@@ -86,6 +146,26 @@ class OperationalStatusTest < Minitest::Test
     assert_equal sha, result.dig("runtime", "build_sha")
     assert_equal "#{Hive::VERSION}+dogfood.0864de726",
                  result.dig("runtime", "display_version")
+  end
+
+  def test_controller_failure_is_not_hidden_by_markerless_scheduler_brake
+    %w[secret_policy_publish_blocked fix_worktree_dirty worktree_head_custody_mismatch].each do |code|
+      row = task(action: "ready_to_run", slug: "controller", marker: "none").merge(
+        "workflow" => "patrol-fix",
+        "diagnostic" => { "source" => "artifact", "code" => code,
+                          "owner" => "operator", "detail" => "Exact controller failure" }
+      )
+      snapshot = scheduler_snapshot_for(row, decision: "markerless_stalled", reason: "No progress")
+      projected = project(
+        status_payload(row), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } }
+      ).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state")
+      assert_equal "operator", projected.fetch("blocker_owner")
+      assert_equal code, projected.dig("reasons", 0, "code")
+      assert_equal "markerless_stalled", projected.dig("reasons", 1, "code")
+    end
   end
 
   def test_closure_projection_advertises_operator_confirmation_and_retains_archived_receipt
@@ -199,6 +279,48 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
   end
 
+  def test_dead_runner_marker_stays_repair_after_the_action_projects_error
+    %w[agent_working review_working].each do |marker|
+      row = task(action: "error", slug: marker, marker: marker).merge(
+        "claude_pid" => 99_999,
+        "claude_pid_alive" => false
+      )
+
+      projected = project(status_payload(row)).fetch("tasks").first
+
+      assert_equal "needs_repair", projected.fetch("state"), marker
+      assert_equal "stale", projected.dig("liveness", "status"), marker
+      assert_equal "stale_runner", projected.dig("reasons", 0, "code"), marker
+    end
+  end
+
+  def test_patrol_fix_receipt_progress_outweighs_a_dead_predecessor_lock
+    row = task(
+      action: "ready_to_advance", slug: "receipt-ready",
+      stage: "2-fix", marker: "none"
+    ).merge(
+      "workflow" => "patrol-fix",
+      "claude_pid" => 99_999,
+      "claude_pid_alive" => false,
+      "attempt_id" => "completed-attempt",
+      "task_generation" => "generation-1"
+    )
+
+    projected = project(
+      status_payload(row),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "idle", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "not_running", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_nil projected.dig("liveness", "attempt_id")
+    assert_nil projected.dig("liveness", "task_generation")
+    assert_equal "ready_for_dispatch", projected.dig("reasons", 0, "code")
+    assert_nil projected.fetch("action"), "the enrolled daemon owns the next transition"
+  end
+
   def test_invalid_task_is_unknown_while_admission_error_needs_repair
     invalid = task(
       action: "error", slug: "invalid", marker: "error",
@@ -206,6 +328,10 @@ class OperationalStatusTest < Minitest::Test
     )
     admission = task(
       action: "admission_error", slug: "admission", blocked: true,
+      unmet_dependencies: [ {
+        "reference" => "base", "blocked_by" => "base",
+        "dependency_stage" => "3-plan", "required_gate" => "8-finalize"
+      } ],
       admission_error: {
         "reason_code" => "dependency_cycle", "offending_ref" => "demo:a -> demo:a",
         "safe_correction" => "Break the cycle."
@@ -219,6 +345,11 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "unknown", rows.fetch("invalid").fetch("state")
     assert_equal "needs_repair", rows.fetch("admission").fetch("state")
     assert_equal "Break the cycle.", rows.fetch("admission").fetch("reason")
+    assert_equal [ "base" ], rows.fetch("admission")
+      .dig("dependency", "unmet_dependencies").map { |entry| entry["blocked_by"] }
+    assert_nil rows.fetch("admission").fetch("action")
+    refute_includes rows.fetch("admission").fetch("reasons").map { |reason| reason["code"] },
+                    "dependency_wait"
   end
 
   def test_daemon_owned_plan_approval_is_not_reported_as_human_input
@@ -397,6 +528,28 @@ class OperationalStatusTest < Minitest::Test
     refute_equal "needs_repair", projected.fetch("state")
   end
 
+  # Supersedes #1473: a refused model is operator-owned configuration, so it
+  # never reads as scheduler-owned automatic retry work, even without a
+  # current scheduler snapshot.
+  def test_model_unsupported_error_needs_the_operator_not_the_scheduler
+    message = "model unsupported for codex: 'gpt-6-sol' is not available to this account; fix config"
+    refused = task(
+      action: "recover_review", slug: "refused", stage: "6-review", marker: "review_error",
+      attrs: { "phase" => "triage", "reason" => "model_unsupported", "model" => "gpt-6-sol",
+               "message" => message }
+    )
+
+    projected = project(
+      status_payload(refused),
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_equal message, projected.fetch("reason")
+    assert_equal "model_unsupported", projected.dig("evidence", "marker_attrs", "reason")
+  end
+
   def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
@@ -466,12 +619,12 @@ class OperationalStatusTest < Minitest::Test
       { "stage_dir" => "5-implement", "task_count" => 2 },
       { "stage_dir" => "6-review", "task_count" => 1 }
     ]
-    payload.dig("projects", 0)["legacy_migrate_command"] = "hive migrate demo"
+    payload.dig("projects", 0)["legacy_state_guide"] = "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
 
     issue = project(payload).fetch("issues").find { |entry| entry.fetch("code") == "legacy_stage_dirs" }
 
     assert_equal "3 tasks hidden in legacy stage dirs: 5-implement (2), 6-review (1)", issue.fetch("message")
-    assert_equal "hive migrate demo", issue.fetch("remediation")
+    assert_equal "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md", issue.fetch("remediation")
 
     payload.dig("projects", 0)["legacy_stage_dirs"] = [
       { "stage_dir" => "5-implement", "task_count" => 1 }
@@ -566,7 +719,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v8 payload", error.message
+    assert_equal "operational status requires a successful hive-status v9 payload", error.message
   end
 
   def test_rejects_an_older_status_schema
@@ -575,7 +728,7 @@ class OperationalStatusTest < Minitest::Test
 
     error = assert_raises(ArgumentError) { project(payload) }
 
-    assert_equal "operational status requires a successful hive-status v8 payload", error.message
+    assert_equal "operational status requires a successful hive-status v9 payload", error.message
   end
 
   def test_noncurrent_scheduler_snapshot_propagates_its_freshness
@@ -595,6 +748,59 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "partial", result.fetch("completeness")
     assert_equal "stale", result.dig("tasks", 0, "freshness", "scheduler_status")
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
+  end
+
+  def test_expired_scheduler_snapshot_names_the_tick_failure_that_blocked_publication
+    source_task = task(action: "ready_to_plan", slug: "expired-scheduler")
+    reason = "duplicate_task_identity: demo:x in 1-inbox (/p/stages/1-inbox/x), " \
+             "3-generate (/p/stages/3-generate/x); keep exactly one stage folder per task slug"
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "status" => "stale", "reason" => "snapshot_expired",
+      "last_failure" => {
+        "reason" => reason, "since" => "2026-07-20T09:58:00.000000Z", "tick_sequence" => 7
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    stale = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_stale" }
+    assert_includes stale.fetch("message"), "snapshot_expired; no complete scheduler snapshot " \
+                                            "published since 2026-07-20T09:58:00.000000Z (tick 7)"
+    assert_includes stale.fetch("message"), "demo:x in 1-inbox (/p/stages/1-inbox/x)"
+    assert_match(/exactly one <project>\/\.hive-state\/stages\/<stage>\/ folder/,
+                 stale.fetch("remediation"))
+    assert_equal "snapshot_expired", result.dig("scheduler", "reason")
+  end
+
+  def test_current_scheduler_snapshot_warns_while_later_ticks_fail
+    source_task = task(action: "ready_to_plan", slug: "retained-scheduler")
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "last_failure" => {
+        "reason" => "status_failure", "since" => "2026-07-20T09:59:30.000000Z", "tick_sequence" => 2
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "current", result.dig("scheduler", "status")
+    warning = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_tick_failed" }
+    refute_nil warning
+    assert_equal "warning", warning.fetch("severity")
+    assert_includes warning.fetch("message"), "stays authoritative only until #{snapshot.fetch('valid_until')}"
+    assert_includes warning.fetch("message"), "(tick 2): status_failure"
+    assert_includes warning.fetch("remediation"), "operational_snapshot_incomplete"
   end
 
   def test_task_graph_sampled_before_snapshot_completion_rejects_scheduler_dispositions
@@ -839,8 +1045,13 @@ class OperationalStatusTest < Minitest::Test
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
+      "retry_pending" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "retry_dispatch_disabled" => [ "needs_repair", "operator" ],
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
+      "model_unsupported" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
+      "pull_request_merged" => [ "waiting_on_you", "operator" ],
+      "pull_request_closed_unmerged" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]
     }
@@ -861,6 +1072,57 @@ class OperationalStatusTest < Minitest::Test
       assert_equal state, projected.fetch("state"), decision
       assert_equal owner, projected.fetch("blocker_owner"), decision
     end
+  end
+
+  def test_queued_retry_behind_terminal_attempt_is_not_running
+    {
+      [ "retry_pending", "retry_awaiting_dispatch", "scheduler" ] =>
+        [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      [ "retry_dispatch_disabled", "project_dispatch_disabled", "operator" ] =>
+        [ "needs_repair", "operator" ]
+    }.each do |(decision, reason, receipt_owner), (state, owner)|
+      source_task = task(action: "ready_to_run", slug: "queued-retry")
+      snapshot = scheduler_snapshot_for(source_task, decision: decision, reason: reason)
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "queued", "request_id" => "69d2202b", "attempt_id" => "0595da53",
+        "phase" => "dispatched", "failure_origin" => "agent_exited_without_terminal_marker",
+        "owner" => receipt_owner, "reason" => reason, "retry_count" => 3,
+        "identical_failure_count" => 3, "escalation_tier" => "degraded"
+      }
+      result = project(
+        status_payload(source_task),
+        project_context: { "demo" => { "daemon_enabled" => true } },
+        scheduler_snapshot: snapshot
+      )
+      projected = result.fetch("tasks").first
+
+      assert_equal [ state, owner ], [ projected.fetch("state"), projected.fetch("blocker_owner") ]
+      assert_equal 0, result.dig("summary", "states", "running").to_i
+      assert_equal decision, projected.dig("reasons", 0, "code")
+      assert_equal reason, projected.fetch("reason")
+      recovery = projected.fetch("recovery")
+      assert_equal [ "queued", receipt_owner, "degraded", 3 ],
+                   recovery.values_at("status", "owner", "escalation_tier", "retry_count")
+    end
+  end
+
+  def test_plan_review_failure_limit_is_operator_owned_repair_not_scheduler_wait
+    source_task = task(action: "plan_reviewing", slug: "stuck-review")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "attempt_failure_limit",
+      reason: "hive plan-review-run failed 3 times in a row with exit 4"
+    )
+    projected = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_includes projected.fetch("reasons").map { |reason| reason.fetch("message") },
+                    "hive plan-review-run failed 3 times in a row with exit 4"
   end
 
   def test_recovery_specific_scheduler_states_have_closed_classifications
@@ -1089,7 +1351,91 @@ class OperationalStatusTest < Minitest::Test
 
     assert_equal "blocked", projected.dig("recovery", "status")
     assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
-    assert_includes projected.dig("recovery", "remediation"), "hive migrate"
+    assert_includes projected.dig("recovery", "remediation"), "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
+  end
+
+  def test_manual_recovery_does_not_require_a_scheduler_snapshot
+    row = task(action: "error", slug: "manual-failure", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "operator", actual.fetch("blocker_owner")
+    assert_equal "operator", actual.dig("recovery", "owner")
+    assert_equal "blocked", actual.dig("recovery", "status")
+    assert_equal "project_dispatch_disabled", actual.dig("recovery", "reason")
+    assert_equal "workflow.retry", actual.dig("action", "action_id")
+    assert_includes actual.dig("recovery", "remediation"), "hive status --operational --json"
+  end
+
+  def test_mixed_fleet_keeps_scheduler_and_operator_recovery_ownership_and_reuses_manual_evidence
+    automated = task(action: "error", slug: "scheduled", stage: "6-review", marker: "review_error")
+    manual = task(action: "ready_for_review", slug: "manual", stage: "6-review", marker: "none")
+    payload = status_payload(automated)
+    payload.fetch("projects") << payload.fetch("projects").first.merge("name" => "manual-project", "tasks" => [ manual ])
+    snapshot = scheduler_snapshot_for(automated, decision: "retry_pending", reason: "awaiting dispatch")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+      "status" => "queued", "phase" => "cleared", "owner" => "scheduler", "request_id" => "scheduled-request"
+    }
+    calls = []
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      calls << [ project, rows.map { |row| row.fetch("slug") } ]
+      { "manual" => { "binding" => { "request_id" => "manual-request", "revision" => 3 },
+        "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+          "status" => "blocked", "phase" => "cleared", "owner" => "operator", "request_id" => "manual-request",
+          "reason" => "project_dispatch_disabled", "retry_count" => 1 }).to_h } }
+    end
+    projection = Hive::OperationalStatus.new(status_payload: payload, scheduler_snapshot: snapshot,
+      project_context: { "demo" => { "daemon_enabled" => true }, "manual-project" => { "daemon_enabled" => false } },
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2))
+    projected = projection.to_h.fetch("tasks")
+    assert_equal %w[scheduler operator], projected.map { |row| row.dig("recovery", "owner") }
+    assert_equal %w[queued blocked], projected.map { |row| row.dig("recovery", "status") }
+    assert_equal %w[scheduler operator], projected.map { |row| row.fetch("blocker_owner") }
+    assert_equal %w[scheduled-request manual-request], projected.map { |row| row.dig("recovery", "request_id") }
+    assert_equal [ "workflow.retry", "workflow.retry" ], projected.map { |row| row.dig("action", "action_id") }
+    assert_equal projected.map { |row| row.fetch("recovery") }, projection.recovery_rows.map { |row| row.fetch("recovery") }
+    assert_equal [ [ "manual-project", [ "manual" ] ] ], calls
+  end
+
+  def test_manual_recovery_projects_a_live_failed_task_as_in_flight
+    row = task(action: "error", slug: "manual-running", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" }, live_task_lock: true)
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "running", actual.dig("recovery", "status")
+    assert_equal "agent", actual.dig("recovery", "owner")
+    assert_equal "existing_live", actual.dig("recovery", "reason")
+    assert_nil actual["action"]
+    assert_includes actual.dig("recovery", "remediation"), "hive task manual-running --project demo --json"
+  end
+
+  def test_manual_recovery_projects_unavailable_evidence_as_hive_owned
+    row = task(action: "error", slug: "manual-unavailable", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      rows.to_h { |row| [ row.fetch("slug"), { "binding" => nil, "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "unavailable", "owner" => "hive", "reason" => "recovery_observation_unavailable",
+        "remediation" => "hive status --operational --json" }).to_h } ] }
+    end
+    actual = Hive::OperationalStatus.new(status_payload: status_payload(row),
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2)).to_h.fetch("tasks").first
+    assert_equal "hive", actual.fetch("blocker_owner")
+    assert_equal "unavailable", actual.dig("recovery", "status")
+    assert_equal "recovery_observation_unavailable", actual.dig("recovery", "reason")
+  end
+
+  def test_idless_recovery_marker_projects_migration_without_a_daemon_snapshot
+    source_task = task(
+      action: "error", slug: "legacy", stage: "4-execute",
+      marker: "error", attrs: { "reason" => "implementer_failed", "marker_id" => nil }
+    )
+
+    projected = project(
+      status_payload(source_task), project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "blocked", projected.dig("recovery", "status")
+    assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
   end
 
   def test_lean_recovery_projection_only_joins_recovery_candidates
@@ -1344,7 +1690,7 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected.fetch("human").fetch("action")
     assert_nil projected.fetch("parked").fetch("action")
     assert_equal "workflow.retry", projected.dig("error", "action", "action_id")
-    assert_equal "unavailable", projected.dig("error", "recovery", "status")
+    assert_equal "blocked", projected.dig("error", "recovery", "status")
   end
 
   def test_human_outcomes_are_preserved_in_operational_position
@@ -1488,6 +1834,39 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  # hivedev C11: a retry_scheduled review sat 3+ days past its retry_at as
+  # an ordinary scheduler wait.
+  def test_overdue_plan_review_retry_is_reported_as_repair_unless_a_dependency_holds_it
+    overdue = { "state" => "retry_scheduled", "retry_at" => "2026-07-20T08:59:00Z",
+                "blocker_owner" => "provider" }
+    row = task(action: "plan_review_retry", slug: "overdue", stage: "3-plan", plan_review: overdue)
+
+    assert_equal [ "needs_repair", "hive" ], classify_row(row, daemon_enabled: true)
+    reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal "plan_review_retry_overdue", reasons.first.fetch("code")
+    assert_includes reasons.first.fetch("message"), "due at 2026-07-20T08:59:00Z"
+    assert_includes reasons.first.fetch("message"), "hive plan-review-run overdue"
+
+    recent = row.merge("plan_review" => overdue.merge("retry_at" => "2026-07-20T09:30:00Z"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(recent, daemon_enabled: true)
+    held = row.merge("blocked" => true)
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(held, daemon_enabled: true)
+    reviewing = row.merge("plan_review" => overdue.merge("state" => "reviewing"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(reviewing, daemon_enabled: true)
+    malformed = row.merge("plan_review" => overdue.merge("retry_at" => "soon"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(malformed, daemon_enabled: true)
+  end
+
+  def test_execution_repair_stays_operator_owned_with_daemon_enabled
+    row = task(action: "recover_execute", slug: "execute-repair", stage: "4-execute")
+
+    assert_equal [ "needs_repair", "operator" ], classify_row(row)
+    assert_equal [ "needs_repair", "operator" ], classify_row(row, daemon_enabled: true)
+  end
+
   def test_plan_review_repair_actions_report_the_review_blocker_owner
     Hive::OperationalStatus::PLAN_REVIEW_REPAIR_ACTIONS.each do |action|
       row = task(action:, slug: "repair", stage: "3-plan",
@@ -1614,7 +1993,7 @@ class OperationalStatusTest < Minitest::Test
     else
       [ {
         "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
-        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_migrate_command" => nil,
+        "tasks" => tasks, "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
         "hidden_archived_task_count" => hidden_count
       } ]
     end
@@ -1629,6 +2008,7 @@ class OperationalStatusTest < Minitest::Test
   def task(action:, slug:, stage: "1-inbox", marker: "waiting", attrs: {}, held: nil,
            live_task_lock: false, task_lock_pid: nil, unanswered_questions: 0,
            blocked: false, depends_on: nil, blocked_by: nil, dependency_stage: nil,
+           unmet_dependencies: [], dependency_base_mode: "default",
            admission_error: nil, closure: nil, plan_review: nil,
            task_history_invalid: false)
     attrs = attrs.dup
@@ -1644,6 +2024,8 @@ class OperationalStatusTest < Minitest::Test
       "depends_on" => depends_on,
       "blocked_by" => blocked_by,
       "dependency_stage" => dependency_stage,
+      "unmet_dependencies" => unmet_dependencies,
+      "dependency_base_mode" => dependency_base_mode,
       "blocked" => blocked,
       "admission_error" => admission_error,
       "folder" => "/tmp/demo/.hive-state/stages/#{stage}/#{slug}",

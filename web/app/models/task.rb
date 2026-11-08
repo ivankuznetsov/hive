@@ -1,10 +1,13 @@
 require "digest"
+require "hive/operational_action"
+require "hive/review_publication_recovery"
 require "json_schemer"
 require "pathname"
 require "shellwords"
 require "hive/plan_review/projection"
 require "hive/plan_review/store"
 require "hive/web/environment"
+require "hive/web/status_payload"
 require "hive/task_workspace/artifacts"
 require "hive/task_workspace/publication"
 require "hive/task_workspace/correlated_log"
@@ -106,7 +109,7 @@ class Task
 
   def initialize(project:, attributes:)
     @project = project
-    @attributes = attributes
+    @attributes = Hive::Web::StatusPayload.task(attributes)
   end
 
   def [](key)
@@ -165,7 +168,7 @@ class Task
 
     details = {
       "summary" => summary, "coverage" => [], "findings" => [],
-      "routes" => Array(summary["routes"]), "artifacts" => []
+      "artifacts" => []
     }
     return details unless folder && summary["review_id"]
 
@@ -186,7 +189,6 @@ class Task
     details.merge(
       "coverage" => current["coverage"],
       "findings" => current["findings"].sort_by { |finding| finding["display_order"] },
-      "routes" => current["routes"],
       "artifacts" => safe_plan_review_artifacts(store, current["artifacts"])
     )
   rescue Hive::PlanReview::Error, JSON::ParserError, SystemCallError, IOError => error
@@ -198,7 +200,7 @@ class Task
         "required_action" => "refresh plan review state and retry",
         "execution_allowed" => false
       ),
-      "coverage" => [], "findings" => [], "routes" => [], "artifacts" => []
+      "coverage" => [], "findings" => [], "artifacts" => []
     }
   end
 
@@ -370,6 +372,15 @@ class Task
     YAML.safe_load(front, permitted_classes: [ Time, Date ])&.dig("original_text").to_s.strip.presence
   rescue StandardError
     nil
+  end
+
+  def operational_action
+    return nil unless project
+    Hive::OperationalAction.descriptor(project: project.name, row: @attributes)
+  end
+
+  def review_publication
+    Hive::ReviewPublicationRecovery.project(self["attrs"] || {}, action: operational_action, marker: self["marker"])
   end
 
   def recovery_action?
@@ -638,10 +649,7 @@ class Task
     manifest = JSON.parse(File.binread(path, Hive::ARTIFACT_CAPTURE_MANIFEST_MAX_BYTES))
     return nil unless manifest.is_a?(Hash)
     return nil unless manifest["schema"] == "hive-artifact-capture"
-    return nil unless [ 1, 2 ].include?(manifest["schema_version"])
-    if manifest["schema_version"] == 2
-      return nil unless CAPTURE_MANIFEST_V2_SCHEMER.valid?(manifest)
-    end
+    return nil unless CAPTURE_MANIFEST_V2_SCHEMER.valid?(manifest)
 
     status = manifest["status"].to_s
     return nil unless %w[captured failed].include?(status)

@@ -29,10 +29,11 @@ module Hive
     PHASES = %w[prepared push_intent branch_observed pr_create_intent pr_observed].freeze
 
     class Blocked < Hive::Error
-      attr_reader :code
+      attr_reader :code, :blocked_fields
 
-      def initialize(code, message)
+      def initialize(code, message, blocked_fields: [])
         @code = code.to_s.freeze
+        @blocked_fields = %w[title body diff].select { |field| blocked_fields.include?(field) }.freeze
         super(message.to_s)
       end
     end
@@ -317,7 +318,36 @@ module Hive
         read_state&.fetch("creation_base_oid")
       end
 
-      def publish!(request, revalidate:)
+      # Git and the local record cannot commit together. Persist the exact
+      # permitted rewrite before pushing; ordinary publication replays it after
+      # a lost response, but never adopts an unrecorded external rewrite.
+      def publish_rebase!(worktree_path:, branch:, before_oid:, after_oid:)
+        @directory.with_lock(".#{@state_name}.lock") do
+          state = read_state
+          return yield unless state && state["pr"]
+
+          if state.dig("pending_rewrite", "after_oid") == before_oid
+            state = record_published_head(state, before_oid)
+          end
+
+          unless state["branch"] == branch && after_oid.to_s.match?(OID) &&
+                 @git.ancestor?(worktree_path: worktree_path,
+                                ancestor_oid: state.fetch("published_head_oid", state.fetch("head_oid")),
+                                head_oid: before_oid).equal?(true)
+            blocked!("revision_history_rewritten", "rebase does not contain the recorded publication")
+          end
+          if state["pending_rewrite"] && state["pending_rewrite"] != { "before_oid" => before_oid, "after_oid" => after_oid }
+            blocked!("revision_history_rewritten", "another publication rewrite requires reconciliation")
+          end
+          state = write_state(state.merge("pending_rewrite" => { "before_oid" => before_oid, "after_oid" => after_oid }))
+          result = yield
+          remote = @git.observe(worktree_path: worktree_path, branch: branch)
+          record_published_head(state, after_oid) if remote.fetch("oid") == after_oid
+          result
+        end
+      end
+
+      def publish!(request, revalidate:, existing_pr_url: nil)
         unless request.is_a?(Request) && revalidate.respond_to?(:call)
           raise ArgumentError, "publication requires a strict request and revalidator"
         end
@@ -325,6 +355,9 @@ module Hive
           ensure_secret_free!(request)
           authenticate(request)
           state = read_state || initialize_state(request, revalidate)
+          if state.fetch("phase") == "prepared" && !existing_pr_url.to_s.empty?
+            state = adopt_recorded_pr(request, existing_pr_url, revalidate)
+          end
           return reconcile_revision(request, state, revalidate) if
             observed_publication_revision?(state, request)
 
@@ -335,7 +368,62 @@ module Hive
         raise Blocked.new("unsafe_state", "publication state is unavailable or unsafe")
       end
 
+      # Explicit operator recovery after inspecting an external rewrite. The
+      # supplied HEAD is a concurrency guard, not a permanent PR identity.
+      def reconcile_inspected!(request, pr_url:, inspected_head:, revalidate:)
+        @directory.with_lock(".#{@state_name}.lock") do
+          unless request.head_oid == inspected_head && observe(request).fetch("oid") == inspected_head
+            blocked!("stale_authority", "inspected publication HEAD is no longer current")
+          end
+          ensure_secret_free!(request)
+          authenticate(request)
+          record = recorded_pr(request, pr_url)
+          blocked!("stale_authority", "inspected PR HEAD changed") unless record.fetch("head_oid") == inspected_head
+          state = read_state
+          if state && state["pr"]
+            unless observed_publication_revision?(state, request) && revision_owned?(record, state, request)
+              blocked!("revision_identity_conflict", "inspected PR does not match the task publication")
+            end
+          else
+            state = initialize_state(request, revalidate)
+            state = observe_pr(state, request, record)
+          end
+          revalidate!(revalidate, :final)
+          revision_observation(state, request, record, head_oid: inspected_head)
+        end
+      end
+
       private
+
+      # Import the task's previously recorded PR, never an arbitrary same-name
+      # branch. URL, repository and branch must all agree with live inventory.
+      def adopt_recorded_pr(request, url, revalidate)
+        record = recorded_pr(request, url)
+        remote_oid = observe(request).fetch("oid")
+        unless remote_oid == record.fetch("head_oid") && revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!("revision_history_rewritten", "recorded task PR history requires inspection before adoption")
+        end
+        imported = Request.new(**request.to_h.merge(
+          head_oid: remote_oid,
+          diff_digest: Hive::AgentGitGate.diff_digest(
+            request.worktree_path, base_oid: request.scan_base_oid, head_oid: remote_oid
+          )
+        ))
+        revalidate!(revalidate, :adopt)
+        observe_pr(initialize_state(imported, revalidate), imported, record)
+      end
+
+      def recorded_pr(request, url)
+        candidates = complete_inventory(request).select { |row| row.fetch("head_branch") == request.branch }
+        record = candidates.first
+        unless candidates.one? && record.fetch("url") == url &&
+               record.fetch("head_repository")&.casecmp?(request.repository) &&
+               record.fetch("base_repository").casecmp?(request.repository) &&
+               record.fetch("base_branch") == request.base_branch
+          blocked!("pr_identity_conflict", "recorded task PR does not match repository and branch inventory")
+        end
+        record
+      end
 
       def authenticate(request)
         @github.authenticate!(host: request.host, repository: request.repository)
@@ -368,10 +456,6 @@ module Hive
             revalidate!(revalidate, :final)
             return state.fetch("pr")
           end
-          if state.fetch("phase") == "pr_observed"
-            blocked!("pr_observation_missing", "the observed pull request is absent from the complete inventory")
-          end
-
           case state.fetch("phase")
           when "prepared", "push_intent"
             state = reconcile_push(request, state, revalidate)
@@ -383,17 +467,15 @@ module Hive
         end
       end
 
-      # A coding task can legitimately return from review/artifact rework with
-      # new commits while its controller-owned draft PR remains open. Keep the
-      # original state as the immutable ownership anchor, prove the hosted PR
-      # still carries that exact title/body marker, and permit only a local
-      # fast-forward of the same branch. The PR body is refreshed later by the
-      # existing finalize stage; this boundary owns only safe branch custody.
+      # PR identity is stable across edits to its title, body and commits.
+      # Branch ancestry is checked separately before publishing new content.
       def reconcile_revision(request, state, revalidate)
         record = revision_pull_request(request, state)
         hosted_state = hosted_state(record)
         if %w[closed merged].include?(hosted_state)
           unless record.fetch("head_oid") == request.head_oid
+            return supersede_closed_pr(request, state, record, revalidate) if hosted_state == "closed"
+
             blocked!(
               "revision_hosted_terminal",
               "pull request became terminal before the publication revision was hosted"
@@ -411,13 +493,18 @@ module Hive
             "controller-owned pull-request head does not match the remote branch"
           )
         end
-        unless revision_ancestor?(request, state.fetch("head_oid"), remote_oid)
+        pending = state["pending_rewrite"]
+        if pending && remote_oid == pending.fetch("after_oid")
+          state = record_published_head(state, remote_oid)
+        end
+        unless revision_ancestor?(request, state.fetch("published_head_oid", state.fetch("head_oid")), remote_oid)
           blocked!(
             "revision_history_rewritten",
             "hosted pull-request head no longer contains the owned publication"
           )
         end
-        unless revision_ancestor?(request, remote_oid, request.head_oid)
+        authorized_rewrite = pending && pending["before_oid"] == remote_oid && pending["after_oid"] == request.head_oid
+        unless authorized_rewrite || revision_ancestor?(request, remote_oid, request.head_oid)
           blocked!(
             "revision_non_fast_forward",
             "local publication revision does not contain the hosted pull-request head"
@@ -458,21 +545,67 @@ module Hive
         revision_observation(state, request, record, head_oid: request.head_oid)
       end
 
+      # hivedev C4: its owner closed the PR unmerged, and the re-run task
+      # reached open-pr again with new commits. A closed PR cannot host them,
+      # so blocking parked the task while the healer retried it forever.
+      # Start a successor publication on the same branch and create a new PR.
+      # The push stays leased: the branch must be absent or still at the last
+      # head this controller published, and the new head must contain it.
+      def supersede_closed_pr(request, state, record, revalidate)
+        published = state.fetch("published_head_oid", state.fetch("pr").fetch("head_oid"))
+        remote_oid = observe(request).fetch("oid")
+        unless remote_oid.nil? || remote_oid == published
+          blocked!(
+            "revision_hosted_terminal",
+            "pull request is closed and its branch moved after the last publication"
+          )
+        end
+        if remote_oid && !revision_ancestor?(request, remote_oid, request.head_oid)
+          blocked!(
+            "revision_non_fast_forward",
+            "local publication revision does not contain the closed pull-request branch"
+          )
+        end
+        successor = write_state(identity(request).merge(
+          "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
+          "phase" => "prepared", "expected_remote_oid" => remote_oid,
+          "push_attempted_at" => nil, "push_observation" => nil,
+          "create_attempts" => 0, "create_attempted_at" => nil, "pr" => nil,
+          "superseded_pr" => {
+            "number" => record.fetch("number"), "url" => record.fetch("url"),
+            "published_head_oid" => published
+          },
+          "updated_at" => timestamp
+        ))
+        reconcile(request, successor, revalidate)
+      end
+
       def observed_publication_revision?(state, request)
         return false unless state.fetch("phase") == "pr_observed" && state.fetch("pr")
 
         expected = identity(request)
-        return false if expected.all? { |key, value| state[key] == value }
-
         %w[host repository base_branch creation_base_oid branch draft].all? do |key|
           state[key] == expected[key]
-        end && state.fetch("title_digest") == request.title_digest &&
-          (state.fetch("head_oid") != request.head_oid || state.fetch("diff_digest") != request.diff_digest)
+        end
+      end
+
+      # PRs on the task branch that can compete for its identity. A closed,
+      # unmerged PR this publication does not own is history, not a competing
+      # identity: GitHub closes a stacked PR when its base branch is deleted at
+      # merge, and that PR cannot be reopened once the head is rebased.
+      # Counting it blocked both first publication and every later revision
+      # push (hivedev C2). Open and merged PRs still conflict.
+      def branch_candidates(records, request)
+        records.select do |record|
+          next false unless record.fetch("head_branch") == request.branch
+
+          record.fetch("state") != "CLOSED" || yield(record)
+        end
       end
 
       def revision_pull_request(request, state)
         records = complete_inventory(request)
-        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        candidates = branch_candidates(records, request) { |record| revision_owned?(record, state, request) }
         exact = candidates.select { |record| revision_owned?(record, state, request) }
         return exact.first if candidates.one? && exact.one?
 
@@ -484,23 +617,12 @@ module Hive
 
       def revision_owned?(record, state, request)
         prior = state.fetch("pr")
-        marker = publication_marker(state)
-        prior_body = "#{request.body.rstrip}\n\n#{marker}\n"
         record.fetch("number") == prior.fetch("number") &&
           record.fetch("url") == prior.fetch("url") &&
+          record.fetch("head_branch") == request.branch &&
           record.fetch("head_repository")&.casecmp?(request.repository) &&
           record.fetch("base_branch") == request.base_branch &&
-          record.fetch("base_repository").casecmp?(request.repository) &&
-          record.fetch("title") == request.title &&
-          record.fetch("body") == prior_body &&
-          Digest::SHA256.hexdigest(record.fetch("title")) == state.fetch("title_digest") &&
-          Digest::SHA256.hexdigest(record.fetch("body")) == state.fetch("body_digest") &&
-          Digest::SHA256.hexdigest(marker) == state.fetch("marker_digest")
-      end
-
-      def publication_marker(state)
-        "<!-- hive-publication:v1 id=#{state.fetch('publication_id')} " \
-          "base=#{state.fetch('creation_base_oid')} -->"
+          record.fetch("base_repository").casecmp?(request.repository)
       end
 
       def revision_ancestor?(request, ancestor_oid, head_oid)
@@ -516,12 +638,18 @@ module Hive
       end
 
       def revision_observation(state, request, record, head_oid:)
+        record_published_head(state, head_oid)
         state.fetch("pr").merge(
           "head_oid" => head_oid,
           "hosted_state" => hosted_state(record),
           "observed_at" => timestamp,
           "diff_digest" => request.diff_digest
         )
+      end
+
+      def record_published_head(state, head_oid)
+        return state if state["published_head_oid"] == head_oid && !state.key?("pending_rewrite")
+        write_state(state.except("pending_rewrite").merge("published_head_oid" => head_oid, "updated_at" => timestamp))
       end
 
       def hosted_state(record)
@@ -542,10 +670,12 @@ module Hive
             "after_oid" => request.head_oid,
             "remote_fingerprint" => current.fetch("remote_fingerprint")
           }
-          return write_state(state.merge(
+          observed = write_state(state.merge(
             "phase" => "branch_observed", "push_observation" => observation,
             "updated_at" => timestamp
           ))
+          record_command_effect_observation("github_push", request, observation)
+          return observed
         end
         unless current.fetch("oid") == state.fetch("expected_remote_oid")
           blocked!("remote_branch_conflict", "remote branch lease no longer matches publication intent")
@@ -564,6 +694,12 @@ module Hive
         state = write_state(state.merge(
           "push_attempted_at" => timestamp, "updated_at" => timestamp
         ))
+        record_command_effect_submission(
+          "github_push",
+          request,
+          "expected_remote_oid" => state.fetch("expected_remote_oid"),
+          "head_oid" => request.head_oid
+        )
         begin
           receipt = @git.push_exact(
             worktree_path: request.worktree_path, branch: request.branch,
@@ -582,10 +718,12 @@ module Hive
               "after_oid" => request.head_oid,
               "remote_fingerprint" => after_failure.fetch("remote_fingerprint")
             }
-            return write_state(state.merge(
+            observed = write_state(state.merge(
               "phase" => "branch_observed", "push_observation" => observation,
               "updated_at" => timestamp
             ))
+            record_command_effect_observation("github_push", request, observation)
+            return observed
           end
           if after_failure.fetch("oid") == state.fetch("expected_remote_oid")
             write_state(state.merge(
@@ -605,10 +743,12 @@ module Hive
           "after_oid" => after.fetch("oid"),
           "remote_fingerprint" => after.fetch("remote_fingerprint")
         }
-        write_state(state.merge(
+        observed = write_state(state.merge(
           "phase" => "branch_observed", "push_observation" => observation,
           "updated_at" => timestamp
         ))
+        record_command_effect_observation("github_push", request, observation)
+        observed
       end
 
       def reconcile_create(request, state, revalidate)
@@ -630,6 +770,12 @@ module Hive
           "create_attempts" => attempts, "create_attempted_at" => timestamp,
           "updated_at" => timestamp
         ))
+        record_command_effect_submission(
+          "github_pull_request",
+          request,
+          "publication_id" => request.publication_id,
+          "head_oid" => request.head_oid
+        )
         begin
           @github.create_pull_request(
             request: request, publication_id: request.publication_id
@@ -653,12 +799,40 @@ module Hive
 
       def reconcile_pull_requests(request)
         records = complete_inventory(request)
-        candidates = records.select { |record| record.fetch("head_branch") == request.branch }
+        candidates = branch_candidates(records, request) { |record| exact_owned?(record, request) }
         return nil if candidates.empty?
         exact = candidates.select { |record| exact_owned?(record, request) }
         return exact.first if candidates.one? && exact.one?
 
         blocked!("pr_identity_conflict", "pull-request identity conflict requires operator reconciliation")
+      end
+
+      def record_command_effect_submission(kind, request, identity)
+        return unless defined?(Hive::CommandOperation)
+
+        Hive::CommandOperation.record_effect_submission(
+          kind: kind,
+          identity: {
+            "publication_id" => request.publication_id,
+            "host" => request.host, "repository" => request.repository,
+            "branch" => request.branch
+          }.merge(identity)
+        )
+      end
+
+      def record_command_effect_observation(source, request, evidence)
+        return unless defined?(Hive::CommandOperation)
+
+        Hive::CommandOperation.record_effect_observation(
+          source: source,
+          correlation_id: request.publication_id,
+          evidence: {
+            "publication_id" => request.publication_id,
+            "host" => request.host,
+            "repository" => request.repository,
+            "branch" => request.branch
+          }.merge(evidence)
+        )
       end
 
       def complete_inventory(request)
@@ -745,9 +919,11 @@ module Hive
           "number" => record.fetch("number"), "url" => record.fetch("url"),
           "hosted_state" => hosted_state(record), "observed_at" => timestamp
         )
-        write_state(state.merge(
+        observed = write_state(state.merge(
           "phase" => "pr_observed", "pr" => pr, "updated_at" => timestamp
         ))
+        record_command_effect_observation("github_pull_request", request, pr)
+        observed
       end
 
       def observe(request)
@@ -776,7 +952,10 @@ module Hive
         end
         return if detected.empty?
 
-        blocked!("secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes")
+        raise Blocked.new(
+          "secret_detected", "publication secret policy blocked #{detected.join(', ')} bytes",
+          blocked_fields: detected.map { |field| field == "commits" ? "diff" : field }
+        )
       rescue Hive::SecretScanner::Unavailable => e
         blocked!("secret_scan_unavailable", e.message)
       end
@@ -829,7 +1008,8 @@ module Hive
       end
 
       def validate_state(state)
-        unless state.is_a?(Hash) && state.keys.sort == STATE_FIELDS.sort &&
+        unless state.is_a?(Hash) &&
+               (state.keys - %w[published_head_oid pending_rewrite superseded_pr]).sort == STATE_FIELDS.sort &&
                state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                PHASES.include?(state["phase"]) && state["publication_id"].to_s.match?(PUBLICATION_ID) &&
                state["creation_base_oid"].to_s.match?(OID) &&
@@ -839,9 +1019,19 @@ module Hive
                state["body_digest"].to_s.match?(DIGEST) &&
                state["marker_digest"].to_s.match?(DIGEST) &&
                [ true, false ].include?(state["draft"]) &&
-               state["expected_remote_oid"].nil? &&
+               valid_expected_remote_oid?(state) &&
                state["create_attempts"].is_a?(Integer) && state["create_attempts"] >= 0
           blocked!("state_corrupt", "publication state contract is invalid")
+        end
+        if state.key?("published_head_oid") && (!state["published_head_oid"].to_s.match?(OID) || !state["pr"])
+          blocked!("state_corrupt", "publication head is invalid")
+        end
+        if state.key?("pending_rewrite")
+          rewrite = state["pending_rewrite"]
+          unless rewrite.is_a?(Hash) && rewrite.keys.sort == %w[after_oid before_oid] &&
+                 rewrite.values.all? { |oid| oid.is_a?(String) && oid.match?(OID) } && state["pr"]
+            blocked!("state_corrupt", "publication rewrite is invalid")
+          end
         end
         %w[host repository base_branch branch].each do |key|
           blocked!("state_corrupt", "publication state contract is invalid") unless
@@ -855,6 +1045,20 @@ module Hive
         state
       rescue ArgumentError, KeyError, TypeError
         blocked!("state_corrupt", "publication state contract is invalid")
+      end
+
+      # V1 pushes only to an absent branch, except that a successor to a
+      # closed PR may lease the branch at the head it last published there.
+      def valid_expected_remote_oid?(state)
+        expected = state["expected_remote_oid"]
+        superseded = state["superseded_pr"]
+        unless superseded.nil?
+          return false unless superseded.is_a?(Hash) &&
+                              superseded.keys.sort == %w[number published_head_oid url] &&
+                              superseded["number"].is_a?(Integer) && superseded["url"].is_a?(String) &&
+                              superseded["published_head_oid"].to_s.match?(OID)
+        end
+        expected.nil? || (!superseded.nil? && expected == superseded["published_head_oid"])
       end
 
       def validate_state_relations!(state)

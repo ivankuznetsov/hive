@@ -28,6 +28,10 @@ components:
     owned_paths:
       - lib/hive/runtime_control_plane.rb
       - lib/hive/runtime_control_plane/codec.rb
+      - lib/hive/runtime_control_plane/command_migrations/002_add_command_receipts.rb
+      - lib/hive/runtime_control_plane/command_schema.rb
+      - lib/hive/runtime_control_plane/command_schema_installation.rb
+      - lib/hive/runtime_control_plane/command_schema_writer_guard.rb
       - lib/hive/runtime_control_plane/database.rb
       - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
       - lib/hive/runtime_control_plane/operational_repository.rb
@@ -40,7 +44,7 @@ components:
       - "Stable-id task leases, task counters, and bounded coordination rows have no filesystem compatibility authority"
       - "Usage telemetry and complete daemon/status generations share this database; operational projections are atomically paired and source-bound"
     schema_contracts:
-      - "A fixed application ID, exact consecutive IntegerMigrator version, complete table inventory, foreign keys, checks, and partial unique indexes fail closed"
+      - "A fixed application ID and exact base IntegerMigrator version are checked with the separately versioned command-receipt extension ledger, manifest checksum, complete table inventory, foreign keys, checks, and indexes; either schema fails closed"
       - "Bounded JSON is canonical UTF-8 text and timestamps are canonical UTC strings with six fractional digits"
       - "SQLite must support partial indexes and RETURNING; live connections use WAL, foreign keys, FULL synchronous mode, trusted_schema off, DQS disabled, and the five-second busy timeout"
     lock_contracts:
@@ -51,6 +55,7 @@ components:
       - hive/config
       - hive/errors
       - hive/paths
+      - hive/pid_file
       - hive/task_meta
     internal_collaborators:
       - Sequel::Database
@@ -59,22 +64,33 @@ components:
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/attempts/detached_launcher.rb
+      - lib/hive/command_receipt_capacity.rb
+      - lib/hive/command_receipt_maintenance.rb
+      - lib/hive/command_receipt_pruner.rb
+      - lib/hive/command_receipt_store.rb
       - lib/hive/babysitter/passthrough_runner.rb
       - lib/hive/commands/daemon.rb
-      - lib/hive/commands/migrate.rb
+      - lib/hive/commands/runtime.rb
+      - lib/hive/commands/setup.rb
       - lib/hive/commands/web.rb
       - lib/hive/daemon/dispatcher.rb
       - lib/hive/daemon/operational_snapshot.rb
       - lib/hive/lock.rb
+      - lib/hive/one_shot/project_guard.rb
+      - lib/hive/one_shot/process_executor.rb
       - lib/hive/patrol/launch_budget.rb
+      - lib/hive/project_identity.rb
+      - lib/hive/runtime_control_plane/installation.rb
       - lib/hive/task_counter.rb
       - lib/hive/usage_db.rb
       - web/config/puma.rb
-    mutation_authority: "The one runtime SQLite file, its exact schema, installation/project/task identity, task leases, counters, usage telemetry, complete operational projections, and connection/process lifecycle only; no task artifact or legacy runtime store is read or mutated."
+    mutation_authority: "The one runtime SQLite file, its exact base and command-receipt extension schemas, installation/project/task identity, command receipts and effect/pin/maintenance ledgers, task leases, counters, usage telemetry, complete operational projections, and connection/process lifecycle only; no task artifact or legacy runtime store is read or mutated."
     recovery_surface: "Missing, older, newer, partial, unrelated, corrupt, unsupported-feature, and integrity failures remain typed and fail closed with offline migration or restore guidance."
     wiki_page: wiki/component-boundaries.md
     focused_tests:
       - test/unit/runtime_control_plane/database_test.rb
+      - test/unit/runtime_control_plane/command_schema_test.rb
+      - test/unit/runtime_control_plane/installation_test.rb
       - test/unit/runtime_control_plane/process_guard_test.rb
       - test/unit/runtime_control_plane/schema_test.rb
       - test/unit/lock_test.rb
@@ -386,6 +402,8 @@ components:
         files:
           - lib/hive/commands/attempt_supervise.rb
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
+          - lib/hive/one_shot/project_liveness.rb
           - lib/hive/commands/module/dry_run.rb
           - lib/hive/commands/status.rb
           - lib/hive/conditions/execute_boundary.rb
@@ -393,11 +411,13 @@ components:
           - lib/hive/artifacts/outcome_evidence/store.rb
           - lib/hive/implementation_identity/store.rb
           - lib/hive/modules/inspector.rb
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/quiescence_process_evidence.rb
           - lib/hive/daemon/recovery_coordinator.rb
           - lib/hive/task_activity.rb
           - lib/hive/task_closure.rb
           - lib/hive/task_workspace/builder.rb
-        reason: "Existing Hive composition, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
+        reason: "Existing Hive composition, quiescence process evidence, read-only consumers, execution-boundary checks, and closure verification share the canonical runtime-control-plane repository; they are not alternate admission producers."
       - constant: Hive::Attempts::Supervisor
         files:
           - lib/hive/commands/attempt_supervise.rb
@@ -405,27 +425,39 @@ components:
       - constant: Hive::Attempts::Reconciler
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root injects reconciliation into its scheduler without exposing lifecycle operations through the admission facade."
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/quiescence_finalizer.rb
+          - lib/hive/one_shot/runner.rb
+        reason: "The daemon composition root, quiescence controller/finalizer, and one-shot runner reconcile attempts without exposing lifecycle operations through the admission facade."
       - constant: Hive::Attempts::ProcessIdentity
         files:
           - lib/hive/commands/daemon.rb
-        reason: "The daemon composition root uses the process-identity verifier to classify live workers safely."
+          - lib/hive/daemon/quiescence.rb
+          - lib/hive/daemon/status_report.rb
+          - lib/hive/one_shot/runner.rb
+          - lib/hive/runtime_control_plane/process_registry.rb
+        reason: "The daemon composition root, quiescence controller, read-only paused-status probe, one-shot runner, and installation-owned process registry use the process-identity verifier to classify live workers safely."
       - constant: Hive::Attempts::LostOutcomeTransition
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns internal loss evidence persistence and injection."
       - constant: Hive::Attempts::LostOutcomeProcessor
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns internal loss-policy wiring; it is not a public recovery operation."
       - constant: Hive::Attempts::FinalizationMaintenance
         files:
           - lib/hive/commands/daemon.rb
+          - lib/hive/one_shot/runner.rb
         reason: "The daemon composition root owns finalization wiring; callers receive the composed service."
     hive_consumers:
       - lib/hive/commands/run.rb
       - lib/hive/commands/stage_action.rb
       - lib/hive/commands/daemon.rb
+      - lib/hive/one_shot/runner.rb
+      - lib/hive/one_shot/project_liveness.rb
       - lib/hive/bot/dispatch_request_writer.rb
     mutation_authority: "The facade accepts explicit admission requests; the repository owns atomic admission, lifecycle, live-capacity, accounting, lost-recovery, failure, and terminal-publication transitions."
     recovery_surface: "The facade admits independent recovery attempts; reconciliation, healing, cancellation, export, and generic lifecycle policy remain internal."
@@ -457,24 +489,33 @@ components:
       - lib/hive/user_service.rb
       - lib/hive/user_service
     state_contracts:
-      - "Per-user systemd unit or launchd plist, manager observations, and timestamped backups"
+      - "Per-user systemd unit or launchd plist, tri-state manager observations, collision-safe operator backups, durable transition journals, and applied receipts"
     schema_contracts:
       - "Definition, Plan, Status, and Result are platform-neutral; Hive command JSON and messages remain adapter-owned"
     lock_contracts:
-      - "No cross-manager transaction; apply and remove revalidate the exact observed file and manager state before mutation"
+      - "Every target mutation is serialized by an owner-private canonical-target lock anchored to the real home; durable directional intent remains authoritative until a prior or desired endpoint is freshly verified"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/atomic_file
+      - hive/lock
+      - hive/managed_directory
     internal_collaborators:
       - Hive::UserService::Manager
+      - Hive::UserService::Transaction
+      - Hive::UserService::TransactionJournal
+      - Hive::UserService::AppliedReceipt
     forbidden_constructions:
       - Hive::UserService::Manager
+      - Hive::UserService::Transaction
+      - Hive::UserService::TransactionJournal
+      - Hive::UserService::AppliedReceipt
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/commands/service_installer/base.rb
       - lib/hive/commands/daemon/service_installer.rb
       - lib/hive/commands/bot/service_installer.rb
       - lib/hive/commands/web/service_installer.rb
+      - lib/hive/commands/babysit/service_installer.rb
       - lib/hive/commands/daemon.rb
       - lib/hive/commands/bot.rb
       - lib/hive/commands/web.rb
@@ -482,15 +523,21 @@ components:
       - lib/hive/commands/init.rb
       - lib/hive/commands/uninstall.rb
       - lib/hive/web/service_status.rb
-    mutation_authority: "Hive command adapters authorize install, force replacement, restart, and remove."
-    recovery_surface: "Typed outcomes report backup paths, final observed state, and partial manager/file failures."
+    mutation_authority: "Hive command adapters authorize operations; UserService alone serializes and applies unit-file and manager mutations."
+    recovery_surface: "Typed outcomes report verified prior, desired, filesystem-only, busy, or retained fail-closed states without exposing private journal schemas."
     wiki_page: wiki/modules/user_service.md
     focused_tests:
       - test/unit/user_service/user_service_test.rb
+      - test/unit/user_service/manager_test.rb
+      - test/unit/user_service/transaction_test.rb
+      - test/unit/user_service/transaction_journal_test.rb
+      - test/unit/user_service/applied_receipt_test.rb
+      - test/unit/user_service/status_test.rb
       - test/unit/commands/service_installer/base_test.rb
       - test/unit/commands/daemon/service_installer_test.rb
       - test/unit/commands/bot/service_installer_test.rb
       - test/unit/commands/web/service_installer_test.rb
+      - test/unit/commands/babysit/service_installer_test.rb
       - test/unit/commands/uninstall_test.rb
     migration_exceptions: []
 
@@ -506,7 +553,7 @@ components:
         - Hive::AgentSupport
         - Hive::AgentSupport::StreamMeter
         - Hive::AgentSupport::Claude
-        - Hive::AgentSupport::Claude::Interactive
+        - Hive::AgentSupport::Claude::Launch
         - Hive::AgentSupport::Claude::Runtime
         - Hive::AgentSupport::Claude::Skills
         - Hive::AgentSupport::Codex
@@ -532,7 +579,7 @@ components:
       - lib/hive/agent_support.rb
       - lib/hive/agent_support/stream_meter.rb
       - lib/hive/agent_support/claude.rb
-      - lib/hive/agent_support/claude/interactive.rb
+      - lib/hive/agent_support/claude/launch.rb
       - lib/hive/agent_support/claude/runtime.rb
       - lib/hive/agent_support/claude/skills.rb
       - lib/hive/agent_support/claude/stream.rb
@@ -568,7 +615,7 @@ components:
       - hive/skill_check
     internal_collaborators:
       - Hive::AgentSupport::OpenCode::Skills
-      - Hive::AgentSupport::Claude::Interactive
+      - Hive::AgentSupport::Claude::Launch
       - Hive::AgentSupport::Claude::Runtime
       - Hive::AgentSupport::Claude::Skills
       - Hive::AgentSupport::Codex::ArtifactPolicy

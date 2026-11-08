@@ -47,8 +47,8 @@
 
 [Unit]
 Description=Hive Telegram bot
-After=network-online.target
-Wants=network-online.target
+# Do not order a user unit on system-manager network targets. Connectivity
+# failures stay inside the bot's application-owned polling retries.
 # Hard cap on the auto-restart loop. If `hive bot start` exits non-zero
 # 3 times within 5 minutes, systemd marks the unit `failed` instead of
 # respawning forever. This is the safety net for a misconfigured ExecStart=
@@ -68,7 +68,7 @@ Type=simple
 # system-Ruby installs. The bot's token comes from ~/.config/hive/.env,
 # not from this unit.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive bot start --foreground
+ExecStart=%h/.local/bin/hive bot start --foreground --context local
 Restart=on-failure
 RestartSec=10
 

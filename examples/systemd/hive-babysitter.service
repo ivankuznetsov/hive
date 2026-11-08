@@ -3,15 +3,15 @@
 
 [Unit]
 Description=Hive PR babysitter
-After=network-online.target
-Wants=network-online.target
+# Do not order a user unit on system-manager network targets. Connectivity
+# failures stay inside the babysitter's application-owned dispatch retries.
 StartLimitBurst=3
 StartLimitIntervalSec=300
 
 [Service]
 Type=simple
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive babysit start
+ExecStart=%h/.local/bin/hive babysit start --context local
 Restart=on-failure
 RestartSec=30s
 # TERM reaches the dispatcher first so an active synchronous repair can drain.

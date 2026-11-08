@@ -9,6 +9,7 @@ require "hive/agent_runtime"
 require "hive/agent_profiles"
 require "hive/config"
 require "hive/markers"
+require "hive/mcp"
 require "hive/secret_patterns"
 require "hive/stages/base"
 require "hive/task_action"
@@ -84,6 +85,7 @@ module Hive
     def run!
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
+        @cfg = cfg
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
         @routing_arguments = Hive::Stages::Base.model_routing_arguments(
           cfg, "diagnose", profile,
@@ -372,7 +374,7 @@ module Hive
       Hive::SecretPatterns.redact(text)
     end
 
-    # popen3 + manual wait loop with pgroup-scoped SIGTERM/SIGKILL on
+    # spawn + manual wait loop with pgroup-scoped SIGTERM/SIGKILL on
     # timeout. Timeout.timeout was the previous shape: when the timer
     # fired, Ruby unwound the popen3 block without signalling the child,
     # leaving the agent binary (claude / codex) running detached from
@@ -380,11 +382,13 @@ module Hive
     # for the full session length. The pattern below mirrors
     # Hive::Tui::Subprocess#bounded_capture3.
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
-      invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
-      run_with_timeout(
-        invocation.argv, cwd, invocation.stdin_data, timeout_sec,
-        profile.subscription_environment
-      )
+      Hive::Mcp.with_launch(profile: profile, cfg: @cfg, scope: "diagnose", cwd: cwd) do |mcp_launch|
+        invocation = compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch)
+        run_with_timeout(
+          invocation.argv, cwd, invocation.stdin_data, timeout_sec,
+          mcp_launch.environment_for(profile.subscription_environment)
+        )
+      end
     end
 
     def run_with_timeout(cmd, cwd, stdin_data, timeout_sec, environment = {})
@@ -392,8 +396,7 @@ module Hive
       # from trap("INT") / trap("TERM") handlers and Mutex#synchronize
       # raises ThreadError in trap context. Queue#<< is trap-safe.
       @kill_threads_queue = Queue.new
-      Open3.popen3(environment, *cmd, chdir: cwd, pgroup: true) do |stdin, stdout, stderr, wait_thr|
-        feed_stdin(stdin, stdin_data)
+      popen_with_stdin_file(environment, cmd, cwd, stdin_data) do |stdout, stderr, wait_thr|
         out_reader = Thread.new { read_stream(stdout) }
         err_reader = Thread.new { read_stream(stderr) }
         started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -500,16 +503,44 @@ module Hive
       threads.none?(&:alive?)
     end
 
-    def feed_stdin(stdin, stdin_data)
-      stdin.write(stdin_data) if stdin_data
-    rescue Errno::EPIPE
-      nil
-    ensure
+    # Open3.popen3's contract (yield stdout, stderr and the wait thread;
+    # close the pipes and join the waiter on exit) with the prompt on a
+    # 0600 regular-file stdin instead of a pipe. Some CLIs read the prompt
+    # through `--prompt-file=/dev/stdin` and reject a pipe ("not a regular
+    # file"; Muse), so diagnosis must hand them a file the same way
+    # Hive::Agent#stdin_file_for does for stage runs.
+    def popen_with_stdin_file(environment, cmd, cwd, stdin_data)
+      stdin_file = stdin_tempfile(stdin_data)
+      out_r, out_w = IO.pipe
+      err_r, err_w = IO.pipe
+      pid = Process.spawn(
+        environment, *cmd,
+        chdir: cwd, pgroup: true,
+        in: stdin_file || File::NULL, out: out_w, err: err_w
+      )
+      out_w.close
+      err_w.close
+      wait_thr = Process.detach(pid)
       begin
-        stdin.close
-      rescue StandardError
-        nil
+        yield out_r, err_r, wait_thr
+      ensure
+        [ out_r, err_r ].each { |io| io.close unless io.closed? }
+        wait_thr.join
       end
+    ensure
+      [ out_r, out_w, err_r, err_w ].compact.each { |io| io.close unless io.closed? }
+      stdin_file&.close!
+    end
+
+    def stdin_tempfile(data)
+      return nil if data.nil?
+
+      file = Tempfile.new([ "hive-diagnose-prompt-", ".txt" ])
+      file.chmod(0o600)
+      file.write(data)
+      file.flush
+      file.rewind
+      file
     end
 
     def read_stream(stream)
@@ -584,24 +615,22 @@ module Hive
     # frames into a markdown artifact gave operators a wall of JSON
     # instead of the diagnosis. Plain-text print mode is the default
     # when `--output-format` is omitted, so dropping the flag is enough.
-    # Also intentionally drop `extra_flags` — Hive::Stages-level extras
-    # (e.g. `--mcp-config`, `--strict-mcp-config`) configure the
-    # structured-stream context the diagnose flow doesn't need.
-    def build_cmd(profile, prompt, add_dirs, max_budget_usd)
-      compiled_invocation(profile, prompt, add_dirs, max_budget_usd).argv.dup
+    # Hive-owned MCP isolation still applies (plan 2026-10-15-001): the
+    # diagnose launch gets the same rendering as every other agent.
+    def build_cmd(profile, prompt, add_dirs, max_budget_usd, mcp_launch = nil)
+      compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch).argv.dup
     end
 
-    def compiled_invocation(profile, prompt, add_dirs, max_budget_usd)
-      Hive::AgentRuntime.compile(
-        Hive::AgentRuntime::Request.new(
-          profile: profile,
-          prompt: prompt,
-          add_dirs: add_dirs,
-          max_budget_usd: max_budget_usd,
-          routing_arguments: @routing_arguments,
-          include_output_format: false
-        )
+    def compiled_invocation(profile, prompt, add_dirs, max_budget_usd, mcp_launch = nil)
+      request = Hive::AgentRuntime::Request.new(
+        profile: profile,
+        prompt: prompt,
+        add_dirs: add_dirs,
+        max_budget_usd: max_budget_usd,
+        routing_arguments: @routing_arguments,
+        include_output_format: false
       )
+      mcp_launch ? Hive::Mcp.compile(request, mcp_launch) : Hive::AgentRuntime.compile(request)
     end
   end
 end

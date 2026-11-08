@@ -1,10 +1,10 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-09-01
-tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal]
+updated: 2026-10-30
+tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
 **TLDR**: `hive status` answers the ordinary operational question—whether the
@@ -15,14 +15,19 @@ broader active queue and blocker ownership, `hive task TARGET --json` for one
 task's detail, `hive tui` for the fleet browser, and `hive archive` for
 terminal history. The former public full-fleet status surface is removed.
 
+For a named remote context, use `hive status --context NAME --json` and follow
+`data.continuation` with `--cursor HANDLE`, preserving the project filter.
+Remote status rejects `--operational` and reports unavailable project loads
+explicitly. See [[remote-access]] for its bounded page and authority contract.
+
 ## Mode contract
 
 | Invocation | Contract |
 |---|---|
-| `hive status` | Bounded human daemon/liveness snapshot. |
+| `hive status` | Bounded human daemon/liveness snapshot. It lists live work only, so it always ends its task block with `Waiting, blocked, and queued work: hive status --operational`; `NO RUNNING TASKS` does not mean nothing is waiting on the operator. |
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
-| `hive status --operational --json` | `hive-operational-status.v4` agent document. It includes required active runtime identity plus the v4 nullable stateless routing decision; superseded v1-v3 are removed. |
+| `hive status --operational --json` | `hive-operational-status.v5` agent document. It includes required active runtime identity, the nullable stateless routing decision, and complete dependency fan-in state; superseded v1-v4 are removed. |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -42,6 +47,32 @@ leaking to process stderr. Outside that scoped build the same warnings retain
 their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
 
+## Usage and examples: act
+
+`hive act ACTION_ID TARGET --observation TOKEN --json` executes one fresh
+routine action issued by operational status. For example, use
+`hive act workflow.retry demo:task --observation TOKEN --json` only with the
+exact `action_id`, target, and opaque token from the current status document; a
+stale or invented action is refused.
+
+## Output exceptions, serialization, and exit codes
+
+Status uses `hive-running-status.v2`, `hive-status-diagnose.v2`, or
+`hive-operational-status.v5` according to the selected mode; act uses
+`hive-act.v2`. Invalid arguments and stale/refused actions emit the selected
+typed error surface. Status suppresses a `JSON::GeneratorError` while encoding
+an error so the original typed error controls the exit, while act propagates
+the generator exception and emits no fallback JSON. Success exits `0`; usage
+errors exit `64`, temporary/stale observations exit `75`, and configuration
+errors exit `78`.
+
+## Behavior, options, schema, output exceptions, serialization fallback, and exit codes
+
+| Command | Options | Behavior | Schema | Output exceptions | Serialization fallback | Exit codes |
+|---|---|---|---|---|---|---|
+| `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v5`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+| `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+
 ## Bounded running-task contract
 
 `Hive::RunningStatus` validates at most 256 registered projects, then performs
@@ -52,7 +83,7 @@ at most 64 KiB of `meta.yml` is read after a live process is established.
 Task and daemon PID files are opened nonblocking and no-follow; daemon health
 reads at most 4 KiB through `Hive::Daemon::StatusReport#running_state`. The
 producer does not instantiate `Task`, open the attempts store, read conditions
-or history, project actions, inspect git, build `hive-status.v8`, or run daemon
+or history, project actions, inspect git, build `hive-status.v9`, or run daemon
 service/binary-drift subprocess probes.
 Bounded JSON/YAML parsing treats parser recursion and allocation failures as
 malformed input, so corrupt leases, metadata, or daemon PID documents
@@ -77,6 +108,10 @@ response: they are counted under `source.malformed_locks` or
 not be proven. Malformed, absent, unreadable, or oversized metadata does not
 hide a live task; the row falls back to its bounded folder identity and reports
 `metadata_status`.
+
+The compact producer loads the task-lease repository directly before deriving
+its lock payload limit, so isolated `hive status --json` loads do not depend on
+another command having initialized that repository first.
 
 Every returned task has `status: "running"`, `action: "agent_running"`, and
 `liveness.running: true`; `liveness.source` says which process observation
@@ -130,6 +165,57 @@ The operational human heading reports the projected graph's age. The operational
 JSON source reports `provenance` (`fresh_scan` or `daemon_cache`) and
 `age_seconds` separately from the projection timestamp.
 
+## Operational audit on read-only state
+
+`hive status --operational --json` normally follows the same writable startup
+path as other commands: Hive validates the installation, opens its WAL
+connection, registers the process, and reconciles the scheduler before
+dispatch. Only the one-shot CLI operational observation may fall back to
+inspection, and only after that ordinary path raises a typed read-only storage
+error before registration is completed. Other status modes, inherited launch
+reservations, mutating option combinations, daemons, Web, and in-process status
+callers do not acquire this exemption. The one other eligible route is
+`hive worktree status TARGET [--project P] [--stage S] [--json]`
+(`OperationalInspection.eligible_route?`; see [[modules/worktree]]).
+
+The fallback is Linux-only. Hive must resolve the actual state path and find an
+available, unambiguous read-only mount in `/proc/self/mountinfo`; mode bits,
+ownership, `File.writable?`, and write probes are not confirmation. Missing or
+ambiguous procfs metadata, and non-Linux platforms such as macOS, leave the
+mount unconfirmed. A typed read-only failure then returns
+`state_storage_read_only` with `Use a writable, accessible state root
+(HIVE_HOME).` rather than a task list. The audit must run as the uid that owns
+the state. Cross-uid auditing is outside this contract; an actual custody
+predicate violation remains `database_custody_invalid` with the established
+backup action.
+
+After confirmation, every installation and task read uses one database-owned
+inspection policy:
+
+- With neither `-wal` nor `-shm`, Hive uses an immutable read-only connection
+  and checks again after opening that no sidecar appeared.
+- A readable WAL/SHM pair uses plain read-only SQLite inspection so committed
+  WAL rows remain visible. If SQLite needs WAL-index recovery that the mount
+  forbids, the command returns `state_storage_read_only` with `Use a writable,
+  accessible state root (HIVE_HOME).`
+- Either sidecar alone returns `state_storage_read_only` with `Use a writable
+  state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove
+  the stray sidecar after verifying no committed data will be lost.`
+
+Inspection never checkpoints, removes, repairs, or creates sidecars. An
+inaccessible database or sidecar returns `state_storage_inaccessible` with
+`Use a writable, accessible state root (HIVE_HOME).` Storage access failures
+never prescribe backup recovery; confirmed corruption and custody violations
+retain their existing codes and backup guidance. Do not suggest `hive runtime
+status` as a remedy when it is failing under this same inspection policy.
+
+A failure before command dispatch uses the existing
+`hive-runtime-maintenance.v1` envelope and exposes `runtime_code` plus
+`next_action`. A failure reached after operational dispatch uses the additive
+optional `code` and `next_action` fields in `hive-operational-status.v4`.
+Those fields are not added to plain, running, full/archive, daemon-task, or
+diagnostic status errors. Successful operational v4 documents are unchanged.
+
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
@@ -181,6 +267,17 @@ Confirmation-free operational actions repeat this routine read under the task
 lock. If history changes or becomes invalid between status and `hive act`, the
 observation token is rejected without mutation.
 
+Dead process metadata is stale liveness only while the task's current action
+or marker still claims that a runner owns the step. A markerless controller
+task whose durable receipts already project `ready_to_run` or
+`ready_to_advance` reports `not_running` and keeps that workflow state even if
+an earlier attempt left dead process metadata in the runtime task lease. For
+daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
+task-lock acquisition reclaims the dead holder with a higher fence without an
+operator repair step. A genuinely current
+`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
+continues to report `needs_repair`.
+
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
 `dependency_wait` as its primary reason; it cannot fall through to `idle`.
@@ -219,6 +316,17 @@ refines that projection. `retry_cooldown` carries the exact deadline and stays
 scheduler-owned; `retry_in_flight` is running/agent-owned; and
 `retry_safety_blocked` becomes `needs_repair` with the reported operator or
 Hive owner instead of falsely claiming the scheduler will clear it.
+`retry_in_flight` requires in-flight evidence: the recovery's dispatch request
+is claimed/admitted/awaiting delivery, or its referenced attempt is still
+launching or running. A durable `dispatched` recovery whose request went back
+to `queued` after its attempt ended is a queued retry, not running work:
+`retry_pending` (`waiting_on_provider_or_scheduler`, scheduler-owned, reason
+`retry_awaiting_dispatch`), or `retry_dispatch_disabled` (`needs_repair`,
+operator-owned, reason `project_dispatch_disabled`, remediation names the
+`daemon.enabled` flag and `hive daemon reload`) when the daemon will not
+dispatch the project. Both keep `recovery.status: queued` with the retry count,
+identical-failure count, and escalation tier, and neither counts toward
+`summary.states.running`.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 
@@ -237,6 +345,14 @@ renders its sanitized declared outcome. Status still publishes the guarded
 only the current terminal stage and that propagated upstream blockers require
 a fresh task.
 
+When later daemon ticks cannot publish a complete scheduler record (for
+example `duplicate_task_identity`, the same slug in two stage folders of one
+project), the retained record carries `last_failure`. While it is still
+current, status adds a `scheduler_tick_failed` warning; after it expires, the
+`scheduler_stale` issue message names the failure (project, slug, and each
+`stage (folder)` for duplicates) instead of only `snapshot_expired`, and the
+remediation says to keep one stage folder per slug.
+
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale
 scheduler evidence, or a failed scheduler join cannot silently collapse into
@@ -244,7 +360,7 @@ an idle verdict. Unclassifiable rows remain `unknown`; a partial snapshot may
 still report a stronger directly observed active state, but never claims idle
 from missing evidence.
 
-`hive-operational-status.v4` includes the task-graph producer's `runtime`
+`hive-operational-status.v5` includes the task-graph producer's `runtime`
 identity (the daemon-recorded identity for a cache hit, or the CLI identity
 for a fresh scan),
 summary/state counts, daemon identity and
@@ -277,6 +393,11 @@ terminal recovery receipt. The one-off recovery-contract migration moved every
 in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
 
+A Patrol Fix publication secret park reports `waiting_on_you`, owned by the
+operator, with a sanitized `secret_detected` reason. It offers no executable
+recovery action, including when the daemon is enabled. Ordinary retry cannot
+release the same blocked generation.
+
 Recovery recommendations bind to the exact current `marker_id`. A task carrying
 an old id-less recoverable marker reports `recovery_migration_required` and
 remains operator-owned until `hive migrate <project>` performs the one-off
@@ -288,6 +409,19 @@ and rejects stale tokens or recommendations that are no longer routine. It is
 not a general command executor and cannot represent destructive, release, or
 administrative actions.
 
+`hive-act.v2` errors include the requested `action_id` and `target`; a missing
+pre-dispatch positional is represented by an empty string. Command-level act
+error serialization uses the strict policy: if `JSON.generate` raises
+`JSON::GeneratorError`, that generator exception is raised rather than
+suppressed, and no fallback JSON document is emitted.
+
+Status pre-dispatch errors retain the requested surface. Bare JSON errors use
+`hive-running-status.v2`, `--diagnose` uses `hive-status-diagnose.v2`, and
+`--operational` uses `hive-operational-status.v5`, each with
+`error_kind: "error"`. Status itself suppresses a
+`JSON::GeneratorError` while serializing an error envelope so the original
+typed status error continues to control the exit boundary.
+
 For markerless descriptor tasks, `observation_mtime` and the locked recheck use
 the stable task `meta.yml` mtime when present rather than the task-directory
 mtime. Task lock creation changes the directory mtime, so using it would make a
@@ -298,18 +432,21 @@ cover workflow stage actions plus generic `run` and `approve` branches from
 status-issued tokens.
 
 Status captures every registered project's workflow/config generation before
-scanning any project's rows, captures one UTC `now`, and then publishes either
-the ordinary or dedicated archive projection. Dependency admission uses those
-same captured generations and is built from the complete
-graph before presentation filtering, so an expired completed dependency still
-satisfies its dependants. When concise operational status builds that graph, it
-also derives each project's `daemon.enabled` context from the captured
-generation instead of parsing the project config a second time. Callers that
-provide an existing status payload retain the context-only config read and do
-not trigger a new workflow-generation scan. Daemon, bot, TUI, and web consume
-the ordinary projection. The TUI separately caches a fresh archive-mode
-payload for its dedicated archive pane and dependency context; it never
-reconstructs ordinary visibility from row timestamps.
+scanning rows and uses one UTC `now`. Active projections build dependency
+admission from the already action-classified rows and their exact referenced prerequisites, so an
+expired completed dependency still satisfies its dependants. Ordinary and
+archive projections retain the complete dependency graph. Operational status
+uses the captured generation for each project's `daemon.enabled` context;
+callers supplying an existing payload keep the context-only config read.
+The producer prepares each project once and reuses selected folders for
+admission. A project that cannot prepare rows falls back to a disk admission
+scan without repeating healthy projects. Synthetic invalid rows retain
+archive membership from their captured workflow generation.
+
+Daemon, TUI, and Web consume active rows. The bot's CLI transport still consumes
+ordinary rows. The TUI separately loads a lossless archive payload on request;
+archive history is not merged back into the active feed or used to derive its
+dependency context.
 
 The JSON envelope isolates project-local failures. Missing roots report
 `error: missing_project_path`, missing state roots report
@@ -383,19 +520,54 @@ summary with `commits`, `path_count`, up to 20 paths, and the latest
 head/reason/time. Bot and TUI consume this producer field rather than reading
 `events.jsonl` independently.
 
-Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
+Every task row has `depends_on`, `blocked_by`, `dependency_stage`,
+`unmet_dependencies`, `dependency_base_mode`, `blocked`, and required nullable
+`admission_error`. `depends_on` is a string, an ordered string array, or null.
+`dependency_base_mode` is `stacked` only for a resolvable same-project scalar
+whose prerequisite is undelivered; delivered prerequisites (`9-done`, or a PR
+observed merged), lists, cross-project scalars, invalid fallbacks, and
+dependency-free tasks use `default`. One scan reuses each project's already loaded default-branch policy
+and one batched local/origin branch-ref inventory; it does not parse project
+configuration or fork Git once per row. Incremental projections build the
+bounded base-selection context only when a changed row declares a scalar
+dependency. If that base-only context fails, affected base modes degrade to
+`default` without marking unrelated rows dependency-blocked. If ref inventory
+is temporarily unavailable, status skips that evidence check rather than
+turning a previously valid stacked relationship into `default`. The
+correlations are closed:
 
-- clear: `blocked: false`, ordinary wait fields null, `admission_error: null`;
-- benign wait: `blocked: true`, `blocked_by`/`dependency_stage` populated, `admission_error: null`;
-- admission error: `blocked: true`, ordinary wait fields null, action `admission_error`, `suggested_command: null`, and an object containing exactly `reason_code`, `offending_ref`, `safe_correction`.
+- clear: `blocked: false`, singular wait fields null,
+  `unmet_dependencies: []`, `admission_error: null`;
+- scalar wait: `blocked: true`; `blocked_by`/`dependency_stage` identify the
+  first unmet direct edge when one exists, but remain null for a transitive-only
+  wait; every outstanding direct or transitive blocker remains in
+  `unmet_dependencies`, with `admission_error: null`;
+- list wait: `blocked: true`, singular wait fields null, and every remaining
+  blocker present in declaration order in `unmet_dependencies`;
+- admission error: `blocked: true`, singular wait fields null, action
+  `admission_error`, `suggested_command: null`, and an object containing
+  exactly `reason_code`, `offending_ref`, `safe_correction`; any independently
+  observed wait entries remain in `unmet_dependencies`.
 
-Text/TUI render a benign wait as `⏸ blocked by <task> (<stage>)`. Admission errors render the stable reason and safe correction ahead of ordinary waits and are never described as waiting on an in-flight task. An unexpected validator exception becomes `dependency_validation_failed`, never an unblocked row.
+Each unmet entry requires `reference`, resolved `blocked_by`, observed
+`dependency_stage`, and `required_gate`. Scalar gates follow project
+`dependency_gate_stage`; list entries always report `required_gate: 9-done`.
+The singular fields are compatibility projections, not a lossy summary for
+fan-in. In particular, when a scalar prerequisite has reached its own gate but
+is waiting on a transitive prerequisite, both singular fields are null and the
+transitive blockers remain available through `unmet_dependencies`.
+
+Text/TUI render all benign blockers from `unmet_dependencies`; scalar rows keep
+the familiar `⏸ blocked by <task> (<stage>)` form. Admission errors render the
+stable reason and safe correction ahead of ordinary waits and are never
+described as waiting on an in-flight task. An unexpected validator exception
+becomes `dependency_validation_failed`, never an unblocked row.
 
 ### Implementation ownership
 
 Coding task rows may also carry `implementation_identity`: the numeric generation, a pending flag, and stage entries for `execute`, `open_pr`, `review.fix`, and `review.ci`. Resolved entries come from projected journal launch events; unlaunched downstream entries are read-only previews from the persisted execute owner plus raw override provenance. Each entry exposes provider, concrete model, requested/effective effort, support, source (`persisted_execute`, `explicit_override`, or `legacy_backfill`), attempts, and resolved/preview status. Unsupported effort is rendered as requested but not applied.
 
-Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append journal events. Text and TUI rows append a bounded execute-owner token after primary error/dependency signals; `I` opens the TUI's full four-stage table, and Hivebox task details show the same projection.
+Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append journal events. Text and TUI rows append a bounded execute-owner token after primary error/dependency signals; `I` opens the TUI's full four-stage table, and Hive web task details show the same projection.
 
 ## Archived tasks
 
@@ -438,15 +610,18 @@ durable per-project cursor under Hive's state home rotates past persistent
 failures across one-shot CLI processes, and the path-only backfill commit
 preserves unrelated staged operator changes.
 
-Operational status, daemon snapshots, TUI, web, and Hivebox omit expired
-archived rows. Every
-successful ordinary project JSON object carries the non-negative
-`hidden_archived_task_count` (including `0`); task objects do not expose
-`completed_at`, retention, hidden details, or hidden reasons. Operational
-status and daemon snapshots aggregate the same key without copying hidden
-rows. Human CLI and TUI surfaces render
-`… and 1 older archived task (hive archive to view)` or
-`… and N older archived tasks (hive archive to view)`.
+Operational status, in-process daemon snapshots, TUI, Web, and watch use the
+active projection. TUI and Web load archive history only when requested,
+through a separate archive producer. Named task reads remain exact, including
+retention-hidden terminal tasks. Non-inert terminal stages remain eligible for
+active scanning; canonical archive membership excludes completed rows even
+when a dependency annotation changes their action label.
+
+The internal CLI graph (`hive status --internal-task-graph --json`), still
+used by the bot, retains ordinary retention-filtered rows pending a separate
+notification recovery contract. Its successful project objects carry
+`hidden_archived_task_count`; task objects do not expose retention details.
+This exception preserves the bot's existing terminal-row notification source.
 
 `hive archive` with no target reuses Status in archive mode
 (`Hive::Commands::Status.new(archive: true)`). It lists every workflow-aware
@@ -486,7 +661,14 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` / `display_name` fields produced v3; dependency waits produced v4. Fail-closed admission is `hive-status` v5, with required nullable `admission_error` and closed reason/action enums; condition fields and isolated projection failures produce v6. Historical v4/v5 schemas remain available. An older daemon safely ignores an admission-error row because it is both `blocked: true` and carries the unknown inert `admission_error` action with no command.
+The `legacy_stage_dirs` field was an additive extension of status v2. Task
+`id` / `display_name` fields produced v3; dependency waits produced v4;
+fail-closed admission produced v5; condition fields and isolated projection
+failures produced v6. The current `hive-status.v9` changes dependency shape to
+admit scalar-or-array `depends_on` and adds required `unmet_dependencies` plus
+`dependency_base_mode`. Pre-1.0 policy publishes only the current schema, so
+upgrade every CLI/daemon/Web consumer and restart long-lived readers before
+creating list metadata. Do not downgrade while arrays exist.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -636,10 +818,27 @@ task/commit locks and committed before the clock can hide a row.
 `status --diagnose --write` is the explicit agent mutation path and writes only
 `diagnostics/red-status.md`.
 
+`status --operational` normally uses the same writable startup and command
+registration as other commands. If that startup returns a typed read-only
+storage error, the one-shot CLI may use a PID-bound, fiber-local inspection
+session only when Linux mount metadata unambiguously confirms the state mount
+is read-only. Clean databases use SQLite immutable URI inspection; a complete
+WAL/SHM pair uses plain read-only SQLite so committed WAL rows remain visible.
+An unpaired sidecar, inaccessible metadata, ambiguous mount evidence, or a
+non-Linux platform fails closed. Integrity validation is reused only within the
+owned one-shot session; custody is still checked for each inspection open, and
+every mutating database entrypoint remains unavailable.
+
 ## Tests
 
+- `test/integration/status_read_only_test.rb` — real Linux read-only mounts,
+  clean and retained-WAL inspection across cache variants, a distinguishable
+  WAL-only scheduler observation, recovery-specific degraded evidence, exact
+  unpaired sidecar errors, and unchanged-state evidence.
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
-- `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
+- `test/integration/dependency_admission_test.rb` — plan-only ordering drift,
+  cross-project repository identity mismatch, and nine-way fan-in release with
+  exact remaining blockers and force non-bypass.
 - `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, workflow-aware retention/count projection, strict boundaries, and lossless archive-mode listing.
 - `test/integration/archive_visibility_retention_test.rb` — one fixed-clock
   mixed legacy/`7`/`never` project drives ordinary status, operational
@@ -667,3 +866,70 @@ owner, or reason. For example, a Patrol fix now parked in review keeps its
 `Escalated (parked)` reason instead of becoming idle with reason `terminal`
 because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
+
+Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.
+
+A local `workflow.retry` action selects its execution policy from the task
+project's effective `daemon.enabled` setting. With dispatch disabled (including
+the legacy default when the key is absent), it admits guarded recovery and
+attaches to the durable attempt until its canonical outcome is available.
+Enabled projects retain queued recovery, regardless of daemon process presence.
+The attached command refreshes task state and returns request/attempt identity,
+terminal outcome and time. JSON remains one `hive-act` v2 document: `ok: true`
+means the action was evaluated; a failed terminal stage also exits nonzero.
+Keyed terminal failures persist a failed command receipt and the same nonzero
+exit status while retaining the evaluated `ok: true` action payload. Failed
+action evaluation replays its stored typed error envelope and extras. Both
+replays emit one envelope without another attempt, including after recovery
+from an interrupted receipt finalization. Stale actions
+require `hive status --operational --json`; inspect live work using
+`hive task SLUG --project PROJECT --json`.
+
+Manual marker workflows do not need scheduler snapshots to expose recovery.
+Controller workflows retain their own receipt-based status. Status
+reads recovery evidence once per project within a snapshot, grouped by slug
+with an independent 65-row overflow check per task. Full status and lean
+recovery projections reuse those observations. Tasks without recovery requests
+need no additional marker read. An identity-matched
+admitted/cleared request over unchanged markerless task input can advertise a
+fresh retry descriptor. The token binds request revision, phase, task identity,
+stage, dispatch generation and post-clear progress. Pending manual recovery is
+`blocked`, owned by the operator; a verified live attempt is agent-owned and
+suppresses routine actions for every descriptor consumer, including remote
+task action reads. Evidence read failures remain typed `unavailable` results
+and suppress routine actions. During execution, configuration and coordinator
+handles are reused while task markers and request bindings are reread at each
+guard. Missing requests and failed best-effort deferral also return typed
+unavailable receipts with local inspection guidance.
+Status only observes: it never clears a marker, resumes a request, dispatches,
+or terminalizes abandoned work.
+
+Caller loss between recovery terminalization and failure-marker repair also
+remains recoverable. When the failed terminal request still matches unchanged
+markerless input, fresh status exposes operator-owned guarded repair. The local
+action completes that repair and reports the existing canonical outcome without
+charging another retry or launching a duplicate. A subsequent fresh descriptor
+can authorize the next retry against the repaired failure marker. Ambiguous
+request bindings are refused before repair; status does not select one by age.
+
+Review terminal rows expose `review_publication`, a local projection of versioned
+marker evidence. It includes publication and verification state, owned worktree
+and branch, full commits absent from the validated PR head, observation time,
+failure reason and recovery commands. `unknown` is distinct from `unpublished`;
+no commit list is invented from the default branch after a squash merge.
+
+Operational text, authenticated task detail and TUI detail share this projection.
+Small TUI screens explicitly omit long commands and direct operators to
+`hive status --operational --json`. Projection performs no GitHub requests or
+Git-history scans. Current routine retry commands come only from the canonical
+action producer. The durable refresh recipe refuses absent/ineligible retry
+recommendations and cannot advance another stage. Findings-only final stales
+require locally committed fixes and explicit operator/coordinator recovery.
+After remediation, select a final-stale task in `hive tui` and press `r` to
+submit that explicit retry. Its routine `workflow.retry` action remains absent.
+
+Draft guidance remains visible after successful review even without a recovery
+request. Normal finalize owns secret scanning and the publication activity record.
+The displayed manual `gh pr ready N` alternative requires publication, exact-head
+verification and a successful current scan, and explains the Hive checks and
+activity record it bypasses. Non-draft and merged PRs have no ready instruction.

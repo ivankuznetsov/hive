@@ -3,10 +3,13 @@ require "stringio"
 require_relative "../../script/test_changed"
 
 class ChangedTestRunnerTest < Minitest::Test
+  include HiveTestHelper
+
   def in_repository
-    Dir.mktmpdir do |directory|
+    with_tmp_dir do |directory|
       Dir.chdir(directory) do
         system("git", "init", "-q", exception: true)
+        disable_git_auto_maintenance!(directory)
         write("lib/hive/old.rb")
         write("test/unit/old_test.rb")
         system("git", "add", ".", exception: true)

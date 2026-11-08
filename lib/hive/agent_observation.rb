@@ -102,6 +102,7 @@ module Hive
         payload: payload,
         evidence: [ { "kind" => "runtime_receipt", "reference" => "sessions/#{session_id}" } ]
       )
+      record_resource_observation(resource, occurred_at: ended_at)
       @finished = true
       true
     rescue Hive::TaskActivity::Error
@@ -126,6 +127,26 @@ module Hive
         evidence: [ { "kind" => "runtime_receipt", "reference" => "sessions/#{session_id}" } ],
         payload: payload
       )
+    end
+
+    def record_resource_observation(resource, occurred_at:)
+      return false unless resource
+
+      append(
+        kind: "resource_limit_observed",
+        operation_id: "session:#{session_id}:resource:#{resource.fetch('kind')}",
+        reason: "agent resource limit observed", occurred_at: occurred_at,
+        payload: {
+          "resource_kind" => resource.fetch("kind"),
+          "kind" => resource.fetch("kind"),
+          "unit" => resource.fetch("unit"),
+          "retry_at" => resource["retry_at"],
+          "state" => "active", "provider" => @provider
+        }
+      )
+      true
+    rescue Hive::TaskActivity::Error
+      false
     end
 
     def reconcile_terminal_operations!
@@ -211,7 +232,7 @@ module Hive
         }
       end
       signal = result[:provider_signal]
-      return nil unless signal.respond_to?(:to_h)
+      return nil unless signal && signal.respond_to?(:to_h)
 
       row = signal.to_h
       failure = row[:failure_class] || row["failure_class"]

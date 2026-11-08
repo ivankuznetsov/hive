@@ -28,17 +28,26 @@ Run `hive setup`, then `hive web` to serve the native Rails UI at
 `http://127.0.0.1:4567`. It operates the same local project registry and
 workflow state as the TUI and CLI; it does not introduce a second workflow
 database or hosted control plane. Loopback access, optional GitHub login,
-service installation, reverse-proxy boundaries, and the separate Hivebox
-container mode are documented in [the web reference](../wiki/commands/web.md).
+service installation, and reverse-proxy boundaries are documented in
+[the web reference](../wiki/commands/web.md).
 
-### When should I choose Hivebox instead of native Hive web?
+### Is there a Docker image? What happened to Hivebox?
 
-Run `hive setup` for the ordinary single-instance Linux/macOS experience: it
-installs the loopback-only native Hive web service by default. Choose
-[Hivebox](../packaging/docker/README.md) when you need container isolation,
-multiple local instances, containment for untrusted agents, or a reproducible
-server/NAS deployment. Windows users can use WSL with systemd for the native
-path or Hivebox for the container path.
+No. Hive has two supported routes: install native Hive and run `hive setup`
+(Homebrew on macOS arm64, AUR on Arch, the bash installer on glibc Linux, or
+any of those inside WSL with systemd on Windows) when you want to run and
+tinker with it yourself, or use the hosted Hive cloud product at [hivedev.sh](https://hivedev.sh) when you would
+rather not. The Hivebox Docker distribution is discontinued. Already published
+`ghcr.io/ivankuznetsov/hivebox` images keep running but get no new builds or
+updates.
+
+To move a Hivebox install to native Hive: install Hive and run `hive setup`;
+copy your project checkouts out of the box's `/data/repos` bind mount
+(`~/hivebox-data/repos` with the old installer defaults) or reclone them;
+register each one with `hive init` (pass `--workflow NAME` when the project
+already carries Hive state, because a plain re-run reports `already
+initialized`); sign Claude, Codex, and `gh` in again on the host; then remove
+the container with `docker rm -f hivebox`.
 
 ### Why more than one agent?
 
@@ -122,11 +131,11 @@ Cause: the CI-fix phase exhausted its attempts. Fix: inspect `reviews/ci-blocked
 Cause: a review phase failed or protected-file tampering was detected. Fix: inspect `task.md`, `logs/`, and `reviews/`, clear with `hive markers clear <folder> --name REVIEW_ERROR`, then re-run.
 
 If the marker is `phase=fix reason=fix_failed` and the message says
-`claude stop hook did not signal completion`, it may be the tmux Stop-hook
-failure covered in [recipes](recipes.md#recover-a-tmux-review-fix-stop-hook-timeout).
+`claude stop hook did not signal completion`, the task stopped under the
+retired Claude Stop hook before an upgrade; see
+[recipes](recipes.md#recover-a-review-fix-left-by-the-retired-claude-stop-hook).
 Clear only with `--match-attr phase=fix,reason=fix_failed` after verifying
-the review artifacts and fix commit/no-change evidence. `claude.mode:
-headless` is still the safest workaround on affected versions.
+the review artifacts and fix commit/no-change evidence.
 
 ### `reviewer_tampered`, `triage_tampered`, or `fix_tampered`
 

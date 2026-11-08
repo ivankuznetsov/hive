@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, lib/hive/proposals/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-09-04
+updated: 2026-11-07
 tags: [architecture, overview]
 ---
 
@@ -17,7 +17,7 @@ bin/hive                          Thor entry; rescues Hive::Error -> exit
        └─ lib/hive/commands/      Init · New · Run · Status · StageAction · Daemon · Bot · TUI helpers
             └─ lib/hive/stages/   Inbox · Brainstorm · Plan · Execute · OpenPr · Review · Artifacts · Finalize · Done
                  ├─ Stages::Base      template render + AgentProfile spawn helpers
-                 ├─ ClaudeLauncher    project-global tmux/headless Claude routing
+                 ├─ ClaudeLauncher    headless Claude launch assembly
                  └─ Hive::Agent       headless subprocess wrapper
                       └─ Hive::Markers / Lock / Worktree / GitOps / Config / Task
 ```
@@ -61,6 +61,20 @@ the same dispatcher; attempt-loss healing creates one deterministic recovery
 request and an independent replacement attempt. A daemon is optional after acceptance. Every surface attaches to
 or observes the durable attempt instead of owning agent lifetime.
 
+The supervisor ends an attempt (terminating the worker group, exit 75) only
+when it genuinely loses the lease: a lost compare-and-swap, a non-transient
+store failure, or SQLite lock contention that outlasts the busy tolerance
+(`busy_tolerance_sec`, default 600s and never below `stale_sec`). A heartbeat
+that loses a lock race is deferred and retried at the heartbeat cadence, and
+the launch claim, first heartbeat, worker checkpoint and terminal receipt
+writes retry through lock contention for the same tolerance (the claim and
+first heartbeat stay bounded by their own launch deadlines, which the
+repository re-checks on every retry); each failed write rolled back, so the
+observed record stays the CAS base. The tolerance may exceed the lease window
+because the reconciler only ever classifies a stale owner whose process still
+matches as a capacity-reserving suspect, never as lost. A supervisor that
+gives up prints the store error to stderr.
+
 ```text
 CLI ───────────────────────────────┐
 bot/web → request rows → daemon ───┼→ Attempts::Dispatcher
@@ -95,9 +109,44 @@ attempt cannot unlink bytes while another attempt publishes the same digest.
 Project and task source files remain authoritative. Registration YAML is
 project discovery authority and synchronizes stable project lineage into SQL;
 deregistering and re-registering the same project reuses that inactive lineage.
-The irreversible fleet cutover imports only validated token-usage history,
-rebuilds project/task identity from files, and discards other legacy runtime
-state after proving services, attempts, and leases are quiescent.
+Fresh setup publishes a current SQLite database with its installation identity.
+Existing current databases are validated in place; runtime startup neither
+requires a cutover manifest nor imports historical state. Unsupported storage
+requires the explicit offline procedure in
+`docs/guides/current-format-migration.md`.
+
+## Host-global daily activity projection
+
+The daily digest is a global projection beside, not inside, the per-project
+workflow state machines. Authoritative task creation receipts, task journals,
+publication evidence, status transitions, and ordered registry membership feed
+one materiality classifier and collector. The store persists one IANA-zone
+interval per effective day under the global state home.
+
+```text
+project-local task/PR owners ─┐
+ordered registry history ────┼→ DailyDigest::Collector → Coordinator → Store
+source health / gaps ─────────┘                                  │
+                                                                 ▼
+                                                   DailyDigest::Reader
+                                                  ├─ CLI text / JSON
+                                                  ├─ authenticated Rails
+                                                  ├─ Telegram renderer
+                                                  └─ canonical agent skill
+```
+
+Only daemon or explicit refresh paths own collection and materialization. An
+open base can be atomically replaced; the first materialization after its
+persisted boundary freezes it. Late facts, corrections, and recovered source
+gaps are immutable idempotent amendments. CLI, Web, Telegram rendering, and
+agents share a pure persisted-record reader, so no output surface becomes a
+workflow authority or reconstructs history from current status.
+
+GitHub is a fail-soft observation source when Hive-owned PR facts are
+insufficient. PRDigest is neither called nor authoritative. Refresh/close and
+opt-in Telegram delivery have separate scheduler/capacity identities and
+ledgers, so an unavailable notification channel cannot block publication. See
+[[modules/daily-digest]], [[commands/digest]], and ADR-052 in [[decisions]].
 
 ## Scheduled architecture-patrol boundary
 
@@ -172,8 +221,8 @@ contracts in `lib/hive/agent_profiles/`.
 
 Claude-backed stages add one config-specific layer on top of the profile:
 `Hive::Config.claude_cli_flags(cfg)` turns `claude.model` and
-`claude.effort` into an argv fragment used by both headless
-`Hive::Agent` and tmux `Hive::ClaudeLauncher` sessions. Fresh projects
+`claude.effort` into the argv fragment `Hive::ClaudeLauncher` passes to
+the headless `Hive::Agent` spawn. Fresh projects
 default `claude.model` to `default`, so Hive passes Claude Code's live
 recommended-model alias instead of inheriting the operator's interactive
 selection. `model: inherit` (or blank) omits `--model`; aliases/full
@@ -214,17 +263,18 @@ otherwise). When a Claude spawn receives `permission_mode` other than
 `bypassPermissions`, the skip flag is replaced with
 `--permission-mode <mode>`.
 
-Claude-backed stages normally route through `Hive::ClaudeLauncher`,
-which honors project config `claude.mode`. `tmux` runs an attachable
-interactive Claude session using the configured
-`claude.permission_mode`; `headless` delegates back to `Hive::Agent`.
+Claude-backed stages route through `Hive::ClaudeLauncher`, which assembles
+MCP, tool-scope, and model/effort flags, repairs any tmux-era
+`.claude/settings.json` Stop-hook stub or `.hive-pre-install` backup left in
+the task folder or cwd, and delegates to `Stages::Base.spawn_agent` and so to
+headless `Hive::Agent`. There is no interactive Claude runtime; the former
+`claude.mode` key is ignored when present. Every Claude spawn without a
+workflow `runtime_policy` denies `AskUserQuestion`.
 
-Provider-limit handling is shared across headless and tmux paths through
-`Hive::AgentLimit`. Headless failures inspect the captured final message
-before generic timeout/exit-code handling; tmux readiness, terminal-marker,
-and expected-output waits inspect the pane tail so Claude's usage-credit menu
-surfaces as `limits reached for claude:` / `ERROR reason=limits_reached`
-instead of being masked as a timeout or session failure.
+Provider-limit handling goes through `Hive::AgentLimit`: headless failures
+inspect the captured final message before generic timeout/exit-code handling,
+so Claude's usage-credit wall surfaces as `limits reached for claude:` /
+`ERROR reason=limits_reached` instead of being masked as a timeout.
 
 The default Claude permission path (`bypassPermissions`, which maps to `--dangerously-skip-permissions`) is a deliberate single-developer trust model. The plan documents this trade-off explicitly: security boundaries come from (a) **per-spawn prompt-injection wrapping** with a fresh random nonce per spawn — `<user_supplied_<hex16>>…</user_supplied_<hex16>>` — so attacker-supplied closing tags can't terminate the wrapper, and a hostile reviewer output saved into `accepted_findings` can't leak into the next spawn (ADR-019 supersedes ADR-008's per-process memoization), (b) physical cwd isolation — every stage's `add-dir` is narrowed to `task.folder` (brainstorm/plan deliberately do **not** add the project root, so prompt-injected user input cannot reach project source); per-CLI variation in the isolation flag is logged to `<task>/logs/isolation-warnings.log` (ADR-018), (c) SHA-256 integrity checks on `plan.md` + `worktree.yml` (+ `task.md` for triage / fix in 6-review) around every code-touching spawn; tampering yields `<!-- ERROR reason=implementer_tampered|triage_tampered|fix_tampered -->` (ADR-013), (d) the Phase 4 auto-commit scope gate, which checks staged fallback-commit paths against `review.fix.auto_commit.scope_check` before Hive writes trailered fix commits, and (e) the post-fix diff guardrail (ADR-020 / `Hive::Stages::Review::FixGuardrail`) which scans `git diff base..head` after Phase 4 fix commits for `shell_pipe_to_interpreter`, `ci_workflow_edit`, secrets (via `Hive::SecretPatterns`), `dotenv_edit`, lockfile churn, and `100755` mode flips — match → `REVIEW_WAITING reason=fix_guardrail`. PR publishing paths (`OpenPr`, `Review::GithubPublisher`, `Finalize`) also secret-scan before sending content to GitHub.
 
@@ -337,7 +387,7 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hive Web and Hivebox pipeline
+## Hive Web pipeline
 
 `hive web` serves the shared vanilla Rails 8 + Turbo app from `web/` (ADR-037;
 the original Sinatra/Puma + SSE tier is gone). Native Hive web is the default
@@ -355,8 +405,8 @@ the first successful remote login writes
 the current owner on every request and evict old sessions when
 `web.github.owner` changes, so a repo-scoped session token cannot survive an
 ownership rotation. A local GitHub connection remains optional for repository
-listing and cloning and does not claim ownership. Hivebox is the distinct
-container distribution of the same owner-gated surface. Managed local installs
+listing and cloning and does not claim ownership. The Hivebox container
+distribution was removed by ADR-055. Managed local installs
 stage a locked Bundler install plus a production asset precompile and verify
 the CSS/JavaScript manifest before the atomic bundle swap; both commands run
 through the locked Bundler and current Ruby without relying on `bundle` or a
@@ -423,19 +473,59 @@ property, so restoring a page after a source-less route cannot revive it.
 Later confirmations on that connection are bounded to one
 reconciliation GET instead of a refresh loop, while navigation cannot revive
 an old URL's latch. A real socket disconnect releases the connection-local
-latch so a later missed update can recover. Rejected lazy Action
-Cable consumer promises are removed from turbo-rails' cache before a bounded
-retry. A synchronous create failure also removes any partially registered
-subscription and replaces its failed consumer; detaching the source cancels
-the retry. A pre-confirmation detach waits for the current transport's
-confirmation, rejection, or disconnect before releasing the handle, preserving
-server subscribe/unsubscribe order across reconnects. A five-second fallback
-closes an otherwise-unowned transport that produces none of those callbacks,
-giving the server a connection-cleanup edge before local release. The channel
-also fences Action Cable's deferred adapter subscribe both before registration
-and at its completion; if teardown wins either race, no handler remains. A
-raising deferred adapter releases the broadcaster lease and reconnects the
-transport, so it cannot strand an active, unconfirmed channel. On task pages
+latch so a later missed update can recover. One `StatusStreamOwner` owns the
+current identity-bearing application attempt, retry timer, pending-release
+timer and disposition, catch-up attempt, and explicit lifecycle state. Each
+application setup or retry creates a dedicated consumer with
+`cable.createConsumer()`; an Action Cable transport reconnect remains on that
+consumer, subscription, and attempt, while setup, registration, rejection, or
+non-reconnecting transport failure fully retires the attempt, enters
+`retry_wait`, and starts a fresh attempt after the existing five-second bound.
+The owner never reads or mutates turbo-rails' shared consumer cache and never
+uses its subscription registry to decide whether cleanup is safe.
+
+The dedicated connection's `open` and `reopen` entry points, every callback,
+both timers, and asynchronous setup continuations are fenced by owner and
+attempt identity. Retiring an attempt first makes those entry points inert, so
+already-queued visibility-monitor work cannot open another socket or mutate a
+successor. A pre-confirmation detach leaves the disconnected owner as the sole
+bounded custodian until confirmation, rejection, or disconnect establishes the
+subscription's disposition. Confirmation still releases only after server
+registration; if none of those callbacks arrives within five seconds, timeout
+cleanup closes the dedicated transport before locally unsubscribing or
+forgetting the handle. This preserves server subscribe/unsubscribe order
+without a shared-registry scan. The element records that bounded custodian on
+plain DOM detach as well as attribute supersession, so a later detach/attach
+cycle force-retires the older predecessor before allocating beyond the two-
+transport overlap bound. The channel also fences Action Cable's deferred
+adapter subscribe both before registration and at its completion; if teardown
+wins either race, no handler remains. A raising deferred adapter releases the
+broadcaster lease and reconnects the same transport, so it cannot strand an
+active, unconfirmed channel.
+
+Owner disconnect is an ordered best-effort transaction. It detaches private
+slots first, cancels the retry timer, attempts every applicable cleanup, and
+commits terminal `disconnected` even if an operation throws. Unsubscribe runs
+before transport cleanup for confirmed subscriptions. Consumer disconnect is
+the primary shutdown; reconnect-disabled connection close and captured-socket
+close are attempted only while that socket remains `OPEN` or `CONNECTING`, and
+the connection monitor is stopped even after earlier failures. The internal
+boundary rethrows the exact first thrown value after finalization, while custom-
+element disconnect, async-failure, and attribute-supersession paths warn only
+after their DOM and successor obligations finish. Repeated disconnect is a
+no-op, and supersession installs or retains a retrying successor even when old
+cleanup fails. Dedicated ownership intentionally allocates one Cable transport
+per simultaneously live status source; an unconfirmed retiring predecessor can
+briefly overlap one successor until the bounded pending release settles, and a
+detached source returns to zero transports after any bounded pending release.
+Although the source is `data-turbo-permanent`, a cross-URL Turbo move invokes
+its disconnect/connect callbacks. Dedicated ownership therefore replaces the
+transport on every such navigation instead of reusing turbo-rails' cached
+consumer: the next `connected` state and catch-up wait for a fresh WebSocket
+and Action Cable subscription handshake. Repeated supersession force-retires
+the older pending predecessor before allocating another successor, so this
+navigation and retry cost never expands the two-transport overlap bound.
+On task pages
 the status-refresh owner
 wraps the mutation forms as well as the stream source, so every task action
 crosses the same native submission guard before a filesystem broadcast can
@@ -452,11 +542,7 @@ answers, and `Commands::New` (with the TUI's `attachments:` contract) for the
 idea composer. Repo setup clones via `gh`, reuses the `hive init` prompt seam,
 and normalizes GitHub SSH origins to https so later daemon-owned `5-open-pr`
 pushes use token-backed credentials; the Agents page can run the `gh` PTY
-login relay so the image's `gh auth git-credential` helper supplies those
-push credentials without docker-exec setup. The container supervisor (tini →
-`Hive::Web::Supervisor`) runs daemon + web + optional bot, restarts crashed or
-signal-killed children with backoff, survives malformed config, and
-SIGHUP-reloads the bot set. Details: [[commands/web]].
+login relay to supply those push credentials. Details: [[commands/web]].
 
 The Rails layer wraps each registry entry in a `Project` model. Project lookup,
 config-backed workflow/default/daemon behavior, and the non-interactive
@@ -469,6 +555,12 @@ source/name input, owns the clone target, bounds and cleans up `gh repo clone`,
 and normalizes origins before handing the checkout to `Project#setup!`.
 `ReposController` only selects between new admission and existing-project
 setup, then renders or redirects.
+
+Hive web groups workflow and module management under one **Honeycombs**
+primary navigation entry. `/honeycombs` opens Workflows; shared Workflows and
+Modules links retain the selected project and stay visible on preview pages.
+The introduction explains that both workflows and modules can be installed.
+Existing workflow and module URLs and lifecycle actions remain available.
 
 Workflow list rows are typed `Workflow` models rather than anonymous adapter
 hashes. The model owns the shared `Hive::Web::WorkflowLifecycle` boundary for
@@ -512,6 +604,67 @@ and recovery, and brainstorm answers. `Project` owns idea capture; the
 `Daemon` resource owns liveness and queued repair. These models delegate
 pipeline mechanics to the canonical gem commands, queue writer, and bot
 recovery/answer primitives rather than duplicating a web orchestration layer.
+`Hive::Remote::CommandService` admits only creation, literal answers, guarded
+workflow actions and forward approval. Its structured command seams return
+values without capturing process stdout or changing the working directory.
+Creation in a request omits the optional background display-name generator.
+Long workflow actions, including any run/rebase work, enter the existing daemon
+dispatch queue. The request payload carries the exact authorized effect and
+non-secret installation/token principal; the worker rechecks task identity,
+stage, workflow and unchanged input before the command's locked mutation.
+Any transition that derives force remains a local operator action, including
+the coding workflow's first brainstorm promotion.
+
+The API's durable caller receipt records admission, while the task-attempt
+receipt records later execution. An admitted worker validates the persisted
+receipt/principal binding and retains it for correlation and pin management,
+but does not reopen the completed admission effect as a writable command
+context. Worker freshness uses the observed task inputs and input epoch so
+its own attempt-journal bookkeeping cannot invalidate its admission. Genuine
+input, marker, workflow or stage changes still fail the worker's locked check.
+The daemon waits for the admission receipt to finish before dispatching; an
+unresolved admission remains queued. API requests retain their queue position
+when the daemon is offline, and terminal or rejected deliveries acknowledge
+the existing dispatch result to release their original receipt pin.
+
+`Hive::Remote::ReadService` reuses the native semantic task workspace, scoped
+status producer, literal-answer inventory, owned-worktree diff and bounded
+artifact/log readers. The HTTP layer selects authorized projects before these
+readers and publishes explicit DTOs instead of serializing native objects.
+API responses use the registered `hive-remote.v1` envelope and name any native
+projection schema/version as provenance. Status pagination counts only granted
+projects and binds opaque cursors to those project registration fingerprints
+and the selected task snapshot. Read-only handle records (questions, artifact
+references and cursors) are private server metadata, separate from command
+receipts; they never admit work or represent mutation outcomes. Native answer
+bindings stay server-side. Unknown API base paths fail with typed
+`unsupported_version` and currently served base paths before parsing a mutation.
+The API middleware consumes and closes bounded JSON responses while ordinary
+request logging is silenced, then emits its fixed audit fields after Rails has
+removed request tags.
+
+Native connection routing freezes a named installation before local activation,
+process registration or project discovery. Context administration reads only
+client configuration; remote task requests carry exact registered project names
+and task IDs/slugs. The HTTPS client verifies fresh token metadata and the pinned
+installation before each mutation, announces its authority/target/retry key on
+stderr, and sends no credentials through redirects. Local filesystem commands
+require an explicit local context while a remote installation is selected.
+Daemon-owned attempt wrappers and native workers explicitly select `local` in
+their execution argv. The server operator's saved client context cannot retarget
+accepted work; the recorded logical worker argv remains unchanged for attempt
+capability verification.
+Local name-generation, daemon, bot, one-shot and TUI native children likewise
+receive a local execution selection without changing logical command metadata
+or arguments for non-Hive executables.
+Rendered managed-service startup and native daemon/babysitter re-exec also keep
+their local target. Existing installed definitions retain drift protection and
+require explicit force-install to adopt the new argv; see [[remote-access]].
+Installed workflow packages and agents retain local operator authority within
+their checkout; the token effect allowlist does not sandbox package internals or
+prompts formed from remotely supplied task text and answers. Deployment and
+incident-response limits are documented in [[remote-access]].
+
 Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
 so the grid and detail page use the same behavior rather than helper-owned
 filesystem reads or action tables. `TasksController` renders that resource.
@@ -546,4 +699,4 @@ precedence, budgets, and negative guarantees are owned by
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
 - [[modules/proposals]] · [[commands/proposal]] — immutable tracking-only skill/workflow proposal history.
-- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/refactor-patrol]]
+- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/digest]] · [[commands/refactor-patrol]]

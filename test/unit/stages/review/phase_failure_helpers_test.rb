@@ -34,6 +34,30 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
                  Hive::Stages::Review.send(:review_phase_error_summary, "line one\n\tline two")
   end
 
+  def test_mark_review_phase_failure_classifies_unsupported_model_before_limits
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "")
+      task = Struct.new(:state_file).new(state_file)
+      formatted = "model unsupported for codex: 'gpt-6.1-sol' is not available to this account; " \
+                  "#{Hive::ModelUnsupported::CONFIG_HINT}"
+
+      limited = Hive::Stages::Review.send(
+        :mark_review_phase_failure, task, phase: :fix, pass: 2,
+        error_message: "fix agent failed\n#{formatted}", limit_text: nil
+      )
+
+      refute limited, "a refused model must not take the limit path"
+      marker = Hive::Markers.current(state_file)
+      assert_equal :review_error, marker.name
+      assert_equal "model_unsupported", marker.attrs["reason"]
+      assert_equal "fix", marker.attrs["phase"]
+      assert_equal "gpt-6.1-sol", marker.attrs["model"]
+      assert_equal "fix: #{formatted}", marker.attrs["message"]
+      assert_nil marker.attrs["retry_after"]
+    end
+  end
+
   def test_triage_max_attempts_defaults_when_unset
     assert_equal Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS,
                  Hive::Stages::Review.send(:triage_max_attempts, {})

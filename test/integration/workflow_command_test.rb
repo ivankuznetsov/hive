@@ -130,14 +130,11 @@ class WorkflowCommandTest < Minitest::Test
       )
       config_path = File.join(project_root, "config.yml")
       read = ->(_root) { [ config_path, {} ] }
-      normalize = ->(data, _source, **_options) { data }
 
       workflows = with_replaced_singleton_method(
         Hive::Config, :read_project_config, read
       ) do
-        with_replaced_singleton_method(
-          Hive::Config, :normalize_legacy_project_config, normalize
-        ) { validator.send(:workflows_dir) }
+        validator.send(:workflows_dir)
       end
 
       assert_equal File.join(project_root, ".hive-state", "workflows"), workflows

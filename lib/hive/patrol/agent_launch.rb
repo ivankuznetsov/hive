@@ -37,7 +37,7 @@ module Hive
 
       def claude?(profile)
         profile.respond_to?(:name) && profile.name.is_a?(Symbol) &&
-          Hive::AgentSupport.supports?(profile, :Interactive)
+          Hive::AgentSupport.supports?(profile, :Launch)
       end
       private_class_method :claude?
     end

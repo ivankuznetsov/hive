@@ -70,7 +70,6 @@ class ApplicationController < ActionController::Base
 
   def web_product_name
     return "hive" if local_web_mode?
-    return "hivebox" if ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
 
     "Hive web"
   end

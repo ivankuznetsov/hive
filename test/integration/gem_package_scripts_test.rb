@@ -10,14 +10,13 @@ class GemPackageScriptsTest < Minitest::Test
   AGENT_CLI_RUNTIME_ROOT = File.join(ROOT, "components", "agent-cli-runtime")
   AGENT_CLI_RUNTIME_GEMSPEC_PATH = File.join(AGENT_CLI_RUNTIME_ROOT, "agent-cli-runtime.gemspec")
   SCRIPT_REFERENCE_FILES = [
-    "lib/hive/claude_launcher.rb",
-    "lib/hive/stop_hook_installer.rb"
+    "lib/hive/workflow_package/runtime_policy.rb"
   ].freeze
 
-  def test_built_gem_contains_all_claude_launcher_script_references
+  def test_built_gem_contains_all_referenced_runtime_scripts
     skip "gem executable unavailable" unless executable_available?("gem")
 
-    referenced_scripts = claude_launcher_script_references
+    referenced_scripts = runtime_script_references
 
     refute_empty referenced_scripts,
                  "script-reference guard must not pass without discovering scripts"
@@ -131,10 +130,10 @@ class GemPackageScriptsTest < Minitest::Test
 
   private
 
-  def claude_launcher_script_references
+  def runtime_script_references
     SCRIPT_REFERENCE_FILES.flat_map do |path|
       source = File.read(File.join(ROOT, path), encoding: "UTF-8")
-      source.scan(%r{scripts/[^"')\s]+\.sh}).map { |script| "lib/hive/#{script}" }
+      source.scan(%r{scripts/[^"')\s]+\.(?:sh|rb)}).map { |script| "lib/hive/#{script}" }
     end.uniq.sort
   end
 

@@ -23,7 +23,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       installer.install!(autostart: false)
       unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
       assert File.exist?(unit)
-      assert_includes File.read(unit), "ExecStart=#{hive} daemon start"
+      assert_includes File.read(unit), "ExecStart=#{hive} daemon start --context local"
       assert_empty commands
     end
   end
@@ -45,6 +45,26 @@ class DaemonServiceInstallerTest < Minitest::Test
       assert_includes unit, "WantedBy=default.target"
       refute_includes unit, "After=default.target",
                       "a unit wanted by default.target must not order itself after that target"
+    end
+  end
+
+  def test_linux_unit_never_stops_restarting_after_transient_failures
+    # 2026-11-05: StartLimitBurst=3 turned a few transient SQLite-busy exits
+    # into a permanent `start-limit-hit` and stalled every project for hours.
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: "/tmp/hive", systemctl_available: false
+      )
+
+      installer.install!(autostart: false)
+      unit = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+
+      assert_match(/^StartLimitIntervalSec=0$/, unit)
+      refute_match(/^StartLimitBurst=/, unit)
+      assert_match(/^Restart=on-failure$/, unit)
+      assert_match(/^RestartSec=30s$/, unit)
+      assert_match(/^RestartSteps=5$/, unit)
+      assert_match(/^RestartMaxDelaySec=10min$/, unit)
     end
   end
 
@@ -70,7 +90,23 @@ class DaemonServiceInstallerTest < Minitest::Test
       fake_bin = File.join(dir, "bin")
       FileUtils.mkdir_p(fake_bin)
       systemctl = File.join(fake_bin, "systemctl")
-      File.write(systemctl, "#!/bin/sh\necho systemctl-noise\nexit 0\n")
+      unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
+      File.write(
+        systemctl,
+        "#!/bin/sh\n" \
+        "if [ \"$2\" = show ]; then\n" \
+        "  echo LoadState=loaded\n" \
+        "  echo FragmentPath=#{unit}\n" \
+        "  echo NeedDaemonReload=no\n" \
+        "  echo UnitFileState=enabled\n" \
+        "  echo ActiveState=active\n" \
+        "  echo MainPID=123\n" \
+        "  echo ExecMainStartTimestampMonotonic=1\n" \
+        "else\n" \
+        "  echo systemctl-noise\n" \
+        "fi\n" \
+        "exit 0\n"
+      )
       FileUtils.chmod(0755, systemctl)
 
       with_env("PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
@@ -123,7 +159,7 @@ class DaemonServiceInstallerTest < Minitest::Test
 
       result = installer.install!(autostart: true)
       assert_equal :failed, result.kind
-      assert installer.messages.any? { |msg| msg.include?("systemctl --user enable failed") }
+      assert installer.messages.any? { |msg| msg.include?("previous state was restored") }
     end
   end
 
@@ -141,7 +177,8 @@ class DaemonServiceInstallerTest < Minitest::Test
       plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
       assert File.exist?(plist)
       assert_includes File.read(plist), "<string>/opt/hive/bin/hive</string>"
-      assert_equal [ [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
     end
   end
 
@@ -296,7 +333,7 @@ class DaemonServiceInstallerTest < Minitest::Test
                       "HIVE_BIN env line must point at the resolved binary so the daemon can find `hive` when systemd-user PATH excludes ~/.local/bin"
       assert_includes unit_body, "Environment=PATH=",
                       "minimal PATH must be set so the daemon's incidental shell-outs (git, etc.) keep working"
-      assert_includes unit_body, "ExecStart=#{hive} daemon start"
+      assert_includes unit_body, "ExecStart=#{hive} daemon start --context local"
     end
   end
 
@@ -522,7 +559,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       exec_line = unit_body.lines.find { |l| l.start_with?("ExecStart=") }
       env_line = unit_body.lines.find { |l| l.start_with?("Environment=HIVE_BIN=") }
       assert exec_line && env_line
-      exec_path = exec_line.sub("ExecStart=", "").split(" daemon start").first
+      exec_path = Shellwords.split(exec_line.sub("ExecStart=", "")).first
       env_path = env_line.sub("Environment=HIVE_BIN=", "").strip
       assert_equal exec_path, env_path,
                    "ExecStart and Environment=HIVE_BIN must reference the same absolute binary"
@@ -550,7 +587,7 @@ class DaemonServiceInstallerTest < Minitest::Test
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed and a second --force doesn't clobber the original backup"
       assert_equal "previous-stale-content\n", File.read(backups.first)
       refute_equal "previous-stale-content\n", File.read(unit)
-      assert_includes File.read(unit), "ExecStart=/tmp/hive daemon start"
+      assert_includes File.read(unit), "ExecStart=/tmp/hive daemon start --context local"
       assert installer.messages.any? { |msg| msg.include?("upgraded existing unit") }
     end
   end
@@ -657,7 +694,8 @@ class DaemonServiceInstallerTest < Minitest::Test
       result = installer.install!(autostart: true, force: true)
 
       assert_equal :upgraded, result.kind
-      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ], commands
+      assert_equal [ [ "launchctl", "unload", plist ], [ "launchctl", "load", plist ] ],
+                   commands.select { |argv| %w[load unload].include?(argv[1]) }
       assert result.restarted
       assert installer.messages.any? { |msg| msg.include?("launchctl unload returned non-zero") }
     end

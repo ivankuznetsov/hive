@@ -171,3 +171,10 @@ data trustworthy. Agent invocation guarantees belong to
 - [[component-boundaries]]
 - [[modules/gh]] · [[modules/worktree]] · [[modules/git_ops]]
 - [[commands/refactor-patrol]]
+
+`publish_local_branch` accepts an optional `expected_local_oid` for callers that
+already admitted a particular commit. It checks the resolved branch OID against
+that immutable expectation before publication, then publishes the captured OID.
+Review supplies its guardrail-cleared head, so branch movement between admission
+and resolution cannot publish a replacement commit. Post-publication HEAD checks
+still detect local movement after that capture.

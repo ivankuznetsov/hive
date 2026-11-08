@@ -345,21 +345,24 @@ module Hive
         end
         result = nil
         begin
-          result = Hive::Agent.new(
-            task: task,
-            prompt: prompt,
-            add_dirs: [ @project_root ],
-            cwd: @project_root,
-            max_budget_usd: nil,
-            max_turns: launch.fetch(:max_turns),
-            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-            log_label: STAGE,
-            profile: profile,
-            expected_output: output_path,
-            status_mode: :output_file_exists,
-            cli_flags: launch.fetch(:cli_flags),
-            routing_arguments: routing_arguments
-          ).run!
+          result = Hive::Mcp.with_launch(profile: profile, cfg: @cfg, scope: "patrol", cwd: @project_root) do |mcp_launch|
+            Hive::Agent.new(
+              task: task,
+              prompt: prompt,
+              add_dirs: [ @project_root ],
+              cwd: @project_root,
+              max_budget_usd: nil,
+              max_turns: launch.fetch(:max_turns),
+              timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+              log_label: STAGE,
+              profile: profile,
+              expected_output: output_path,
+              status_mode: :output_file_exists,
+              cli_flags: launch.fetch(:cli_flags),
+              routing_arguments: routing_arguments,
+              mcp_launch: mcp_launch
+            ).run!
+          end
         ensure
           @launch_budget.record!(
             result: result, profile: profile, stage: STAGE, started_at: started_at

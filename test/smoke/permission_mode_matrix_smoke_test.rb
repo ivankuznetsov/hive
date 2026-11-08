@@ -6,14 +6,12 @@ require "hive/commands/new"
 require "hive/commands/run"
 
 # Live-claude smoke for the claude.permission_mode change. Spawns the real
-# `claude` binary and asserts a brainstorm round completes end-to-end across
-# the (launch mode x permission mode) matrix, proving the flags Hive emits are
-# accepted by the installed CLI on BOTH paths:
+# `claude` binary and asserts a brainstorm round completes end-to-end for each
+# permission mode, proving the flags Hive emits are accepted by the installed
+# CLI:
 #
-#   - tmux     + bypassPermissions -> wrapper passes --dangerously-skip-permissions
-#   - tmux     + acceptEdits       -> wrapper passes --permission-mode acceptEdits
-#   - headless + bypassPermissions -> `claude -p --dangerously-skip-permissions`
-#   - headless + acceptEdits       -> `claude -p --permission-mode acceptEdits`
+#   - bypassPermissions -> `claude -p --dangerously-skip-permissions`
+#   - acceptEdits       -> `claude -p --permission-mode acceptEdits`
 #
 # Excluded from the default `rake test` suite — invoke via `rake smoke`.
 # Each case is one real claude run (~$0.25); headless `-p` may bill API tokens.
@@ -26,34 +24,26 @@ class PermissionModeMatrixSmokeTest < Minitest::Test
     skip "claude binary not on PATH" unless system("which claude > /dev/null 2>&1")
   end
 
-  def test_tmux_bypass_permissions_completes_brainstorm
-    assert_brainstorm_completes(mode: "tmux", permission_mode: "bypassPermissions")
+  def test_bypass_permissions_completes_brainstorm
+    assert_brainstorm_completes(permission_mode: "bypassPermissions")
   end
 
-  def test_tmux_non_default_permission_mode_completes_brainstorm
-    assert_brainstorm_completes(mode: "tmux", permission_mode: NON_DEFAULT_MODE)
-  end
-
-  def test_headless_bypass_permissions_completes_brainstorm
-    assert_brainstorm_completes(mode: "headless", permission_mode: "bypassPermissions")
-  end
-
-  def test_headless_non_default_permission_mode_completes_brainstorm
-    assert_brainstorm_completes(mode: "headless", permission_mode: NON_DEFAULT_MODE)
+  def test_non_default_permission_mode_completes_brainstorm
+    assert_brainstorm_completes(permission_mode: NON_DEFAULT_MODE)
   end
 
   private
 
-  def assert_brainstorm_completes(mode:, permission_mode:)
-    label = "claude.mode=#{mode} claude.permission_mode=#{permission_mode}"
+  def assert_brainstorm_completes(permission_mode:)
+    label = "claude.permission_mode=#{permission_mode}"
     # Keep the real HOME so the spawned claude reuses the operator's
     # logged-in session credentials (~/.claude); only HIVE_HOME is isolated.
-    # Without this the tmux/headless claude drops to the login screen.
+    # Without this the spawned claude drops to the login screen.
     real_home = ENV.fetch("HOME")
     with_tmp_global_config(home: real_home) do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
-        patch_claude_config(dir, mode: mode, permission_mode: permission_mode)
+        patch_claude_config(dir, permission_mode: permission_mode)
 
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "add a contributing note").call }
@@ -78,16 +68,14 @@ class PermissionModeMatrixSmokeTest < Minitest::Test
   # Rewrites the claude block of the rendered config.yml. YAML round-trip drops
   # the template comments, which is fine for a throwaway smoke project; the
   # subsequent Config.load validates the result.
-  def patch_claude_config(dir, mode:, permission_mode:)
+  def patch_claude_config(dir, permission_mode:)
     path = File.join(dir, ".hive-state", "config.yml")
     cfg = YAML.safe_load(File.read(path))
     cfg["claude"] ||= {}
-    cfg["claude"]["mode"] = mode
     cfg["claude"]["permission_mode"] = permission_mode
     File.write(path, YAML.dump(cfg))
 
     loaded = Hive::Config.load(dir)
-    assert_equal mode, loaded.dig("claude", "mode")
     assert_equal permission_mode, loaded.dig("claude", "permission_mode")
   end
 

@@ -24,7 +24,7 @@ class ReviewRemoteCiTest < Minitest::Test
       @identity = { "host" => "github.com", "repository" => "acme/app" }
       @metadata = Hive::Gh::PrMetadata.new(
         number: 42, url: url, base_ref_name: "main",
-        head_ref_oid: remote_head, is_cross_repository: false, state: "OPEN"
+        head_ref_oid: remote_head, is_cross_repository: false, state: "OPEN", is_draft: nil
       )
       @candidates = [
         { "number" => 42, "url" => url, "state" => "OPEN", "headRefName" => branch }
@@ -58,6 +58,7 @@ class ReviewRemoteCiTest < Minitest::Test
       @push_result
     end
 
+    def origin_push_url(*) = "https://github.com/acme/app.git"
     def failing_jobs_with_logs(*) = @jobs
   end
 
@@ -111,6 +112,7 @@ class ReviewRemoteCiTest < Minitest::Test
 
   def with_fixture
     with_tmp_git_repo do |repo|
+      run!("git", "-C", repo, "checkout", "-b", "demo-task", "--quiet")
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       folder = File.join(repo, ".hive-state", "stages", "6-review", "demo-task")
       FileUtils.mkdir_p(File.join(folder, "reviews"))
@@ -136,7 +138,18 @@ class ReviewRemoteCiTest < Minitest::Test
           Hive::Worktree, :read_owned_pointer,
           ->(*, **) { { "path" => repo, "branch" => task.slug } }
         ) do
-          yield(repo, head, task, ctx, gh, clock, runner)
+          test_case = self
+          gate = lambda do |repository_path:, branch:, expected_remote_oid:, expected_local_oid:|
+            gh.pushes << [ repository_path, branch, { expected_remote_oid: expected_remote_oid } ]
+            raise Hive::AgentGitGate::RemoteConflict unless gh.push_result.success?
+            test_case.assert_equal expected_local_oid, Hive::ReviewPublicationRecovery.git(repo, "rev-parse", "HEAD").strip
+            current = test_case.run!("git", "-C", repo, "rev-parse", "HEAD").strip
+            gh.metadata = gh.metadata.with(head_ref_oid: current)
+            Struct.new(:after_oid).new(current)
+          end
+          with_replaced_singleton_method(Hive::AgentGitGate, :publish_local_branch, gate) do
+            yield(repo, head, task, ctx, gh, clock, runner)
+          end
         end
       end
     end
@@ -227,7 +240,6 @@ class ReviewRemoteCiTest < Minitest::Test
       assert_includes result.combined, head
       assert_equal 1, gh.pushes.length
       assert_equal head, gh.pushes.first.last.fetch(:expected_remote_oid)
-      assert_equal false, gh.pushes.first.last.fetch(:set_upstream)
       assert_operator gh.rollup_calls, :>=, 3
     end
   end
@@ -288,6 +300,22 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  # hivedev's bin/ci posts a `signoff` commit status for a commit already on
+  # the remote. Review runs it before publishing the new head, so the status
+  # exists only on the old head and must not hold the new head pending.
+  def test_runner_does_not_wait_for_baseline_commit_statuses_on_a_new_head
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      signoff = { "__typename" => "StatusContext", "context" => "signoff", "state" => "FAILURE", "targetUrl" => "" }
+      legacy = { "context" => "legacy", "state" => "SUCCESS", "targetUrl" => "" }
+      gh.rollups = [ rollup(head: head, checks: [ signoff, legacy, check(name: "unit") ]) ] +
+                   Array.new(6) { rollup(head: head, checks: [ check(name: "unit") ]) }
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 0, result.exit_code, result.respond_to?(:reason) ? result.reason : nil
+    end
+  end
+
   def test_runner_reports_an_exact_head_failure_at_the_settlement_deadline
     with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
       gh.rollups = [
@@ -336,7 +364,7 @@ class ReviewRemoteCiTest < Minitest::Test
         success: false, stdout: "push stdout", stderr: "push rejected"
       )
       rejected = runner.call(max_bytes: 1_024, timeout_sec: 2)
-      assert_match(/push rejected/, rejected.reason)
+      assert_match(/remote_conflict/, rejected.reason)
     end
   end
 
@@ -468,6 +496,214 @@ class ReviewRemoteCiTest < Minitest::Test
       gh.rollups = [ rollup(head: head, checks: [ unknown ]), rollup(head: head, checks: [ unknown ]) ]
       failed = runner.call(max_bytes: 10, timeout_sec: 1)
       assert_equal 1, failed.exit_code
+    end
+  end
+
+  def test_verification_recipe_uses_the_registered_project_alias
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      registration = -> { [ { "name" => "registered-alias", "path" => repo } ] }
+      with_replaced_singleton_method(Hive::Config, :registered_projects, registration) do
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_includes result.evidence["verification_recipe"], "registered-alias:demo-task"
+        assert_equal "published", result.evidence["publication"]
+      end
+    end
+  end
+
+  def test_withheld_publication_rejects_a_context_outside_the_owned_worktree
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      Dir.mktmpdir do |other|
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg,
+          ctx: ctx.with(worktree_path: other), pr_url: gh.metadata.url, gh: gh)
+        publisher.publish!(expected_head: head, withheld: "guardrail_approval_required")
+        assert_equal "unknown", publisher.evidence["publication"]
+        assert_equal "publication_identity_unavailable", publisher.evidence["failure_reason"]
+        assert_empty gh.pushes
+      end
+    end
+  end
+
+  def test_confirmation_rejects_pr_identity_movement_even_at_the_same_head
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+      identity = publisher.identity.merge(number: 43)
+      publisher.define_singleton_method(:resolve_identity!) { identity }
+      error = assert_raises(Hive::Stages::Review::Publication::Stop) { publisher.confirm!(head) }
+      assert_equal "pr_identity_moved", error.reason
+      assert_equal "published", publisher.evidence["publication"]
+    end
+  end
+
+  def test_project_registration_failure_retains_publication_but_omits_retry_recipe
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { raise Hive::ConfigError, "unreadable" }) do
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", publisher.evidence["publication"]
+        assert_equal "project_registration_unavailable", publisher.evidence["recovery_reason"]
+        assert_nil publisher.evidence["verification_recipe"]
+      end
+    end
+  end
+
+  def test_receipt_confirmed_publication_detects_local_head_movement_without_retry
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      calls = 0
+      test_case = self
+      gate = Object.new
+      gate.define_singleton_method(:publish_local_branch) do |**|
+        calls += 1
+        test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "concurrent movement")
+        Struct.new(:after_oid).new(head)
+      end
+      result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, gate: gate).publish!(expected_head: head)
+      assert_equal "published", result.evidence["publication"]
+      assert_equal "local_head_moved", result.evidence["failure_reason"]
+      assert_equal 1, calls
+    end
+  end
+
+  def test_publication_confirmation_rejects_local_movement_during_remote_lookup
+    [ :head, :branch ].each do |movement|
+      with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+        lookups = 0
+        candidates = gh.candidates
+        test_case = self
+        gh.define_singleton_method(:lookup_prs_for_branch) do |*|
+          lookups += 1
+          if lookups == 2
+            if movement == :head
+              test_case.run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "concurrent edit")
+            else
+              test_case.run!("git", "-C", repo, "checkout", "-qb", "concurrent-branch")
+            end
+          end
+          candidates
+        end
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", result.evidence["publication"]
+        assert_equal "pending", result.evidence["verification"]
+        assert_equal "local_#{movement}_moved", result.evidence["failure_reason"]
+        assert_equal head, result.evidence["remote_head"]
+        assert_equal 1, gh.pushes.size
+      end
+    end
+  end
+
+  def test_cross_repository_and_merged_pr_refuse_publication
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      [ gh.metadata.with(is_cross_repository: true), gh.metadata.with(state: "MERGED") ].each do |metadata|
+        gh.metadata = metadata
+        result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "unknown", result.evidence["publication"]
+        assert_equal "publication_identity_unavailable", result.evidence["failure_reason"]
+        assert_empty gh.pushes
+      end
+    end
+  end
+
+  def test_final_verification_settles_without_another_publication
+    with_fixture do |_repo, head, task, ctx, gh, clock, _runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, no_repair: true,
+        clock: -> { clock.now }, sleeper: ->(seconds) { clock.now += seconds },
+        poll_interval_sec: 1, quiet_settlement_sec: 1)
+      assert_equal 0, runner.call(max_bytes: 1024, timeout_sec: 3).exit_code
+      assert_empty gh.pushes
+    end
+  end
+
+  def test_publication_receipt_survives_failed_pr_cross_check
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      calls = 0
+      metadata = gh.metadata
+      gh.define_singleton_method(:pr_metadata) do |*|
+        calls += 1
+        raise Hive::GhError, "unavailable" if calls > 1
+        metadata
+      end
+      result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: metadata.url, gh: gh).publish!(expected_head: head)
+      assert_equal "published", result.evidence["publication"]
+      assert_equal "pending", result.evidence["verification"]
+      assert_equal "pr_confirmation_unavailable", result.evidence["failure_reason"]
+    end
+  end
+
+  def test_publication_failure_retains_multiple_commit_identifiers
+    with_fixture do |repo, base, task, ctx, gh, _clock, _runner|
+      shas = 2.times.map do |n|
+        File.write(File.join(repo, "fix"), n.to_s)
+        run!("git", "-C", repo, "add", "fix")
+        run!("git", "-C", repo, "commit", "-qm", "fix #{n}")
+        run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      end
+      gate = Object.new
+      gate.define_singleton_method(:publish_local_branch) { |**| raise Hive::AgentGitGate::PublicationFailed }
+      gate.define_singleton_method(:observe_remote_branch) { |**| Struct.new(:oid).new(base) }
+      result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, gate: gate).publish!(expected_head: shas.last)
+      assert_equal "unpublished", result.evidence["publication"]
+      assert_equal shas, result.evidence["unpushed_shas"]
+      assert_includes result.evidence["push_command"], shas.last
+      gate.define_singleton_method(:observe_remote_branch) { |**| raise Hive::AgentGitGate::CommandFailed }
+      unknown = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, gate: gate).publish!(expected_head: shas.last)
+      assert_equal "unknown", unknown.evidence["publication"]
+    end
+  end
+
+  def test_withholding_skips_hosted_ci_before_any_repair_or_publication
+    with_fixture do |_repo, _head, task, ctx, _gh, _clock, _runner|
+      runner = Object.new
+      runner.define_singleton_method(:command_label) { raise "withheld CI must not start" }
+      result = Hive::Stages::Review::RemoteCi.run!(task: task, cfg: cfg, ctx: ctx,
+        runner: runner, publication_withheld: "fix_guardrail_receipt_required")
+      assert_equal :skipped, result.status
+      assert_equal 0, result.attempts
+    end
+  end
+
+  def test_hosted_runner_cannot_publish_a_withheld_baseline
+    with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, publication_base_head: head,
+        publication_withheld: "fix_guardrail_receipt_required")
+      result = runner.call(max_bytes: 1024, timeout_sec: 3)
+      assert_match(/publication withheld/, result.reason)
+      assert_empty gh.pushes
+      assert_nil runner.settled_head
+    end
+  end
+
+  def test_reused_publisher_does_not_carry_publication_proof_to_a_different_head
+    [ :conflict, :unobservable, :identity_unavailable ].each do |failure|
+      with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+        publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+        assert_equal "published", publisher.evidence["publication"]
+        run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "next fix")
+        new_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+        gate = Object.new
+        gate.define_singleton_method(:publish_local_branch) do |**|
+          raise(failure == :conflict ? Hive::AgentGitGate::RemoteConflict : Hive::AgentGitGate::PublicationFailed)
+        end
+        gate.define_singleton_method(:observe_remote_branch) { |**| raise Hive::AgentGitGate::CommandFailed }
+        publisher.instance_variable_set(:@gate, gate)
+        gh.metadata = gh.metadata.with(state: "MERGED") if failure == :identity_unavailable
+        publisher.publish!(expected_head: new_head)
+        assert_equal new_head, publisher.evidence["local_head"]
+        assert_equal "unknown", publisher.evidence["publication"], failure.to_s
+        assert_equal "pending", publisher.evidence["verification"]
+        refute_nil publisher.evidence["failure_reason"]
+      end
     end
   end
 

@@ -10,7 +10,7 @@ module Hive
       module_function
 
       def build(task:, gate:, rerun_with: nil)
-        diagnostic = diagnostics(gate).first
+        diagnostic = primary_diagnostic(gate)
         return nil unless diagnostic
 
         if %w[pending missing].include?(diagnostic["state"])
@@ -40,6 +40,18 @@ module Hive
           "condition_state" => diagnostic["state"],
           "diagnostic_code" => diagnostic["code"]
         )
+      end
+
+      # An explicit wait explains the lack of implementation. Do not hide a
+      # branch repair or an actual question behind incidental missing changes.
+      def primary_diagnostic(gate)
+        entries = diagnostics(gate)
+        return entries.first unless entries.first&.fetch("reason", nil) == "no_worktree_changes"
+
+        entries.find do |entry|
+          entry["role"] == "inhibitor" && entry["state"] == "satisfied" &&
+            entry["reason"] != "no_worktree_changes"
+        end || entries.first
       end
 
       def diagnostics(gate)

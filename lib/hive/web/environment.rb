@@ -5,8 +5,10 @@ require "hive/web/loopback"
 module Hive
   module Web
     # Single source of truth for the native shared-app environment migration.
-    # Only the six enumerated HIVEBOX_* names are deprecated; container image,
-    # supervisor, repo-root, and session-secret settings remain canonical.
+    # The six enumerated HIVEBOX_* names are deprecated aliases honored until
+    # the next major release. The discontinued Hivebox image's own settings
+    # (supervisor, repo-root, session-secret, precompiled assets) are no
+    # longer read at all.
     module Environment
       Setting = Data.define(:canonical, :legacy, :default)
       USE_SETTING_DEFAULT = Object.new.freeze

@@ -1,0 +1,5 @@
+## [2026-10-09T01:30:00Z] testing - rejected inherited RAKEOPT invalidates the stale default report
+
+**Action:** Updated [[testing]] after fixing `bin/hive-eval`'s inherited-RAKEOPT guard. The guard previously exited `1` before the shared stale-report removal point, so a previously valid `tmp/hive-eval-report.json` survived every rejection (`--dry-run`, `-n`, and conservative malformed-value rejections), letting downstream readers mistake old JSON for the failed invocation's output. The guard now clears the default report before exiting, matching the other pre-run guards; caller-provided report paths remain untouched until full validation.
+
+**Tests:** Added `test_cli_rejects_inherited_rake_dry_run_clears_stale_default_report` in `test/eval/support/reporter_test.rb`, wrapped in the `preserve_path` helper so the hardcoded default report location is restored for a developer's checkout after the run.

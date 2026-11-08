@@ -1,11 +1,16 @@
 require "time"
+require "hive/review_publication_recovery"
 require "hive/attempts/storage_status"
 require "hive/operational_action"
+require "hive/model_unsupported"
 require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
 require "hive/task_projection"
 require "hive/terminal_outcome"
+require "hive/patrol_fix/publication_block_receipt"
+require "hive/dependencies"
+require "hive/daemon/operational_snapshot"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -22,23 +27,29 @@ module Hive
       completion_ready unknown idle
     ].freeze
     RUNNING_ACTIONS = %w[agent_running].freeze
+    RUNNING_MARKERS = %w[agent_working review_working].freeze
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
     PLAN_REVIEW_WAIT_ACTIONS = %w[plan_reviewing plan_review_retry].freeze
     PLAN_REVIEW_REPAIR_ACTIONS = %w[plan_review_unsupported plan_review_blocked].freeze
+    # A due plan-review retry is dispatched on the next daemon tick. One still
+    # pending this long after its retry_at is not waiting on anything.
+    PLAN_REVIEW_RETRY_OVERDUE_SEC = 60 * 60
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
     PATROL_FIX_WORKFLOW = Hive::PatrolFix::WORKFLOW_ID.to_s.freeze
 
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
                    status_payload_tick_sequence: nil,
                    runtime_identity: Hive::RuntimeIdentity.new.to_h,
+                   recovery_coordinator: nil,
                    now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
       @scheduler_snapshot = scheduler_snapshot
       @status_payload_tick_sequence = status_payload_tick_sequence
       @runtime_identity = runtime_identity
+      @recovery_coordinator = recovery_coordinator
       @now = now.utc
     end
 
@@ -120,6 +131,7 @@ module Hive
       scheduler = scheduler_payload(projects)
 
       active_rows(projects).filter_map do |project, row|
+        row = manual_observation(project, row) unless daemon_enabled?(project.fetch("name"))
         next unless recovery_candidate?(project, row, scheduler)
 
         disposition, freshness = scheduler_disposition_for(project, row, scheduler)
@@ -201,7 +213,7 @@ module Hive
         issues << issue(
           code: "legacy_stage_dirs", source: "task_graph", project: project["name"],
           message: "#{total} task#{total == 1 ? '' : 's'} hidden in legacy stage dirs: #{dirs}",
-          remediation: project["legacy_migrate_command"] || "hive migrate"
+          remediation: project["legacy_state_guide"] || "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
         )
       end
       active.each do |project, row|
@@ -289,11 +301,23 @@ module Hive
         {}
       end
       issues = []
-      unless status == "current"
+      failure = Hive::Daemon::OperationalSnapshot.failure_detail(snapshot)
+      if status == "current"
+        if failure
+          issues << issue(
+            code: "scheduler_tick_failed", source: "scheduler",
+            message: "the last complete scheduler snapshot (tick #{snapshot['tick_sequence']}) " \
+                     "stays authoritative only until #{snapshot['valid_until']}; #{failure}",
+            remediation: scheduler_failure_remediation(snapshot)
+          )
+        end
+      else
+        message = "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}"
         issues << issue(
           code: "scheduler_#{status}", source: "scheduler",
-          message: "daemon scheduler observation is #{status}: #{reason || 'unknown reason'}",
-          remediation: "check hive daemon status --json and wait for one complete reconciliation tick"
+          message: failure ? "#{message}; #{failure}" : message,
+          remediation: failure ? scheduler_failure_remediation(snapshot) :
+            "check hive daemon status --json and wait for one complete reconciliation tick"
         )
       end
       {
@@ -307,6 +331,16 @@ module Hive
         "provider_holds" => Array(snapshot["provider_holds"]),
         "issues" => issues + Array(snapshot["issues"])
       }
+    end
+
+    def scheduler_failure_remediation(snapshot)
+      if snapshot.dig("last_failure", "reason").to_s.start_with?("duplicate_task_identity")
+        "remove or move the stale copy so each task slug lives in exactly one " \
+          "<project>/.hive-state/stages/<stage>/ folder; the next daemon tick then publishes"
+      else
+        "inspect operational_snapshot_incomplete events in the daemon log and " \
+          "wait for one complete reconciliation tick"
+      end
     end
 
     def task_graph_predates_snapshot?(snapshot)
@@ -379,6 +413,7 @@ module Hive
     end
 
     def project_row(project, row, scheduler)
+      row = manual_observation(project, row) unless daemon_enabled?(project.fetch("name"))
       reasons = reasons_for(project, row)
       state, owner = classify(project, row)
       scheduler_disposition, scheduler_freshness = scheduler_disposition_for(
@@ -390,9 +425,13 @@ module Hive
           scheduler_disposition.fetch("reason", "scheduler disposition is unavailable"),
           "scheduler"
         )
-        reasons.unshift(scheduler_reason) if material_scheduler_disposition?(scheduler_disposition)
+        controller_failure = scheduler_disposition["decision"] == "markerless_stalled" &&
+          typed_attempt_diagnostic(row)
+        if material_scheduler_disposition?(scheduler_disposition)
+          controller_failure ? reasons.push(scheduler_reason) : reasons.unshift(scheduler_reason)
+        end
         scheduler_state, scheduler_owner = classify_scheduler_disposition(scheduler_disposition)
-        unless running?(row) || scheduler_state.nil?
+        unless running?(row) || scheduler_state.nil? || controller_failure
           state = scheduler_state
           owner = scheduler_owner
         end
@@ -416,12 +455,7 @@ module Hive
           "marker" => row.fetch("marker"),
           "allowed_outcomes" => Array(row["outcomes"])
         },
-        "liveness" => {
-          "status" => liveness_status(row),
-          "pid" => row["task_lock_pid"] || row["claude_pid"],
-          "attempt_id" => row["attempt_id"],
-          "task_generation" => row["task_generation"]
-        },
+        "liveness" => liveness_payload(row),
         "state" => state,
         "blocker_owner" => owner,
         "reason" => reasons.first.fetch("message"),
@@ -436,10 +470,13 @@ module Hive
         "recovery" => recovery_payload(row, scheduler_disposition, scheduler_freshness),
         "closure" => closure_payload(project, row),
         "plan_review" => row["plan_review"],
+        "review_publication" => Hive::ReviewPublicationRecovery.project(row["attrs"] || {}, action: action, marker: row["marker"]),
         "dependency" => {
           "blocked" => row["blocked"] == true,
           "blocked_by" => row["blocked_by"],
           "dependency_stage" => row["dependency_stage"],
+          "unmet_dependencies" => Array(row["unmet_dependencies"]),
+          "dependency_base_mode" => row["dependency_base_mode"] || "default",
           "admission_error" => row["admission_error"]
         },
         "freshness" => {
@@ -459,7 +496,19 @@ module Hive
     end
 
     def scheduler_disposition_for(project, row, scheduler)
-      return [ nil, "not_applicable" ] unless daemon_enabled?(project.fetch("name"))
+      unless daemon_enabled?(project.fetch("name"))
+        receipt = row["manual_recovery_receipt"]
+        receipt ||= manual_marker_receipt(row) if Hive::Recovery::API.recoverable_marker?(row["marker"])
+        return [ nil, "not_applicable" ] unless receipt
+        decision = case receipt["status"]
+        when "running" then "retry_in_flight"
+        when "unavailable" then "recovery_unavailable"
+        else "retry_dispatch_disabled"
+        end
+        return [ { "status" => "available", "decision" => decision,
+          "owner" => receipt["owner"], "reason" => receipt["reason"],
+          "recovery" => receipt }, "not_applicable" ]
+      end
 
       status = scheduler.fetch("status")
       return [ nil, status ] unless status == "current"
@@ -493,6 +542,52 @@ module Hive
       [ disposition, "current" ]
     end
 
+    def manual_observation(project, row)
+      row = row.merge("project" => project.fetch("name"))
+      return row unless manual_observation_candidate?(row)
+      @recovery_coordinator ||= Hive::Daemon::RecoveryCoordinator.new
+      @manual_evidence ||= {}
+      evidence_by_slug = @manual_evidence[project.fetch("name")] ||= begin
+        rows = project.fetch("tasks").select { |candidate| manual_observation_candidate?(candidate) }
+          .map { |candidate| candidate.merge("project" => project.fetch("name")) }
+        @recovery_coordinator.manual_evidence_for(project: project.fetch("name"), rows: rows)
+      end
+      evidence = evidence_by_slug[row.fetch("slug")]
+      return row unless evidence
+
+      row.merge("recovery_observation" => evidence.fetch("binding"),
+        "recovery_binding_conflict" => evidence["binding"].nil?,
+        "manual_recovery_receipt" => evidence.fetch("receipt"))
+    end
+
+    def manual_observation_candidate?(row)
+      workflow = Hive::Workflows::Registry.workflows[row["workflow"].to_s.to_sym]
+      return false if workflow&.controller?
+      !invalid_task?(row) &&
+        (row["marker"] == "none" || Hive::Recovery::API.recoverable_marker?(row["marker"]))
+    end
+
+    def manual_marker_receipt(row)
+      return nil if invalid_task?(row)
+      if running?(row)
+        return Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+          "status" => "running", "owner" => "agent", "reason" => "existing_live",
+          "attempt_id" => row["attempt_id"], "failure_origin" => row.dig("attrs", "reason"),
+          "remediation" => Shellwords.join([ "hive", "task", row["slug"], "--project", row["project"], "--json" ])
+        }).to_h
+      end
+      diagnostic = typed_attempt_diagnostic(row)
+      owner = diagnostic ? diagnostic.fetch("owner") : "operator"
+      reason = row.dig("attrs", "marker_id").to_s.empty? ? "recovery_migration_required" : "project_dispatch_disabled"
+      Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "blocked", "owner" => owner, "reason" => reason,
+        "attempt_id" => row["attempt_id"], "failure_origin" => row.dig("attrs", "reason"),
+        "remediation" => reason == "recovery_migration_required" ?
+          "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status" :
+          "use a fresh local workflow.retry action from hive status --operational --json"
+      }).to_h
+    end
+
     def scheduler_task_matches?(observed, row)
       expected = {
         "folder" => row["folder"],
@@ -509,6 +604,8 @@ module Hive
         "depends_on" => row["depends_on"],
         "blocked_by" => row["blocked_by"],
         "dependency_stage" => row["dependency_stage"],
+        "unmet_dependencies" => Array(row["unmet_dependencies"]),
+        "dependency_base_mode" => row["dependency_base_mode"] || "default",
         "blocked" => row["blocked"] == true,
         "admission_error" => row["admission_error"]
       }
@@ -528,6 +625,8 @@ module Hive
         "depends_on" => observed["depends_on"],
         "blocked_by" => observed["blocked_by"],
         "dependency_stage" => observed["dependency_stage"],
+        "unmet_dependencies" => Array(observed["unmet_dependencies"]),
+        "dependency_base_mode" => observed["dependency_base_mode"] || "default",
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
       }
@@ -599,11 +698,14 @@ module Hive
         [ "running", "agent" ]
       when "retry_safety_blocked"
         [ "needs_repair", disposition["owner"] || "operator" ]
-      when "semantic_terminal_error"
+      when "retry_dispatch_disabled"
+        [ "needs_repair", disposition.dig("recovery", "owner") || "operator" ]
+      when "semantic_terminal_error", "attempt_failure_limit", Hive::ModelUnsupported::REASON
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
-        [ "unknown", "hive" ]
-      when "wait_for_answers"
+        owner = disposition["owner"] || "hive"
+        [ owner == "provider" ? "waiting_on_provider_or_scheduler" : "unknown", owner ]
+      when "wait_for_answers", "pull_request_merged", "pull_request_closed_unmerged"
         [ "waiting_on_you", "operator" ]
       when "quarantined", "project_dropped", "folder_missing", "folder_missing_nil",
            "plan_approval_invalid", "legacy_layout", "markerless_stalled"
@@ -617,8 +719,13 @@ module Hive
       return [ "unknown", "unknown" ] if invalid_task?(row)
       return [ "needs_repair", "hive" ] if stale_liveness?(row)
       return [ "running", "agent" ] if running?(row)
+      if row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        return [ "waiting_on_you", "operator" ]
+      end
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+        return [ "needs_repair", "hive" ] if plan_review_retry_overdue?(row)
+
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
         return [ "waiting_on_provider_or_scheduler", owner ]
       end
@@ -749,7 +856,7 @@ module Hive
             "next_eligible_at" => nil,
             "owner" => "operator",
             "reason" => "recovery_migration_required",
-            "remediation" => "run `hive migrate` in the task project and retry from fresh status",
+            "remediation" => "read https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md with your agent, then retry from fresh status",
             "retry_count" => nil,
             "provider_hint" => provider_hint(row),
             "terminal_outcome" => nil,
@@ -798,7 +905,7 @@ module Hive
     end
 
     def recovery_candidate?(project, row, scheduler)
-      return true if Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return true if Hive::Recovery::API.recoverable_marker?(row["marker"]) || row["manual_recovery_receipt"]
       return false unless scheduler.fetch("status") == "current"
 
       observed = (@scheduler_task_index || {})[
@@ -888,6 +995,9 @@ module Hive
     end
 
     def stale_liveness?(row)
+      return false unless RUNNING_ACTIONS.include?(row["action"]) ||
+                          RUNNING_MARKERS.include?(row["marker"])
+
       (row["claude_pid"] && row["claude_pid_alive"] == false) ||
         (row["task_lock_pid"] && row["live_task_lock"] == false)
     end
@@ -916,7 +1026,8 @@ module Hive
       daemon_enabled?(project["name"]) &&
         %w[error review_error].include?(row["marker"].to_s) &&
         !Hive::TaskProjection.history_invalid_row?(row) &&
-        !task_history_unavailable?(row)
+        !task_history_unavailable?(row) &&
+        !Hive::ModelUnsupported.marker?(row["attrs"] || {})
     end
 
     def task_history_unavailable?(row)
@@ -940,6 +1051,20 @@ module Hive
           "task has a verified live runner"
         end
         reasons << reason("live_runner", message, "liveness")
+      elsif row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
+        reasons << reason(
+          Hive::PatrolFix::PublicationBlockReceipt::CODE,
+          Hive::PatrolFix::PublicationBlockReceipt::SUMMARY,
+          "patrol_fix"
+        )
+      elsif plan_review_retry_overdue?(row)
+        retry_at = row.dig("plan_review", "retry_at")
+        reasons << reason(
+          "plan_review_retry_overdue",
+          "plan review retry was due at #{retry_at} and has not run; " \
+          "run `hive plan-review-run #{row['slug']}` or inspect `hive plan-review #{row['slug']} show`",
+          "plan_review"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
@@ -984,7 +1109,7 @@ module Hive
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]
         reasons << reason("human_input", message || "task requires an operator decision", "task")
       elsif row["blocked"] == true
-        message = row["blocked_by"] ? "blocked by #{row.fetch('blocked_by')}" : "blocked by a task dependency"
+        message = dependency_wait_message(row)
         reasons << reason("dependency_wait", message, "dependency")
       elsif COMPLETION_ACTIONS.include?(row["action"])
         reasons << reason("completion_ready", row["action_label"] || "task is ready to complete", "task")
@@ -996,13 +1121,45 @@ module Hive
         held = row.fetch("held")
         reasons << reason("provider_quota", "#{held['provider'] || 'provider'} quota hold", "provider")
       end
-      if row["blocked_by"] && reasons.none? { |entry| entry["code"] == "dependency_wait" }
-        reasons << reason("dependency_wait", "blocked by #{row.fetch('blocked_by')}", "dependency")
+      if dependency_wait?(row) && reasons.none? { |entry| entry["code"] == "dependency_wait" }
+        reasons << reason("dependency_wait", dependency_wait_message(row), "dependency")
       end
       if row["condition_warning"]
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
       end
       reasons
+    end
+
+    # A scheduled plan-review retry whose time passed long ago and that no
+    # dependency holds back. Reported as needs_repair instead of an
+    # indefinite scheduler wait.
+    def plan_review_retry_overdue?(row)
+      return false unless PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+      return false if row["blocked"] == true || dependency_wait?(row)
+
+      review = row["plan_review"]
+      return false unless review.is_a?(Hash) && review["state"] == "retry_scheduled"
+
+      @now - Time.iso8601(review["retry_at"].to_s) > PLAN_REVIEW_RETRY_OVERDUE_SEC
+    rescue ArgumentError
+      false
+    end
+
+    def dependency_wait?(row)
+      return false if row["admission_error"]
+
+      Hive::Dependencies.blocker_names(
+        unmet_dependencies: row["unmet_dependencies"], blocked_by: row["blocked_by"]
+      ).any?
+    end
+
+    def dependency_wait_message(row)
+      Hive::Dependencies.blocker_summary(
+        depends_on: row["depends_on"],
+        blocked_by: row["blocked_by"],
+        dependency_stage: row["dependency_stage"],
+        unmet_dependencies: row["unmet_dependencies"]
+      )
     end
 
     def typed_attempt_diagnostic(row)
@@ -1039,6 +1196,17 @@ module Hive
       return "stale" if stale_liveness?(row)
 
       "not_running"
+    end
+
+    def liveness_payload(row)
+      status = liveness_status(row)
+      owned = status != "not_running"
+      {
+        "status" => status,
+        "pid" => owned ? row["task_lock_pid"] || row["claude_pid"] : nil,
+        "attempt_id" => owned ? row["attempt_id"] : nil,
+        "task_generation" => owned ? row["task_generation"] : nil
+      }
     end
 
     def archive_payload(archived)

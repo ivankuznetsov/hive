@@ -150,8 +150,8 @@ class ReviewErrorReasonTest < Minitest::Test
   # (see ReviewErrorReason.classify's input-contract note) plus benign agent
   # narration must classify to `unknown`, not a specific bucket. The positive
   # tables above prove the patterns FIRE; this proves they don't OVER-fire on
-  # prose. Notably the launcher's own `tmux_session_terminated` signature — a
-  # real error_message that reaches classify — is pinned here, so a future
+  # prose. Notably the retired tmux launcher's `tmux_session_terminated`
+  # signature — still present in legacy task records — is pinned here, so a future
   # regex broadening (e.g. adding /terminated/i to agent_crashed) that
   # reclassified an infra timeout as a crash fails loudly instead of silently.
   NON_FIRING_LINES = [

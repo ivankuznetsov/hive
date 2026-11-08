@@ -99,7 +99,7 @@ class BetterleaksTest < Minitest::Test
       capture_io do
         assert_raises(RuntimeError) { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
       end
-      assert_equal [ first ], requests
+      assert_equal [ first ], requests.uniq
       assert_equal "corrupt", File.read(cache_path(cache, first))
       assert_empty Dir.glob(File.join(root, "*", "betterleaks"))
       assert_empty Dir.glob(File.join(cache, ".betterleaks-*"))
@@ -110,7 +110,7 @@ class BetterleaksTest < Minitest::Test
     %i[download extraction].each do |failure|
       package_fixture(failure: failure) do |root, cache, requests|
         assert_raises(RuntimeError) { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
-        assert_equal 1, requests.size
+        assert_equal 1, requests.uniq.size
         assert_empty Dir.glob(File.join(root, "*", "betterleaks"))
       end
     end
@@ -166,20 +166,31 @@ class BetterleaksTest < Minitest::Test
       requests = []
       original_capture = Open3.method(:capture3)
       capture = lambda do |*argv, **options|
-        if argv.first == "curl"
-          platform = assets.keys.find { |key| argv.last.include?(key) }
-          requests << platform
-          bytes = failure == :checksum ? "wrong bytes" : archives.fetch(platform)
-          File.binwrite(argv.fetch(argv.index("--output") + 1), bytes)
-          [ "", "private transport detail", Hive::Gh::CommandStatus.new(exitstatus: failure == :download ? 1 : 0) ]
-        elsif argv.first == "tar" && failure == :extraction
+        if argv.first == "tar" && failure == :extraction
           [ "", "private extraction detail", Hive::Gh::CommandStatus.new(exitstatus: 1) ]
         else
           original_capture.call(*argv, **options)
         end
       end
+      transport = lambda do |argv, deadline:|
+        platform = assets.keys.find { |key| argv.last.include?(key) }
+        requests << platform
+        bytes = failure == :checksum ? "wrong bytes" : archives.fetch(platform)
+        File.binwrite(argv.fetch(argv.index("--output") + 1), bytes)
+        File.binwrite(argv.fetch(argv.index("--dump-header") + 1), "HTTP/2 200\r\n\r\n")
+        failure == :download ? 7 : 0
+      end
+      now = 0.0
       with_env("HIVE_BETTERLEAKS_CACHE_DIR" => nil, "GITHUB_TOKEN" => nil, "GH_TOKEN" => nil) do
-        with_replaced_singleton_method(Open3, :capture3, capture) { yield root, cache, requests }
+        with_replaced_singleton_method(Open3, :capture3, capture) do
+          with_replaced_singleton_method(HiveBetterleaksPackage, :run_curl, transport) do
+            with_replaced_singleton_method(HiveBetterleaksPackage, :monotonic_now, -> { now }) do
+              with_replaced_singleton_method(HiveBetterleaksPackage, :sleep, ->(seconds) { now += seconds }) do
+                yield root, cache, requests
+              end
+            end
+          end
+        end
       end
     ensure
       if original_assets

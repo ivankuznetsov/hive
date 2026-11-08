@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-09-02
+updated: 2026-11-08
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
@@ -20,7 +20,7 @@ hive review <slug>                        # promote 5-open-pr → 6-review, run 
 hive review --pr 197                      # create/reuse 6-review/adhoc-review-pr-197, run review
 hive artifacts <slug>                     # promote 6-review → 7-artifacts, collect artifacts
 hive finalize <slug>                      # promote 7-artifacts → 8-finalize, finalize PR
-hive archive <slug>                       # promote 8-finalize → 9-done, run archive
+hive archive <slug>                       # confirm PR MERGED, promote 8-finalize → 9-done, run archive
 hive archive <slug> --reason already_delivered \
   --evidence owner/repo#42                # verify, preview, confirm y/N (or --yes), archive
 hive archive <slug> --reason superseded \
@@ -111,9 +111,25 @@ identity-mismatched receipts are quarantined and never authorize a move.
 5. **At-target branch**: if the task is already at the verb's target stage, just run the stage's agent via `Hive::Commands::Run`. Phase: `ran`.
 6. **Wrong-stage guard**: if the task is at neither source nor target, raise `WrongStage` with the verb's expected source/target.
 7. **Marker/condition validation**: forward advance requires a terminal marker — currently `:complete`, `:execute_complete`, or `:review_complete` (one per stage that writes a typed terminal marker; the closed set is `Hive::Markers::TERMINAL_MARKER_NAMES`). Effective condition authority additionally gates `4-execute`; a blocked JSON error includes `condition_gate` and `next_action`. The `brainstorm` verb has `force_source: true` and skips this check. Archive has no error-marker exception; automatic merge closure reaches the separate receipt guard only through `Hive::TaskClosure`.
-8. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
-9. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
-10. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
+8. **Archive merge confirmation** (`confirm_archive_pr_merged!`): for the
+   ordinary `archive` advance out of `8-finalize`, a finalize `:complete`
+   marker only proves the PR was readied. StageAction reads the canonical
+   `pr_url` from `pr.md` and asks GitHub through `Hive::Gh.pr_state` (the same
+   adapter finalize's merged short-circuit uses) whether it is `MERGED`. Any
+   other answer refuses before the move with `Hive::ArchivePrNotMerged`
+   (`reason=pr_not_merged`, message names the PR URL and state); a gh failure
+   or a missing/non-canonical `pr_url` fails closed with
+   `Hive::ArchivePrStateUnobservable` (`reason=pr_state_unobservable` /
+   `pr_url_unresolved`). Both are `WrongStage` subclasses: exit `4`, JSON
+   `error_kind: wrong_stage`, distinguished by `error_class`, with
+   `current_stage`/`target_stage`. The message names the two ways forward:
+   merge the PR and re-run `hive archive <slug> --from 8-finalize`, or close
+   with `--reason already_delivered|superseded|cancelled`. Explicit `--reason`
+   closures never reach this guard (they use `Hive::TaskClosure`), and the
+   daemon's merged-PR reconciliation keeps its own closure receipt path.
+9. **Promote**: call `Hive::Commands::Approve` with `to: target_stage`, `from: current_stage`, and `quiet: @json` so the inner Approve doesn't double-emit.
+10. **Run**: call `Hive::Commands::Run` on the new folder, also `quiet: @json`.
+11. **Emit**: in JSON mode, emit a single `hive-stage-action` envelope with `phase: "promoted_and_ran"` (or `ran` / `noop`).
 
 ## JSON contract (`schema = "hive-stage-action"`, version 2)
 

@@ -617,16 +617,16 @@ module HiveTestHelper
     cleanup_tmp_dir!(dir) if dir
   end
 
-  def with_tmp_git_repo
+  def with_tmp_git_repo(git_runner: method(:run!), init_options: [])
     with_tmp_dir do |dir|
-      run!("git", "-C", dir, "init", "-b", "master", "--quiet")
-      run!("git", "-C", dir, "config", "user.email", "test@example.com")
-      run!("git", "-C", dir, "config", "user.name", "Test")
-      run!("git", "-C", dir, "config", "commit.gpgsign", "false")
-      disable_git_auto_maintenance!(dir)
+      git_runner.call("git", "-C", dir, "init", *init_options, "-b", "master", "--quiet")
+      git_runner.call("git", "-C", dir, "config", "user.email", "test@example.com")
+      git_runner.call("git", "-C", dir, "config", "user.name", "Test")
+      git_runner.call("git", "-C", dir, "config", "commit.gpgsign", "false")
+      disable_git_auto_maintenance!(dir, git_runner: git_runner)
       File.write(File.join(dir, "README.md"), "test\n")
-      run!("git", "-C", dir, "add", ".")
-      run!("git", "-C", dir, "commit", "-m", "initial", "--quiet")
+      git_runner.call("git", "-C", dir, "add", ".")
+      git_runner.call("git", "-C", dir, "commit", "-m", "initial", "--quiet")
       yield(dir)
     end
   end
@@ -634,9 +634,9 @@ module HiveTestHelper
   # Git may fork a detached `git maintenance run --auto` after a commit or
   # fetch. It writes .git/objects/maintenance.lock while the test's tmpdir is
   # being removed, so cleanup fails with ENOENT. Fixture repos never need it.
-  def disable_git_auto_maintenance!(dir)
-    run!("git", "-C", dir, "config", "maintenance.auto", "false")
-    run!("git", "-C", dir, "config", "gc.auto", "0")
+  def disable_git_auto_maintenance!(dir, git_runner: method(:run!))
+    git_runner.call("git", "-C", dir, "config", "maintenance.auto", "false")
+    git_runner.call("git", "-C", dir, "config", "gc.auto", "0")
   end
 
   def run!(*cmd)

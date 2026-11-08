@@ -38,7 +38,9 @@ module Hive
 
           patterns = resolve_patterns(cfg)
           waivers = resolve_waivers(cfg)
-          matches, waived = scan_diff(diff, patterns).partition do |match|
+          found = scope_to_task_changes(ctx.worktree_path, ctx.default_branch, head_sha,
+                                        scan_diff(diff, patterns), patterns)
+          matches, waived = found.partition do |match|
             !waivers.include?([ match.pattern_name, match.match_sha256 ])
           end
 
@@ -70,6 +72,58 @@ module Hive
                   "git diff failed in #{worktree_path}: #{err.to_s.strip}"
           end
           out
+        end
+
+        # `base..head` is a tree diff, so it over-reports in two shapes:
+        # a base that is not an ancestor of head (a receipt head recorded
+        # before a rebase) contributes its own changes in reverse, and a
+        # head that merged the upstream default branch carries every
+        # upstream change the merge brought in. Neither is fix content.
+        #
+        # Keep only matches that are also present in the task branch's
+        # own diff against upstream (`merge-base(upstream, head)..head`),
+        # i.e. content the branch itself carries. The scan stays a subset
+        # filter over the real base..head matches, so anything the fix
+        # introduced (including merge-resolution content) still trips.
+        # Content-match keys include the matched text's digest; path and
+        # header matches key on pattern + file only, so a fix's mode flip
+        # on a file the task created (`new file mode` there vs `new mode`
+        # here) is not dropped on a snippet mismatch.
+        #
+        # Falls back to the unfiltered matches (today's behavior, a
+        # superset) when the upstream ref is unset or unresolvable, the
+        # histories share no merge base, or head is already reachable
+        # from upstream. git failure on the task diff itself raises.
+        def scope_to_task_changes(worktree_path, upstream_ref, head, matches, patterns)
+          return matches if matches.empty?
+
+          fork_point = task_fork_point(worktree_path, upstream_ref, head)
+          return matches unless fork_point
+
+          owned = scan_diff(capture_diff(worktree_path, fork_point, head), patterns)
+                  .to_set { |match| task_match_key(match) }
+          matches.select { |match| owned.include?(task_match_key(match)) }
+        end
+
+        def task_fork_point(worktree_path, upstream_ref, head)
+          ref = upstream_ref.to_s.strip
+          return nil if ref.empty?
+
+          out, _err, status = Open3.capture3("git", "-C", worktree_path, "merge-base",
+                                             "--end-of-options", ref, head)
+          return nil unless status.success?
+
+          # Head already on upstream: the task diff would be empty and
+          # filter every match away, so keep the unfiltered scan.
+          _out, _err, reachable = Open3.capture3("git", "-C", worktree_path, "merge-base",
+                                                 "--is-ancestor", head, ref)
+          return nil if reachable.success?
+
+          out.strip
+        end
+
+        def task_match_key(match)
+          [ match.pattern_name, match.file, match.line && match.match_sha256 ]
         end
 
         # Apply config overrides on top of the default pattern set.
@@ -345,7 +399,7 @@ module Hive
           Match.new(pattern_name:, file:, line:, snippet:, severity:, match_sha256:)
         end
         private_class_method :add_file_path_matches, :diff_git_path, :exempt_new_file?,
-                             :decode_git_path, :build_match
+                             :decode_git_path, :build_match, :task_fork_point, :task_match_key
       end
     end
   end

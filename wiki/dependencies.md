@@ -252,7 +252,7 @@ dying in seconds rather than as a test failure.
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
-| `sqlite3` | `~> 2.0` (root and web locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.10.2 or newer to avoid GHSA-4fqr-96q8-xrfx (query truncation for strings of at least 4 GiB), as well as GHSA-mwm8-39rw-8826. |
+| `sqlite3` | `~> 2.0` (root and web locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. Both lockfiles use 2.10.2 or newer to avoid GHSA-4fqr-96q8-xrfx (possible query truncation for strings of 4 GiB or larger), while retaining the earlier GHSA-mwm8-39rw-8826 fix. |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -282,6 +282,8 @@ security floor fixes the November 2026 template regular-expression denial-of-ser
 URI host/path normalization, and misleading display-host advisories reported by
 `bundler-audit`; compatible patch updates preserve the existing dependency
 constraints.
+CI audits both lockfiles, so security updates must cover both dependency
+resolutions and every locked native `sqlite3` platform.
 
 ## Web app bundle
 
@@ -321,6 +323,12 @@ The root lock's transitive `activesupport`, pulled in by the RuboCop Rails
 plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
+
+The web lock pins Nokogiri 1.19.7, rails-html-sanitizer 1.7.2, and Loofah
+2.25.3 following the November 2026 HTML/XML parsing and sanitization
+advisories. All eight existing Nokogiri platform variants use the patched
+release. These compatible patch updates require no direct Gemfile changes;
+the CI audit checks the web lock as well as the root lock.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

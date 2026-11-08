@@ -16,6 +16,21 @@ attempt row fails closed with an invalid attempt record rather than a clean
 newer-schema refusal. Whether a dedicated fence (schema v3 plus a
 QuiescenceUpgrade source) is wanted is undecided.
 
+## Review base-conflict gate and rewind archive (2026-11-08)
+
+- Finalize's merge-time handling of `BEHIND` (guarded update-branch) is still
+  open.
+- The required-checks gate reads only classic branch protection
+  (`branches/<base>/protection/required_status_checks`); required checks
+  configured through repository rulesets are not counted, and a 403 on the
+  protection endpoint is treated as "nothing required". Not live-smoked
+  against a PR with a never-created required check.
+- Review does not offer an automatic merge-from-base step; the operator (or an
+  agent following `reviews/ci-blocked.md`) performs the merge commit.
+- Not live-smoked against a real CONFLICTING PR; covered by unit doubles of the
+  `gh pr view` rollup only. No e2e scenario runs hosted checks (they are
+  disabled in e2e) or a backward approve into 6-review.
+
 ## Manual-retry admission identity fence (2026-11-08)
 
 Focused regression coverage exercises foreign existing-live admission through
@@ -123,6 +138,61 @@ verbs, their limits, and the per-token revocation cost.
   (`ORCHESTRATOR_JOURNALS`), and the daemon hold observer still defers while a
   task lock is live. Both predate the append-only custody and could now be
   simplified; left unchanged pending live validation.
+
+## Canonical hive-bench Pi self-resolution follow-up (2026-11-03)
+
+The planning inspection of canonical hive-bench `main` at
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326` (2026-11-01) found an unresolved
+Pi self-resolution defect in `harness/lib/hive_stages.sh:132`: after placing
+the reused `/work/.hb/bin` first on PATH, `PI_REAL="$(command -v pi)"` can
+discover the existing wrapper that the script then overwrites. Hive's packaged
+script has no such discovery; its explicit `HIVE_PI_BIN` launcher owns the
+transport extension. Hive's persisted-entry cleanup is independently
+deliverable and does not resolve this canonical defect.
+
+The separate repair belongs to hive-bench. It must avoid discovering its own
+wrapper, preserve extension injection and caller argv, and fail when the real
+Pi executable is unavailable. Future proof should run the full caller twice
+against one temporary work directory, with the managed bin first on inherited
+PATH, a legacy Pi wrapper, and a sentinel real Pi elsewhere. Require bounded
+termination, exactly one sentinel call per run, preserved extension/caller
+arguments, and missing-real-Pi failure. Inspect `harness/lib/hive_stages.sh`
+and `test/hive_stages_test.rb`; a launcher-based repair may also need
+`harness/lib/{pi_bench_launcher.sh,hive_driver.rb}` and
+`test/pi_bench_launcher_test.rb`. Select the runner from canonical `AGENTS.md`
+and `Rakefile`; extracted shell blocks alone are insufficient proof.
+
+No canonical task identifier, fix, tested commit, or passing external result is
+known from this execution. None is a completion condition for Hive's cleanup.
+The inspected revision is evidence from planning, not a new external test run.
+
+## Accepted Hive persisted-bin limitations (2026-11-03)
+
+Hive's non-sealed controller cleanup deliberately retains the three-name
+legacy-wrapper set (`codex`, `pi`, `grok`) enumerated in historical commit
+`b1fd4b1862`. See [[modules/workflows]] for the driver executable-selection
+table and [[testing]] for current full-caller cleanup evidence. Three residual
+exposures remain outside this repair's scope and do not gate its completion:
+
+- **Stale Claude wrapper:** the driver does not pin `HIVE_CLAUDE_BIN`, so a
+  stale `claude` in reused `/work/.hb/bin` can still shadow the PATH-resolved
+  executable. The allowlist describes known older wrappers, rather than every
+  PATH-resolved agent. OpenCode is excluded with its launcher explicitly
+  pinned by `HIVE_OPENCODE_BIN`.
+- **Stale gh window:** an existing `/work/.hb/bin/gh` remains first on PATH
+  through plan and execute. The existing `HB_REVIEW` block later rewrites and
+  chmods it; `HB_REVIEW=0` never rewrites it. Cleanup leaves `gh` untouched.
+  Tests observe its preservation immediately after cleanup, before review
+  setup can replace it; they do not bless stale plan/execute behavior.
+- **Other stale commands:** the non-sealed caller prepends `/work/.hb/bin`
+  to PATH for all commands. Unrelated entries such as `hive`, `git`, or `ruby`
+  can therefore shadow their intended executables. The initial Hive version
+  check uses an absolute runtime path and does not detect a stale PATH-resolved
+  `hive`. These names remain outside the three-name cleanup allowlist.
+
+These accepted Hive scope limitations are separate from the unresolved
+canonical Pi self-resolution follow-up above. Hive's cleanup does not claim
+cross-repository behavioral parity.
 
 ## Task observation boundary (2026-10-02)
 
@@ -2137,3 +2207,57 @@ suite passes. The wiki read-only snapshot check passes alone; the broad check
 observed concurrent scratch/log writes. Focused lifecycle, HTTP, schema, skill
 projection and restart-policy checks pass, but no green full-suite result is
 claimed for this host.
+
+## Babysitter Git option compatibility evidence (2026-11-01)
+
+The fixed six-token `cat-file` boundary (`--filters`, `--fi`, `--fil`, `--filt`,
+`--filte`, `--filter`) intentionally over-blocks some errors and reads with
+synthetic success and empty stdout, independently of Git version. For
+external-diff options, only exact `--ext-diff` is denied; its recorded rejected
+prefixes remain Git's responsibility on otherwise allowlisted reads.
+
+Only the exact versions and cases recorded in
+`test/fixtures/babysitter/git_option_spellings.v1.json` are proven: Git 2.45.4,
+2.55.0, and host 2.56.0 were re-probed locally with executable helper markers.
+The latest successful security-matrix CI run reports `/usr/bin/git` 2.56.0;
+that version identity is recorded separately from locally reproduced parsing.
+Unrecorded versions/cases fail the compatibility test with a characterization
+request, while production continues to deny the same six bare tokens.
+Fixture coverage cannot prove every future Git parsing behavior. In particular,
+allowed glued `cat-file --filter=<spec>` is parsed as `--filters` on Git
+2.45.4 and rejected because that option takes no value. Its safety on that
+version depends on the valueless option continuing to reject attached values.
+
+A broader multi-version compatibility matrix and an audit of other
+abbreviation-dependent option execution seams remain deferred. Git launchers
+outside the babysitter policy's direct stub/overlay consumers also remain
+outside this fix. Exact `--filters` is the sole raw smudge positive control;
+ambiguous spellings and object-filter options are not claimed as helper seams
+on versions that reject them or use them for ordinary reads.
+
+## Historical status lock holder remains unknown (2026-10-30)
+
+The original reported status crash has no retained lock-holder or duration
+capture. A separate SQLite writer reproduces the raw Sequel/SQLite busy escape
+in the prior implementation; it does not establish that historical cause.
+The runtime-contention CI gate now proves bounded default status, retained
+15-second ordinary registration, transient release beyond five seconds, and
+conservative cleanup/reconciliation against isolated real databases. Historical
+lock attribution remains unverified and is not a prerequisite for this policy.
+Transient busy errors during table-presence probes are covered at startup and
+quiescence read boundaries, plus a real exclusive-lock catalog-query test;
+these establish error propagation, not the original lock holder's identity.
+
+## Archive merge truth covers only the ordinary archive verb (2026-11-08)
+
+`hive archive <slug>` from `8-finalize` now refuses unless `Hive::Gh.pr_state`
+reports the recorded PR `MERGED`. Not covered: a direct
+`hive approve <slug> --to 9-done` still moves a finalize task without a merge
+check, and `Hive::Gh` itself invokes `gh` from `PATH` (only managed git's
+credential helper honours `HIVE_GH_BIN`), so the archive check uses whatever
+`gh` the controller's PATH resolves. The related 2026-11-08 gaps from the same
+task idea — CONFLICTING/BEHIND detection in the review CI gate and finalize,
+guarded update-branch before merge, and generation-scoped review pass counters
+after backward recovery into `6-review` — remain open. Finalize's summary.md
+gate treats a legacy `summary.md` without a recorded `head_oid` as drift and
+re-runs finalize once; no live task has been observed in that shape.

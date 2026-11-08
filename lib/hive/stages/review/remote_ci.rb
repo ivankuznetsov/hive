@@ -17,10 +17,29 @@ module Hive
       # gate, a fix commit can trigger fresh hosted checks while the task is
       # already moving into artifacts.
       module RemoteCi
+        # +reason+ types a mergeability block (see Blocked below); it is
+        # nil for ordinary check results and guardrail stops.
         Result = Data.define(
           :status, :attempts, :last_output, :error_message, :limit_text,
-          :guardrail
-        )
+          :guardrail, :reason
+        ) do
+          def initialize(guardrail: nil, reason: nil, **fields)
+            super
+          end
+        end
+        # GitHub runs few or no checks on a PR it cannot merge, so a
+        # CONFLICTING PR can look green. Mergeability is part of settlement:
+        #   base_conflict        -> REVIEW_CI_STALE (operator merges the base)
+        #   mergeability_unknown -> REVIEW_ERROR (GitHub never resolved it
+        #                           within the bounded wait; fail closed)
+        # Required checks are part of settlement too: GitHub may create only
+        # some checks (or none) for a head, so "every present check is green"
+        # does not prove the base branch's protection is satisfied.
+        #   required_checks_missing -> REVIEW_ERROR (a required context never
+        #                              reported success on the exact head)
+        #   required_checks_unknown -> REVIEW_ERROR (the protection lookup kept
+        #                              failing in transport; fail closed)
+        Blocked = Data.define(:reason, :detail)
         POLL_INTERVAL_SEC = 10
         QUIET_SETTLEMENT_SEC = 20
         NO_CHECKS_GRACE_SEC = 30
@@ -67,6 +86,7 @@ module Hive
               head_oid: runner.settled_head
             )
           end
+          return blocked_result(runner.blocked, result) if runner.respond_to?(:blocked) && runner.blocked
           return result unless runner.guardrail_result
 
           Result.new(
@@ -87,6 +107,17 @@ module Hive
           )
         end
 
+        def blocked_result(blocked, result)
+          Result.new(
+            status: blocked.reason == "base_conflict" ? :stale : :error,
+            attempts: result.attempts,
+            last_output: blocked.detail,
+            error_message: blocked.detail,
+            limit_text: nil,
+            reason: blocked.reason
+          )
+        end
+
         def skipped_result
           Hive::Stages::Review::CiFix::Result.new(
             status: :skipped,
@@ -98,7 +129,7 @@ module Hive
         end
 
         class Runner
-          attr_reader :guardrail_result, :settled_head
+          attr_reader :guardrail_result, :settled_head, :blocked
 
           def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh,
                          publication_base_head: nil, publication_withheld: nil, no_repair: false, admit_head: nil, publication_observer: nil,
@@ -126,6 +157,8 @@ module Hive
             @published_head = nil unless @published_head.match?(/\A[0-9a-f]{40,64}\z/)
             @guardrail_result = nil
             @settled_head = nil
+            @blocked = nil
+            @required_contexts = {}
           end
 
           def command_label
@@ -214,7 +247,11 @@ module Hive
               validate_rollup!(latest, identity)
               now = @clock.call
 
+              checks_settled = false
+              mergeable = latest["mergeable"].to_s.upcase
               if latest["headRefOid"].to_s.downcase == local_head
+                return base_conflict(latest, local_head) if mergeable == "CONFLICTING"
+
                 checks = Array(latest["statusCheckRollup"]).select { |entry| entry.is_a?(Hash) }
                 keys = check_keys(latest)
                 states = checks.to_h { |entry| [ check_key(entry), check_state(entry) ] }
@@ -225,7 +262,14 @@ module Hive
                   return failed_run(latest, failures, max_bytes)
                 end
 
-                if !pending && failures.empty?
+                checks_settled = !pending
+                # UNKNOWN (GitHub still computing) keeps polling inside the
+                # same bounded wait; only a MERGEABLE head may settle green.
+                # Required contexts are only consulted once everything else
+                # would settle, so the protection lookup stays off the hot path.
+                required_gap = nil
+                required_gap = required_checks_gap(latest, checks) if checks_settled && mergeable == "MERGEABLE"
+                if checks_settled && mergeable == "MERGEABLE" && required_gap.nil?
                   required_quiet = checks.empty? ? @no_checks_grace_sec : @quiet_settlement_sec
                   signature = settlement_signature(checks)
                   if signature != stable_signature
@@ -235,7 +279,7 @@ module Hive
                     @expected_checks.merge(carried_check_keys(latest))
                     @settled_head = local_head
                     return Hive::Stages::Review::CiFix::Run.new(
-                      "GitHub checks settled for exact head #{local_head}\n", 0
+                      "GitHub checks settled for exact head #{local_head}\n#{behind_note(latest)}", 0
                     )
                   end
                 else
@@ -254,6 +298,8 @@ module Hive
                 if latest["headRefOid"].to_s.downcase == local_head && failures.any?
                   return failed_run(latest, failures, max_bytes)
                 end
+                return required_checks_blocked(required_gap, latest, local_head, timeout_sec) if required_gap
+                return mergeability_unknown(latest, local_head, timeout_sec) if checks_settled
 
                 return Hive::Stages::Review::CiFix::CommandError.new(
                   "GitHub checks did not settle on exact head #{local_head} within #{timeout_sec}s"
@@ -262,6 +308,87 @@ module Hive
 
               @sleeper.call([ @poll_interval_sec, deadline - now ].min)
             end
+          end
+
+          def base_conflict(rollup, local_head)
+            base = rollup["baseRefName"].to_s
+            base = @ctx.default_branch.to_s if base.empty?
+            detail = <<~TEXT
+              Pull request #{rollup['url']} conflicts with its base branch `#{base}` at head #{local_head}
+              (mergeable=CONFLICTING mergeStateStatus=#{rollup['mergeStateStatus'] || 'unknown'}).
+              GitHub does not run the full check suite on a conflicting PR, so CI cannot be treated as green.
+
+              Recovery: in the task worktree, merge the base into the task branch with a merge commit
+              (no rebase, no force-push), resolve the conflicts, and commit:
+
+                  git -C #{@ctx.worktree_path} fetch origin
+                  git -C #{@ctx.worktree_path} merge --no-ff origin/#{base}
+
+              Then refresh `hive status --operational --json` and invoke this task's
+              workflow.retry action so review re-runs on the merged head.
+            TEXT
+            block!("base_conflict", detail)
+          end
+
+          def mergeability_unknown(rollup, local_head, timeout_sec)
+            block!(
+              "mergeability_unknown",
+              "GitHub did not resolve mergeability for #{rollup['url']} at head #{local_head} " \
+              "within #{timeout_sec}s (mergeable=#{rollup['mergeable'] || 'missing'}); " \
+              "checks settled but review fails closed until GitHub reports MERGEABLE"
+            )
+          end
+
+          # nil when every required context of the PR's base branch reported a
+          # green conclusion on this head (or nothing is required). Otherwise
+          # the gap that keeps settlement open: the missing contexts, or the
+          # transport error that left the required set unknown. Non-required
+          # checks are not consulted here; their failures are handled above.
+          def required_checks_gap(rollup, checks)
+            base = rollup["baseRefName"].to_s
+            base = @ctx.default_branch.to_s if base.empty?
+            required = @required_contexts[base] ||= begin
+              repository = @gh.parse_pull_request_url(rollup["url"])
+              @gh.required_status_check_contexts(
+                host: repository.fetch("host"), repository: repository.fetch("repository"),
+                branch: base, cfg: @cfg
+              )
+            end
+            green = checks.select { |entry| check_state(entry) == :green }.map { |entry| check_name(entry) }.to_set
+            missing = required.reject { |context| green.include?(context) }
+            missing.empty? ? nil : { missing: missing, base: base }
+          rescue Hive::GhError => e
+            { unknown: e.message, base: base }
+          end
+
+          def required_checks_blocked(gap, rollup, local_head, timeout_sec)
+            if gap[:unknown]
+              return block!(
+                "required_checks_unknown",
+                "GitHub required status checks for base `#{gap[:base]}` of #{rollup['url']} could not be read " \
+                "within #{timeout_sec}s (#{gap[:unknown]}); review fails closed until the required set is known"
+              )
+            end
+
+            block!(
+              "required_checks_missing",
+              "Required checks for base `#{gap[:base]}` never reported success on #{rollup['url']} at head " \
+              "#{local_head} within #{timeout_sec}s: #{gap[:missing].join(', ')}. GitHub may not have created " \
+              "them for this head; re-run or re-trigger them, then invoke this task's workflow.retry action"
+            )
+          end
+
+          def block!(reason, detail)
+            @blocked = Blocked.new(reason: reason, detail: detail)
+            Hive::Stages::Review::CiFix::CommandError.new(detail)
+          end
+
+          # BEHIND is a merge-time branch-protection concern, not a review
+          # failure: report it alongside the green result.
+          def behind_note(rollup)
+            return "" unless rollup["mergeStateStatus"].to_s.upcase == "BEHIND"
+
+            "note: mergeStateStatus=BEHIND; the branch may need a base merge before `gh pr merge`\n"
           end
 
           def validate_rollup!(rollup, identity)

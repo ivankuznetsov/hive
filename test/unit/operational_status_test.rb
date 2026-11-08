@@ -262,21 +262,161 @@ class OperationalStatusTest < Minitest::Test
 
     assert_equal "running", projected.fetch("state")
     assert_equal "agent", projected.fetch("blocker_owner")
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
     assert_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "provider_quota"
+  end
+
+  def test_live_task_lock_beats_stale_agent_pid
+    result = project(status_payload(live_lock_with_stale_agent))
+    projected = assert_live_liveness(
+      result, pid: 4242, message: "task runner holds the live lock (pid 4242)"
+    )
+
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
+    assert_equal "task runner holds the live lock (pid 4242)", projected.fetch("reason")
+  end
+
+  def test_live_agent_pid_beats_stale_task_lock
+    result = project(status_payload(live_agent_with_stale_lock))
+    projected = assert_live_liveness(result, pid: 777, message: "agent process 777 is alive")
+
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
+    assert_equal "agent process 777 is alive", projected.fetch("reason")
+  end
+
+  def test_material_scheduler_reasons_precede_both_mixed_live_explanations
+    [
+      [ live_lock_with_stale_agent, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ live_agent_with_stale_lock, 777, "agent process 777 is alive" ]
+    ].each do |row, pid, message|
+      %w[in_flight dispatched].each do |decision|
+        scheduler_message = "scheduler reports #{decision}"
+        snapshot = scheduler_snapshot_for(row, decision: decision, reason: scheduler_message)
+        result = project(
+          status_payload(row),
+          project_context: { "demo" => { "daemon_enabled" => true } },
+          scheduler_snapshot: snapshot
+        )
+        label = "#{row.fetch('slug')}/#{decision}"
+        projected = assert_live_liveness(result, pid: pid, message: message, label: label)
+
+        assert_equal [ "running", "agent" ], classify_row(row, daemon_enabled: true), label
+        assert_equal "current", projected.dig("freshness", "scheduler_status"), label
+        assert_equal decision, projected.dig("reasons", 0, "code"), label
+        assert_equal "scheduler", projected.dig("reasons", 0, "source"), label
+        assert_equal scheduler_message, projected.dig("reasons", 0, "message"), label
+        assert_equal scheduler_message, projected.fetch("reason"), label
+        assert_equal "live_runner", projected.dig("reasons", 1, "code"), label
+      end
+    end
+  end
+
+  def test_live_pid_and_explanation_prefer_the_first_available_verified_source
+    cases = [
+      [ "both-live", true, 4242, true, 777, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ "missing-lock-pid", true, nil, true, 777, 777, "agent process 777 is alive" ],
+      [ "missing-agent-pid", true, 4242, true, nil, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ "missing-both-pids", true, nil, true, nil, nil, "task has a verified live runner" ],
+      [ "lock-flag-only", true, nil, false, 777, nil, "task has a verified live runner" ],
+      # Synthetic projector invariant: the producer retains only a live lock holder.
+      [ "agent-flag-only", false, 4242, true, nil, nil, "task has a verified live runner" ]
+    ]
+    cases.each do |slug, lock_live, lock_pid, agent_live, agent_pid, expected_pid, message|
+      row = task(
+        action: "agent_running", slug: slug, live_task_lock: lock_live, task_lock_pid: lock_pid
+      ).merge("claude_pid" => agent_pid, "claude_pid_alive" => agent_live)
+      projected = assert_live_liveness(
+        project(status_payload(row)), pid: expected_pid, message: message, label: slug
+      )
+
+      assert_equal message, projected.fetch("reason"), slug
+      assert_equal "live_runner", projected.dig("reasons", 0, "code"), slug
+    end
+  end
+
+  def test_unverified_pid_flags_do_not_publish_or_narrate_historical_pids
+    # Synthetic projector invariant: the producer retains only a live lock holder.
+    [ false, nil, :missing ].each do |flag|
+      row = task(action: "agent_running", slug: "unverified-#{flag}", task_lock_pid: 4242).merge(
+        "claude_pid" => 777, "live_task_lock" => flag, "claude_pid_alive" => flag,
+        "attempt_id" => "current-attempt", "task_generation" => "generation-1"
+      )
+      if flag == :missing
+        row.delete("live_task_lock")
+        row.delete("claude_pid_alive")
+      end
+
+      result = project(status_payload(row))
+      assert_operational_schema(result, label: flag.inspect)
+      projected = result.fetch("tasks").first
+      assert_nil projected.dig("liveness", "pid"), flag.inspect
+      assert_equal "current-attempt", projected.dig("liveness", "attempt_id"), flag.inspect
+      assert_equal "generation-1", projected.dig("liveness", "task_generation"), flag.inspect
+      if flag == false
+        assert_equal "needs_repair", projected.fetch("state"), flag.inspect
+        assert_equal "stale_runner", projected.dig("reasons", 0, "code"), flag.inspect
+      else
+        assert_equal "running", projected.fetch("state"), flag.inspect
+        assert_equal "task is running", projected.fetch("reason"), flag.inspect
+      end
+
+      live_lock = row.merge("live_task_lock" => true)
+      assert_live_liveness(
+        project(status_payload(live_lock)), pid: 4242,
+        message: "task runner holds the live lock (pid 4242)", label: flag.inspect
+      )
+      live_agent = row.merge("claude_pid_alive" => true)
+      assert_live_liveness(
+        project(status_payload(live_agent)), pid: 777,
+        message: "agent process 777 is alive", label: flag.inspect
+      )
+
+      historical = row.merge("action" => "ready_to_plan")
+      historical_result = project(status_payload(historical))
+      assert_operational_schema(historical_result, label: flag.inspect)
+      historical_liveness = historical_result.fetch("tasks").first.fetch("liveness")
+      assert_equal "not_running", historical_liveness.fetch("status"), flag.inspect
+      %w[pid attempt_id task_generation].each do |key|
+        assert_nil historical_liveness.fetch(key), "#{flag.inspect}/#{key}"
+      end
+    end
+  end
+
+  def test_action_derived_running_without_live_pid_keeps_ownership_metadata
+    row = task(action: "agent_running", slug: "action-only").merge(
+      "attempt_id" => "current-attempt", "task_generation" => "generation-1"
+    )
+    projected = assert_live_liveness(
+      project(status_payload(row)), pid: nil, message: "task is running"
+    )
+
+    assert_equal "task is running", projected.fetch("reason")
+    assert_equal "current-attempt", projected.dig("liveness", "attempt_id")
+    assert_equal "generation-1", projected.dig("liveness", "task_generation")
   end
 
   def test_dead_recorded_runner_is_repair_not_running
     row = task(action: "agent_running", slug: "stale").merge(
       "claude_pid" => 99_999,
-      "claude_pid_alive" => false
+      "claude_pid_alive" => false,
+      "attempt_id" => "stale-attempt", "task_generation" => "generation-1"
     )
 
-    projected = project(status_payload(row)).fetch("tasks").first
+    result = project(status_payload(row))
+    assert_operational_schema(result)
+    projected = result.fetch("tasks").first
 
     assert_equal "needs_repair", projected.fetch("state")
     assert_equal "hive", projected.fetch("blocker_owner")
     assert_equal "stale", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_equal "stale-attempt", projected.dig("liveness", "attempt_id")
+    assert_equal "generation-1", projected.dig("liveness", "task_generation")
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+    assert_equal "liveness", projected.dig("reasons", 0, "source")
+    assert_equal "recorded task runner is no longer alive", projected.dig("reasons", 0, "message")
+    assert_equal projected.dig("reasons", 0, "message"), projected.fetch("reason")
+    refute_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "live_runner"
   end
 
   def test_dead_runner_marker_stays_repair_after_the_action_projects_error
@@ -1897,6 +2037,45 @@ class OperationalStatusTest < Minitest::Test
   end
 
   private
+
+  def live_lock_with_stale_agent
+    task(
+      action: "agent_running", slug: "mixed-lock", live_task_lock: true, task_lock_pid: 4242
+    ).merge("claude_pid" => 99_999, "claude_pid_alive" => false)
+  end
+
+  # Synthetic projector invariant: the producer retains only a live lock holder.
+  def live_agent_with_stale_lock
+    task(action: "agent_running", slug: "mixed-agent", task_lock_pid: 4242).merge(
+      "claude_pid" => 777, "claude_pid_alive" => true
+    )
+  end
+
+  def assert_operational_schema(result, label: nil)
+    schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    )
+    assert_empty schema.validate(result).to_a, label
+  end
+
+  def assert_live_liveness(result, pid:, message:, label: nil)
+    assert_operational_schema(result, label: label)
+    projected = result.fetch("tasks").first
+    assert_equal "running", projected.fetch("state"), label
+    assert_equal "agent", projected.fetch("blocker_owner"), label
+    assert_equal "running", projected.dig("liveness", "status"), label
+    if pid.nil?
+      assert_nil projected.dig("liveness", "pid"), label
+    else
+      assert_equal pid, projected.dig("liveness", "pid"), label
+    end
+    live_reason = projected.fetch("reasons").find { |entry| entry.fetch("source") == "liveness" }
+    refute_nil live_reason, label
+    assert_equal "live_runner", live_reason.fetch("code"), label
+    assert_equal message, live_reason.fetch("message"), label
+    refute_includes projected.fetch("reasons").map { |entry| entry.fetch("code") }, "stale_runner", label
+    projected
+  end
 
   def classify_row(row, daemon_enabled: false)
     context = daemon_enabled ? { "demo" => { "daemon_enabled" => true } } : {}

@@ -16,8 +16,8 @@ class ReviewRemoteCiTest < Minitest::Test
 
   class FakeGh
     attr_accessor :identity, :metadata, :candidates, :rollups, :push_result,
-                  :jobs, :parsed_url
-    attr_reader :pushes, :rollup_calls
+                  :jobs, :parsed_url, :required_responses
+    attr_reader :pushes, :rollup_calls, :required_calls
 
     def initialize(url:, branch:, remote_head:)
       @url = url
@@ -34,6 +34,18 @@ class ReviewRemoteCiTest < Minitest::Test
       @jobs = []
       @pushes = []
       @rollup_calls = 0
+      @required_responses = [ [] ]
+      @required_calls = []
+    end
+
+    # Each response is the required-context list, or an exception to raise;
+    # the last one repeats.
+    def required_status_check_contexts(**kwargs)
+      @required_calls << kwargs
+      response = @required_responses.length > 1 ? @required_responses.shift : @required_responses.first
+      raise response if response.is_a?(Exception)
+
+      response
     end
 
     def parse_pull_request_url(value)
@@ -99,8 +111,9 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
-  def rollup(head:, checks:, url: "https://github.com/acme/app/pull/42")
-    { "url" => url, "headRefOid" => head, "statusCheckRollup" => checks }
+  def rollup(head:, checks:, url: "https://github.com/acme/app/pull/42", mergeable: "MERGEABLE", **extra)
+    { "url" => url, "headRefOid" => head, "statusCheckRollup" => checks, "mergeable" => mergeable }
+      .merge(extra.transform_keys(&:to_s))
   end
 
   def check(name: "unit", status: "COMPLETED", conclusion: "SUCCESS", **extra)
@@ -241,6 +254,242 @@ class ReviewRemoteCiTest < Minitest::Test
       assert_equal 1, gh.pushes.length
       assert_equal head, gh.pushes.first.last.fetch(:expected_remote_oid)
       assert_operator gh.rollup_calls, :>=, 3
+    end
+  end
+
+  def test_runner_blocks_a_conflicting_pr_even_when_its_checks_are_green
+    with_fixture do |repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [
+        rollup(head: head, checks: [ check ], mergeable: "CONFLICTING",
+               mergeStateStatus: "DIRTY", baseRefName: "trunk")
+      ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_kind_of Hive::Stages::Review::CiFix::CommandError, result
+      assert_equal "base_conflict", runner.blocked.reason
+      assert_nil runner.settled_head
+      assert_includes runner.blocked.detail, "mergeStateStatus=DIRTY"
+      assert_includes runner.blocked.detail, "git -C #{repo} merge --no-ff origin/trunk"
+      assert_includes runner.blocked.detail, "no force-push"
+      assert_equal 2, gh.rollup_calls, "a conflict is reported on first observation, not after the wait"
+    end
+  end
+
+  def test_runner_base_conflict_falls_back_to_the_context_default_branch
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [ rollup(head: head, checks: [], mergeable: "CONFLICTING") ]
+
+      runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_includes runner.blocked.detail, "origin/master"
+      assert_includes runner.blocked.detail, "mergeStateStatus=unknown"
+    end
+  end
+
+  def test_runner_polls_unknown_mergeability_until_github_resolves_it
+    with_fixture do |_repo, head, _task, _ctx, gh, clock, runner|
+      gh.rollups = [
+        rollup(head: head, checks: [ check ], mergeable: "UNKNOWN"),
+        rollup(head: head, checks: [ check ], mergeable: "UNKNOWN"),
+        rollup(head: head, checks: [ check ], mergeable: "UNKNOWN"),
+        rollup(head: head, checks: [ check ], mergeStateStatus: "CLEAN")
+      ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 10)
+
+      assert_equal 0, result.exit_code
+      assert_equal head, runner.settled_head
+      assert_nil runner.blocked
+      assert_operator clock.now, :>=, 4, "quiet settlement restarts once mergeability resolves"
+      refute_includes result.combined, "BEHIND"
+    end
+  end
+
+  def test_runner_fails_closed_when_mergeability_stays_unknown_at_the_bound
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ], mergeable: "UNKNOWN") ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_kind_of Hive::Stages::Review::CiFix::CommandError, result
+      assert_equal "mergeability_unknown", runner.blocked.reason
+      assert_match(/within 5s \(mergeable=UNKNOWN\)/, runner.blocked.detail)
+      assert_nil runner.settled_head
+    end
+  end
+
+  def test_runner_treats_missing_mergeability_as_unknown
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ], mergeable: nil) ]
+
+      runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal "mergeability_unknown", runner.blocked.reason
+      assert_includes runner.blocked.detail, "mergeable=missing"
+    end
+  end
+
+  def test_runner_keeps_the_plain_timeout_when_checks_never_settled
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [ rollup(head: head, checks: [ check(status: "IN_PROGRESS", conclusion: "") ], mergeable: "UNKNOWN") ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_match(/did not settle/, result.reason)
+      assert_nil runner.blocked
+    end
+  end
+
+  def test_runner_reports_behind_as_informational_on_a_green_head
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.rollups = [ rollup(head: head, checks: [ check ], mergeStateStatus: "BEHIND") ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 0, result.exit_code
+      assert_equal head, runner.settled_head
+      assert_includes result.combined, "mergeStateStatus=BEHIND"
+    end
+  end
+
+  def test_runner_settles_green_once_every_required_context_succeeded
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.required_responses = [ [ "unit", "legacy" ] ]
+      checks = [ check, { "context" => "legacy", "state" => "SUCCESS" }, check(name: "lint") ]
+      gh.rollups = [ rollup(head: head, checks: checks, baseRefName: "trunk") ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 0, result.exit_code
+      assert_equal head, runner.settled_head
+      assert_equal 1, gh.required_calls.length, "the required set is fetched once per base"
+      assert_equal({ host: "github.com", repository: "acme/app", branch: "trunk", cfg: runner.instance_variable_get(:@cfg) },
+                   gh.required_calls.first)
+    end
+  end
+
+  def test_runner_waits_for_a_required_context_github_never_created
+    with_fixture do |_repo, head, _task, _ctx, gh, clock, runner|
+      gh.required_responses = [ [ "unit", "integration" ] ]
+      gh.rollups = [
+        rollup(head: head, checks: [ check ]),
+        rollup(head: head, checks: [ check ]),
+        rollup(head: head, checks: [ check, check(name: "integration") ])
+      ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 10)
+
+      assert_equal 0, result.exit_code
+      assert_equal head, runner.settled_head
+      assert_operator clock.now, :>=, 3, "quiet settlement starts only once the required context succeeded"
+    end
+  end
+
+  def test_runner_fails_closed_when_required_contexts_never_report
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.required_responses = [ [ "integration", "unit" ] ]
+      gh.rollups = [ rollup(head: head, checks: [ check(name: "unit", conclusion: "SKIPPED") ]) ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_kind_of Hive::Stages::Review::CiFix::CommandError, result
+      assert_equal "required_checks_missing", runner.blocked.reason
+      assert_includes runner.blocked.detail, "base `master`"
+      assert_match(/within 5s: integration\./, runner.blocked.detail)
+      assert_nil runner.settled_head
+    end
+  end
+
+  def test_runner_required_check_gate_does_not_relax_non_required_failures
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.required_responses = [ [ "unit" ] ]
+      advisory = check(name: "incident duration budget (advisory)", conclusion: "FAILURE")
+      gh.rollups = [ rollup(head: head, checks: [ check, advisory ]) ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 1, result.exit_code
+      assert_includes result.combined, "incident duration budget (advisory): FAILURE"
+      assert_nil runner.blocked
+      assert_empty gh.required_calls, "a failing head never consults the required set"
+    end
+  end
+
+  def test_runner_retries_a_protection_transport_error_within_the_bound
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.required_responses = [ Hive::GhError.new("HTTP 502"), [ "unit" ] ]
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_equal 0, result.exit_code
+      assert_equal head, runner.settled_head
+      assert_equal 2, gh.required_calls.length
+    end
+  end
+
+  def test_runner_fails_closed_when_the_required_set_stays_unknown
+    with_fixture do |_repo, head, _task, _ctx, gh, _clock, runner|
+      gh.required_responses = [ Hive::GhError.new("HTTP 502 Bad Gateway") ]
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ]
+
+      result = runner.call(max_bytes: 1_024, timeout_sec: 5)
+
+      assert_kind_of Hive::Stages::Review::CiFix::CommandError, result
+      assert_equal "required_checks_unknown", runner.blocked.reason
+      assert_includes runner.blocked.detail, "HTTP 502 Bad Gateway"
+      assert_nil runner.settled_head
+    end
+  end
+
+  def test_run_types_required_check_blocks_as_review_errors
+    with_fixture do |_repo, _head, task, ctx, _gh, _clock, _runner|
+      File.write(
+        File.join(task.folder, "pr.md"),
+        "---\npr_url: https://github.com/acme/app/pull/42\n---\n"
+      )
+      stub = StubRunner.new(Hive::Stages::Review::CiFix::CommandError.new("missing"))
+      stub.define_singleton_method(:blocked) do
+        Hive::Stages::Review::RemoteCi::Blocked.new(reason: "required_checks_missing", detail: "integration")
+      end
+      result = Hive::Stages::Review::RemoteCi.run!(task: task, cfg: cfg, ctx: ctx, runner: stub)
+
+      assert_equal :error, result.status
+      assert_equal "required_checks_missing", result.reason
+    end
+  end
+
+  def test_run_types_mergeability_blocks
+    with_fixture do |_repo, _head, task, ctx, _gh, _clock, _runner|
+      File.write(
+        File.join(task.folder, "pr.md"),
+        "---\npr_url: https://github.com/acme/app/pull/42\n---\n"
+      )
+      conflict_runner = StubRunner.new(Hive::Stages::Review::CiFix::CommandError.new("conflict"))
+      conflict_runner.define_singleton_method(:blocked) do
+        Hive::Stages::Review::RemoteCi::Blocked.new(reason: "base_conflict", detail: "merge the base")
+      end
+      conflict = Hive::Stages::Review::RemoteCi.run!(
+        task: task, cfg: cfg, ctx: ctx, runner: conflict_runner
+      )
+      assert_equal :stale, conflict.status
+      assert_equal "base_conflict", conflict.reason
+      assert_equal "merge the base", conflict.last_output
+      assert_equal 1, conflict.attempts
+      assert_nil conflict.guardrail
+
+      unknown_runner = StubRunner.new(Hive::Stages::Review::CiFix::CommandError.new("unknown"))
+      unknown_runner.define_singleton_method(:blocked) do
+        Hive::Stages::Review::RemoteCi::Blocked.new(reason: "mergeability_unknown", detail: "still computing")
+      end
+      unknown = Hive::Stages::Review::RemoteCi.run!(
+        task: task, cfg: cfg, ctx: ctx, runner: unknown_runner
+      )
+      assert_equal :error, unknown.status
+      assert_equal "mergeability_unknown", unknown.reason
+      assert_equal "still computing", unknown.error_message
+      assert_nil unknown.limit_text
     end
   end
 

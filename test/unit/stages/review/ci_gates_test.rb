@@ -219,6 +219,48 @@ class ReviewCiGatesTest < Minitest::Test
     end
   end
 
+  def test_ci_terminal_result_types_a_hosted_base_conflict_as_ci_stale
+    with_fixture do |_repo, task, ctx, _cfg|
+      remote = Hive::Stages::Review::RemoteCi::Result.new(
+        status: :stale, attempts: 1, last_output: "Recovery: merge origin/main",
+        error_message: "conflict", limit_text: nil, reason: "base_conflict"
+      )
+
+      terminal = Hive::Stages::Review.ci_terminal_result(
+        task, remote, gate: "github", pass: 2, ctx: ctx
+      )
+
+      assert_equal({ commit: "ci_github_base_conflict", status: :review_ci_stale }, terminal)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :review_ci_stale, marker.name
+      assert_equal({ "gate" => "github", "reason" => "base_conflict", "attempts" => "1", "pass" => "2" },
+                   marker.attrs.slice("gate", "reason", "attempts", "pass"))
+      blocked = File.read(File.join(task.folder, "reviews", "ci-blocked.md"))
+      assert_includes blocked, "# GitHub CI blocked: base_conflict"
+      assert_includes blocked, "Recovery: merge origin/main"
+      refute_includes blocked, "max_attempts"
+    end
+  end
+
+  def test_ci_terminal_result_fails_closed_on_unresolved_mergeability
+    with_fixture do |_repo, task, ctx, _cfg|
+      remote = Hive::Stages::Review::RemoteCi::Result.new(
+        status: :error, attempts: 1, last_output: "still computing",
+        error_message: "still computing", limit_text: nil, reason: "mergeability_unknown"
+      )
+
+      terminal = Hive::Stages::Review.ci_terminal_result(
+        task, remote, gate: "github", pass: 1, ctx: ctx
+      )
+
+      assert_equal({ commit: "ci_github_mergeability_unknown", status: :review_error }, terminal)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "mergeability_unknown", marker.attrs.fetch("reason")
+      assert_equal "still computing", marker.attrs.fetch("message")
+      refute File.exist?(File.join(task.folder, "reviews", "ci-error-01.md"))
+    end
+  end
+
   def with_review_state(**values)
     review = Hive::Stages::Review
     previous = values.to_h { |key, _| [ key, [ review.instance_variable_defined?("@#{key}"), review.instance_variable_get("@#{key}") ] ] }

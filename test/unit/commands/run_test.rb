@@ -814,6 +814,26 @@ class CommandsRunTest < Minitest::Test
     assert_equal({ "kind" => Hive::Schemas::NextActionKind::NO_OP }, unknown)
   end
 
+  def test_review_ci_stale_next_action_names_the_base_merge_for_a_conflict
+    run = command
+    t = task(folder: "/tmp/task-folder")
+
+    conflict = run.send(:json_next_action, t, marker(:review_ci_stale, "gate" => "github", "reason" => "base_conflict"))
+    red = run.send(:json_next_action, t, marker(:review_ci_stale, "gate" => "github", "attempts" => "3"))
+
+    assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, conflict.fetch("kind")
+    assert_equal [ "review_ci_stale" ], conflict.fetch("markers_to_clear")
+    assert_match(/merge origin\/<base> into the task branch with a merge commit/, conflict.fetch("instructions"))
+    assert_match(/no force-push/, conflict.fetch("instructions"))
+    assert_match(/\Afix CI failures/, red.fetch("instructions"))
+
+    out, = capture_io do
+      run.send(:report_text, t, { status: :review_ci_stale },
+               marker(:review_ci_stale, "reason" => "base_conflict"))
+    end
+    assert_includes out, "next: the PR conflicts with its base"
+  end
+
   def test_next_stage_dir_uses_task_workflow_sequence
     run = command
     t = task(stage_name: "gather", stage_index: 2, workflow: research_workflow)

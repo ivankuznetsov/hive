@@ -199,7 +199,7 @@ module Hive
         occupied_main + wal
       end
       connection ? measure.call(connection) : database.read { |db| measure.call(db) }
-    rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError, ArgumentError, TypeError => error
+    rescue Hive::RuntimeControlPlane::Busy, Sequel::Error, SQLite3::Exception, SystemCallError, IOError, ArgumentError, TypeError => error
       if Hive::RuntimeControlPlane::SQLiteSupport.busy_error?(error)
         capacity_error!(:command_prune_busy, :installation,
                         "resolve database contention, then rerun; free disk if storage is exhausted")

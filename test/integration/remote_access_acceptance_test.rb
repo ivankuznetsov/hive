@@ -31,7 +31,11 @@ class RemoteAccessAcceptanceTest < Minitest::Test
 
   def test_remote_creation_approval_and_progress_leave_the_same_named_local_project_unchanged
     initialize_client_project
+    # Force stale index stat data so inventory reads exercise Git's optional refresh.
+    stale_time = Time.now - 60
+    File.utime(stale_time, stale_time, File.join(@checkout, "README.md"))
     before = checkout_inventory
+    assert_equal before, checkout_inventory, "Taking a checkout inventory must not change the checkout"
     connect
     document = successful("status", "--json")
     assert_equal "hive-remote", document.fetch("schema")
@@ -289,7 +293,7 @@ class RemoteAccessAcceptanceTest < Minitest::Test
   end
 
   def git(*args)
-    out, status = Open3.capture2("git", "-C", @checkout, *args)
+    out, status = Open3.capture2({ "GIT_OPTIONAL_LOCKS" => "0" }, "git", "-C", @checkout, *args)
     assert status.success?
     out
   end

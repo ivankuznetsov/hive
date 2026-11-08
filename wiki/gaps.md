@@ -16,6 +16,12 @@ web bundle installation to those shards. The dependency setup is repaired on
 this branch; a later green CI run is still required to establish acceptance
 evidence. Local fixture success does not establish coverage-shard success.
 
+CI run `42429818653` executed the Rails-backed fixtures but failed the remote
+acceptance checkout snapshot because its own `git status` refreshed the local
+index. The inventory now disables optional Git writes and the acceptance test
+forces stale stat data to reproduce that observer effect. A green CI rerun is
+still required to verify the corrected coverage shard and aggregate gates.
+
 The token and authentication checks use isolated local installations. Live NAS,
 TLS proxy/tunnel and discontinued Hivebox deployment captures are unavailable;
 these checks do not establish external-network deployment behavior. The remote

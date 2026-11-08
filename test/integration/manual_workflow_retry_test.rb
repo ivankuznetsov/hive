@@ -346,6 +346,30 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  def test_admission_race_lost_to_a_lost_attempt_fails_closed_without_relaunch
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << record
+        store.mark_lost(record, reason: "fixture_owner_gone", now: Time.now.utc)
+        { "claimed" => true }
+      end
+      create = store.method(:create_launching)
+      raced = false
+      store.define_singleton_method(:create_launching) do |**attributes|
+        unless raced
+          raced = true
+          dispatcher.call({}).dispatch_request(repository.fetch(attributes.fetch(:request_id)), interactive: false)
+        end
+        create.call(**attributes)
+      end
+      receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "unavailable", receipt.status, receipt.to_h.inspect
+      assert_equal "launch_unavailable", receipt.reason
+      assert_includes receipt.remediation, "Hive::Attempts::RepositoryError"
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
   def test_terminal_failure_interruption_before_marker_repair_remains_actionable
     with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
       prepared = coordinator.prepare_manual(row: Hive::Recovery::API.observation(row),

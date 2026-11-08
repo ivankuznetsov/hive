@@ -167,6 +167,98 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_action_request_refuses_duplicate_bindings_for_one_failure
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      Q.write_request!(project: request.project, slug: request.slug, argv: request.argv,
+        requestor: "action", trigger: "recovery", request_id: "duplicate-request",
+        task_generation: request.task_generation, task_id: request.task_id,
+        expected_stage: request.expected_stage, expected_marker_name: request.expected_marker_name,
+        expected_marker_id: request.expected_marker_id, recovery: request.recovery,
+        state_home: home, now: NOW)
+      result = coordinator.request(row: row, requestor: "action", now: NOW)
+      assert_equal [ "blocked", "operator", "recovery_binding_conflict" ],
+        [ result.status, result.owner, result.reason ]
+    end
+  end
+
+  def test_existing_recovery_for_another_task_identity_blocks_reuse
+    current = nil
+    resolver = ->(task, _dir) { current = task; ->(**_kwargs) { current } }
+    with_fixture(task_resolver_builder: resolver) do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      current = current.with(id: 818)
+      result = coordinator.request(row: row, requestor: "action", now: NOW)
+      assert_equal [ "blocked", "operator", "task_identity_conflict", admitted.request_id ],
+        [ result.status, result.owner, result.reason, result.request_id ]
+    end
+  end
+
+  def test_manual_evidence_fails_closed_past_its_request_bound
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      64.times do |index|
+        Q.write_request!(project: request.project, slug: request.slug, argv: request.argv,
+          requestor: "action", trigger: "recovery", request_id: "bulk-#{index}",
+          task_generation: request.task_generation, task_id: request.task_id,
+          expected_stage: request.expected_stage, expected_marker_name: request.expected_marker_name,
+          expected_marker_id: request.expected_marker_id,
+          recovery: request.recovery.merge("phase" => "terminal"), state_home: home, now: NOW)
+      end
+      evidence = coordinator.manual_evidence(row: manual_row(row))
+      assert_nil evidence.fetch("binding")
+      assert_equal [ "unavailable", "hive", "recovery_observation_unavailable" ],
+        evidence.fetch("receipt").values_at("status", "owner", "reason")
+    end
+  end
+
+  def test_manual_observation_reports_a_held_task_lock_as_existing_live_work
+    with_fixture do |coordinator, row, home|
+      coordinator.request(row: row, requestor: "action", now: NOW)
+      current = manual_row(row)
+      current["recovery_observation"] = coordinator.manual_evidence(row: current).fetch("binding")
+      token = coordinator.observation_token_for(current)
+      {
+        Hive::ConcurrentRunError.new("task lock held") => [ "blocked", "operator", "existing_live" ],
+        Hive::Error.new("lock storage unavailable") => [ "unavailable", "hive", "recovery_unavailable" ]
+      }.each do |error, expected|
+        with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*, **) { raise error }) do
+          result = coordinator.prepare_manual(row: current, observation_token: token, now: NOW)
+          assert_equal expected, [ result.status, result.owner, result.reason ]
+        end
+      end
+    end
+  end
+
+  def test_disabled_projection_refuses_an_unobservable_or_mismatched_recovery_attempt
+    records = {}
+    store = Object.new
+    store.define_singleton_method(:fetch) do |attempt_id|
+      value = records.fetch(attempt_id)
+      raise value if value.is_a?(Exception)
+      value
+    end
+    with_fixture(attempt_store: store) do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      coordinator.resume(request: request, row: row, now: NOW)
+      coordinator.mark_dispatched(request, attempt_id: "attempt-x", now: NOW)
+      dispatched = Q.fetch(admitted.request_id, state_home: home)
+      {
+        nil => "attempt_observation_unavailable",
+        { "task_id" => "other" } => "attempt_identity_conflict",
+        Hive::Attempts::RepositoryError.new("attempt store unreadable") => "attempt_observation_unavailable"
+      }.each do |record, reason|
+        records["attempt-x"] = record
+        projected = coordinator.projected_receipt_for_request(dispatched, dispatch_enabled: false)
+        assert_equal [ "unavailable", "hive", reason ], [ projected.status, projected.owner, projected.reason ]
+        assert_equal "hive status --operational --json", projected.remediation
+      end
+    end
+  end
+
   def manual_row(row)
     marker = Hive::Markers.current(row.state_file)
     row.to_h.transform_keys(&:to_s).merge(

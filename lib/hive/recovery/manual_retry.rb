@@ -35,9 +35,8 @@ module Hive
           record = attempts.fetch(receipt.attempt_id) if receipt.attempt_id
           return unavailable(receipt, row, "attempt_observation_unavailable") unless record
           return unavailable(receipt, row, "attempt_identity_conflict") unless @coordinator.manual_attempt_matches?(request, record)
-          return finish(request, record) if record.final?
-          return attach(request, record.attempt_id, row) if record.live?
-          return unavailable(receipt, row, "attempt_observation_unavailable")
+          # Record validation admits only live or final states.
+          return record.final? ? finish(request, record) : attach(request, record.attempt_id, row)
         end
         return guidance(receipt, row) unless receipt.phase == "cleared" && receipt.status == "queued"
 
@@ -51,7 +50,7 @@ module Hive
           attach(request, result.attempt.attempt_id, row)
         when :terminal_replay
           finish(request, result.attempt)
-        when :deferred, :no_route
+        else # :deferred or :no_route, the dispatcher's only other outcomes
           if result.reason == "attempt_lost" && result.attempt&.state == "lost" &&
               result.attempt["request_id"] == request.request_id &&
               @coordinator.manual_attempt_matches?(request, result.attempt)
@@ -62,8 +61,6 @@ module Hive
           base = observed || receipt
           guidance(base.with(status: result.status == :no_route ? "unavailable" : "blocked",
             owner: result.status == :no_route ? "provider" : "operator", reason: result.reason), row)
-        else
-          unavailable(receipt, row, "admission_unavailable")
         end
       rescue Hive::Error, SystemCallError, IOError => error
         @coordinator.defer_dispatch_failure(request, now: now) if request
@@ -102,16 +99,13 @@ module Hive
       def attach(request, attempt_id, row)
         # Inner stage envelopes belong to the attempt log. Act emits one final
         # envelope of its own, including when a keyed operation captures stdout.
-        result = (@client || attempts).attach(
-          attempt_id, stdout: Sink.new, stderr: Sink.new
-        )
+        # Attachment returns on a terminal or lost record, or when the caller
+        # detaches; a non-final record afterwards means the caller detached.
+        (@client || attempts).attach(attempt_id, stdout: Sink.new, stderr: Sink.new)
         record = attempts.fetch(attempt_id)
         return finish(request, record) if record&.final?
-        if result.status == :detached
-          return guidance(@coordinator.receipt_for_request(repository.fetch(request.request_id)).with(
-            reason: "caller_detached", owner: "agent"), row)
-        end
-        unavailable(@coordinator.receipt_for_request(request), row, "terminal_receipt_unavailable")
+        guidance(@coordinator.receipt_for_request(repository.fetch(request.request_id)).with(
+          reason: "caller_detached", owner: "agent"), row)
       end
 
       def finish(request, record)

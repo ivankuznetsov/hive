@@ -1350,6 +1350,46 @@ class OperationalStatusTest < Minitest::Test
     assert_includes actual.dig("recovery", "remediation"), "hive status --operational --json"
   end
 
+  def test_manual_recovery_projects_a_live_failed_task_as_in_flight
+    row = task(action: "error", slug: "manual-running", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" }, live_task_lock: true)
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "running", actual.dig("recovery", "status")
+    assert_equal "agent", actual.dig("recovery", "owner")
+    assert_equal "existing_live", actual.dig("recovery", "reason")
+    assert_includes actual.dig("recovery", "remediation"), "hive task manual-running --project demo --json"
+  end
+
+  def test_manual_recovery_projects_unavailable_evidence_as_hive_owned
+    row = task(action: "error", slug: "manual-unavailable", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence) do |row:|
+      { "binding" => nil, "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "unavailable", "owner" => "hive", "reason" => "recovery_observation_unavailable",
+        "remediation" => "hive status --operational --json" }).to_h }
+    end
+    actual = Hive::OperationalStatus.new(status_payload: status_payload(row),
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2)).to_h.fetch("tasks").first
+    assert_equal "hive", actual.fetch("blocker_owner")
+    assert_equal "unavailable", actual.dig("recovery", "status")
+    assert_equal "recovery_observation_unavailable", actual.dig("recovery", "reason")
+  end
+
+  def test_idless_recovery_marker_projects_migration_without_a_daemon_snapshot
+    source_task = task(
+      action: "error", slug: "legacy", stage: "4-execute",
+      marker: "error", attrs: { "reason" => "implementer_failed", "marker_id" => nil }
+    )
+
+    projected = project(
+      status_payload(source_task), project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "blocked", projected.dig("recovery", "status")
+    assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
+  end
+
   def test_lean_recovery_projection_only_joins_recovery_candidates
     ordinary = 20.times.map do |index|
       task(action: "ready_to_plan", slug: "ordinary-#{index}", marker: "complete")

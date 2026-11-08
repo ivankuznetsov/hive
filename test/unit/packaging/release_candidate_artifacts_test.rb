@@ -144,6 +144,66 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
     end
   end
 
+  def test_gem_build_inherits_the_absolute_cache_path_in_the_export_and_forwards_safe_diagnostics
+    with_tmp_dir do |dir|
+      export = File.join(dir, "export")
+      FileUtils.mkdir_p(File.join(export, "packaging"))
+      File.write(File.join(export, "packaging/betterleaks.rb"), <<~'RUBY')
+        require "json"
+        File.write("scanner-context.json", JSON.generate("cache" => ENV.fetch("HIVE_BETTERLEAKS_CACHE_DIR"), "cwd" => Dir.pwd))
+        warn "Betterleaks cache checksum mismatch for linux_x64; downloading"
+        warn "Betterleaks cache write failed for darwin_arm64 (Errno::EACCES); using verified temporary archive"
+        warn "synthetic-private-token in a raw response"
+        warn "Betterleaks download HTTP 403 for linux_x64 synthetic-private-token"
+      RUBY
+      File.write(File.join(export, "hive.gemspec"), <<~'RUBY')
+        Gem::Specification.new do |spec|
+          spec.name = "candidate-fixture"
+          spec.version = "1.0.0"
+          spec.summary = "fixture"
+          spec.authors = [ "Hive Test" ]
+          spec.files = []
+        end
+      RUBY
+      artifacts = HiveReleaseCandidate::Artifacts.new(
+        repo_root: dir, candidate_sha: "a" * 40, candidate_dir: File.join(dir, "candidate")
+      )
+      cache = File.join(dir, "shared-cache")
+      destination = File.join(dir, "fixture.gem")
+      with_env("HIVE_BETTERLEAKS_CACHE_DIR" => cache) do
+        _out, err = capture_io { artifacts.send(:build_gem, export, destination) }
+        assert_includes err, "Betterleaks cache checksum mismatch"
+        assert_includes err, "cache write failed for darwin_arm64"
+        refute_includes err, "synthetic-private-token"
+      end
+      assert File.file?(destination)
+      assert_equal({ "cache" => cache, "cwd" => export }, JSON.parse(File.read(File.join(export, "scanner-context.json"))))
+    end
+  end
+
+  def test_scanner_failure_forwards_bounded_safe_diagnostics_and_keeps_generic_context
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "packaging"))
+      File.write(File.join(dir, "packaging/betterleaks.rb"), <<~'RUBY')
+        warn "Betterleaks download deadline exhausted for linux_x64 (300s budget)"
+        100.times { warn "Betterleaks cache checksum mismatch for linux_x64; downloading" }
+        warn "raw synthetic-private-token"
+        exit 1
+      RUBY
+      artifacts = HiveReleaseCandidate::Artifacts.new(
+        repo_root: dir, candidate_sha: "a" * 40, candidate_dir: File.join(dir, "candidate")
+      )
+      _out, err = capture_io do
+        error = assert_raises(HiveReleaseCandidate::Error) { artifacts.send(:build_gem, dir, File.join(dir, "fixture.gem")) }
+        assert_equal "cannot bundle Betterleaks in candidate gem", error.message
+      end
+      assert_includes err, "deadline exhausted for linux_x64"
+      refute_includes err, "synthetic-private-token"
+      assert_operator err.bytesize, :<=, 4096
+      assert_operator err.lines.size, :<=, 16
+    end
+  end
+
   def test_artifact_path_collision_fails_before_any_build
     with_tmp_dir do |dir|
       candidate = File.join(dir, "candidate")

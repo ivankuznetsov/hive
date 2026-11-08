@@ -241,4 +241,11 @@ module HiveBetterleaksPackage
   end
 end
 
-HiveBetterleaksPackage.build if $PROGRAM_NAME == __FILE__
+if $PROGRAM_NAME == __FILE__
+  begin
+    HiveBetterleaksPackage.build
+  rescue HiveBetterleaksPackage::DownloadError => error
+    warn error.message
+    exit 1
+  end
+end

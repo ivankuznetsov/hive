@@ -259,15 +259,38 @@ module HiveReleaseCandidate
     end
 
     def build_gem(export, destination)
-      _stdout, _stderr, scanner_status = Open3.capture3(
+      _stdout, scanner_stderr, scanner_status = Open3.capture3(
         "ruby", "packaging/betterleaks.rb", chdir: export
       )
+      forward_betterleaks_diagnostics(scanner_stderr)
       raise Error, "cannot bundle Betterleaks in candidate gem" unless scanner_status.success?
 
       _stdout, stderr, status = Open3.capture3(
         "gem", "build", "hive.gemspec", "--output", destination, chdir: export
       )
       raise Error, "cannot build committed candidate gem: #{stderr.strip}" unless status.success?
+    end
+
+    def forward_betterleaks_diagnostics(stderr)
+      # Candidate output is untrusted. Forward only the packaging script's
+      # fixed diagnostic vocabulary, never response text or exception causes.
+      platform = "(?:linux|darwin)_(?:x64|arm64)"
+      patterns = [
+        /\ABetterleaks cache checksum mismatch for #{platform}; downloading\z/,
+        /\ABetterleaks cache (?:read|write) failed for #{platform} \((?:Errno::[A-Z0-9]+|IOError)\); using verified temporary archive\z/,
+        /\ABetterleaks authentication rejected for #{platform}; retrying anonymously\z/,
+        /\ABetterleaks (?:invalid authentication token|extraction failed) for #{platform}\z/,
+        /\ABetterleaks download (?:TLS failure|redirect policy failure|response policy failure|response unavailable|HTTP [1-5][0-9]{2}) for #{platform}\z/,
+        /\ABetterleaks download deadline exhausted for #{platform} \(300s budget\)\z/
+      ]
+      forwarded_bytes = 0
+      stderr.byteslice(0, 8192).to_s.b.each_line.take(16).each do |line|
+        message = line.chomp
+        next unless patterns.any? { |pattern| pattern.match?(message) }
+        break if forwarded_bytes + message.bytesize + 1 > 4096
+        warn message
+        forwarded_bytes += message.bytesize + 1
+      end
     end
 
     def build_managed_web(export, version, destination)

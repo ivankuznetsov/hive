@@ -267,6 +267,40 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     assert_response :content_too_large
   end
 
+  test "manual retry returns typed dispatcher refusal without persisting recovery and enabled retry still queues" do
+    task, = question_task!
+    File.write(task.state_file, "# Brainstorm\n<!-- ERROR reason=timeout marker_id=manual-retry -->\n")
+    config_path = File.join(@project_record.fetch("hive_state_path"), "config.yml")
+    config = YAML.safe_load_file(config_path)
+    config["daemon"] = { "enabled" => false }
+    File.write(config_path, config.to_yaml)
+    descriptor = Hive::OperationalAction.descriptor_for_task(task, project: @project)
+    payload = { action_id: "workflow.retry", observation: descriptor.fetch("observation_token"), idempotency_key: "disabled-retry" }
+    post "#{@base}/tasks/#{task.slug}/actions", params: payload, headers: @headers, as: :json
+    assert_response :service_unavailable
+    assert_equal "dispatcher_unavailable", response.parsed_body.dig("error", "code")
+    command = Shellwords.join([ "hive", "act", "workflow.retry", descriptor.fetch("target"),
+      "--observation", descriptor.fetch("observation_token"), "--project", @project, "--json" ])
+    assert_includes response.parsed_body.dig("error", "message"), command
+    assert_empty runtime_dispatch_requests.select { |request| request.project == @project }
+    post "#{@base}/tasks/#{task.slug}/actions", params: payload, headers: @headers, as: :json
+    assert_response :service_unavailable
+    assert_equal "dispatcher_unavailable", response.parsed_body.dig("error", "code")
+    assert_includes response.parsed_body.dig("error", "message"), command
+    assert_empty runtime_dispatch_requests.select { |request| request.project == @project }
+
+    config["daemon"] = { "enabled" => true }
+    File.write(config_path, config.to_yaml)
+    descriptor = Hive::OperationalAction.descriptor_for_task(task, project: @project)
+    post "#{@base}/tasks/#{task.slug}/actions", params: payload.merge(
+      observation: descriptor.fetch("observation_token"), idempotency_key: "enabled-retry"), headers: @headers, as: :json
+    assert_response :accepted
+    assert_equal true, response.parsed_body.dig("data", "queued")
+    request = runtime_dispatch_requests.find { |entry| entry.request_id == response.parsed_body.dig("data", "request_id") }
+    assert_equal "admitted", request.recovery.fetch("phase")
+    assert_includes File.read(task.state_file), "ERROR"
+  end
+
   test "actions accept canonical observations and reject stale or administrative effects" do
     task, = question_task!
     File.write(task.state_file, "# Brainstorm\n<!-- COMPLETE -->\n")

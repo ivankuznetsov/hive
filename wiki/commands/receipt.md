@@ -3,7 +3,7 @@ title: hive receipt
 type: command
 source: lib/hive/commands/receipt.rb, lib/hive/command_receipt_{store,pruner,maintenance,capacity,ledger}.rb
 created: 2026-09-27
-updated: 2026-11-07
+updated: 2026-11-08
 tags: [command, idempotency, receipts, sqlite, maintenance]
 ---
 
@@ -109,6 +109,12 @@ durable result or permanently burns the key. Every effect submission,
 dispatch-context bind, and observation is fenced by the receipt's ownership
 generation and principal, so a reclaimed owner cannot append evidence to its
 successor's execution.
+
+A completed manual retry whose stage failed stores the applied result as
+`failed` with the stage error exit status, including when authoritative effect
+evidence repairs an interrupted final receipt write. Its action payload keeps
+`ok: true` because the action was evaluated. This applied failure is not
+retry-eligible through the whole-effect non-application allocator.
 
 Untemplated JSON success and failure envelopes retain the canonical typed
 payload for replay. Display mode remains a caller choice: text-first durable

@@ -49,6 +49,19 @@ class CommandsActTest < Minitest::Test
     assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_inner_stage_stdout_cannot_become_a_second_act_json_document
+    executor = FakeExecutor.new
+    executor.define_singleton_method(:execute) do |**|
+      puts '{"schema":"inner-stage"}'
+      { "task_state" => "idle", "stage" => "3-plan", "marker" => "complete" }
+    end
+    stdout, = capture_io do
+      Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64,
+        json: true, executor: executor).call
+    end
+    assert_equal "hive-act", JSON.parse(stdout).fetch("schema")
+  end
+
   def test_keyed_json_success_is_not_marked_emitted_before_receipt_finalization
     command = Hive::Commands::Act.new(
       "workflow.advance", "demo:task", observation: "a" * 64, json: true,
@@ -56,6 +69,26 @@ class CommandsActTest < Minitest::Test
     )
     capture_io { command.send(:emit_success, FakeExecutor.new.execute) }
     refute command.instance_variable_get(:@stdout_written)
+  end
+
+  def test_failed_attached_stage_emits_one_success_envelope_and_exits_nonzero
+    result = { "task_state" => "error", "stage" => "6-review", "marker" => "error",
+      "recovery" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "terminal", "phase" => "terminal", "owner" => "none",
+        "request_id" => "request-1", "attempt_id" => "attempt-1",
+        "terminal_outcome" => "failed", "terminal_at" => Time.now.utc.iso8601
+      }).to_h }
+    stdout, = capture_io do
+      assert_raises(Hive::TaskInErrorState) do
+        Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+          json: true, executor: FakeExecutor.new(result: result)).call
+      end
+    end
+    payload = JSON.parse(stdout)
+    assert_equal true, payload.fetch("ok")
+    assert_equal "failed", payload.dig("result", "recovery", "terminal_outcome")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+    assert schema.valid?(payload), schema.validate(payload).to_a.inspect
   end
 
   def test_human_success_is_concise
@@ -97,7 +130,7 @@ class CommandsActTest < Minitest::Test
       operation = Hive::CommandOperation.new(
         key: "act-move", command: "act", target: "demo:task",
         request: { "action_id" => "workflow.advance", "observation" => token, "project" => nil },
-        project_root: project, principal: "owner", json: true,
+        project_root: project, principal: "owner", json: true, structured: true,
         failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
         text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
         store: store
@@ -135,7 +168,7 @@ class CommandsActTest < Minitest::Test
         request: {
           "action_id" => "workflow.advance", "observation" => "e" * 64, "project" => nil
         },
-        project_root: project, principal: "owner", json: true,
+        project_root: project, principal: "owner", json: true, structured: true,
         failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
         text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
         store: store
@@ -150,6 +183,34 @@ class CommandsActTest < Minitest::Test
       assert_equal "command_unresolved_pending", envelope.fetch("error_kind")
       assert_equal Hive::ExitCodes::COMMAND_UNRESOLVED, envelope.fetch("exit_code")
       assert_equal "unresolved", envelope.dig("command_receipt", "state")
+    end
+  end
+
+  def test_keyed_rejected_action_replays_the_typed_envelope_and_original_status_once
+    with_command_receipts do |project, store|
+      executor = FakeExecutor.new(error: Hive::WrongStage.new("stage changed"))
+      resolver = Struct.new(:resolve).new(Struct.new(:project_root).new(project))
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+        with_replaced_singleton_method(Hive::CommandOperation, :registered_project_roots, ->(**) { [ project ] }) do
+          outputs = [ Hive::WrongStage, Hive::CommandReplayFailure ].map do |error_class|
+            stdout, = capture_io do
+              error = assert_raises(error_class) do
+                Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+                  json: true, executor: executor, idempotency_key: "rejected-action",
+                  command_receipt_store: store, principal: "owner").call
+              end
+              assert_equal Hive::ExitCodes::WRONG_STAGE, error.exit_code
+            end
+            payload = JSON.parse(stdout)
+            assert_equal "stale_observation", payload.fetch("error_kind")
+            assert_equal "workflow.retry", payload.fetch("action_id")
+            assert_equal "demo:task", payload.fetch("target")
+            stdout
+          end
+          assert_equal outputs.first, outputs.last
+          assert_equal 1, executor.calls.length
+        end
+      end
     end
   end
 

@@ -109,7 +109,7 @@ module Hive
                         row_value(row, :mtime)
           observed_at = Time.parse(observed_at.to_s) unless
             observed_at.nil? || observed_at.respond_to?(:utc)
-          ::Digest::SHA256.hexdigest(JSON.generate(
+          fields = {
             "project" => row_value(row, :project),
             "slug" => row_value(row, :slug),
             "folder" => row_value(row, :folder),
@@ -121,7 +121,10 @@ module Hive
               row_value(row, :condition_task_generation),
             "attempt_id" => row_value(row, :attempt_id) ||
               row_value(row, :current_attempt)
-          ))
+          }
+          binding = row_value(row, :recovery_observation)
+          fields["recovery_observation"] = binding if binding
+          ::Digest::SHA256.hexdigest(JSON.generate(fields))
         rescue ArgumentError, TypeError
           ::Digest::SHA256.hexdigest(JSON.generate("invalid_observation" => true))
         end
@@ -152,7 +155,7 @@ module Hive
         @generation_resolver = generation_resolver || method(:resolve_generation)
         @attempt_store = attempt_store
         @attempt_store_factory = attempt_store_factory || lambda do
-          Hive::Attempts::Repository.open_default(state_home: @state_home)
+          Hive::Attempts::Repository.open_default(state_home: @state_home, create_directories: false)
         end
         @runtime_digest = runtime_digest.to_s
         unless @runtime_digest.match?(/\A[0-9a-f]{64}\z/)
@@ -372,6 +375,18 @@ module Hive
             end
           end
 
+          if requestor.to_s == "action"
+            matches = request_queue.recovery_requests(project: value(row, :project), slug: value(row, :slug), limit: 65)
+            ambiguous = matches.count do |candidate|
+              candidate.recovery["phase"] != "terminal" &&
+                candidate.recovery["observed_marker_generation"] == expected_generation
+            end > 1
+            if ambiguous || matches.size > 64
+              return receipt("blocked", owner: "operator", reason: "recovery_binding_conflict",
+                remediation: "hive status --operational --json")
+            end
+          end
+
           existing = request_queue.find_recovery(
             project: value(row, :project),
             slug: value(row, :slug),
@@ -379,6 +394,10 @@ module Hive
             state_home: @state_home
           )
           if existing
+            unless request_task_identity_matches?(existing, locked_task)
+              return receipt("blocked", request_id: existing.request_id, owner: "operator",
+                reason: "task_identity_conflict", remediation: "hive status --operational --json")
+            end
             existing = rearm_changed_runtime(existing, now:)
             existing = expedite_operator_recovery(existing, now:) if operator_request
             return receipt_for_request(
@@ -988,6 +1007,150 @@ module Hive
         unavailable_request(request, "#{e.class}: #{e.message}")
       end
 
+      # Query-only evidence for an attached operator retry. Filtering happens in
+      # SQL before the bound; a second candidate fails closed rather than
+      # selecting whichever host-global row happened to fit in a snapshot.
+      def manual_evidence(row:, requests: nil)
+        scoped = requests || request_queue.recovery_requests(
+          project: value(row, :project), slug: value(row, :slug), limit: 65
+        )
+        return nil if scoped.empty?
+        if scoped.size > 64
+          return { "binding" => nil, "receipt" => receipt("unavailable", owner: "hive",
+            reason: "recovery_observation_unavailable", remediation: "hive status --operational --json").to_h }
+        end
+        task = resolve_task_for(row)
+        marker = Hive::Markers.current(task.state_file)
+        requests = scoped.select do |request|
+          recovery = request.recovery || {}
+          next false unless recovery["variant"] == "marker"
+          retryable_terminal = recovery["phase"] == "terminal" && marker.none? &&
+            RETRYABLE_TERMINAL_OUTCOMES.include?(recovery["terminal_outcome"])
+          next false unless %w[admitted cleared dispatched].include?(recovery["phase"]) || retryable_terminal
+          next false unless request_task_identity_matches?(request, task)
+          next false unless request.expected_marker_id.to_s == recovery.dig("expected_marker_attrs", "marker_id").to_s
+          if recoverable_marker?(marker)
+            next false unless marker.name.to_s == request.expected_marker_name.to_s &&
+              marker_generation(marker) == recovery["observed_marker_generation"] &&
+              expected_attrs_match?(marker, recovery.fetch("expected_marker_attrs"))
+          else
+            next false unless marker.none?
+          end
+          body = Hive::Markers.without_markers(File.binread(task.state_file))
+          generation = call_generation_resolver(task, project: request.project,
+            intended_stage: request.expected_stage, state_file_content: body)
+          generation_matches?(generation, recovery)
+        end
+        if requests.size > 1 || (requests.empty? && marker.none? && scoped.any? do |request|
+            recovery = request.recovery || {}
+            recovery["variant"] == "marker" && recovery["phase"] != "terminal"
+          end)
+          return { "binding" => nil, "receipt" => receipt("blocked", owner: "operator",
+            reason: "recovery_binding_conflict", remediation: "hive status --operational --json").to_h }
+        end
+        return nil if requests.empty?
+
+        request = requests.first
+        recovery = request.recovery
+        projected = projected_receipt_for_request(request, dispatch_enabled: false)
+        if recovery["phase"] == "terminal"
+          projected = projected.with(status: "blocked", owner: "operator", reason: "recovery_marker_repair_pending",
+            remediation: "use a fresh local workflow.retry action from hive status --operational --json")
+        end
+        {
+          "binding" => {
+            "request_id" => request.request_id, "revision" => request.revision,
+            "phase" => recovery["phase"], "state" => request.state,
+            "task_id" => request.task_id.to_s,
+            "folder" => recovery["canonical_task_folder"],
+            "stage" => request.expected_stage, "generation" => request.task_generation,
+            "progress" => recovery["expected_post_clear_progress_fingerprint"]
+          },
+          "receipt" => projected.to_h
+        }
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError, KeyError => error
+        unavailable_manual_evidence(error)
+      end
+
+      # One bounded query per project, reused by the snapshot's projections.
+      def manual_evidence_for(project:, rows:)
+        requests = request_queue.recovery_requests_by_slug(project: project,
+          slugs: rows.map { |row| value(row, :slug) }, limit: 65)
+        rows.to_h do |row|
+          slug = value(row, :slug)
+          [ slug, manual_evidence(row: row, requests: requests.fetch(slug, [])) ]
+        end
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError => error
+        rows.to_h { |row| [ value(row, :slug), unavailable_manual_evidence(error) ] }
+      end
+
+      def unavailable_manual_evidence(error)
+        { "binding" => nil, "receipt" => receipt("unavailable", owner: "hive",
+          reason: "recovery_observation_unavailable",
+          remediation: "#{error.class}: #{error.message}; hive status --operational --json").to_h }
+      end
+
+      # The old failure observation is checked before marker repair. Resume
+      # then uses the request's post-clear generation, never the old token.
+      def prepare_manual(row:, observation_token:, now: Time.now.utc)
+        binding = value(row, :recovery_observation)
+        unless binding
+          evidence = manual_evidence(row: row)
+          return Receipt.from_h(evidence.fetch("receipt")) if evidence && evidence["binding"].nil?
+          result = request(row: row, requestor: "action", observation_token: observation_token, now: now)
+          return result unless result.request_id && %w[queued cooldown].include?(result.status)
+          request = request_queue.fetch(result.request_id)
+          unless request
+            return receipt("unavailable", request_id: result.request_id, owner: "hive",
+              reason: "recovery_observation_unavailable",
+              remediation: "recovery request disappeared; hive status --operational --json")
+          end
+          return resume(request: request, row: row, now: now)
+        end
+
+        unless binding.is_a?(Hash) && binding["request_id"].is_a?(String) && !binding["request_id"].empty?
+          return receipt("unavailable", owner: "hive", reason: "recovery_unavailable",
+            remediation: "invalid recovery observation; hive status --operational --json")
+        end
+        task = resolve_task_for(row)
+        current = nil
+        Hive::Lock.with_task_lock(task.folder, "operation" => "manual_recovery_observation") do
+          marker = Hive::Markers.current(task.state_file)
+          evidence = manual_evidence(row: row)
+          return Receipt.from_h(evidence.fetch("receipt")) if evidence && evidence["binding"].nil?
+          unless evidence && evidence["binding"] == binding &&
+              secure_compare(locked_observation_token(row, task, marker), observation_token.to_s)
+            return receipt("blocked", owner: "operator", reason: "stale_observation",
+              remediation: "hive status --operational --json")
+          end
+          current = request_queue.fetch(binding.fetch("request_id"))
+          unless current
+            return receipt("unavailable", request_id: binding.fetch("request_id"), owner: "hive",
+              reason: "recovery_observation_unavailable",
+              remediation: "recovery request disappeared; hive status --operational --json")
+          end
+          current = expedite_operator_recovery(current, now: now)
+        end
+        resume(request: current, row: row, now: now)
+      rescue Hive::ConcurrentRunError => error
+        receipt("blocked", owner: "operator", reason: "existing_live",
+          remediation: "#{error.class}: #{error.message}; " +
+            Shellwords.join([ "hive", "task", value(row, :slug), "--project", value(row, :project), "--json" ]))
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError => error
+        receipt("unavailable", owner: "hive", reason: "recovery_unavailable",
+          remediation: "#{error.class}: #{error.message}; hive status --operational --json")
+      end
+
+      def manual_attempt_matches?(request, record)
+        return false unless record && record.respond_to?(:[])
+        record["task_id"].to_s == request.task_id.to_s &&
+          record["project"].to_s == request.project.to_s &&
+          record["task_slug"].to_s == request.slug.to_s &&
+          record["intended_stage"].to_s == request.expected_stage.to_s &&
+          record["task_generation"].to_s == request.task_generation.to_s &&
+          record["progress_token"].to_s == request.recovery["expected_post_clear_progress_fingerprint"].to_s
+      end
+
       def mark_dispatched(request, attempt_id:, terminal: false, outcome: nil,
                           now: Time.now.utc)
         current = request_queue.fetch(request.request_id, state_home: @state_home) || request
@@ -1164,6 +1327,33 @@ module Hive
       # escalation evidence are preserved either way.
       def projected_receipt_for_request(request, dispatch_enabled: true, now: Time.now.utc)
         receipt = receipt_for_request(request, now: now)
+        unless dispatch_enabled
+          attempt_id = receipt.attempt_id
+          attempt_id ||= request_queue.recovery_attempt_id(request.request_id) if request_queue.respond_to?(:recovery_attempt_id)
+          record = attempts_store.fetch(attempt_id) if attempt_id
+          if request.recovery&.fetch("variant", nil) == "marker" && attempt_id &&
+              !manual_attempt_matches?(request, record)
+            return receipt.with(status: "unavailable", owner: "hive",
+              reason: record ? "attempt_identity_conflict" : "attempt_observation_unavailable",
+              remediation: "hive status --operational --json")
+          end
+          if record&.live?
+            return receipt.with(status: "running", owner: "agent", attempt_id: attempt_id,
+              reason: "existing_live", remediation: Shellwords.join([ "hive", "task", request.slug, "--project", request.project, "--json" ]))
+          end
+          observation = request.recovery&.fetch("admission_observation", nil)
+          if observation.is_a?(Hash) && observation["status"] == "no_route"
+            owner = observation["next_action_owner"]
+            owner = "provider" unless %w[operator provider hive].include?(owner)
+            return receipt.with(status: "unavailable", owner: owner,
+              reason: observation["reason"], remediation: "hive status --operational --json")
+          end
+          if %w[queued cooldown running].include?(receipt.status)
+            return receipt.with(status: "blocked", owner: "operator", reason: PROJECT_DISPATCH_DISABLED,
+              remediation: "use a fresh local workflow.retry action from hive status --operational --json")
+          end
+          return receipt
+        end
         return receipt unless receipt.status == "running"
         return receipt if IN_FLIGHT_REQUEST_STATES.include?(request.state.to_s)
         return receipt if attempt_live?(receipt.attempt_id)
@@ -1171,14 +1361,11 @@ module Hive
           return receipt.with(status: "unavailable", owner: "hive",
                               reason: "recovery_transition_pending", remediation: nil)
         end
-        return receipt.with(status: "queued", owner: "scheduler",
-                            reason: RETRY_AWAITING_DISPATCH, remediation: nil) if dispatch_enabled
-
-        receipt.with(
-          status: "queued", owner: "operator", reason: PROJECT_DISPATCH_DISABLED,
-          remediation: "daemon dispatch is disabled for #{request.project}; set " \
-                       "daemon.enabled: true in its config and run `hive daemon reload`"
-        )
+        receipt.with(status: "queued", owner: "scheduler",
+                     reason: RETRY_AWAITING_DISPATCH, remediation: nil)
+      rescue Hive::Attempts::RepositoryError
+        receipt.with(status: "unavailable", owner: "hive", reason: "attempt_observation_unavailable",
+          remediation: "hive status --operational --json")
       end
 
       def escalation_tier_for(recovery)
@@ -1622,7 +1809,8 @@ module Hive
           "marker_attrs" => marker.attrs.to_h.transform_keys(&:to_s),
           "state_file_mtime" => File.mtime(task.state_file).utc,
           "task_generation" => value(row, :task_generation),
-          "attempt_id" => value(row, :attempt_id)
+          "attempt_id" => value(row, :attempt_id),
+          "recovery_observation" => value(row, :recovery_observation)
         )
       end
 
@@ -1858,7 +2046,7 @@ module Hive
       # runtime digest through +rearm_changed_runtime+.
       def expedite_operator_recovery(request, now:)
         recovery = request.recovery || {}
-        return request unless recovery["phase"] == "admitted"
+        return request unless %w[admitted cleared].include?(recovery["phase"])
         blocked_reason = recovery["blocked_reason"]
         return request unless blocked_reason.nil? || blocked_reason == "deterministic_failure"
 
@@ -1868,7 +2056,7 @@ module Hive
         end
         transitioned = request_queue.update_recovery!(
           request.request_id,
-          expected_phase: "admitted",
+          expected_phase: recovery["phase"],
           changes: changes,
           state_home: @state_home
         )

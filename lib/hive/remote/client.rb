@@ -19,10 +19,11 @@ module Hive
       SCOPES = Contract::SCOPES
 
       class Failure < Hive::Error
-        attr_reader :code, :status
+        attr_reader :code, :status, :retry_binding
 
-        def initialize(message, code: "transport", status: 0)
+        def initialize(message, code: "transport", status: 0, retry_binding: nil)
           @code, @status = code, status
+          @retry_binding = retry_binding
           super(message)
         end
 
@@ -63,7 +64,8 @@ module Hive
         "stale" => "remote task changed; refresh its observation or question inventory",
         "too_large" => "remote input or response exceeds the size limit",
         "validation" => "remote operation could not be completed; inspect the task or advance it locally",
-        "unavailable" => "remote API is unavailable"
+        "unavailable" => "remote API is unavailable",
+        "dispatcher_unavailable" => "daemon dispatch is disabled for the project; no remote dispatcher is available"
       }.freeze
 
       def initialize(context:, bearer:, connect_timeout: 5, read_timeout: 15,
@@ -131,11 +133,51 @@ module Hive
         rescue Failure => error
           raise UnknownSubmission.new(key: key, target: target) if %w[transport protocol response_too_large].include?(error.code)
 
+          if error.code == "dispatcher_unavailable" && (command = local_retry_command(target, payload, binding: error.retry_binding))
+            raise Failure.new("#{error.message}. Run locally: #{command}", code: error.code, status: error.status)
+          end
+
           raise
         end
       end
 
       private
+
+      # Reconstruct guidance from validated caller inputs, never server prose.
+      def local_retry_command(target, payload, binding: nil)
+        project, slug = target.split(":", 2)
+        return unless project_name?(project) && slug.is_a?(String) && slug.match?(Contract::TASK_ID)
+        return unless payload["action_id"] == "workflow.retry" &&
+          payload["observation"].is_a?(String) && payload["observation"].match?(Contract::GENERATION)
+
+        # Numeric task IDs must use the server's canonical slug to satisfy the
+        # local descriptor's exact target check. Accept only matching identity
+        # fields from the closed command grammar, never arbitrary error prose.
+        if binding && binding[0] == project && binding[2] == payload["observation"] &&
+            (slug.match?(/\A\d+\z/) || slug == binding[1])
+          slug = binding[1]
+        elsif slug.match?(/\A\d+\z/)
+          return
+        end
+
+        Shellwords.join([ "hive", "act", "workflow.retry", "#{project}:#{slug}",
+          "--observation", payload["observation"], "--project", project, "--json" ])
+      end
+
+      def local_retry_binding(error)
+        return unless error["code"] == "dispatcher_unavailable" && printable?(error["message"], 4096)
+        command = error["message"].split("Run locally: ", 2)[1]
+        return unless command
+        argv = Shellwords.split(command)
+        return unless argv.size == 9
+        project, slug = argv[3].split(":", 2)
+        return unless project_name?(project) && slug&.match?(Contract::TASK_ID) && argv[5].match?(Contract::GENERATION)
+        return unless argv == [ "hive", "act", "workflow.retry", "#{project}:#{slug}",
+          "--observation", argv[5], "--project", project, "--json" ]
+        [ project, slug, argv[5] ]
+      rescue ArgumentError
+        nil
+      end
 
       def request(method, path, query: {}, body: nil, key: nil)
         uri = @base.dup
@@ -197,7 +239,7 @@ module Hive
           end
           message = SAFE_ERRORS.fetch(error["code"], "remote request failed")
           code = SAFE_ERRORS.key?(error["code"]) ? error["code"] : "remote_error"
-          raise Failure.new(message, code: code, status: status)
+          raise Failure.new(message, code: code, status: status, retry_binding: local_retry_binding(error))
         end
         protocol_error! unless status.between?(200, 299) && document["data"].is_a?(Hash)
         verify_identity!(document["instance_id"])

@@ -48,6 +48,20 @@ module Hive
       "ready_to_archive" => "archive"
     }.freeze
 
+    class ObservationContext
+      def initialize
+        @configs = {}
+      end
+
+      def config_for(task)
+        @configs[task.project_root] ||= Hive::Config.load(task.project_root)
+      end
+
+      def recovery_coordinator
+        @recovery_coordinator ||= Hive::Daemon::RecoveryCoordinator.new
+      end
+    end
+
     class << self
       def descriptor(project:, row:)
         action_id = action_id_for(row)
@@ -93,7 +107,8 @@ module Hive
       end
 
       def recoverable?(row)
-        Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+        (Hive::Recovery::API.recoverable_marker?(row["marker"]) ||
+          (row["marker"] == "none" && row["recovery_observation"].is_a?(Hash))) &&
           !Hive::TaskProjection.history_invalid_row?(row) &&
           !Hive::TerminalOutcome.outcome_evidence_rework?(row["attrs"] || {}) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
@@ -104,6 +119,11 @@ module Hive
       end
 
       def action_id_for(row)
+        return nil if row["recovery_binding_conflict"]
+        receipt = row["manual_recovery_receipt"] || {}
+        return nil if row["live_task_lock"] == true || receipt["status"] == "running"
+        return nil if receipt["status"] == "unavailable" &&
+          %w[attempt_observation_unavailable attempt_identity_conflict recovery_observation_unavailable].include?(receipt["reason"])
         return RETRY_ACTION_ID if recoverable?(row)
         return ACTION_ID if safe?(row)
 
@@ -135,7 +155,7 @@ module Hive
         ::Digest::SHA256.hexdigest(Hive::WorkflowPackage::CanonicalJSON.generate(fields))
       end
 
-      def observed_row(task, project:)
+      def observed_row(task, project:, context: ObservationContext.new)
         require "hive/config"
         require "hive/markers"
         require "hive/task_action"
@@ -161,12 +181,12 @@ module Hive
           action_marker = Hive::Markers::State.new(name: :error, attrs: attrs, raw: nil)
           projection = Hive::TaskProjection.project(records: [], marker: action_marker)
         end
-        config = Hive::Config.load(task.project_root)
+        config = context.config_for(task)
         action = Hive::TaskAction.for(
           task, action_marker, projection: projection, config: config, project_name: project
         )
         projection_data = projection.to_h
-        {
+        row = {
           "project" => project,
           "slug" => task.slug,
           "folder" => task.folder,
@@ -187,10 +207,19 @@ module Hive
           "blocked" => false,
           "held" => nil
         }
+        unless config.dig("daemon", "enabled") == true || task.workflow.controller?
+          evidence = context.recovery_coordinator.manual_evidence(row: row)
+          if evidence
+            row["recovery_observation"] = evidence["binding"]
+            row["recovery_binding_conflict"] = evidence["binding"].nil?
+            row["manual_recovery_receipt"] = evidence["receipt"]
+          end
+        end
+        row
       end
 
-      def descriptor_for_task(task, project:)
-        descriptor(project: project, row: observed_row(task, project: project))
+      def descriptor_for_task(task, project:, context: ObservationContext.new)
+        descriptor(project: project, row: observed_row(task, project: project, context: context))
       end
 
       def intended_stage_for(task, action_id: ACTION_ID)
@@ -201,13 +230,13 @@ module Hive
         verb ? Hive::Workflows.for_verb(verb).fetch(:target) : "#{task.stage_index}-#{task.stage_name}"
       end
 
-      def assert_current!(task, project:, action_id:, target:, observation_token:)
-        current = descriptor_for_task(task, project: project)
+      def assert_current!(task, project:, action_id:, target:, observation_token:, context: ObservationContext.new)
+        current = descriptor_for_task(task, project: project, context: context)
         unless current && current.fetch("action_id") == action_id &&
                current.fetch("target") == target &&
                secure_compare(current.fetch("observation_token"), observation_token)
           raise Hive::StaleOperationalObservation,
-                "task changed or the recommendation is no longer routine; take a fresh operational snapshot"
+                "task changed or the recommendation is no longer routine; run hive status --operational --json"
         end
 
         current
@@ -249,27 +278,30 @@ module Hive
       end
 
       def execute(action_id:, target:, observation_token:)
+        @observation_context = ObservationContext.new
         validate_action_id!(action_id)
         project_name, slug = parse_target(target)
-        project = registered_project(project_name)
+        registered_project(project_name)
         task = resolve_task(slug, project_name)
-        observed = OperationalAction.observed_row(task, project: project_name)
+        observed = OperationalAction.observed_row(task, project: project_name, context: @observation_context)
         OperationalAction.assert_current!(
           task,
           project: project_name,
           action_id: action_id,
           target: target,
-          observation_token: observation_token
+          observation_token: observation_token, context: @observation_context
         ) unless @remote_authority
         verify_remote_effect!(task, project_name, action_id, observation_token)
         if action_id == OperationalAction::RETRY_ACTION_ID
+          manual = @observation_context.config_for(task).dig("daemon", "enabled") != true
+          options = manual ? { execution: :manual, coordinator: @observation_context.recovery_coordinator } : {}
           receipt = @recovery_writer.recover!(
             row: observed,
             project: project_name,
             requestor: "action",
-            observation_token: observation_token
+            observation_token: observation_token, **options
           )
-          return recovery_result(observed, receipt)
+          return manual ? result_for(project_name, slug).merge("recovery" => receipt.to_h) : recovery_result(observed, receipt)
         end
 
         guard = lambda do |locked_task|
@@ -278,7 +310,7 @@ module Hive
             project: project_name,
             action_id: action_id,
             target: target,
-            observation_token: observation_token
+            observation_token: observation_token, context: @observation_context
           ) unless @remote_authority
           verify_remote_effect!(locked_task, project_name, action_id, observation_token)
         end
@@ -382,7 +414,7 @@ module Hive
 
       def result_for(project_name, slug)
         task = resolve_task(slug, project_name)
-        row = OperationalAction.observed_row(task, project: project_name)
+        row = OperationalAction.observed_row(task, project: project_name, context: @observation_context)
         {
           "task_state" => row.fetch("action"),
           "stage" => row.fetch("stage"),

@@ -109,9 +109,12 @@ module Hive
   end
 
   class CommandReplayFailure < Error
-    def initialize(message, exit_code:)
+    attr_reader :payload
+
+    def initialize(message, exit_code:, payload: nil)
       super(message)
       @replay_exit_code = Integer(exit_code)
+      @payload = payload
     end
 
     def exit_code = @replay_exit_code

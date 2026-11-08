@@ -4174,7 +4174,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     assert_equal(
-      { "enabled-task" => true, "disabled-task" => false, "action-task" => true },
+      { "enabled-task" => true, "disabled-task" => false, "action-task" => false },
       seen
     )
   end

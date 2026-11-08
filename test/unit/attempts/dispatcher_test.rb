@@ -5,6 +5,7 @@ require "hive/attempts/lost_outcome"
 require "hive/attempts/reconciler"
 require "hive/patrol_fix/receipt_store"
 require "hive/workflows/patrol_fix"
+require "hive/recovery/manual_retry"
 
 class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
@@ -1431,6 +1432,40 @@ class AttemptsDispatcherTest < Minitest::Test
       edited = dispatch_plan_review(dispatcher, task, request_id: "edited-plan", now: now + 86_403)
       assert_equal :accepted, edited.status
       assert_equal 0, edited.attempt["retry_charge"]
+    end
+  end
+
+  def test_manual_retry_dispatch_retains_transition_delay_and_repeated_failure_ceiling
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_) { task })
+      runner = Hive::Recovery::ManualRetry.new(coordinator: nil,
+        attempts: Hive::Attempts::API.new(daemon: dispatcher))
+      request = lambda do |id|
+        FakeRequest.new(project: "demo", slug: task.slug, request_id: id,
+          argv: [ "hive", "plan-review-run", task.slug, "--project", "demo" ],
+          requestor: "action", trigger: "recovery", inherited_outputs: [],
+          recovery: { "variant" => "marker", "phase" => "cleared", "retry_count" => 1 })
+      end
+      with_replaced_singleton_method(Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => false } } }) do
+        now = NOW
+        Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT.times do |index|
+          accepted = runner.send(:dispatch, request.call("manual-#{index}"), now: now)
+          assert_equal :accepted, accepted.status
+          assert_nil accepted.attach_descriptor, "manual admission must remain noninteractive"
+          terminalize_attempt(store, launcher, accepted, outcome: "failed", exit_status: 4, now: now + 1)
+          delay = Hive::Recovery::RetryPolicy.delay_sec(index)
+          early = runner.send(:dispatch, request.call("manual-early-#{index}"), now: now + delay)
+          assert_equal :deferred, early.status
+          expected = index == Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT - 1 ?
+            Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON : "transition_retry"
+          assert_equal expected, early.reason
+          now += delay + 1
+        end
+        held = runner.send(:dispatch, request.call("manual-after-limit"), now: now + 86_400)
+        assert_equal :deferred, held.status
+        assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON, held.reason
+        assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT, launcher.launched.size
+      end
     end
   end
 

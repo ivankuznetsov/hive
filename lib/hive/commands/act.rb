@@ -33,14 +33,31 @@ module Hive
         call_with_envelope do
           invoke = lambda do
             validate!
-            result = @executor.execute(
-              action_id: @action_id,
-              target: @target,
-              observation_token: @observation
-            )
+            result = with_stage_stdout do
+              @executor.execute(
+                action_id: @action_id,
+                target: @target,
+                observation_token: @observation
+              )
+            end
             emit_success(result)
           end
-          @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          payload = begin
+            @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          rescue Hive::CommandReplayFailure => error
+            # A terminal stage failure retains the evaluated action payload.
+            # Other failures are rendered by the outer envelope boundary.
+            raise unless error.payload&.dig("result", "recovery") && error.payload["ok"] == true
+            error.payload
+          end
+          if @idempotency_key
+            render_success(payload)
+          end
+          recovery = payload.dig("result", "recovery")
+          if failed_recovery?(payload)
+            raise Hive::TaskInErrorState, "retry attempt #{recovery['attempt_id']} ended #{recovery['terminal_outcome']}"
+          end
+          payload
         end
       end
 
@@ -69,7 +86,30 @@ module Hive
 
       def envelope_serialization_failure_policy = :raise
 
+      def envelope_payload_for(error)
+        return error.payload if error.is_a?(Hive::CommandReplayFailure) && error.payload
+        super
+      end
+
       private
+
+      def with_stage_stdout
+        return yield unless @json
+
+        Hive::CommandOperation::CAPTURE_MUTEX.synchronize do
+          previous = $stdout
+          File.open(File::NULL, "w") do |sink|
+            begin
+              $stdout = Hive::CommandOperation::ThreadRoutedOutput.new(
+                capture_thread: Thread.current, captured: sink, passthrough: previous
+              )
+              yield
+            ensure
+              $stdout = previous
+            end
+          end
+        end
+      end
 
       def command_operation
         Hive::CommandOperation.new(
@@ -91,12 +131,13 @@ module Hive
             project_name, slug = qualified_target
             Hive::TaskResolver.new(slug, project_filter: project_name).resolve.project_root
           },
-          json: @json,
-          structured: @structured,
-          display_json: @json && !@structured,
+          json: true,
+          structured: true,
+          display_json: false,
           principal: @principal,
           principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
+          result_status: ->(payload) { failed_recovery?(payload) ? Hive::ExitCodes::TASK_IN_ERROR : Hive::ExitCodes::SUCCESS },
           text_renderer: ->(payload) { text_success(payload.fetch("result")) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
@@ -112,6 +153,12 @@ module Hive
         end
       end
 
+      def failed_recovery?(payload)
+        recovery = payload.dig("result", "recovery")
+        recovery && recovery["status"] == "terminal" &&
+          !%w[succeeded success completed terminal_replay].include?(recovery["terminal_outcome"])
+      end
+
       def emit_success(result)
         payload = {
           "schema" => "hive-act",
@@ -122,13 +169,17 @@ module Hive
           "observation_token" => @observation,
           "result" => result
         }
-        if @structured
-          payload
-        elsif @json
+        render_success(payload) unless @idempotency_key
+        payload
+      end
+
+      def render_success(payload)
+        return payload if @structured
+        if @json
           puts JSON.generate(payload)
-          @stdout_written = true unless @idempotency_key
+          @stdout_written = true
         else
-          print text_success(result)
+          print text_success(payload.fetch("result"))
         end
         payload
       end

@@ -2979,8 +2979,7 @@ module Hive
           begin
             receipt = @recovery_coordinator.projected_receipt_for_request(
               request,
-              dispatch_enabled: project_enabled?(request.project) ||
-                explicit_action_recovery?(request)
+              dispatch_enabled: project_enabled?(request.project)
             )
             {
               "project" => request.project,
@@ -3131,10 +3130,11 @@ module Hive
         return if @attempt_admission_failure_signatures[key] == message
 
         @attempt_admission_failure_signatures[key] = message
+        inspection_command = Shellwords.join([ "hive", "task", row.slug, "--project", row.project ])
         @logger.event(
           :blocked, project: row.project, slug: row.slug, stage: row.stage,
           reason: "attempt_admission_failed", message: message,
-          remediation: "inspect the task with `hive task #{row.slug} --project #{row.project}`; " \
+          remediation: "inspect the task with `#{inspection_command}`; " \
                        "a task without an id cannot be admitted"
         )
       end
@@ -4081,6 +4081,13 @@ module Hive
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
             admission_view: @attempt_snapshot&.admission_view
           )
+          if req.recovery&.fetch("variant", nil) == "marker" &&
+              %i[accepted existing_live terminal_replay].include?(result.status) &&
+              !@recovery_coordinator.manual_attempt_matches?(req, result.attempt)
+            result = Hive::Attempts::DispatchResult.new(status: :deferred,
+              attempt: result.attempt, receipt: nil, attach_descriptor: nil,
+              reason: "attempt_identity_conflict")
+          end
           log_attempt_admission(result)
           if result.status == :deferred && result.reason == "capacity_saturated"
             recovery_receipt = if req.recovery.is_a?(Hash)

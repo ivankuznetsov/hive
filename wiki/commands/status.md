@@ -868,3 +868,46 @@ because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
 
 Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.
+
+A local `workflow.retry` action selects its execution policy from the task
+project's effective `daemon.enabled` setting. With dispatch disabled (including
+the legacy default when the key is absent), it admits guarded recovery and
+attaches to the durable attempt until its canonical outcome is available.
+Enabled projects retain queued recovery, regardless of daemon process presence.
+The attached command refreshes task state and returns request/attempt identity,
+terminal outcome and time. JSON remains one `hive-act` v2 document: `ok: true`
+means the action was evaluated; a failed terminal stage also exits nonzero.
+Keyed terminal failures persist a failed command receipt and the same nonzero
+exit status while retaining the evaluated `ok: true` action payload. Failed
+action evaluation replays its stored typed error envelope and extras. Both
+replays emit one envelope without another attempt, including after recovery
+from an interrupted receipt finalization. Stale actions
+require `hive status --operational --json`; inspect live work using
+`hive task SLUG --project PROJECT --json`.
+
+Manual marker workflows do not need scheduler snapshots to expose recovery.
+Controller workflows retain their own receipt-based status. Status
+reads recovery evidence once per project within a snapshot, grouped by slug
+with an independent 65-row overflow check per task. Full status and lean
+recovery projections reuse those observations. Tasks without recovery requests
+need no additional marker read. An identity-matched
+admitted/cleared request over unchanged markerless task input can advertise a
+fresh retry descriptor. The token binds request revision, phase, task identity,
+stage, dispatch generation and post-clear progress. Pending manual recovery is
+`blocked`, owned by the operator; a verified live attempt is agent-owned and
+suppresses routine actions for every descriptor consumer, including remote
+task action reads. Evidence read failures remain typed `unavailable` results
+and suppress routine actions. During execution, configuration and coordinator
+handles are reused while task markers and request bindings are reread at each
+guard. Missing requests and failed best-effort deferral also return typed
+unavailable receipts with local inspection guidance.
+Status only observes: it never clears a marker, resumes a request, dispatches,
+or terminalizes abandoned work.
+
+Caller loss between recovery terminalization and failure-marker repair also
+remains recoverable. When the failed terminal request still matches unchanged
+markerless input, fresh status exposes operator-owned guarded repair. The local
+action completes that repair and reports the existing canonical outcome without
+charging another retry or launching a duplicate. A subsequent fresh descriptor
+can authorize the next retry against the repaired failure marker. Ambiguous
+request bindings are refused before repair; status does not select one by age.

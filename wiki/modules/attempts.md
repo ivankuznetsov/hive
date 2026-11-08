@@ -268,3 +268,31 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Guarded attached recovery uses `Recovery::API` with an explicit manual execution
+policy. The coordinator alone validates a persisted recovery observation and
+repairs markers. Its query-only evidence is scoped by project and task before
+applying a bound; tokens include the request revision, phase and post-clear
+binding. A fresh operator action can expedite an admitted or cleared request
+without charging another retry. Other recovery callers retain queued admission.
+
+The bounded restart investigation is recorded in
+[[log.d/20261108-004-operator-attempt-restart-investigation]]. On the exercised
+Linux host, real external supervisors survived disposable services modeling
+all three shipped kill policies, for direct execute and attached review work.
+Actual application-service restarts and the historical incident remain
+unverified; no production orphan policy was changed based on that probe.
+
+`Attempts::API#fetch` and `#attach` expose canonical observation and read-only
+attachment without constructing internal repositories or clients in recovery
+adapters. A contended request admission re-reads the canonical request attempt
+and verifies its task/stage/generation binding before returning existing-live
+or terminal replay. Genuine loss remains a ledger state; manual recovery maps
+it to the `lost` outcome and retains its canonical end time.
+
+Manual retry validates every accepted, existing-live, or terminal-replay
+admission result against the recovery request's task, project, slug, stage,
+generation and post-clear progress before binding or attaching. The daemon's
+marker-recovery consumer applies the same fence. A foreign semantic owner
+leaves the request cleared and unbound, so a fresh operator retry remains
+available after that owner ends.

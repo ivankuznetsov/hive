@@ -273,3 +273,19 @@ Automated local fixtures exercise separate client/server installations, real
 transport and deterministic workers. Live NAS/Hivebox deployment, a production
 TLS proxy, and manual network captures require a later authorized deployment;
 their absence is a verification limitation, not evidence of a successful rollout.
+
+Remote `workflow.retry` requires the selected project's effective
+`daemon.enabled: true`. A disabled project now returns HTTP 503 with the
+existing AdmissionRefused contract and the new code `dispatcher_unavailable`,
+replacing the former successful queued response. Its message includes the exact local
+`hive act workflow.retry PROJECT:SLUG --observation TOKEN --project PROJECT --json`
+command. Keyed replay preserves the refusal code and HTTP status. The CLI
+keeps that code and reconstructs the local command from validated caller
+inputs and a matching canonical slug from the closed refusal-command grammar
+when the caller used a numeric task ID. It does not reflect server diagnostics.
+This refusal creates no
+recovery request or worker; clients continue to use the existing remote error
+envelope and API version. Run the supplied
+command locally while its observation is fresh, or obtain a new descriptor with
+`hive status --operational --json`. Enabled projects retain queued admission
+even while their daemon is unavailable. Remote requests do not attach to stages.

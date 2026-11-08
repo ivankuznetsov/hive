@@ -139,6 +139,15 @@ module Hive
           raise Attempts::RepositoryError, "dispatch request is not claimable"
         end
         payload = Codec.load_json(row.fetch(:payload_json))
+        recovery = payload["recovery"]
+        if recovery.is_a?(Hash) && recovery["variant"] == "marker"
+          unless recovery["phase"] == "cleared" && recovery["blocked_reason"].nil? &&
+              recovery["dispatch_generation"] == record.task_generation &&
+              recovery["expected_post_clear_progress_fingerprint"] == record["progress_token"] &&
+              payload["expected_stage"] == record["intended_stage"]
+            raise Attempts::RepositoryError, "recovery request is not eligible for admission"
+          end
+        end
         bound_generation = payload["task_generation"]
         bound_task = payload["task_id"]
         generation_matches = bound_generation.to_s.empty? ||

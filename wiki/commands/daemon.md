@@ -557,3 +557,10 @@ original typed failure.
 - [[modules/daemon]] · [[modules/plan_review]]
 - [[decisions]] (ADR-024)
 - [[architecture]]
+
+A disabled project's action-originated recovery requests remain eligible for a
+live daemon's existing explicit-action carve-out. Local attached retry and the
+daemon share transactional attempt admission, so concurrent consumers converge
+on one attempt. Receipt projection uses actual project dispatch configuration;
+the carve-out does not imply scheduler ownership for a manual project. Enabled
+projects retain scheduler snapshot joins and queued admission during outages.

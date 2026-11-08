@@ -149,7 +149,7 @@ module Hive
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request)
+          retry_release: explicit_retry_release?(request, task: task)
         ) if recoverable_source_attempt?(source_attempt)
 
         dispatch(
@@ -158,9 +158,27 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request),
+          retry_release: explicit_retry_release?(request, task: task),
           replay_semantic_terminal: replay_semantic_terminal
         )
+      rescue RepositoryError
+        # Another consumer can win after the request lookup and before the
+        # admission transaction. Only that canonical, identically bound
+        # attempt can turn a claim conflict into attachment or terminal replay.
+        attempt_id = @store.attempt_id_for_request(request_id: request.request_id)
+        winner = @store.fetch(attempt_id) if attempt_id
+        unless generation && winner && winner["task_id"].to_s == generation.task_id.to_s &&
+            winner["project"] == generation.project && winner["task_slug"] == generation.task_slug &&
+            winner["intended_stage"] == generation.intended_stage &&
+            winner.task_generation == generation.task_generation
+          raise
+        end
+        return live_result(winner, interactive: interactive) if winner.live?
+        if winner.state == "terminal"
+          return DispatchResult.new(status: :terminal_replay, attempt: winner,
+            receipt: winner.receipt, attach_descriptor: nil, reason: nil)
+        end
+        raise
       end
 
       # Read-only provider-route projection used by scheduler readiness. Global,
@@ -771,7 +789,13 @@ module Hive
         }
       end
 
-      def explicit_retry_release?(request)
+      def explicit_retry_release?(request, task: nil)
+        if request.respond_to?(:requestor) && request.requestor.to_s == "action" &&
+            request.respond_to?(:recovery) && request.recovery.is_a?(Hash) && request.recovery["variant"] == "marker" &&
+            task&.respond_to?(:project_root) && task.project_root &&
+            Hive::Config.load(task.project_root).dig("daemon", "enabled") != true
+          return false
+        end
         request.respond_to?(:recovery) && request.recovery.is_a?(Hash) &&
           request.respond_to?(:requestor) &&
           OPERATOR_RETRY_REQUESTORS.include?(request.requestor.to_s) &&

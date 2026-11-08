@@ -171,12 +171,33 @@ module Hive
         end
       end
 
-      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, **)
+      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, project: nil, slug: nil, **)
         database.read do |db|
-          db[:dispatch_requests]
-            .where(recovery_request: 1)
-            .reverse_order(:updated_at, :request_id).limit(Integer(limit))
+          scope = db[:dispatch_requests].where(recovery_request: 1)
+          scope = scope.where(project_id: db[:projects].where(name: project.to_s).select(:project_id)) if project
+          scope = scope.where(task_slug: slug.to_s) if slug
+          scope.reverse_order(:updated_at, :request_id).limit(Integer(limit))
             .all.reverse.map { |row| request_from(row) }
+        end
+      end
+
+      def recovery_attempt_id(request_id)
+        database.read do |db|
+          db[:attempts].where(request_id: request_id.to_s).get(:attempt_id)
+        end
+      end
+
+      def recovery_requests_by_slug(project:, slugs:, limit: RECOVERY_PROJECTION_LIMIT)
+        return {} if slugs.empty?
+        per_task_limit = Integer(limit)
+        database.read do |db|
+          ranked = db[:dispatch_requests].where(recovery_request: 1, task_slug: slugs,
+            project_id: db[:projects].where(name: project.to_s).select(:project_id))
+            .select_append(Sequel.function(:row_number).over(partition: :task_slug,
+              order: [ Sequel.desc(:updated_at), Sequel.desc(:request_id) ]).as(:recovery_rank))
+          ranked.from_self.where { recovery_rank <= per_task_limit }
+            .order(:task_slug, Sequel.desc(:recovery_rank)).all
+            .map { |row| request_from(row) }.group_by(&:slug)
         end
       end
 

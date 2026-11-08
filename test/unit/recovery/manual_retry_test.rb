@@ -57,6 +57,27 @@ class ManualRetryTest < Minitest::Test
     assert_includes receipt.remediation, "hive status --operational --json"
   end
 
+  def test_admission_requires_a_matching_attempt_before_binding_attachment_or_terminalization
+    %i[accepted existing_live terminal_replay].each do |status|
+      record = Record.new(attempt_id: "foreign-attempt", state: "running")
+      result = Hive::Attempts::DispatchResult.new(status: status, attempt: record,
+        receipt: nil, attach_descriptor: nil, reason: nil)
+      @attempts.define_singleton_method(:dispatch_request) { |*, **| result }
+      checked = []
+      @coordinator.define_singleton_method(:manual_attempt_matches?) do |request, attempt|
+        checked << [ request, attempt ]
+        false
+      end
+
+      receipt = runner.call(row: @row, observation_token: "a" * 64)
+
+      assert_equal [ [ @request, record ] ], checked
+      assert_equal [ "unavailable", "attempt_identity_conflict" ], [ receipt.status, receipt.reason ]
+      assert_nil receipt.attempt_id
+      assert_includes receipt.remediation, "hive status --operational --json"
+    end
+  end
+
   def test_missing_request_after_attachment_returns_unavailable_evidence
     @coordinator.instance_variable_set(:@prepared, @receipt.with(status: "running", phase: "dispatched", attempt_id: "attempt-1"))
     @coordinator.define_singleton_method(:manual_attempt_matches?) { |*| true }

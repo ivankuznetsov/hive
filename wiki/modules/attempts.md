@@ -289,3 +289,10 @@ adapters. A contended request admission re-reads the canonical request attempt
 and verifies its task/stage/generation binding before returning existing-live
 or terminal replay. Genuine loss remains a ledger state; manual recovery maps
 it to the `lost` outcome and retains its canonical end time.
+
+Manual retry validates every accepted, existing-live, or terminal-replay
+admission result against the recovery request's task, project, slug, stage,
+generation and post-clear progress before binding or attaching. The daemon's
+marker-recovery consumer applies the same fence. A foreign semantic owner
+leaves the request cleared and unbound, so a fresh operator retry remains
+available after that owner ends.

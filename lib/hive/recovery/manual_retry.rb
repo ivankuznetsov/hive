@@ -46,11 +46,13 @@ module Hive
         # action's entry timestamp as a superseded source observation.
         result = dispatch(request, now: [ now, Time.now.utc ].max)
         case result.status
-        when :accepted, :existing_live
+        when :accepted, :existing_live, :terminal_replay
+          return unavailable(receipt, row, "attempt_identity_conflict") unless
+            @coordinator.manual_attempt_matches?(request, result.attempt)
+          return finish(request, result.attempt) if result.status == :terminal_replay
+
           @coordinator.mark_dispatched(request, attempt_id: result.attempt.attempt_id, now: now)
           attach(request, result.attempt.attempt_id, row)
-        when :terminal_replay
-          finish(request, result.attempt)
         else # :deferred or :no_route, the dispatcher's only other outcomes
           if result.reason == "attempt_lost" && result.attempt&.state == "lost" &&
               result.attempt["request_id"] == request.request_id &&

@@ -7,6 +7,14 @@ updated: 2026-11-08
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Manual-retry admission identity fence (2026-11-08)
+
+Focused regression coverage exercises foreign existing-live admission through
+both the manual and daemon marker-recovery consumers, including successful
+retry after the foreign attempt fails. It also covers identity rejection for
+accepted and terminal-replay manual admission results. An installed CLI race
+with a concurrent operator command has not been live-smoked.
+
 ## Remote API deployment evidence (2026-11-07)
 
 The 2026-11-08 manual-retry review fix checkpoint ran `bin/test --all` (16,374

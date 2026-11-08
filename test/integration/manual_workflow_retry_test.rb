@@ -299,6 +299,81 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  def test_foreign_existing_live_admission_never_binds_manual_recovery_in_either_consumer
+    %i[manual daemon].each do |consumer|
+      with_retry(stage: "3-plan", marker: "ERROR", reason: "timeout") do |row, coordinator, repository, store, launcher, runner, dispatcher|
+        task = Hive::Task.new(row.fetch("folder"))
+        prepared = coordinator.prepare_manual(row: Hive::Recovery::API.observation(row),
+          observation_token: coordinator.observation_token_for(row))
+        request = repository.fetch(prepared.request_id)
+        launch = launcher.method(:launch)
+        foreign_capability = nil
+        launcher.define_singleton_method(:launch) do |record, claim_capability:|
+          @launched << record
+          foreign_capability = claim_capability
+          { "claimed" => true }
+        end
+        # An owner command wins after repair, before recovery admission, using
+        # the same task/stage/generation but a different command progress token.
+        foreign_request = request.with(request_id: "foreign-run", recovery: nil,
+          argv: [ "hive", "plan-review-run", request.slug,
+            "--project", request.project, "--json" ])
+        admission = dispatcher.call({})
+        foreign = admission.dispatch_request(foreign_request, interactive: false).attempt
+        refute coordinator.manual_attempt_matches?(request, foreign)
+        api = Hive::Attempts::API.new(daemon: admission)
+        api.define_singleton_method(:attach) { |*, **| raise "must not attach to foreign work" }
+
+        if consumer == :manual
+          attached = Hive::Recovery::ManualRetry.new(coordinator: coordinator,
+            repository: repository, attempts: api)
+          current = Hive::OperationalAction.observed_row(task, project: row.fetch("project"))
+          receipt = attached.call(row: current, observation_token: coordinator.observation_token_for(current))
+          assert_equal "unavailable", receipt.status, receipt.to_h.inspect
+          assert_equal "attempt_identity_conflict", receipt.reason
+          assert_nil receipt.attempt_id
+        else
+          daemon = Hive::Daemon::Dispatcher.allocate
+          daemon.instance_variable_set(:@dispatch_repository, repository)
+          daemon.instance_variable_set(:@attempt_dispatcher, api)
+          daemon.instance_variable_set(:@recovery_coordinator, coordinator)
+          daemon.instance_variable_set(:@dispatch_request_log_signatures, {})
+          logger = Object.new
+          logger.define_singleton_method(:event) { |*, **| }
+          daemon.instance_variable_set(:@logger, logger)
+          result = daemon.send(:dispatch_request!, request, now: Time.now.utc)
+          assert_equal :deferred, result.status
+          assert_equal "attempt_identity_conflict", result.reason
+        end
+
+        current_request = repository.fetch(request.request_id)
+        assert_equal "cleared", current_request.recovery["phase"]
+        assert_nil current_request.recovery["attempt_id"]
+        assert_nil repository.recovery_attempt_id(request.request_id)
+        assert_equal foreign.to_h, store.fetch(foreign.attempt_id).to_h, "foreign work must remain untouched"
+        assert_equal 1, launcher.launched.size
+
+        claimed = store.claim(foreign, owner: { "pid" => Process.pid },
+          claim_capability: foreign_capability, first_heartbeat_timeout_sec: 30, now: Time.now.utc)
+        running = store.first_heartbeat(claimed, stale_sec: 30, now: Time.now.utc)
+        store.terminalize(running, outcome: "failed", exit_status: 1,
+          final_checkpoint: running.checkpoint, output_references: [],
+          log_reference: { "path" => "logs/#{foreign.attempt_id}.frames", "size" => 0,
+            "sha256" => Digest::SHA256.hexdigest("") }, now: Time.now.utc)
+        launcher.define_singleton_method(:launch, launch)
+        current = Hive::OperationalAction.observed_row(task, project: row.fetch("project"))
+        action = Hive::OperationalAction.descriptor(project: row.fetch("project"), row: current)
+        assert_equal "workflow.retry", action.fetch("action_id")
+        receipt = runner.call(row: current, observation_token: action.fetch("observation_token"))
+        assert_equal "terminal", receipt.status, receipt.to_h.inspect
+        assert_equal "succeeded", receipt.terminal_outcome
+        assert_equal request.request_id, receipt.request_id
+        assert_equal 1, receipt.retry_count
+        assert_equal 2, launcher.launched.size
+      end
+    end
+  end
+
   def test_two_consumers_reaching_admission_together_launch_once_in_either_winner_order
     %i[manual competitor].each do |winner|
       with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|

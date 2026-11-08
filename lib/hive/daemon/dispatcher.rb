@@ -4081,6 +4081,13 @@ module Hive
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
             admission_view: @attempt_snapshot&.admission_view
           )
+          if req.recovery&.fetch("variant", nil) == "marker" &&
+              %i[accepted existing_live terminal_replay].include?(result.status) &&
+              !@recovery_coordinator.manual_attempt_matches?(req, result.attempt)
+            result = Hive::Attempts::DispatchResult.new(status: :deferred,
+              attempt: result.attempt, receipt: nil, attach_descriptor: nil,
+              reason: "attempt_identity_conflict")
+          end
           log_attempt_admission(result)
           if result.status == :deferred && result.reason == "capacity_saturated"
             recovery_receipt = if req.recovery.is_a?(Hash)

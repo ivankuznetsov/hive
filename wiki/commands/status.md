@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-01
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -272,24 +272,44 @@ status` as a remedy when it is failing under this same inspection policy.
 A failure before command dispatch uses the existing
 `hive-runtime-maintenance.v1` envelope and exposes `runtime_code` plus
 `next_action`. A failure reached after operational dispatch uses the additive
-optional `code` and `next_action` fields in `hive-operational-status.v4`.
+optional `code` and `next_action` fields in `hive-operational-status.v5`.
 Those fields are not added to plain, running, full/archive, daemon-task, or
-diagnostic status errors. Successful operational v4 documents are unchanged.
+diagnostic status errors. Successful operational v5 documents do not include
+these error-only fields.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
 Classification precedence is running, repair, human input, provider/scheduler,
-completion, unknown, then idle. The human renderer deliberately displays
-running, human input, repair, provider/scheduler, completion, unknown, then
-idle; it caps each band at five rows and directs overflow to `hive tui`. The
-human view prints active/archive counts, exact project/slug
-identity, stage/marker, blocker owner, reason, and source issues. The JSON
-document additionally carries project counts, daemon/scheduler identity and
-freshness, structured provider/retry evidence, and the exact durable routing
-decision when an explicit pool was evaluated. The human row adds either the
-selected route or the no-selection reason only when that routing data exists;
-legacy rows render unchanged.
+completion, unknown, then idle. Either true liveness flag (`live_task_lock` or
+`claude_pid_alive`) outranks simultaneous stale evidence in state,
+`blocker_owner`, liveness-source reasons, and liveness status. The human
+renderer deliberately displays running, human input, repair,
+provider/scheduler, completion, unknown, then idle; it caps each band at five
+rows and directs overflow to `hive tui`. The human view prints active/archive
+counts, exact project/slug identity, stage/marker, blocker owner, reason, and
+source issues. The JSON document additionally carries project counts,
+daemon/scheduler identity and freshness, structured provider/retry evidence,
+and the exact durable routing decision when an explicit pool was evaluated.
+The human row adds either the selected route or the no-selection reason only
+when that routing data exists; legacy rows render unchanged.
+
+The task-lock check requires a live PID and matches its process start time
+when the lock records one; without a recorded start time it checks PID
+existence only. The agent check tests PID existence only, so a reused PID can
+read as live. Without either true flag, a dead recorded PID requests
+stale-runner repair only when the action is `agent_running` or the marker is
+`agent_working` or `review_working`. An `agent_running` action without stale
+evidence can still classify as running; without either true liveness flag,
+its generic reason is "task is running". A true liveness flag without an
+available verified PID instead reports "task has a verified live runner".
+Material scheduler reasons remain ahead of the live explanation.
+
+`tasks[].liveness.pid` selects the available task-lock PID only when
+`live_task_lock == true`, otherwise the available agent PID only when
+`claude_pid_alive == true`, otherwise null. Both-live rows prefer the lock
+PID. Stale-only rows publish null. The same PID rule applies when a material
+scheduler reason precedes the live explanation.
 
 ## Bounded task history
 
@@ -334,9 +354,10 @@ task whose durable receipts already project `ready_to_run` or
 an earlier attempt left dead process metadata in the runtime task lease. For
 daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
 task-lock acquisition reclaims the dead holder with a higher fence without an
-operator repair step. A genuinely current
-`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
-continues to report `needs_repair`.
+operator repair step. A genuinely current `agent_running`, `AGENT_WORKING`, or
+`REVIEW_WORKING` claim whose recorded runners are all dead — neither
+`live_task_lock` nor `claude_pid_alive` is true — continues to report
+`needs_repair`.
 
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and

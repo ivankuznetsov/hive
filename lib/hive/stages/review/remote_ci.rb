@@ -32,6 +32,13 @@ module Hive
         #   base_conflict        -> REVIEW_CI_STALE (operator merges the base)
         #   mergeability_unknown -> REVIEW_ERROR (GitHub never resolved it
         #                           within the bounded wait; fail closed)
+        # Required checks are part of settlement too: GitHub may create only
+        # some checks (or none) for a head, so "every present check is green"
+        # does not prove the base branch's protection is satisfied.
+        #   required_checks_missing -> REVIEW_ERROR (a required context never
+        #                              reported success on the exact head)
+        #   required_checks_unknown -> REVIEW_ERROR (the protection lookup kept
+        #                              failing in transport; fail closed)
         Blocked = Data.define(:reason, :detail)
         POLL_INTERVAL_SEC = 10
         QUIET_SETTLEMENT_SEC = 20
@@ -151,6 +158,7 @@ module Hive
             @guardrail_result = nil
             @settled_head = nil
             @blocked = nil
+            @required_contexts = {}
           end
 
           def command_label
@@ -257,7 +265,11 @@ module Hive
                 checks_settled = !pending
                 # UNKNOWN (GitHub still computing) keeps polling inside the
                 # same bounded wait; only a MERGEABLE head may settle green.
-                if checks_settled && mergeable == "MERGEABLE"
+                # Required contexts are only consulted once everything else
+                # would settle, so the protection lookup stays off the hot path.
+                required_gap = nil
+                required_gap = required_checks_gap(latest, checks) if checks_settled && mergeable == "MERGEABLE"
+                if checks_settled && mergeable == "MERGEABLE" && required_gap.nil?
                   required_quiet = checks.empty? ? @no_checks_grace_sec : @quiet_settlement_sec
                   signature = settlement_signature(checks)
                   if signature != stable_signature
@@ -286,6 +298,7 @@ module Hive
                 if latest["headRefOid"].to_s.downcase == local_head && failures.any?
                   return failed_run(latest, failures, max_bytes)
                 end
+                return required_checks_blocked(required_gap, latest, local_head, timeout_sec) if required_gap
                 return mergeability_unknown(latest, local_head, timeout_sec) if checks_settled
 
                 return Hive::Stages::Review::CiFix::CommandError.new(
@@ -323,6 +336,45 @@ module Hive
               "GitHub did not resolve mergeability for #{rollup['url']} at head #{local_head} " \
               "within #{timeout_sec}s (mergeable=#{rollup['mergeable'] || 'missing'}); " \
               "checks settled but review fails closed until GitHub reports MERGEABLE"
+            )
+          end
+
+          # nil when every required context of the PR's base branch reported a
+          # green conclusion on this head (or nothing is required). Otherwise
+          # the gap that keeps settlement open: the missing contexts, or the
+          # transport error that left the required set unknown. Non-required
+          # checks are not consulted here; their failures are handled above.
+          def required_checks_gap(rollup, checks)
+            base = rollup["baseRefName"].to_s
+            base = @ctx.default_branch.to_s if base.empty?
+            required = @required_contexts[base] ||= begin
+              repository = @gh.parse_pull_request_url(rollup["url"])
+              @gh.required_status_check_contexts(
+                host: repository.fetch("host"), repository: repository.fetch("repository"),
+                branch: base, cfg: @cfg
+              )
+            end
+            green = checks.select { |entry| check_state(entry) == :green }.map { |entry| check_name(entry) }.to_set
+            missing = required.reject { |context| green.include?(context) }
+            missing.empty? ? nil : { missing: missing, base: base }
+          rescue Hive::GhError => e
+            { unknown: e.message, base: base }
+          end
+
+          def required_checks_blocked(gap, rollup, local_head, timeout_sec)
+            if gap[:unknown]
+              return block!(
+                "required_checks_unknown",
+                "GitHub required status checks for base `#{gap[:base]}` of #{rollup['url']} could not be read " \
+                "within #{timeout_sec}s (#{gap[:unknown]}); review fails closed until the required set is known"
+              )
+            end
+
+            block!(
+              "required_checks_missing",
+              "Required checks for base `#{gap[:base]}` never reported success on #{rollup['url']} at head " \
+              "#{local_head} within #{timeout_sec}s: #{gap[:missing].join(', ')}. GitHub may not have created " \
+              "them for this head; re-run or re-trigger them, then invoke this task's workflow.retry action"
             )
           end
 

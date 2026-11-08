@@ -88,6 +88,7 @@ Mergeability is part of hosted settlement (the rollup already reads `mergeable`,
 
 - `mergeable=CONFLICTING` on the exact head stops the gate on first observation with `REVIEW_CI_STALE gate=github reason=base_conflict`. No CI-fix agent runs. `reviews/ci-blocked.md` names the base branch and the recovery: merge `origin/<base>` into the task branch with a merge commit (`git merge --no-ff`, no rebase, no force-push), resolve, commit, then invoke `workflow.retry` so review re-runs on the merged head. `hive run` next-action text says the same.
 - `mergeable=UNKNOWN` (or missing) is not green: the gate keeps polling inside its existing bounded wait (`timeout_sec.review_ci`), and the quiet-settlement window only starts once GitHub reports `MERGEABLE`. If checks settled but mergeability is still unresolved at the bound, the gate fails closed with `REVIEW_ERROR phase=ci gate=github reason=mergeability_unknown` (daemon-retryable like other `REVIEW_ERROR`s).
+- Required checks are part of settlement too. GitHub may create only some of a head's checks (or none), so "every present check is green" does not prove branch protection is satisfied. Once the exact head is MERGEABLE and its present checks settled, the runner reads the base branch's required contexts once per base through `Hive::Gh.required_status_check_contexts` (`gh api --hostname <host> repos/<repo>/branches/<base>/protection/required_status_checks`, `contexts` unioned with `checks[].context`, matched against check-run `name` / status `context`). Settlement stays open until every required context has a green conclusion (SUCCESS/NEUTRAL/SKIPPED) on that head; the quiet window starts only then. Still missing at the bound fails closed with `REVIEW_ERROR phase=ci gate=github reason=required_checks_missing` naming the contexts. HTTP 404 (no protection) or 403 (protection unreadable) means "nothing required" and keeps the previous behavior. Any other lookup failure leaves the set unknown: it is retried on later polls, and still unknown at the bound fails closed with `reason=required_checks_unknown`. Non-required checks keep their semantics: any failed check on the exact head (required or advisory) is a CI failure fed to the fixer, and the required set is never consulted for a failing head. Rulesets (`repos/<repo>/rules/branches/<base>`) are not read.
 - `mergeStateStatus=BEHIND` does not block review (it is a merge-time branch-protection concern); the settled-green output carries an informational `mergeStateStatus=BEHIND` note.
 - `review.github_checks.enabled: false` skips all of this, as before.
 
@@ -108,7 +109,13 @@ when `source` stringifies case-insensitively to `ad-hoc`.
 
 After each reviewer file is written, `Review::GithubPublisher.publish!` posts a
 PR-level comment headed `### Reviewer: <name> - Pass NN` when
-`review.github_publish.enabled` is true. Before reading comments or posting, it
+`review.github_publish.enabled` is true. The header is the dedupe key and is
+generation-scoped: after a backward approve archived earlier generations
+(`PassArchive.generation` = 1 + directories under `reviews/archive/`), the
+header becomes `### Reviewer: <name> - Pass NN (review generation G)`, so the
+rewound pass 01 is no longer mistaken for the archived generation's comment.
+The first generation keeps the bare header (comments posted before the suffix
+existed still dedupe), and a re-run within one generation still dedupes. Before reading comments or posting, it
 requires the controller-owned worktree pointer, exact task branch, persisted
 `head_oid`, origin host/repository, and one OPEN PR observation whose
 URL/number/branch/head all match. A forged, stale, cross-repository, or

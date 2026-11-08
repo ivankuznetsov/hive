@@ -2075,3 +2075,10 @@ Web/TUI retry-button execution remains on its existing path and can still
 strand a request when no dispatcher consumes it. Remote `workflow.retry` now
 refuses admission for daemon-disabled projects with 503
 `dispatcher_unavailable` and an exact local attached action command.
+
+The reported live operator-attempt orphaning after service restart remains
+unreproduced. Disposable Linux user services modeling daemon/web/babysitter
+kill policies preserved real external supervisors and leases, including
+attached review retry. Actual application-service restarts, installed policy
+drift, historical logs and macOS launchd remain unexercised; see
+[[log.d/20261108-004-operator-attempt-restart-investigation]].

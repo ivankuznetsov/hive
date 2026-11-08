@@ -275,3 +275,10 @@ repairs markers. Its query-only evidence is scoped by project and task before
 applying a bound; tokens include the request revision, phase and post-clear
 binding. A fresh operator action can expedite an admitted or cleared request
 without charging another retry. Other recovery callers retain queued admission.
+
+The bounded restart investigation is recorded in
+[[log.d/20261108-004-operator-attempt-restart-investigation]]. On the exercised
+Linux host, real external supervisors survived disposable services modeling
+all three shipped kill policies, for direct execute and attached review work.
+Actual application-service restarts and the historical incident remain
+unverified; no production orphan policy was changed based on that probe.

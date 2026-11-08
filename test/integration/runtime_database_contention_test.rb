@@ -63,7 +63,7 @@ class RuntimeDatabaseContentionTest < Minitest::Test
           puts "CONTENTION persistent_registration_wait=#{registration_wait.round(3)} process=#{result[:duration].round(3)}"
           assert_operator result[:duration], :>=, 15
           assert_operator result[:duration], :<, 15 + STARTUP_TOLERANCE
-          assert_equal "runtime database busy, retry\n", result[:stderr]
+          assert_equal [ target_announcement(name), "runtime database busy, retry\n" ], result[:stderr].lines
           assert_empty task_files(project)
           if flags.empty?
             assert_equal "", result[:stdout]
@@ -307,8 +307,17 @@ class RuntimeDatabaseContentionTest < Minitest::Test
     puts "CONTENTION status_wait=#{waited.round(3)} process=#{result[:duration].round(3)}"
   end
 
+  # Local mutations announce their target before dispatch (remote CLI policy).
+  # The announcement is not an error; every other stderr byte is.
+  TARGET_ANNOUNCEMENT = /\Ahive: context=local installation=local authority=unrestricted-local-operator target=[^\r\n]*\n\z/
+
+  def target_announcement(name)
+    "hive: context=local installation=local authority=unrestricted-local-operator target=#{name}\n"
+  end
+
   def assert_clean_errors(result)
-    assert_equal "", result[:stderr], result.inspect
+    diagnostics = result[:stderr].lines.reject { |line| line.match?(TARGET_ANNOUNCEMENT) }.join
+    assert_equal "", diagnostics, result.inspect
     refute_match(/BusyException|DatabaseError|backtrace|database_corrupt|external backup/, result[:stdout])
   end
 

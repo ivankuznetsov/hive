@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-08
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -91,6 +91,44 @@ generation's finalization reserve. The same signal outside quiescing remains
 an ordinary cancellation. The installation controller aggregates any receipt
 the supervisor already committed for that generation with interruptions it
 finishes after verified wrapper and worker-group absence.
+
+## Attempt memory cap
+
+On Linux hosts with a systemd user manager, `DetachedLauncher` starts each
+durable attempt wrapper in a transient `hive-attempt-<digest>.scope`
+(`systemd-run --user --scope --collect -p Delegate=yes`). The scope contains the
+supervisor, the agent CLI, and every tool shell, ad-hoc probe, test run, and
+review CI command the attempt starts, so a cap on the scope bounds the whole
+attempt. `ConfiguredDispatcher` reads `daemon.attempt_memory_max` (default
+`"6G"`) and `daemon.attempt_memory_swap_max` (default `"0"`) from the freshly
+loaded global daemon block via `LaunchPolicy.memory_limits` and the launcher
+adds `--property=MemoryMax=…`, `--property=MemorySwapMax=…`, and, on systemd
+>= 253 (probed once per launch with `systemd-run --version`),
+`--property=OOMPolicy=continue`.
+
+- `OOMPolicy=continue` is load-bearing: with systemd's default `stop`, one
+  kernel OOM kill inside the scope tears down the whole scope, including the
+  supervisor, which turns a bounded failure into a lost attempt. With
+  `continue`, the kernel kills only the largest process (typically the runaway
+  probe), and the agent keeps running and sees its tool command die.
+- Default reasoning: on the 16 GB dogfood host, runaway Codex reviewer probes
+  reached 4-4.6 GB within seconds and nearly OOMed the host. 6G stays above
+  normal agent and test peaks while stopping a runaway well before the host
+  limit. Swap 0 makes the cap take effect immediately instead of after a swap
+  storm. Large projects whose test suites need more memory raise
+  `daemon.attempt_memory_max`; `false` disables the cap (and the swap cap,
+  which applies only together with the memory cap).
+- No-op on macOS, on hosts without a user bus or `systemd-run`, and for plain
+  spawn paths. Those keep the previous uncapped behavior.
+- OOM classification: the supervisor reads its own cgroup v2
+  `memory.events` `oom_kill` counter before it spawns the worker and after
+  the worker exits. If the counter increased and the worker died by `SIGKILL`
+  without a Hive-forced termination, it appends
+  `hive-attempt: failure_reason=memory_limit_exceeded oom_kills=N` to the
+  attempt log and sets the synthesized patrol-fix diagnostic's `agent_reason`
+  to `memory_limit_exceeded`. If only a descendant was killed, it logs a
+  `memory_limit_oom_kills=N` notice and keeps the worker's own outcome. The
+  terminal receipt schema is unchanged (see `wiki/gaps.md`).
 
 Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
 an ambient or transient systemd scope are not complete descendant custody. The

@@ -239,6 +239,43 @@ class ReviewGithubPublisherTest < Minitest::Test
     end
   end
 
+  def test_rewound_generation_posts_past_the_archived_pass_comment
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      FileUtils.mkdir_p(File.join(task.reviews_dir, "archive", "rewind-8-finalize-to-6-review"))
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] new finding\n")
+      # The archived generation already posted its pass 01 comment.
+      ENV["HIVE_FAKE_GH_COMMENTS_BODY"] = "### Reviewer: codex - Pass 01\n\nold"
+
+      result = publish_review!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+
+      assert_equal :posted, result
+      log = File.read(File.join(@log_dir, "fake-gh-argv.log"))
+      posted = log[/body_content<<EOF\n(.*?)\nEOF\n/m, 1]
+      assert_match(/\A### Reviewer: codex - Pass 01 \(review generation 2\)\n\n.*new finding/m, posted)
+    end
+  end
+
+  def test_rewound_generation_still_dedupes_its_own_pass_comment
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      FileUtils.mkdir_p(File.join(task.reviews_dir, "archive", "rewind-8-finalize-to-6-review"))
+      body = File.join(task.reviews_dir, "codex-01.md")
+      File.write(body, "- [ ] new finding\n")
+      ENV["HIVE_FAKE_GH_COMMENTS_BODY"] = "### Reviewer: codex - Pass 01 (review generation 2)\n\nfirst run"
+
+      result = publish_review!(
+        task, pass: 1, reviewer_name: "codex", body_path: body, cfg: cfg
+      )
+
+      assert_equal :already_posted, result
+      refute_includes File.read(File.join(@log_dir, "fake-gh-argv.log")), "arg=comment\n"
+    end
+  end
+
   def test_substring_quoted_header_does_NOT_dedupe
     # H6 regression guard: a human comment quoting the bot header in
     # the middle of the body must NOT trip the dedupe. Substring

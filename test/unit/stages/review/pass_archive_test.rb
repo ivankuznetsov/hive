@@ -100,4 +100,37 @@ class ReviewPassArchiveTest < Minitest::Test
       assert File.exist?(File.join(folder, "reviews", "archive", "gen", "claude-01.md"))
     end
   end
+
+  def test_generation_counts_archived_generation_directories
+    with_tmp_dir do |folder|
+      assert_equal 1, Archive.generation(folder)
+
+      write(folder, "reviews/claude-01.md")
+      assert_equal 1, Archive.generation(folder)
+
+      Archive.archive!(folder, label: "gen")
+      assert_equal 2, Archive.generation(folder)
+
+      write(folder, "reviews/claude-01.md")
+      moves = Archive.archive!(folder, label: "gen")
+      write(folder, "reviews/archive/stray.md")
+      File.symlink(File.join(folder, "reviews"), File.join(folder, "reviews", "archive", "linked"))
+      assert_equal 3, Archive.generation(folder), "files and symlinks are not generations"
+
+      Archive.restore!(folder, moves)
+      assert_equal 2, Archive.generation(folder)
+    end
+  end
+
+  def test_generation_ignores_a_symlinked_archive_root
+    with_tmp_dir do |folder|
+      with_tmp_dir do |elsewhere|
+        FileUtils.mkdir_p(File.join(elsewhere, "gen"))
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.symlink(elsewhere, File.join(folder, "reviews", "archive"))
+
+        assert_equal 1, Archive.generation(folder)
+      end
+    end
+  end
 end

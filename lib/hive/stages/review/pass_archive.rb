@@ -71,6 +71,20 @@ module Hive
           issues.empty? ? nil : "review pass archive restore incomplete: #{issues.join('; ')}"
         end
 
+        # 1-based ordinal of the live review generation: one more than the
+        # number of archived generations under `reviews/archive/`. It only
+        # changes when `archive!` creates (or `restore!` removes) a directory,
+        # so every pass of one generation observes the same value.
+        def generation(task_folder)
+          root = File.join(task_folder, "reviews", ARCHIVE_DIR)
+          return 1 unless File.directory?(root) && !File.symlink?(root)
+
+          1 + Dir.children(root).count do |name|
+            path = File.join(root, name)
+            File.directory?(path) && !File.symlink?(path)
+          end
+        end
+
         def present?(path)
           File.exist?(path) || File.symlink?(path)
         end

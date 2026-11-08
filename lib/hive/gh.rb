@@ -609,6 +609,46 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
+    # GitHub answers 404 when the branch has no protection (or no required
+    # status checks) and 403 when the token may not read protection. Neither
+    # proves a required set exists, so both mean "nothing required".
+    PROTECTION_UNAVAILABLE = /\(HTTP 40[34]\)/
+
+    # The base branch's required status-check contexts: the deprecated
+    # `contexts` list unioned with `checks[].context` (GitHub fills both, but
+    # app-bound checks may appear in only one). Returns [] when protection is
+    # absent or unreadable; raises Hive::GhError on any other failure so the
+    # caller can treat the required set as unknown instead of empty.
+    def required_status_check_contexts(host:, repository:, branch:, cfg: nil, timeout_sec: nil)
+      host = RepositoryIdentity.validated_github_host(host)
+      repository = RepositoryIdentity.validated_repository_slug(repository)
+      branch = branch.to_s
+      if branch.empty? || branch.start_with?("-") || branch.match?(/[\0\r\n\s]/)
+        raise Hive::GhError, "base branch is invalid"
+      end
+
+      endpoint = "repos/#{repository}/branches/#{URI.encode_uri_component(branch)}" \
+                 "/protection/required_status_checks"
+      out, err, status = capture3(
+        "gh", "api", "--hostname", host, endpoint,
+        cfg: cfg, timeout_sec: timeout_sec, max_stdout_bytes: 256 * 1024
+      )
+      unless status.success?
+        detail = err.to_s.strip.empty? ? out.to_s.strip : err.strip
+        return [] if detail.match?(PROTECTION_UNAVAILABLE)
+
+        raise Hive::GhError, "`gh api #{endpoint}` failed: #{detail}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh api #{endpoint}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      contexts = Array(doc["contexts"]) + Array(doc["checks"]).map { |check| check.is_a?(Hash) ? check["context"] : nil }
+      contexts.filter_map { |context| context.to_s unless context.to_s.empty? }.uniq.sort
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh api #{endpoint}` returned unparseable JSON: #{e.message}"
+    end
+
     def failing_jobs_with_logs(worktree_path, rollup, cfg: nil, byte_cap: 50 * 1024)
       jobs = failing_jobs_from_rollup(rollup)
       return [] if jobs.empty?

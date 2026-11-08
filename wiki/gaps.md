@@ -2223,3 +2223,17 @@ lock attribution remains unverified and is not a prerequisite for this policy.
 Transient busy errors during table-presence probes are covered at startup and
 quiescence read boundaries, plus a real exclusive-lock catalog-query test;
 these establish error propagation, not the original lock holder's identity.
+
+## Archive merge truth covers only the ordinary archive verb (2026-11-08)
+
+`hive archive <slug>` from `8-finalize` now refuses unless `Hive::Gh.pr_state`
+reports the recorded PR `MERGED`. Not covered: a direct
+`hive approve <slug> --to 9-done` still moves a finalize task without a merge
+check, and `Hive::Gh` itself invokes `gh` from `PATH` (only managed git's
+credential helper honours `HIVE_GH_BIN`), so the archive check uses whatever
+`gh` the controller's PATH resolves. The related 2026-11-08 gaps from the same
+task idea — CONFLICTING/BEHIND detection in the review CI gate and finalize,
+guarded update-branch before merge, and generation-scoped review pass counters
+after backward recovery into `6-review` — remain open. Finalize's summary.md
+gate treats a legacy `summary.md` without a recorded `head_oid` as drift and
+re-runs finalize once; no live task has been observed in that shape.

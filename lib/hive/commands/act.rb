@@ -40,7 +40,16 @@ module Hive
             )
             emit_success(result)
           end
-          @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          payload = @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          if @idempotency_key
+            render_success(payload)
+          end
+          recovery = payload.dig("result", "recovery")
+          if recovery && recovery["status"] == "terminal" &&
+              !%w[succeeded success completed terminal_replay].include?(recovery["terminal_outcome"])
+            raise Hive::TaskInErrorState, "retry attempt #{recovery['attempt_id']} ended #{recovery['terminal_outcome']}"
+          end
+          payload
         end
       end
 
@@ -91,9 +100,9 @@ module Hive
             project_name, slug = qualified_target
             Hive::TaskResolver.new(slug, project_filter: project_name).resolve.project_root
           },
-          json: @json,
-          structured: @structured,
-          display_json: @json && !@structured,
+          json: true,
+          structured: true,
+          display_json: false,
           principal: @principal,
           principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
@@ -122,13 +131,17 @@ module Hive
           "observation_token" => @observation,
           "result" => result
         }
-        if @structured
-          payload
-        elsif @json
+        render_success(payload) unless @idempotency_key
+        payload
+      end
+
+      def render_success(payload)
+        return payload if @structured
+        if @json
           puts JSON.generate(payload)
-          @stdout_written = true unless @idempotency_key
+          @stdout_written = true
         else
-          print text_success(result)
+          print text_success(payload.fetch("result"))
         end
         payload
       end

@@ -93,7 +93,8 @@ module Hive
       end
 
       def recoverable?(row)
-        Hive::Recovery::API.recoverable_marker?(row["marker"]) &&
+        (Hive::Recovery::API.recoverable_marker?(row["marker"]) ||
+          (row["marker"] == "none" && row["recovery_observation"].is_a?(Hash))) &&
           !Hive::TaskProjection.history_invalid_row?(row) &&
           !Hive::TerminalOutcome.outcome_evidence_rework?(row["attrs"] || {}) &&
           row.dig("attrs", "reason").to_s != "invalid_task" &&
@@ -166,7 +167,7 @@ module Hive
           task, action_marker, projection: projection, config: config, project_name: project
         )
         projection_data = projection.to_h
-        {
+        row = {
           "project" => project,
           "slug" => task.slug,
           "folder" => task.folder,
@@ -187,6 +188,11 @@ module Hive
           "blocked" => false,
           "held" => nil
         }
+        unless config.dig("daemon", "enabled") == true
+          evidence = Hive::Daemon::RecoveryCoordinator.new.manual_evidence(row: row)
+          row["recovery_observation"] = evidence["binding"] if evidence
+        end
+        row
       end
 
       def descriptor_for_task(task, project:)
@@ -207,7 +213,7 @@ module Hive
                current.fetch("target") == target &&
                secure_compare(current.fetch("observation_token"), observation_token)
           raise Hive::StaleOperationalObservation,
-                "task changed or the recommendation is no longer routine; take a fresh operational snapshot"
+                "task changed or the recommendation is no longer routine; run hive status --operational --json"
         end
 
         current
@@ -251,7 +257,7 @@ module Hive
       def execute(action_id:, target:, observation_token:)
         validate_action_id!(action_id)
         project_name, slug = parse_target(target)
-        project = registered_project(project_name)
+        registered_project(project_name)
         task = resolve_task(slug, project_name)
         observed = OperationalAction.observed_row(task, project: project_name)
         OperationalAction.assert_current!(
@@ -263,13 +269,15 @@ module Hive
         ) unless @remote_authority
         verify_remote_effect!(task, project_name, action_id, observation_token)
         if action_id == OperationalAction::RETRY_ACTION_ID
+          manual = Hive::Config.load(task.project_root).dig("daemon", "enabled") != true
+          options = manual ? { execution: :manual } : {}
           receipt = @recovery_writer.recover!(
             row: observed,
             project: project_name,
             requestor: "action",
-            observation_token: observation_token
+            observation_token: observation_token, **options
           )
-          return recovery_result(observed, receipt)
+          return manual ? result_for(project_name, slug).merge("recovery" => receipt.to_h) : recovery_result(observed, receipt)
         end
 
         guard = lambda do |locked_task|

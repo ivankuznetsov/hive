@@ -109,10 +109,11 @@ class OperationalActionTest < Minitest::Test
 
     writer = RecoveryWriter.new(calls: [])
     executor = Hive::OperationalAction::Executor.new(recovery_writer: writer)
-    task = Object.new
+    task = Struct.new(:project_root).new("/tmp")
     executor.define_singleton_method(:registered_project) { |_name| { "path" => "/tmp" } }
     executor.define_singleton_method(:resolve_task) { |_slug, _project| task }
     assertions = []
+    with_replaced_singleton_method(Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => true } } }) do
     with_replaced_singleton_method(
       Hive::OperationalAction,
       :observed_row,
@@ -134,6 +135,8 @@ class OperationalActionTest < Minitest::Test
 
         assert_equal "queued", result.dig("recovery", "status")
       end
+    end
+
     end
 
     assert_equal action.fetch("observation_token"),

@@ -58,6 +58,26 @@ class CommandsActTest < Minitest::Test
     refute command.instance_variable_get(:@stdout_written)
   end
 
+  def test_failed_attached_stage_emits_one_success_envelope_and_exits_nonzero
+    result = { "task_state" => "error", "stage" => "6-review", "marker" => "error",
+      "recovery" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "terminal", "phase" => "terminal", "owner" => "none",
+        "request_id" => "request-1", "attempt_id" => "attempt-1",
+        "terminal_outcome" => "failed", "terminal_at" => Time.now.utc.iso8601
+      }).to_h }
+    stdout, = capture_io do
+      assert_raises(Hive::TaskInErrorState) do
+        Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+          json: true, executor: FakeExecutor.new(result: result)).call
+      end
+    end
+    payload = JSON.parse(stdout)
+    assert_equal true, payload.fetch("ok")
+    assert_equal "failed", payload.dig("result", "recovery", "terminal_outcome")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+    assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+  end
+
   def test_human_success_is_concise
     stdout, = capture_io do
       Hive::Commands::Act.new(
@@ -97,7 +117,7 @@ class CommandsActTest < Minitest::Test
       operation = Hive::CommandOperation.new(
         key: "act-move", command: "act", target: "demo:task",
         request: { "action_id" => "workflow.advance", "observation" => token, "project" => nil },
-        project_root: project, principal: "owner", json: true,
+        project_root: project, principal: "owner", json: true, structured: true,
         failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
         text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
         store: store
@@ -135,7 +155,7 @@ class CommandsActTest < Minitest::Test
         request: {
           "action_id" => "workflow.advance", "observation" => "e" * 64, "project" => nil
         },
-        project_root: project, principal: "owner", json: true,
+        project_root: project, principal: "owner", json: true, structured: true,
         failure_payload: ->(error) { command.send(:envelope_payload_for, error) },
         text_renderer: ->(payload) { command.send(:text_success, payload.fetch("result")) },
         store: store

@@ -868,3 +868,15 @@ because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
 
 Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.
+
+A local `workflow.retry` action selects its execution policy from the task
+project's effective `daemon.enabled` setting. With dispatch disabled (including
+the legacy default when the key is absent), it admits guarded recovery and
+attaches to the durable attempt until its canonical outcome is available.
+Enabled projects retain queued recovery, regardless of daemon process presence.
+The attached command refreshes task state and returns request/attempt identity,
+terminal outcome and time. JSON remains one `hive-act` v2 document: `ok: true`
+means the action was evaluated; a failed terminal stage also exits nonzero.
+Keyed replay returns that same outcome without another attempt. Stale actions
+require `hive status --operational --json`; inspect live work using
+`hive task SLUG --project PROJECT --json`.

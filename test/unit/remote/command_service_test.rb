@@ -207,6 +207,38 @@ class RemoteCommandServiceTest < Minitest::Test
     end
   end
 
+  def test_disabled_project_retry_refuses_before_recovery_and_replays_failed_receipt
+    with_server do |service, store, repository, project, task|
+      path = File.join(project.fetch("hive_state_path"), "config.yml")
+      config = YAML.safe_load(File.read(path))
+      config["daemon"] = { "enabled" => false }
+      File.write(path, config.to_yaml)
+      Hive::Markers.set(task.state_file, :error, reason: "timeout")
+      descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
+      command = Shellwords.join(["hive", "act", "workflow.retry", descriptor.fetch("target"),
+        "--observation", descriptor.fetch("observation_token"), "--project", project.fetch("name"), "--json"])
+      with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**) { flunk "recovery must not be admitted" }) do
+        error = assert_raises(Hive::Remote::AdmissionRefused) do
+          service.action(project: project, task: task, action_id: "workflow.retry",
+            observation: descriptor.fetch("observation_token"), idempotency_key: "manual-remote",
+            principal: PRINCIPAL, scopes: ["act"])
+        end
+        assert_equal 503, error.status
+        assert_equal "dispatcher_unavailable", error.code
+        assert_includes error.message, command
+        assert_raises(Hive::CommandReplayFailure) do
+          service.action(project: project, task: task, action_id: "workflow.retry",
+            observation: descriptor.fetch("observation_token"), idempotency_key: "manual-remote",
+            principal: PRINCIPAL, scopes: ["act"])
+        end
+      end
+      assert_empty repository.recovery_requests
+      assert_empty repository.pending
+      receipt = repository.database.read { |db| db[:command_receipts].where(command: "act").first }
+      assert_equal "failed", receipt.fetch(:state)
+    end
+  end
+
   def test_retry_only_admits_a_canonical_workflow_command_with_the_original_receipt_identity
     with_server do |service, store, repository, project, task|
       File.write(task.state_file, "# Brainstorm\n<!-- ERROR reason=timeout marker_id=retry-marker -->\n")

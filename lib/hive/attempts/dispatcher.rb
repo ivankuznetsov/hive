@@ -149,7 +149,7 @@ module Hive
           inherited_outputs: request.inherited_outputs,
           retry_charge: recovery_retry_charge(request), interactive: interactive,
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request)
+          retry_release: explicit_retry_release?(request, task: task)
         ) if recoverable_source_attempt?(source_attempt)
 
         dispatch(
@@ -158,7 +158,7 @@ module Hive
           interactive: interactive, generation: generation,
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
-          retry_release: explicit_retry_release?(request),
+          retry_release: explicit_retry_release?(request, task: task),
           replay_semantic_terminal: replay_semantic_terminal
         )
       end
@@ -771,7 +771,12 @@ module Hive
         }
       end
 
-      def explicit_retry_release?(request)
+      def explicit_retry_release?(request, task: nil)
+        if request.respond_to?(:requestor) && request.requestor.to_s == "action" && request.recovery&.fetch("variant", nil) == "marker" &&
+            task&.respond_to?(:project_root) && task.project_root &&
+            Hive::Config.load(task.project_root).dig("daemon", "enabled") != true
+          return false
+        end
         request.respond_to?(:recovery) && request.recovery.is_a?(Hash) &&
           request.respond_to?(:requestor) &&
           OPERATOR_RETRY_REQUESTORS.include?(request.requestor.to_s) &&

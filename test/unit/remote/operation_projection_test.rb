@@ -164,9 +164,20 @@ class RemoteOperationProjectionTest < Minitest::Test
       File.write(task.state_file, "# Brainstorm\n### Q1. Private question?\n### A1.\n<!-- WAITING -->\n")
       inventory = Hive::Commands::Answer.inventory(task.slug, project: project.fetch("name"))
       binding = inventory.fetch("slots").first.fetch("binding")
+      handle = "private-remote-answer-handle"
       native = service.answer(project: project, task: task, binding: binding, answer: "Private answer",
-        idempotency_key: "answer", principal: PRINCIPAL, scopes: [ "answer" ],
+        idempotency_key: "answer", principal: PRINCIPAL, scopes: [ "answer" ], remote_handle: handle,
         state_reader: ->(current) { Hive::Remote::ReadService.validate_state!(current, allow_missing: false, strict_text: true) })
+      row = projection.existing(project: project, key: "answer", principal: PRINCIPAL)
+      assert_equal binding, projection.answer_binding(row, handle: handle)
+      assert_raises(Hive::CommandConflict) { projection.answer_binding(row, handle: "different-handle") }
+      { command: "approve", mode: "read", principal_source: "local_cli" }.each do |field, value|
+        assert_raises(Hive::CommandConflict) { projection.answer_binding(row.merge(field => value), handle: handle) }
+      end
+      request = Hive::RuntimeControlPlane::Codec.load_json(row.fetch(:frozen_request_json))
+      request.delete("remote_binding")
+      legacy = row.merge(frozen_request_json: Hive::RuntimeControlPlane::Codec.dump_json(request))
+      assert_nil projection.answer_binding(legacy, handle: handle)
       result = projection.call(project: project, id: native.dig("command_receipt", "id"), principal: PRINCIPAL, scopes: [ "answer" ])
       assert_equal "written", result.dig("acknowledgement", "outcome")
       assert_equal task.id, result.dig("acknowledgement", "task_id")

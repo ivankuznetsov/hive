@@ -300,6 +300,17 @@ class ConnectionContextsTest < Minitest::Test
     end
   end
 
+  def test_context_directory_refuses_symlinks_before_opening_the_lock
+    link = File.join(@root, "context-link")
+    File.symlink(@root, link)
+    contexts = Hive::ConnectionContexts.new(root: link, verifier: @verifier)
+
+    error = assert_raises(Hive::ConfigError) { contexts.resolve }
+
+    assert_equal "context directory must belong to the current operator", error.message
+    refute_path_exists File.join(@root, ".lock")
+  end
+
   def test_credentials_and_lock_refuse_exposed_files_and_symlinks
     add_remote
     File.chmod(0o640, @store.credentials_path)

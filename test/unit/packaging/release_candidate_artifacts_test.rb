@@ -4,6 +4,7 @@ require "json"
 require "open3"
 require_relative "../../../packaging/release_candidate/artifacts"
 require_relative "../../../packaging/release_candidate/runner"
+require_relative "../../../packaging/betterleaks"
 
 class ReleaseCandidateArtifactsTest < Minitest::Test
   include HiveTestHelper
@@ -184,8 +185,8 @@ class ReleaseCandidateArtifactsTest < Minitest::Test
   def test_scanner_failure_forwards_bounded_safe_diagnostics_and_keeps_generic_context
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "packaging"))
-      File.write(File.join(dir, "packaging/betterleaks.rb"), <<~'RUBY')
-        warn "Betterleaks download deadline exhausted for linux_x64 (300s budget)"
+      File.write(File.join(dir, "packaging/betterleaks.rb"), <<~RUBY)
+        warn "Betterleaks download deadline exhausted for linux_x64 (#{HiveBetterleaksPackage::DOWNLOAD_BUDGET}s budget; last failure: HTTP 503)"
         100.times { warn "Betterleaks cache checksum mismatch for linux_x64; downloading" }
         warn "raw synthetic-private-token"
         exit 1

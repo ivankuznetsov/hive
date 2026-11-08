@@ -13,6 +13,7 @@ module HiveBetterleaksPackage
   DOWNLOAD_BUDGET = 300
   REDIRECT_STATUSES = [ 301, 302, 303, 307, 308 ].freeze
   TLS_FAILURES = [ 35, 51, 53, 58, 59, 60, 64, 66, 77, 80, 82, 83, 90, 91, 98 ].freeze
+  TRANSIENT_CURL_FAILURES = [ 5, 6, 7, 16, 18, 28, 52, 55, 56, 81, 89, 92, 95, 96 ].freeze
 
   class DownloadError < RuntimeError; end
 
@@ -28,7 +29,7 @@ module HiveBetterleaksPackage
           publish_archive(cache_dir, archive, digest, platform) if cache_dir
         end
         _out, _err, status = Open3.capture3("tar", "-xzf", archive, "-C", temporary, "betterleaks", "LICENSE")
-        raise "Betterleaks extraction failed for #{platform}" unless status.success?
+        raise DownloadError, "Betterleaks extraction failed for #{platform}" unless status.success?
 
         destination = File.join(root, platform)
         FileUtils.mkdir_p(destination)
@@ -80,6 +81,7 @@ module HiveBetterleaksPackage
     if token&.match?(/[\r\n]/)
       raise DownloadError, "Betterleaks invalid authentication token for #{platform}"
     end
+    token = token&.strip
 
     deadline = monotonic_now + DOWNLOAD_BUDGET
     authorization = File.join(File.dirname(archive), "authorization.headers")
@@ -92,16 +94,21 @@ module HiveBetterleaksPackage
     url = original
     redirects = 0
     delay = 5
+    last_failure = nil
     loop do
-      remaining!(deadline, platform)
+      remaining!(deadline, platform, last_failure)
       FileUtils.rm_f(archive)
       credentialed = authenticated && release_origin?(url)
-      response = curl_hop(url, archive, credentialed ? authorization : nil, deadline, platform)
-      remaining!(deadline, platform)
+      response = curl_hop(url, archive, credentialed ? authorization : nil, deadline, platform, last_failure)
       code = response.fetch(:code)
       if TLS_FAILURES.include?(code)
         raise DownloadError, "Betterleaks download TLS failure for #{platform}"
       end
+      unless code.zero? || TRANSIENT_CURL_FAILURES.include?(code)
+        raise DownloadError, "Betterleaks download invocation failure for #{platform} (curl exit #{code})"
+      end
+      last_failure = code.zero? ? [ :http, response.fetch(:status) ] : [ :transport, code ]
+      remaining!(deadline, platform, last_failure)
       if code.zero?
         status = response.fetch(:status)
         if credentialed && [ 401, 403 ].include?(status)
@@ -119,15 +126,15 @@ module HiveBetterleaksPackage
           url = redirect_url(url, response[:location], platform)
           next
         elsif (200..299).cover?(status)
-          valid = verified?(archive, digest)
-          remaining!(deadline, platform)
-          return if valid
+          return if verified?(archive, digest)
+
+          last_failure = [ :checksum ]
         elsif status != 408 && status != 429 && !(500..599).cover?(status)
           raise DownloadError, "Betterleaks download HTTP #{status} for #{platform}"
         end
       end
-      sleep([ delay, remaining!(deadline, platform) ].min)
-      remaining!(deadline, platform)
+      sleep([ delay, remaining!(deadline, platform, last_failure) ].min)
+      remaining!(deadline, platform, last_failure)
       delay = [ delay * 2, 30 ].min
       url = original
       redirects = 0
@@ -140,12 +147,22 @@ module HiveBetterleaksPackage
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
 
-  def remaining!(deadline, platform)
+  def remaining!(deadline, platform, last_failure = nil)
     remaining = deadline - monotonic_now
     if remaining <= 0
-      raise DownloadError, "Betterleaks download deadline exhausted for #{platform} (300s budget)"
+      raise DownloadError, deadline_message(platform, last_failure)
     end
     remaining
+  end
+
+  def deadline_message(platform, last_failure)
+    cause = case last_failure&.first
+    when :http then "HTTP #{last_failure[1]}"
+    when :transport then "transport code #{last_failure[1]}"
+    when :checksum then "checksum mismatch"
+    else "none"
+    end
+    "Betterleaks download deadline exhausted for #{platform} (#{DOWNLOAD_BUDGET}s budget; last failure: #{cause})"
   end
 
   def release_origin?(url)
@@ -163,11 +180,11 @@ module HiveBetterleaksPackage
     raise DownloadError, "Betterleaks download redirect policy failure for #{platform}", cause: nil
   end
 
-  def curl_hop(url, archive, authorization, deadline, platform)
+  def curl_hop(url, archive, authorization, deadline, platform, last_failure = nil)
     # Round down: curl treats a zero timeout as unlimited.
-    remaining = remaining!(deadline, platform).floor(6)
+    remaining = remaining!(deadline, platform, last_failure).floor(6)
     if remaining <= 0
-      raise DownloadError, "Betterleaks download deadline exhausted for #{platform} (300s budget)"
+      raise DownloadError, deadline_message(platform, last_failure)
     end
     headers = File.join(File.dirname(archive), "response.headers")
     argv = [ "curl", "--disable", "--silent", "--globoff",

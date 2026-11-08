@@ -371,6 +371,9 @@ inherits the absolute `HIVE_BETTERLEAKS_CACHE_DIR` despite changing into the
 committed source export. It forwards only fixed, sanitized packaging diagnostics
 (up to 16 lines and 4 KiB from the first 8 KiB of stderr), preserving the generic
 `cannot bundle Betterleaks in candidate gem` failure context.
+The allowlist covers extraction and curl invocation failures plus deadline
+exhaustion with the budget and a bounded last-failure category/status/code.
+Tests exercise every emitted diagnostic category through this filter.
 
 Neither release-candidate packaging step receives `GITHUB_TOKEN` or `GH_TOKEN`.
 Both use the anonymous path, preserving credential-free exact-byte candidate

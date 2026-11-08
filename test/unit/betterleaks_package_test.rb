@@ -1,5 +1,6 @@
 require "test_helper"
 require_relative "../../packaging/betterleaks"
+require_relative "../../packaging/release_candidate/artifacts"
 
 class BetterleaksPackageTest < Minitest::Test
   include HiveTestHelper
@@ -9,7 +10,8 @@ class BetterleaksPackageTest < Minitest::Test
   DIGEST = Digest::SHA256.hexdigest(BODY)
 
   def test_tokens_use_precedence_private_files_and_origin_bound_redirects
-    [ [ SECRET, "other", SECRET ], [ "", SECRET, SECRET ], [ " ", nil, nil ], [ nil, nil, nil ] ].each do |github, gh, expected|
+    [ [ SECRET, "other", SECRET ], [ " \t#{SECRET} \t", "other", SECRET ],
+      [ "", " \t#{SECRET} \t", SECRET ], [ " ", nil, nil ], [ nil, nil, nil ] ].each do |github, gh, expected|
       with_download(env: { "GITHUB_TOKEN" => github, "GH_TOKEN" => gh }) do |download, requests, _time|
         @responses = [ { headers: release_headers }, { headers: assets_headers } ]
         download.call
@@ -93,15 +95,48 @@ class BetterleaksPackageTest < Minitest::Test
   end
 
   def test_persistent_failures_stop_at_one_deadline_including_backoff
-    [ { status: 503 }, { body: "bad digest" }, { code: 28 } ].each do |failure|
+    { "HTTP 503" => { status: 503 }, "checksum mismatch" => { body: "bad digest" },
+      "transport code 28" => { code: 28 } }.each do |cause, failure|
       with_download do |download, requests, time|
         @responses = Array.new(20, failure)
         error = assert_raises(RuntimeError) { download.call }
         assert_includes error.message, "deadline exhausted"
+        assert_includes error.message, "(#{HiveBetterleaksPackage::DOWNLOAD_BUDGET}s budget; last failure: #{cause})"
         assert_equal 300, time[:now]
         assert_equal [ 5, 10, 20, 30 ], time[:sleeps].first(4)
         assert_operator time[:sleeps].max, :<=, 30
         assert_operator requests.last[:started], :<, 300
+      end
+    end
+  end
+
+  def test_post_transfer_verification_can_finish_after_the_download_deadline
+    [ true, false ].each do |valid|
+      with_download do |download, requests, time|
+        @responses = [ { elapsed: 299.9 } ]
+        verification = ->(*) { time[:now] += 0.2; valid }
+        with_replaced_singleton_method(HiveBetterleaksPackage, :verified?, verification) do
+          if valid
+            download.call
+          else
+            error = assert_raises(HiveBetterleaksPackage::DownloadError) { download.call }
+            assert_includes error.message, "last failure: checksum mismatch"
+          end
+        end
+        assert_equal 1, requests.size
+        assert_empty time[:sleeps]
+      end
+    end
+  end
+
+  def test_missing_or_unusable_curl_stops_without_backoff
+    [ -1, 1, 2, 3, 23 ].each do |code|
+      with_download do |download, requests, time|
+        @responses = [ { code: code } ]
+        error = assert_raises(HiveBetterleaksPackage::DownloadError) { download.call }
+        assert_equal "Betterleaks download invocation failure for linux_x64 (curl exit #{code})", error.message
+        assert_equal 1, requests.size
+        assert_empty time[:sleeps]
       end
     end
   end
@@ -175,11 +210,13 @@ class BetterleaksPackageTest < Minitest::Test
   end
 
   def test_malformed_token_is_redacted_and_never_sent
-    with_download(env: { "GITHUB_TOKEN" => "#{SECRET}\r\nInjected: value" }) do |download, requests|
-      error = assert_raises(RuntimeError) { download.call }
-      assert_includes error.message, "token"
-      refute_includes error.full_message, SECRET
-      assert_empty requests
+    [ "#{SECRET}\r\nInjected: value", "#{SECRET}\n", "\r#{SECRET}" ].each do |token|
+      with_download(env: { "GITHUB_TOKEN" => token }) do |download, requests|
+        error = assert_raises(RuntimeError) { download.call }
+        assert_includes error.message, "token"
+        refute_includes error.full_message, SECRET
+        assert_empty requests
+      end
     end
   end
 
@@ -188,7 +225,7 @@ class BetterleaksPackageTest < Minitest::Test
       pid_path = File.join(dir, "pid")
       before = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       code = HiveBetterleaksPackage.run_curl(
-        [ RbConfig.ruby, "-e", "File.write(ARGV[0], Process.pid); sleep 30", pid_path ],
+        [ "sh", "-c", 'echo $$ > "$0"; exec sleep 30', pid_path ],
         deadline: before + 0.25
       )
       elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - before
@@ -203,6 +240,74 @@ class BetterleaksPackageTest < Minitest::Test
   def test_subprocess_errors_do_not_expose_the_underlying_exception
     with_replaced_singleton_method(Process, :spawn, ->(*) { raise Errno::ENOENT, SECRET }) do
       assert_equal(-1, HiveBetterleaksPackage.run_curl([ "curl" ], deadline: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1))
+    end
+  end
+
+  def test_every_packaging_diagnostic_passes_the_candidate_allowlist_without_raw_details
+    messages = []
+    capture_error = lambda do |&operation|
+      messages << assert_raises(HiveBetterleaksPackage::DownloadError, &operation).message
+    end
+    # Exercise emitted messages rather than reproducing the forwarder's vocabulary.
+    with_download do |download|
+      [ { code: 60 }, { code: -1 }, { code: 2 }, { status: 404 },
+        { status: 302, location: "http://example.com/#{SECRET}" },
+        { headers: "malformed #{SECRET}" } ].each do |response|
+        @responses = [ response ]
+        capture_error.call { download.call }
+      end
+      [ { status: 503 }, { body: "bad digest" }, { code: 28 } ].each do |response|
+        with_download do |retrying|
+          @responses = Array.new(20, response)
+          capture_error.call { retrying.call }
+        end
+      end
+      with_replaced_singleton_method(File, :binread, ->(*) { raise IOError, SECRET }) do
+        @responses = [ {} ]
+        capture_error.call { download.call }
+      end
+      capture_error.call { HiveBetterleaksPackage.remaining!(0, "linux_x64") }
+      capture_error.call { HiveBetterleaksPackage.curl_hop("https://github.com", "/unused", nil, 0.0000001, "linux_x64") }
+    end
+    with_download(env: { "GITHUB_TOKEN" => "#{SECRET}\n" }) do |download|
+      capture_error.call { download.call }
+    end
+    with_download(env: { "GITHUB_TOKEN" => SECRET }) do |download|
+      @responses = [ { status: 401 }, {} ]
+      _out, warning = capture_io { download.call }
+      messages.concat(warning.lines.map(&:chomp))
+    end
+    Dir.mktmpdir do |dir|
+      cache = File.join(dir, "cache")
+      archive = File.join(dir, "archive")
+      FileUtils.mkdir_p(cache)
+      File.write(File.join(cache, "#{DIGEST}.tar.gz"), "bad digest")
+      _out, warning = capture_io { HiveBetterleaksPackage.cached_archive(cache, archive, DIGEST, "linux_x64") }
+      messages.concat(warning.lines.map(&:chomp))
+      with_replaced_singleton_method(FileUtils, :cp, ->(*) { raise Errno::EACCES, SECRET }) do
+        _out, warning = capture_io do
+          HiveBetterleaksPackage.cached_archive(cache, archive, DIGEST, "linux_x64")
+          HiveBetterleaksPackage.publish_archive(cache, archive, DIGEST, "linux_x64")
+        end
+        messages.concat(warning.lines.map(&:chomp))
+      end
+      with_replaced_singleton_method(HiveBetterleaksPackage, :cached_archive, ->(*) { true }) do
+        # A verified archive can still lack the required tar members.
+        status = Struct.new(:success?).new(false)
+        with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "", SECRET, status ] }) do
+          capture_error.call { HiveBetterleaksPackage.build(root: dir, cache_dir: cache) }
+        end
+      end
+    end
+    forwarder = HiveReleaseCandidate::Artifacts.allocate
+    messages.each do |message|
+      refute_includes message, SECRET
+      _out, forwarded = capture_io { forwarder.send(:forward_betterleaks_diagnostics, "#{message}\n") }
+      assert_equal "#{message}\n", forwarded
+      _out, rejected = capture_io do
+        forwarder.send(:forward_betterleaks_diagnostics, "#{message} #{SECRET}\n#{SECRET} #{message}\n")
+      end
+      assert_empty rejected
     end
   end
 

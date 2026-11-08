@@ -281,7 +281,8 @@ module HiveReleaseCandidate
         /\ABetterleaks authentication rejected for #{platform}; retrying anonymously\z/,
         /\ABetterleaks (?:invalid authentication token|extraction failed) for #{platform}\z/,
         /\ABetterleaks download (?:TLS failure|redirect policy failure|response policy failure|response unavailable|HTTP [1-5][0-9]{2}) for #{platform}\z/,
-        /\ABetterleaks download deadline exhausted for #{platform} \(300s budget\)\z/
+        /\ABetterleaks download invocation failure for #{platform} \(curl exit (?:-1|[1-9][0-9]{0,2})\)\z/,
+        /\ABetterleaks download deadline exhausted for #{platform} \([0-9]+s budget; last failure: (?:none|checksum mismatch|HTTP [1-5][0-9]{2}|transport code [1-9][0-9]{0,2})\)\z/
       ]
       forwarded_bytes = 0
       stderr.byteslice(0, 8192).to_s.b.each_line.take(16).each do |line|

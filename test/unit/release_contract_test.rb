@@ -96,6 +96,16 @@ class ReleaseContractTest < Minitest::Test
           refute workflow.fetch("env", {}).key?(variable)
           refute job.fetch("env", {}).key?(variable)
         end
+        gh_token_steps = steps.each_with_index.filter_map do |step, index|
+          (step["name"] || "step #{index}") if step.fetch("env", {}).key?("GH_TOKEN")
+        end
+        expected_gh_token_steps = if filename == "release-candidate.yml" && name == "release-e2e"
+          [ "Attest exact producer before release E2E" ]
+        else
+          []
+        end
+        assert_equal expected_gh_token_steps, gh_token_steps,
+                     "#{filename}:#{name}: GH_TOKEN is restricted to the existing producer attestation step"
         assert_equal ".", consumer.fetch("working-directory") if name == "web-tests"
         if filename == "ci.yml"
           minutes = %w[expensive-test-gates launchd-macos].include?(name) ? 15 : 20
@@ -114,7 +124,8 @@ class ReleaseContractTest < Minitest::Test
       token_steps = workflow.fetch("jobs").flat_map do |name, job|
         job.fetch("steps", []).filter_map { |step| name if step.fetch("env", {}).key?("GITHUB_TOKEN") }
       end
-      assert_equal(filename == "release-candidate.yml" ? [] : jobs.sort, token_steps.sort)
+      assert_equal(filename == "release-candidate.yml" ? [] : jobs.sort, token_steps.sort,
+                   "#{filename}: GITHUB_TOKEN is restricted to the Betterleaks packaging consumer steps")
     end
   end
 

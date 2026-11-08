@@ -56,7 +56,8 @@ guarantee. A cold run or a new-pin rollout can still fail.
 ### Authentication, redirects, and retry limits
 
 Downloads prefer a nonblank `GITHUB_TOKEN`, then a nonblank `GH_TOKEN`, and
-support neither. CR/LF in a selected token is rejected with a redacted error.
+support neither. CR/LF in a selected token is rejected with a redacted error
+before surrounding whitespace is stripped.
 Authorization is supplied through a private mode-0600 header file, cleaned up
 on success or failure. It is sent only to the HTTPS `github.com` origin on
 effective port 443, including same-origin redirects. A credentialed 401 or 403
@@ -69,8 +70,9 @@ Raw headers, bodies, redirect URLs, curl stderr, and credentials are not logged.
 Ruby owns redirects and retries. Every hop requires HTTPS with normal TLS
 certificate verification. Relative redirects are resolved; HTTP downgrades,
 URL userinfo, malformed response chains, and chains exceeding ten redirects
-fail closed. Ambient curl configuration is disabled with `--disable` first;
-curl performs neither automatic redirects nor nested retries. The
+fail closed. Ambient curlrc files are disabled with `--disable` first;
+proxy and certificate environment settings remain inherited. Curl performs
+neither automatic redirects nor nested retries. The
 [curl manual](https://curl.se/docs/manpage.html) describes the header-file,
 response-header, and timeout options used here.
 
@@ -81,14 +83,19 @@ values. Tests also cover proxy CONNECT and interim response blocks. This capture
 used a separate curl command, not the rewritten transport. The production
 endpoint limitation remains recorded in [[gaps]].
 
-Each required archive starts one monotonic 300-second download deadline.
+Each required archive starts one monotonic download deadline set by
+`DOWNLOAD_BUDGET` in `packaging/betterleaks.rb` (currently 300 seconds).
 Requests, redirects, auth fallback, and backoff share it; each curl hop receives
 a total timeout no larger than the remaining time and a connection timeout no
 larger than 15 seconds or that remainder. A parent process deadline kills and
-reaps an overdue subprocess. Transport failures, HTTP 408/429/5xx, and checksum
-mismatches retry with delays of 5, 10, 20, then 30 seconds, capped by remaining
-time. TLS/policy errors and other permanent HTTP failures stop promptly.
-Exhaustion stops packaging before a later platform starts. Every cache and
+reaps an overdue subprocess. Transient transport failures, HTTP 408/429/5xx,
+and checksum mismatches retry with delays of 5, 10, 20, then 30 seconds, capped
+by remaining time. Missing/unusable curl, non-transient curl exits, TLS/policy errors, and
+other permanent HTTP failures stop promptly with redacted diagnostics.
+Exhaustion reports the budget and last failure category (HTTP status, transport
+exit code, checksum mismatch, or no prior failure), and stops packaging before a
+later platform starts. Post-transfer hashing may finish after the deadline;
+verified bytes from an in-budget transfer are accepted. Every cache and
 successful-response path retains authoritative digest verification.
 
 A cold four-archive run can approach 4 × 300s = 1200s (20m) if earlier archives

@@ -22,3 +22,7 @@
   completion still idempotent, draft PR re-readied, moved head re-recorded,
   cleared marker no longer claims completion, drift classification).
 - Hive task: review-and-finalize-do-not-261108-6f72.
+- e2e `full_pipeline_happy_path` now models the real pipeline at archive:
+  the 8-finalize `pr.md` carries canonical `pr_url`/`pr_number` frontmatter
+  and a `COMPLETE ... is_draft=false` marker, and the single ordered gh script
+  ends with archive's `gh pr view <url> --json state` read returning `MERGED`.

@@ -245,7 +245,9 @@ class RuntimeControlPlaneAdmissionTransitionTest < Minitest::Test
         attempts.observe_task_source(task: task, generation: generation, observed_at: NOW + 1)
       end
       assert_kind_of Hive::Attempts::RepositoryError, error
-      assert_match(/attempt task source could not be observed: .*database is locked/, error.message)
+      # The runtime database layer classifies raw SQLite lock errors as the
+      # typed busy outcome before the repository prefixes its context.
+      assert_equal "attempt task source could not be observed: runtime database busy, retry", error.message
       assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
 
       holder.execute("ROLLBACK")

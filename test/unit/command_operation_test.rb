@@ -140,6 +140,20 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_typed_runtime_busy_after_effect_keeps_unresolved_finalization_contract
+    with_operation(key: "busy-finalization") do |_operation, store, project|
+      store.define_singleton_method(:succeed) { |*_, **_| raise Hive::RuntimeControlPlane::Busy.new }
+      operation = Hive::CommandOperation.new(
+        key: "busy-finalization", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      error = assert_raises(Hive::CommandUnresolved) do
+        operation.call { { "schema" => "hive-approve", "ok" => true } }
+      end
+      assert_equal "command_unresolved_pending", error.reason
+    end
+  end
+
   def test_authoritative_finalization_reacquires_live_execution_capacity
     with_operation(key: "capacity-finalization") do |_operation, store, project|
       original_succeed = store.method(:succeed)

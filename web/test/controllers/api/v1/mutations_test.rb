@@ -284,7 +284,9 @@ class ApiMutationsTest < ActionDispatch::IntegrationTest
     assert_includes response.parsed_body.dig("error", "message"), command
     assert_empty runtime_dispatch_requests.select { |request| request.project == @project }
     post "#{@base}/tasks/#{task.slug}/actions", params: payload, headers: @headers, as: :json
-    assert_response :unprocessable_entity
+    assert_response :service_unavailable
+    assert_equal "dispatcher_unavailable", response.parsed_body.dig("error", "code")
+    assert_includes response.parsed_body.dig("error", "message"), command
     assert_empty runtime_dispatch_requests.select { |request| request.project == @project }
 
     config["daemon"] = { "enabled" => true }

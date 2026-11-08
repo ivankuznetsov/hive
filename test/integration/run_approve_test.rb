@@ -216,6 +216,42 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_backward_move_into_review_archives_the_prior_review_generation
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        review = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        FileUtils.mkdir_p(File.dirname(finalize))
+        FileUtils.mv(inbox, finalize)
+        File.write(File.join(finalize, "task.md"), "# implementation\n<!-- REVIEW_COMPLETE pass=6 -->\n")
+        reviews = File.join(finalize, "reviews")
+        FileUtils.mkdir_p(reviews)
+        %w[claude-opus-5-ce-code-review-06.md escalations-06.md fix-success-05.md].each do |name|
+          File.write(File.join(reviews, name), "prior generation\n")
+        end
+        File.write(File.join(reviews, "ci-blocked.md"), "blocked\n")
+        File.write(File.join(reviews, "deferred-findings.md"), "deferred\n")
+
+        capture_io do
+          Hive::Commands::Approve.new(slug, from: "8-finalize", to: "6-review").call
+        end
+
+        live = Dir.children(File.join(review, "reviews")).sort
+        assert_equal %w[archive ci-blocked.md deferred-findings.md], live
+        generations = Dir.children(File.join(review, "reviews", "archive"))
+        assert_equal 1, generations.length
+        assert_match(/\A\d{8}T\d{6}Z-8-finalize-to-6-review\z/, generations.first)
+        assert_equal %w[claude-opus-5-ce-code-review-06.md escalations-06.md fix-success-05.md],
+                     Dir.children(File.join(review, "reviews", "archive", generations.first)).sort
+        assert_equal 0, Hive::Stages::Review.max_review_pass(review, { "review" => { "max_passes" => 3 } })
+        tracked = `git -C #{File.join(dir, ".hive-state")} ls-files stages/6-review/#{slug}/reviews`.lines.map(&:strip)
+        assert_includes tracked,
+                        "stages/6-review/#{slug}/reviews/archive/#{generations.first}/claude-opus-5-ce-code-review-06.md"
+      end
+    end
+  end
+
   def test_to_accepts_short_stage_name
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -281,6 +281,15 @@ failures retain their blocking behavior.
 ## Betterleaks distribution and recovery verification
 
 Betterleaks 1.8.1 binaries are checksum-pinned for Linux/macOS x64/arm64.
+The rewritten curl redirect/auth transport has not been exercised against the
+production GitHub release endpoint before merge. Controlled transport fixtures
+and a bounded real subprocess timeout check cover local behavior; a separate
+anonymous redirect/header capture supplied fixture structure only and does not
+close this gap. Review-fix tests also cover permanent curl invocation failures,
+safe diagnostic forwarding, and post-transfer hashing across the deadline;
+these remain controlled local checks. Warm-cache outage independence requires
+all four readable, verified pinned archives; new-pin or inaccessible/incomplete
+caches can fail.
 Real scanner regression tests run on Linux x64; execution on the other three
 targets and packaged installation remain release/CI verification obligations.
 Publication range and size fixes have candidate-code checks, but live task

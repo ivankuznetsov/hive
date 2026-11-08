@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-08
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -19,11 +19,147 @@ artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 ## Bundled secret detection
 
 Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,
-plus its MIT license. `ruby packaging/betterleaks.rb` downloads the pinned
-upstream archives and checks the per-platform SHA-256 values in
-`lib/hive/betterleaks.rb` before bundling. The release-candidate builder runs this step; Homebrew, AUR, and install.sh consume that gem.
-Generated binaries are ignored by Git. Source developers run the same bundling
-step or install Betterleaks locally. Runtime scans never download tools.
+plus its MIT license. `ruby packaging/betterleaks.rb` bundles all four pinned
+archives from `lib/hive/betterleaks.rb`, preserving executable mode 0755 and
+license mode 0644. The release-candidate builder runs this step; Homebrew, AUR,
+and install.sh consume that gem. Generated binaries are ignored by Git.
+Source developers run the bundling step or install Betterleaks locally.
+Runtime scans never download tools.
+
+### Verified archive cache
+
+Persistent caching is opt-in with `HIVE_BETTERLEAKS_CACHE_DIR`. Unset or empty
+values keep temporary-download operation. For local use, choose an absolute
+cache directory outside the repository working tree, specifically outside
+`lib/hive/assets/`: the gem's asset glob could otherwise package the cached
+archives themselves. This path constraint is an operator responsibility,
+without a new code gate. For example, from a checkout outside `$HOME/.cache`:
+
+```sh
+HIVE_BETTERLEAKS_CACHE_DIR="$HOME/.cache/hive/betterleaks-archives" ruby packaging/betterleaks.rb
+```
+
+Entries are `<cache_dir>/<pinned-sha256>.tar.gz`. Every use copies an entry into
+a private build directory and hashes that copy before extracting those same
+bytes. Only absent, corrupt, or inaccessible entries require downloads. Cache
+I/O failures emit concise diagnostics and fall back to verified temporary
+downloads. A verified download is published through a unique temporary file
+and atomic rename; failed publication still permits installation from the
+verified private archive. Invalid bytes never reach extraction or installation.
+Partial cache publications and private build files are cleaned up.
+
+For unchanged pins, all four readable, verified entries make packaging
+independent of release-download availability: it sends zero release requests.
+An incomplete cache, restoration failure, or access failure removes this outage
+guarantee. A cold run or a new-pin rollout can still fail.
+
+### Authentication, redirects, and retry limits
+
+Downloads prefer a nonblank `GITHUB_TOKEN`, then a nonblank `GH_TOKEN`, and
+support neither. CR/LF in a selected token is rejected with a redacted error
+before surrounding whitespace is stripped.
+Authorization is supplied through a private mode-0600 header file, cleaned up
+on success or failure. It is sent only to the HTTPS `github.com` origin on
+effective port 443, including same-origin redirects. A credentialed 401 or 403
+switches once to anonymous mode for the rest of that archive, restarting from
+the original release URL within the original deadline. This recovery rule does
+not assert that every 403 means an invalid token. CDN 403 responses are permanent
+failures; 429 responses are retryable and do not trigger authentication fallback.
+Raw headers, bodies, redirect URLs, curl stderr, and credentials are not logged.
+
+Ruby owns redirects and retries. Every hop requires HTTPS with normal TLS
+certificate verification. Relative redirects are resolved; HTTP downgrades,
+URL userinfo, malformed response chains, and chains exceeding ten redirects
+fail closed. Ambient curlrc files are disabled with `--disable` first;
+proxy and certificate environment settings remain inherited. Curl performs
+neither automatic redirects nor nested retries. The
+[curl manual](https://curl.se/docs/manpage.html) describes the header-file,
+response-header, and timeout options used here.
+
+An anonymous out-of-band capture on 2026-11-08 observed HTTP/2 302 from
+`github.com` to `release-assets.githubusercontent.com`, followed by HTTP/2 200.
+Sanitized fixtures preserve those header blocks, replacing signed/expiring
+values. Tests also cover proxy CONNECT and interim response blocks. This capture
+used a separate curl command, not the rewritten transport. The production
+endpoint limitation remains recorded in [[gaps]].
+
+Each required archive starts one monotonic download deadline set by
+`DOWNLOAD_BUDGET` in `packaging/betterleaks.rb` (currently 300 seconds).
+Requests, redirects, auth fallback, and backoff share it; each curl hop receives
+a total timeout no larger than the remaining time and a connection timeout no
+larger than 15 seconds or that remainder. A parent process deadline kills and
+reaps an overdue subprocess. Transient transport failures, HTTP 408/429/5xx,
+and checksum mismatches retry with delays of 5, 10, 20, then 30 seconds, capped
+by remaining time. Missing/unusable curl, non-transient curl exits, TLS/policy errors, and
+other permanent HTTP failures stop promptly with redacted diagnostics.
+Exhaustion reports the budget and last failure category (HTTP status, transport
+exit code, checksum mismatch, or no prior failure), and stops packaging before a
+later platform starts. Post-transfer hashing may finish after the deadline;
+verified bytes from an in-budget transfer are accepted. Every cache and
+successful-response path retains authoritative digest verification.
+
+A cold four-archive run can approach 4 × 300s = 1200s (20m) if earlier archives
+succeed near their deadlines. The existing `ci.yml` job limits remain:
+
+| Job | Whole-job timeout |
+| --- | --- |
+| `coverage-shards` | 20m |
+| `expensive-test-gates` | 15m |
+| `e2e` | 20m |
+| `web-tests` | 20m |
+| `launchd-macos` | 15m |
+
+These budgets include setup and actual tests. In that worst-case cold run the
+runner cancels packaging before the active archive deadline expires: no deadline
+diagnostic is emitted, and the operator sees an opaque maximum-execution-time
+cancellation. The old `--retry 3 --retry-max-time 60 --max-time 120` settings put
+a simple stalled-transfer four-archive scenario near 8 minutes, versus the new
+near-20-minute allowance. That old estimate was not a strict end-to-end bound:
+retry-max-time limits starting another attempt. There is no whole-invocation
+budget setting and neither 15-minute job timeout is raised. This work does not
+promise that every cold run succeeds or prove execution on all architectures.
+
+### CI cache visibility and pin changes
+
+All eight packaging paths in `ci.yml`, `live-agent-skills.yml`, and
+`release-candidate.yml` restore `actions/cache` at the repository's pinned
+revision. They pass `${{ runner.temp }}/betterleaks-archives`, outside source
+exports. Each cache contains all four target archives and uses:
+
+```text
+key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+restore-keys: betterleaks-archives-v1-${{ runner.os }}-
+```
+
+Packaging always revalidates, including on a cache hit. Only digest-named
+archives are cached, never extracted binaries or authentication files.
+The five dedicated CI packaging steps and the live-agent-skills build step
+receive `GITHUB_TOKEN: ${{ github.token }}`. The latter is a multiline step and
+shares that environment with `gem build` and the live-agent artifact builder.
+Both release-candidate consumers use anonymous downloads; the candidate cache
+step has the same fresh-build condition as its builder. See [[release-candidate]].
+
+An exact-key warm cache needs a prior successful save for that source-file hash
+and runner OS on an accessible ref. GitHub searches the current ref and default
+branch, plus a pull request's base branch; arbitrary sibling refs are not
+visible. PR merge-ref saves do not warm main. The prefix can restore entries
+from another file hash, so an exact-key miss need not mean cold archives.
+These are the [Actions cache matching and scope rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+A full version/pin bump changes the exact key and introduces four digests
+without prior saved entries. All eight paths are fully cold until successful
+jobs save the new archives within accessible ref/OS scopes. PR re-runs remain
+cold until that save. A later push to main is cold again if only PR-scoped
+saves exist, until a main job succeeds and saves. A partial pin bump reuses
+unchanged digests through the prefix; a comment or host-detection-only edit
+can remain fully warm. Stale entries cannot substitute for required pins:
+filenames are digest-specific, and private copies are rehashed before use.
+
+Actions caches are immutable. Local repairs work immediately, but persisting a
+repair to an exact-key corrupt remote cache can require eviction or a cache-key
+namespace bump. Failed jobs might never save new entries, and concurrent jobs
+may race to save the same key. Neither a restore nor a save is an availability
+guarantee.
 
 Detection uses the upstream rules with network validation disabled. Hive turns
 off global path exclusions, supplies a private policy-free Git view, and ignores

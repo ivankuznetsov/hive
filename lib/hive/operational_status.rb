@@ -436,7 +436,6 @@ module Hive
         end
       end
       action = Hive::OperationalAction.descriptor(project: project.fetch("name"), row: row)
-      action = nil if row.dig("manual_recovery_receipt", "status") == "running"
       if daemon_enabled?(project.fetch("name")) &&
          action&.fetch("action_id") != Hive::OperationalAction::RETRY_ACTION_ID
         action = nil
@@ -543,15 +542,27 @@ module Hive
 
     def manual_observation(project, row)
       row = row.merge("project" => project.fetch("name"))
-      return row if invalid_task?(row)
-      return row unless row["marker"] == "none" || Hive::Recovery::API.recoverable_marker?(row["marker"])
+      return row unless manual_observation_candidate?(row)
       @recovery_coordinator ||= Hive::Daemon::RecoveryCoordinator.new
-      evidence = @recovery_coordinator.manual_evidence(row: row.merge("project" => project.fetch("name")))
+      @manual_evidence ||= {}
+      evidence_by_slug = @manual_evidence[project.fetch("name")] ||= begin
+        rows = project.fetch("tasks").select { |candidate| manual_observation_candidate?(candidate) }
+          .map { |candidate| candidate.merge("project" => project.fetch("name")) }
+        @recovery_coordinator.manual_evidence_for(project: project.fetch("name"), rows: rows)
+      end
+      evidence = evidence_by_slug[row.fetch("slug")]
       return row unless evidence
 
       row.merge("recovery_observation" => evidence.fetch("binding"),
         "recovery_binding_conflict" => evidence["binding"].nil?,
         "manual_recovery_receipt" => evidence.fetch("receipt"))
+    end
+
+    def manual_observation_candidate?(row)
+      workflow = Hive::Workflows::Registry.workflows[row["workflow"].to_s.to_sym]
+      return false if workflow&.controller?
+      !invalid_task?(row) &&
+        (row["marker"] == "none" || Hive::Recovery::API.recoverable_marker?(row["marker"]))
     end
 
     def manual_marker_receipt(row)
@@ -560,7 +571,7 @@ module Hive
         return Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
           "status" => "running", "owner" => "agent", "reason" => "existing_live",
           "attempt_id" => row["attempt_id"], "failure_origin" => row.dig("attrs", "reason"),
-          "remediation" => "hive task #{row['slug']} --project #{row['project']} --json"
+          "remediation" => Shellwords.join([ "hive", "task", row["slug"], "--project", row["project"], "--json" ])
         }).to_h
       end
       diagnostic = typed_attempt_diagnostic(row)

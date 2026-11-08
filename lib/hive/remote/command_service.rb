@@ -142,9 +142,20 @@ module Hive
           key: key, command: command, mode: "remote", target: "#{project.fetch('name')}:#{task.slug}",
           project_root: project.fetch("path"), project_roots: [ project.fetch("path") ], request: request,
           principal: principal, principal_source: "api_token", structured: true, json: true, display_json: false,
+          failure_payload: lambda { |error|
+            if error.is_a?(Hive::Remote::AdmissionRefused)
+              { "remote_admission_refused" => { "code" => error.code, "status" => error.status },
+                "message" => error.message }
+            end
+          },
           retry_horizon_expires_at: (@clock.call + Hive::CommandReceiptPruner::RETENTION_SECONDS).utc.iso8601(6),
           store: @store
         ).call(&block)
+      rescue Hive::CommandReplayFailure => error
+        refusal = error.payload&.fetch("remote_admission_refused", nil)
+        raise unless refusal
+        raise Hive::Remote::AdmissionRefused.new(code: refusal.fetch("code"), status: refusal.fetch("status"),
+          message: error.payload.fetch("message"))
       end
 
       def authority_for(project, task, principal, effect)

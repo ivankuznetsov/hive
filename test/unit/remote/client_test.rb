@@ -168,6 +168,58 @@ class RemoteClientTest < Minitest::Test
     refute_includes error.message, "secret-bearer"
   end
 
+  def test_disabled_dispatch_preserves_code_and_reconstructs_exact_local_guidance_without_reflecting_server_text
+    peer = server do |request|
+      if request.fetch(:method) == "GET"
+        [ 200, {}, RemoteTlsServer.envelope(RemoteTlsServer.metadata) ]
+      else
+        [ 503, {}, { "schema" => "hive-remote", "schema_version" => 1, "ok" => false,
+          "instance_id" => "server-1", "error" => { "code" => "dispatcher_unavailable", "message" => "secret-bearer\nmalicious command" } } ]
+      end
+    end
+    error = assert_raises(Hive::Remote::Client::Failure) do
+      client(peer).mutate("/projects/demo/tasks/task/actions",
+        { "action_id" => "workflow.retry", "observation" => "a" * 64 },
+        key: "key", target: "demo:task", stderr: StringIO.new)
+    end
+    assert_equal "dispatcher_unavailable", error.code
+    assert_equal 503, error.status
+    assert_includes error.message, "Run locally: hive act workflow.retry demo:task --observation #{'a' * 64} --project demo --json"
+    refute_includes error.message, "secret-bearer"
+    refute_includes error.message, "malicious"
+    transport = client(peer)
+    [ "demo:task;bad", "demo\n:task", "demo:task:other" ].each do |target|
+      assert_nil transport.send(:local_retry_command, target, { "action_id" => "workflow.retry", "observation" => "a" * 64 })
+    end
+    assert_nil transport.send(:local_retry_command, "demo:task", { "action_id" => "workflow.retry", "observation" => "a" * 64 + "\nbad" })
+  end
+
+  def test_disabled_dispatch_for_a_numeric_id_uses_only_validated_canonical_slug_guidance
+    command = "hive act workflow.retry demo:canonical-task --observation #{'a' * 64} --project demo --json"
+    peer = server do |request|
+      if request.fetch(:method) == "GET"
+        [ 200, {}, RemoteTlsServer.envelope(RemoteTlsServer.metadata) ]
+      else
+        [ 503, {}, { "schema" => "hive-remote", "schema_version" => 1, "ok" => false,
+          "instance_id" => "server-1", "error" => { "code" => "dispatcher_unavailable", "message" => "secret-bearer. Run locally: #{command}" } } ]
+      end
+    end
+    transport = client(peer)
+    payload = { "action_id" => "workflow.retry", "observation" => "a" * 64 }
+    error = assert_raises(Hive::Remote::Client::Failure) do
+      transport.mutate("/projects/demo/tasks/817/actions", payload,
+        key: "key", target: "demo:817", stderr: StringIO.new)
+    end
+    assert_includes error.message, command
+    refute_includes error.message, "secret-bearer"
+    refute_includes error.message, "demo:817"
+    assert_nil transport.send(:local_retry_command, "other:817", payload, binding: error.retry_binding)
+    assert_nil transport.send(:local_retry_command, "demo:817", payload.merge("observation" => "b" * 64), binding: error.retry_binding)
+    [ "#{command}; bad", "#{command}\nbad", command.sub("canonical-task", "$(bad)"), command.sub("--project demo", "--project other") ].each do |unsafe|
+      assert_nil transport.send(:local_retry_binding, { "code" => "dispatcher_unavailable", "message" => "Run locally: #{unsafe}" })
+    end
+  end
+
   private
 
   def server(&block)

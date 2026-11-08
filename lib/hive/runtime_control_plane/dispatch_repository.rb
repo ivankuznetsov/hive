@@ -187,6 +187,20 @@ module Hive
         end
       end
 
+      def recovery_requests_by_slug(project:, slugs:, limit: RECOVERY_PROJECTION_LIMIT)
+        return {} if slugs.empty?
+        per_task_limit = Integer(limit)
+        database.read do |db|
+          ranked = db[:dispatch_requests].where(recovery_request: 1, task_slug: slugs,
+            project_id: db[:projects].where(name: project.to_s).select(:project_id))
+            .select_append(Sequel.function(:row_number).over(partition: :task_slug,
+              order: [ Sequel.desc(:updated_at), Sequel.desc(:request_id) ]).as(:recovery_rank))
+          ranked.from_self.where { recovery_rank <= per_task_limit }
+            .order(:task_slug, Sequel.desc(:recovery_rank)).all
+            .map { |row| request_from(row) }.group_by(&:slug)
+        end
+      end
+
       def fetch(request_id, **)
         row = database.read { |db| db[:dispatch_requests].where(request_id: request_id.to_s).first }
         row && request_from(row)

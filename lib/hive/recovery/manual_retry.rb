@@ -26,6 +26,7 @@ module Hive
         row = API.observation(row)
         receipt = @coordinator.prepare_manual(row: row, observation_token: observation_token, now: now)
         request = repository.fetch(receipt.request_id) if receipt.request_id
+        return unavailable(receipt, row, "recovery_observation_unavailable") if receipt.request_id && !request
         return guidance(receipt, row) unless request
         if receipt.phase == "terminal"
           @coordinator.repair_failed_terminal_marker(request)
@@ -62,8 +63,12 @@ module Hive
           guidance(base.with(status: result.status == :no_route ? "unavailable" : "blocked",
             owner: result.status == :no_route ? "provider" : "operator", reason: result.reason), row)
         end
-      rescue Hive::Error, SystemCallError, IOError => error
-        @coordinator.defer_dispatch_failure(request, now: now) if request
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception => error
+        begin
+          @coordinator.defer_dispatch_failure(request, now: now) if request
+        rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception
+          # Deferral is best effort; retain the original launch diagnostic.
+        end
         base = receipt || Hive::Daemon::RecoveryCoordinator::Receipt.from_h({})
         unavailable(base.with(remediation: "#{error.class}: #{error.message}"), row, "launch_unavailable")
       end
@@ -104,7 +109,11 @@ module Hive
         (@client || attempts).attach(attempt_id, stdout: Sink.new, stderr: Sink.new)
         record = attempts.fetch(attempt_id)
         return finish(request, record) if record&.final?
-        guidance(@coordinator.receipt_for_request(repository.fetch(request.request_id)).with(
+        current = repository.fetch(request.request_id)
+        unless current
+          return unavailable(@coordinator.receipt_for_request(request), row, "recovery_observation_unavailable")
+        end
+        guidance(@coordinator.receipt_for_request(current).with(
           reason: "caller_detached", owner: "agent"), row)
       end
 

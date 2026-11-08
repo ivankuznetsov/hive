@@ -3,11 +3,21 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-07
+updated: 2026-11-08
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
 ## Remote API deployment evidence (2026-11-07)
+
+The 2026-11-08 manual-retry review fix checkpoint ran `bin/test --all` (16,374
+tests across the root and agent-runtime component workers). It reproduced the
+existing `/proc/<pid>/environ` `Errno::ESRCH` failures in process custody and
+OpenCode tests, plus the process-registry `root_gone_led_group_empty` expectation
+mismatch described below. Those source/test files are unchanged from the
+feature base. The run also exposed two Patrol Fix status regressions from
+applying manual marker recovery evidence to controller workflows; the fix
+excludes controllers, with focused status/descriptor regressions rerun locally.
+The broad checkpoint is not green and was not repeated after that correction.
 
 CI run `42416154313` could not execute the Rails-backed root integration tests
 `remote_operations_test.rb` and `remote_access_acceptance_test.rb` because its

@@ -3130,10 +3130,11 @@ module Hive
         return if @attempt_admission_failure_signatures[key] == message
 
         @attempt_admission_failure_signatures[key] = message
+        inspection_command = Shellwords.join([ "hive", "task", row.slug, "--project", row.project ])
         @logger.event(
           :blocked, project: row.project, slug: row.slug, stage: row.stage,
           reason: "attempt_admission_failed", message: message,
-          remediation: "inspect the task with `hive task #{row.slug} --project #{row.project}`; " \
+          remediation: "inspect the task with `#{inspection_command}`; " \
                        "a task without an id cannot be admitted"
         )
       end

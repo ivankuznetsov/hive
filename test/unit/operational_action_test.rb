@@ -49,6 +49,18 @@ class OperationalActionTest < Minitest::Test
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)
   end
 
+  def test_unobservable_or_live_manual_attempts_suppress_routine_actions_across_consumers
+    row = { "slug" => "manual-task", "action" => "ready_for_review", "marker" => "none", "attrs" => {},
+      "recovery_observation" => { "request_id" => "request-1" } }
+    %w[attempt_observation_unavailable attempt_identity_conflict recovery_observation_unavailable].each do |reason|
+      unavailable = row.merge("manual_recovery_receipt" => { "status" => "unavailable", "reason" => reason })
+      assert_nil Hive::OperationalAction.descriptor(project: "demo", row: unavailable)
+    end
+    assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row.merge("live_task_lock" => true))
+    provider = row.merge("manual_recovery_receipt" => { "status" => "unavailable", "reason" => "no_eligible_provider_route" })
+    assert_equal "workflow.retry", Hive::OperationalAction.descriptor(project: "demo", row: provider).fetch("action_id")
+  end
+
   def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token
     row = {
       "slug" => "delivered-task",
@@ -117,7 +129,7 @@ class OperationalActionTest < Minitest::Test
     with_replaced_singleton_method(
       Hive::OperationalAction,
       :observed_row,
-      ->(_task, project:) { observed.merge("project" => project) }
+      ->(_task, project:, **) { observed.merge("project" => project) }
     ) do
       with_replaced_singleton_method(
         Hive::OperationalAction,

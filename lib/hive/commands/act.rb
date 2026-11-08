@@ -42,13 +42,19 @@ module Hive
             end
             emit_success(result)
           end
-          payload = @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          payload = begin
+            @idempotency_key ? command_operation.call(&invoke) : invoke.call
+          rescue Hive::CommandReplayFailure => error
+            # A terminal stage failure retains the evaluated action payload.
+            # Other failures are rendered by the outer envelope boundary.
+            raise unless error.payload&.dig("result", "recovery") && error.payload["ok"] == true
+            error.payload
+          end
           if @idempotency_key
             render_success(payload)
           end
           recovery = payload.dig("result", "recovery")
-          if recovery && recovery["status"] == "terminal" &&
-              !%w[succeeded success completed terminal_replay].include?(recovery["terminal_outcome"])
+          if failed_recovery?(payload)
             raise Hive::TaskInErrorState, "retry attempt #{recovery['attempt_id']} ended #{recovery['terminal_outcome']}"
           end
           payload
@@ -79,6 +85,11 @@ module Hive
       end
 
       def envelope_serialization_failure_policy = :raise
+
+      def envelope_payload_for(error)
+        return error.payload if error.is_a?(Hive::CommandReplayFailure) && error.payload
+        super
+      end
 
       private
 
@@ -126,6 +137,7 @@ module Hive
           principal: @principal,
           principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
+          result_status: ->(payload) { failed_recovery?(payload) ? Hive::ExitCodes::TASK_IN_ERROR : Hive::ExitCodes::SUCCESS },
           text_renderer: ->(payload) { text_success(payload.fetch("result")) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
         )
@@ -139,6 +151,12 @@ module Hive
           raise Hive::OperationalActionUsageError,
                 "--observation must be the 64-character token from a fresh operational snapshot"
         end
+      end
+
+      def failed_recovery?(payload)
+        recovery = payload.dig("result", "recovery")
+        recovery && recovery["status"] == "terminal" &&
+          !%w[succeeded success completed terminal_replay].include?(recovery["terminal_outcome"])
       end
 
       def emit_success(result)

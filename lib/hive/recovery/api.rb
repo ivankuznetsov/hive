@@ -140,8 +140,8 @@ module Hive
       def observation_token(row, project: nil, state_home: Hive::Paths.state_home,
                             coordinator: nil)
         normalized = observation(row, project: project)
-        coordinator ||= Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
-        coordinator.observation_token_for(normalized)
+        coordinator ? coordinator.observation_token_for(normalized) :
+          Hive::Daemon::RecoveryCoordinator.observation_token(normalized)
       end
 
       def observation(row, project: nil)

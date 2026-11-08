@@ -186,6 +186,34 @@ class CommandsActTest < Minitest::Test
     end
   end
 
+  def test_keyed_rejected_action_replays_the_typed_envelope_and_original_status_once
+    with_command_receipts do |project, store|
+      executor = FakeExecutor.new(error: Hive::WrongStage.new("stage changed"))
+      resolver = Struct.new(:resolve).new(Struct.new(:project_root).new(project))
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+        with_replaced_singleton_method(Hive::CommandOperation, :registered_project_roots, ->(**) { [ project ] }) do
+          outputs = [ Hive::WrongStage, Hive::CommandReplayFailure ].map do |error_class|
+            stdout, = capture_io do
+              error = assert_raises(error_class) do
+                Hive::Commands::Act.new("workflow.retry", "demo:task", observation: "a" * 64,
+                  json: true, executor: executor, idempotency_key: "rejected-action",
+                  command_receipt_store: store, principal: "owner").call
+              end
+              assert_equal Hive::ExitCodes::WRONG_STAGE, error.exit_code
+            end
+            payload = JSON.parse(stdout)
+            assert_equal "stale_observation", payload.fetch("error_kind")
+            assert_equal "workflow.retry", payload.fetch("action_id")
+            assert_equal "demo:task", payload.fetch("target")
+            stdout
+          end
+          assert_equal outputs.first, outputs.last
+          assert_equal 1, executor.calls.length
+        end
+      end
+    end
+  end
+
   def test_retry_renders_and_validates_the_canonical_recovery_receipt
     result = {
       "task_state" => "error",

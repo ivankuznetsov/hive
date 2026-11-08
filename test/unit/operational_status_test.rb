@@ -1350,6 +1350,37 @@ class OperationalStatusTest < Minitest::Test
     assert_includes actual.dig("recovery", "remediation"), "hive status --operational --json"
   end
 
+  def test_mixed_fleet_keeps_scheduler_and_operator_recovery_ownership_and_reuses_manual_evidence
+    automated = task(action: "error", slug: "scheduled", stage: "6-review", marker: "review_error")
+    manual = task(action: "ready_for_review", slug: "manual", stage: "6-review", marker: "none")
+    payload = status_payload(automated)
+    payload.fetch("projects") << payload.fetch("projects").first.merge("name" => "manual-project", "tasks" => [ manual ])
+    snapshot = scheduler_snapshot_for(automated, decision: "retry_pending", reason: "awaiting dispatch")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+      "status" => "queued", "phase" => "cleared", "owner" => "scheduler", "request_id" => "scheduled-request"
+    }
+    calls = []
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      calls << [ project, rows.map { |row| row.fetch("slug") } ]
+      { "manual" => { "binding" => { "request_id" => "manual-request", "revision" => 3 },
+        "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+          "status" => "blocked", "phase" => "cleared", "owner" => "operator", "request_id" => "manual-request",
+          "reason" => "project_dispatch_disabled", "retry_count" => 1 }).to_h } }
+    end
+    projection = Hive::OperationalStatus.new(status_payload: payload, scheduler_snapshot: snapshot,
+      project_context: { "demo" => { "daemon_enabled" => true }, "manual-project" => { "daemon_enabled" => false } },
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2))
+    projected = projection.to_h.fetch("tasks")
+    assert_equal %w[scheduler operator], projected.map { |row| row.dig("recovery", "owner") }
+    assert_equal %w[queued blocked], projected.map { |row| row.dig("recovery", "status") }
+    assert_equal %w[scheduler operator], projected.map { |row| row.fetch("blocker_owner") }
+    assert_equal %w[scheduled-request manual-request], projected.map { |row| row.dig("recovery", "request_id") }
+    assert_equal [ "workflow.retry", "workflow.retry" ], projected.map { |row| row.dig("action", "action_id") }
+    assert_equal projected.map { |row| row.fetch("recovery") }, projection.recovery_rows.map { |row| row.fetch("recovery") }
+    assert_equal [ [ "manual-project", [ "manual" ] ] ], calls
+  end
+
   def test_manual_recovery_projects_a_live_failed_task_as_in_flight
     row = task(action: "error", slug: "manual-running", stage: "6-review", marker: "review_error",
       attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" }, live_task_lock: true)
@@ -1357,6 +1388,7 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "running", actual.dig("recovery", "status")
     assert_equal "agent", actual.dig("recovery", "owner")
     assert_equal "existing_live", actual.dig("recovery", "reason")
+    assert_nil actual["action"]
     assert_includes actual.dig("recovery", "remediation"), "hive task manual-running --project demo --json"
   end
 
@@ -1364,10 +1396,10 @@ class OperationalStatusTest < Minitest::Test
     row = task(action: "error", slug: "manual-unavailable", stage: "6-review", marker: "review_error",
       attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
     coordinator = Object.new
-    coordinator.define_singleton_method(:manual_evidence) do |row:|
-      { "binding" => nil, "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      rows.to_h { |row| [ row.fetch("slug"), { "binding" => nil, "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
         "status" => "unavailable", "owner" => "hive", "reason" => "recovery_observation_unavailable",
-        "remediation" => "hive status --operational --json" }).to_h }
+        "remediation" => "hive status --operational --json" }).to_h } ] }
     end
     actual = Hive::OperationalStatus.new(status_payload: status_payload(row),
       recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2)).to_h.fetch("tasks").first

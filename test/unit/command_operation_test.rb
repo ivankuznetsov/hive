@@ -182,6 +182,31 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_authoritative_failed_outcome_recovers_after_a_lost_final_receipt_write
+    with_operation(key: "failed-finalization") do |_operation, store, project|
+      store.define_singleton_method(:fail_applied) do |*, **|
+        raise Sequel::DatabaseError, "lost failure finalization"
+      end
+      operation = Hive::CommandOperation.new(
+        key: "failed-finalization", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true,
+        display_json: false, result_status: ->(_) { Hive::ExitCodes::TASK_IN_ERROR }, store: store
+      )
+      assert_raises(Hive::CommandUnresolved) do
+        operation.call { { "ok" => true, "result" => { "terminal_outcome" => "failed" } } }
+      end
+      error = assert_raises(Hive::CommandReplayFailure) do
+        operation.call { flunk "recovering a failed outcome must never repeat the effect" }
+      end
+      assert_equal Hive::ExitCodes::TASK_IN_ERROR, error.exit_code
+      assert_equal "failed", error.payload.dig("command_receipt", "state")
+      durable = store.receipt(error.payload.dig("command_receipt", "id"))
+      assert_equal "failed", durable.fetch(:state)
+      assert_equal Hive::ExitCodes::TASK_IN_ERROR, durable.fetch(:result_status)
+      assert_equal 0, durable.fetch(:retry_eligible)
+    end
+  end
+
   def test_interrupted_reconcilable_provider_effect_resumes_without_resubmitting_applied_push
     with_operation(key: "provider-reconcile") do |_operation, store, project|
       remote = File.join(File.dirname(project), "remote.git")

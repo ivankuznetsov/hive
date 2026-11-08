@@ -226,11 +226,14 @@ class RemoteCommandServiceTest < Minitest::Test
         assert_equal 503, error.status
         assert_equal "dispatcher_unavailable", error.code
         assert_includes error.message, command
-        assert_raises(Hive::CommandReplayFailure) do
+        replay = assert_raises(Hive::Remote::AdmissionRefused) do
           service.action(project: project, task: task, action_id: "workflow.retry",
             observation: descriptor.fetch("observation_token"), idempotency_key: "manual-remote",
             principal: PRINCIPAL, scopes: [ "act" ])
         end
+        assert_equal error.code, replay.code
+        assert_equal error.status, replay.status
+        assert_equal error.message, replay.message
       end
       assert_empty repository.recovery_requests
       assert_empty repository.pending
@@ -469,12 +472,14 @@ class RemoteCommandServiceTest < Minitest::Test
       descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
       refused = Struct.new(:to_h).new({ "state" => "safety_blocked", "request_id" => nil })
       with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**) { refused }) do
-        [ Hive::Remote::AdmissionRefused, Hive::CommandReplayFailure ].each do |error_class|
-          assert_raises(error_class) do
+        2.times do
+          error = assert_raises(Hive::Remote::AdmissionRefused) do
             service.action(project: project, task: task, action_id: descriptor.fetch("action_id"),
               observation: descriptor.fetch("observation_token"), idempotency_key: "refused-retry",
               principal: PRINCIPAL, scopes: [ "act" ])
           end
+          assert_equal "unavailable", error.code
+          assert_equal 503, error.status
         end
       end
       assert_empty repository.pending

@@ -28,6 +28,31 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     )
   end
 
+  def test_batched_recovery_query_keeps_an_independent_bound_for_each_slug_in_one_read
+    with_repository do |repository|
+      %w[alpha beta ignored].each do |slug|
+        3.times do |index|
+          repository.write_request!(project: "hive", slug: slug, argv: [ "hive", "run", slug ],
+            request_id: "#{slug}-#{index}", recovery: { "phase" => "terminal" }, now: NOW + index)
+        end
+      end
+      reads = 0
+      original = repository.database.method(:read)
+      result = nil
+      with_replaced_singleton_method(repository.database, :read, lambda { |&block|
+        reads += 1
+        original.call(&block)
+      }) do
+        result = repository.recovery_requests_by_slug(project: "hive", slugs: %w[alpha beta], limit: 2)
+      end
+      assert_equal 1, reads
+      assert_equal %w[alpha beta], result.keys.sort
+      assert_equal %w[alpha-1 alpha-2], result.fetch("alpha").map(&:request_id)
+      assert_equal %w[beta-1 beta-2], result.fetch("beta").map(&:request_id)
+      assert_empty repository.recovery_requests_by_slug(project: "other", slugs: %w[alpha beta], limit: 2)
+    end
+  end
+
   def test_request_claim_sequence_and_result_are_transactional_and_idempotent
     with_repository do |repository|
       id = repository.write_request!(

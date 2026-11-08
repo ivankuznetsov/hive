@@ -1010,16 +1010,17 @@ module Hive
       # Query-only evidence for an attached operator retry. Filtering happens in
       # SQL before the bound; a second candidate fails closed rather than
       # selecting whichever host-global row happened to fit in a snapshot.
-      def manual_evidence(row:)
-        task = resolve_task_for(row)
-        marker = Hive::Markers.current(task.state_file)
-        scoped = request_queue.recovery_requests(
+      def manual_evidence(row:, requests: nil)
+        scoped = requests || request_queue.recovery_requests(
           project: value(row, :project), slug: value(row, :slug), limit: 65
         )
+        return nil if scoped.empty?
         if scoped.size > 64
           return { "binding" => nil, "receipt" => receipt("unavailable", owner: "hive",
             reason: "recovery_observation_unavailable", remediation: "hive status --operational --json").to_h }
         end
+        task = resolve_task_for(row)
+        marker = Hive::Markers.current(task.state_file)
         requests = scoped.select do |request|
           recovery = request.recovery || {}
           next false unless recovery["variant"] == "marker"
@@ -1067,8 +1068,26 @@ module Hive
           },
           "receipt" => projected.to_h
         }
-      rescue Hive::Error, SystemCallError, IOError, ArgumentError, KeyError
-        nil
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError, KeyError => error
+        unavailable_manual_evidence(error)
+      end
+
+      # One bounded query per project, reused by the snapshot's projections.
+      def manual_evidence_for(project:, rows:)
+        requests = request_queue.recovery_requests_by_slug(project: project,
+          slugs: rows.map { |row| value(row, :slug) }, limit: 65)
+        rows.to_h do |row|
+          slug = value(row, :slug)
+          [ slug, manual_evidence(row: row, requests: requests.fetch(slug, [])) ]
+        end
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError => error
+        rows.to_h { |row| [ value(row, :slug), unavailable_manual_evidence(error) ] }
+      end
+
+      def unavailable_manual_evidence(error)
+        { "binding" => nil, "receipt" => receipt("unavailable", owner: "hive",
+          reason: "recovery_observation_unavailable",
+          remediation: "#{error.class}: #{error.message}; hive status --operational --json").to_h }
       end
 
       # The old failure observation is checked before marker repair. Resume
@@ -1081,29 +1100,45 @@ module Hive
           result = request(row: row, requestor: "action", observation_token: observation_token, now: now)
           return result unless result.request_id && %w[queued cooldown].include?(result.status)
           request = request_queue.fetch(result.request_id)
+          unless request
+            return receipt("unavailable", request_id: result.request_id, owner: "hive",
+              reason: "recovery_observation_unavailable",
+              remediation: "recovery request disappeared; hive status --operational --json")
+          end
           return resume(request: request, row: row, now: now)
         end
 
+        unless binding.is_a?(Hash) && binding["request_id"].is_a?(String) && !binding["request_id"].empty?
+          return receipt("unavailable", owner: "hive", reason: "recovery_unavailable",
+            remediation: "invalid recovery observation; hive status --operational --json")
+        end
         task = resolve_task_for(row)
         current = nil
         Hive::Lock.with_task_lock(task.folder, "operation" => "manual_recovery_observation") do
           marker = Hive::Markers.current(task.state_file)
           evidence = manual_evidence(row: row)
+          return Receipt.from_h(evidence.fetch("receipt")) if evidence && evidence["binding"].nil?
           unless evidence && evidence["binding"] == binding &&
               secure_compare(locked_observation_token(row, task, marker), observation_token.to_s)
             return receipt("blocked", owner: "operator", reason: "stale_observation",
               remediation: "hive status --operational --json")
           end
           current = request_queue.fetch(binding.fetch("request_id"))
+          unless current
+            return receipt("unavailable", request_id: binding.fetch("request_id"), owner: "hive",
+              reason: "recovery_observation_unavailable",
+              remediation: "recovery request disappeared; hive status --operational --json")
+          end
           current = expedite_operator_recovery(current, now: now)
         end
         resume(request: current, row: row, now: now)
       rescue Hive::ConcurrentRunError => error
         receipt("blocked", owner: "operator", reason: "existing_live",
-          remediation: Shellwords.join([ "hive", "task", value(row, :slug), "--project", value(row, :project), "--json" ]))
-      rescue Hive::Error, SystemCallError, IOError, ArgumentError, KeyError, TypeError => error
+          remediation: "#{error.class}: #{error.message}; " +
+            Shellwords.join([ "hive", "task", value(row, :slug), "--project", value(row, :project), "--json" ]))
+      rescue Hive::Error, SystemCallError, IOError, Sequel::Error, SQLite3::Exception, ArgumentError => error
         receipt("unavailable", owner: "hive", reason: "recovery_unavailable",
-          remediation: "hive status --operational --json")
+          remediation: "#{error.class}: #{error.message}; hive status --operational --json")
       end
 
       def manual_attempt_matches?(request, record)

@@ -100,6 +100,41 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  def test_action_observations_reuse_configuration_and_coordinator_but_refresh_requests_and_markers
+    with_retry do |row, coordinator|
+      task = Hive::Task.new(row.fetch("folder"))
+      context = Hive::OperationalAction::ObservationContext.new
+      config = Hive::Config.load(task.project_root)
+      config_reads = 0
+      coordinator_opens = 0
+      evidence_reads = 0
+      coordinator.define_singleton_method(:manual_evidence) do |**|
+        evidence_reads += 1
+        evidence_reads == 1 ? nil : { "binding" => { "request_id" => "request-live" }, "receipt" => { "status" => "running" } }
+      end
+      with_replaced_singleton_method(Hive::Config, :load, lambda { |*|
+        config_reads += 1
+        config
+      }) do
+        with_replaced_singleton_method(Hive::Daemon::RecoveryCoordinator, :new, lambda { |**|
+          coordinator_opens += 1
+          coordinator
+        }) do
+          first = Hive::OperationalAction.observed_row(task, project: row.fetch("project"), context: context)
+          assert Hive::OperationalAction.descriptor(project: row.fetch("project"), row: first)
+          Hive::Markers.clear_current(task.state_file, expected_name: "review_error")
+          second = Hive::OperationalAction.observed_row(task, project: row.fetch("project"), context: context)
+          assert_equal "none", second.fetch("marker")
+          assert_equal "request-live", second.dig("recovery_observation", "request_id")
+          assert_nil Hive::OperationalAction.descriptor(project: row.fetch("project"), row: second)
+        end
+      end
+      assert_equal 1, config_reads
+      assert_equal 1, coordinator_opens
+      assert_equal 2, evidence_reads
+    end
+  end
+
   def test_keyed_failed_stage_emits_one_envelope_and_replays_without_a_second_attempt
     with_retry do |row, coordinator, repository, store, launcher, runner|
       launcher.outcome = "failed"
@@ -129,6 +164,11 @@ class ManualWorkflowRetryTest < Minitest::Test
         assert_equal true, payload.fetch("ok")
         assert_equal "failed", payload.dig("result", "recovery", "terminal_outcome")
         assert_equal launcher.launched.first.attempt_id, payload.dig("result", "recovery", "attempt_id")
+        assert_equal "failed", payload.dig("command_receipt", "state")
+        durable = Hive::CommandReceiptStore.new(database: store.database).receipt(payload.dig("command_receipt", "id"))
+        assert_equal "failed", durable.fetch(:state)
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, durable.fetch(:result_status)
+        assert_equal 0, durable.fetch(:retry_eligible), "applied failure must never authorize resubmission"
         payload
       end
       assert_equal outputs.first, outputs.last
@@ -154,6 +194,8 @@ class ManualWorkflowRetryTest < Minitest::Test
       assert_equal "agent", first.owner
       assert_equal "caller_detached", first.reason
       current = Hive::OperationalAction.observed_row(Hive::Task.new(row.fetch("folder")), project: row.fetch("project"))
+      assert_equal "running", current.dig("manual_recovery_receipt", "status")
+      assert_nil Hive::OperationalAction.descriptor_for_task(Hive::Task.new(row.fetch("folder")), project: row.fetch("project"))
       second = attached.call(row: current, observation_token: coordinator.observation_token_for(current))
       assert_equal first.attempt_id, second.attempt_id
       assert_equal "dispatched", repository.fetch(first.request_id).recovery["phase"]
@@ -254,6 +296,51 @@ class ManualWorkflowRetryTest < Minitest::Test
       assert_equal :existing_live, loser.status
       assert_equal receipt.attempt_id, loser.attempt.attempt_id
       assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_two_consumers_reaching_admission_together_launch_once_in_either_winner_order
+    %i[manual competitor].each do |winner|
+      with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+        arrivals = Queue.new
+        create = store.method(:create_launching)
+        store.define_singleton_method(:create_launching) do |**attributes|
+          gate = Queue.new
+          arrivals << [ Thread.current[:consumer], gate ]
+          gate.pop
+          create.call(**attributes)
+        end
+        threads = {}
+        gates = {}
+        begin
+          threads[:manual] = Thread.new do
+            Thread.current[:consumer] = :manual
+            runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+          end
+          name, gate = Timeout.timeout(10) { arrivals.pop }
+          gates[name] = gate
+          request = repository.recovery_requests(project: row.fetch("project"), slug: row.fetch("slug")).fetch(0)
+          threads[:competitor] = Thread.new do
+            Thread.current[:consumer] = :competitor
+            dispatcher.call({}).dispatch_request(request, interactive: false)
+          end
+          name, gate = Timeout.timeout(10) { arrivals.pop }
+          gates[name] = gate
+          assert_empty launcher.launched, "both consumers must reach admission before either can launch"
+          gates.fetch(winner) << true
+          Timeout.timeout(10) { threads.fetch(winner).value }
+          gates.fetch((threads.keys - [ winner ]).fetch(0)) << true
+          results = Timeout.timeout(10) { threads.transform_values(&:value) }
+          assert_equal "terminal", results.fetch(:manual).status
+          assert_equal "succeeded", results.fetch(:manual).terminal_outcome
+          assert_equal results.fetch(:manual).attempt_id, results.fetch(:competitor).attempt.attempt_id
+          assert_equal 1, launcher.launched.size
+          assert_equal 1, results.fetch(:manual).retry_count
+        ensure
+          gates.each_value { |pending| pending << true }
+          threads.each_value { |thread| thread.kill if thread.alive?; thread.join }
+        end
+      end
     end
   end
 

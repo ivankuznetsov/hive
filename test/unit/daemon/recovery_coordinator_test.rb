@@ -112,6 +112,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request = Q.fetch(admitted.request_id, state_home: home)
       coordinator.resume(request: request, row: row, now: NOW)
       coordinator.defer_dispatch_failure(request, now: NOW)
+      deferred = Q.fetch(request.request_id, state_home: home)
+      assert_equal "cleared", deferred.recovery.fetch("phase")
+      assert_operator Time.iso8601(deferred.recovery.fetch("next_eligible_at")), :>, NOW
+      assert_equal "cooldown", coordinator.receipt_for_request(deferred, now: NOW).status
       current = manual_row(row)
       evidence = coordinator.manual_evidence(row: current)
       current["recovery_observation"] = evidence.fetch("binding")
@@ -123,6 +127,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       assert_equal admitted.request_id, result.request_id
       assert_equal 1, result.retry_count
       assert_equal 1, Q.recovery_requests(state_home: home).size
+      assert_equal NOW.iso8601(6), Q.fetch(request.request_id, state_home: home).recovery.fetch("next_eligible_at")
       assert Hive::Markers.current(row.state_file).none?
     end
   end
@@ -156,6 +161,68 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_manual_evidence_read_errors_remain_typed_and_cannot_authorize_recovery
+    with_fixture do |coordinator, row, home|
+      [ IOError.new("storage unavailable"), Sequel::DatabaseError.new("database unreadable") ].each do |error|
+        repository = Q.repository(home)
+        with_replaced_singleton_method(repository, :recovery_requests, ->(**) { raise error }) do
+          evidence = coordinator.manual_evidence(row: row)
+          assert_nil evidence.fetch("binding")
+          assert_equal [ "unavailable", "hive", "recovery_observation_unavailable" ],
+            evidence.fetch("receipt").values_at("status", "owner", "reason")
+          assert_includes evidence.dig("receipt", "remediation"), error.message
+          prepared = coordinator.prepare_manual(row: row, observation_token: coordinator.observation_token_for(row), now: NOW)
+          assert_equal "unavailable", prepared.status
+        end
+        assert_empty Q.recovery_requests(state_home: home)
+      end
+    end
+  end
+
+  def test_prepare_manual_reports_malformed_bindings_without_swallowing_programming_errors
+    with_fixture do |coordinator, row, home|
+      [ "invalid", {}, { "request_id" => 1 } ].each do |binding|
+        result = coordinator.prepare_manual(row: manual_row(row).merge("recovery_observation" => binding),
+          observation_token: "a" * 64, now: NOW)
+        assert_equal "unavailable", result.status
+        assert_includes result.remediation, "hive status --operational --json"
+      end
+      [ TypeError.new("programming error"), KeyError.new("missing invariant") ].each do |error|
+        with_replaced_singleton_method(coordinator, :manual_evidence, ->(**) { raise error }) do
+          assert_raises(error.class) { coordinator.prepare_manual(row: row, observation_token: "a" * 64, now: NOW) }
+        end
+      end
+    end
+  end
+
+  def test_bound_manual_observation_preserves_unavailable_evidence_and_missing_request_diagnostics
+    with_fixture do |coordinator, row, home|
+      coordinator.request(row: row, requestor: "action", now: NOW)
+      current = manual_row(row)
+      current["recovery_observation"] = coordinator.manual_evidence(row: current).fetch("binding")
+      token = coordinator.observation_token_for(current)
+      repository = Q.repository(home)
+      with_replaced_singleton_method(repository, :recovery_requests, ->(**) { raise IOError, "unreadable evidence" }) do
+        result = coordinator.prepare_manual(row: current, observation_token: token, now: NOW)
+        assert_equal "unavailable", result.status
+        assert_equal "recovery_observation_unavailable", result.reason
+        assert_includes result.remediation, "unreadable evidence"
+      end
+      with_replaced_singleton_method(repository, :fetch, ->(*, **) { nil }) do
+        result = coordinator.prepare_manual(row: current, observation_token: token, now: NOW)
+        assert_equal "unavailable", result.status
+        assert_equal "recovery_observation_unavailable", result.reason
+        assert_includes result.remediation, "recovery request disappeared"
+      end
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { raise Errno::EIO, "marker unreadable" }) do
+        evidence = coordinator.manual_evidence(row: current)
+        assert_nil evidence.fetch("binding")
+        assert_equal "recovery_observation_unavailable", evidence.dig("receipt", "reason")
+        assert_includes evidence.dig("receipt", "remediation"), "marker unreadable"
+      end
+    end
+  end
+
   def test_recovery_query_scopes_before_applying_its_bound
     with_fixture do |coordinator, row, home|
       admitted = coordinator.request(row: row, requestor: "action", now: NOW)
@@ -164,6 +231,17 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       ).map(&:request_id)
       assert_empty Q.recovery_requests(project: "other", slug: row.slug, limit: 1, state_home: home)
       assert_empty Q.recovery_requests(project: "hive", slug: "other-task", limit: 1, state_home: home)
+    end
+  end
+
+  def test_batched_manual_evidence_skips_task_file_reads_for_healthy_rows
+    with_fixture do |coordinator, row, home|
+      rows = 10.times.map { |index| manual_row(row).merge("slug" => "healthy-#{index}", "marker" => "none") }
+      with_replaced_singleton_method(Hive::Markers, :current, ->(*) { flunk "healthy tasks have no recovery evidence to validate" }) do
+        evidence = coordinator.manual_evidence_for(project: row.project, rows: rows)
+        assert_equal rows.map { |candidate| candidate.fetch("slug") }, evidence.keys
+        assert evidence.values.all?(&:nil?)
+      end
     end
   end
 
@@ -227,6 +305,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
         with_replaced_singleton_method(Hive::Lock, :with_task_lock, ->(*, **) { raise error }) do
           result = coordinator.prepare_manual(row: current, observation_token: token, now: NOW)
           assert_equal expected, [ result.status, result.owner, result.reason ]
+          assert_includes result.remediation, "#{error.class}: #{error.message}"
+          expected_command = error.is_a?(Hive::ConcurrentRunError) ?
+            "hive task demo-task --project hive --json" : "hive status --operational --json"
+          assert_includes result.remediation, expected_command
         end
       end
     end

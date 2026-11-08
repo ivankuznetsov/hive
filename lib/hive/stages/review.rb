@@ -2411,8 +2411,16 @@ module Hive
       end
 
       def ci_terminal_result(task, ci_result, gate:, pass:, ctx:)
+        reason = ci_result.respond_to?(:reason) ? ci_result.reason : nil
         case ci_result.status
         when :stale
+          if reason
+            write_ci_blocked_reason(task, ci_result, gate: gate, reason: reason)
+            Hive::Markers.set(task.state_file, :review_ci_stale,
+                              gate: gate, reason: reason, attempts: ci_result.attempts, pass: pass)
+            return { commit: "ci_#{gate}_#{reason}", status: :review_ci_stale }
+          end
+
           write_ci_blocked(task, ci_result, gate: gate)
           Hive::Markers.set(task.state_file, :review_ci_stale,
                             gate: gate, attempts: ci_result.attempts, pass: pass)
@@ -2436,16 +2444,16 @@ module Hive
           end
 
           message = truncate_marker_message(ci_result.error_message)
-          if ci_result.last_output && !ci_result.last_output.to_s.strip.empty?
+          if !reason && ci_result.last_output && !ci_result.last_output.to_s.strip.empty?
             artifact = write_ci_error(task, ci_result, gate: gate, pass: pass)
             message = "#{message} (captured output: #{artifact})"
           end
           Hive::Markers.set(
             task.state_file, :review_error,
-            phase: :ci, gate: gate, reason: "ci_unrunnable", pass: pass,
+            phase: :ci, gate: gate, reason: reason || "ci_unrunnable", pass: pass,
             message: message
           )
-          { commit: "ci_#{gate}_error", status: :review_error }
+          { commit: "ci_#{gate}_#{reason || 'error'}", status: :review_error }
         when :guardrail
           emit_guardrail_waivers(task, pass, ci_result.guardrail.waived_matches)
           ci_guardrail_terminal_result(
@@ -2489,6 +2497,19 @@ module Hive
           ```
           #{ci_result.last_output}
           ```
+        MD
+      end
+
+      # A typed hosted-CI block (e.g. base_conflict) is not a repair-loop
+      # exhaustion: no fix agent ran. Record the gate's own diagnosis and
+      # recovery steps in the same operator-facing file.
+      def write_ci_blocked_reason(task, ci_result, gate:, reason:)
+        path = File.join(task.folder, "reviews", "ci-blocked.md")
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, <<~MD)
+          # #{gate == "github" ? "GitHub" : "Local"} CI blocked: #{reason}
+
+          #{ci_result.last_output}
         MD
       end
 

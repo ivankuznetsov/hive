@@ -20,6 +20,7 @@ require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
+require "hive/stages/review/pass_archive"
 require "hive/task_activity"
 require "hive/command_operation"
 require "hive/command_error_kind"
@@ -448,6 +449,7 @@ module Hive
         commit_action = nil
         human_state_snapshot = nil
         rewind_state_snapshots = []
+        review_archive_moves = []
         completion_snapshot = nil
         with_optional_commit_lock(task.hive_state_path) do
           Hive::Lock.with_task_lock(
@@ -470,6 +472,7 @@ module Hive
               )
               rearm_backward_stages!(task, dest_stage, snapshots: rewind_state_snapshots)
               @post_rearm_mutation&.call(task)
+              archive_rewound_review_passes!(task, dest_stage, moves: review_archive_moves)
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
@@ -489,6 +492,9 @@ module Hive
                 ),
                 restore_rearmed_stages!(
                   task, new_folder, rewind_state_snapshots, observation: observation
+                ),
+                Hive::Stages::Review::PassArchive.restore!(
+                  rollback_folder(task, new_folder), review_archive_moves
                 )
               ].compact
               if rollback_issues.any?
@@ -541,6 +547,27 @@ module Hive
             Hive::AtomicFile.write(path, rearmed) unless rearmed == body
           end
         end
+      end
+
+      # A rewind through the workflow's review stage starts a new review
+      # generation. Review numbers passes from the top-level
+      # `reviews/*-NN.md` files and refuses a pass above its admitted
+      # ceiling, so prior-generation pass files would make the next
+      # `hive review` fail pre-flight (`reason=config_error`). Move them to
+      # `reviews/archive/<utc>-<from>-to-<to>/`; unnumbered review state
+      # (`ci-blocked.md`, `deferred-findings.md`, `suppressed.md`) stays.
+      # Runs after `post_rearm_mutation` so a composing caller that archives
+      # with its own label (outcome-evidence rework) keeps that label.
+      def archive_rewound_review_passes!(task, dest_stage, moves:)
+        destination = stage_for_dest!(task, dest_stage)
+        return unless destination.index < task.stage_index
+
+        review_stage = task.workflow.stages.find { |stage| stage.kind == :review_council }
+        return unless review_stage&.index&.between?(destination.index, task.stage_index)
+
+        label = "#{@clock.call.utc.strftime('%Y%m%dT%H%M%SZ')}-" \
+                "#{task.stage_index}-#{task.stage_name}-to-#{dest_stage}"
+        Hive::Stages::Review::PassArchive.archive!(task.folder, label: label, moves: moves)
       end
 
       def read_rewind_state_snapshot!(path, state_file)

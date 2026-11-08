@@ -594,7 +594,7 @@ module Hive
 
     def pr_status_rollup(worktree_path, number, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", number.to_s,
-                                  "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",
+                                  "--json", "mergeable,mergeStateStatus,baseRefName,statusCheckRollup,headRefOid,url",
                                   chdir: worktree_path,
                                   cfg: cfg)
       unless status.success?

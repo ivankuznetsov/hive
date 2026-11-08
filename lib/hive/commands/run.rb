@@ -551,8 +551,7 @@ module Hive
             "markers_to_clear" => [ "review_stale" ] }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, then refresh " \
-                              "`hive status --operational --json` and invoke this task's workflow.retry action",
+            "instructions" => review_ci_stale_instructions(marker),
             "markers_to_clear" => [ "review_ci_stale" ] }
         when :manual_steering
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
@@ -671,6 +670,17 @@ module Hive
         end
       end
 
+      def review_ci_stale_instructions(marker)
+        if marker.attrs["reason"].to_s == "base_conflict"
+          return "the PR conflicts with its base: merge origin/<base> into the task branch with a merge " \
+                 "commit (no rebase, no force-push) as reviews/ci-blocked.md describes, then refresh " \
+                 "`hive status --operational --json` and invoke this task's workflow.retry action"
+        end
+
+        "fix CI failures, edit reviews/ci-blocked.md, then refresh " \
+          "`hive status --operational --json` and invoke this task's workflow.retry action"
+      end
+
       def execute_waiting_next_action(task, marker)
         Hive::ExecuteWaitingAction.build(task, marker, rerun_with: friendly_command(task, marker))
       end
@@ -733,8 +743,7 @@ module Hive
           puts "  next: inspect or edit the highest-pass review files, then refresh " \
                "`hive status --operational --json` and invoke this task's workflow.retry action"
         when :review_ci_stale
-          puts "  next: fix CI failures, edit reviews/ci-blocked.md, then refresh " \
-               "`hive status --operational --json` and invoke this task's workflow.retry action"
+          puts "  next: #{review_ci_stale_instructions(marker)}"
         when :manual_steering
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error

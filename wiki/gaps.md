@@ -7,6 +7,24 @@ updated: 2026-11-08
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Review base-conflict gate and rewind archive (2026-11-08)
+
+- The hosted CI gate now blocks `mergeable=CONFLICTING` and fails closed on
+  unresolved mergeability, but it does not count *required* checks: a
+  MERGEABLE PR whose branch protection expects checks GitHub never created can
+  still settle green (the idea's "missing required checks" case). Finalize's
+  merge-time handling of `BEHIND` (guarded update-branch) is also still open.
+- Review does not offer an automatic merge-from-base step; the operator (or an
+  agent following `reviews/ci-blocked.md`) performs the merge commit.
+- After a backward approve archives a review generation, the new pass 01 GitHub
+  comment uses the same `### Reviewer: <name> - Pass 01` header as the archived
+  generation, so `GithubPublisher.already_posted?` skips it. The local review
+  file stays authoritative; the PR mirror is incomplete for re-reviewed
+  generations.
+- Not live-smoked against a real CONFLICTING PR; covered by unit doubles of the
+  `gh pr view` rollup only. No e2e scenario runs hosted checks (they are
+  disabled in e2e) or a backward approve into 6-review.
+
 ## Manual-retry admission identity fence (2026-11-08)
 
 Focused regression coverage exercises foreign existing-live admission through

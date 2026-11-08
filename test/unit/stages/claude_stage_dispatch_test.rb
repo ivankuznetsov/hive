@@ -487,6 +487,22 @@ class ClaudeStageDispatchTest < Minitest::Test
   # `claude_launch_failed` marker on the plan's own state file and returns
   # an error envelope instead of escaping as a crash (daemon auto-retry
   # keys on that reason).
+  def test_plan_bookkeeping_exhaustion_is_attributed_and_propagated
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- AGENT_WORKING -->\n")
+      error = Hive::Attempts::BookkeepingBusy.new(
+        operation: "checkpoint", attempt_id: "attempt-1", retry_count: 3, elapsed_sec: 30, budget_sec: 30
+      )
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*) { raise error }) do
+        assert_same error, assert_raises(Hive::Attempts::BookkeepingBusy) {
+          Hive::Stages::Plan.spawn_plan_agent(task, {}, "prompt", claude_profile({}))
+        }
+      end
+      assert_equal "runtime_bookkeeping_busy", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+    end
+  end
+
   def test_plan_claude_launch_failure_writes_claude_launch_failed_marker
     with_tmp_dir do |dir|
       cfg = {}

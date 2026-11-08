@@ -39,7 +39,11 @@ module Hive
             next
           end
           if expired?(@budget.deadline)
-            result = nonpaused("deadline_exhausted", lifecycle: current, checkpoint: passive)
+            result = nonpaused(
+              "deadline_exhausted", lifecycle: current,
+              checkpoint: passive.slice(:complete, :busy, :log_frames, :checkpointed_frames)
+                .merge(complete: false, passive_drain: passive)
+            )
             next
           end
           candidate = @lifecycle.mark_paused!(

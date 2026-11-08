@@ -105,6 +105,19 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_loss_reason_survives_recovery_projection_and_restart
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
+        lost = lost_without_worker(store, reason: reason)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        assert_equal reason, outcomes.ensure_for(lost, now: NOW + 32).fetch("failure_origin")
+        restarted = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        assert_equal reason, restarted.fetch(lost.attempt_id).fetch("failure_origin")
+      end
+    end
+  end
+
   def test_workerless_loss_without_a_worktree_becomes_ready
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
@@ -387,7 +400,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     store.mark_lost(with_worker, reason: "owner_gone", now: NOW + 3)
   end
 
-  def lost_without_worker(store)
+  def lost_without_worker(store, reason: "launch_timeout")
     launching = store.create_launching(
       attempt_id: "lost-no-worker", request_id: "request-no-worker",
       task_id: "42", project: "demo", task_slug: "durable-task",
@@ -397,6 +410,6 @@ class AttemptsLostOutcomeTest < Minitest::Test
       claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
-    store.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
+    store.mark_lost(launching, reason: reason, now: NOW + 31)
   end
 end

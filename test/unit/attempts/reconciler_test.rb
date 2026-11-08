@@ -141,6 +141,213 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_claimed_owner_ceiling_is_fixed_across_sweeps_and_restart
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 10, now: NOW)
+      [ 11, 29.999 ].each do |elapsed|
+        snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + elapsed)
+        assert_equal :suspect, snapshot.attempts.first.classification
+        assert_equal 1, snapshot.capacity.global_count
+        assert_equal claimed.to_h, store.fetch(claimed.attempt_id).to_h
+      end
+      result = reconciler(store, :unverifiable).reconcile(now: NOW + 30)
+      assert_equal :lost, result.attempts.first.classification
+      assert_equal 0, result.capacity.global_count
+      lost = store.fetch(claimed.attempt_id)
+      assert_equal "first_heartbeat_owner_unverifiable_ceiling", lost.bookkeeping_reason
+      assert_equal (NOW + 30).iso8601(6), lost["diagnostics"].fetch("first_heartbeat_owner_unverifiable_ceiling_at")
+      assert_equal "no_worker", lost["diagnostics"].fetch("worker_group")
+      assert_equal "unverifiable", lost["diagnostics"].fetch("owner_status")
+      assert_empty reconciler(store, :unverifiable).reconcile(now: NOW + 100).newly_lost_attempts
+    end
+  end
+
+  def test_matching_claimed_owner_never_expires_at_the_unverifiable_ceiling
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      [ 2, 3, 30 ].each do |elapsed|
+        snapshot = reconciler(store, :matching).reconcile(now: NOW + elapsed)
+        assert_empty snapshot.newly_lost_attempts
+        assert_equal [ claimed.attempt_id ], snapshot.capacity.reserved_attempt_ids
+      end
+    end
+  end
+
+  def test_legacy_or_invalid_claim_time_retains_capacity_without_guessing_a_ceiling
+    [ nil, "invalid-time", 42 ].each do |claimed_at|
+      with_store do |store|
+        claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                              first_heartbeat_timeout_sec: 1, now: NOW)
+        legacy = claimed.with("diagnostics" => { "claimed_at" => claimed_at })
+        store.database.transaction do |db|
+          db[:attempts].where(attempt_id: legacy.attempt_id).update(legacy.to_row)
+        end
+        snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + 100)
+        assert_equal :suspect, snapshot.attempts.first.classification
+        assert_equal [ legacy.attempt_id ], snapshot.capacity.reserved_attempt_ids
+        assert_equal legacy.to_h, store.fetch(legacy.attempt_id).to_h
+      end
+    end
+  end
+
+  def test_ceiling_rechecks_identity_and_preserves_a_proven_live_worker
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      # A worker identity may have been recovered from another bookkeeping try.
+      worker = OWNER.merge("pid" => 456, "process_group_id" => 456)
+      claimed = claimed.with("worker" => worker)
+      store.define_singleton_method(:active_attempts) { [ claimed ] }
+      store.define_singleton_method(:fetch) { |*, **| claimed }
+      identity = InterruptionIdentity.new(:unverifiable, :matching)
+      identity.define_singleton_method(:terminate_orphan_group) { |**| flunk "live custody must retain capacity" }
+      snapshot = Hive::Attempts::Reconciler.new(store: store, process_identity: identity).reconcile(now: NOW + 3)
+      assert_equal :suspect, snapshot.attempts.first.classification
+      assert_equal 1, snapshot.capacity.global_count
+      assert_equal "matching", snapshot.attempts.first.evidence.fetch("worker_group")
+
+      statuses = [ :unverifiable, :matching ]
+      identity.define_singleton_method(:status) { |_| statuses.shift || :matching }
+      snapshot = Hive::Attempts::Reconciler.new(store: store, process_identity: identity).reconcile(now: NOW + 4)
+      assert_equal :suspect, snapshot.attempts.first.classification
+      assert_equal :matching, snapshot.attempts.first.owner_status
+    end
+  end
+
+  def test_ceiling_busy_disposition_retries_without_resetting_the_persisted_window
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      store.pending_bookkeeping.record_busy(claimed, operation: "first_heartbeat")
+      mark_lost = store.method(:mark_lost)
+      store.define_singleton_method(:mark_lost) do |*, **|
+        raise Hive::RuntimeControlPlane::FileFence::Busy, "busy"
+      end
+      first = reconciler(store, :unverifiable).reconcile(now: NOW + 3)
+      assert_equal 1, first.capacity.global_count
+      assert_equal :suspect, first.attempts.first.classification
+      assert store.pending_bookkeeping.present?(claimed)
+      store.define_singleton_method(:mark_lost, mark_lost)
+      second = reconciler(store, :unverifiable).reconcile(now: NOW + 4)
+      assert_equal :lost, second.attempts.first.classification
+      assert_equal "first_heartbeat_owner_unverifiable_ceiling", second.attempts.first.attempt.bookkeeping_reason
+      assert_equal 0, second.capacity.global_count
+    end
+  end
+
+  def test_eperm_and_empty_fingerprints_expire_claimed_owners_but_never_running_owners
+    [ :eperm, :empty_live, :empty_recorded ].each do |failure|
+      with_store do |store|
+        owner = failure == :empty_recorded ? OWNER.merge("start_fingerprint" => "") : OWNER
+        claimed = store.claim(create(store), owner: owner, claim_capability: CLAIM_CAPABILITY,
+                              first_heartbeat_timeout_sec: 1, now: NOW)
+        identity = Hive::Attempts::ProcessIdentity.new(
+          signaler: ->(*_) { true },
+          start_reader: ->(_) { raise Errno::EPERM if failure == :eperm; failure == :empty_live ? "" : "start-1" },
+          session_reader: ->(_) { 123 }, group_reader: ->(_) { 123 }
+        )
+        before = Hive::Attempts::Reconciler.new(store: store, process_identity: identity).reconcile(now: NOW + 2.999)
+        assert_equal :suspect, before.attempts.first.classification
+        at_ceiling = Hive::Attempts::Reconciler.new(store: store, process_identity: identity).reconcile(now: NOW + 3)
+        assert_equal :lost, at_ceiling.attempts.first.classification, failure.to_s
+        assert_equal 0, at_ceiling.capacity.global_count
+      end
+    end
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 1)
+      snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + 1000)
+      assert_equal :suspect, snapshot.attempts.first.classification
+      assert_equal [ running.attempt_id ], snapshot.capacity.reserved_attempt_ids
+    end
+  end
+
+  def test_ceiling_replays_valid_completion_and_diagnoses_corrupt_completion
+    [ false, true ].each do |corrupt|
+      with_store do |store|
+        claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                              first_heartbeat_timeout_sec: 1, now: NOW)
+        # Prepared evidence carries its own validated start time even when the
+        # first running-state publication was deferred.
+        receipt = prepare_pending_completion(store, claimed.with("started_at" => NOW.iso8601(6)))
+        File.write(store.log_archive.hot_path(claimed.attempt_id), "changed") if corrupt
+        result = reconciler(store, :unverifiable).reconcile(now: NOW + 3).attempts.first
+        assert_equal corrupt ? :lost : :terminal, result.classification
+        if corrupt
+          assert_equal "first_heartbeat_owner_unverifiable_ceiling", result.attempt.bookkeeping_reason
+          assert_equal "invalid", result.evidence.fetch("pending_bookkeeping")
+          assert store.pending_bookkeeping.present?(result.attempt)
+        else
+          assert_equal receipt, result.attempt.receipt
+          assert_nil result.attempt["loss"]
+        end
+      end
+    end
+  end
+
+  def test_first_heartbeat_winning_ceiling_disposition_cas_remains_running
+    with_store do |store|
+      live_owner = Hive::Attempts::ProcessIdentity.new.capture(Process.pid).to_h
+      claimed = store.claim(create(store), owner: live_owner, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      mark_lost = store.method(:mark_lost)
+      store.define_singleton_method(:mark_lost) do |record, **options|
+        first_heartbeat(record, stale_sec: 30, now: NOW + 3)
+        mark_lost.call(record, **options)
+      end
+      snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + 3)
+      assert_empty snapshot.newly_lost_attempts
+      assert_equal 1, snapshot.capacity.global_count
+      assert_equal "running", store.fetch(claimed.attempt_id).state
+    end
+  end
+
+  def test_terminal_receipt_winning_ceiling_cas_prevents_loss
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      writer = store.log_archive.open_writer(claimed.attempt_id)
+      writer.close
+      receipt = store.prepare_terminal_receipt(
+        claimed.with("started_at" => NOW.iso8601(6)), outcome: "succeeded", exit_status: 0,
+        final_checkpoint: claimed.checkpoint, output_references: [],
+        log_reference: Hive::OutputReference.build(writer.path, root: store.root), now: NOW + 2
+      )
+      mark_lost = store.method(:mark_lost)
+      store.define_singleton_method(:mark_lost) do |record, **options|
+        commit_prepared_terminal(record, receipt, allow_claimed_launch: true)
+        mark_lost.call(record, **options)
+      end
+      snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + 3)
+      assert_empty snapshot.newly_lost_attempts
+      assert_equal 0, snapshot.capacity.global_count
+      assert_equal receipt, store.fetch(claimed.attempt_id).receipt
+      assert_equal :terminal, reconciler(store, :unverifiable).reconcile(now: NOW + 4).attempts.first.classification
+    end
+  end
+
+  def test_competing_ceiling_disposition_emits_only_one_new_loss
+    with_store do |store|
+      claimed = store.claim(create(store), owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+                            first_heartbeat_timeout_sec: 1, now: NOW)
+      mark_lost = store.method(:mark_lost)
+      competing = nil
+      store.define_singleton_method(:mark_lost) do |record, **options|
+        define_singleton_method(:mark_lost, mark_lost)
+        competing = Hive::Attempts::Reconciler.new(store: self, process_identity: FakeIdentity.new(:unverifiable))
+          .reconcile(now: NOW + 3)
+        mark_lost.call(record, **options)
+      end
+      snapshot = reconciler(store, :unverifiable).reconcile(now: NOW + 3)
+      assert_empty snapshot.newly_lost_attempts
+      assert_equal [ claimed.attempt_id ], competing.newly_lost_attempts.map(&:attempt_id)
+      assert_equal 0, snapshot.capacity.global_count
+      assert_equal 0, competing.capacity.global_count
+      assert_empty reconciler(store, :unverifiable).reconcile(now: NOW + 4).newly_lost_attempts
+    end
+  end
+
   def test_valid_terminal_receipt_has_highest_precedence
     with_store do |store|
       running = running_attempt(store, stale_sec: 30)

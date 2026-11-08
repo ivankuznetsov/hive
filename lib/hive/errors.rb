@@ -314,13 +314,14 @@ module Hive
   # emitting the JSON document its caller requested. Carry the worker's exact
   # exit status through the ordinary command envelope/rescue path.
   class AttemptExecutionError < Error
-    attr_reader :attempt_id, :outcome
+    attr_reader :attempt_id, :outcome, :reason
 
-    def initialize(message, exit_code:, attempt_id:, outcome:)
+    def initialize(message, exit_code:, attempt_id:, outcome:, reason: nil)
       super(message)
       @attempt_exit_code = Integer(exit_code)
       @attempt_id = attempt_id.to_s
       @outcome = outcome.to_s
+      @reason = reason
     end
 
     def exit_code

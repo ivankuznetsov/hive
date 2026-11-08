@@ -921,7 +921,7 @@ module Hive
         # hid it.
         Hive::Markers.set(task.state_file, :review_error,
                           phase: @current_phase || :pre_flight,
-                          reason: "runner_exception",
+                          reason: Hive::Attempts::BookkeepingReason.from(e) || "runner_exception",
                           exception_class: e.class.name,
                           message: truncate_marker_message(e.message))
         raise
@@ -1742,10 +1742,10 @@ module Hive
             # silently dropping the unenforceable reviewer — a silent security
             # downgrade. Re-raise so the outer `Stages::Review.run!`
             # Hive::ConfigError rescue stamps the `config_error` review_error
-            # marker and hard-fails the run. Only the typed config error
-            # propagates; genuine per-reviewer infra failures (spawn errors,
-            # adapter timeouts) still degrade to a recorded :error below.
-            raise if e.is_a?(Hive::ConfigError)
+            # marker and hard-fails the run. Typed config errors and runtime
+            # bookkeeping failures propagate; per-reviewer spawn/adapter
+            # failures still degrade to a recorded :error below.
+            raise if e.is_a?(Hive::ConfigError) || Hive::Attempts::BookkeepingReason.from(e)
 
             Hive::Reviewers::Result.new(
               name: spec["name"],

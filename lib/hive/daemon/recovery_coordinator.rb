@@ -1002,6 +1002,9 @@ module Hive
         if terminal
           changes["terminal_outcome"] = outcome
           changes["terminal_at"] = now.utc.iso8601(6)
+          if (reason = terminal_bookkeeping_reason(current, attempt_id))
+            changes["failure_origin"] = reason
+          end
         end
         transitioned = request_queue.update_recovery!(
           request.request_id,
@@ -1058,7 +1061,7 @@ module Hive
 
           Hive::Markers.set(
             locked_task.state_file, :error,
-            reason: "recovery_attempt_failed",
+            reason: terminal_bookkeeping_reason(current, recovery["attempt_id"]) || "recovery_attempt_failed",
             attempt_id: recovery["attempt_id"],
             outcome: recovery["terminal_outcome"],
             recovery_request_id: current.request_id
@@ -1351,6 +1354,21 @@ module Hive
         record.attempt_id.to_s == source_receipt["attempt_id"].to_s &&
           terminal["receipt_version"] == source_receipt["receipt_version"] &&
           terminal["terminal_lease_version"] == source_receipt["terminal_lease_version"]
+      end
+
+      def terminal_bookkeeping_reason(request, attempt_id)
+        record = attempts_store.fetch(attempt_id)
+        return nil unless record&.final? && record.respond_to?(:bookkeeping_reason)
+        return nil unless record.attempt_id.to_s == attempt_id.to_s
+        return nil unless record["project"].to_s == request.project.to_s &&
+                          record["task_id"].to_s == request.task_id.to_s &&
+                          record["task_slug"].to_s == request.slug.to_s &&
+                          record["intended_stage"].to_s == request.expected_stage.to_s &&
+                          record.task_generation.to_s == request.task_generation.to_s
+
+        record.bookkeeping_reason
+      rescue Hive::Error, SystemCallError, IOError
+        nil
       end
 
       def attempts_store

@@ -1878,14 +1878,32 @@ that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
 
 - Runtime contention qualification has not reproduced the historical long
-  publisher hold. Initial measurements include one residual manual writer
-  hold over one second; checkpoint and recovery qualification remain pending.
+  publisher hold. Initial measurements retain one residual manual hold over
+  one second as negative evidence. The November 8 named gate runs the fixed
+  comparison three times plus real daemon/four-supervisor held-lock scenarios;
+  it establishes deterministic recovery and invocation counts, not historical
+  long-hold reduction or a long-running steady-state WAL maximum.
 
-- The bounded bookkeeping interface has deterministic full-envelope tests and
-  a real held-lock claim test. Crash/restart pending-operation persistence,
-  end-to-end transient attribution and the combined daemon/four-supervisor
-  workload still require their planned recovery and qualification evidence.
+- The bounded bookkeeping interface now has default full-envelope invariants,
+  restart pending-receipt replay, typed stage/recovery attribution and a named
+  daemon/four-supervisor gate. Its real contention cases shorten retry budgets;
+  injected-clock tests independently check 30/600-second bounds. Legacy claimed
+  rows without a valid persisted `diagnostics.claimed_at` cannot derive the
+  fixed unverifiable-owner ceiling and retain the conservative old policy.
 
 - The November 3 runtime CI repair is locally reproduced and checked against
   the failed test files and both dependency audits. Hosted checks for the new
   commit remain pending; this does not close the workload qualification gaps.
+
+- November 8 local changed-source coverage encounters `Errno::ESRCH` when
+  unchanged `InvocationProcessCustody` reads `/proc/2067241/environ` for a
+  defunct 1Password process on this host. Both OpenCode integration tests
+  reproduce the error in isolation; this blocks a clean wider validation
+  receipt independently of the runtime bookkeeping regressions.
+
+- The November 8 broad checkpoint completed with three failures and 23 errors.
+  Besides independently reproduced OpenCode procfs errors, its public-help
+  snapshot assertion observed concurrent checkout/test/Git writes. The focused
+  bookkeeping tests and named contention gate pass. The unmodified public-help
+  snapshot file passes with a quiet checkout (2 tests / 52 assertions); this
+  is not broad-suite success evidence.

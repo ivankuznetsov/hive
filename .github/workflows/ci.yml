@@ -140,6 +140,8 @@ jobs:
             task: test:setup_agents_integration
           - name: operational status read-only mounts
             task: test:status_read_only
+          - name: runtime database contention
+            task: test:runtime_database_contention
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:
@@ -154,6 +156,14 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain runtime contention evidence
+        if: ${{ always() && matrix.task == 'test:runtime_database_contention' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-database-contention-evidence
+          path: tmp/runtime-database-contention-evidence.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain read-only mount evidence
         if: ${{ always() && matrix.task == 'test:status_read_only' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

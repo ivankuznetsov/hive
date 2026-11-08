@@ -7,6 +7,24 @@ module Hive
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 
+    module BookkeepingReason
+      VALUES = %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].freeze
+
+      def self.from(value)
+        if value.is_a?(Hash)
+          reason = value[:error_reason] || value["error_reason"] || value[:reason] || value["reason"]
+          return reason if VALUES.include?(reason)
+        else
+          candidates = value.is_a?(Exception) ? Hive::InternalError.exception_chain(value) : [ value ]
+          candidates.each do |candidate|
+            reason = candidate.reason if candidate.respond_to?(:reason)
+            return reason if VALUES.include?(reason)
+          end
+        end
+        nil
+      end
+    end
+
     ClientResult = Data.define(
       :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes,
       :output_status, :reason

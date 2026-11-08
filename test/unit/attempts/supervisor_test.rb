@@ -147,8 +147,117 @@ class AttemptsSupervisorTest < Minitest::Test
       with_replaced_singleton_method(Process, :wait2, ->(pid, _flags) { wait.call(pid) }) do
         assert_equal 0, supervisor.run
       end
-      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      refute_nil terminal.worker
       assert_nil supervisor.instance_variable_get(:@cancel_reason)
+    end
+  end
+
+  def test_cancellation_before_registration_persists_worker_identity
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.05
+      )
+      supervisor.instance_variable_set(:@cancel_reason, :signal)
+      supervisor.instance_variable_set(:@cancel_signal, "TERM")
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+    end
+  end
+
+  def test_timeout_before_registration_persists_worker_identity
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        timeout_sec: Float::MIN, kill_grace_sec: 0.05
+      )
+
+      assert_equal 124, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+    end
+  end
+
+  def test_quiescence_before_registration_persists_worker_custody_before_interruption
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.05
+      )
+      identity = supervisor.method(:process_identity)
+      supervisor.define_singleton_method(:process_identity) do |pid|
+        captured = identity.call(pid)
+        unless pid == Process.pid
+          lifecycle.begin_quiesce!(
+            deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+            boot_id: "test-boot", shutdown_grace_sec: 0.05
+          )
+          @cancel_reason = :signal
+          @cancel_signal = "TERM"
+        end
+        captured
+      end
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "interrupted", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+      assert_equal lifecycle.current.generation, terminal.receipt.fetch("pause_generation")
+      cleanup_writes = store.database.read do |db|
+        db[:quiescence_cleanup_writes].select_map(:attempt_id)
+      end
+      assert_equal [ attempt.attempt_id, "worker:#{attempt.attempt_id}" ].sort, cleanup_writes.sort
+    end
+  end
+
+  def test_cancelled_hive_worker_registration_does_not_release_execution_gate
+    with_attempt(worker_argv: [ "hive", "run", "durable-task" ]) do |store, attempt|
+      invoked = File.join(store.root, "unexpected-execution")
+      worker = <<~'RUBY'
+        gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+        File.write(ARGV.fetch(0), "executed") if gate.read(1) == "1"
+        sleep 30
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.3
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker, invoked ]
+      end
+      signal = supervisor.method(:signal_worker_group)
+      supervisor.define_singleton_method(:signal_worker_group) do |name|
+        name == "TERM" ? true : signal.call(name)
+      end
+      supervisor.instance_variable_set(:@cancel_reason, :signal)
+      supervisor.instance_variable_set(:@cancel_signal, "TERM")
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      refute_nil store.fetch(attempt.attempt_id).worker
+      refute File.exist?(invoked)
+    end
+  end
+
+  def test_short_worker_registration_retries_before_publishing_terminal_receipt
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      calls = fail_store_calls(store, :checkpoint, times: 1)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      assert_equal 2, calls.call
+      refute_nil store.fetch(attempt.attempt_id).worker
     end
   end
 
@@ -440,15 +549,19 @@ class AttemptsSupervisorTest < Minitest::Test
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY), timeout_sec: 0.1,
         heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5,
-        kill_grace_sec: 0.05
+        kill_grace_sec: 0.05, busy_tolerance_sec: 0.1
       )
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      assert_equal 124, Timeout.timeout(2) { supervisor.run }
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(2) { supervisor.run } }
       assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1.0
       terminal = store.fetch(attempt.attempt_id)
-      assert_equal "cancelled", terminal.outcome
-      reference = terminal.receipt.fetch("log_reference")
-      frames = Hive::Attempts::StreamLog.read(File.join(store.root, reference.fetch("path")))
+      assert_equal "running", terminal.state
+      assert_nil terminal.receipt
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(
+        "pid" => supervisor.instance_variable_get(:@worker_pid)
+      )
+      assert_equal :valid, store.pending_bookkeeping.read(terminal).status
+      frames = Hive::Attempts::StreamLog.read(store.log_archive.hot_path(attempt.attempt_id))
       assert frames.any? { |frame| frame.bytes.include?("started") }
     end
   end

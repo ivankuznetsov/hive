@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-08
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -86,6 +86,19 @@ concurrent admission and ambiguous worker registration, and error preservation
 when bounded SQL timeout cleanup fails. Supervisor race tests control worker
 exit and registration observation explicitly so those paths do not depend on
 scheduler timing.
+
+`bundle exec rake test:runtime_database_contention` is a separate CI merge gate.
+It runs one daemon publisher/reconciler with four real supervisors through
+held-lock release and exhaustion for claim, first heartbeat, worker registration,
+heartbeat and terminal publication. It checks invocation counts, typed reasons,
+restart receipt replay and per-role checkpoint pragmas, then invokes the fixed
+writer-comparison and pinned-reader checkpoint fixtures. CI retains
+`tmp/runtime-database-contention-evidence.json`. Short real lock holds use
+reduced retry budgets; the default `runtime_database_contention_invariants_test`
+independently checks the full 30/600-second envelopes with an injected clock.
+The attempt reconciler tests cover persisted ceiling boundaries, identity
+rechecks, EPERM/empty fingerprints, worker custody, busy retry and receipt/CAS
+precedence. Timing observations remain evidence, without CI performance ratios.
 
 ```bash
 bin/test --changed --list                    # inspect files, commands, fallback reasons

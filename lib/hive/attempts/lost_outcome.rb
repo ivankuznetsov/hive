@@ -107,6 +107,7 @@ module Hive
           "task_generation" => row.fetch(:task_generation),
           "project" => row.fetch(:project_name), "task_slug" => row.fetch(:task_slug),
           "phase" => row.fetch(:lost_recovery_phase),
+          "failure_origin" => Record.from_row(row).bookkeeping_reason || "attempt_lost",
           "cleanup" => row[:lost_recovery_cleanup],
           "request_id" => row[:lost_recovery_request_id],
           "revision" => row.fetch(:lost_recovery_revision),

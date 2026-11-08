@@ -452,6 +452,15 @@ module Hive
       end
 
       def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+        if (reason = Hive::Attempts::BookkeepingReason.from(impl_result))
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :error,
+            attrs: { reason: reason, status: impl_result[:status], message: impl_result[:error_message] },
+            commit: reason, status: :error, waiting_reason: reason
+          )
+        end
+
         if implementer_model_unsupported?(impl_result)
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
@@ -519,6 +528,13 @@ module Hive
       # Preserve the exception for the attempt receipt while also publishing
       # the same recoverable marker used by ordinary implementation failures.
       def mark_implementer_exception(task, cfg, error)
+        if (reason = Hive::Attempts::BookkeepingReason.from(error))
+          return Hive::Markers.set(
+            task.state_file, :error, reason: reason, status: "exception",
+            exception_class: error.class.name, message: AgentCliRuntime::Redactor.diagnostic(error)
+          )
+        end
+
         Hive::Markers.set(
           task.state_file, :error,
           reason: "implementer_failed",

@@ -7,6 +7,17 @@ class AttemptsPendingBookkeepingTest < Minitest::Test
   OWNER = { "pid" => 123, "start_fingerprint" => "owner", "session_id" => 123, "process_group_id" => 123 }.freeze
   SECRET = "c" * 64
 
+  def test_completion_replays_when_the_store_root_traverses_a_symlink
+    with_running(symlink_root: true) do |store, record|
+      receipt = receipt_for(store, record)
+      store.pending_bookkeeping.prepare_completion(record, receipt: receipt)
+      pending = Hive::Attempts::PendingBookkeeping.new(store: store)
+      result = pending.read(record)
+      assert_equal :valid, result.status
+      assert_equal receipt, pending.replay(record, result.document).receipt
+    end
+  end
+
   def test_prepared_completion_is_private_and_replays_exact_receipt_after_restart
     with_running do |store, record|
       receipt = receipt_for(store, record)
@@ -153,8 +164,15 @@ class AttemptsPendingBookkeepingTest < Minitest::Test
 
   private
 
-  def with_running
+  def with_running(symlink_root: false)
     with_tmp_dir do |root|
+      if symlink_root
+        target = File.join(root, "state")
+        FileUtils.mkdir_p(target)
+        link = File.join(root, "linked-state")
+        File.symlink(target, link)
+        root = File.join(link, "runtime")
+      end
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
       launching = store.create_launching(
         attempt_id: "pending-attempt", request_id: "pending-request", task_id: "42",

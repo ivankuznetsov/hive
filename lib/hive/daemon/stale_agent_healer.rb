@@ -174,7 +174,7 @@ module Hive
           @logger.event(
             :marker_healed,
             project: attempt["project"], slug: attempt["task_slug"],
-            stage: attempt["intended_stage"], reason: "attempt_lost",
+            stage: attempt["intended_stage"], reason: attempt.bookkeeping_reason || "attempt_lost",
             attempt_id: attempt.attempt_id,
             recovery_request_id: completed.fetch("request_id"),
             replacement_attempt_id: result.attempt&.attempt_id,
@@ -184,7 +184,7 @@ module Hive
           @logger.event(
             :marker_heal_failed,
             project: attempt["project"], slug: attempt["task_slug"],
-            stage: attempt["intended_stage"], reason: "attempt_lost",
+            stage: attempt["intended_stage"], reason: attempt.bookkeeping_reason || "attempt_lost",
             error: "#{e.class}: #{e.message}"
           )
         end
@@ -426,6 +426,7 @@ module Hive
 
       def error_heal_label(row, reason)
         return "finalize_unpushed_commits" if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
+        return reason if Hive::Attempts::BookkeepingReason::VALUES.include?(reason)
         return "limits_reached" if reason == "limits_reached"
         return "stage_timeout" if reason == "timeout"
         return "clean_exit_residue" if reason == "ensure_clean_on_exit_failed"
@@ -439,6 +440,7 @@ module Hive
       # keep their own reason as the label.
       def review_heal_label(reason)
         case reason
+        when *Hive::Attempts::BookkeepingReason::VALUES then reason
         when "review_agent_died", "fix_failed", "reviewer_partial_failure" then reason
         when "limits_reached" then "reviewer_limits_reached"
         when "all_failed" then "reviewer_all_failed"

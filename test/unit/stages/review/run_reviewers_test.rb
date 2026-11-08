@@ -858,6 +858,26 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_exhaustion_aborts_reviewers_without_attributing_provider_failure
+    with_tmp_dir do |dir|
+      specs = [ { "name" => "busy", "output_basename" => "busy" }, { "name" => "ok", "output_basename" => "ok" } ]
+      cfg = { "review" => { "reviewers" => specs } }
+      ctx = make_ctx(dir)
+      error = Hive::Attempts::BookkeepingBusy.new(
+        operation: "checkpoint", attempt_id: "attempt-1", retry_count: 3, elapsed_sec: 30, budget_sec: 30
+      )
+      busy = RaisingReviewer.new(specs.first, ctx)
+      busy.define_singleton_method(:run!) { |deadline: nil| raise error }
+      with_stubbed_dispatch([ busy, OkReviewer.new(specs.last, ctx) ]) do
+        assert_same error, assert_raises(Hive::Attempts::BookkeepingBusy) {
+          Hive::Stages::Review.run_reviewers(cfg, ctx, Task.new(dir, File.join(dir, "task.md")))
+        }
+      end
+      refute File.exist?(File.join(dir, "reviews", "ok-01.md"))
+      refute File.exist?(File.join(dir, "reviews", "errors-01.md"))
+    end
+  end
+
   def test_first_reviewer_raise_does_not_abort_second
     with_tmp_dir do |dir|
       cfg = {

@@ -78,4 +78,79 @@ maximum and lifecycle behavior at that maximum remain qualification work for
 the combined implementation. Deterministic tests separately cover cadence,
 process and overlap guards, deferred errors, lifecycle operation/writer fences,
 closed admission, transaction rejection and pre-pause error/deadline exhaustion.
-The broad local checkpoint has not been run for this unit.
+At the original checkpoint-policy capture, the broad local checkpoint had
+not been run; the combined qualification below records the later checks.
+
+## Combined recovery qualification, November 8
+
+Review-pass implementation based on `3335aef8d0` adds the default
+`test/unit/runtime_database_contention_invariants_test.rb` and the named
+`bundle exec rake test:runtime_database_contention` gate. CI runs the gate
+separately and retains `tmp/runtime-database-contention-evidence.json`.
+The final gate passed locally: three tests, 113 assertions. Its ten held-lock cases
+run one daemon publisher/reconciler and four actual supervisors through claim,
+first heartbeat, worker registration, heartbeat and terminal publication.
+A barrier places the SQLite writer hold at the selected operation. Each
+success case releases after 0.25 seconds with a five-second test envelope;
+each exhaustion case holds for 0.6 seconds against a 0.2-second test envelope.
+These shortened real-lock cases establish operation behavior and invocation
+counts, not wall-clock proof of production envelopes. Default injected-clock
+invariants separately exercise 30-second startup and 600-second live-operation
+budgets, success after more than 30 seconds, and nested calls sharing one try.
+
+All four supervisors returned zero on lock release. Exhaustion returned
+TEMPFAIL with `runtime_bookkeeping_busy`; prestart cases invoked no workers,
+while live/terminal cases invoked each worker once. Restarting reconciliation
+replayed the prepared terminal successes without another invocation. The
+per-role pragmas were zero for the daemon and 4096 for every manual supervisor.
+The publisher retains the pinned 5 Hz cadence; the largest sampled WAL
+allocation across the short combined matrix was 1,355,512 bytes. Transaction
+observations retain acquisition wait and hold independently.
+The gate also executes both original fixtures, including all three fixed-size
+writer-comparison repetitions. This capture had zero holds over one second;
+the earlier negative baseline reproduction and its residual warning remain
+unchanged. No historical incident resolution or performance ratio is claimed.
+
+The pinned-reader fixture again reached 20,175,672 WAL bytes / 4897 frames.
+After reader release, PASSIVE drained all frames in 0.375 ms; quiescence took
+22.87 ms, including a 0.128 ms passive pre-drain and 0.164 ms FULL checkpoint.
+Upgrade TRUNCATE took 3.52 ms and reduced WAL bytes to zero. The unchanged
+budgets were 600 seconds for quiescence and 15 seconds for upgrade SQLite.
+This fixed-size pinned workload is storage feasibility evidence, not a
+long-running steady-state WAL bound for the combined workload.
+
+Additional unit regressions cover the fixed claimed-owner ceiling immediately
+before and at expiry, restart stability, EPERM and empty fingerprints, matching
+owner protection, proven live worker custody, deferred SQL disposition, pending
+completion precedence and a delayed first heartbeat winning the lease CAS.
+They also verify cancellation before worker registration, quiescence's separate
+custody/finalization allowances, typed reasons through stage/recovery consumers,
+symlinked store ancestors and the production deadline-exhausted JSON schema.
+
+The changed-source coverage run (`HIVE_COVERAGE_BASE=HEAD bundle exec rake
+coverage:changed`) selected 14 sources and 93 focused files. Its 2205 tests had
+no assertion failures but two OpenCode integration errors: unchanged
+`InvocationProcessCustody` raises `Errno::ESRCH` reading the environment of a
+defunct 1Password process on this host. Both errors reproduce in the isolated
+OpenCode file. The coverage task stops before enforcing its per-file gate, so
+this run does not establish exact changed-source coverage.
+
+The explicit regression selection passed 563 tests / 2998 assertions.
+Pending-bookkeeping and supervisor suites also passed with TMPDIR traversing a
+symlink: 69 tests / 429 assertions. Changed Ruby files pass RuboCop.
+
+The broad `bin/test --all` checkpoint completed in 1286 seconds: 16,015
+tests / 306,010 assertions, with three failures, 23 errors and 14 skips.
+OpenCode procfs cleanup errors reproduce in the isolated lifecycle file
+(29 tests: two failures / 20 errors) as well as the integration file. The
+public-help repository snapshot assertion also observed concurrent checkout
+activity during the broad run, which included the local fix commit. These
+wider failures are not treated as a passing broad checkpoint.
+
+A final reconciler regression also covers legacy/malformed persisted claim
+timestamps without guessing a ceiling: 39 tests / 199 assertions passed.
+
+With the broad workers stopped and the checkout quiet, the unmodified public-
+help snapshot test passes in isolation: two tests / 52 assertions. This
+confirms the snapshot failure depends on concurrent checkout activity; it does
+not erase the failed broad checkpoint or the OpenCode procfs errors.

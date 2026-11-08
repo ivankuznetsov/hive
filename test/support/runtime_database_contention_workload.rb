@@ -29,7 +29,8 @@ module RuntimeDatabaseContentionWorkload
       fork do
         measurements = []
         connection = Hive::RuntimeControlPlane::Database.new(
-          path: path, transaction_observer: ->(item) { measurements << item }
+          path: path, checkpoint_role: writer.zero? ? :daemon_backed : :manual,
+          transaction_observer: ->(item) { measurements << item }
         )
         connection.open!
         publisher = Hive::RuntimeControlPlane::OperationalRepository.new(database: connection)
@@ -57,6 +58,7 @@ module RuntimeDatabaseContentionWorkload
     measurements = Dir.glob(File.join(root, "writer-*.json")).flat_map { |name| JSON.parse(File.read(name)) }
     {
       manifest: MANIFEST.merge(snapshot_bytes: Hive::RuntimeControlPlane::Codec.dump_json(document).bytesize),
+      roles: { daemon_backed: 0, manual: 4096 },
       writers: measurements.group_by { |item| item.fetch("operation") }.transform_values do |items|
         {
           count: items.size, long_holds: items.count { |item| item.fetch("hold_sec").to_f > 1 },

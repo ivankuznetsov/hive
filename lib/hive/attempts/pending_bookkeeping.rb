@@ -68,7 +68,10 @@ module Hive
         receipt = document.fetch("terminal_receipt")
         return nil unless receipt
         references(receipt).each { |reference| verify_reference!(reference) }
-        @store.commit_prepared_terminal(record, receipt, authority: authority, timeout_sec: timeout_sec)
+        @store.commit_prepared_terminal(
+          record, receipt, authority: authority, timeout_sec: timeout_sec,
+          allow_claimed_launch: true
+        )
       end
 
       def present?(record)
@@ -176,7 +179,7 @@ module Hive
         OutputReference.validate_shape!(reference)
         relative = reference.fetch("path")
         field!(relative)
-        candidate = File.join(@store.root, relative)
+        candidate = File.join(@filesystem.realpath(@store.root), relative)
         parent = File.dirname(candidate)
         unless @filesystem.realpath(parent) == parent
           raise InvalidEvidence, "pending bookkeeping reference parent is redirected"

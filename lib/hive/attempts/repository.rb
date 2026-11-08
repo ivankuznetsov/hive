@@ -368,10 +368,13 @@ module Hive
       end
 
       def first_heartbeat(observed, stale_sec:, now:, timeout_sec: nil)
-        raise CompareAndSwapFailed, "first heartbeat deadline expired" if
-          observed.active_deadline && now > observed.active_deadline
         mutate(observed, operation: "attempt.first_heartbeat", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           raise CompareAndSwapFailed, "attempt has not been claimed" unless data["wrapper"]
+          deadline = data["first_heartbeat_deadline"] && Time.iso8601(data["first_heartbeat_deadline"])
+          if deadline && now > deadline &&
+             (data["wrapper"]["pid"] != Process.pid || ProcessIdentity.new.status(data["wrapper"]) != :matching)
+            raise CompareAndSwapFailed, "first heartbeat deadline expired"
+          end
 
           timestamp = Record.iso8601(now)
           data.merge(
@@ -393,7 +396,15 @@ module Hive
       end
 
       def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil, timeout_sec: nil)
-        mutate(observed, operation: "attempt.checkpoint", allowed_states: [ "running" ], timeout_sec: timeout_sec) do |data|
+        # First worker custody is cleanup bookkeeping even if quiescence won
+        # the race with spawn. Its one bounded write must not consume the
+        # separate terminal/interruption cleanup allowance.
+        registering_worker = worker && !observed.worker &&
+          Hive::StringifyKeys.call(checkpoint) == observed.checkpoint &&
+          output_references.nil? && log_reference.nil?
+        mutate(observed, operation: registering_worker ? "attempt.register_worker" : "attempt.checkpoint",
+               allowed_states: [ "running" ], timeout_sec: timeout_sec,
+               cleanup_attempt_id: registering_worker ? "worker:#{observed.attempt_id}" : nil) do |data|
           outputs = output_references.nil? ? data.fetch("current_outputs") :
             Hive::StringifyKeys.call(output_references)
           outputs.each { |reference| OutputReference.validate_shape!(reference) }
@@ -449,7 +460,8 @@ module Hive
         commit_prepared_terminal(observed, receipt, authority: authority, timeout_sec: timeout_sec)
       end
 
-      def commit_prepared_terminal(observed, receipt, authority: nil, timeout_sec: nil, reason: nil)
+      def commit_prepared_terminal(observed, receipt, authority: nil, timeout_sec: nil, reason: nil,
+                                   allow_claimed_launch: false)
         version = observed.lease_version + 1
         Record.validate_receipt!(
           receipt, attempt_id: observed.attempt_id, task_generation: observed.task_generation,
@@ -461,13 +473,16 @@ module Hive
         log_reference = receipt.fetch("log_reference")
         outcome = receipt.fetch("outcome")
         mutate(
-          observed, operation: "attempt.terminalize", allowed_states: [ "running" ], pending_receipt: receipt,
+          observed, operation: "attempt.terminalize",
+          allowed_states: allow_claimed_launch && observed.claimed? ? %w[launching running] : [ "running" ],
+          pending_receipt: receipt,
           authority: authority, cleanup_attempt_id: observed.attempt_id,
           timeout_sec: timeout_sec
         ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
-            "heartbeat_deadline" => nil, "ended_at" => receipt.fetch("ended_at"),
+            "claim_deadline" => nil, "first_heartbeat_deadline" => nil, "heartbeat_deadline" => nil,
+            "started_at" => data["started_at"] || receipt.fetch("started_at"), "ended_at" => receipt.fetch("ended_at"),
             "diagnostics" => reason ? data.fetch("diagnostics").merge("bookkeeping_reason" => reason) : data.fetch("diagnostics"),
             "latest_revision" => final_checkpoint["revision"] || final_checkpoint[:revision] || data["latest_revision"],
             "checkpoint" => Hive::StringifyKeys.call(final_checkpoint),

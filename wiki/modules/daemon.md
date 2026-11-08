@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-03
+updated: 2026-11-08
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -22,6 +22,11 @@ duration and deferred errors. Quiescence performs a bounded PASSIVE drain
 while still quiescing under controller authority, then preserves the checked
 FULL checkpoint and proof boundary. Upgrade source TRUNCATE checks remain.
 The quiesce v1 schema accepts the nested `checkpoint.passive_drain` metrics.
+If the deadline expires after PASSIVE but before pause, the envelope retains
+the same four checkpoint summary fields with `complete: false` and nests all
+eight passive metrics in `passive_drain`; it never claims a completed FULL
+checkpoint. Regression coverage validates the actual producer's JSON against
+the published schema.
 Explicit zero-timeout writer transactions retain nonblocking SQL semantics so
 an expired proof-publication deadline can roll its paused candidate back to
 quiescing under the held controller fence. Exhausted positive write budgets

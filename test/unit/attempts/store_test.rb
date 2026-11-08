@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/repository"
+require "hive/runtime_control_plane/lifecycle_repository"
 
 class AttemptsRepositoryTest < Minitest::Test
   include HiveTestHelper
@@ -30,6 +31,66 @@ class AttemptsRepositoryTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 16, 12)
   CLAIM_CAPABILITY = "c" * 64
+
+  def test_quiescing_permits_only_first_worker_custody_without_consuming_terminal_cleanup
+    with_repository do |repository|
+      launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = repository.claim(launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+                                 first_heartbeat_timeout_sec: 30, now: NOW)
+      running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 1)
+      Hive::RuntimeControlPlane::LifecycleRepository.new(database: repository.database).begin_quiesce!(
+        deadline_monotonic: 700, boot_id: "boot", shutdown_grace_sec: 120
+      )
+      worker = owner.merge("pid" => 456, "process_group_id" => 456)
+      [ { checkpoint: checkpoint }, { checkpoint: running.checkpoint, output_references: [] },
+        { checkpoint: running.checkpoint, log_reference: log_reference } ].each do |changes|
+        assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+          repository.checkpoint(running, worker: worker, now: NOW + 2, **changes)
+        end
+      end
+      registered = repository.checkpoint(running, worker: worker, checkpoint: running.checkpoint, now: NOW + 2)
+      assert_equal worker, registered.worker
+      assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) do
+        repository.checkpoint(registered, worker: worker.merge("pid" => 789), checkpoint: registered.checkpoint, now: NOW + 3)
+      end
+      terminal = repository.terminalize(
+        registered, outcome: "cancelled", exit_status: 143, final_checkpoint: registered.checkpoint,
+        output_references: [], log_reference: log_reference, now: NOW + 3
+      )
+      assert_equal "terminal", terminal.state
+      assert_equal 2, repository.database.read { |db| db[:quiescence_cleanup_writes].count }
+    end
+  end
+
+  def test_delayed_first_heartbeat_requires_the_exact_live_wrapper_and_cas
+    [ :matching, :reused, :other_process, :unverifiable ].each do |status|
+      with_tmp_dir do |root|
+        repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+        launching = repository.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+        live_owner = Hive::Attempts::ProcessIdentity.new.capture(Process.pid).to_h
+        live_owner = live_owner.merge("start_fingerprint" => "reused") if status == :reused
+        live_owner = live_owner.merge("pid" => Process.pid + 100_000) if status == :other_process
+        live_owner = live_owner.merge("start_fingerprint" => "") if status == :unverifiable
+        claimed = repository.claim(
+          launching, owner: live_owner, claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 1, now: NOW
+        )
+        if status == :matching
+          running = repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 10)
+          assert_equal "running", running.state
+          assert_equal live_owner, running.wrapper
+          assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+            repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 11)
+          end
+        else
+          assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+            repository.first_heartbeat(claimed, stale_sec: 30, now: NOW + 10)
+          end
+          assert_equal claimed.to_h, repository.fetch(claimed.attempt_id).to_h
+        end
+      end
+    end
+  end
 
   def test_expired_claim_requires_the_exact_live_wrapper_capability_and_cas
     with_tmp_dir do |root|

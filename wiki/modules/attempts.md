@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-08
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -13,6 +13,28 @@ terminal receipt supplies the failure time and retry charge; each admitted
 successor increments that charge. No extra timer table or watcher is involved.
 Explicit operator retries retain their existing bypass of automatic pacing.
 The project daily dispatch cap remains the emergency brake.
+
+Claimed launch reservations retain matching owners past the first-heartbeat
+deadline, and the exact live wrapper can commit a delayed first heartbeat under
+the original lease CAS. Unverifiable claimed owners are retained only until
+`first_heartbeat_deadline + 2 * (first_heartbeat_deadline - claimed_at)`, derived
+from persisted claim diagnostics. Restart and timer changes cannot move this
+ceiling. Reconciliation rechecks the row, wrapper and worker custody: a proven
+live worker still reserves capacity; otherwise valid pending completion wins
+before the distinct `first_heartbeat_owner_unverifiable_ceiling` loss. Running
+unverifiable owners retain their existing conservative policy.
+
+Worker registration continues through cancellation, timeout and short worker
+exit, without releasing a cancelled worker's execution gate. During quiescence
+the first identity-only checkpoint has one bounded `worker:<attempt_id>` cleanup
+slot, separate from terminal/interruption cleanup; it cannot change outputs or
+the work checkpoint. Pending receipt references resolve against the canonical
+store root while continuing to reject redirected descendants and linked files.
+
+Typed bookkeeping reasons survive client errors, Execute and Review markers,
+lost-recovery projections, healer logs and recovery terminal-marker repair.
+`runtime_bookkeeping_busy` and the claimed-owner ceiling remain attributable to
+runtime bookkeeping instead of becoming generic agent/provider failures.
 
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
 `attempts` row owns the attempt record plus fixed accounting,

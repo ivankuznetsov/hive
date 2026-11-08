@@ -3,6 +3,8 @@ require "hive/daemon/quiescence"
 require "hive/runtime_control_plane/database"
 require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/runtime_control_plane/process_registry"
+require "hive/commands/daemon"
+require "json_schemer"
 
 class HiveDaemonQuiescenceTest < Minitest::Test
   include HiveTestHelper
@@ -297,9 +299,11 @@ class HiveDaemonQuiescenceTest < Minitest::Test
     end
     with_runtime do |root, database|
       clock = ManualClock.new
-      database.define_singleton_method(:passive_checkpoint!) do |**|
+      passive_checkpoint = database.method(:passive_checkpoint!)
+      database.define_singleton_method(:passive_checkpoint!) do |**options|
+        result = passive_checkpoint.call(**options)
         clock.sleep(1)
-        { complete: false, busy: 0, log_frames: 1, checkpointed_frames: 0 }
+        result
       end
       database.define_singleton_method(:checkpoint!) { |**| flunk "FULL must not start after the lifecycle deadline" }
       result = coordinator(
@@ -309,6 +313,10 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       refute result.paused
       assert_equal "deadline_exhausted", result.reason
       assert_equal "quiescing", lifecycle(database).phase
+      payload = Hive::Commands::Daemon.new(nil).send(:lifecycle_result_envelope, "quiesce", result)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-quiesce"))))
+      assert_empty schema.validate(JSON.parse(JSON.generate(payload))).map { |error| error.fetch("error") }
+      assert_equal 8, result.checkpoint.fetch(:passive_drain).size
     end
   end
 

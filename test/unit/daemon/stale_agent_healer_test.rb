@@ -134,6 +134,26 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_markers_keep_typed_reason_when_recovery_submission_fails
+    @coordinator.request_error = IOError.new("unavailable")
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      %i[error review_error].each do |marker_name|
+        with_marker_file do |state_file|
+          Hive::Markers.set(state_file, marker_name, reason: reason)
+          row = make_row(
+            state_file, marker: marker_name.to_s, pid_alive: nil, live_task_lock: false,
+            marker_attrs: Hive::Markers.current(state_file).attrs
+          )
+          heal([ row ])
+          event = @logger.events.last
+          assert_equal :marker_heal_failed, event.first
+          assert_equal reason, event.last.fetch(:reason)
+          assert_equal reason, Hive::Markers.current(state_file).attrs.fetch("reason")
+        end
+      end
+    end
+  end
+
   def test_recoverable_markers_delegate_to_one_coordinator_without_mutation
     [
       [ :error, "error", "4-execute", { "reason" => "implementer_failed" } ],

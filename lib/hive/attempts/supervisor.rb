@@ -372,7 +372,7 @@ module Hive
             termination_kill_sent = true
           end
 
-          if !registered && !@cancel_reason && status.nil? && now_mono >= next_registration
+          if !registered && now_mono >= next_registration
             registered_record = registration.try do |timeout|
               if registration.retry_count.positive?
                 winner = @store.fetch(@attempt_id, timeout_sec: timeout)
@@ -391,7 +391,7 @@ module Hive
               record = registered_record
               @last_durable_record = record
               registered = true
-              if gate_w
+              if gate_w && !@cancel_reason && status.nil?
                 gate_w.write("1")
                 gate_w.close
               end
@@ -427,7 +427,7 @@ module Hive
           end
 
           wait_for = [ next_heartbeat - now_mono, 0.05 ].min
-          if !registered && !@cancel_reason && status.nil?
+          if !registered
             wait_for = [ wait_for, next_registration - now_mono ].min
           end
           wait_for = [ wait_for, timeout_at - now_mono ].min if timeout_at && @cancel_reason.nil?
@@ -465,16 +465,22 @@ module Hive
         end
 
         @terminal_deadline ||= @monotonic.call + @busy_tolerance_sec
-        if !registered && registration.retry_count.positive?
-          # A short-lived worker can exit before the next scheduled try. If
-          # registration committed ambiguously, terminal CAS must use that
-          # exact winner. This read shares the terminal write's 600s deadline.
+        unless registered
+          # Cancellation or a short-lived worker may end the loop before
+          # registration succeeds. Persist custody even after exit, or adopt
+          # its exact ambiguous winner, before publishing a terminal receipt.
+          # This retry shares the terminal write's fixed deadline.
           record = bookkeeping_retry(
             "worker_registration_result", budget_sec: @busy_tolerance_sec,
             deadline: @terminal_deadline
           ).run do |timeout|
             winner = @store.fetch(@attempt_id, timeout_sec: timeout)
-            next record if winner&.lease_version == record.lease_version && winner.to_h == record.to_h
+            if winner&.lease_version == record.lease_version && winner.to_h == record.to_h
+              next @store.checkpoint(
+                record, checkpoint: record.checkpoint, worker: worker_identity,
+                now: @clock.call, timeout_sec: timeout
+              )
+            end
             unless winner&.state == "running" && winner.lease_version == record.lease_version + 1 &&
                    winner.wrapper == record.wrapper && winner.worker == worker_identity && winner.checkpoint == record.checkpoint
               raise CompareAndSwapFailed, "worker registration result changed ownership"

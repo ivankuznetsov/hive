@@ -232,6 +232,14 @@ module Hive
 
         owner_status = @process_identity.status(record.wrapper)
         if record.state == "launching"
+          ceiling = claimed_owner_unverifiable_ceiling(record)
+          if owner_status == :unverifiable && ceiling && now >= ceiling
+            return completion_first_disposition(
+              record, reason: "first_heartbeat_owner_unverifiable_ceiling", now: now,
+              owner_status: owner_status, authority: authority, timeout_sec: timeout_sec,
+              diagnostics: { "first_heartbeat_owner_unverifiable_ceiling_at" => Record.iso8601(ceiling) }
+            )
+          end
           if expired?(record, now) && !%i[matching unverifiable].include?(owner_status)
             return completion_first_disposition(
               record, reason: "first_heartbeat_timeout", now: now,
@@ -270,11 +278,21 @@ module Hive
         end
         unless custody_resolved
           owner_status = @process_identity.status(current.wrapper) if current.claimed?
-          if %i[matching unverifiable].include?(owner_status)
+          ceiling = claimed_owner_unverifiable_ceiling(current)
+          bounded_unverifiable = reason == "first_heartbeat_owner_unverifiable_ceiling" &&
+            owner_status == :unverifiable && ceiling && now >= ceiling
+          if owner_status == :matching || (owner_status == :unverifiable && !bounded_unverifiable)
             return reconciled(current, :suspect, owner_status, { "custody" => "owner_retained" })
           end
-          custody = resolve_worker_custody(current)
-          unless %i[absent terminated no_worker].include?(custody)
+          # At the fixed claimed-launch ceiling, an unproven identity cannot
+          # reserve forever. A proven live worker still fences replacement;
+          # never signal a group on behalf of an unverifiable wrapper.
+          custody = if bounded_unverifiable
+            current.worker ? @process_identity.orphan_group_status(wrapper: current.wrapper, worker: current.worker) : :no_worker
+          else
+            resolve_worker_custody(current)
+          end
+          if custody == :matching || (!bounded_unverifiable && !%i[absent terminated no_worker].include?(custody))
             return reconciled(current, :suspect, owner_status, { "worker_group" => custody.to_s })
           end
           diagnostics = diagnostics.merge("worker_group" => custody.to_s)
@@ -324,6 +342,19 @@ module Hive
 
       def expired?(record, now)
         record.active_deadline && now > record.active_deadline
+      end
+
+      def claimed_owner_unverifiable_ceiling(record)
+        return unless record.claimed?
+
+        claimed_at = record["diagnostics"]["claimed_at"]
+        return unless claimed_at
+
+        deadline = record.active_deadline
+        window = deadline - Time.iso8601(claimed_at)
+        deadline + 2 * window if window.positive?
+      rescue ArgumentError, TypeError
+        nil
       end
 
       # Receipt state has already won before this method is reached. Marker

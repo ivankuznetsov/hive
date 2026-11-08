@@ -215,7 +215,7 @@ class RemoteClientTest < Minitest::Test
     refute_includes error.message, "demo:817"
     assert_nil transport.send(:local_retry_command, "other:817", payload, binding: error.retry_binding)
     assert_nil transport.send(:local_retry_command, "demo:817", payload.merge("observation" => "b" * 64), binding: error.retry_binding)
-    [ "#{command}; bad", "#{command}\nbad", command.sub("canonical-task", "$(bad)"), command.sub("--project demo", "--project other") ].each do |unsafe|
+    [ "#{command}; bad", "#{command}\nbad", "#{command} '", command.sub("canonical-task", "$(bad)"), command.sub("--project demo", "--project other") ].each do |unsafe|
       assert_nil transport.send(:local_retry_binding, { "code" => "dispatcher_unavailable", "message" => "Run locally: #{unsafe}" })
     end
   end

@@ -245,6 +245,44 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_batched_manual_evidence_reports_query_failure_for_every_row
+    with_fixture do |coordinator, row, home|
+      rows = [ manual_row(row), manual_row(row).merge("slug" => "other-task") ]
+      repository = Q.repository(home)
+      with_replaced_singleton_method(repository, :recovery_requests_by_slug,
+        ->(**) { raise Sequel::DatabaseError, "recovery query unreadable" }) do
+        evidence = coordinator.manual_evidence_for(project: row.project, rows: rows)
+
+        assert_equal rows.map { |candidate| candidate.fetch("slug") }, evidence.keys
+        evidence.each_value do |entry|
+          assert_nil entry.fetch("binding")
+          assert_equal [ "unavailable", "hive", "recovery_observation_unavailable" ],
+            entry.fetch("receipt").values_at("status", "owner", "reason")
+          assert_includes entry.dig("receipt", "remediation"), "recovery query unreadable"
+        end
+      end
+    end
+  end
+
+  def test_unbound_manual_observation_reports_a_request_disappearing_after_admission
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      before = File.binread(row.state_file)
+      repository = Q.repository(home)
+      with_replaced_singleton_method(coordinator, :request, ->(**) { admitted }) do
+        with_replaced_singleton_method(repository, :fetch, ->(*, **) { nil }) do
+          result = coordinator.prepare_manual(row: row,
+            observation_token: coordinator.observation_token_for(row), now: NOW)
+
+          assert_equal [ "unavailable", "hive", "recovery_observation_unavailable", admitted.request_id ],
+            [ result.status, result.owner, result.reason, result.request_id ]
+          assert_includes result.remediation, "recovery request disappeared"
+          assert_equal before, File.binread(row.state_file)
+        end
+      end
+    end
+  end
+
   def test_action_request_refuses_duplicate_bindings_for_one_failure
     with_fixture do |coordinator, row, home|
       admitted = coordinator.request(row: row, requestor: "action", now: NOW)

@@ -3,7 +3,7 @@ title: Release Candidate Evidence
 type: reference
 source: bin/hive-release-candidate, packaging/release_candidate/, packaging/managed_web_archive.rb, .github/workflows/{release-candidate,release}.yml
 created: 2026-07-27
-updated: 2026-09-09
+updated: 2026-11-08
 tags: [release, candidate, evidence, packaging, safety]
 ---
 
@@ -342,10 +342,57 @@ The isolated managed-web verifier models systemd `show` properties and tracks
 unit reload, enablement, and running state in its private temporary directory.
 It requires readiness to hit its temporary loopback health server and report
 that server's URL. It never invokes the operator's service manager. Build-time
-Betterleaks downloads use bounded curl retries and timeouts while retaining
-exact checksum validation.
+Betterleaks packaging uses verified archive reuse and a 300-second deadline
+per missing archive, with exact checksum validation on every use; see
+[[dependencies]] for authentication, retry, and cold-job timeout behavior.
 
 The release E2E job prepares the checksum-pinned Betterleaks bundle before
 running publication scenarios, matching ordinary CI. It retains complete
 scenario reports on success or failure for 14 days; a summary count alone
 cannot identify a failed scenario.
+
+## Betterleaks archive reuse and dispatch sequencing
+
+The fresh `candidate` build and `release-e2e` scanner preparation both restore
+the pinned `actions/cache` archive directory at
+`${{ runner.temp }}/betterleaks-archives`. Their exact key is
+`betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}`
+with prefix `betterleaks-archives-v1-${{ runner.os }}-`. Packaging always privately
+copies and rehashes each digest-named archive. All four readable verified entries
+avoid release requests with unchanged pins. Missing, corrupt, or inaccessible
+entries fall back to verified downloads; cold/new-pin runs can still fail.
+Ref/OS visibility, prefix reuse, immutable-cache repair, and the distinction
+between PR and main saves are documented in [[dependencies]].
+
+The candidate cache step runs only when `inputs.source_run_id == ''`, matching
+fresh artifact construction. Artifact-reuse retries retain their existing exact
+bytes and do not trigger unnecessary cache or packaging work. `build_gem`
+inherits the absolute `HIVE_BETTERLEAKS_CACHE_DIR` despite changing into the
+committed source export. It forwards only fixed, sanitized packaging diagnostics
+(up to 16 lines and 4 KiB from the first 8 KiB of stderr), preserving the generic
+`cannot bundle Betterleaks in candidate gem` failure context.
+
+Neither release-candidate packaging step receives `GITHUB_TOKEN` or `GH_TOKEN`.
+Both use the anonymous path, preserving credential-free exact-byte candidate
+builds and `persist-credentials: false`. The five ordinary CI packaging steps
+and the live-agent-skills multiline build step receive the workflow token;
+that multiline step also shares it with its gem and artifact build commands.
+No candidate identity, source export, permission scope, artifact reuse, or release
+publication rule changes.
+
+Adding the two cache `uses:` entries changes the required dispatch
+`action_lock_sha256`. After this change lands, re-dispatch candidates from a
+post-change main SHA with the updated lock. Pre-change candidates and targeted
+artifact-reuse retries carrying the old lock fail `validate_dispatch.sh`'s lock
+comparison. Both `packaging/betterleaks.rb` and `lib/hive/betterleaks.rb` are
+release-e2e trusted-harness paths, so candidate files differing from trusted main
+fail the harness-drift attestation. These are sequencing consequences; identity
+computation and retry rules remain unchanged.
+
+Controlled fixtures prove cache integrity, outages, auth/redirect policy, and
+shared deadlines; a short real subprocess check proves timeout cleanup. The
+out-of-band HTTP/2 302 → release-assets HTTP/2 200 capture supplied parser fixture
+structure, without exercising the rewritten transport against production.
+The production-endpoint verification limitation remains in [[gaps]]. No public
+network download is a test or completion gate, and execution on all four target
+architectures remains unproven by this change.

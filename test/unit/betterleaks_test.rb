@@ -116,6 +116,112 @@ class BetterleaksTest < Minitest::Test
     end
   end
 
+  def test_warm_cache_build_succeeds_during_a_total_download_outage
+    package_fixture(warm: true) do |root, cache|
+      unavailable = ->(*) { raise "release downloads unavailable" }
+      with_replaced_singleton_method(HiveBetterleaksPackage, :run_curl, unavailable) do
+        HiveBetterleaksPackage.build(root: root, cache_dir: cache)
+      end
+      assert_bundle(root)
+    end
+  end
+
+  def test_cold_service_outage_exhausts_first_archive_and_cleans_private_files
+    package_fixture(failure: :service) do |root, cache, requests, time|
+      error = assert_raises(RuntimeError) { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
+      assert_includes error.message, "deadline exhausted for linux_x64"
+      assert_equal 300, time[:now]
+      assert_equal [ "linux_x64" ], requests.uniq
+      assert_empty Dir.glob(File.join(root, "*", "betterleaks"))
+      refute File.exist?(cache)
+    end
+  end
+
+  def test_bad_digests_are_rejected_with_a_token_without_a_token_and_after_auth_fallback
+    [ [ nil, [] ], [ "synthetic-private-token", [] ],
+      [ "synthetic-private-token", [ { status: 401 } ] ] ].each do |token, responses|
+      package_fixture(failure: :checksum, responses: responses) do |root, cache, requests, time|
+        with_env("GITHUB_TOKEN" => token) do
+          _out, err = capture_io do
+            error = assert_raises(RuntimeError) { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
+            refute_includes error.full_message, "synthetic-private-token"
+          end
+          refute_includes err, "synthetic-private-token"
+        end
+        assert_equal 300, time[:now]
+        assert_equal [ "linux_x64" ], requests.uniq
+        assert_empty Dir.glob(File.join(root, "*", "betterleaks"))
+        assert_empty Dir.glob(File.join(cache, "*"))
+        if token && !responses.empty?
+          assert time[:authorization].first
+          assert time[:authorization].drop(1).all?(&:nil?)
+        end
+      end
+    end
+  end
+
+  def test_anonymous_recovery_installs_and_caches_all_four_verified_archives
+    package_fixture(responses: [ { status: 403 } ]) do |root, cache, requests, time|
+      with_env("GITHUB_TOKEN" => "synthetic-private-token") do
+        capture_io { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
+      end
+      assert_equal [ "linux_x64", *Hive::Betterleaks::ASSETS.keys ], requests
+      assert time[:authorization][0]
+      assert_nil time[:authorization][1]
+      assert_bundle(root)
+      assert_cache(cache)
+    end
+  end
+
+  def test_each_cache_use_rehashes_bytes_and_extracts_the_private_copy
+    package_fixture(warm: true) do |root, cache, requests|
+      original = FileUtils.method(:cp)
+      replace_after_copy = lambda do |source, destination, **options|
+        result = original.call(source, destination, **options)
+        File.write(source, "concurrently replaced") if source.start_with?(cache + "/")
+        result
+      end
+      with_replaced_singleton_method(FileUtils, :cp, replace_after_copy) do
+        HiveBetterleaksPackage.build(root: root, cache_dir: cache)
+      end
+      assert_empty requests
+      assert_bundle(root)
+      capture_io { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
+      assert_equal Hive::Betterleaks::ASSETS.keys, requests
+      assert_cache(cache)
+      assert_bundle(root)
+    end
+  end
+
+  def test_failed_replacement_keeps_a_verified_private_download_usable
+    package_fixture(warm: true) do |root, cache, requests|
+      first = Hive::Betterleaks::ASSETS.keys.first
+      File.write(cache_path(cache, first), "corrupt")
+      with_replaced_singleton_method(File, :rename, ->(*) { raise Errno::EACCES }) do
+        _out, err = capture_io { HiveBetterleaksPackage.build(root: root, cache_dir: cache) }
+        assert_includes err, "cache write failed"
+      end
+      assert_equal [ first ], requests
+      assert_equal "corrupt", File.read(cache_path(cache, first))
+      assert_empty Dir.glob(File.join(cache, ".betterleaks-*"))
+      assert_bundle(root)
+    end
+  end
+
+  def test_repeated_concurrent_builds_publish_complete_archives_and_leave_no_partials
+    package_fixture do |root, cache|
+      roots = 3.times.map { |index| "#{root}-#{index}" }
+      workers = roots.map do |destination|
+        Thread.new { 3.times { HiveBetterleaksPackage.build(root: destination, cache_dir: cache) } }
+      end
+      workers.each(&:value)
+      roots.each { |destination| assert_bundle(destination) }
+      assert_cache(cache)
+    ensure
+      workers&.each(&:join)
+    end
+  end
+
   private
 
   def assert_bundle(root)
@@ -140,7 +246,7 @@ class BetterleaksTest < Minitest::Test
     end
   end
 
-  def package_fixture(failure: nil, warm: false)
+  def package_fixture(failure: nil, warm: false, responses: [])
     Dir.mktmpdir do |temporary|
       root = File.join(temporary, "bundle")
       cache = File.join(temporary, "cache")
@@ -172,26 +278,34 @@ class BetterleaksTest < Minitest::Test
           original_capture.call(*argv, **options)
         end
       end
+      queued = responses.dup
+      time = { now: 0.0, sleeps: [], authorization: [], private_directories: [] }
       transport = lambda do |argv, deadline:|
         platform = assets.keys.find { |key| argv.last.include?(key) }
         requests << platform
+        response = queued.shift || {}
         bytes = failure == :checksum ? "wrong bytes" : archives.fetch(platform)
-        File.binwrite(argv.fetch(argv.index("--output") + 1), bytes)
-        File.binwrite(argv.fetch(argv.index("--dump-header") + 1), "HTTP/2 200\r\n\r\n")
+        archive = argv.fetch(argv.index("--output") + 1)
+        time[:private_directories] << File.dirname(archive)
+        auth_index = argv.index("--header")
+        time[:authorization] << (auth_index && File.read(argv[auth_index + 1].delete_prefix("@")))
+        File.binwrite(archive, bytes)
+        status = response.fetch(:status, failure == :service ? 503 : 200)
+        File.binwrite(argv.fetch(argv.index("--dump-header") + 1), "HTTP/2 #{status}\r\n\r\n")
         failure == :download ? 7 : 0
       end
-      now = 0.0
       with_env("HIVE_BETTERLEAKS_CACHE_DIR" => nil, "GITHUB_TOKEN" => nil, "GH_TOKEN" => nil) do
         with_replaced_singleton_method(Open3, :capture3, capture) do
           with_replaced_singleton_method(HiveBetterleaksPackage, :run_curl, transport) do
-            with_replaced_singleton_method(HiveBetterleaksPackage, :monotonic_now, -> { now }) do
-              with_replaced_singleton_method(HiveBetterleaksPackage, :sleep, ->(seconds) { now += seconds }) do
-                yield root, cache, requests
+            with_replaced_singleton_method(HiveBetterleaksPackage, :monotonic_now, -> { time[:now] }) do
+              with_replaced_singleton_method(HiveBetterleaksPackage, :sleep, ->(seconds) { time[:sleeps] << seconds; time[:now] += seconds }) do
+                yield root, cache, requests, time
               end
             end
           end
         end
       end
+      time[:private_directories].uniq.each { |path| refute File.exist?(path), "private download directory was not removed" }
     ensure
       if original_assets
         Hive::Betterleaks.send(:remove_const, :ASSETS)

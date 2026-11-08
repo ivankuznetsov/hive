@@ -268,3 +268,10 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Guarded attached recovery uses `Recovery::API` with an explicit manual execution
+policy. The coordinator alone validates a persisted recovery observation and
+repairs markers. Its query-only evidence is scoped by project and task before
+applying a bound; tokens include the request revision, phase and post-clear
+binding. A fresh operator action can expedite an admitted or cleared request
+without charging another retry. Other recovery callers retain queued admission.

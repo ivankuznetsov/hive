@@ -171,11 +171,12 @@ module Hive
         end
       end
 
-      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, **)
+      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, project: nil, slug: nil, **)
         database.read do |db|
-          db[:dispatch_requests]
-            .where(recovery_request: 1)
-            .reverse_order(:updated_at, :request_id).limit(Integer(limit))
+          scope = db[:dispatch_requests].where(recovery_request: 1)
+          scope = scope.where(project_id: db[:projects].where(name: project.to_s).select(:project_id)) if project
+          scope = scope.where(task_slug: slug.to_s) if slug
+          scope.reverse_order(:updated_at, :request_id).limit(Integer(limit))
             .all.reverse.map { |row| request_from(row) }
         end
       end

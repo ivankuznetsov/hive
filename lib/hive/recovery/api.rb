@@ -19,13 +19,14 @@ module Hive
       Observation = Data.define(
         :project, :slug, :folder, :state_file, :stage, :workflow, :marker,
         :marker_attrs, :state_file_mtime, :live_task_lock, :attempt_id,
-        :task_generation, :suggested_command
+        :task_generation, :suggested_command, :recovery_observation
       )
 
       def recover!(row:, project: nil, requestor: "operator", chat_id: nil,
                    update_id: nil, request_id: nil, observation_token: nil,
                    state_home: Hive::Paths.state_home, now: Time.now,
-                   coordinator: nil, admission_guard: nil, command_context: nil, remote_authority: nil)
+                   coordinator: nil, admission_guard: nil, command_context: nil, remote_authority: nil,
+                   execution: :queued, manual_retry: nil)
         observation = observation(row, project: project)
         coordinator ||= Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
         observation_token ||= coordinator.observation_token_for(observation)
@@ -36,7 +37,13 @@ module Hive
         else
           {}
         end
-        result = coordinator.request(
+        result = if execution == :manual
+          require "hive/recovery/manual_retry"
+          (manual_retry || ManualRetry.new(coordinator: coordinator, state_home: state_home)).call(
+            row: observation, observation_token: observation_token, now: now
+          )
+        else
+          coordinator.request(
           row: observation,
           requestor: requestor,
           request_id: request_id,
@@ -44,7 +51,8 @@ module Hive
           chat_id: chat_id,
           update_id: update_id,
           now: now, **remote_options
-        )
+          )
+        end
         complete_recovery_operation(operation, result, now: now)
         record_recovery_observation(activity, observation, result, now: now)
         result
@@ -156,7 +164,8 @@ module Hive
           attempt_id: row_value(row, :attempt_id) || row_value(row, :current_attempt),
           task_generation: row_value(row, :task_generation) ||
             row_value(row, :condition_task_generation),
-          suggested_command: row_value(row, :suggested_command)
+          suggested_command: row_value(row, :suggested_command),
+          recovery_observation: row_value(row, :recovery_observation)
         )
       end
 

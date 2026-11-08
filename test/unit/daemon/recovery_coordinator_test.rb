@@ -86,6 +86,75 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
   FakeGeneration = Data.define(:progress_token, :task_generation)
 
+  def test_manual_observation_resumes_a_cleared_request_without_another_retry_charge
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      coordinator.resume(request: request, row: row, now: NOW)
+      coordinator.defer_dispatch_failure(request, now: NOW)
+      current = manual_row(row)
+      evidence = coordinator.manual_evidence(row: current)
+      current["recovery_observation"] = evidence.fetch("binding")
+      result = coordinator.prepare_manual(
+        row: current, observation_token: coordinator.observation_token_for(current), now: NOW
+      )
+      assert_equal "cleared", result.phase
+      assert_equal "queued", result.status
+      assert_equal admitted.request_id, result.request_id
+      assert_equal 1, result.retry_count
+      assert_equal 1, Q.recovery_requests(state_home: home).size
+      assert Hive::Markers.current(row.state_file).none?
+    end
+  end
+
+  def test_manual_observation_rejects_a_changed_request_revision_without_mutation
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      current = manual_row(row)
+      current["recovery_observation"] = coordinator.manual_evidence(row: current).fetch("binding")
+      token = coordinator.observation_token_for(current)
+      Q.update_recovery!(admitted.request_id, expected_phase: "admitted",
+        changes: { "next_eligible_at" => (NOW + 60).iso8601 }, state_home: home)
+      before = File.binread(row.state_file)
+      result = coordinator.prepare_manual(row: current, observation_token: token, now: NOW)
+      assert_equal "blocked", result.status
+      assert_equal "stale_observation", result.reason
+      assert_equal before, File.binread(row.state_file)
+    end
+  end
+
+  def test_manual_evidence_rejects_changed_identity_and_progress
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      coordinator.resume(request: request, row: row, now: NOW)
+      File.open(row.state_file, "a") { |file| file.puts "New task instructions" }
+      assert_nil coordinator.manual_evidence(row: manual_row(row))
+      Q.update_recovery!(admitted.request_id, expected_phase: "cleared",
+        changes: { "canonical_task_folder" => "/elsewhere" }, state_home: home)
+      assert_nil coordinator.manual_evidence(row: manual_row(row))
+    end
+  end
+
+  def test_recovery_query_scopes_before_applying_its_bound
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      assert_equal [ admitted.request_id ], Q.recovery_requests(
+        project: "hive", slug: row.slug, limit: 1, state_home: home
+      ).map(&:request_id)
+      assert_empty Q.recovery_requests(project: "other", slug: row.slug, limit: 1, state_home: home)
+      assert_empty Q.recovery_requests(project: "hive", slug: "other-task", limit: 1, state_home: home)
+    end
+  end
+
+  def manual_row(row)
+    marker = Hive::Markers.current(row.state_file)
+    row.to_h.transform_keys(&:to_s).merge(
+      "marker" => marker.name.to_s, "marker_attrs" => marker.attrs,
+      "state_file_mtime" => File.mtime(row.state_file).utc
+    )
+  end
+
   def test_request_reports_missing_observation_when_assessment_has_no_retry_time
     with_tmp_dir do |state_home|
       coordinator = Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)

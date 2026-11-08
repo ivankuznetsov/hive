@@ -5,6 +5,15 @@ set -eu
 HB_CONTROLLER_ORIGIN=${HB_CONTROLLER_ORIGIN:-/opt/hb/controller-state/origin.git}
 case "$(id -u)" in
   0)
+    # Hive's trusted controller writes protected activity receipts as root,
+    # while this wrapper runs Git as the unprivileged benchmark identity. Make
+    # controller-owned worktree state readable before dropping privileges;
+    # candidate processes already operate as this same UID and protected-file
+    # integrity is enforced by Hive's custody checks.
+    chown -R 1000:1000 /work 2>/dev/null || {
+      echo "sealed controller Git could not hand worktree state to uid 1000" >&2
+      exit 126
+    }
     exec setpriv --reuid=1000 --regid=1000 --init-groups --no-new-privs \
       --bounding-set=-all --inh-caps=-all --ambient-caps=-all /bin/bash "$0" "$@"
     ;;

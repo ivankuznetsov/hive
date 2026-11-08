@@ -359,6 +359,156 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
+  # ── archive merge truth ────────────────────────────────────────────────
+
+  def seed_completed_finalize(dir, pr_url: "https://github.com/acme/app/pull/42")
+    inbox, slug = seed_inbox(dir)
+    finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+    FileUtils.mkdir_p(File.dirname(finalize))
+    FileUtils.mv(inbox, finalize)
+    File.write(File.join(finalize, "pr.md"), <<~MD)
+      ---
+      pr_url: #{pr_url}
+      pr_number: 42
+      ---
+
+      ## Summary
+      final
+
+      <!-- COMPLETE pr_url=#{pr_url} is_draft=false -->
+    MD
+    File.write(File.join(finalize, "summary.md"), "summary\n")
+    [ finalize, slug ]
+  end
+
+  # Archive asks GitHub through the repository's fake gh double, so the
+  # real Hive::Gh.pr_state argv/JSON path is exercised end to end.
+  def with_fake_gh(state: "OPEN", view_exit: 0)
+    gh_dir = Dir.mktmpdir("fake-gh-bin")
+    log_dir = Dir.mktmpdir("fake-gh-log")
+    File.symlink(FAKE_GH_FIXTURE, File.join(gh_dir, "gh"))
+    with_env(
+      "PATH" => "#{gh_dir}:#{ENV.fetch('PATH')}",
+      "HIVE_FAKE_GH_LOG_DIR" => log_dir,
+      "HIVE_FAKE_GH_STATE" => state,
+      "HIVE_FAKE_GH_VIEW_EXIT" => view_exit.to_s
+    ) { yield File.join(log_dir, "fake-gh-argv.log") }
+  ensure
+    FileUtils.rm_rf(gh_dir) if gh_dir
+    FileUtils.rm_rf(log_dir) if log_dir
+  end
+
+  # Observed 2026-11-08: `hive archive TASK --from 8-finalize` moved a task
+  # to 9-done while its PR was still OPEN (merge refused: checks pending).
+  def test_archive_refuses_finalize_task_whose_pr_is_open
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        finalize, slug = seed_completed_finalize(dir)
+
+        out = err = status = nil
+        with_fake_gh(state: "OPEN") do |argv_log|
+          out, err, status = with_captured_exit do
+            Hive::Commands::StageAction.new("archive", slug, from: "8-finalize").call
+          end
+          assert_match(%r{arg=view\narg=https://github\.com/acme/app/pull/42\narg=--json\narg=state}, File.read(argv_log))
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status, out
+        assert_includes err, "reason=pr_not_merged"
+        assert_includes err, "https://github.com/acme/app/pull/42 is OPEN, not MERGED"
+        assert_includes err, "merge the PR and re-run `hive archive #{slug} --from 8-finalize`"
+        assert_includes err, "--reason already_delivered|superseded|cancelled"
+        assert File.directory?(finalize)
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "9-done", slug))
+      end
+    end
+  end
+
+  def test_archive_refusal_is_typed_in_the_json_envelope
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _finalize, slug = seed_completed_finalize(dir)
+
+        out = status = nil
+        with_fake_gh(state: "CLOSED") do
+          out, _err, status = with_captured_exit do
+            Hive::Commands::StageAction.new("archive", slug, json: true).call
+          end
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "ArchivePrNotMerged", payload["error_class"]
+        assert_equal "wrong_stage", payload["error_kind"]
+        assert_equal "8-finalize", payload["current_stage"]
+        assert_equal "9-done", payload["target_stage"]
+        assert_includes payload["message"], "is CLOSED, not MERGED"
+      end
+    end
+  end
+
+  def test_archive_moves_finalize_task_to_done_when_pr_is_merged
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        finalize, slug = seed_completed_finalize(dir)
+
+        with_fake_gh(state: "MERGED") do
+          capture_io { Hive::Commands::StageAction.new("archive", slug, from: "8-finalize").call }
+        end
+
+        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        refute File.directory?(finalize)
+        assert File.directory?(done)
+        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
+      end
+    end
+  end
+
+  def test_archive_fails_closed_when_pr_state_cannot_be_observed
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        finalize, slug = seed_completed_finalize(dir)
+
+        err = status = nil
+        with_fake_gh(view_exit: 1) do
+          _out, err, status = with_captured_exit do
+            Hive::Commands::StageAction.new("archive", slug).call
+          end
+        end
+
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "reason=pr_state_unobservable"
+        assert_includes err, "https://github.com/acme/app/pull/42"
+        assert_includes err, "check `gh auth status` and retry"
+        assert File.directory?(finalize)
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "9-done", slug))
+      end
+    end
+  end
+
+  def test_archive_fails_closed_without_a_canonical_pr_url
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        finalize, slug = seed_completed_finalize(dir, pr_url: "https://example.com/pr/2")
+
+        error = nil
+        with_fake_gh(state: "MERGED") do
+          capture_io do
+            error = assert_raises(Hive::ArchivePrStateUnobservable) do
+              Hive::Commands::StageAction.new("archive", slug).send(:do_call)
+            end
+          end
+        end
+
+        assert_equal "pr_url_unresolved", error.reason
+        assert_nil error.pr_url
+        assert_includes error.message, "no canonical pr_url in pr.md"
+        assert File.directory?(finalize)
+      end
+    end
+  end
+
   # ── JSON envelope error path ───────────────────────────────────────────
 
   def test_json_error_envelope_on_wrong_stage_under_json_mode

@@ -1,4 +1,3 @@
-require "fileutils"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/proposals/ingestor"
@@ -113,18 +112,6 @@ module Hive
 
       def clean_uncommitted_state!
         Proposals.restore_committed_proposal_state!(@git_ops)
-      end
-
-      def remove_untracked!(relative)
-        path = File.join(@git_ops.hive_state_path, relative)
-        stat = File.lstat(path)
-        if stat.directory? && !stat.symlink?
-          FileUtils.rm_rf(path)
-        else
-          File.unlink(path)
-        end
-      rescue Errno::ENOENT
-        nil
       end
     end
   end

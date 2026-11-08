@@ -415,6 +415,63 @@ class ProposalSourceEventStoreTest < Minitest::Test
     end
   end
 
+  def test_rate_and_usage_helpers_drop_malformed_timestamps_and_identifiers
+    now = Time.utc(2026, 9, 8, 12)
+    with_tmp_dir do |dir|
+      store = Hive::Proposals::SourceEventStore.new(root: dir, limits: limits, clock: -> { now })
+      fresh = "2026-09-08T11:30:00.000000Z"
+      index = {
+        "recent_actor_events" => [
+          { "actor_id" => "alice", "occurred_at" => fresh },
+          { "actor_id" => "mallory", "occurred_at" => "not-a-time" }
+        ]
+      }
+
+      assert_equal [ "alice" ],
+                   store.send(:prune_recent_actor_events, index)
+                        .fetch("recent_actor_events").map { |entry| entry["actor_id"] }
+
+      lifecycle = {
+        "type" => "decision", "occurred_at" => fresh,
+        "provenance" => { "actor" => { "id" => "alice" } }
+      }
+      relative = "events/prp-00000000-0000-4000-8000-000000000001/0001-event.json"
+      assert_equal "alice", store.send(:recent_actor_event, relative, lifecycle).fetch("actor_id")
+      assert_nil store.send(:recent_actor_event, relative, lifecycle.merge("occurred_at" => "garbage"))
+
+      refute store.send(
+        :valid_recent_actor_events?, [ { "actor_id" => "alice", "occurred_at" => "garbage" } ]
+      )
+      assert_equal [ 0, 0 ], store.send(
+        :canonical_usage_for_result, { "kind" => "record", "proposal_id" => "not-a-proposal" }
+      )
+    end
+  end
+
+  def test_directory_guard_rejects_escapes_and_tolerates_concurrent_creation
+    with_tmp_dir do |dir|
+      root = File.join(dir, "proposals")
+      store = Hive::Proposals::SourceEventStore.new(root: root, limits: limits)
+
+      escape = assert_raises(Hive::Proposals::Error) do
+        store.send(:ensure_safe_directory!, File.join(dir, "elsewhere"))
+      end
+      assert_equal "proposal source directory escapes its root", escape.message
+
+      raced = File.join(dir, "raced")
+      original = FileUtils.method(:mkdir)
+      racing = lambda do |path, **options|
+        original.call(path, **options)
+        raise Errno::EEXIST, path
+      end
+      with_replaced_singleton_method(FileUtils, :mkdir, racing) do
+        store.send(:ensure_one_directory!, raced)
+      end
+      assert File.directory?(raced)
+      assert_equal 0o700, File.stat(raced).mode & 0o777
+    end
+  end
+
   private
 
   def source_event

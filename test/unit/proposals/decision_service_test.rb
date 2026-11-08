@@ -549,6 +549,57 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_supersession_refuses_a_lineage_cycle
+    first = "prp-00000000-0000-4000-8000-000000000011"
+    second = "prp-00000000-0000-4000-8000-000000000012"
+    third = "prp-00000000-0000-4000-8000-000000000013"
+    create_record(first, requested_supersedes: third)
+    create_record(second, requested_supersedes: first)
+    create_record(third, requested_supersedes: second)
+    [ [ first, second ], [ second, third ] ].each do |predecessor, successor|
+      @service.supersede(
+        proposal_id: predecessor, successor_id: successor,
+        expected_head: @store.projection(predecessor).lifecycle_head,
+        **authority_args("supersede-#{predecessor[-2..]}")
+      )
+    end
+
+    error = assert_raises(Hive::Proposals::Conflict) do
+      @service.supersede(
+        proposal_id: third, successor_id: first,
+        expected_head: @store.projection(third).lifecycle_head,
+        **authority_args("supersede-cycle")
+      )
+    end
+    assert_equal "proposal supersession would create a lineage cycle", error.message
+  end
+
+  def test_lifecycle_rejects_a_commit_whose_durable_bytes_differ
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "k", outcome: "pass", metric: 0.9)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        service = durable_service(store, ops)
+        ops.define_singleton_method(:read_hive_state_blob_at) { |*_args, **_options| "tampered" }
+
+        error = assert_raises(Hive::Proposals::SourceUnavailable) do
+          service.decide(
+            proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+            rationale_category: "evaluated", rationale: "accept", links: [],
+            expected_head: store.projection(proposal_id).lifecycle_head,
+            **authority_args("undurable-bytes")
+          )
+        end
+        assert_equal "proposal lifecycle transaction was not durably committed", error.message
+      end
+    end
+  end
+
   private
 
   def proposal_id = "prp-00000000-0000-4000-8000-000000000001"

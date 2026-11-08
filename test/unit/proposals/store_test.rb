@@ -525,6 +525,34 @@ class ProposalStoreTest < Minitest::Test
     Process.wait(child) if child
   end
 
+  def test_history_gap_is_diagnosed_without_hiding_the_record_set
+    gap_id = "prp-00000000-0000-4000-8000-000000000021"
+    create_record(gap_id, source: "5")
+    gapped = build_event(gap_id, version: 2, event_id: "pev-00000000-0000-4000-8000-000000000021")
+    path = @store.send(:event_path, gapped)
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, Hive::Proposals.canonical(gapped.to_h))
+
+    snapshot = @store.load
+    assert_includes snapshot.diagnostics.map(&:code), "inconsistent_history"
+    refute_includes snapshot.projections.map(&:proposal_id), gap_id
+  end
+
+  def test_source_event_cache_generation_skips_paths_that_vanish_while_listing
+    create_record("prp-00000000-0000-4000-8000-000000000031", source: "6")
+    records_root = File.join(@root, "records")
+    vanished = File.join(records_root, "vanished.json")
+    original_children = @store.method(:children)
+    @store.define_singleton_method(:children) do |directory|
+      entries = original_children.call(directory)
+      directory == records_root ? entries + [ "vanished.json" ] : entries
+    end
+
+    generation = @store.send(:source_event_cache_generation)
+    refute_includes generation.map(&:first), vanished
+    assert_equal 1, generation.length
+  end
+
   private
 
   def record_attributes

@@ -318,6 +318,26 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
+  def test_rejects_symlinked_or_missing_task_journal_parents
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      producer = producer_for(ops, activity:)
+      stage = File.dirname(activity.task_folder)
+      relocated = File.join(dir, "relocated-stage")
+      FileUtils.mv(stage, relocated)
+      File.symlink(relocated, stage)
+
+      parent = assert_raises(Hive::Proposals::Error) { producer.send(:ensure_safe_task_journal!) }
+      assert_equal "proposal task journal parent is unsafe", parent.message
+
+      File.unlink(stage)
+      missing = assert_raises(Hive::Proposals::Error) { producer.send(:ensure_safe_task_journal!) }
+      assert_equal "proposal task journal parent is unsafe", missing.message
+    end
+  end
+
   private
 
   def producer_for(ops, activity:)

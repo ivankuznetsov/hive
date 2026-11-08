@@ -177,9 +177,24 @@ class ProposalReconcilerTest < Minitest::Test
       directory = File.join(ops.hive_state_path, "proposals", "v1", "scratch")
       FileUtils.mkdir_p(directory)
       File.write(File.join(directory, "temporary"), "temporary")
-      reconciler.send(:remove_untracked!, "proposals/v1/scratch")
-      refute File.exist?(directory)
-      assert_nil reconciler.send(:remove_untracked!, "proposals/v1/missing")
+      untracked = File.join(ops.hive_state_path, "proposals", "v1", "inbox", "stray.json")
+      FileUtils.mkdir_p(File.dirname(untracked))
+      File.write(untracked, "{}")
+      assert_equal 2, reconciler.send(:clean_uncommitted_state!)
+      refute File.exist?(File.join(directory, "temporary"))
+      refute File.exist?(untracked)
+      assert_equal 0, reconciler.send(:clean_uncommitted_state!)
+    end
+  end
+
+  def test_committed_blob_size_is_unknown_when_git_cannot_read_the_blob
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      ops.define_singleton_method(:run_git!) { |*| raise Hive::GitError, "missing blob" }
+
+      assert_nil reconciler(ops, source_store, store).send(
+        :committed_blob_size, "proposals/v1/inbox/missing.json"
+      )
     end
   end
 

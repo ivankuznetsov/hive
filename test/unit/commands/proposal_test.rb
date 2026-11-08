@@ -282,6 +282,18 @@ class ProposalCommandTest < Minitest::Test
     end
   end
 
+  def test_managed_wiki_commit_is_absent_for_an_invalid_configured_branch
+    command = Hive::Commands::Proposal.new("refresh", nil, input: nil)
+    previous = ENV["LLM_WIKI_REFRESH_BRANCH"]
+    ENV["LLM_WIKI_REFRESH_BRANCH"] = "bad..branch"
+    ops = Object.new
+    ops.define_singleton_method(:ref_exists?) { |_| flunk "an invalid branch must not reach Git" }
+
+    assert_nil command.send(:managed_wiki_commit, ops)
+  ensure
+    previous.nil? ? ENV.delete("LLM_WIKI_REFRESH_BRANCH") : ENV["LLM_WIKI_REFRESH_BRANCH"] = previous
+  end
+
   def test_terminal_renderer_escapes_every_control_family
     command = Hive::Commands::Proposal.new("list", nil, input: nil)
     assert_equal "\\t\\n\\r\\u0001\\u007f", command.send(:terminal, "\t\n\r\u0001\u007f")

@@ -78,6 +78,22 @@ class ProposalsTest < Minitest::Test
     assert_equal 2, git_ops.reset_calls.length
   end
 
+  def test_committed_state_restore_removes_untracked_directories_and_skips_vanished_paths
+    Dir.mktmpdir("hive-proposals-restore") do |root|
+      nested = File.join(root, "proposals", "v1", "nested-repo")
+      FileUtils.mkdir_p(nested)
+      File.write(File.join(nested, "payload"), "untracked")
+      git_ops = Struct.new(:hive_state_path) do
+        def run_git!(*)
+          "?? proposals/v1/nested-repo/\0?? proposals/v1/inbox/vanished.json\0?? ../outside.json\0"
+        end
+      end.new(root)
+
+      assert_equal 1, Hive::Proposals.restore_committed_proposal_state!(git_ops)
+      refute File.exist?(nested)
+    end
+  end
+
   def test_provenance_and_evaluation_facts_reject_untyped_values
     invalid_provenance = provenance.merge("task_generation" => [])
     assert_raises(Hive::Proposals::InvalidEvent) do

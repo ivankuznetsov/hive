@@ -3,13 +3,19 @@ title: hive proposal
 type: command
 source: lib/hive/commands/proposal.rb, lib/hive/cli.rb, lib/hive/proposals/
 created: 2026-08-30
-updated: 2026-11-01
+updated: 2026-11-08
 tags: [command, proposals, skills, workflows, evidence]
 ---
 
 **TLDR**: `hive proposal` submits and evaluates task-bound skill/workflow
 candidates, exposes live canonical history, records authority-gated lifecycle
 facts, and refreshes deterministic wiki views. Every mutation is tracking-only.
+
+The remote command policy classifies `proposal` as local-only: a remote
+connection context rejects every subcommand before dispatch with a
+`--context local` hint. Task-journal `proposal_source_recorded` and
+`proposal_context_supplied` activity is daily-digest noise; proposal history
+lives in the proposal ledger, not the digest.
 
 ## Discovery
 

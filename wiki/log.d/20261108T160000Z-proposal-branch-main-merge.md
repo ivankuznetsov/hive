@@ -11,3 +11,10 @@ terminal receipt v2. The `proposal` pre-dispatch JSON usage contract moved from
 
 **Verification:** Focused attempts, runtime-control-plane, config, proposal,
 schema-file, and CLI usage-error tests, plus RuboCop over the changed Ruby files.
+
+Follow-up merge-integration fixes: `proposal` is explicitly `LOCAL_ONLY` in
+`Hive::Remote::CommandPolicy` (main's remote CLI requires every command to be
+classified); the task-journal kinds `proposal_source_recorded` and
+`proposal_context_supplied` are `:noise` in the daily-digest materiality
+matrix; and `wiki/modules/config.md` was regenerated with
+`script/generate-config-defaults-doc` to include the `proposals` defaults.

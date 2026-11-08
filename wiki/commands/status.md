@@ -889,3 +889,11 @@ stage, dispatch generation and post-clear progress. Pending manual recovery is
 `blocked`, owned by the operator; a verified live attempt is agent-owned.
 Status only observes: it never clears a marker, resumes a request, dispatches,
 or terminalizes abandoned work.
+
+Caller loss between recovery terminalization and failure-marker repair also
+remains recoverable. When the failed terminal request still matches unchanged
+markerless input, fresh status exposes operator-owned guarded repair. The local
+action completes that repair and reports the existing canonical outcome without
+charging another retry or launching a duplicate. A subsequent fresh descriptor
+can authorize the next retry against the repaired failure marker. Ambiguous
+request bindings are refused before repair; status does not select one by age.

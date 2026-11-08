@@ -2082,3 +2082,11 @@ kill policies preserved real external supervisors and leases, including
 attached review retry. Actual application-service restarts, installed policy
 drift, historical logs and macOS launchd remain unexercised; see
 [[log.d/20261108-004-operator-attempt-restart-investigation]].
+
+The manual-retry broad checkpoint reproduced the existing procfs/custody and
+process-registry failures documented above. Its new component-construction
+failure was repaired through the Attempts API facade and the component boundary
+suite passes. The wiki read-only snapshot check passes alone; the broad check
+observed concurrent scratch/log writes. Focused lifecycle, HTTP, schema, skill
+projection and restart-policy checks pass, but no green full-suite result is
+claimed for this host.

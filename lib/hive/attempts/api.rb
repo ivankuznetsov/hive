@@ -1,8 +1,10 @@
 require "securerandom"
 require "hive/attempts/contracts"
+require "hive/paths"
 
 module Hive
   module Attempts
+    autoload :Client, "hive/attempts/client"
     autoload :ConfiguredDispatcher, "hive/attempts/configured_dispatcher"
     autoload :Entrypoint, "hive/attempts/entrypoint"
     autoload :Repository, "hive/attempts/repository"
@@ -12,10 +14,12 @@ module Hive
     # Hive remains the primary consumer. Entrypoint, ConfiguredDispatcher,
     # launchers, and stores are implementation collaborators behind this API.
     class API
-      def initialize(store: nil, foreground: nil, daemon: nil)
+      def initialize(store: nil, foreground: nil, daemon: nil, client: nil, state_home: Hive::Paths.state_home)
         @store = store
         @foreground = foreground
         @daemon = daemon
+        @client = client
+        @state_home = state_home
       end
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
@@ -34,6 +38,15 @@ module Hive
           admission_view: admission_view,
           replay_semantic_terminal: replay_semantic_terminal
         )
+      end
+
+      # Observation and attachment do not own worker lifetime or recovery.
+      def fetch(attempt_id)
+        store.fetch(attempt_id)
+      end
+
+      def attach(attempt_id, stdout: $stdout, stderr: $stderr)
+        (@client ||= Client.new(store: store)).attach(attempt_id, stdout: stdout, stderr: stderr)
       end
 
       def routing_decision_for_request(request, now: Time.now.utc, admission_view: nil)
@@ -85,7 +98,7 @@ module Hive
       end
 
       def store
-        @store ||= Repository.open_default
+        @store ||= Repository.open_default(state_home: @state_home)
       end
     end
   end

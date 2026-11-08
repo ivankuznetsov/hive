@@ -49,6 +49,19 @@ class CommandsActTest < Minitest::Test
     assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
   end
 
+  def test_inner_stage_stdout_cannot_become_a_second_act_json_document
+    executor = FakeExecutor.new
+    executor.define_singleton_method(:execute) do |**|
+      puts '{"schema":"inner-stage"}'
+      { "task_state" => "idle", "stage" => "3-plan", "marker" => "complete" }
+    end
+    stdout, = capture_io do
+      Hive::Commands::Act.new("workflow.advance", "demo:task", observation: "a" * 64,
+        json: true, executor: executor).call
+    end
+    assert_equal "hive-act", JSON.parse(stdout).fetch("schema")
+  end
+
   def test_keyed_json_success_is_not_marked_emitted_before_receipt_finalization
     command = Hive::Commands::Act.new(
       "workflow.advance", "demo:task", observation: "a" * 64, json: true,

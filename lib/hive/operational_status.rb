@@ -498,15 +498,15 @@ module Hive
       unless daemon_enabled?(project.fetch("name"))
         receipt = row["manual_recovery_receipt"]
         receipt ||= manual_marker_receipt(row) if Hive::Recovery::API.recoverable_marker?(row["marker"])
-        return [nil, "not_applicable"] unless receipt
+        return [ nil, "not_applicable" ] unless receipt
         decision = case receipt["status"]
         when "running" then "retry_in_flight"
         when "unavailable" then "recovery_unavailable"
         else "retry_dispatch_disabled"
         end
-        return [{ "status" => "available", "decision" => decision,
+        return [ { "status" => "available", "decision" => decision,
           "owner" => receipt["owner"], "reason" => receipt["reason"],
-          "recovery" => receipt }, "not_applicable"]
+          "recovery" => receipt }, "not_applicable" ]
       end
 
       status = scheduler.fetch("status")
@@ -550,6 +550,7 @@ module Hive
       return row unless evidence
 
       row.merge("recovery_observation" => evidence.fetch("binding"),
+        "recovery_binding_conflict" => evidence["binding"].nil?,
         "manual_recovery_receipt" => evidence.fetch("receipt"))
     end
 

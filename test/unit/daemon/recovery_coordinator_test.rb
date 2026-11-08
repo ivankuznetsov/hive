@@ -86,6 +86,26 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
   FakeGeneration = Data.define(:progress_token, :task_generation)
 
+  def test_manual_recovery_rejects_ambiguous_request_bindings
+    with_fixture do |coordinator, row, home|
+      admitted = coordinator.request(row: row, requestor: "action", now: NOW)
+      request = Q.fetch(admitted.request_id, state_home: home)
+      Q.write_request!(project: request.project, slug: request.slug, argv: request.argv,
+        requestor: "action", trigger: "recovery", request_id: "duplicate-request",
+        task_generation: request.task_generation, task_id: request.task_id,
+        expected_stage: request.expected_stage, expected_marker_name: request.expected_marker_name,
+        expected_marker_id: request.expected_marker_id, recovery: request.recovery,
+        state_home: home, now: NOW)
+      before = File.binread(row.state_file)
+      result = coordinator.prepare_manual(row: row,
+        observation_token: coordinator.observation_token_for(row), now: NOW)
+      assert_equal "blocked", result.status
+      assert_equal "recovery_binding_conflict", result.reason
+      assert_equal before, File.binread(row.state_file)
+      assert_equal 2, Q.recovery_requests(project: row.project, slug: row.slug, state_home: home).size
+    end
+  end
+
   def test_manual_observation_resumes_a_cleared_request_without_another_retry_charge
     with_fixture do |coordinator, row, home|
       admitted = coordinator.request(row: row, requestor: "action", now: NOW)
@@ -129,10 +149,10 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       request = Q.fetch(admitted.request_id, state_home: home)
       coordinator.resume(request: request, row: row, now: NOW)
       File.open(row.state_file, "a") { |file| file.puts "New task instructions" }
-      assert_nil coordinator.manual_evidence(row: manual_row(row))
+      assert_equal "recovery_binding_conflict", coordinator.manual_evidence(row: manual_row(row)).dig("receipt", "reason")
       Q.update_recovery!(admitted.request_id, expected_phase: "cleared",
         changes: { "canonical_task_folder" => "/elsewhere" }, state_home: home)
-      assert_nil coordinator.manual_evidence(row: manual_row(row))
+      assert_equal "recovery_binding_conflict", coordinator.manual_evidence(row: manual_row(row)).dig("receipt", "reason")
     end
   end
 

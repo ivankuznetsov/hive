@@ -170,8 +170,8 @@ module Hive
 
       def retry_admission(project, task, row, authority)
         unless Hive::Config.load(task.project_root).dig("daemon", "enabled") == true
-          command = Shellwords.join(["hive", "act", "workflow.retry", "#{project.fetch('name')}:#{task.slug}",
-            "--observation", authority.fetch("observation"), "--project", project.fetch("name"), "--json"])
+          command = Shellwords.join([ "hive", "act", "workflow.retry", "#{project.fetch('name')}:#{task.slug}",
+            "--observation", authority.fetch("observation"), "--project", project.fetch("name"), "--json" ])
           raise AdmissionRefused.new(code: "dispatcher_unavailable", status: 503,
             message: "daemon dispatch is disabled for #{project.fetch('name')}; no remote dispatcher is available. Run locally: #{command}")
         end

@@ -4,6 +4,7 @@ require "hive/commands/act"
 require "hive/recovery/manual_retry"
 require "hive/attempts/dispatcher"
 require "hive/operational_status"
+require "hive/daemon/dispatcher"
 require "json_schemer"
 require "hive/runtime_control_plane/command_schema_installation"
 
@@ -40,9 +41,9 @@ class ManualWorkflowRetryTest < Minitest::Test
   end
 
   def test_review_and_execute_retries_use_real_request_admission_and_return_terminal_outcomes
-    { "6-review" => ["REVIEW_ERROR", "review_orphaned", "review"],
-      "4-execute" => ["ERROR", "implementer_failed", "develop"],
-      "3-plan" => ["ERROR", "timeout", "plan"] }.each do |stage, (marker, reason, verb)|
+    { "6-review" => [ "REVIEW_ERROR", "review_orphaned", "review" ],
+      "4-execute" => [ "ERROR", "implementer_failed", "develop" ],
+      "3-plan" => [ "ERROR", "timeout", "plan" ] }.each do |stage, (marker, reason, verb)|
       with_retry(stage: stage, marker: marker, reason: reason) do |row, coordinator, repository, store, launcher, runner|
         receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
         assert_equal "terminal", receipt.status, receipt.to_h.inspect
@@ -62,6 +63,25 @@ class ManualWorkflowRetryTest < Minitest::Test
       assert_equal "terminal", receipt.status, receipt.to_h.inspect
       assert_equal "run", launcher.launched.first["worker_argv"][1]
       assert_includes launcher.launched.first["worker_argv"], "4-draft"
+    end
+  end
+
+  def test_no_provider_route_is_unavailable_and_retains_a_guarded_request
+    policy = Hive::ProviderRouting::Policy.explicit(stage: "review", routes: [],
+      requirements: Hive::ProviderRouting::Requirements.empty, pin: nil, account_policy: {})
+    with_retry(policy: policy) do |row, coordinator, repository, store, launcher, runner|
+      receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "unavailable", receipt.status
+      assert_equal "provider", receipt.owner
+      assert_equal "no_eligible_provider_route", receipt.reason
+      assert_empty launcher.launched
+      assert_empty store.active_attempts
+      request = repository.fetch(receipt.request_id)
+      assert_equal "cleared", request.recovery["phase"]
+      projected = coordinator.projected_receipt_for_request(request, dispatch_enabled: false)
+      assert_equal "provider", projected.owner
+      assert_equal "unavailable", projected.status
+      assert_equal 1, projected.retry_count
     end
   end
 
@@ -116,6 +136,85 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  def test_caller_detachment_preserves_the_admitted_attempt_for_fresh_attachment
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << record
+        { "claimed" => true }
+      end
+      client = Object.new
+      client.define_singleton_method(:attach) do |attempt_id, **|
+        Hive::Attempts::ClientResult.new(status: :detached, exit_status: 130,
+          outcome: nil, receipt: nil, attempt_id: attempt_id)
+      end
+      attached = Hive::Recovery::ManualRetry.new(coordinator: coordinator, repository: repository,
+        store: store, attempts: Hive::Attempts::API.new(daemon: dispatcher.call({})), client: client)
+      first = attached.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "running", first.status
+      assert_equal "agent", first.owner
+      assert_equal "caller_detached", first.reason
+      current = Hive::OperationalAction.observed_row(Hive::Task.new(row.fetch("folder")), project: row.fetch("project"))
+      second = attached.call(row: current, observation_token: coordinator.observation_token_for(current))
+      assert_equal first.attempt_id, second.attempt_id
+      assert_equal "dispatched", repository.fetch(first.request_id).recovery["phase"]
+      assert_equal 1, launcher.launched.size
+      assert_equal 1, store.active_attempts.size
+    end
+  end
+
+  def test_terminal_receipt_wins_a_caller_detachment_race
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      client = Object.new
+      client.define_singleton_method(:attach) do |attempt_id, **|
+        Hive::Attempts::ClientResult.new(status: :detached, exit_status: 130,
+          outcome: nil, receipt: nil, attempt_id: attempt_id)
+      end
+      attached = Hive::Recovery::ManualRetry.new(coordinator: coordinator, repository: repository,
+        store: store, attempts: Hive::Attempts::API.new(daemon: dispatcher.call({})), client: client)
+      receipt = attached.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "terminal", receipt.status
+      assert_equal "succeeded", receipt.terminal_outcome
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_lost_attempt_reports_canonical_loss_and_repairs_the_unchanged_failure_marker
+    with_retry do |row, coordinator, repository, store, launcher, runner|
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << record
+        store.mark_lost(record, reason: "fixture_owner_gone", now: Time.now.utc)
+        { "claimed" => true }
+      end
+      receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "terminal", receipt.status
+      assert_equal "lost", receipt.terminal_outcome
+      assert_equal store.fetch(receipt.attempt_id)["ended_at"], receipt.terminal_at
+      assert_equal "recovery_attempt_failed", Hive::Markers.current(row.fetch("state_file")).attrs["reason"]
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_caller_loss_before_dispatch_phase_reconciles_a_lost_attempt_without_relaunch
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      prepared = coordinator.prepare_manual(row: Hive::Recovery::API.observation(row),
+        observation_token: coordinator.observation_token_for(row))
+      request = repository.fetch(prepared.request_id)
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << record
+        store.mark_lost(record, reason: "fixture_owner_gone", now: Time.now.utc)
+        { "claimed" => true }
+      end
+      dispatcher.call({}).dispatch_request(request, interactive: false)
+      current = Hive::OperationalAction.observed_row(Hive::Task.new(row.fetch("folder")), project: row.fetch("project"))
+      receipt = runner.call(row: current, observation_token: coordinator.observation_token_for(current))
+      assert_equal "terminal", receipt.status
+      assert_equal "lost", receipt.terminal_outcome
+      assert_equal request.request_id, receipt.request_id
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
   def test_capacity_deferral_is_restartable_with_same_request_and_one_retry_charge
     with_retry(limits: { max_global: 0 }) do |row, coordinator, repository, store, launcher, runner, dispatcher|
       receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
@@ -138,9 +237,17 @@ class ManualWorkflowRetryTest < Minitest::Test
   def test_concurrent_consumer_uses_existing_attempt_without_allocating_a_successor
     with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
       loser = nil
+      daemon = Hive::Daemon::Dispatcher.allocate
+      daemon.instance_variable_set(:@dispatch_repository, repository)
+      daemon.instance_variable_set(:@attempt_dispatcher, Hive::Attempts::API.new(daemon: dispatcher.call({})))
+      daemon.instance_variable_set(:@recovery_coordinator, coordinator)
+      logger = Object.new
+      logger.define_singleton_method(:event) { |*_, **_| }
+      daemon.instance_variable_set(:@logger, logger)
       launcher.before_launch = lambda do |record|
         request = repository.fetch(record["request_id"])
-        loser = dispatcher.call({}).dispatch_request(request, interactive: false)
+        assert daemon.send(:explicit_action_recovery?, request)
+        loser = daemon.send(:dispatch_request!, request, now: Time.now.utc)
       end
       receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
       assert_equal "terminal", receipt.status, receipt.to_h.inspect
@@ -160,11 +267,11 @@ class ManualWorkflowRetryTest < Minitest::Test
       current.delete("recovery_observation") # Status discovers evidence independently.
       before = File.binread(task.state_file)
       payload = { "schema" => "hive-status", "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
-        "ok" => true, "generated_at" => Time.now.utc.iso8601, "projects" => [{
+        "ok" => true, "generated_at" => Time.now.utc.iso8601, "projects" => [ {
           "name" => row.fetch("project"), "path" => task.project_root,
           "hive_state_path" => File.dirname(File.dirname(File.dirname(task.folder))),
-          "tasks" => [current], "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
-          "hidden_archived_task_count" => 0 }] }
+          "tasks" => [ current ], "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
+          "hidden_archived_task_count" => 0 } ] }
       status = Hive::OperationalStatus.new(status_payload: payload,
         recovery_coordinator: coordinator).to_h
       projected = status.fetch("tasks").first
@@ -174,7 +281,7 @@ class ManualWorkflowRetryTest < Minitest::Test
       assert_equal "workflow.retry", projected.dig("action", "action_id")
       assert_equal deferred.request_id, projected.dig("recovery", "request_id")
       schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
-      assert schema.valid?(status), schema.validate(status).map { |error| [error["data_pointer"], error["error"]] }.inspect
+      assert schema.valid?(status), schema.validate(status).map { |error| [ error["data_pointer"], error["error"] ] }.inspect
       assert_equal before, File.binread(task.state_file)
       assert_equal request, repository.fetch(deferred.request_id)
       assert_empty store.active_attempts
@@ -218,9 +325,57 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  def test_admission_race_returns_the_canonical_attempt_outcome
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      create = store.method(:create_launching)
+      raced = false
+      competitor = nil
+      store.define_singleton_method(:create_launching) do |**attributes|
+        unless raced
+          raced = true
+          request = repository.fetch(attributes.fetch(:request_id))
+          competitor = dispatcher.call({}).dispatch_request(request, interactive: false)
+        end
+        create.call(**attributes)
+      end
+      receipt = runner.call(row: row, observation_token: coordinator.observation_token_for(row))
+      assert_equal "terminal", receipt.status, receipt.to_h.inspect
+      assert_equal competitor.attempt.attempt_id, receipt.attempt_id
+      assert_equal "succeeded", receipt.terminal_outcome
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
+  def test_terminal_failure_interruption_before_marker_repair_remains_actionable
+    with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|
+      prepared = coordinator.prepare_manual(row: Hive::Recovery::API.observation(row),
+        observation_token: coordinator.observation_token_for(row))
+      request = repository.fetch(prepared.request_id)
+      launcher.outcome = "failed"
+      launch = launcher.method(:launch)
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        result = launch.call(record, claim_capability: claim_capability)
+        Hive::Markers.clear_current(row.fetch("state_file"), expected_name: "error")
+        result
+      end
+      admitted = dispatcher.call({}).dispatch_request(request, interactive: false)
+      canonical = store.fetch(admitted.attempt.attempt_id)
+      coordinator.mark_dispatched(request, attempt_id: canonical.attempt_id,
+        terminal: true, outcome: canonical.outcome, now: Time.iso8601(canonical.receipt.fetch("ended_at")))
+      current = Hive::OperationalAction.observed_row(Hive::Task.new(row.fetch("folder")), project: row.fetch("project"))
+      assert current["recovery_observation"], current.inspect
+      receipt = runner.call(row: current, observation_token: coordinator.observation_token_for(current))
+      assert_equal "terminal", receipt.status
+      assert_equal "failed", receipt.terminal_outcome
+      assert_equal "recovery_attempt_failed", Hive::Markers.current(row.fetch("state_file")).attrs["reason"]
+      assert_equal 1, receipt.retry_count
+      assert_equal 1, launcher.launched.size
+    end
+  end
+
   private
 
-  def with_retry(stage: "6-review", marker: "REVIEW_ERROR", reason: "review_orphaned", limits: {}, workflow: "coding")
+  def with_retry(stage: "6-review", marker: "REVIEW_ERROR", reason: "review_orphaned", limits: {}, workflow: "coding", policy: nil)
     with_tmp_global_config do
       with_tmp_git_repo do |root|
         capture_io { Hive::Commands::Init.new(root).call }
@@ -240,7 +395,8 @@ class ManualWorkflowRetryTest < Minitest::Test
         launcher = Launcher.new(store, task)
         dispatcher = lambda do |settings|
           Hive::Attempts::Dispatcher.new(store: store, launcher: launcher,
-            task_resolver: ->(_) { task }, limits: { max_global: 5, max_per_project: 5, max_daily: 50 }.merge(settings))
+            task_resolver: ->(_) { task },
+            routing_policy_resolver: policy && ->(*) { policy }, limits: { max_global: 5, max_per_project: 5, max_daily: 50 }.merge(settings))
         end
         runner = Hive::Recovery::ManualRetry.new(coordinator: coordinator, repository: repository,
           store: store, attempts: Hive::Attempts::API.new(daemon: dispatcher.call(limits)))

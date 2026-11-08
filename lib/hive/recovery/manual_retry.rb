@@ -1,7 +1,6 @@
 require "shellwords"
 require "hive/daemon/recovery_coordinator"
 require "hive/attempts/api"
-require "hive/attempts/client"
 
 module Hive
   module Recovery
@@ -28,9 +27,14 @@ module Hive
         receipt = @coordinator.prepare_manual(row: row, observation_token: observation_token, now: now)
         request = repository.fetch(receipt.request_id) if receipt.request_id
         return guidance(receipt, row) unless request
+        if receipt.phase == "terminal"
+          @coordinator.repair_failed_terminal_marker(request)
+          return receipt
+        end
         if receipt.phase == "dispatched"
-          record = store.fetch(receipt.attempt_id) if receipt.attempt_id
+          record = attempts.fetch(receipt.attempt_id) if receipt.attempt_id
           return unavailable(receipt, row, "attempt_observation_unavailable") unless record
+          return unavailable(receipt, row, "attempt_identity_conflict") unless @coordinator.manual_attempt_matches?(request, record)
           return finish(request, record) if record.final?
           return attach(request, record.attempt_id, row) if record.live?
           return unavailable(receipt, row, "attempt_observation_unavailable")
@@ -40,7 +44,7 @@ module Hive
         # Recovery takes task leases and records a newer source observation.
         # Admission must observe after those writes rather than reuse the
         # action's entry timestamp as a superseded source observation.
-        result = dispatch(request, now: [now, Time.now.utc].max)
+        result = dispatch(request, now: [ now, Time.now.utc ].max)
         case result.status
         when :accepted, :existing_live
           @coordinator.mark_dispatched(request, attempt_id: result.attempt.attempt_id, now: now)
@@ -48,6 +52,11 @@ module Hive
         when :terminal_replay
           finish(request, result.attempt)
         when :deferred, :no_route
+          if result.reason == "attempt_lost" && result.attempt&.state == "lost" &&
+              result.attempt["request_id"] == request.request_id &&
+              @coordinator.manual_attempt_matches?(request, result.attempt)
+            return finish(request, result.attempt)
+          end
           observed = @coordinator.observe_admission_result(request: request, result: result, now: now)
           @coordinator.defer_dispatch_failure(request, now: now) if result.status == :deferred
           base = observed || receipt
@@ -68,14 +77,8 @@ module Hive
         @repository ||= Hive::RuntimeControlPlane::DispatchRepository.open_default(state_home: @state_home)
       end
 
-      def store
-        @store ||= Hive::Attempts::Repository.new(
-          root: Hive::Paths.runtime_payload_root(@state_home), database: repository.database
-        )
-      end
-
       def attempts
-        @attempts ||= Hive::Attempts::API.new(store: store)
+        @attempts ||= Hive::Attempts::API.new(store: @store, state_home: @state_home)
       end
 
       def dispatch(request, now:)
@@ -99,16 +102,15 @@ module Hive
       def attach(request, attempt_id, row)
         # Inner stage envelopes belong to the attempt log. Act emits one final
         # envelope of its own, including when a keyed operation captures stdout.
-        result = (@client || Hive::Attempts::Client.new(store: store)).attach(
+        result = (@client || attempts).attach(
           attempt_id, stdout: Sink.new, stderr: Sink.new
         )
+        record = attempts.fetch(attempt_id)
+        return finish(request, record) if record&.final?
         if result.status == :detached
           return guidance(@coordinator.receipt_for_request(repository.fetch(request.request_id)).with(
             reason: "caller_detached", owner: "agent"), row)
         end
-        record = store.fetch(attempt_id)
-        return finish(request, record) if record&.final?
-
         unavailable(@coordinator.receipt_for_request(request), row, "terminal_receipt_unavailable")
       end
 
@@ -116,7 +118,7 @@ module Hive
         terminal = record.receipt || {}
         ended_at = terminal["ended_at"] || record["ended_at"]
         receipt = @coordinator.mark_dispatched(request, attempt_id: record.attempt_id,
-          terminal: true, outcome: record.outcome,
+          terminal: true, outcome: record.state == "lost" ? "lost" : record.outcome,
           now: ended_at ? Time.iso8601(ended_at) : Time.now.utc)
         @coordinator.repair_failed_terminal_marker(request)
         receipt
@@ -129,13 +131,13 @@ module Hive
       def guidance(receipt, row)
         return receipt if receipt.status == "terminal"
         command = if receipt.status == "running" || receipt.reason == "existing_live"
-          Shellwords.join(["hive", "task", API.row_value(row, :slug), "--project", API.row_value(row, :project), "--json"])
+          Shellwords.join([ "hive", "task", API.row_value(row, :slug), "--project", API.row_value(row, :project), "--json" ])
         else
           "hive status --operational --json"
         end
         receipt = receipt.with(status: "blocked", owner: "operator", reason: receipt.reason || "project_dispatch_disabled") if
           %w[queued cooldown].include?(receipt.status)
-        receipt.with(remediation: [receipt.remediation, command].compact.uniq.join("; "))
+        receipt.with(remediation: [ receipt.remediation, command ].compact.uniq.join("; "))
       end
     end
   end

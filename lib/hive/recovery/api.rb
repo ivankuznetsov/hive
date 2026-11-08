@@ -44,13 +44,13 @@ module Hive
           )
         else
           coordinator.request(
-          row: observation,
-          requestor: requestor,
-          request_id: request_id,
-          observation_token: observation_token,
-          chat_id: chat_id,
-          update_id: update_id,
-          now: now, **remote_options
+            row: observation,
+            requestor: requestor,
+            request_id: request_id,
+            observation_token: observation_token,
+            chat_id: chat_id,
+            update_id: update_id,
+            now: now, **remote_options
           )
         end
         complete_recovery_operation(operation, result, now: now)

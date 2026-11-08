@@ -105,6 +105,7 @@ module Hive
       end
 
       def action_id_for(row)
+        return nil if row["recovery_binding_conflict"]
         return RETRY_ACTION_ID if recoverable?(row)
         return ACTION_ID if safe?(row)
 
@@ -190,7 +191,10 @@ module Hive
         }
         unless config.dig("daemon", "enabled") == true
           evidence = Hive::Daemon::RecoveryCoordinator.new.manual_evidence(row: row)
-          row["recovery_observation"] = evidence["binding"] if evidence
+          if evidence
+            row["recovery_observation"] = evidence["binding"]
+            row["recovery_binding_conflict"] = evidence["binding"].nil?
+          end
         end
         row
       end

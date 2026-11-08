@@ -215,13 +215,13 @@ class RemoteCommandServiceTest < Minitest::Test
       File.write(path, config.to_yaml)
       Hive::Markers.set(task.state_file, :error, reason: "timeout")
       descriptor = Hive::OperationalAction.descriptor_for_task(task, project: project.fetch("name"))
-      command = Shellwords.join(["hive", "act", "workflow.retry", descriptor.fetch("target"),
-        "--observation", descriptor.fetch("observation_token"), "--project", project.fetch("name"), "--json"])
+      command = Shellwords.join([ "hive", "act", "workflow.retry", descriptor.fetch("target"),
+        "--observation", descriptor.fetch("observation_token"), "--project", project.fetch("name"), "--json" ])
       with_replaced_singleton_method(Hive::Recovery::API, :recover!, ->(**) { flunk "recovery must not be admitted" }) do
         error = assert_raises(Hive::Remote::AdmissionRefused) do
           service.action(project: project, task: task, action_id: "workflow.retry",
             observation: descriptor.fetch("observation_token"), idempotency_key: "manual-remote",
-            principal: PRINCIPAL, scopes: ["act"])
+            principal: PRINCIPAL, scopes: [ "act" ])
         end
         assert_equal 503, error.status
         assert_equal "dispatcher_unavailable", error.code
@@ -229,7 +229,7 @@ class RemoteCommandServiceTest < Minitest::Test
         assert_raises(Hive::CommandReplayFailure) do
           service.action(project: project, task: task, action_id: "workflow.retry",
             observation: descriptor.fetch("observation_token"), idempotency_key: "manual-remote",
-            principal: PRINCIPAL, scopes: ["act"])
+            principal: PRINCIPAL, scopes: [ "act" ])
         end
       end
       assert_empty repository.recovery_requests

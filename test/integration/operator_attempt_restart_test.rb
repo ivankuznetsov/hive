@@ -128,7 +128,7 @@ class OperatorAttemptRestartTest < Minitest::Test
               # Delayed heartbeats with a matching wrapper remain suspects.
               status = Hive::Attempts::Reconciler.new(store: store).reconcile(now: Time.now.utc + 120)
               assert_empty status.newly_lost_attempts, service
-              assert_equal [attempt_id], status.capacity.reserved_attempt_ids, service
+              assert_equal [ attempt_id ], status.capacity.reserved_attempt_ids, service
               marker = Hive::Markers.current(task.state_file)
               row = Hive::Daemon::StatusConsumer::Row.new(project: project.fetch("name"), slug: task.slug,
                 stage: stage, folder: folder, state_file: task.state_file,
@@ -138,7 +138,7 @@ class OperatorAttemptRestartTest < Minitest::Test
               logger.define_singleton_method(:event) { |*_, **_| }
               Hive::Daemon::StaleAgentHealer.new(controller: Hive::Daemon::ConcurrencyController.new(
                 max_concurrent_runs: 4, max_concurrent_per_project: 2, max_runs_per_day_per_project: 50),
-                logger: logger).heal([row], now: Time.now.utc)
+                logger: logger).heal([ row ], now: Time.now.utc)
               assert_equal before, File.binread(task.state_file), service
               assert Hive::Lock.read_task_lock(folder), service
               assert_equal record.wrapper, store.fetch(attempt_id).wrapper, service
@@ -167,7 +167,7 @@ class OperatorAttemptRestartTest < Minitest::Test
           assert_equal "succeeded", receipt.terminal_outcome, receipt.to_h.inspect
         else
           admitted = dispatcher.dispatch(task: task, project: project.fetch("name"), intended_stage: "4-execute",
-            argv: ["hive", "develop", task.slug], request_id: "direct-restart-probe", provider: "codex", interactive: false)
+            argv: [ "hive", "develop", task.slug ], request_id: "direct-restart-probe", provider: "codex", interactive: false)
           result = client.attach(admitted.attempt.attempt_id, stdout: StringIO.new, stderr: StringIO.new)
           assert_equal "succeeded", result.outcome
         end

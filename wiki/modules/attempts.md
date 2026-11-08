@@ -282,3 +282,10 @@ Linux host, real external supervisors survived disposable services modeling
 all three shipped kill policies, for direct execute and attached review work.
 Actual application-service restarts and the historical incident remain
 unverified; no production orphan policy was changed based on that probe.
+
+`Attempts::API#fetch` and `#attach` expose canonical observation and read-only
+attachment without constructing internal repositories or clients in recovery
+adapters. A contended request admission re-reads the canonical request attempt
+and verifies its task/stage/generation binding before returning existing-live
+or terminal replay. Genuine loss remains a ledger state; manual recovery maps
+it to the `lost` outcome and retains its canonical end time.

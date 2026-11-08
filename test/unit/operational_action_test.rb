@@ -136,7 +136,6 @@ class OperationalActionTest < Minitest::Test
         assert_equal "queued", result.dig("recovery", "status")
       end
     end
-
     end
 
     assert_equal action.fetch("observation_token"),

@@ -33,11 +33,13 @@ module Hive
         call_with_envelope do
           invoke = lambda do
             validate!
-            result = @executor.execute(
-              action_id: @action_id,
-              target: @target,
-              observation_token: @observation
-            )
+            result = with_stage_stdout do
+              @executor.execute(
+                action_id: @action_id,
+                target: @target,
+                observation_token: @observation
+              )
+            end
             emit_success(result)
           end
           payload = @idempotency_key ? command_operation.call(&invoke) : invoke.call
@@ -79,6 +81,24 @@ module Hive
       def envelope_serialization_failure_policy = :raise
 
       private
+
+      def with_stage_stdout
+        return yield unless @json
+
+        Hive::CommandOperation::CAPTURE_MUTEX.synchronize do
+          previous = $stdout
+          File.open(File::NULL, "w") do |sink|
+            begin
+              $stdout = Hive::CommandOperation::ThreadRoutedOutput.new(
+                capture_thread: Thread.current, captured: sink, passthrough: previous
+              )
+              yield
+            ensure
+              $stdout = previous
+            end
+          end
+        end
+      end
 
       def command_operation
         Hive::CommandOperation.new(

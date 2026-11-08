@@ -518,7 +518,7 @@ module Hive
         [
           payload,
           {
-            "reference" => relative, "digest" => Digest::SHA256.hexdigest(bytes),
+            "reference" => relative, "digest" => ::Digest::SHA256.hexdigest(bytes),
             "bytes" => bytes.bytesize, "media_type" => "application/json"
           }
         ]

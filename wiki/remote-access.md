@@ -3,7 +3,7 @@ title: Remote CLI access and incident response
 type: guide
 source: lib/hive/remote/, lib/hive/connection_contexts.rb, lib/hive/commands/token.rb, lib/hive/commands/daemon.rb, lib/hive/commands/web.rb, web/app/controllers/api/v1/
 created: 2026-11-07
-updated: 2026-11-07
+updated: 2026-11-08
 tags: [remote, cli, authentication, operations]
 ---
 
@@ -185,6 +185,8 @@ Daemon-owned work executes against the serving installation even if its
 operator has saved a remote client context. Native attempt wrappers and workers
 explicitly select `local` before dispatch. Current managed service definitions
 and native daemon/babysitter re-exec paths also retain that local target.
+Bot and answer-digest internal task-graph status polls explicitly select `local`
+as well, so a saved remote context does not redirect their reads.
 
 Remote status/task/mutation JSON uses `hive-remote.v1` with explicit semantic DTOs
 and source schema/version metadata where applicable. It does not promise the

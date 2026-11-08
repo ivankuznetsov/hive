@@ -6,6 +6,7 @@ require "shellwords"
 require "hive/connection_contexts"
 require "hive/daemon/child_supervisor"
 require "hive/bot/child_supervisor"
+require "hive/bot/status_watcher"
 require "hive/one_shot/process_executor"
 require "hive/tui/subprocess"
 
@@ -48,6 +49,16 @@ class LocalChildContextTest < Minitest::Test
       execution = Hive::OneShot::ProcessExecutor.new.call(Shellwords.join(LOGICAL))
       assert_equal 0, execution.exit_code
       assert_equal "hive-runtime-maintenance", execution.envelope.fetch("schema")
+      assert_equal "elsewhere", contexts.resolve.fetch("name")
+    end
+  end
+
+  def test_bot_and_digest_status_poll_keeps_local_authority
+    with_remote_selected do |_home, contexts|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: HIVE).fetch
+
+      assert result.ok, result.error
+      assert_empty result.rows
       assert_equal "elsewhere", contexts.resolve.fetch("name")
     end
   end

@@ -91,6 +91,7 @@ module Hive
       SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
       SHOW_SIGNATURE_SUBCOMMANDS = %w[log show rev-list].freeze
       REMERGE_DIFF_FORMATS = %w[remerge r].freeze
+      CAT_FILE_FILTER_TOKENS = %w[--fi --fil --filt --filte --filter].freeze
 
       def command_option_consumes_next?(subcommand, arg)
         # Only `git grep`'s value-taking options (`-e PATTERN`, `--file FILE`, ...) consume the
@@ -145,9 +146,17 @@ module Hive
         # helper. Reject the repeated/clustered short flag and every long abbreviation Git accepts.
         return true if verbose_status_option?(subcommand, arg)
         # `git cat-file --filters` applies smudge filters, running the repo-local
-        # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
+        # `filter.<driver>.smudge` command — an exec seam the log/show `--no-textconv`
         # hardening never sees, since cat-file stays a plain allowlisted passthrough.
         return true if arg == "--filters"
+        # Fixed bare-token boundary, independent of Git version: newer Git makes
+        # four spellings ambiguous and --filter an object-filter option. Deliberately
+        # over-block those errors/reads; glued --filter=<spec> remains outside this set.
+        # Excluded --f and --filters=<value> are inert only while Git keeps --f
+        # ambiguous and --filters valueless; that parsing dependency can change.
+        # Git 2.45.4 also parses glued --filter=<spec> as valueless --filters,
+        # rejecting the value before helper execution; newer Git uses object filtering.
+        return true if subcommand == "cat-file" && CAT_FILE_FILTER_TOKENS.include?(arg)
         # `--submodule=diff` expands nested diffs inside submodule repositories; the top-level
         # `--no-ext-diff --no-textconv` flags do not harden those nested git invocations.
         return true if submodule_diff_option?(arg, next_arg)

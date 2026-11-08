@@ -30,6 +30,11 @@ discovery/action resumes.
 
 ## Subcommands
 
+Managed service startup and daemon code-refresh re-exec explicitly select
+`--context local`, so a saved remote client context cannot interrupt the local
+daemon lifecycle. Installing an updated definition still follows the existing
+drift and `--force` rules.
+
 ```
 hive daemon start [--detach] [--dry-run]
 hive daemon stop

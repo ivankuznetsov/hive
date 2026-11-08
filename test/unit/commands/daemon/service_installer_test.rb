@@ -23,7 +23,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       installer.install!(autostart: false)
       unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
       assert File.exist?(unit)
-      assert_includes File.read(unit), "ExecStart=#{hive} daemon start"
+      assert_includes File.read(unit), "ExecStart=#{hive} daemon start --context local"
       assert_empty commands
     end
   end
@@ -333,7 +333,7 @@ class DaemonServiceInstallerTest < Minitest::Test
                       "HIVE_BIN env line must point at the resolved binary so the daemon can find `hive` when systemd-user PATH excludes ~/.local/bin"
       assert_includes unit_body, "Environment=PATH=",
                       "minimal PATH must be set so the daemon's incidental shell-outs (git, etc.) keep working"
-      assert_includes unit_body, "ExecStart=#{hive} daemon start"
+      assert_includes unit_body, "ExecStart=#{hive} daemon start --context local"
     end
   end
 
@@ -559,7 +559,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       exec_line = unit_body.lines.find { |l| l.start_with?("ExecStart=") }
       env_line = unit_body.lines.find { |l| l.start_with?("Environment=HIVE_BIN=") }
       assert exec_line && env_line
-      exec_path = exec_line.sub("ExecStart=", "").split(" daemon start").first
+      exec_path = Shellwords.split(exec_line.sub("ExecStart=", "")).first
       env_path = env_line.sub("Environment=HIVE_BIN=", "").strip
       assert_equal exec_path, env_path,
                    "ExecStart and Environment=HIVE_BIN must reference the same absolute binary"
@@ -587,7 +587,7 @@ class DaemonServiceInstallerTest < Minitest::Test
                    "force must preserve prior content as a timestamped .bak so user hand-edits aren't silently destroyed and a second --force doesn't clobber the original backup"
       assert_equal "previous-stale-content\n", File.read(backups.first)
       refute_equal "previous-stale-content\n", File.read(unit)
-      assert_includes File.read(unit), "ExecStart=/tmp/hive daemon start"
+      assert_includes File.read(unit), "ExecStart=/tmp/hive daemon start --context local"
       assert installer.messages.any? { |msg| msg.include?("upgraded existing unit") }
     end
   end

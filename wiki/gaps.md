@@ -3,9 +3,56 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-06
+updated: 2026-11-07
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Remote API deployment evidence (2026-11-07)
+
+CI run `42416154313` could not execute the Rails-backed root integration tests
+`remote_operations_test.rb` and `remote_access_acceptance_test.rb` because its
+coverage shards installed only the root bundle. Commit `a67eb1f2d9` adds the
+web bundle installation to those shards. The dependency setup is repaired on
+this branch; a later green CI run is still required to establish acceptance
+evidence. Local fixture success does not establish coverage-shard success.
+
+CI run `42429818653` executed the Rails-backed fixtures but failed the remote
+acceptance checkout snapshot because its own `git status` refreshed the local
+index. The inventory now disables optional Git writes and the acceptance test
+forces stale stat data to reproduce that observer effect. A green CI rerun is
+still required to verify the corrected coverage shard and aggregate gates.
+
+The token and authentication checks use isolated local installations. Live NAS,
+TLS proxy/tunnel and discontinued Hivebox deployment captures are unavailable;
+these checks do not establish external-network deployment behavior. The remote
+access implementation does not provision a proxy, configure its rate limit, or
+change web bind policy.
+
+The broad local execution checkpoint is not green on this host. The existing
+`InvocationProcessCustody` can raise `Errno::ESRCH` while reading a disappearing
+same-user `/proc/<pid>/environ`; that source is byte-identical to the feature's
+starting commit, and standalone cleanup plus unchanged OpenCode tests reproduce
+the error. A separate wiki read-only snapshot assertion observed concurrent
+worker logs/edits and passed in isolation (2 tests, 52 assertions). The parallel
+runner reused one worker's failed log for a later component job, so its complete
+earlier failure list was not retained. Focused remote checks pass; a green broad
+checkpoint and exhaustive CI coverage remain separate verification obligations. The review
+fix pass also reproduced the unchanged process-registry test's evidence mismatch
+(`root_gone` versus an additional `root_gone_led_group_empty`) in isolation.
+Broad execution overlapped edits and reported stale skill-manifest/reference
+expectations; focused post-update projection checks pass. These results do not
+establish a green full-suite checkpoint.
+
+## Remote token incident-response limits (2026-11-07)
+
+Existing local verbs can list/revoke tokens, inspect pending daemon requests,
+stop web/daemon, or request an installation-wide verified quiescence. No
+supported local CLI verb enumerates and selectively cancels all accepted work
+for one token. Receipt `principal`/`principal_source`, retained dispatch contexts
+and attempt request IDs provide forensic correlation, but require local ledger
+investigation. Revocation and web shutdown do not cancel accepted work; queued
+requests may run after a daemon resume. See [[remote-access]] for the verified
+verbs, their limits, and the per-token revocation cost.
 
 ## Owner-command failure limit scope (2026-11-06)
 
@@ -2009,3 +2056,12 @@ by booting the deployment against the live database. The manual rollback
 (`dogfood-current` link swap) is documented in [[commands/receipt]] but not
 automated or exercised; `hive-dogfood-deploy` only moves forward. The
 release-channel published package remains #1550.
+
+## Remote answer replay retention compatibility (2026-11-07)
+
+New remote answer receipts retain the exact native binding and a digest of the
+submitted handle, independently of bounded read-registry eviction. Older answer
+receipts lack this metadata and still need the original read-registry record
+for replay; an already-evicted legacy binding cannot be recovered safely.
+Focused controller regressions cover new receipt eviction, advancement, and
+changed-input conflicts plus replay of older receipts with retained handles.

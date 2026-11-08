@@ -26,7 +26,7 @@ class BabysitServiceInstallerTest < Minitest::Test
       unit = File.read(unit_path)
 
       assert_equal :written, outcome.kind
-      assert_includes unit, "ExecStart=/tmp/hive babysit start"
+      assert_includes unit, "ExecStart=/tmp/hive babysit start --context local"
       refute_includes unit, "--detach"
       assert_includes unit, "KillMode=mixed"
       assert_includes unit, "TimeoutStopSec=610"

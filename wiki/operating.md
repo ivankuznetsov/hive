@@ -367,6 +367,12 @@ does not depend on an unpublished companion `hive-skills` package. Setup does
 not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
 after correcting the scoped remediation printed by doctor.
 
+The canonical skill also routes named remote contexts through its
+`references/remote-access.md`: bounded status continuation, task/content reads,
+opaque answer handles, independent scopes, approval replay guards and durable
+operation lookup. Remote contexts reject local-only verbs and `--operational`;
+operators explicitly select `--context local` for the local operational loop.
+
 OpenClaw support is rendered from the same canonical `skills/hive/` source into
 `openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug

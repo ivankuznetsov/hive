@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-context.v1.json",
+  "title": "Hive connection context command",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "type"],
+      "properties": {
+        "name": { "type": "string" },
+        "type": { "enum": ["local", "remote"] },
+        "url": { "type": "string", "format": "uri" },
+        "instance_id": { "type": "string" },
+        "api_version": { "const": "v1" },
+        "selected": { "type": "boolean" },
+        "authority": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "unrestricted-local-operator" },
+            "id": { "type": "string" },
+            "scopes": { "type": "array", "items": { "enum": ["read", "create", "act", "answer"] } },
+            "projects": { "type": "array", "items": { "type": "string" } },
+            "all_projects": { "type": "boolean" },
+            "expires_at": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "data"],
+      "properties": {
+        "schema": { "const": "hive-context" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "enum": ["add", "list", "show", "use"] },
+        "data": { "oneOf": [
+          { "$ref": "#/$defs/Context" },
+          { "type": "array", "items": { "$ref": "#/$defs/Context" } }
+        ] }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-context" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "config", "internal"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

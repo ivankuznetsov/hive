@@ -2,7 +2,44 @@ require "test_helper"
 require "hive/cli_argv_policy"
 
 class HiveCliArgvPolicyTest < Minitest::Test
-  VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
+  VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key --context].freeze
+
+  def test_local_child_context_pins_only_native_hive_launches_without_an_explicit_context
+    policy = Hive::CliArgvPolicy
+    assert_equal %w[hive --context local run demo:task], policy.local_child_argv(%w[hive run demo:task])
+    assert_equal %w[/opt/hive/bin/hv --context local generate-name /task],
+      policy.local_child_argv(%w[/opt/hive/bin/hv generate-name /task])
+    [ %w[ruby -e puts], %w[sh -c echo], %w[/tmp/fake-hive-run.rb run task],
+     %w[hive --context remote status], %w[hive status --context=remote],
+     %w[hive --context local status] ].each do |argv|
+      assert_equal argv, policy.local_child_argv(argv)
+    end
+    logical = %w[hive new demo -- task --context remote]
+    assert_equal %w[hive --context local new demo -- task --context remote], policy.local_child_argv(logical)
+    assert_equal %w[hive new demo -- task --context remote], logical
+    assert_raises(Hive::UsageError) { policy.local_child_argv(%w[hive status --context]) }
+  end
+
+  def test_context_options_work_before_the_command_and_after_new_project
+    assert_equal [ %w[status --json], "nas" ], Hive::CliArgvPolicy.extract_context(%w[--context nas status --json])
+    assert_equal [ %w[new project idea], "nas" ], Hive::CliArgvPolicy.extract_context(%w[new project --context nas idea])
+    assert_equal [ %w[new project -- idea --context nas], nil ], Hive::CliArgvPolicy.extract_context(%w[new project -- idea --context nas])
+    [ %w[new project idea --context nas], %w[new project idea --context=nas],
+      %w[new_task project idea --context nas] ].each do |argv|
+      assert_equal [ [ argv.first, "project", "idea" ], "nas" ], Hive::CliArgvPolicy.extract_context(argv)
+    end
+    assert_equal [ %w[new project -- --context literal -- idea], "nas" ],
+      Hive::CliArgvPolicy.extract_context(%w[new project --context nas -- --context literal -- idea])
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[new project idea --context]) }
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[new project idea --context=]) }
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[new project idea --context nas --context local]) }
+    assert_equal "status", Hive::CliArgvPolicy.command_name(%w[--context=nas --json status])
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[status --context]) }
+    assert_raises(Hive::UsageError) { Hive::CliArgvPolicy.extract_context(%w[status --context one --context two]) }
+    assert_equal %w[new --context nas project -- idea], Hive::CliArgvPolicy.lift_new_options(
+      %w[new project idea --context nas], value_options: VALUE_OPTIONS
+    )
+  end
 
   def test_json_and_encoding_policy
     assert Hive::CliArgvPolicy.json_requested?(%w[status --json])

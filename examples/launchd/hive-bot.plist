@@ -69,6 +69,8 @@
     <string>bot</string>
     <string>start</string>
     <string>--foreground</string>
+    <string>--context</string>
+    <string>local</string>
   </array>
 
   <key>RunAtLoad</key>

@@ -25,6 +25,34 @@ if (launch_gate_fd = ENV.delete("HIVE_LAUNCH_GATE_FD"))
 end
 
 require "hive"
+require "hive/remote/command_policy"
+require "hive/remote/dispatcher"
+
+# Freeze the installation target before activation, command registration,
+# scheduler repair, or any command can discover a local project.
+begin
+  connection_contexts = Hive::Remote::Dispatcher.contexts
+  connection_invocation = Hive::Remote::CommandPolicy.preflight!(
+    Hive::CliArgvPolicy.validate_encoding(ARGV), contexts: connection_contexts,
+    dispatcher: Hive::Remote::Dispatcher.new(contexts: connection_contexts)
+  )
+  exit 0 if connection_invocation.handled?
+  ARGV.replace(connection_invocation.argv)
+rescue Hive::Error, Thor::Error => error
+  require "hive/cli_usage_contracts"
+  contract = Hive::CliUsageContracts.contract(ARGV) unless error.is_a?(Hive::Remote::Dispatcher::ReportedError)
+  if error.is_a?(Thor::Error)
+    error = Hive::CliUsageContracts.usage_error(contract, error.message)
+  end
+  if !error.is_a?(Hive::Remote::Dispatcher::ReportedError) && Hive::CliArgvPolicy.json_requested?(ARGV)
+    if contract
+      puts JSON.generate(Hive::CliUsageContracts.error_payload(contract, error, argv: ARGV))
+    end
+  end
+  warn "hive: #{error.message}"
+  exit(error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::USAGE)
+end
+
 require "hive/runtime_control_plane/activation_gate"
 require "hive/runtime_control_plane/command_registration"
 require "hive/runtime_control_plane/operational_inspection"
@@ -157,7 +185,7 @@ if ARGV == [ "--version" ] || ARGV == [ "-v" ]
 end
 
 JSON_BOOLEAN_OPTIONS = Hive::CliJsonOptions::BOOLEAN_OPTIONS
-NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key].freeze
+NEW_VALUE_OPTIONS = %w[--base --depends-on --workflow --idempotency-key --context].freeze
 
 # Each command boundary (lib/hive/commands/<command>.rb) declares its own
 # pre-dispatch JSON usage contract via Hive::CliUsageContracts.declare; the
@@ -190,7 +218,9 @@ begin
   text_start = Hive::CliArgvPolicy.new_text_start_index(ARGV, value_options: NEW_VALUE_OPTIONS)
   ARGV.replace(Hive::CliArgvPolicy.rewrite_help(ARGV, text_start_index: text_start))
   ARGV.replace(Hive::CliArgvPolicy.lift_new_options(ARGV, value_options: NEW_VALUE_OPTIONS))
-  Hive::CLI.start(ARGV, debug: true)
+  Hive::Remote::CommandPolicy.with_invocation(connection_invocation) do
+    Hive::CLI.start(ARGV, debug: true)
+  end
 rescue Thor::Error => e
   contract = Hive::CliUsageContracts.contract(original_argv, on_failure: ->(exception_class) {
     name = exception_class.name.to_s.gsub(/[^A-Za-z0-9_:]/, "")[0, 120]

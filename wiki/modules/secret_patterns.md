@@ -3,7 +3,7 @@ title: Secret detection and diagnostic redaction
 type: module
 source: lib/hive/secret_scanner.rb, lib/hive/secret_patterns.rb, lib/hive/betterleaks.rb
 created: 2026-04-26
-updated: 2026-09-06
+updated: 2026-11-07
 tags: [security, secrets, betterleaks, redact]
 ---
 
@@ -41,6 +41,10 @@ the scanner. Hardened Git config and exact-OID validation remain in force.
 `SecretPatterns.redact(text)` masks diagnostic strings without spawning a process
 inside status/log formatting. It preserves UTF-8, handles binary log tails,
 redacts complete and truncated PEM blocks, and does not mutate its input.
+Remote attempt-log reads also use this redactor before returning content.
+URL userinfo and Hive's native `24hex.64hex` bearer shape are masked even
+without an Authorization prefix. The diagnostic receipt policy version stays
+at 1 so the additional patterns do not invalidate existing receipts.
 The former `scan`, `match?`, `match_diff?`, and password-reference APIs are gone.
 Existing diagnostic receipts retain their numeric redaction-version metadata;
 reading them still checks their contents with the current Betterleaks detector.

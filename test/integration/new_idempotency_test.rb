@@ -64,6 +64,56 @@ class NewIdempotencyTest < Minitest::Test
     end
   end
 
+  def test_structured_creation_returns_its_receipt_and_task_id_without_printing
+    with_initialized_project do |project_root, project|
+      result = nil
+      out, err = capture_io do
+        result = Hive::Commands::New.new(project, "structured capture", slug_override: "structured-capture",
+          idempotency_key: "structured:capture", structured: true).call
+      end
+
+      assert_empty out
+      assert_empty err
+      assert_operator result.fetch("task_id"), :>, 0
+      assert_equal "succeeded", result.dig("command_receipt", "state")
+      assert_equal 1, idempotent_tasks(project_root).length
+    end
+  end
+
+  def test_structured_capture_rejection_retains_a_schema_valid_failure_receipt
+    with_initialized_project do |project_root, project|
+      out, err = capture_io do
+        assert_raises(Hive::UsageError) do
+          Hive::Commands::New.new(project, "rejected capture", slug_override: "rejected-capture",
+            idempotency_key: "structured:rejected", structured: true,
+            task_capture_factory: ->(**) { raise Hive::UsageError, "capture rejected" }).call
+        end
+      end
+      assert_empty out
+      assert_empty err
+      row = Hive::RuntimeControlPlane.database.read { |db| db[:command_receipts].where(command: "new").first }
+      assert_equal "failed", row.fetch(:state)
+      failure = JSON.parse(row.fetch(:result_json)).fetch("payload")
+      assert_equal "capture rejected", failure.fetch("message")
+      assert_empty JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new")))).validate(failure).to_a
+      assert_empty idempotent_tasks(project_root)
+    end
+  end
+
+  def test_base_selection_on_a_non_draft_workflow_is_rejected_before_task_capture
+    with_initialized_project do |project_root, project|
+      out, err, status = with_captured_exit do
+        Hive::Commands::New.new(project, "invalid content base", workflow: "content", base: "main",
+          idempotency_key: "content:base", json: true).call
+      end
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_empty err
+      assert_equal "InvalidDraftPrCombination", JSON.parse(out).fetch("error_class")
+      assert_empty idempotent_tasks(project_root)
+    end
+  end
+
   def test_reusing_key_for_different_input_is_rejected_without_a_second_task
     with_initialized_project do |project_root, project|
       create_json(project, "first request", key: "creator:stable", slug: "first-task")

@@ -99,7 +99,7 @@ class Project
     text = text.to_s.strip
     raise Hive::Error, "idea text is empty" if text.empty?
 
-    Hive::Commands::New.new(name, text, attachments:).call!
+    Hive::Commands::New.new(name, text, attachments:, structured: true).call!
   rescue SystemCallError, IOError => e
     # Commands::New#call! deliberately leaves I/O errors raising for
     # in-process adapters to present in their native UI. Normalize them here

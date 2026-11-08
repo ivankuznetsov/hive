@@ -651,7 +651,8 @@ module Hive
     def failure_error_kind(_error) = "usage"
 
     def deterministic_non_application?(error)
-      error.is_a?(Hive::UsageError) ||
+      (error.respond_to?(:deterministic_non_application?) && error.deterministic_non_application?) ||
+        error.is_a?(Hive::UsageError) ||
         error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
     end
 

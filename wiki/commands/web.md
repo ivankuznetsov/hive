@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-10-15
+updated: 2026-11-07
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -36,6 +36,29 @@ ordinary artifacts verb. Rails revalidates its exact canonical
 `hive evidence rework ... --stage 7-artifacts --generation ...
 --recovery-digest ...` command before queueing; malformed or stale bindings are
 rejected before any request write.
+
+## Scoped remote API
+
+`/api/v1` exposes bearer-only JSON adapters over the shared readers and domain
+commands. It does not accept browser cookies or loopback authentication as a
+fallback, and does not change browser login or CSRF behavior. The API is
+unavailable while the owner is blank or `HIVE_WEB_LOCAL_LOOPBACK` evaluates true;
+literal `"0"` is false. Mutations also require installed command receipts.
+These interlocks return byte-identical safe 503 bodies and distinct audit codes.
+
+Supported exposure uses loopback web behind an operator-managed TLS proxy or
+tunnel forwarding only `/api/v1`, refusing all browser paths, and providing rate
+limiting. Set `web.local_loopback: false` and provision a non-blank
+`web.github.owner` before exposure, including hosted hivedev C15 workspace
+creation. The server daemon must be installed and running for accepted work to
+execute. Issuing tokens never authorizes a non-loopback bind;
+`enforce_bind_policy!` is unchanged. A separately authorized non-loopback bind
+avoids the bypass interlock but is outside the supported proxy recipe.
+
+See [[remote-access]] for setup, scopes, bounded content, durable operation
+recovery and incident response; [[commands/token]] owns the server-local token
+lifecycle. There is no remote setup, module grant, deletion, release, shell/argv
+executor, or browser token-management UI.
 
 ## CLI
 

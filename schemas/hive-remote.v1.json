@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-remote.v1.json",
+  "title": "Hive remote API envelope (v1)",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok", "instance_id"],
+  "properties": {
+    "schema": {"const": "hive-remote"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "instance_id": {"type": ["string", "null"]},
+    "data": {},
+    "error": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}}
+  },
+  "oneOf": [
+    {"properties": {"ok": {"const": true}}, "required": ["data"], "not": {"required": ["error"]}},
+    {"properties": {"ok": {"const": false}}, "required": ["error"], "not": {"required": ["data"]}}
+  ]
+}

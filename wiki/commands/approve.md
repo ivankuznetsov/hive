@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-07
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -22,6 +22,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
 ```
 
 `<stage>` accepts either the full directory name (`3-plan`) or the short suffix (`plan`). Both `--to` and `--from` are validated against the closed enum at parse time (Thor `enum:` constraint).
+
+Remote approval requires `answer` authority and full stage/generation guards.
+When omitted by a token with `read`, the CLI resolves them and prints the exact
+`--from`, `--generation` and retry key to stderr before submission. Reuse those
+values for a lost-response retry after advancement. Retained remote verification
+composes with caller observation guards and always refuses force/destination
+overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
+[[remote-access]].
 
 ## Steps performed (`Commands::Approve#call`)
 
@@ -201,6 +209,19 @@ and holds invalid dependency state. Agent callers use `approve` for:
 - an audit-trail commit on `hive/state` recording the approval
 
 `hive approve` adds all of that without removing the manual `mv` path — the two coexist.
+
+## Remote context
+
+Remote approval requires the independent `answer` scope and an expected stage
+and generation. `--from STAGE --generation GENERATION` lets an answer-only token
+submit the binding without obtaining general read access. With `read`, the
+native transport can obtain the task's current `approval_generation`. Admission
+is durable and the daemon performs the guarded transition later. Remote
+`--force`, destination overrides and effects that derive force are refused with
+guidance to advance locally, even when the token has every scope. A workflow
+action that performs approval needs both `act` and `answer`; the explicit
+approval endpoint needs `answer`. See [[remote-access]] for operation recovery
+and authority boundaries. Remote JSON uses the bounded `hive-remote.v1` contract.
 
 ## Backlinks
 

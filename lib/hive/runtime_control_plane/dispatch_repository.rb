@@ -15,7 +15,7 @@ module Hive
       REQUESTORS = %w[bot healer web tui cli action daemon recorder operator].freeze
       ALLOWED_VERBS = %w[
         run develop brainstorm plan plan-review-run review open-pr artifacts finalize
-        archive markers daemon
+        archive markers daemon act approve
       ].freeze
       GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
       GLOBAL_MAINTENANCE_ARGVS = [ %w[hive daemon install --force] ].freeze
@@ -37,14 +37,14 @@ module Hive
         :chat_id, :update_id, :trigger, :task_generation,
         :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
-        :recovery, :schema_version, :state, :revision
+        :recovery, :schema_version, :state, :revision, :remote_authority
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
                        inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
-                       state: "queued", revision: 0)
+                       state: "queued", revision: 0, remote_authority: nil)
           super(
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
@@ -52,7 +52,8 @@ module Hive
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
-            schema_version: schema_version, state: state, revision: revision
+            schema_version: schema_version, state: state, revision: revision,
+            remote_authority: remote_authority
           )
         end
       end
@@ -93,14 +94,14 @@ module Hive
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil, recovery: nil, now: @clock.call,
-                         command_context: nil, **)
+                         command_context: nil, remote_authority: nil, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
           task_generation: task_generation,
           inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
-          recovery: recovery, now: now
+          recovery: recovery, now: now, remote_authority: remote_authority
         )
         database.transaction do |db|
           insert_request!(db, payload)
@@ -424,7 +425,7 @@ module Hive
       end
 
       def expired?(request, now: @clock.call, expiry_sec: EXPIRY_SEC)
-        !request.recovery && now.utc - request.created_at.utc > expiry_sec
+        !request.recovery && !request.remote_authority && now.utc - request.created_at.utc > expiry_sec
       end
 
       def write_result!(chat_id:, project:, slug:, request_id:, exit_code:, command:,
@@ -674,7 +675,7 @@ module Hive
                           update_id: nil, trigger: nil, task_generation: nil,
                           inherited_outputs: [], task_id: nil,
                           expected_stage: nil, expected_marker_name: nil,
-                          expected_marker_id: nil, recovery: nil, remaining_argvs: [])
+                          expected_marker_id: nil, recovery: nil, remaining_argvs: [], remote_authority: nil)
         validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
         {
           "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
@@ -685,7 +686,7 @@ module Hive
           "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
           "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
           "expected_marker_id" => expected_marker_id, "recovery" => recovery,
-          "remaining_argvs" => Array(remaining_argvs)
+          "remaining_argvs" => Array(remaining_argvs), "remote_authority" => remote_authority
         }
       end
 
@@ -718,7 +719,7 @@ module Hive
           request_id project slug argv requestor chat_id update_id trigger task_generation
           inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
-          remaining_argvs
+          remaining_argvs remote_authority
         ].all? { |key| existing[key] == payload[key] }
       end
 
@@ -744,7 +745,7 @@ module Hive
           expected_marker_name: payload["expected_marker_name"],
           expected_marker_id: payload["expected_marker_id"], recovery: payload["recovery"],
           schema_version: payload.fetch("schema_version"), state: row.fetch(:state),
-          revision: row.fetch(:revision)
+          revision: row.fetch(:revision), remote_authority: payload["remote_authority"]
         )
       rescue KeyError, ArgumentError, TypeError, CodecError => error
         raise IntegrityError.new(

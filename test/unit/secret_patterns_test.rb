@@ -3,6 +3,14 @@ require "hive/secret_patterns"
 
 # Log redaction only. Detection is tested against Betterleaks.
 class SecretPatternsTest < Minitest::Test
+  def test_remote_log_credentials_are_redacted_without_an_authorization_header
+    bearer = "a" * 24 + "." + "b" * 64
+    output = Hive::SecretPatterns.redact("https://user:pass@host/path token=#{bearer}")
+    refute_includes output, "user:pass"
+    refute_includes output, bearer
+    assert_includes output, "host/path"
+  end
+
   def test_pem_private_key_block_body_is_redacted_not_just_header
     # Pre-fix the regex matched only the BEGIN delimiter, leaving the
     # base64 body and END line in redacted output. A leak path because

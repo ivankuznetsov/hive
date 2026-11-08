@@ -559,10 +559,10 @@ module Hive
       # We invoke Kernel#exec via method(:exec).call to dodge a
       # JS-codebase security linter that pattern-matches on the literal
       # `exec(` token. The array-argv form here is execve(2)-equivalent
-      # with three literal arguments under our control; there is no
+      # with literal arguments under our control; there is no
       # shell and no injection surface.
       def reexec_with_fresh_code!
-        reexec_argv = [ "daemon", "start" ]
+        reexec_argv = [ "daemon", "start", "--context", "local" ]
         reexec_argv << "--dry-run" if @dry_run
         Hive::RuntimeControlPlane::ProcessGuard.exec(Process.argv0, *reexec_argv)
       end

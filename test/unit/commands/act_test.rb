@@ -68,6 +68,21 @@ class CommandsActTest < Minitest::Test
     assert_equal "advanced demo:task — idle at 3-plan (complete)\n", stdout
   end
 
+  def test_structured_call_returns_the_payload_without_output
+    payload = nil
+    stdout, stderr = capture_io do
+      payload = Hive::Commands::Act.new(
+        "workflow.advance", "demo:task", observation: "a" * 64,
+        structured: true, executor: FakeExecutor.new
+      ).call
+    end
+
+    assert_empty stdout
+    assert_empty stderr
+    assert_equal true, payload.fetch("ok")
+    assert_equal "idle", payload.dig("result", "task_state")
+  end
+
   def test_keyed_replay_after_task_move_preserves_payload_without_reexecuting_act
     with_command_receipts do |project, store|
       source = File.join(project, ".hive-state", "stages", "1-inbox", "task")

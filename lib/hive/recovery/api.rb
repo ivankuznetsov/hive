@@ -25,12 +25,17 @@ module Hive
       def recover!(row:, project: nil, requestor: "operator", chat_id: nil,
                    update_id: nil, request_id: nil, observation_token: nil,
                    state_home: Hive::Paths.state_home, now: Time.now,
-                   coordinator: nil)
+                   coordinator: nil, admission_guard: nil, command_context: nil, remote_authority: nil)
         observation = observation(row, project: project)
         coordinator ||= Hive::Daemon::RecoveryCoordinator.new(state_home: state_home)
         observation_token ||= coordinator.observation_token_for(observation)
         activity = activity_for(observation, now: now)
         operation = begin_recovery_operation(activity, observation, now: now)
+        remote_options = if remote_authority
+          { admission_guard: admission_guard, command_context: command_context, remote_authority: remote_authority }
+        else
+          {}
+        end
         result = coordinator.request(
           row: observation,
           requestor: requestor,
@@ -38,7 +43,7 @@ module Hive
           observation_token: observation_token,
           chat_id: chat_id,
           update_id: update_id,
-          now: now
+          now: now, **remote_options
         )
         complete_recovery_operation(operation, result, now: now)
         record_recovery_observation(activity, observation, result, now: now)

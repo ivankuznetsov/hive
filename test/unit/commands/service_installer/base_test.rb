@@ -420,6 +420,7 @@ class ServiceInstallerBaseTest < Minitest::Test
 
     state = installer.service_lifecycle_state
 
+    assert_equal "unsupported", installer.envelope_platform
     assert_equal "unsupported", state["platform"]
     assert_nil state["unit_path"]
     refute state["service_installed"]
@@ -428,6 +429,19 @@ class ServiceInstallerBaseTest < Minitest::Test
     refute state["service_manager_available"]
     refute installer.service_manager_available?
     refute installer.send(:manager_query_available?)
+  end
+
+  def test_remove_retires_the_installed_definition_when_the_manager_is_absent
+    with_tmp_dir do |dir|
+      installer = build(dir)
+      assert_equal :written, installer.install!(autostart: false).kind
+      assert File.exist?(installer.target_path)
+
+      result = installer.remove!(inspect_absent_manager: false)
+
+      assert_equal :removed, result.kind
+      refute File.exist?(installer.target_path)
+    end
   end
 
   def test_user_service_diagnostics_are_rendered_by_the_adapter

@@ -44,6 +44,14 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Install web gems for remote API fixtures
+        # Remote access integration tests boot the web API fixture with
+        # BUNDLE_GEMFILE=web/Gemfile, so shards need the web bundle too.
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: web
       - name: Bundle pinned Betterleaks
         run: ruby packaging/betterleaks.rb
       - name: Collect coverage shard

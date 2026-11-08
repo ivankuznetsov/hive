@@ -357,6 +357,17 @@ module Hive
         remove_file_if_present("#{temporary_path}-shm") if temporary_path
       end
 
+      # Request authentication needs only this immutable row, not a database
+      # diagnosis or a ProcessGuard checkout. Re-read in a forked process.
+      def cached_installation_identity
+        cached = @cached_installation_identity
+        return cached.last if cached && cached.first == Process.pid
+
+        identity = inspect_database { |database| database[:installations].first }.freeze
+        @cached_installation_identity = [ Process.pid, identity ]
+        identity
+      end
+
       def installation_identity
         ProcessGuard.checkout do
           diagnosis = diagnostics_uncoordinated
@@ -418,6 +429,7 @@ module Hive
 
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
       def disconnect
+        @cached_installation_identity = nil
         connection = @connection
         @connection = nil
         @validated = false

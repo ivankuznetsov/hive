@@ -15,6 +15,11 @@ broader active queue and blocker ownership, `hive task TARGET --json` for one
 task's detail, `hive tui` for the fleet browser, and `hive archive` for
 terminal history. The former public full-fleet status surface is removed.
 
+For a named remote context, use `hive status --context NAME --json` and follow
+`data.continuation` with `--cursor HANDLE`, preserving the project filter.
+Remote status rejects `--operational` and reports unavailable project loads
+explicitly. See [[remote-access]] for its bounded page and authority contract.
+
 ## Mode contract
 
 | Invocation | Contract |

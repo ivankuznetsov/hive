@@ -780,6 +780,10 @@ module Hive
 
       def intended_stage_for(argv, task)
         verb = Array(argv)[1].to_s
+        if verb == "act"
+          require "hive/operational_action"
+          return Hive::OperationalAction.intended_stage_for(task, action_id: Array(argv)[2])
+        end
         return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
 
         Hive::Workflows.for_verb(verb).fetch(:target)

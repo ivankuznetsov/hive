@@ -3,7 +3,7 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-11-04
+updated: 2026-11-07
 tags: [index, wiki]
 ---
 
@@ -49,6 +49,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[active-areas]] — `wiki/active-areas.md`
 - [[architecture]] — `wiki/architecture.md`
 - [[cli]] — `wiki/cli.md`
+- [[remote-access]] — remote CLI deployment prerequisites, authority and incident response.
 - [[commands]] — `wiki/commands.md`
 - [[commands/answer]] — `wiki/commands/answer.md`
 - [[commands/answer-digest]] — `wiki/commands/answer-digest.md`
@@ -56,6 +57,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/babysit]] — `wiki/commands/babysit.md`
 - [[commands/bench-submit]] — `wiki/commands/bench-submit.md`
 - [[commands/bot]] — `wiki/commands/bot.md`
+- [[commands/context]] — `wiki/commands/context.md`
 - [[commands/daemon]] — `wiki/commands/daemon.md`
 - [[commands/digest]] — `wiki/commands/digest.md`
 - [[commands/doctor]] — `wiki/commands/doctor.md`
@@ -72,6 +74,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/migrate]] — `wiki/commands/migrate.md`
 - [[commands/module]] — `wiki/commands/module.md`
 - [[commands/new]] — `wiki/commands/new.md`
+- [[commands/operation]] — `wiki/commands/operation.md`
 - [[commands/patrol]] — `wiki/commands/patrol.md`
 - [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
@@ -87,6 +90,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/task]] — `wiki/commands/task.md`
+- [[commands/token]] — `wiki/commands/token.md`
 - [[commands/tree]] — `wiki/commands/tree.md`
 - [[commands/watch]] — `wiki/commands/watch.md`
 - [[commands/tui]] — `wiki/commands/tui.md`

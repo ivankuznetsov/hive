@@ -67,6 +67,19 @@ authorized run on the unchanged exact head can produce authenticated evidence.
 
 ## Local feedback loop
 
+The checkout inventory in `remote_access_acceptance_test.rb` runs its Git reads
+with `GIT_OPTIONAL_LOCKS=0`: `git status` must not refresh `.git/index` after
+the inventory hashes it. The creation/approval test forces stale tracked-file
+stat data and compares consecutive inventories before connecting, so the
+observer's own writes fail deterministically while all checkout bytes remain
+part of the remote-isolation assertions.
+
+The copied-launcher fixtures in `status_error_envelope_test.rb` use
+`test/support/runtime_bootstrap_hive.rb` to isolate runtime activation,
+registration, and inspection cleanup. That fixture stubs remote preflight and
+invocation wrapping as well as CLI dispatch, so it reaches the runtime checks
+without mixing real connection discovery with its stubbed argv policy.
+
 Use `bin/test --changed --list` to inspect selection, then `bin/test --changed`
 for the implementation loop. Selection includes branch changes against the merge
 base, staged/unstaged edits, untracked files, and deletions. Changed test files

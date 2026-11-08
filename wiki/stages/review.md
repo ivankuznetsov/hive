@@ -316,6 +316,11 @@ Every newly terminal outcome carries publication/recovery evidence; existing
 terminal markers are not rerun by status. Waiting pauses preserve their reason,
 pass, matches and guarded head. Unapproved or partial fixes remain local.
 
+A restart that advances past a completed pass whose `fixed`, `approved` or
+`ci_repaired` receipt is bound to the current HEAD republishes that head before
+entry CI and the next reviewer pass, even for pre-cap passes, so a crash between
+writing the receipt and publishing it cannot let reviewers run on an unpublished fix.
+
 Final verification determines its mode before entry CI on restart. Local and
 hosted checks run once without repair agents; settlement polling is still allowed.
 A moved head invalidates verification, including movement during browser testing.

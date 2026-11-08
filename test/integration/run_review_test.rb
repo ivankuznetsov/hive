@@ -2795,6 +2795,39 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  def test_restart_after_unpublished_pre_cap_fix_receipt_publishes_before_reviewers
+    # Crash between writing fix-success-01.md and publishing it: with
+    # max_passes=3 the restart selects pre-cap pass 2 (not verify mode),
+    # yet the receipted fix must still reach the PR before reviewers run.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 3, "reviewers" => [ STUB_REVIEWER_SPEC ],
+                        "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        previous = review_head(worktree)
+        File.write(File.join(worktree, "fix.txt"), "pass one fix\n")
+        run!("git", "-C", worktree, "add", "fix.txt")
+        run!("git", "-C", worktree, "commit", "-qm", "pass one fix")
+        fixed = review_head(worktree)
+        seed_completed_review_pass(folder, 1, head: fixed)
+        File.write(File.join(folder, "reviews", "fix-success-01.md"),
+          "<!-- HIVE: fix-success sentinel; head=#{fixed} kind=fixed -->\n")
+        spawns = install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree, remote_head: previous) do |published|
+          passes, ci_calls = drive_review_loop(folder, worktree, findings: {},
+            verify_observer: -> { assert_equal [ fixed ], published })
+          assert_equal [ 2 ], passes
+          assert_equal [ fixed ], published
+          assert_equal [ 1, fixed ], ci_calls.first
+        end
+        assert_equal 0, spawns.call
+        assert_equal :review_complete, Hive::Markers.current(File.join(folder, "task.md")).name
+      end
+    end
+  end
+
   def test_explicit_final_verification_retry_publishes_manual_commits_without_faking_a_receipt
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

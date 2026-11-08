@@ -262,7 +262,7 @@ module Hive
             end
           end
         end
-        if @verify_mode
+        if @verify_mode || resumed_unreviewed_receipt?(task.folder, initial_disk_pass, initial_pass)
           publication_stop = publish_review_head(task: task, cfg: cfg, ctx: ctx.with(pass: initial_pass))
           return publication_stop if publication_stop
         end
@@ -1520,6 +1520,18 @@ module Hive
         File.mtime(fix_success_path) >= File.mtime(escalations_path)
       rescue SystemCallError, IOError
         true
+      end
+
+      # A restart that advances past a completed pass whose admissible
+      # receipt (fixed/approved/ci_repaired) is bound to the current HEAD
+      # may have crashed between writing that receipt and publishing it.
+      # Publish before any further reviewer pass, pre-cap passes included.
+      def resumed_unreviewed_receipt?(task_folder, disk_pass, next_pass)
+        return false unless @withheld_reason.nil? && next_pass > disk_pass &&
+                            completed_pass_receipt?(task_folder, disk_pass)
+
+        FIX_SUCCESS_UNREVIEWED_KINDS.include?(fix_success_kind(task_folder, disk_pass)) &&
+          fix_success_head(task_folder, disk_pass) == @admissible_head
       end
 
       def completed_pass_receipt?(task_folder, pass)

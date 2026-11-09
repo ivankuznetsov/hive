@@ -54,6 +54,30 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 - `oom_kill` is a cumulative counter for the scope, so concurrent descendant
   kills just before the worker's own `SIGKILL` are attributed to it.
 
+## Attempt scope leftover reaping (2026-11-09)
+
+- What was reaped is recorded in the attempt log only. The terminal receipt
+  has an exact key set (`receipt_version` 2), so a structured
+  `scope_leftovers` field would need a receipt version bump.
+- Killing podman's `conmon` skips podman's own exit cleanup, so the
+  container can stay in podman's state as `Exited` or `Stopping` until the
+  next `podman` command repairs it. The container's processes are killed
+  only when they share the attempt scope's cgroup. Under the systemd
+  cgroup manager they run in a separate `libpod-*.scope`, which this reaper
+  never touches, so a container can outlive the attempt there. Not verified
+  against a live podman run.
+- Pid reuse between the membership read and the signal is narrowed by a
+  `/proc/<pid>/cgroup` re-check, not closed. Closing it needs pidfds or
+  cgroup v2 `cgroup.kill` on a sub-cgroup that excludes the supervisor.
+- Attempts started by an older supervisor, or ones whose supervisor is
+  killed with SIGKILL, still leave their leftovers behind. No sweeper
+  reaps orphaned `hive-attempt-*` scopes whose attempt record is terminal,
+  and no status surface lists them.
+- The hivedev window that failed on 2026-11-09 08:20-08:31 recorded Hive
+  status `running=3`/`live=3`, and the user journal shows other attempt
+  scopes really active at the time. So that drain timeout may have been
+  counting live attempts, not only the leftover scope.
+
 ## Review base-conflict gate and rewind archive (2026-11-08)
 
 - Finalize's merge-time handling of `BEHIND` (guarded update-branch) is still

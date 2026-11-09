@@ -15,6 +15,7 @@ require "hive/proposals/decision_service"
 require "hive/proposals/query"
 require "hive/proposals/reconciler"
 require "hive/task_resolver"
+require "hive/attempts/api"
 
 module Hive
   module Commands
@@ -26,6 +27,7 @@ module Hive
       COMMANDS = (SOURCE_COMMANDS + READ_COMMANDS + LIFECYCLE_COMMANDS + %w[refresh]).freeze
       MANAGED_WIKI_BRANCH = "llm-wiki/refresh".freeze
       MANAGED_REFRESH_TIMEOUT_SEC = 120
+      MAX_PUBLISHED_INDEX_BYTES = 128 * 1024 * 1024
 
       def initialize(subcommand, target, input:, project: nil, json: false, stdout: $stdout,
                      task_resolver: nil, producer_factory: nil, reconciler: nil,
@@ -34,7 +36,7 @@ module Hive
                      include_drafts: false, include_quarantine: false,
                      expected_head_version: nil, expected_head_digest: nil,
                      considered_evaluations: [], authority_identity: nil,
-                     policy_fingerprint: nil)
+                     policy_fingerprint: nil, proposal_id: nil, attempts_api: nil)
         @subcommand = subcommand.to_s
         @target = target
         @input = input
@@ -58,6 +60,8 @@ module Hive
         @considered_evaluations = considered_evaluations
         @authority_identity = authority_identity
         @policy_fingerprint = policy_fingerprint
+        @proposal_id = proposal_id
+        @attempts_api = attempts_api
       end
 
       def call
@@ -72,7 +76,11 @@ module Hive
         task = @task_resolver.call(@target, @project)
         @reconciler.call(task)
         payload, artifact = read_artifact(task)
-        producer = @producer_factory.call(task)
+        producer = begin
+          @producer_factory.call(task)
+        rescue Hive::Proposals::MissingBinding
+          return dispatch_source_command(task)
+        end
         result = @subcommand == "submit" ? submit(producer, payload, artifact) :
           evaluate(producer, payload, artifact)
         render(result)
@@ -172,7 +180,7 @@ module Hive
         unless ops.hive_state_worktree_exists?
           raise Hive::Proposals::SourceUnavailable, "proposal refresh requires an initialized hive/state worktree"
         end
-        source_ref = @source_ref || ops.hive_state_head_sha
+        source_ref = @source_ref
         if @compile_only
           if @check || @output_root.to_s.empty?
             raise Hive::Proposals::InvalidRecord,
@@ -184,6 +192,7 @@ module Hive
           return render_refresh("compiled", result)
         end
         return check_refresh(ops, source_ref) if @check
+        source_ref ||= ops.hive_state_head_sha
         if @output_root
           raise Hive::Proposals::InvalidRecord,
                 "proposal refresh --output-root is internal to --compile-only"
@@ -196,18 +205,19 @@ module Hive
       def check_refresh(ops, source_ref)
         result = nil
         matches = nil
+        published_commit = managed_wiki_commit(ops)
+        source_ref ||= current_check_source(ops, published_commit)
         Dir.mktmpdir("hive-proposal-refresh-check-", Dir.tmpdir) do |scratch|
           result = Hive::Proposals::Compiler.compile_at_ref(
             git_ops: ops, source_ref:, output_root: scratch
           )
-          published_commit = managed_wiki_commit(ops)
           matches = published_commit && result.paths.all? do |generated|
             relative = Pathname.new(generated).relative_path_from(Pathname.new(scratch)).to_s
             expected = File.binread(generated)
             published = ops.read_blob_at(
               published_commit, relative, max_bytes: expected.bytesize + 1
             )
-            published == expected
+            published&.b == expected.b
           end
         end
         unless matches
@@ -215,6 +225,39 @@ module Hive
                 "compiled proposal wiki views are stale for #{result.source_commit}"
         end
         render_refresh("current", result)
+      end
+
+      def current_check_source(ops, published_commit)
+        published_source = published_proposal_source(ops, published_commit)
+        return ops.hive_state_head_sha unless published_source
+
+        newer = ops.run_git!(
+          "-C", ops.hive_state_path, "log", "-1", "--format=%H",
+          "#{published_source}..HEAD", "--",
+          "proposals/v1/records", "proposals/v1/events"
+        ).strip
+        newer.match?(/\A[0-9a-f]{40,64}\z/i) ? newer : published_source
+      rescue Hive::GitError
+        ops.hive_state_head_sha
+      end
+
+      def published_proposal_source(ops, published_commit)
+        return unless published_commit
+
+        bytes = ops.read_blob_at(
+          published_commit, "wiki/proposals.json", max_bytes: MAX_PUBLISHED_INDEX_BYTES + 1
+        )
+        return unless bytes
+
+        source = JSON.parse(bytes).fetch("source_commit", nil).to_s
+        return unless source.match?(/\A[0-9a-f]{40,64}\z/i)
+
+        resolved = ops.run_git!(
+          "-C", ops.hive_state_path, "rev-parse", "--verify", "#{source}^{commit}"
+        ).strip
+        resolved if resolved.match?(/\A[0-9a-f]{40,64}\z/i)
+      rescue JSON::ParserError, Hive::GitError
+        nil
       end
 
       def managed_wiki_commit(ops)
@@ -562,6 +605,70 @@ module Hive
 
       def build_producer(task)
         Hive::Proposals::Producer.for_task(project_root: task.project_root, task: task)
+      end
+
+      def dispatch_source_command(task)
+        (@attempts_api || Hive::Attempts::API.new).dispatch(
+          task:, intended_stage: "#{task.stage_index}-#{task.stage_name}",
+          argv: source_worker_argv(task), interactive: true,
+          proposal_admission: source_admission(task)
+        )
+      end
+
+      def source_admission(task)
+        subject = if @subcommand == "submit"
+          {
+            "kind" => required_option(@filters["kind"], "--kind"),
+            "reference" => required_option(@filters["subject"], "--subject"),
+            "revision" => required_option(@filters["revision"], "--revision"),
+            "proposal_id" => nil
+          }
+        else
+          projection = source_proposal_projection(task)
+          projection.subject.merge(
+            "revision" => projection.revision,
+            "proposal_id" => projection.proposal_id
+          )
+        end
+        {
+          "subject" => Hive::Proposals::SourceEvent.normalize_subject(subject),
+          "actor" => {
+            "id" => "uid-#{Process.uid}", "kind" => "local_user",
+            "binding" => "uid:#{Process.uid}"
+          },
+          "evaluator_identity" => @subcommand == "evaluate" ?
+            required_option(@filters["evaluator"], "--evaluator") : nil,
+          "agent_profile" => nil
+        }
+      end
+
+      def source_proposal_projection(task)
+        proposal_id = Proposals.proposal_id!(
+          required_option(@proposal_id, "--proposal-id")
+        )
+        ops = Hive::GitOps.new(task.project_root)
+        store = Hive::Proposals::Store.new(
+          root: File.join(ops.hive_state_path, "proposals", "v1")
+        )
+        projection = store.projection(proposal_id)
+        raise Hive::Proposals::InvalidRecord, "proposal is missing or quarantined" unless projection
+
+        projection
+      end
+
+      def source_worker_argv(task)
+        argv = [
+          "hive", "proposal", @subcommand, task.folder,
+          "--input", File.expand_path(@input)
+        ]
+        if @subcommand == "submit"
+          argv.concat([ "--kind", @filters["kind"], "--subject", @filters["subject"],
+                        "--revision", @filters["revision"] ])
+        else
+          argv.concat([ "--proposal-id", @proposal_id, "--evaluator", @filters["evaluator"] ])
+        end
+        argv << "--json" if @json
+        argv
       end
 
       def reconcile_task(task)

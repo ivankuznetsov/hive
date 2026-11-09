@@ -51,14 +51,22 @@ structural encoders.
 ## Task-bound source commands
 
 ```bash
-hive proposal submit TASK --input candidate.json [--project NAME] [--json]
-hive proposal evaluate TASK --input evaluation.json [--project NAME] [--json]
+hive proposal submit TASK --input candidate.json \
+  --kind skill|workflow --subject REF --revision REV [--project NAME] [--json]
+hive proposal evaluate TASK --input evaluation.json \
+  --proposal-id PROPOSAL_ID --evaluator ID [--project NAME] [--json]
 ```
 
-Both require a real durable proposal-bound task attempt. The controller or
-dispatcher must have admitted the subject and actor; evaluation additionally
-requires a named evaluator binding. `--input` cannot supply or replace actor,
-subject, evaluator, or configuration identity.
+Both run through a real durable proposal-bound task attempt. When the task's
+current attempt already carries a proposal binding, the command uses it. When
+it does not, the command controller dispatches a distinct durable source
+attempt: submit validates the typed subject options, evaluate resolves the
+named proposal's canonical subject, the actor is bound to the local UID, and a
+configured evaluator is admitted against workflow, stage, and agent profile.
+The command and bounded input digest form the source attempt's progress token,
+so changed inputs or typed subjects receive a fresh attempt while exact retries
+remain replayable. `--input` cannot supply or replace actor, subject, evaluator,
+or configuration identity.
 
 A submission artifact contains `proposed_change`, `motivation`, `evidence`, and
 optional `lineage`, `source_event_id`, or `idempotency_key`. An evaluation
@@ -69,6 +77,10 @@ The regular non-symlink JSON file must be bounded and project-relative.
 The command commits the inbox receipt before synchronous ingestion. A failure
 after source commit remains recoverable; a failure before it restores task,
 activity, and inbox paths together.
+
+New receipts intersect the attempt's dispatch-time evidence policy with the
+current configured visibility, retention, and link-scheme ceilings. Exact
+retries of an already committed receipt retain its historical policy and bytes.
 
 ## Lifecycle commands
 
@@ -115,7 +127,10 @@ agent first and then overwrite the generated proposal pair from the pinned
 state source. Both files publish in one wiki commit. `--check` compiles to an
 external disposable directory, compares bytes with the pair at the managed wiki
 branch, removes the scratch output, and does not publish or modify a managed
-worktree or the primary checkout.
+worktree or the primary checkout. The check starts from the published pair's
+pinned source and advances only to a newer commit that changed canonical
+proposal records/events, so unrelated `hive/state` commits do not make a current
+pair stale. Comparisons are byte-oriented and remain correct for Unicode output.
 The managed refresh subprocess is time-bounded, and its redacted diagnostic
 output is truncated on a valid UTF-8 boundary.
 

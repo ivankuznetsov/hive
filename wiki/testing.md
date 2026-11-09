@@ -1689,7 +1689,9 @@ bin/test --all   # broad checkpoint when warranted
 ```
 
 Wiki-refresh integration separately proves pinned-source, provider-free
-proposal-only compilation and one-commit publication. The generated pair is
+proposal-only compilation and one-commit publication. It also covers Unicode
+byte comparison, unrelated state-HEAD advancement, and proposal-compiler
+quarantine without opening the ordinary refresh circuit. The generated pair is
 never used as canonical test input, and no live provider, activation,
 publication, deployment, or compensating revert is part of the gate.
 

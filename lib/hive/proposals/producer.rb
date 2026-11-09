@@ -27,10 +27,10 @@ module Hive
         def for_task(project_root:, task:, attempts: Hive::Attempts::API.new,
                      git_ops: Hive::GitOps.new(project_root), config: nil)
           activity = Hive::TaskActivity.for_task(task, attempt_store: attempts)
-          raise Unauthorized, "proposal command requires a durable task attempt" unless activity
+          raise MissingBinding, "proposal command requires a durable task attempt" unless activity
 
           attempt = attempts.fetch(activity.binding.fetch("attempt_id"))
-          raise Unauthorized, "proposal command has no admitted attempt" unless attempt
+          raise MissingBinding, "proposal command has no admitted attempt" unless attempt
 
           new(
             project_root:, activity:, attempt:, git_ops:,
@@ -65,11 +65,12 @@ module Hive
                  artifact: nil, source_event_id: nil, idempotency_key: nil)
         source_event_id = resolve_source_event_id(source_event_id, idempotency_key)
         existing = @source_store.fetch(source_event_id)
+        committed_retry = existing && committed_source_event?(existing)
+        binding = admission_binding(existing, committed_retry:)
         proposal_id = @proposal_binding.dig("subject", "proposal_id") ||
           existing&.proposal_id || @proposal_id_generator.call
         event = SourceEvent.submission(
-          source_event_id:,
-          proposal_id:, proposal_binding: @proposal_binding,
+          source_event_id:, proposal_id:, proposal_binding: binding,
           task_binding: task_binding,
           proposed_change:, motivation:, evidence:, lineage:,
           artifact:,
@@ -85,10 +86,11 @@ module Hive
 
         source_event_id = resolve_source_event_id(source_event_id, idempotency_key)
         existing = @source_store.fetch(source_event_id)
-        ensure_evaluator_currently_authorized! unless existing && committed_source_event?(existing)
+        committed_retry = existing && committed_source_event?(existing)
+        ensure_evaluator_currently_authorized! unless committed_retry
+        binding = admission_binding(existing, committed_retry:)
         event = SourceEvent.evaluation(
-          source_event_id:,
-          proposal_id:, proposal_binding: @proposal_binding,
+          source_event_id:, proposal_id:, proposal_binding: binding,
           task_binding: task_binding, method:, result:, rationale:, evidence:, links:,
           artifact:,
           created_at: existing&.to_h&.fetch("created_at") || @clock.call
@@ -181,7 +183,7 @@ module Hive
         elsif @attempt.respond_to?(:[])
           @attempt.dig("subject", "proposal")
         end
-        raise Unauthorized, "durable attempt has no proposal subject binding" unless value
+        raise MissingBinding, "durable attempt has no proposal subject binding" unless value
         value
       end
 
@@ -207,6 +209,41 @@ module Hive
         )
         commit = @git_ops.hive_state_commit_for_path(receipt_path)
         commit && committed_receipt_matches?(event, commit, receipt_path)
+      end
+
+      def admission_binding(existing, committed_retry:)
+        return binding_from_source_event(existing) if committed_retry
+
+        binding = Proposals.stringify(@proposal_binding)
+        binding["policy"] = intersect_policy(
+          binding.fetch("policy"), @config.dig("proposals", "evidence") || {}
+        )
+        SourceEvent.normalize_proposal_binding(binding)
+      end
+
+      def binding_from_source_event(event)
+        SourceEvent.normalize_proposal_binding(
+          "schema_version" => 1,
+          "subject" => event["subject"], "actor" => event["actor"],
+          "evaluator" => event["evaluator"],
+          "configuration_fingerprint" => event["configuration_fingerprint"],
+          "policy" => event["policy"]
+        )
+      end
+
+      def intersect_policy(admitted, current)
+        admitted = Proposals.policy!(admitted)
+        current = Proposals.policy!(current)
+        {
+          "visibility" => Proposals.effective_classification(
+            admitted.fetch("visibility"), current.fetch("visibility"), Proposals::VISIBILITIES
+          ),
+          "retention" => Proposals.effective_classification(
+            admitted.fetch("retention"), current.fetch("retention"), Proposals::RETENTIONS
+          ),
+          "allowed_link_schemes" => admitted.fetch("allowed_link_schemes") &
+            current.fetch("allowed_link_schemes")
+        }
       end
 
       def ensure_evaluator_currently_authorized!

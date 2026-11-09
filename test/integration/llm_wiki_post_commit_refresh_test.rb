@@ -406,7 +406,18 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     refute_path_exists pending
     assert_path_exists failed
     assert_equal "2", File.read(failure_count).strip
-    assert_equal "quarantined:1", File.read(breaker).strip
+    refute_path_exists breaker
+
+    File.write(File.join(@wt, "bin", "ordinary-after-proposal-failure.sh"), "echo ordinary\n")
+    git(@wt, "add bin/ordinary-after-proposal-failure.sh")
+    git(@wt, "commit -qm 'feat: ordinary refresh remains available'")
+    ordinary_sha = git(@wt, "rev-parse HEAD")
+    ordinary_result = run_refresh_from(@wt)
+
+    assert_equal 0, ordinary_result.fetch(:status), ordinary_result.fetch(:out)
+    assert system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/receipts/#{ordinary_sha}")
+    refute_path_exists breaker
   end
 
   def test_refresh_branch_is_pushed_without_touching_main

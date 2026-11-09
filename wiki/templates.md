@@ -38,7 +38,9 @@ files remain retained for inspection. A reconstruction that cannot read the
 source commit's changed paths also retains the original temp for a later retry.
 Proposal-only batches remain exempt from the provider-failure circuit and
 ordinary pending budget, but compile failures still increment their retry count,
-move exhausted sources to `failed/`, and open the quarantined-backlog breaker.
+and move exhausted sources to `failed/` for explicit retry. Their quarantined
+entries do not open or keep open the ordinary refresh breaker, so an exhausted
+proposal compiler cannot disable unrelated wiki refresh.
 Primary-checkout discovery reads the complete porcelain worktree path, including
 ordinary spaces.
 

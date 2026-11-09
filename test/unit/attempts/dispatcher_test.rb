@@ -245,6 +245,30 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_proposal_progress_token_tracks_the_typed_command_and_input_bytes
+    with_dispatcher do |dispatcher, _launcher, task|
+      with_tmp_dir do |dir|
+        input = File.join(dir, "candidate.json")
+        File.write(input, "{\"revision\":1}\n")
+        argv = [
+          "hive", "proposal", "submit", task.slug, "--input", input,
+          "--kind", "skill", "--subject", "agent-skills/reviewer", "--revision", "v2"
+        ]
+        first = dispatcher.send(:command_progress_token, argv, task)
+
+        assert_equal first, dispatcher.send(:command_progress_token, argv, task)
+        File.write(input, "{\"revision\":2}\n")
+        second = dispatcher.send(:command_progress_token, argv, task)
+        refute_equal first, second
+        refute_equal second, dispatcher.send(
+          :command_progress_token,
+          argv.map { |value| value == "agent-skills/reviewer" ? "agent-skills/planner" : value },
+          task
+        )
+      end
+    end
+  end
+
   def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
     events = []
     provenance = Object.new

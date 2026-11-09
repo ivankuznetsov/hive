@@ -6,7 +6,10 @@ require "hive/schemas"
 class ProposalCommandTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:project_root, :folder, keyword_init: true)
+  FakeTask = Struct.new(
+    :project_root, :folder, :id, :slug, :stage_index, :stage_name,
+    keyword_init: true
+  )
 
   def test_submit_reads_a_bounded_regular_artifact_and_does_not_accept_actor_spoofing
     with_tmp_dir do |dir|
@@ -81,10 +84,146 @@ class ProposalCommandTest < Minitest::Test
     end
   end
 
+  def test_unbound_source_command_dispatches_a_controller_authored_proposal_attempt
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        project_root: dir, folder:, id: 42, slug: "task",
+        stage_index: 4, stage_name: "execute"
+      )
+      input = File.join(dir, "candidate.json")
+      File.write(input, JSON.generate(
+        "proposed_change" => "Change review", "motivation" => "Improve recall",
+        "evidence" => []
+      ))
+      dispatches = []
+      attempts = Object.new
+      attempts.define_singleton_method(:dispatch) do |**attributes|
+        dispatches << attributes
+        :attached
+      end
+      missing_binding = lambda do |_task|
+        raise Hive::Proposals::MissingBinding, "durable attempt has no proposal subject binding"
+      end
+
+      result = Hive::Commands::Proposal.new(
+        "submit", "task", input:, stdout: StringIO.new,
+        task_resolver: ->(_target, _project) { task }, producer_factory: missing_binding,
+        reconciler: ->(_task) { }, attempts_api: attempts,
+        filters: {
+          "kind" => "skill", "subject" => "agent-skills/reviewer", "revision" => "v2"
+        }
+      ).call
+
+      assert_equal :attached, result
+      assert_equal 1, dispatches.length
+      dispatch = dispatches.first
+      assert_equal task, dispatch.fetch(:task)
+      assert_equal "4-execute", dispatch.fetch(:intended_stage)
+      admission = dispatch.fetch(:proposal_admission)
+      assert_equal "agent-skills/reviewer", admission.dig("subject", "reference")
+      assert_equal "uid-#{Process.uid}", admission.dig("actor", "id")
+      assert_equal "local_user", admission.dig("actor", "kind")
+      assert_nil admission.fetch("evaluator_identity")
+      assert_includes dispatch.fetch(:argv), "--subject"
+      assert_includes dispatch.fetch(:argv), "agent-skills/reviewer"
+    end
+  end
+
+  def test_unbound_evaluation_resolves_the_canonical_subject_before_dispatch
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      folder = File.join(ops.hive_state_path, "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        project_root: dir, folder:, id: 42, slug: "task",
+        stage_index: 4, stage_name: "execute"
+      )
+      store = Hive::Proposals::Store.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      )
+      proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+      record = store.create_record!(
+        proposal_id:, subject_kind: "workflow", subject_ref: "coding", revision: "v2",
+        proposed_change: "Change planning", motivation: "Improve recall",
+        evidence: [ { "label" => "test", "content" => "pass", "media_type" => "text/plain" } ],
+        author: { "id" => "alice", "kind" => "proposer", "binding" => "team" },
+        provenance: proposal_provenance, source_event_id: "pse-#{'3' * 64}",
+        created_at: "2026-08-30T12:00:00Z"
+      )
+      ops.hive_commit(
+        stage_name: "test", slug: "proposal", action: "seeded proposal",
+        pathspecs: [ "proposals/v1/records/#{record.proposal_id}.json" ]
+      )
+      input = File.join(dir, "evaluation.json")
+      File.write(input, JSON.generate(
+        "method" => { "kind" => "benchmark", "label" => "held-out" },
+        "result" => { "outcome" => "pass", "metrics" => {} },
+        "rationale" => "Measured", "evidence" => []
+      ))
+      dispatches = []
+      attempts = Object.new
+      attempts.define_singleton_method(:dispatch) do |**attributes|
+        dispatches << attributes
+        :attached
+      end
+      missing_binding = lambda do |_task|
+        raise Hive::Proposals::MissingBinding, "durable attempt has no proposal subject binding"
+      end
+
+      result = Hive::Commands::Proposal.new(
+        "evaluate", "task", input:, stdout: StringIO.new,
+        task_resolver: ->(_target, _project) { task }, producer_factory: missing_binding,
+        reconciler: ->(_task) { }, attempts_api: attempts,
+        filters: { "evaluator" => "benchmark-reviewer" }, proposal_id:
+      ).call
+
+      assert_equal :attached, result
+      admission = dispatches.first.fetch(:proposal_admission)
+      assert_equal "workflow", admission.dig("subject", "kind")
+      assert_equal "coding", admission.dig("subject", "reference")
+      assert_equal "v2", admission.dig("subject", "revision")
+      assert_equal proposal_id, admission.dig("subject", "proposal_id")
+      assert_equal "benchmark-reviewer", admission.fetch("evaluator_identity")
+    end
+  end
+
   def test_refresh_compile_only_and_check_use_pinned_external_outputs
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)
       ops.hive_state_init
+      store = Hive::Proposals::Store.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      )
+      proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+      record = store.create_record!(
+        proposal_id:, subject_kind: "skill", subject_ref: "agent-skills/reviewer",
+        revision: "v2", proposed_change: "Prefer café fixtures",
+        motivation: "Exercise Unicode output",
+        evidence: [ { "label" => "test", "content" => "pass", "media_type" => "text/plain" } ],
+        author: { "id" => "alice", "kind" => "proposer", "binding" => "team" },
+        provenance: proposal_provenance, source_event_id: "pse-#{'1' * 64}",
+        created_at: "2026-08-30T12:00:00Z"
+      )
+      evaluation = store.append_event!(
+        proposal_id:, type: "evaluation", source_event_id: "pse-#{'2' * 64}",
+        provenance: proposal_provenance, occurred_at: "2026-08-30T12:01:00Z",
+        data: {
+          "evaluator" => { "id" => "reviewer", "binding_fingerprint" => "b" * 64 },
+          "method" => { "kind" => "benchmark", "label" => "Unicode" },
+          "result" => { "outcome" => "pass", "metrics" => {} },
+          "rationale" => "Measured", "evidence" => [], "links" => []
+        }
+      )
+      ops.hive_commit(
+        stage_name: "test", slug: "proposal", action: "seeded Unicode proposal",
+        pathspecs: [
+          "proposals/v1/records/#{record.proposal_id}.json",
+          store.path_for_event(evaluation).delete_prefix("#{ops.hive_state_path}/")
+        ]
+      )
       output = File.join(@tmpdir || Dir.tmpdir, "proposal-compiled-#{SecureRandom.hex(4)}")
       command_output = StringIO.new
       result = Hive::Commands::Proposal.new(
@@ -110,21 +249,31 @@ class ProposalCommandTest < Minitest::Test
       refute_path_exists File.join(dir, "wiki", "proposals.json")
       refute_path_exists File.join(dir, "wiki", "proposals.md")
 
+      published_state_head = ops.hive_state_head_sha
+      unrelated = File.join(ops.hive_state_path, "stages", "1-inbox", "other", "task.md")
+      FileUtils.mkdir_p(File.dirname(unrelated))
+      File.write(unrelated, "# unrelated\n")
+      ops.hive_commit(
+        stage_name: "1-inbox", slug: "other", action: "advanced unrelated task",
+        pathspecs: [ "stages/1-inbox/other/task.md" ]
+      )
+      current_state_head = ops.hive_state_head_sha
+      refute_equal published_state_head, current_state_head
+
       managed = File.join(Dir.tmpdir, "hive-managed-check-#{SecureRandom.hex(4)}")
       run!("git", "-C", dir, "worktree", "add", managed, "llm-wiki/refresh")
       begin
         project_before = repository_snapshot(dir)
         managed_before = repository_snapshot(managed)
-        state_head_before = ops.hive_state_head_sha
         scratch_before = Dir.glob(File.join(Dir.tmpdir, "hive-proposal-refresh-check-*"))
 
         checked = Hive::Commands::Proposal.new(
           "refresh", dir, input: nil, check: true, stdout: StringIO.new
         ).call
-        assert_equal state_head_before, checked.source_commit
+        assert_equal published_state_head, checked.source_commit
         assert_equal project_before, repository_snapshot(dir)
         assert_equal managed_before, repository_snapshot(managed)
-        assert_equal state_head_before, ops.hive_state_head_sha
+        assert_equal current_state_head, ops.hive_state_head_sha
         assert_equal scratch_before,
                      Dir.glob(File.join(Dir.tmpdir, "hive-proposal-refresh-check-*"))
       ensure

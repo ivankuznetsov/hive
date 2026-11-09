@@ -601,7 +601,8 @@ failed_source_count() {
   local path count=0
   shopt -s nullglob
   for path in "$failed_dir"/*; do
-    [ -f "$path" ] && count=$((count + 1))
+    [ -f "$path" ] || continue
+    queue_file_proposal_only "$path" || count=$((count + 1))
   done
   shopt -u nullglob
   printf '%s\n' "$count"
@@ -1087,7 +1088,6 @@ prune_receipted_queue_files() {
 record_batch_failure() {
   local failure_kind="$1"
   local file queued_sha queued_branch count counter_file max_attempts count_tmp unreceipted=0
-  local failed_count breaker_tmp
   counter_file="$failure_count_file"
   [ "$failure_kind" = "provider" ] || counter_file="$proposal_failure_count_file"
   max_attempts="${LLM_WIKI_MAX_REFRESH_ATTEMPTS:-2}"
@@ -1129,11 +1129,7 @@ record_batch_failure() {
       printf 'failures:%s\n' "$count" >"$breaker_file"
       log_line "ERROR: automatic refresh disabled after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
     else
-      failed_count="$(failed_source_count)"
-      breaker_tmp="$state_dir/.refresh-disabled.$$"
-      printf 'quarantined:%s\n' "$failed_count" >"$breaker_tmp"
-      mv -f "$breaker_tmp" "$breaker_file"
-      log_line "ERROR: proposal compilation quarantined after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+      log_line "ERROR: proposal compilation quarantined after $count consecutive failed batch(es) without opening the ordinary refresh circuit; run .llm-wiki/post-commit-refresh.sh --retry-failed all"
     fi
   else
     log_line "refresh batch failed ($count/$max_attempts consecutive failures); queue retained"

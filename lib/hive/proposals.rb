@@ -62,6 +62,7 @@ module Hive
     class Unauthorized < Error
       def exit_code = Hive::ExitCodes::USAGE
     end
+    class MissingBinding < Unauthorized; end
     class StaleObservation < Error
       def exit_code = Hive::ExitCodes::TEMPFAIL
     end

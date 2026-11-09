@@ -1,3 +1,4 @@
+require "digest"
 require "hive/canonical_json"
 
 module Hive
@@ -34,9 +35,31 @@ module Hive
             ).progress_token,
             "runtime" => runtime_digest
           )
+        when "proposal"
+          Hive::CanonicalJSON.digest(
+            "artifact" => fallback,
+            "command" => Array(argv).map(&:to_s),
+            "input_digest" => proposal_input_digest(argv)
+          )
         else
           fallback
         end
+      end
+
+      def proposal_input_digest(argv)
+        values = Array(argv).map(&:to_s)
+        path = values.each_with_index.filter_map do |value, index|
+          if value == "--input"
+            values[index + 1]
+          elsif value.start_with?("--input=")
+            value.delete_prefix("--input=")
+          end
+        end.last
+        return unless path && File.file?(path) && !File.symlink?(path)
+
+        ::Digest::SHA256.file(path).hexdigest
+      rescue SystemCallError, IOError
+        nil
       end
 
       def task_progress?(task)

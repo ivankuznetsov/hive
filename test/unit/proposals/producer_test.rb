@@ -289,6 +289,59 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
+  def test_new_receipts_apply_current_privacy_ceilings_but_committed_retries_keep_history
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      permissive_binding = Marshal.load(Marshal.dump(proposal_binding))
+      restricted = Hive::Config.merge_defaults(
+        "proposals" => {
+          "evidence" => {
+            "visibility" => "restricted", "retention" => "task",
+            "allowed_link_schemes" => [ "https" ]
+          }
+        }
+      )
+      source_id = "pse-#{'7' * 64}"
+      attributes = {
+        proposed_change: "Change review", motivation: "Improve recall",
+        evidence: [ evidence.merge("visibility" => "project", "retention" => "project") ],
+        source_event_id: source_id
+      }
+      build = lambda do |config|
+        Hive::Proposals::Producer.new(
+          project_root: dir, git_ops: ops, activity:,
+          attempt: FakeAttempt.new(permissive_binding), config:,
+          proposal_id_generator: -> { proposal_id }
+        )
+      end
+
+      first = build.call(restricted).submit(**attributes)
+      receipt = Hive::Proposals::SourceEventStore.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      ).fetch(source_id)
+      admitted = receipt.to_h.fetch("payload").fetch("evidence").first
+      assert_equal "restricted", admitted.fetch("visibility")
+      assert_equal "task", admitted.dig("retention", "policy")
+      refute admitted.key?("summary")
+
+      tighter = Hive::Config.merge_defaults(
+        "proposals" => {
+          "evidence" => {
+            "visibility" => "restricted", "retention" => "ephemeral",
+            "allowed_link_schemes" => [ "https" ]
+          }
+        }
+      )
+      replay = build.call(tighter).submit(**attributes)
+      assert_equal first, replay
+      assert_equal "task", Hive::Proposals::SourceEventStore.new(
+        root: File.join(ops.hive_state_path, "proposals", "v1")
+      ).fetch(source_id).to_h.dig("payload", "evidence", 0, "retention", "policy")
+    end
+  end
+
   def test_rejects_symlinked_or_missing_task_journal_parents
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

@@ -49,10 +49,14 @@ the canonical store and source inbox use bounded lock acquisition.
 
 ## Durable source admission
 
-`Producer` is the only submission/evaluation admission boundary. It reconstructs
+`Producer` is the only submission/evaluation persistence boundary. It reconstructs
 the proposal subject, actor, optional evaluator, configuration fingerprint, and
 evidence policy from the durable `Attempts::Record`; CLI text and artifact fields
-cannot create those bindings. It writes an immutable `pse-*` inbox receipt and a
+cannot replace those bindings. The source-command controller creates a proposal-
+bound durable attempt when the task has none: typed submit options define the
+candidate subject, evaluations resolve an existing canonical proposal, the actor
+is derived from the local UID, and evaluator admission remains configuration-
+gated. It writes an immutable `pse-*` inbox receipt and a
 bounded task-activity correlation, commits the normal task paths plus the exact
 inbox paths, and only then starts canonical ingestion in a second commit.
 
@@ -119,6 +123,9 @@ Evaluation metric names pass through the same redaction boundary, and names
 that collide after redaction are rejected rather than silently overwriting one
 another.
 Producer-requested visibility or retention may only narrow configured policy.
+New source receipts intersect historical dispatch policy with current
+visibility, retention, and allowed-link ceilings; committed exact retries keep
+their historical policy so replay does not rewrite immutable bytes.
 Unclassified evidence defaults to restricted/digest-only; restricted/private
 evidence persists only safe labels, digests, byte/media metadata, classification,
 declarative retention, and safe source references. Retention always reports
@@ -135,7 +142,8 @@ diagnosis, never as live symlink targets. The managed llm-wiki hook compiles
 proposal-only batches without an LLM provider or ordinary breaker budget and
 publishes the pair in one wiki commit. Refresh checks compare scratch compiler
 output with that atomically published managed-ref pair, not files in the primary
-checkout. Transient Git or filesystem failures during pinned materialization
+checkout, and advance the published pin only for newer canonical proposal
+commits. Transient Git or filesystem failures during pinned materialization
 abort publication so the previously committed pair remains visible.
 
 Automatic proposal context is available only when a durable attempt carries a

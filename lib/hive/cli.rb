@@ -626,9 +626,9 @@ module Hive
 
     desc "proposal SUBCOMMAND [TARGET]", "Track and inspect skill/workflow proposals"
     long_desc <<~DESC
-      Source commands require a durable proposal-bound task attempt:
-        submit TASK --input FILE
-        evaluate TASK --input FILE
+      Source commands use or create a durable proposal-bound task attempt:
+        submit TASK --input FILE --kind KIND --subject REF --revision REV
+        evaluate TASK --input FILE --proposal-id ID --evaluator ID
 
       Live discovery reads canonical hive/state projections:
         list [PROJECT_PATH]
@@ -656,6 +656,8 @@ module Hive
     option :status, type: :string, desc: "filter by effective lifecycle status"
     option :relation, type: :string, desc: "filter by related proposal ID"
     option :evaluator, type: :string, desc: "filter by evaluator identity"
+    option :proposal_id, type: :string,
+                         desc: "target proposal ID for an evaluation source command"
     option :method, type: :string, desc: "filter by evaluation method"
     option :include_drafts, type: :boolean, default: false,
                             desc: "include valid drafts in discovery output"
@@ -689,7 +691,8 @@ module Hive
         expected_head_version: options[:expected_head_version],
         expected_head_digest: options[:expected_head_digest],
         considered_evaluations: options[:considered_evaluations],
-        authority_identity: options[:authority], policy_fingerprint: options[:policy_fingerprint]
+        authority_identity: options[:authority], policy_fingerprint: options[:policy_fingerprint],
+        proposal_id: options[:proposal_id]
       ).call
     end
 

@@ -367,6 +367,13 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
   include RuntimeContentionAttemptFixture
 
   OPERATIONS = %i[claim first_heartbeat checkpoint heartbeat terminalize].freeze
+  # Exhaustion envelope. Every pre-barrier phase (launch writes, worker
+  # registration, heartbeats) shares this budget with four concurrent
+  # supervisors and the daemon, so it must absorb scheduler and fsync stalls on
+  # a small CI runner; 0.2s did not. The hold stays well past the budget so the
+  # selected operation still exhausts while the writer lock is held.
+  EXHAUST_BUDGET_SEC = 1.0
+  EXHAUST_LOCK_HOLD_SEC = 2.0
   REPORTS = {}
 
   def test_daemon_and_four_supervisors_recover_each_held_bookkeeping_operation_without_duplicate_execution
@@ -484,8 +491,8 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
         supervisor = Hive::Attempts::Supervisor.new(
           store: child_store, attempt_id: index.to_s,
           claim_io: StringIO.new(RuntimeContentionAttemptFixture::SECRET),
-          heartbeat_sec: 0.01, stale_sec: 1, bookkeeping_timeout_sec: exhaust ? 0.2 : 5,
-          busy_tolerance_sec: exhaust ? 0.2 : 5, kill_grace_sec: 0.01,
+          heartbeat_sec: 0.01, stale_sec: 1, bookkeeping_timeout_sec: exhaust ? EXHAUST_BUDGET_SEC : 5,
+          busy_tolerance_sec: exhaust ? EXHAUST_BUDGET_SEC : 5, kill_grace_sec: 0.01,
           process_registry: registry, reservation_id: reservation.id,
           random: -> { 0.5 }
         )
@@ -515,7 +522,7 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
       connection.execute("BEGIN IMMEDIATE")
       locked_write.write("l")
       locked_write.close
-      sleep(exhaust ? 0.6 : 0.25)
+      sleep(exhaust ? EXHAUST_LOCK_HOLD_SEC : 0.25)
       connection.execute("ROLLBACK")
       connection.close
       exit! 0
@@ -547,8 +554,8 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
       Hive::Attempts::Reconciler.new(store: restarted).reconcile
     end
     {
-      operation: operation, lock_hold_sec: exhaust ? 0.6 : 0.25,
-      configured_budget_sec: exhaust ? 0.2 : 5, duration_sec: monotonic - started,
+      operation: operation, lock_hold_sec: exhaust ? EXHAUST_LOCK_HOLD_SEC : 0.25,
+      configured_budget_sec: exhaust ? EXHAUST_BUDGET_SEC : 5, duration_sec: monotonic - started,
       production_prestart_budget_sec: 30, production_live_budget_sec: 600,
       exit_statuses: summaries.map { |item| item.fetch("status") },
       manual_pragmas: summaries.map { |item| item.fetch("autocheckpoint") },

@@ -95,7 +95,9 @@ run one daemon publisher/reconciler and four actual supervisors through claim,
 first heartbeat, worker registration, heartbeat and terminal publication.
 A barrier places the SQLite writer hold at the selected operation. Each
 success case releases after 0.25 seconds with a five-second test envelope;
-each exhaustion case holds for 0.6 seconds against a 0.2-second test envelope.
+each exhaustion case holds for 2 seconds against a 1-second test envelope
+(widened from 0.6 against 0.2 seconds after the shorter envelope exhausted
+pre-barrier writes on a loaded two-CPU runner).
 These shortened real-lock cases establish operation behavior and invocation
 counts, not wall-clock proof of production envelopes. Default injected-clock
 invariants separately exercise 30-second startup and 600-second live-operation

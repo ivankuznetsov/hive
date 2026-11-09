@@ -187,6 +187,24 @@ class AttemptsProcessIdentityTest < Minitest::Test
     end
   end
 
+  def test_malformed_recorded_group_is_an_identity_mismatch_and_never_signalled
+    wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+    # nil raises TypeError and a non-numeric string ArgumentError from Integer().
+    [ nil, "not-a-group" ].each do |pgid|
+      signals = []
+      verifier = Hive::Attempts::ProcessIdentity.new(
+        signaler: ->(signal, _pid) { signals << signal },
+        sleeper: ->(_seconds) { }, monotonic: -> { 1 }
+      )
+      verifier.define_singleton_method(:orphan_group_status) { |**| :matching }
+      worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456, "process_group_id" => pgid)
+
+      assert_equal :identity_mismatch,
+                   verifier.terminate_orphan_group(wrapper: wrapper, worker: worker, grace_sec: 0)
+      assert_empty signals
+    end
+  end
+
   def test_default_timing_hooks_and_status_argument_error_paths
     verifier = Hive::Attempts::ProcessIdentity.new
     verifier.instance_variable_get(:@sleeper).call(0)

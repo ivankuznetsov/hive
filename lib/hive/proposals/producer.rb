@@ -1,6 +1,7 @@
 require "digest"
 require "securerandom"
 require "hive/attempts/api"
+require "hive/attempts/context"
 require "hive/config"
 require "hive/git_ops"
 require "hive/proposals/ingestor"
@@ -24,13 +25,23 @@ module Hive
     # independent rollback scopes by design.
     class Producer
       class << self
+        # Only the authenticated worker of the task's live admitted attempt may
+        # reuse that attempt's proposal binding. Any other caller, including a
+        # later command on a task whose earlier proposal attempt has finished,
+        # gets MissingBinding so the command controller admits a fresh attempt
+        # for its own typed options instead of inheriting a stale subject.
         def for_task(project_root:, task:, attempts: Hive::Attempts::API.new,
-                     git_ops: Hive::GitOps.new(project_root), config: nil)
+                     git_ops: Hive::GitOps.new(project_root), config: nil,
+                     context: Hive::Attempts::Context.current)
           activity = Hive::TaskActivity.for_task(task, attempt_store: attempts)
           raise MissingBinding, "proposal command requires a durable task attempt" unless activity
 
-          attempt = attempts.fetch(activity.binding.fetch("attempt_id"))
-          raise MissingBinding, "proposal command has no admitted attempt" unless attempt
+          attempt_id = activity.binding.fetch("attempt_id")
+          unless context && context.attempt_id == attempt_id
+            raise MissingBinding, "proposal command is not running inside the task's admitted attempt"
+          end
+          attempt = attempts.fetch(attempt_id)
+          raise MissingBinding, "proposal command has no live admitted attempt" unless attempt&.live?
 
           new(
             project_root:, activity:, attempt:, git_ops:,
@@ -64,7 +75,7 @@ module Hive
       def submit(proposed_change:, motivation:, evidence:, lineage: {},
                  artifact: nil, source_event_id: nil, idempotency_key: nil)
         source_event_id = resolve_source_event_id(source_event_id, idempotency_key)
-        existing = @source_store.fetch(source_event_id)
+        existing = committed_state_fetch(source_event_id)
         committed_retry = existing && committed_source_event?(existing)
         binding = admission_binding(existing, committed_retry:)
         proposal_id = @proposal_binding.dig("subject", "proposal_id") ||
@@ -85,7 +96,7 @@ module Hive
         raise Unauthorized, "proposal evaluation attempt is not bound to a proposal ID" unless proposal_id
 
         source_event_id = resolve_source_event_id(source_event_id, idempotency_key)
-        existing = @source_store.fetch(source_event_id)
+        existing = committed_state_fetch(source_event_id)
         committed_retry = existing && committed_source_event?(existing)
         ensure_evaluator_currently_authorized! unless committed_retry
         binding = admission_binding(existing, committed_retry:)
@@ -99,6 +110,17 @@ module Hive
       end
 
       private
+
+      # Retry state must come from committed `hive/state` bytes: crash-left
+      # worktree-only receipts are restored away under the commit lock before
+      # the lookup, so a direct service caller recovers without the CLI's
+      # separate reconciliation pass.
+      def committed_state_fetch(source_event_id)
+        Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          Proposals.restore_committed_proposal_state!(@git_ops)
+          @source_store.fetch(source_event_id)
+        end
+      end
 
       def produce!(event)
         commit_source_receipt!(event)

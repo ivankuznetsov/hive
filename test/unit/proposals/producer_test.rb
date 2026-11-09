@@ -158,6 +158,63 @@ class ProposalProducerTest < Minitest::Test
     end
   end
 
+  def test_for_task_reuses_a_binding_only_inside_the_live_admitted_worker
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      activity = activity_for(ops)
+      record = Struct.new(:proposal_binding, :live) do
+        def live? = live
+        def [](_key) = nil
+      end
+      store = Struct.new(:record) do
+        def fetch(_attempt_id) = record
+      end
+      worker = Struct.new(:attempt_id).new("attempt-1")
+      build = lambda do |attempt, context|
+        Hive::Proposals::Producer.for_task(
+          project_root: dir, task: Object.new, attempts: store.new(attempt), git_ops: ops,
+          config: Hive::Config::DEFAULTS, context:
+        )
+      end
+
+      with_replaced_singleton_method(Hive::TaskActivity, :for_task, ->(*_args, **_kwargs) { activity }) do
+        live = record.new(proposal_binding, true)
+        assert_raises(Hive::Proposals::MissingBinding) { build.call(live, nil) }
+        assert_raises(Hive::Proposals::MissingBinding) do
+          build.call(live, Struct.new(:attempt_id).new("attempt-2"))
+        end
+        assert_raises(Hive::Proposals::MissingBinding) do
+          build.call(record.new(proposal_binding, false), worker)
+        end
+        assert_instance_of Hive::Proposals::Producer, build.call(live, worker)
+      end
+    end
+  end
+
+  def test_direct_service_retry_ignores_a_crash_left_malformed_receipt
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      producer = producer_for(ops, activity: activity_for(ops))
+      source_event_id = "pse-#{'f' * 64}"
+      inbox = File.join(ops.hive_state_path, "proposals", "v1", "inbox")
+      FileUtils.mkdir_p(inbox)
+      File.write(File.join(inbox, "#{source_event_id}.json"), "{malformed")
+
+      result = producer.submit(
+        proposed_change: "Change review", motivation: "Recover without CLI reconciliation",
+        evidence: [ evidence ], source_event_id:
+      )
+
+      assert_equal source_event_id, result.source_event_id
+      assert ops.read_hive_state_blob_at(
+        ops.hive_state_head_sha, "proposals/v1/inbox/#{source_event_id}.json",
+        max_bytes: Hive::Proposals::SourceEventStore::MAX_FILE_BYTES + 1
+      )
+    end
+  end
+
   def test_requires_the_committed_receipt_to_match_before_ingestion
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

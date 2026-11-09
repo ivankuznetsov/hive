@@ -188,6 +188,35 @@ class ProposalTrackingTest < Minitest::Test
         assert_path_exists proposal_root
         assert_equal [ created.proposal_id ],
                      live_store(ops).load.projections.map(&:proposal_id)
+
+        # A later command on the same task runs outside that (now idle)
+        # attempt: it must admit a fresh source attempt for its own typed
+        # options instead of reusing the earlier subject in-process.
+        dispatches = []
+        attempts = Object.new
+        attempts.define_singleton_method(:dispatch) do |**attributes|
+          dispatches << attributes
+          Hive::Attempts::ClientResult.new(
+            status: :terminal, exit_status: 0, outcome: "success",
+            receipt: nil, attempt_id: "fresh-source-attempt"
+          )
+        end
+        Hive::Commands::Proposal.new(
+          "submit", task.slug,
+          input: copy_input(project, fixture("rejected-planning-prompt", "submission.json")),
+          stdout: StringIO.new, task_resolver: ->(_target, _project) { task },
+          attempts_api: attempts,
+          filters: { "kind" => "workflow", "subject" => "workflows/coding", "revision" => "v9" }
+        ).call
+
+        assert_equal 1, dispatches.length
+        assert_equal(
+          { "kind" => "workflow", "reference" => "workflows/coding", "revision" => "v9",
+            "proposal_id" => nil },
+          dispatches.first.dig(:proposal_admission, "subject")
+        )
+        assert_equal [ created.proposal_id ],
+                     live_store(ops).load.projections.map(&:proposal_id)
       end
     end
   end
@@ -342,15 +371,23 @@ class ProposalTrackingTest < Minitest::Test
       }
     )
     assert_equal :accepted, result.status
+    (@admitted_attempts ||= {})[task.folder] = result.attempt
     [ task, result.attempt ]
   end
 
+  # Runs the source command as the admitted attempt's authenticated worker.
   def run_source(command, task, project, source_path)
     input = copy_input(project, source_path)
-    Hive::Commands::Proposal.new(
-      command, task.slug, input:, stdout: StringIO.new,
-      task_resolver: ->(_target, _project) { task }
-    ).call
+    attempt = @admitted_attempts.fetch(task.folder)
+    with_attempt_context(
+      attempt_id: attempt.attempt_id, task_generation: attempt.task_input_epoch,
+      ownership_generation: attempt.ownership_generation
+    ) do
+      Hive::Commands::Proposal.new(
+        command, task.slug, input:, stdout: StringIO.new,
+        task_resolver: ->(_target, _project) { task }
+      ).call
+    end
   end
 
   def run_lifecycle(command, proposal_id, project, ops, source_path, considered: [])

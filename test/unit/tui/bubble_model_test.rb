@@ -676,27 +676,33 @@ class HiveTuiBubbleModelTest < Minitest::Test
   end
 
   def test_two_column_idea_preview_frame_preserves_oversized_graphemes_and_pads_siblings
-    [ "界", "👨‍👩‍👧‍👦" ].each do |sentinel|
-      state = Hive::Tui::Model::InfoPanelState.new(
-        slug: "tiny", stage: "1-inbox", created_at: nil, original_text: sentinel,
-        folder_path: nil, latest_log_path: nil, stage_extra: nil
-      )
-      @model = Hive::Tui::BubbleModel.new(
-        hive_model: Hive::Tui::Model.initial.with(mode: :idea_preview, info_panel_state: state, cols: 2, rows: 11),
-        dispatch: @dispatch
-      )
-      out = with_zero_usage { @model.view }
-      lines = out.lines(chomp: true)
-      cells = Hive::Tui::Views::Format.display_width(sentinel)
+    # Lipgloss pads siblings with its own grapheme widths, which count an RGI
+    # ZWJ sequence as two cells. Pin unicode-display_width to the same RGI
+    # mode so both measurements agree wherever the suite runs; at `cols: 2`
+    # the one-cell body budget makes every two-cell sentinel oversized.
+    with_emoji_width_mode(:rgi) do
+      [ "界", "👨‍👩‍👧‍👦" ].each do |sentinel|
+        state = Hive::Tui::Model::InfoPanelState.new(
+          slug: "tiny", stage: "1-inbox", created_at: nil, original_text: sentinel,
+          folder_path: nil, latest_log_path: nil, stage_extra: nil
+        )
+        @model = Hive::Tui::BubbleModel.new(
+          hive_model: Hive::Tui::Model.initial.with(mode: :idea_preview, info_panel_state: state, cols: 2, rows: 11),
+          dispatch: @dispatch
+        )
+        out = with_zero_usage { @model.view }
+        lines = out.lines(chomp: true)
+        cells = Hive::Tui::Views::Format.display_width(sentinel)
 
-      assert_operator cells, :>, 2 if sentinel != "界"
-      assert_equal 1, out.scan(sentinel).length
-      assert_equal sentinel, lines[8]
-      refute_includes out, "…"
-      assert_equal 11, lines.length
-      assert_equal [ cells ], lines.map { |line| Hive::Tui::Views::Format.display_width(line) }.uniq
-      assert_equal "─".ljust(cells), lines[1]
-      assert_equal cells, Hive::Tui::Views::Format.display_width(lines.last)
+        assert_equal 2, cells
+        assert_equal 1, out.scan(sentinel).length
+        assert_equal sentinel, lines[8]
+        refute_includes out, "…"
+        assert_equal 11, lines.length
+        assert_equal [ cells ], lines.map { |line| Hive::Tui::Views::Format.display_width(line) }.uniq
+        assert_equal "─".ljust(cells), lines[1]
+        assert_equal cells, Hive::Tui::Views::Format.display_width(lines.last)
+      end
     end
   end
 

@@ -192,8 +192,16 @@ class HiveTuiViewsIdeaPreviewTest < Minitest::Test
   def test_mixed_graphemes_repack_from_source_at_each_width
     source = "ae\u0301界👩‍💻z"
     state = info_state(original_text: source)
-    assert_equal [ "ae\u0301", "界", "👩‍💻", "z" ], rendered_lines(state: state, cols: 2, height: 13)[8, 4]
-    assert_equal [ "ae\u0301界", "👩‍💻", "z" ], rendered_lines(state: state, cols: 4, height: 12)[8, 3]
+    # Per-codepoint emoji widths: the ZWJ sequence fills a 4-cell row alone.
+    with_emoji_width_mode(:none) do
+      assert_equal [ "ae\u0301", "界", "👩‍💻", "z" ], rendered_lines(state: state, cols: 2, height: 13)[8, 4]
+      assert_equal [ "ae\u0301界", "👩‍💻", "z" ], rendered_lines(state: state, cols: 4, height: 12)[8, 3]
+    end
+    # RGI sequence widths (unicode-display_width's CI default): two cells.
+    with_emoji_width_mode(:rgi) do
+      assert_equal [ "ae\u0301", "界", "👩‍💻", "z" ], rendered_lines(state: state, cols: 2, height: 13)[8, 4]
+      assert_equal [ "ae\u0301界", "👩‍💻z" ], rendered_lines(state: state, cols: 4, height: 11)[8, 2]
+    end
     assert_equal source, state.original_text
   end
 

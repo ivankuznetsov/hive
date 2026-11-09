@@ -307,6 +307,20 @@ Hive::Attempts::Repository.prepend(HiveTestAttemptRepository)
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
 
+  # unicode-display_width picks its default emoji width mode from ENV (CI=1
+  # selects :rgi, most local terminals :none), so ZWJ sequences measure 2 or
+  # more cells depending on where the suite runs. Pin the mode for tests whose
+  # expected layout depends on emoji sequence width.
+  def with_emoji_width_mode(mode)
+    require "unicode/display_width"
+    support = Unicode::DisplayWidth::EmojiSupport
+    original = support.method(:recommended)
+    support.define_singleton_method(:recommended) { mode }
+    yield
+  ensure
+    support.define_singleton_method(:recommended, original) if original
+  end
+
   def prepare_runtime_project(state_home:, name:, path: state_home,
                               state_root_path: File.join(path, ".hive-state"),
                               project_id: nil)

@@ -16,7 +16,14 @@
   anonymously. When no token is set, the only change is the retry.
 - Workflows: `install-smoke.yml` (`full-smoke`, `verify-release`) and
   `install-verify.yml` (bash channel) pass step-scoped
-  `GITHUB_TOKEN: ${{ github.token }}`. cosign-installer is SHA-pinned to v4.1.3
-  with `cosign-release: v2.5.2`. That action has no token input, so its
-  built-in download retry is what makes it resilient.
+  `GITHUB_TOKEN: ${{ github.token }}`.
+- cosign: a first attempt pinned cosign-installer to v4.1.3 for its retry. PR CI
+  still failed: 6 anonymous 504s, then exit 22. The three jobs now use the
+  local composite action `.github/actions/install-cosign`, which runs
+  `gh release download v2.5.2 --repo sigstore/cosign` authenticated with the
+  job token. It makes 5 attempts with 5/10/20/40s backoff and checks a pinned
+  SHA-256 for linux amd64 `bcfeae05…` and arm64 `2cbcea18…`, taken from
+  upstream `cosign_checksums.txt` and matching cosign-installer v3's bootstrap
+  pins. It then runs `chmod +x` and adds the binary to `$GITHUB_PATH`. The
+  cosign download is now authenticated.
 - Pages: [[operating]], [[testing]], [[gaps]].

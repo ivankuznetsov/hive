@@ -8,7 +8,7 @@ class PackagingVerifyReleaseTest < Minitest::Test
   MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
   CHANNEL_SCRIPT = File.expand_path("../../../packaging/verify-channel.sh", __dir__).freeze
   INSTALL_VERIFY_WORKFLOW = File.expand_path("../../../.github/workflows/install-verify.yml", __dir__).freeze
-  COSIGN_INSTALLER = "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532".freeze
+  INSTALL_COSIGN_ACTION = File.expand_path("../../../.github/actions/install-cosign/action.yml", __dir__).freeze
   FIXTURE_TOKEN = "ghs_fixtureTokenValue123".freeze
 
   def test_release_and_channel_smokes_use_the_public_status_contracts_for_their_jobs
@@ -181,7 +181,7 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, "steps.release.outputs.capable == 'true'"
   end
 
-  def test_install_jobs_pin_a_retrying_cosign_installer_and_scope_the_token_to_release_downloads
+  def test_install_jobs_use_authenticated_cosign_install_and_scope_the_token_to_release_downloads
     smoke = YAML.safe_load_file(INSTALL_SMOKE_WORKFLOW, aliases: true).fetch("jobs")
     verify = YAML.safe_load_file(INSTALL_VERIFY_WORKFLOW, aliases: true).fetch("jobs")
     jobs = {
@@ -192,10 +192,11 @@ class PackagingVerifyReleaseTest < Minitest::Test
 
     jobs.each do |name, (job, token_steps)|
       steps = job.fetch("steps")
-      installers = steps.select { |step| step["uses"].to_s.start_with?("sigstore/cosign-installer@") }
+      installers = steps.select { |step| step["uses"] == "./.github/actions/install-cosign" }
       assert_equal 1, installers.size, name
-      assert_equal COSIGN_INSTALLER, installers.first.fetch("uses"), "#{name}: pin v4.1.3 (download retries)"
-      assert_equal "v2.5.2", installers.first.fetch("with").fetch("cosign-release"), name
+      assert_equal "${{ github.token }}", installers.first.fetch("with").fetch("github-token"), name
+      checkout = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+      assert_operator checkout, :<, steps.index(installers.first), "#{name}: local action needs checkout first"
 
       actual = steps.filter_map { |step| step["name"] if step.fetch("env", {}).key?("GITHUB_TOKEN") }
       assert_equal token_steps, actual, "#{name}: GITHUB_TOKEN is scoped to the release-download step"
@@ -208,8 +209,31 @@ class PackagingVerifyReleaseTest < Minitest::Test
                  verify.fetch("verify").fetch("steps").find { |step| step["name"] == "Verify channel" }
                        .fetch("env").fetch("GITHUB_TOKEN")
     [ INSTALL_SMOKE_WORKFLOW, INSTALL_VERIFY_WORKFLOW ].each do |path|
-      refute_includes File.read(path), "sigstore/cosign-installer@v3"
+      refute_includes File.read(path), "sigstore/cosign-installer", "#{path}: anonymous bootstrap download"
     end
+  end
+
+  def test_install_cosign_action_downloads_authenticated_and_verifies_a_pinned_digest
+    action = YAML.safe_load_file(INSTALL_COSIGN_ACTION, aliases: true)
+    step = action.fetch("runs").fetch("steps").first
+    env = step.fetch("env")
+    run = step.fetch("run")
+
+    assert_equal "${{ inputs.github-token }}", env.fetch("GH_TOKEN")
+    assert_equal "v2.5.2", env.fetch("COSIGN_VERSION")
+    # Upstream sigstore/cosign v2.5.2 cosign_checksums.txt (same digests the
+    # cosign-installer v3 bootstrap pinned).
+    assert_equal "bcfeae05557a9f313ee4392d2f335d0ff69ebbfd232019e3736fb04999fe1734",
+                 env.fetch("COSIGN_LINUX_AMD64_SHA256")
+    assert_equal "2cbcea1873ad76274c3f241ef175d204654e3aac3e73e6ec4504e5227015cb0a",
+                 env.fetch("COSIGN_LINUX_ARM64_SHA256")
+    assert_includes run, 'gh release download "$COSIGN_VERSION" --repo sigstore/cosign'
+    assert_includes run, "for attempt in 1 2 3 4 5; do"
+    assert_includes run, 'sleep "$delay"'
+    assert_includes run, '[[ "$actual" != "$expected" ]]'
+    assert_operator run.index("sha256sum"), :<, run.index('chmod +x "$dir/cosign"')
+    assert_operator run.index('chmod +x "$dir/cosign"'), :<, run.index('>> "$GITHUB_PATH"')
+    refute_match(/\bcurl\b/, run)
   end
 
   def test_release_fetch_authenticates_only_github_with_a_redirect_safe_curl

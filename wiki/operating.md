@@ -489,12 +489,18 @@ Every `install.sh` / `verify-release.sh` GitHub download uses a bounded curl
 retry (`--retry 4 --retry-delay 5 --retry-max-time 60`; curl treats HTTP
 408/429/5xx and timeouts as transient even without `--fail`) and the optional
 `GITHUB_TOKEN` auth above. The `full-smoke`, `verify-release`, and
-`install-verify.yml` bash-channel steps pass `${{ github.token }}` step-scoped,
-and `sigstore/cosign-installer` is SHA-pinned to v4.1.3 (installing cosign
-v2.5.2) because that action has no token input; its own per-download retry
-(6 tries, fixed 5s delay, `--retry-all-errors`, 120s cap) rides out the 504s
-from GitHub's 2026-11-09 anonymous-traffic incident that failed the floating
-`@v3` bootstrap.
+`install-verify.yml` bash-channel steps pass `${{ github.token }}` step-scoped.
+These jobs install cosign with the local composite action
+[`.github/actions/install-cosign`](../.github/actions/install-cosign/action.yml)
+instead of `sigstore/cosign-installer`. That action has no token input, and its
+anonymous bootstrap downloads kept failing with 504 during GitHub's 2026-11-09
+anonymous-traffic incident, even with v4.1.3's built-in retry. The local action
+runs `gh release download v2.5.2 --repo sigstore/cosign` with the job token,
+which goes through the authenticated API asset endpoint. It retries 5 times
+with 5/10/20/40s backoff and checks the binary against a pinned SHA-256 for
+linux amd64/arm64, taken from upstream `cosign_checksums.txt`. These are the
+same digests cosign-installer v3 hardcoded for its v2.5.2 bootstrap. The binary
+is then added to `$GITHUB_PATH`.
 
 ## Prerequisites
 

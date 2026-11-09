@@ -1057,8 +1057,11 @@ unrelated third-party apt outage does not hide the verifier's actual behavior.
 `test/unit/packaging/verify_release_test.rb` also extracts and runs
 `release_fetch` against a recording fake curl (token only for exact
 `https://github.com/` URLs on curl >= 7.83, never in argv, anonymous retry on
-401) and pins the install workflows to the SHA-pinned retrying
-cosign-installer v4.1.3 with step-scoped `GITHUB_TOKEN`. It pins the safety boundary that
+401). It also pins the install workflows to the local authenticated
+`.github/actions/install-cosign` action, with no `sigstore/cosign-installer` and
+a step-scoped `GITHUB_TOKEN`, and pins that action's `gh release download`, its
+5-attempt retry, the v2.5.2 SHA-256 digests, and verify-before-`$GITHUB_PATH`
+ordering. It pins the safety boundary that
 inert per-prefix `systemctl`/`launchctl` stubs enter `PATH` before any installed
 Hive command can contact the host's live user service manager. It also pins the
 published-release path through `packaging/verify-managed-web-setup.sh`: after

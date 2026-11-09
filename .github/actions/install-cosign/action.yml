@@ -1,0 +1,60 @@
+name: install-cosign
+description: >
+  Install a SHA-256-pinned cosign v2.5.2 Linux binary through the authenticated
+  GitHub release-asset API (`gh release download` with the job token). This
+  replaces sigstore/cosign-installer, whose bootstrap downloads are anonymous
+  and failed with HTTP 504 during GitHub's anonymous-traffic throttling
+  incident on 2026-11-09. The digests are those in sigstore/cosign v2.5.2's
+  cosign_checksums.txt. They match the v2.5.2 bootstrap digests that
+  cosign-installer v3 hardcoded. Assumes a Linux runner (X64 or ARM64).
+inputs:
+  github-token:
+    description: Token for the authenticated release-asset download (pass github.token).
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install cosign v2.5.2 (authenticated, digest-pinned)
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUNNER_ARCH_NAME: ${{ runner.arch }}
+        RUNNER_OS_NAME: ${{ runner.os }}
+        COSIGN_VERSION: v2.5.2
+        COSIGN_LINUX_AMD64_SHA256: bcfeae05557a9f313ee4392d2f335d0ff69ebbfd232019e3736fb04999fe1734
+        COSIGN_LINUX_ARM64_SHA256: 2cbcea1873ad76274c3f241ef175d204654e3aac3e73e6ec4504e5227015cb0a
+      run: |
+        set -euo pipefail
+        [[ "$RUNNER_OS_NAME" == "Linux" ]] || { echo "install-cosign: unsupported OS ${RUNNER_OS_NAME}" >&2; exit 1; }
+        case "$RUNNER_ARCH_NAME" in
+          X64) asset=cosign-linux-amd64; expected="$COSIGN_LINUX_AMD64_SHA256" ;;
+          ARM64) asset=cosign-linux-arm64; expected="$COSIGN_LINUX_ARM64_SHA256" ;;
+          *) echo "install-cosign: unsupported architecture ${RUNNER_ARCH_NAME}" >&2; exit 1 ;;
+        esac
+        dir="$RUNNER_TEMP/cosign"
+        mkdir -p "$dir"
+        # Bounded retry: 5 attempts, 5/10/20/40s backoff (~75s of waiting).
+        delay=5
+        for attempt in 1 2 3 4 5; do
+          if gh release download "$COSIGN_VERSION" --repo sigstore/cosign \
+               --pattern "$asset" --dir "$dir" --clobber; then
+            break
+          fi
+          if [[ "$attempt" -eq 5 ]]; then
+            echo "install-cosign: download of ${asset} ${COSIGN_VERSION} failed after ${attempt} attempts" >&2
+            exit 1
+          fi
+          echo "install-cosign: attempt ${attempt} failed; retrying in ${delay}s" >&2
+          sleep "$delay"
+          delay=$((delay * 2))
+        done
+        actual="$(sha256sum "$dir/$asset" | awk '{print $1}')"
+        if [[ "$actual" != "$expected" ]]; then
+          echo "install-cosign: SHA-256 mismatch for ${asset} (expected ${expected}, got ${actual})" >&2
+          rm -f "$dir/$asset"
+          exit 1
+        fi
+        mv "$dir/$asset" "$dir/cosign"
+        chmod +x "$dir/cosign"
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/cosign" version

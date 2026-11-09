@@ -21,6 +21,9 @@ module Hive
           usable = [ width.to_i, 1 ].max
           max_rows = [ height.to_i, 1 ].max
           content_capacity = [ max_rows - 1, 0 ].max
+          if content_capacity.zero? && (present(state.original_text) || present(state.stage_extra))
+            return Styles::HINT.render("…")
+          end
 
           base = base_lines(state, usable)
           extra = extra_lines(state, usable)
@@ -60,7 +63,11 @@ module Hive
           return [] if capacity <= 0
           return truncate_rows(base, capacity, width) if extra.empty?
 
-          # Reserve at least the title block so a long original_text cannot suppress extra entirely.
+          # Reserve up to the extra block's first three chrome rows so a long
+          # original_text cannot suppress extra entirely. This floors how many
+          # rows extra may claim; it does not guarantee its title survives. At a
+          # tight capacity (e.g. 3: base 1 / extra 2) extra's allotment collapses
+          # to a blank row plus the `…` marker, dropping the title row.
           extra_reserve = [ extra.length, 3 ].min
           base_capacity = [ capacity - extra_reserve, 1 ].max
           base_rows = truncate_rows(base, base_capacity, width)
@@ -70,10 +77,9 @@ module Hive
         def truncate_rows(rows, capacity, width)
           return [] if capacity <= 0
           return rows if rows.length <= capacity
+          return [ truncate(with_ellipsis(rows.first.to_s), width) ] if capacity == 1
 
-          visible = rows.first(capacity)
-          visible[-1] = truncate(with_ellipsis(visible[-1].to_s), width)
-          visible
+          rows.first(capacity - 1) + [ Styles::HINT.render("…") ]
         end
 
         # Insert `…` before any trailing ANSI reset so styled lines keep the indicator inside the style run.
@@ -113,13 +119,16 @@ module Hive
         def wrapped_body(text, width)
           return [] if text.empty?
 
-          wrap_text(text, width).map { |line| truncate(line, width) }
+          wrap_text(text, width)
         end
 
         def wrap_text(text, width)
-          capacity = [ width.to_i, 1 ].max
-          text.each_line(chomp: true).flat_map do |line|
-            Views::Format.character_chunks(line, capacity)
+          # Drop only the final separator's empty field, matching each_line;
+          # retain all other blank logical rows, including an initial one.
+          lines = text.split(/\r\n?|\n/, -1)
+          lines.pop if lines.last == ""
+          lines.flat_map do |line|
+            Views::Format.cell_chunks(line, width)
           end
         end
 

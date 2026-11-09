@@ -307,6 +307,30 @@ Hive::Attempts::Repository.prepend(HiveTestAttemptRepository)
 module HiveTestHelper
   UNSET_ENV = Object.new.freeze
 
+  # Valid emoji width modes accepted by unicode-display_width's `emoji:` option
+  # and returned by EmojiSupport.recommended. Validating against this set means a
+  # typo (e.g. :rgl) raises instead of silently falling through to :none-width
+  # behavior and pinning nonsense expectations.
+  EMOJI_WIDTH_MODES = %i[all all_no_vs16 rgi rgi_at vs16 possible none].freeze
+
+  # unicode-display_width picks its default emoji width mode from ENV (CI=1
+  # selects :rgi, most local terminals :none), so ZWJ sequences measure 2 or
+  # more cells depending on where the suite runs. Pin the mode for tests whose
+  # expected layout depends on emoji sequence width.
+  def with_emoji_width_mode(mode)
+    unless EMOJI_WIDTH_MODES.include?(mode)
+      raise ArgumentError,
+        "unknown emoji width mode #{mode.inspect}; expected one of #{EMOJI_WIDTH_MODES.inspect}"
+    end
+    require "unicode/display_width"
+    support = Unicode::DisplayWidth::EmojiSupport
+    original = support.method(:recommended)
+    support.define_singleton_method(:recommended) { mode }
+    yield
+  ensure
+    support.define_singleton_method(:recommended, original) if original
+  end
+
   def prepare_runtime_project(state_home:, name:, path: state_home,
                               state_root_path: File.join(path, ".hive-state"),
                               project_id: nil)

@@ -34,6 +34,8 @@ Claude no longer runs in tmux: every Claude stage is now a plain `claude -p` pro
 
 ### Fixes
 
+- Direct benchmark `run_all.rb` and `pipeline_run.rb` v1-slate generators now receive only their profile's API key or OAuth file. Bare/unknown Pi routes and direct `gen` callers with missing/invalid `HB_API_KEYS` declarations or conflicting auth now refuse. Use, for example, `HB_API_KEYS=OPENROUTER_API_KEY` with both OAuth controls empty, or `HB_API_KEYS=""` with exactly one OAuth file. The unchanged `PI_MODELS` entries `minimax-3` and `qwen-2.6-coder` both refuse before spawn, so every default unfiltered pass parks both in `failed` and exits 2 until each is qualified to a verified `openrouter/<id>` route. Update `harness/profiles/README.md` with that future migration; preflight checks binary/auth/version only. Existing projects require an explicit runtime refresh. The v2 `generate.md` → `hive_run.rb` → `HiveDriver` path, its `env_args`/`auth_mounts` forwarding and `hive_stages.sh` in-container `auth.json` materialization are unchanged. See [the credential contract and refresh/revert commands](templates/builtins/bench/runtime/harness/CREDENTIAL_ISOLATION.md).
+
 - Fixed `hive new --idempotency-key` failing on every host with "command receipts are not installed". Without the optional receipt extension it uses per-project idempotency again, so retrying the same key returns the existing task.
 - The PR babysitter no longer gives up on a PR when the agent hits its provider usage limit. It waits for the limit to clear instead of adding `babysitter/needs-human`, and its give-up comments now lead with the actual error.
 

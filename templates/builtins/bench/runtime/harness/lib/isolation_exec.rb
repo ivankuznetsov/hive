@@ -74,15 +74,15 @@ module HiveBench
       lambda do |profile:, prompt:, cwd:|
         prompt_path = File.join(cwd, PROMPT_FILE)
         begin
+          env = gen_env(profile)
           File.write(prompt_path, frame.call(prompt))
           cmd = agent_command(profile)
-          # HB_ALLOW_EGRESS acknowledges the run permits model-API egress; provider
-          # keys are inherited from the driver's env, and a claude cell's OAuth
-          # creds path is passed so isolation.sh mounts it read-only.
+          # The profile declares one API variable or one OAuth file. Nil path
+          # overrides remove inherited credentials before the wrapper runs.
           # Capture to files, not pipes: agent JSON streams reach many MB and
           # Open3.capture3's reader threads race ("stream closed in another
           # thread") on that volume — file redirection sidesteps it entirely.
-          out, err, status = run_to_files(gen_env(profile), script, cwd, cmd)
+          out, err, status = run_to_files(env, script, cwd, cmd)
           fail_closed!(status, err, phase: "gen")
           parsed = parse_stream(profile.harness, out)
           # A clean exit that yielded no parseable usage usually means the agent's
@@ -116,19 +116,36 @@ module HiveBench
     # Fail closed on an explicit isolation refusal (70) or a container that never
     # started (125-127). Other non-zero exits mean the agent ran and failed, or
     # the gate's tests failed — those are scored normally, not raised.
-    def fail_closed!(status, diagnostics, phase:)
+    def fail_closed!(status, _diagnostics, phase:)
       code = status.exitstatus
       return unless code == FAIL_ISOLATION || CONTAINER_START_FAILURES.include?(code)
 
-      raise IsolationError, "runner could not establish isolation (#{phase}, exit #{code}): #{diagnostics.to_s.strip[0, 300]}"
+      raise IsolationError, "runner could not establish isolation (#{phase}, exit #{code})"
     end
 
-    # The env the runner inherits for a gen cell. claude needs its OAuth creds
-    # bind-mounted (path only — never the token value), set per harness.
+    API_KEYS = { "openrouter" => "OPENROUTER_API_KEY", "anthropic" => "ANTHROPIC_API_KEY",
+                 "openai" => "OPENAI_API_KEY" }.freeze
+    CREDENTIAL_POLICY_ERROR = "gen credentials require a supported Pi provider prefix or a configured Claude/Codex OAuth file"
+
+    # A complete declaration for this profile, independent of ambient controls.
+    # Values stay on the host; only the selected API variable's name is declared.
     def gen_env(profile)
-      env = { "HB_ALLOW_EGRESS" => "1" }
-      env["HB_CLAUDE_AUTH"] = File.expand_path(profile.auth_path) if profile.harness == "claude" && profile.auth_path
-      env["HB_CODEX_AUTH"] = File.expand_path(profile.auth_path) if profile.harness == "codex" && profile.auth_path
+      env = { "HB_ALLOW_EGRESS" => "1", "HB_API_KEYS" => "",
+              "HB_CLAUDE_AUTH" => nil, "HB_CODEX_AUTH" => nil }
+      case profile.harness
+      when "pi"
+        provider, model = profile.model.to_s.split("/", 2)
+        key = API_KEYS[provider]
+        raise IsolationError, CREDENTIAL_POLICY_ERROR unless key && model && !model.empty?
+
+        env["HB_API_KEYS"] = key
+      when "claude", "codex"
+        raise IsolationError, CREDENTIAL_POLICY_ERROR if profile.auth_path.to_s.empty?
+
+        env["HB_#{profile.harness.upcase}_AUTH"] = File.expand_path(profile.auth_path)
+      else
+        raise IsolationError, CREDENTIAL_POLICY_ERROR
+      end
       env
     end
 

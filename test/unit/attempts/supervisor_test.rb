@@ -1092,6 +1092,95 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal "memory_limit_exceeded", supervisor.instance_variable_get(:@failure_reason)
   end
 
+  def test_terminal_attempt_reaps_scope_leftovers_into_the_attempt_log
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 3" ]) do |store, attempt|
+      reaper = recording_scope_reaper("reaped", reaped: [ { "pid" => 4242, "comm" => "conmon" } ])
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.3,
+        scope_reaper: reaper
+      )
+
+      assert_equal 3, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      assert_equal [ 0.3 ], reaper.calls
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "hive-attempt: scope_leftovers {"
+      assert_includes log, '"comm":"conmon"'
+    end
+  end
+
+  def test_clean_scope_leaves_the_attempt_log_untouched
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      reaper = recording_scope_reaper("clean")
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, scope_reaper: reaper
+      )
+
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      assert_equal 1, reaper.calls.length
+      refute_includes attempt_log_text(store, store.fetch(attempt.attempt_id)), "scope_leftovers"
+    end
+  end
+
+  def test_unexpected_failure_still_reaps_scope_leftovers_before_the_receipt
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      reaper = recording_scope_reaper("incomplete", survivors: [ { "pid" => 7, "comm" => "stuck" } ])
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), scope_reaper: reaper
+      )
+      supervisor.define_singleton_method(:run_worker) { |_record, _log| raise "boom" }
+
+      assert_equal Hive::ExitCodes::SOFTWARE, supervisor.run
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      assert_equal 1, reaper.calls.length
+      assert_includes attempt_log_text(store, terminal), '"status":"incomplete"'
+    end
+  end
+
+  def test_scope_reaping_runs_on_early_exits_and_never_raises
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      reaper = Object.new
+      calls = 0
+      reaper.define_singleton_method(:reap) do |**|
+        calls += 1
+        raise Errno::EACCES, "cgroup"
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new("f" * 64), scope_reaper: reaper
+      )
+
+      assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
+      assert_equal 1, calls
+    end
+
+    reaper = recording_scope_reaper("reaped")
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new, scope_reaper: reaper
+    )
+    closed_log = Object.new
+    closed_log.define_singleton_method(:closed?) { true }
+    closed_log.define_singleton_method(:append) { |*| flunk "a closed log must not be appended" }
+    assert_nil supervisor.send(:reap_scope_leftovers, closed_log)
+    assert_nil supervisor.send(:reap_scope_leftovers, closed_log)
+    assert_equal 1, reaper.calls.length
+  end
+
+  def test_supervisor_defaults_to_a_reaper_for_its_own_attempt_scope
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new
+    )
+
+    assert_instance_of Hive::Attempts::ScopeReaper, supervisor.instance_variable_get(:@scope_reaper)
+  end
+
   def test_signalled_patrol_attempt_reports_memory_limit_agent_reason
     worker_argv = [ "hive", "run", "durable-task" ]
     with_attempt(
@@ -1476,6 +1565,20 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   private
+
+  def recording_scope_reaper(status, reaped: [], survivors: [])
+    reaper = Object.new
+    calls = []
+    result = Hive::Attempts::ScopeReaper::Result.new(
+      status: status, unit: "hive-attempt-test.scope", reaped: reaped, survivors: survivors, error: nil
+    )
+    reaper.define_singleton_method(:calls) { calls }
+    reaper.define_singleton_method(:reap) do |term_grace_sec:|
+      calls << term_grace_sec
+      result
+    end
+    reaper
+  end
 
   def attempt_log_text(store, terminal)
     Hive::Attempts::StreamLog.read(

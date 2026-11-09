@@ -198,7 +198,15 @@ class ConditionsAttemptObserverTest < Minitest::Test
         projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
         health = projection.current_condition("AgentHealthy")
         assert_equal "unsatisfied", health.fetch("state")
-        assert_equal reason == "launch_timeout" ? "attempt_lost" : reason, health.fetch("reason")
+        # A typed bookkeeping loss must keep the routed `attempt_lost`
+        # reason (recover_execute) and carry the typed reason as evidence.
+        assert_equal "attempt_lost", health.fetch("reason")
+        lease = health.fetch("evidence").find { |entry| entry["type"] == "attempt_lease" }
+        if reason == "launch_timeout"
+          refute lease.key?("bookkeeping_reason")
+        else
+          assert_equal reason, lease.fetch("bookkeeping_reason")
+        end
         assert_equal :acknowledged, observer.observe(status, now: NOW + 2)
       end
     end

@@ -147,6 +147,14 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
       assert_equal "attempt_lost", result.projection.current_condition("AgentHealthy").fetch("reason")
     end
 
+    with_fixture do |task, store, attempt, baseline|
+      lost = store.mark_lost(attempt, reason: "runtime_bookkeeping_busy", now: Time.now.utc)
+      health = build_reconciler(task, store, lost).reconcile(baseline_head: baseline)
+                                                  .projection.current_condition("AgentHealthy")
+      assert_equal "attempt_lost", health.fetch("reason")
+      assert_equal "runtime_bookkeeping_busy", health.fetch("evidence").first.fetch("bookkeeping_reason")
+    end
+
     with_fixture(task_input_epoch: 9) do |task, store, attempt, baseline|
       assert_raises(Hive::Conditions::GenerationMismatch) do
         build_reconciler(task, store, attempt).reconcile(baseline_head: baseline)

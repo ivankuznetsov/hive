@@ -173,7 +173,9 @@ completion replay or loss instead of reserving capacity forever. The same rule
 applies to lost-outcome cleanup. Permission-denied termination and custody that
 becomes unverifiable during cleanup report `still_alive`, retaining the live
 or unresolved worker fence. Bookkeeping losses publish `AgentHealthy` as
-`unsatisfied` with the typed reason. Markerless recovery preserves its original
+`unsatisfied` with reason `attempt_lost`, so they route to `recover_execute`;
+the typed reason travels as `bookkeeping_reason` on the `attempt_lease`
+evidence. Markerless recovery preserves its original
 failure-origin lookup key through terminalization and rearms at retry count two
 without a duplicate request-id conflict.
 

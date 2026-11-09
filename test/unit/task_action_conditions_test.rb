@@ -74,6 +74,30 @@ class TaskActionConditionsTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_busy_lost_attempt_routes_to_execute_recovery_not_operator_input
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |bookkeeping_reason|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        lost = observation(
+          "agent-lost", "AgentHealthy", "unsatisfied", "attempt_lost",
+          [ { "type" => "attempt_lease", "attempt_id" => "attempt-b", "lease_version" => 2,
+              "state" => "lost", "outcome" => nil, "bookkeeping_reason" => bookkeeping_reason } ]
+        )
+        records = satisfied_records.reject { |record| record["event_id"] == "agent" } + [ lost ]
+        action = Hive::TaskAction.for(
+          task,
+          projection: Hive::TaskProjection.project(records: records, marker: marker(:execute_complete)),
+          config: condition_config("conditions")
+        )
+
+        assert_equal "recover_execute", action.key
+        assert_equal Hive::Schemas::NextActionKind::RUN, action.next_action.fetch("kind")
+        assert_equal "attempt_lost", action.next_action.fetch("reason")
+        assert_equal dir, action.next_action.fetch("target")
+      end
+    end
+  end
+
   def test_no_change_condition_is_repair_while_an_actual_question_still_needs_input
     with_tmp_dir do |dir|
       task = build_task(dir)

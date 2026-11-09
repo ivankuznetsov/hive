@@ -130,6 +130,59 @@ adds `--property=MemoryMax=…`, `--property=MemorySwapMax=…`, and, on systemd
   `memory_limit_oom_kills=N` notice and keeps the worker's own outcome. The
   terminal receipt schema is unchanged (see `wiki/gaps.md`).
 
+## Attempt scope leftovers
+
+A finished worker does not end its scope by itself. systemd keeps a
+`hive-attempt-*.scope` `active (running)` while any process is left in its
+cgroup, and the supervisor only signals the worker's process group. A tool
+that calls setsid(2) escapes that group but not the cgroup: `podman run`
+leaves `conmon` and `pasta` behind. On 2026-11-09 a todero review agent's test
+container kept its terminal attempt's scope active for about 7.5 hours, which
+blocked hivedev spike windows that require zero attempt units.
+
+`Attempts::ScopeReaper` closes this gap. The supervisor calls it once the
+worker is gone, on every exit path: success, failure, provider hold/limit
+(a failed outcome), timeout, cancellation, quiesce interruption, an
+unexpected supervisor error, a lost lease, and an early refusal. On the
+normal path it runs after `run_worker` and before the attempt log is closed
+and the terminal receipt is committed.
+
+- It acts only when the supervisor's own cgroup (`/proc/self/cgroup`) is
+  exactly `hive-attempt-<sha256(attempt_id)[0,24]>.scope`, the unit
+  `DetachedLauncher` names via `ScopeReaper.unit_name`. Anywhere else (macOS,
+  no user manager, plain spawn, test processes, a different attempt's scope,
+  a sub-cgroup) it is a no-op (`unscoped`).
+- It lists every pid in the scope and its descendant cgroups (`cgroup.procs`,
+  bounded to 4096), never the supervisor itself. It sends SIGTERM, waits up to
+  the supervisor's kill grace (`--kill-grace-sec`, shortened during
+  quiescence), then sends SIGKILL and waits up to 2 s more. Each round
+  re-reads membership, so processes forked meanwhile are caught. Every pid is
+  re-checked against the scope's cgroup right before it is signalled, so a pid
+  reused outside the scope is never signalled.
+- When the last process exits, systemd collects the scope (`--collect`). The
+  supervisor cannot use `systemctl --user stop` on its own scope because that
+  would kill the supervisor before it commits the receipt.
+- When anything was left, the attempt log gets one supervisor-channel line:
+  `hive-attempt: scope_leftovers {"unit":…,"status":"reaped"|"incomplete"|"unavailable","reaped":[{"pid":…,"comm":…}],"survivors":[…]}`.
+  Only pid and `comm` are recorded, not command lines, which can carry
+  secrets. A clean scope logs nothing. The terminal receipt schema is
+  unchanged.
+- Reaping never raises into the supervisor. Containers whose processes live
+  in a separate cgroup (podman with the systemd cgroup manager puts them in
+  their own `libpod-*.scope`) are outside this attempt's scope and are not
+  touched. Only the leftovers inside the attempt scope are killed.
+
+Hive's own drain and wait paths do not count scopes. Operational task
+liveness uses task-lock and agent pid identity. Daemon status liveness and
+quiescence use `owned_processes` rows and attempt record states, and
+`ProcessRegistry#reconcile_exited_processes!` uses wrapper session and
+process-group absence. None of them treats a terminal attempt's scope as
+running, so they gained no orphan output. The scope-level check that
+blocked was in hivedev (`Window.live_attempt_scopes` and the spike
+scripts' "no `hive-attempt-*` unit" precondition). The unit description
+(`Hive durable attempt <attempt_id>`) in `systemctl --user list-units
+'hive-attempt-*'` already names the attempt behind a leftover scope.
+
 Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
 an ambient or transient systemd scope are not complete descendant custody. The
 Linux delegated-cgroup adapter is eligible only for an explicitly established

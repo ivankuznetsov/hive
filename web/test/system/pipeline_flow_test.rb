@@ -518,7 +518,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
       window.history.pushState({}, "", "?project=#{first}")
       window.dispatchEvent(new PopStateEvent("popstate"))
     JS
-    assert_field "Project", with: first
+    assert_equal first, composer_project
     click_project_filter(second)
     assert_selector ".project-nav a.active[data-project-filter-name-param='#{second}']"
     assert_equal second, composer_project,

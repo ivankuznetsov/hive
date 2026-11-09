@@ -235,7 +235,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
       File.write(File.join(event_dir, "also-malformed.json"), "null")
       assert_empty store.index.fetch("recent_actor_events")
 
-      store.send(:write_index_unlocked, store.send(:empty_index))
+      store.send(:write_index_bytes_unlocked, store.send(:encoded_index, store.send(:empty_index)))
       assert_equal [], store.index.fetch("pending")
       assert_equal 3, store.index.dig("usage", "project_events")
       assert_operator store.index.dig("usage", "project_bytes"), :>, 0

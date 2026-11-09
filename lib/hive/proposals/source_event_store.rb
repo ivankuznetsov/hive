@@ -474,10 +474,6 @@ module Hive
         [ 0, 0 ]
       end
 
-      def write_index_unlocked(document)
-        write_index_bytes_unlocked(encoded_index(document))
-      end
-
       def encoded_index(document)
         bytes = Proposals.canonical(document)
         raise QuotaExceeded, "proposal source index is oversize" if bytes.bytesize > MAX_FILE_BYTES

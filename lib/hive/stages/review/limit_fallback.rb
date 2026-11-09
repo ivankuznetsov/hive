@@ -22,7 +22,9 @@ module Hive
       # The `agents` map is keyed by the PRIMARY agent profile and names the
       # substitute profile. It applies to every review role that launches an
       # agent: each reviewer (by its `agent`, or `codex` for `codex_review`),
-      # triage, the fix agent, and the CI-fix agent.
+      # triage, the fix agent, the CI-fix agent, and the auto-rebase
+      # conflict-resolution agent when `hive run` rebases a task in the
+      # review stage (Hive::Rebase, phase "rebase").
       #
       # A fallback is attempted only when every condition holds:
       #   - the option is enabled and maps the primary profile to a different
@@ -52,7 +54,8 @@ module Hive
         LIMIT_DETAIL_MAX = 200
 
         # One approved substitution. `phase` is the review phase whose marker
-        # would carry a failed attempt ("reviewers", "triage", "fix", "ci");
+        # would carry a failed attempt ("reviewers", "triage", "fix", "ci";
+        # "rebase" for the pre-stage conflict agent, which writes no marker);
         # `role` is the display name (a reviewer's name, or the phase).
         # `retry_after` is the provider's explicit reset estimate (ISO-8601),
         # or nil when the provider gave none.
@@ -124,6 +127,14 @@ module Hive
             retry_after: explicit&.iso8601,
             limit_detail: Hive::AgentLimit.first_useful_line(text)[0, LIMIT_DETAIL_MAX]
           )
+        end
+
+        # Receipt outcome for a finished substitute run: "used" when it
+        # succeeded, "limited" when it also hit a limit, else "failed".
+        def outcome(ok:, limit_text:, error_message:)
+          return "used" if ok
+
+          limited?(limit_text: limit_text, error_message: error_message) ? "limited" : "failed"
         end
 
         def min_wait_sec(opts)

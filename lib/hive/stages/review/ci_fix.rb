@@ -496,11 +496,10 @@ module Hive
         end
 
         def fallback_outcome(spawn_result)
-          return "used" if spawn_result[:status] == :ok
-
-          Hive::Stages::Review::LimitFallback.limited?(
+          Hive::Stages::Review::LimitFallback.outcome(
+            ok: spawn_result[:status] == :ok,
             limit_text: spawn_result[:limit_text], error_message: spawn_result[:error_message]
-          ) ? "limited" : "failed"
+          )
         end
 
         def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:,

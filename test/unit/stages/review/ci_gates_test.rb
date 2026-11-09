@@ -175,6 +175,16 @@ class ReviewCiGatesTest < Minitest::Test
       )
       assert_equal :review_error, limited.fetch(:status)
       assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs.fetch("reason")
+      assert_equal "agent", Hive::Markers.current(task.state_file).attrs.fetch("limit_source")
+
+      hosted_error = Hive::AgentLimit.error_message(
+        "usage limit reached", agent: Hive::Stages::Review::CiFix::HOSTED_CI_LIMIT_AGENT
+      )
+      Hive::Stages::Review.ci_terminal_result(
+        task, result(:error, error: hosted_error, limit: "usage limit reached"),
+        gate: "github", pass: 2, ctx: ctx
+      )
+      assert_equal "hosted_ci", Hive::Markers.current(task.state_file).attrs.fetch("limit_source")
 
       errored = Hive::Stages::Review.ci_terminal_result(
         task, result(:error, error: "binary missing"),

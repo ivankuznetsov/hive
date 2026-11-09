@@ -146,6 +146,24 @@ module Hive
       end
     end
 
+    # Compare-and-swap attr merge on the exact observed marker. Keeps the
+    # marker name and every existing attr (including attempt-binding ids,
+    # which `set` would re-project from the current attempt context) and
+    # overlays `attrs`. A concurrent marker write wins: returns false.
+    def merge_attrs_if_current(state_file_path, observed:, attrs:)
+      with_markers_lock(state_file_path) do
+        current_marker = current(state_file_path)
+        return false unless observed&.raw && current_marker.raw == observed.raw
+
+        merged = current_marker.attrs.merge(attrs.to_h.transform_keys(&:to_s))
+        new_marker = build_marker(current_marker.name.to_s.upcase, merged)
+        body = read_regular_body(state_file_path)
+        replaced, = replace_last_marker(body, new_marker)
+        write_atomic(state_file_path, replaced)
+        true
+      end
+    end
+
     def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
       with_markers_lock(state_file_path) do
         marker = current(state_file_path)

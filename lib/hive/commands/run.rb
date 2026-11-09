@@ -19,6 +19,7 @@ require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/terminal_outcome"
+require "hive/review_residual_commit"
 
 module Hive
   module Commands
@@ -483,7 +484,33 @@ module Hive
         end
       end
 
+      # Decorate the marker-specific action with review residual-commit and
+      # long provider-limit guidance (see Hive::ReviewResidualCommit).
       def json_next_action(task, marker)
+        action = marker_next_action(task, marker)
+        hints = review_recovery_hints(task, marker)
+        return action if hints.empty?
+
+        sha = marker.attrs["residual_commit"].to_s
+        action = action.merge("residual_commit" => sha, "residual_published" => false) unless sha.empty?
+        instructions = [ action["instructions"], *hints ].compact.join("; ")
+        action.merge("instructions" => instructions)
+      end
+
+      def review_recovery_hints(task, marker)
+        return [] unless %i[review_error review_stale review_ci_stale error].include?(marker.name)
+
+        [
+          Hive::ReviewResidualCommit.next_step(marker, worktree: task_worktree(task)),
+          (Hive::ReviewResidualCommit.agent_profile_hint(marker) if marker.name == :review_error)
+        ].compact
+      end
+
+      def task_worktree(task)
+        task.worktree_path if task.respond_to?(:worktree_path)
+      end
+
+      def marker_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
         if human_stage?(task)
           if marker.name == :complete
@@ -742,8 +769,10 @@ module Hive
         when :review_stale
           puts "  next: inspect or edit the highest-pass review files, then refresh " \
                "`hive status --operational --json` and invoke this task's workflow.retry action"
+          review_recovery_hints(task, marker).each { |hint| puts "  next: #{hint}" }
         when :review_ci_stale
           puts "  next: #{review_ci_stale_instructions(marker)}"
+          review_recovery_hints(task, marker).each { |hint| puts "  next: #{hint}" }
         when :manual_steering
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
@@ -774,6 +803,7 @@ module Hive
                    "and invoke this task's workflow.retry action with `hive act`"
             end
           end
+          review_recovery_hints(task, marker).each { |hint| warn "  next: #{hint}" }
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end
       end

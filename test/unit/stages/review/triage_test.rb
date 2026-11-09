@@ -575,6 +575,39 @@ class TriageTest < Minitest::Test
     end
   end
 
+  def test_prior_escalations_context_orders_extended_passes_numerically
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder, pass: 100)
+      reviews = File.join(task_folder, "reviews")
+      %w[099 100 101].each do |pass|
+        File.write(File.join(reviews, "escalations-#{pass}.md"), "Decision for #{pass}\n")
+      end
+      File.write(File.join(reviews, "escalations-other-02.md"), "not an escalation pass\n")
+
+      section = Hive::Stages::Review::Triage.build_prior_escalations_context(ctx, "tag1")
+
+      assert_includes section, "Decision for 099"
+      assert_includes section, "Decision for 100"
+      assert_operator section.index("Decision for 099"), :<, section.index("Decision for 100")
+      refute_includes section, "Decision for 101"
+      refute_includes section, "not an escalation pass"
+    end
+  end
+
+  def test_discover_reviewer_files_accepts_extended_and_zero_padded_passes
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder, pass: 100)
+      reviews = File.join(task_folder, "reviews")
+      %w[codex-100.md claude-0100.md errors-100.md codex-99.md].each do |name|
+        File.write(File.join(reviews, name), "review\n")
+      end
+
+      files = Hive::Stages::Review::Triage.discover_reviewer_files(ctx)
+
+      assert_equal %w[claude-0100.md codex-100.md], files.map { |path| File.basename(path) }
+    end
+  end
+
   def test_successful_triage_spawn_without_custody_is_rejected
     with_triage_dir do |dir, task_folder|
       reviews = File.join(task_folder, "reviews")

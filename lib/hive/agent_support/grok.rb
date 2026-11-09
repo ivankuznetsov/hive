@@ -13,6 +13,8 @@ module Hive::AgentSupport::Grok
 
   module_function
 
+  def operator_command_arguments = [ "--deny", "Bash(*review-grant*)" ]
+
   def credential_path(home: nil) = AgentCliRuntime::Profiles.grok_auth_path(home:, env: ENV)
   def execution_identity(model) = [ "xai", model.to_s.empty? ? nil : model.to_s ]
   def model_identity_equivalent?(requested_model:, served_model:, family:)

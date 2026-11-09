@@ -9,6 +9,7 @@ require "hive/commands/approve"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
+require "hive/review_pass"
 require "hive/task_resolver"
 require "hive/terminal_outcome"
 
@@ -331,8 +332,6 @@ module Hive
         }
       end
 
-      REVIEW_PASS_FILE = /-\d{2}\.md\z/
-
       # A rework sends the task back through execute and a fresh review of the
       # reworked code. Review numbers passes from the pass-numbered files at the
       # top of reviews/ and refuses once they exceed review.max_passes, so
@@ -340,8 +339,15 @@ module Hive
       # Keep the earlier passes for provenance under reviews/archive/.
       def archive_review_passes!(locked_task, sequence)
         reviews = File.join(locked_task.folder, "reviews")
-        passes = Dir[File.join(reviews, "*.md")].select { |path| File.basename(path).match?(REVIEW_PASS_FILE) }
+        passes = Dir[File.join(reviews, "*")].select do |path|
+          Hive::ReviewPass.number(path) || Hive::ReviewPass.budget_receipt?(path)
+        end.sort_by { |path| Hive::ReviewPass.sort_key(path) }
         return if passes.empty?
+
+        if passes.any? { |path| Hive::ReviewPass.budget_receipt?(path) }
+          Hive::ReviewBudget.new(task: locked_task, project: locked_task.project_name)
+            .record_expiry!(reason: "review_reset")
+        end
 
         archive = File.join(reviews, "archive", format("rework-%02d", sequence.to_i))
         FileUtils.mkdir_p(archive)

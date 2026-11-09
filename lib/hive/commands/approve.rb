@@ -24,6 +24,7 @@ require "hive/stages/review/pass_archive"
 require "hive/task_activity"
 require "hive/command_operation"
 require "hive/command_error_kind"
+require "hive/review_budget"
 require "hive/workflow_admission"
 
 module Hive
@@ -451,6 +452,7 @@ module Hive
         rewind_state_snapshots = []
         review_archive_moves = []
         completion_snapshot = nil
+        review_reset_snapshot = {}
         with_optional_commit_lock(task.hive_state_path) do
           Hive::Lock.with_task_lock(
             task.folder, slug: task.slug, op: "approve",
@@ -470,6 +472,7 @@ module Hive
                 task:, destination: dest_stage, observation: @plan_review_observation,
                 config: @plan_review_config
               )
+              archive_review_budget_for_reset!(task, dest_stage, snapshot: review_reset_snapshot)
               rearm_backward_stages!(task, dest_stage, snapshots: rewind_state_snapshots)
               @post_rearm_mutation&.call(task)
               archive_rewound_review_passes!(task, dest_stage, moves: review_archive_moves)
@@ -495,6 +498,9 @@ module Hive
                 ),
                 Hive::Stages::Review::PassArchive.restore!(
                   rollback_folder(task, new_folder), review_archive_moves
+                ),
+                restore_review_budget_reset!(
+                  task, new_folder, review_reset_snapshot, observation: observation
                 )
               ].compact
               if rollback_issues.any?
@@ -547,6 +553,62 @@ module Hive
             Hive::AtomicFile.write(path, rearmed) unless rearmed == body
           end
         end
+      end
+
+      def archive_review_budget_for_reset!(task, dest_stage, snapshot:)
+        destination = stage_for_dest!(task, dest_stage)
+        review_stage = task.workflow.stages.find { |stage| stage.dir == "6-review" } # coding-scoped: grants expire across coding review resets.
+        return unless review_stage && destination.index < task.stage_index &&
+          review_stage.index.between?(destination.index, task.stage_index)
+        return unless Dir[File.join(task.folder, "reviews", "review-grant-*.json")].any?
+
+        budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+        current = budget.observe
+        raise Hive::ReviewBudget::Refused.new(current.reason, current.remediation) if current.state == "refused"
+        budget.record_expiry!(reason: "review_reset")
+        reviews = File.join(task.folder, "reviews")
+        archive_root = File.join(reviews, "archive")
+        Dir.mkdir(archive_root, 0o700) unless budget.store.directory!(archive_root, missing: true)
+        relative = File.join("reviews", "archive", "review-reset-#{@clock.call.utc.strftime('%Y%m%dT%H%M%S%6N')}-#{SecureRandom.hex(4)}")
+        archive = File.join(task.folder, relative)
+        Dir.mkdir(archive, 0o700)
+        snapshot.merge!(archive: relative, moved: [], digests: {})
+        names = Dir.children(reviews).select do |name|
+          Hive::ReviewPass.number(name) || Hive::ReviewPass.budget_receipt?(name)
+        end.sort_by { |name| Hive::ReviewPass.sort_key(name) }
+        names.each do |name|
+          source = File.join(reviews, name)
+          bytes = budget.store.read_regular(source, max_bytes: Hive::ReviewBudget::MAX_ARTIFACT_BYTES)
+          snapshot.fetch(:digests)[name] = ::Digest::SHA256.hexdigest(bytes)
+          File.rename(source, File.join(archive, name))
+          snapshot.fetch(:moved) << name
+        end
+        Hive::AtomicFile.fsync_directory(archive)
+        Hive::AtomicFile.fsync_directory(reviews)
+      end
+
+      def restore_review_budget_reset!(task, new_folder, snapshot, observation:)
+        return if snapshot.empty?
+
+        folder = rollback_folder(task, new_folder)
+        Hive::TaskMeta.validate_observation!(folder, observation)
+        budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+        snapshot.fetch(:moved).reverse_each do |name|
+          source = File.join(folder, snapshot.fetch(:archive), name)
+          destination = File.join(folder, "reviews", name)
+          bytes = budget.store.read_regular(source, max_bytes: Hive::ReviewBudget::MAX_ARTIFACT_BYTES)
+          unless ::Digest::SHA256.hexdigest(bytes) == snapshot.fetch(:digests).fetch(name) &&
+              !File.exist?(destination) && !File.symlink?(destination)
+            raise Hive::ReviewBudget::Refused.new("unsafe_state", "review reset rollback evidence changed")
+          end
+          File.rename(source, destination)
+        end
+        Dir.rmdir(File.join(folder, snapshot.fetch(:archive)))
+        Hive::AtomicFile.fsync_directory(File.join(folder, "reviews"))
+        nil
+      rescue Hive::TaskMeta::InvalidMetadata, Hive::TaskMeta::StaleTask, Hive::ReviewBudget::Refused,
+             SystemCallError, IOError, ArgumentError => error
+        rollback_skip("review budget reset", error)
       end
 
       # A rewind through the workflow's review stage starts a new review

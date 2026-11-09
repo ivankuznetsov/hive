@@ -1,9 +1,81 @@
 require "test_helper"
 require "json_schemer"
 require "hive/commands/status"
+require "hive/commands/review_grant"
+require_relative "../../support/review_grant_fixture"
 
 class CommandsStatusOperationalTest < Minitest::Test
   include HiveTestHelper
+  include ReviewGrantFixture
+
+  def test_review_grant_is_visible_without_scheduler_recovery_and_never_executable_by_act
+    with_review_grant_task do |task, _cfg|
+      command = Hive::Commands::Status.new(json: true, operational: true)
+      project = { "name" => task.project_name, "path" => task.project_root, "hive_state_path" => task.hive_state_path }
+      before = Dir[File.join(task.folder, "**", "*")].select { |p| File.file?(p) }.to_h { |p| [ p, File.binread(p) ] }
+      payload = command.operational_payload([ project ])
+      row = payload.fetch("tasks").find { |r| r.dig("identity", "slug") == task.slug }
+      grant = row.fetch("review_grant")
+      assert_equal "eligible", grant.fetch("state")
+      assert_equal "workflow.grant_fix_passes", grant.dig("action", "action_id")
+      refute_includes Hive::OperationalAction::EXECUTABLE_ACTION_IDS, grant.dig("action", "action_id")
+      assert_includes grant.fetch("command"), "hive review-grant #{task.slug}"
+      assert_includes grant.fetch("command"), "--passes N --reason TEXT --evidence-token"
+      assert_match(/\A[0-9a-f]{64}\z/, grant.fetch("evidence_token"))
+      assert_equal "operator", row.fetch("blocker_owner")
+      assert_equal before, before.keys.to_h { |p| [ p, File.binread(p) ] }
+      refute File.exist?(File.join(task.folder, "review-budget"))
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+      assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+      output, = capture_io { command.send(:render_operational, payload) }
+      assert_includes output, grant.fetch("command")
+    end
+  end
+
+  def test_applied_and_suspended_review_budget_remains_visible_without_recovery_payload
+    with_review_grant_task do |task, _cfg|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
+          passes: "3", reason: "Complete the accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      project = { "name" => task.project_name, "path" => task.project_root, "hive_state_path" => task.hive_state_path }
+      command = Hive::Commands::Status.new(operational: true)
+      applied = command.operational_payload([ project ]).fetch("tasks").first.fetch("review_grant")
+      assert_equal "applied", applied.fetch("state")
+      assert_equal 3, applied.fetch("remaining")
+      output, = capture_io { command.send(:render_operational, command.operational_payload([ project ])) }
+      assert_includes output, "review grant applied: 3 fix pass(es) remaining"
+      assert_includes output, "Normal review admission and existing recovery holds apply."
+      refute_includes output, "--evidence-token"
+      Hive::Markers.set(task.state_file, :review_error, phase: "fix", reason: "limits_reached", pass: 4)
+      suspended = command.operational_payload([ project ]).fetch("tasks").first.fetch("review_grant")
+      assert_equal "suspended", suspended.fetch("state")
+      assert_equal 3, suspended.fetch("remaining")
+      assert_equal "review_error", suspended.dig("blocking_marker", "name")
+      refute suspended.key?("evidence_token")
+      refute suspended.key?("action")
+      output, = capture_io { command.send(:render_operational, command.operational_payload([ project ])) }
+      assert_includes output, "review grant suspended: 3 fix pass(es) remaining"
+      assert_includes output, "Use the existing recovery route for review_error"
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+      assert schema.valid?(command.operational_payload([ project ]))
+    end
+  end
+
+  def test_insufficient_grant_evidence_has_specific_diagnostic_and_no_token
+    with_review_grant_task do |task, _cfg|
+      File.delete(File.join(task.folder, "reviews", "fix-success-03.md"))
+      project = { "name" => task.project_name, "path" => task.project_root, "hive_state_path" => task.hive_state_path }
+      command = Hive::Commands::Status.new(operational: true)
+      row = command.operational_payload([ project ]).fetch("tasks").first
+      assert_nil row.fetch("review_grant")
+      assert_match(/fix-success-03/, row.dig("evidence", "review_grant_diagnostic", "remediation"))
+      output, = capture_io { command.send(:render_operational, command.operational_payload([ project ])) }
+      assert_includes output, "fix-success-03"
+      refute_includes output, "--evidence-token"
+    end
+  end
 
   def teardown
     Hive::RuntimeControlPlane::OperationalInspection.clear! if

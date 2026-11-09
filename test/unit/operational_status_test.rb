@@ -1,9 +1,13 @@
 require "test_helper"
 require "json_schemer"
 require "hive/operational_status"
+require "hive/commands/status"
+require_relative "../support/review_grant_fixture"
 require "hive/review_publication_recovery"
 
 class OperationalStatusTest < Minitest::Test
+  include HiveTestHelper
+  include ReviewGrantFixture
   STATES = %w[
     unknown running needs_repair waiting_on_you
     waiting_on_provider_or_scheduler completion_ready idle
@@ -11,6 +15,239 @@ class OperationalStatusTest < Minitest::Test
 
   def setup
     Hive::RuntimeControlPlane.database.migrate!
+  end
+
+  def test_review_grant_remains_operator_owned_with_current_scheduler_and_missing_recovery_observation
+    with_review_grant_task do |task, _config|
+      source = review_grant_source(task)
+      raw = source.dig("projects", 0, "tasks", 0)
+      scheduler = scheduler_snapshot_for(raw, decision: "not_evaluated", reason: "Operator intervention required")
+      scheduler.fetch("tasks").first.fetch("identity")["project"] = task.project_name
+      result = review_grant_projection(task, source: source, daemon_enabled: true, scheduler: scheduler)
+      row = result.fetch("tasks").first
+
+      assert_equal "current", result.dig("scheduler", "status")
+      assert_equal "recovery_observation_missing", row.dig("recovery", "reason")
+      assert_equal "eligible", row.dig("review_grant", "state")
+      assert_equal "waiting_on_you", row.fetch("state")
+      assert_equal "operator", row.fetch("blocker_owner")
+      assert_equal "review_grant_available", row.fetch("reasons").first.fetch("code")
+      assert_equal "operator_attested", row.dig("review_grant", "action", "risk_class")
+      assert row.fetch("closure"), "closure remains a separate operator option"
+      assert_review_grant_schema(result)
+    end
+  end
+
+  def test_review_grant_does_not_hide_unavailable_scheduler_evidence
+    with_review_grant_task do |task, _config|
+      result = review_grant_projection(task, daemon_enabled: true)
+
+      assert_equal "eligible", result.dig("tasks", 0, "review_grant", "state")
+      assert_equal "operator", result.dig("tasks", 0, "blocker_owner")
+      assert_equal "unavailable", result.dig("scheduler", "status")
+      assert_equal "partial", result.fetch("completeness")
+      assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_unavailable"
+      assert_review_grant_schema(result)
+    end
+  end
+
+  def test_current_grant_states_and_sealed_spending_survive_fresh_status_readers
+    with_review_grant_task do |task, _config|
+      budget, receipt = record_review_grant(task, passes: 2)
+      pending = review_grant_projection(task)
+      assert_equal "pending", pending.dig("tasks", 0, "review_grant", "state")
+      assert_equal 2, pending.dig("tasks", 0, "review_grant", "remaining")
+      assert_review_grant_schema(pending)
+      Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+      applied = review_grant_projection(task)
+      assert_equal "applied", applied.dig("tasks", 0, "review_grant", "state")
+      assert_nil applied.dig("tasks", 0, "recovery")
+      assert_review_grant_schema(applied)
+
+      Hive::Markers.set(task.state_file, :review_working, phase: "fix", pass: 4)
+      fixing = review_grant_projection(task)
+      grant = fixing.dig("tasks", 0, "review_grant")
+      assert_equal "fixing", grant.fetch("state")
+      assert_equal({ "decision_id" => receipt.fetch("decision_id"), "slot" => 1 }, grant.fetch("incomplete_slot"))
+      assert_review_grant_schema(fixing)
+      2.times do |index|
+        Hive::Lock.with_task_lock(task.folder) do
+          budget.complete_fix!(snapshot: budget.observe, pass: 4 + index, head: Hive::Stages::Review.git_head(task.worktree_path))
+        end
+      end
+      Hive::Markers.clear_current(task.state_file, expected_name: :review_working)
+      verifying = review_grant_projection(task)
+      grant = verifying.dig("tasks", 0, "review_grant")
+      assert_equal "verifying", grant.fetch("state")
+      assert_equal [ 2, 2, 0 ], grant.values_at("granted", "spent", "remaining")
+      assert_nil grant.fetch("incomplete_slot")
+      refute grant.key?("action")
+      refute grant.key?("evidence_token")
+      assert_nil verifying.dig("tasks", 0, "recovery")
+      assert_review_grant_schema(verifying)
+    end
+  end
+
+  def test_non_final_parks_keep_remaining_slots_visible_without_canonical_recovery
+    with_review_grant_task do |task, _config|
+      budget, receipt = record_review_grant(task, passes: 3)
+      Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+      Hive::Lock.with_task_lock(task.folder) do
+        budget.complete_fix!(snapshot: budget.observe, pass: 4, head: Hive::Stages::Review.git_head(task.worktree_path))
+      end
+      [ [ :review_error, "limits_reached" ], [ :review_ci_stale, "ci_timeout" ], [ :review_stale, "max_passes" ], [ :review_stale, "wall_clock_budget" ] ].each do |marker, reason|
+        Hive::Markers.set(task.state_file, marker, reason: reason, phase: "fix", pass: 5)
+        result = review_grant_projection(task)
+        grant = result.dig("tasks", 0, "review_grant")
+
+        assert_equal "suspended", grant.fetch("state")
+        assert_equal [ 3, 1, 2 ], grant.values_at("granted", "spent", "remaining")
+        assert_equal marker.to_s, grant.dig("blocking_marker", "name")
+        assert_equal reason, grant.dig("blocking_marker", "attrs", "reason")
+        assert_match(/existing recovery route/, grant.fetch("remediation"))
+        refute grant.key?("evidence_token")
+        refute grant.key?("action")
+        refute result.dig("tasks", 0, "recovery", "request_id")
+        assert_review_grant_schema(result)
+      end
+    end
+  end
+
+  def test_completion_and_integer_generation_expiry_advertise_zero_usable_allowance
+    [ :completed, :generation ].each do |cause|
+      with_review_grant_task do |task, _config|
+        _budget, receipt = record_review_grant(task, passes: 2)
+        Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+        if cause == :completed
+          Hive::Markers.set(task.state_file, :review_complete, pass: 5)
+        else
+          event = Hive::TaskJournal::Envelope.authoritative({
+            event_type: "generation_advanced", task: { "id" => task.id, "slug" => task.slug },
+            workflow: "coding", stage: "6-review", attempt_id: "new-input", task_generation: 1,
+            reason: "Task input changed", payload: {}
+          })
+          File.open(File.join(task.folder, "task-journal.jsonl"), "a") { |file| file.puts(JSON.generate(event)) }
+        end
+        result = review_grant_projection(task)
+        grant = result.dig("tasks", 0, "review_grant")
+
+        assert_equal(cause == :completed ? "completed" : "expired", grant.fetch("state"))
+        assert_equal 0, grant.fetch("remaining")
+        assert_equal receipt.fetch("decision_id"), grant.fetch("decision_id")
+        assert_equal receipt.fetch("scope"), grant.fetch("original_scope")
+        assert File.file?(grant.fetch("audit_path"))
+        refute grant.key?("evidence_token")
+        refute grant.key?("action")
+        assert_review_grant_schema(result)
+      end
+    end
+  end
+
+  def test_invalid_history_and_changed_grant_findings_show_specific_unavailable_evidence
+    [ :history, :findings ].each do |cause|
+      with_review_grant_task do |task, _config|
+        if cause == :history
+          File.write(File.join(task.folder, "task-journal.jsonl"), "malformed history\n")
+        else
+          _budget, receipt = record_review_grant(task, passes: 2)
+          Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+          File.write(File.join(task.folder, "reviews", "codex-04.md"), "- [x] Changed accepted finding\n")
+        end
+        before = review_grant_files(task)
+        result = review_grant_projection(task)
+        row = result.fetch("tasks").first
+
+        assert_nil row.fetch("review_grant")
+        diagnostic = row.dig("evidence", "review_grant_diagnostic")
+        assert_equal(cause == :history ? "invalid_task_history" : "evidence_changed", diagnostic.fetch("reason"))
+        assert_match(cause == :history ? /journal|history|record/i : /artifact|findings/i, diagnostic.fetch("remediation"))
+        assert_includes row.fetch("reasons").map { |reason| reason.fetch("code") }, "review_grant_unavailable"
+        assert_equal before, review_grant_files(task)
+      end
+    end
+  end
+
+  def test_read_only_restart_preserves_derived_grant_and_audit_bytes
+    with_review_grant_task do |task, _config|
+      _budget, receipt = record_review_grant(task, passes: 2)
+      Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+      source = review_grant_source(task)
+      before = review_grant_files(task)
+      expected = review_grant_projection(task, source: source).dig("tasks", 0, "review_grant")
+      modes = [ task.folder, *Dir.glob(File.join(task.folder, "**", "*"), File::FNM_DOTMATCH) ].reject { |path| %w[. ..].include?(File.basename(path)) }.to_h do |path|
+        [ path, File.stat(path).mode & 0o777 ]
+      end
+      begin
+        modes.each_key { |path| File.chmod(File.directory?(path) ? 0o500 : 0o400, path) }
+        2.times do
+          result = review_grant_projection(task, source: source)
+          assert_equal expected, result.dig("tasks", 0, "review_grant")
+          assert_review_grant_schema(result)
+        end
+        assert_equal before, review_grant_files(task)
+      ensure
+        modes.each { |path, mode| File.chmod(mode, path) }
+      end
+    end
+  end
+
+  def test_unrelated_task_skips_review_evidence_and_git_reads
+    with_replaced_singleton_method(Hive::ReviewBudget, :new, ->(**) { flunk "unrelated tasks must not scan review evidence or HEAD" }) do
+      result = project(status_payload(task(action: "ready_to_run", slug: "unrelated")))
+      assert_nil result.dig("tasks", 0, "review_grant")
+      assert_nil result.dig("tasks", 0, "evidence", "review_grant_diagnostic")
+      assert_review_grant_schema(result)
+    end
+  end
+
+  def test_live_owner_keeps_eligible_review_grant_unavailable_until_refresh
+    with_review_grant_task do |task, _config|
+      source = review_grant_source(task)
+      source.dig("projects", 0, "tasks", 0).merge!("live_task_lock" => true, "action" => "agent_running", "task_lock_pid" => Process.pid)
+      row = review_grant_projection(task, source: source).fetch("tasks").first
+
+      assert_equal "running", row.fetch("state")
+      assert_nil row.fetch("review_grant")
+      assert_equal "live_owner", row.dig("evidence", "review_grant_diagnostic", "reason")
+      assert_match(/current task owner/, row.dig("evidence", "review_grant_diagnostic", "remediation"))
+    end
+  end
+
+  def test_workflow_identity_change_during_status_read_refuses_grant_without_crashing
+    with_review_grant_task do |task, _config|
+      source = review_grant_source(task)
+      metadata = YAML.safe_load(File.read(Hive::TaskMeta.path(task.folder)))
+      metadata["workflow"] = "unknown-review-workflow"
+      File.write(Hive::TaskMeta.path(task.folder), metadata.to_yaml)
+      before = review_grant_files(task)
+      row = review_grant_projection(task, source: source).fetch("tasks").first
+
+      assert_nil row.fetch("review_grant")
+      assert_equal "evidence_unavailable", row.dig("evidence", "review_grant_diagnostic", "reason")
+      assert_match(/refresh operational status/, row.dig("evidence", "review_grant_diagnostic", "remediation"))
+      assert_equal before, review_grant_files(task)
+    end
+  end
+
+  def test_status_reads_current_receipts_and_bounded_audit_tail_without_archived_budget
+    with_review_grant_task do |task, _config|
+      budget, receipt = record_review_grant(task, passes: 2)
+      Hive::Markers.clear_current(task.state_file, expected_name: :review_stale, match_attrs: receipt.dig("evidence", "marker", "attrs"))
+      source = review_grant_source(task)
+      expected = review_grant_projection(task, source: source).dig("tasks", 0, "review_grant")
+      # Older retention bytes lie outside the bounded tail; current receipts
+      # and the intact recent audit entry remain the only applicable evidence.
+      File.binwrite(budget.audit_path, "x" * (Hive::ReviewBudget::Store::MAX_AUDIT_TAIL + 1) + "\n" + File.binread(budget.audit_path))
+      archive = File.join(task.folder, "reviews", "archive", "old-review")
+      FileUtils.mkdir_p(archive)
+      File.write(File.join(archive, "review-grant-#{'f' * 64}.json"), "malformed archived retention\n")
+      before = review_grant_files(task)
+      result = review_grant_projection(task, source: source)
+
+      assert_equal expected, result.dig("tasks", 0, "review_grant")
+      assert_equal before, review_grant_files(task)
+      assert_review_grant_schema(result)
+    end
   end
 
   def test_review_publication_evidence_is_projected_without_remote_or_git_reads
@@ -2037,6 +2274,35 @@ class OperationalStatusTest < Minitest::Test
   end
 
   private
+
+  def review_grant_source(task)
+    project = { "name" => task.project_name, "path" => task.project_root, "hive_state_path" => task.hive_state_path }
+    Hive::Commands::Status.new(json: true).json_payload([ project ]).merge("generated_at" => "2026-07-20T10:00:00Z")
+  end
+
+  def review_grant_projection(task, source: nil, daemon_enabled: false, scheduler: nil)
+    project(source || review_grant_source(task),
+      project_context: { task.project_name => { "daemon_enabled" => daemon_enabled } }, scheduler_snapshot: scheduler)
+  end
+
+  def record_review_grant(task, passes:)
+    budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+    receipt = Hive::Lock.with_task_lock(task.folder) do
+      budget.record_grant!(snapshot: budget.observe, passes: passes, reason: "Complete the accepted fixes", caller: "test-operator", source: "operator")
+    end
+    [ budget, receipt ]
+  end
+
+  def review_grant_files(task)
+    Dir[File.join(task.folder, "**", "*")].to_h do |path|
+      [ path.delete_prefix(task.folder), File.file?(path) ? File.binread(path) : :directory ]
+    end
+  end
+
+  def assert_review_grant_schema(payload)
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert_empty schema.validate(payload).to_a
+  end
 
   def live_lock_with_stale_agent
     task(

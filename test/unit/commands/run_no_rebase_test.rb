@@ -1,6 +1,8 @@
 require "test_helper"
 require "hive/commands/run"
 require "hive/rebase"
+require "hive/commands/review_grant"
+require_relative "../../support/review_grant_fixture"
 
 # Unit-level coverage for the `--no-rebase` flag plumbed in PR #69
 # AGENT-O2. The full Commands::Run.call flow needs a project + lock
@@ -10,6 +12,35 @@ require "hive/rebase"
 # never invokes Hive::Rebase.perform.
 class HiveCommandsRunNoRebaseTest < Minitest::Test
   include HiveTestHelper
+  include ReviewGrantFixture
+
+  def test_unspent_preserved_findings_grant_skips_rebase_and_completed_fix_restores_it
+    with_review_grant_task do |task, _cfg|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      snapshot = budget.observe
+      budget.record_grant!(snapshot: snapshot, passes: 1, reason: "Finish accepted fixes",
+        caller: "uid:#{Process.uid}", source: "operator_cli")
+      command = Hive::Commands::Run.new(task.folder)
+      calls = 0
+      with_replaced_singleton_method(Hive::Rebase, :perform, lambda { |*|
+        calls += 1
+        Hive::Rebase::Result.no_op
+      }) do
+        result = command.send(:perform_rebase, task, {})
+        assert_equal :pending_review_grant_fix, result.reason
+        assert_equal 0, calls
+        assert_equal :review_stale, Hive::Markers.current(task.state_file).name
+        capture_io do
+          Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name, passes: 1,
+            reason: "Finish accepted fixes", evidence_token: snapshot.evidence_token).call
+        end
+        assert_equal :pending_review_grant_fix, command.send(:perform_rebase, task, {}).reason
+        budget.complete_fix!(snapshot: budget.observe, pass: 4, head: Hive::Stages::Review.git_head(task.worktree_path))
+        command.send(:perform_rebase, task, {})
+        assert_equal 1, calls
+      end
+    end
+  end
 
   FakeWorkflow = Struct.new(:draft_pr_handoff?, :controller?)
   FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root, :workflow)
@@ -40,6 +71,27 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
       _out  # silence warning
     ensure
       Hive::Rebase.singleton_class.define_method(:perform, original)
+    end
+  end
+
+  def test_bound_incomplete_later_grant_slot_keeps_rebase_paused
+    with_review_grant_task do |task, _cfg|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name, passes: 2,
+          reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      head = Hive::Stages::Review.git_head(task.worktree_path)
+      budget.complete_fix!(snapshot: budget.observe, pass: 4, head: head)
+      File.write(File.join(task.reviews_dir, "fix-success-04.md"), "<!-- head=#{head} kind=fixed -->\n")
+      File.write(File.join(task.reviews_dir, "codex-05.md"), "- [x] Next accepted fix\n")
+      File.write(File.join(task.reviews_dir, "escalations-05.md"), "# Escalations\n")
+      snapshot = budget.observe
+      Hive::Markers.set(task.state_file, :review_error, phase: :fix, pass: 5, reason: "agent_failed",
+        grant_decision: snapshot.decision_id, grant_slot: 2, input_head: head, head: head,
+        input_artifacts_digest: Hive::ReviewBudget.digest(snapshot.evidence.fetch("artifacts")))
+      command = Hive::Commands::Run.new(task.folder)
+      assert_equal :pending_review_grant_fix, command.send(:perform_rebase, task, {}).reason
     end
   end
 
@@ -125,7 +177,7 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     # mustn't make every skip state spammy.
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
     [ :disabled, :no_worktree, :cli_override, :managed_draft_pr_handoff,
-      :controller_workflow, :pending_head_bound_approval,
+      :controller_workflow, :pending_head_bound_approval, :pending_review_grant_fix,
       :dirty_worktree, :detached_head ].each do |reason|
       result = Hive::Rebase::Result.skipped(reason)
       _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }

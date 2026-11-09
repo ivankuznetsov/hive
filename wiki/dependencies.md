@@ -16,6 +16,11 @@ Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown
 artifact rendering. Managed llm-wiki refreshes also require GNU `timeout` (or
 `gtimeout`) for timeout-governed Git-ref, QMD, and provider operations.
 
+The web lockfile pins Nokogiri 1.19.6, Loofah 2.25.3, and
+rails-html-sanitizer 1.7.2 to address the November 2, 2026 HTML parsing and
+sanitization advisories. These are patch updates within the existing bundle
+constraints; CI audits both the root and web lockfiles.
+
 ## Bundled secret detection
 
 Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,

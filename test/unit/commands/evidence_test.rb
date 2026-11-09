@@ -1,8 +1,11 @@
 require "test_helper"
 require "hive/commands/evidence"
+require "hive/commands/review_grant"
+require_relative "../../support/review_grant_fixture"
 
 class CommandsEvidenceTest < Minitest::Test
   include HiveTestHelper
+  include ReviewGrantFixture
 
   FakeTask = Data.define(
     :folder, :slug, :project_root, :project_name, :state_file
@@ -255,6 +258,74 @@ class CommandsEvidenceTest < Minitest::Test
         assert_raises(Hive::Artifacts::OutcomeEvidence::StoreError) { command.call }
       end
       refute File.exist?(File.join(task.folder, "outcome-evidence", "reworks"))
+    end
+  end
+
+  def test_archive_review_passes_includes_extended_passes_and_budget_receipts_but_retains_audit
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      archived = [
+        "codex-100.md", "escalations-0100.md", "fix-success-100.md",
+        "review-grant-#{'a' * 64}.json", "review-completion-#{'b' * 64}-01.json"
+      ]
+      retained = [ "suppressed.md", "review-grant-malformed.json", "review-completion-malformed-01.json" ]
+      (archived + retained).each { |name| File.write(File.join(reviews, name), name) }
+      audit = File.join(task.folder, "review-budget", "audit.jsonl")
+      FileUtils.mkdir_p(File.dirname(audit))
+      File.write(audit, "retained audit\n")
+
+      command = Hive::Commands::Evidence.new("rework", task.slug)
+      expiries = []
+      budget = Object.new
+      budget.define_singleton_method(:record_expiry!) { |reason:| expiries << reason }
+      with_replaced_singleton_method(Hive::ReviewBudget, :new, ->(**) { budget }) do
+        command.send(:archive_review_passes!, task, 2)
+      end
+
+      assert_equal [ "review_reset" ], expiries
+      assert_equal archived.sort, Dir.children(File.join(reviews, "archive", "rework-02")).sort
+      assert_equal retained.sort, (Dir.children(reviews) - [ "archive" ]).sort
+      assert_equal "retained audit\n", File.read(audit)
+    end
+  end
+
+  def test_archive_review_passes_archives_budget_receipts_even_without_markdown_passes
+    with_tmp_dir do |dir|
+      task = fake_task(dir)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      receipt = "review-grant-#{'a' * 64}.json"
+      File.write(File.join(reviews, receipt), "grant\n")
+
+      command = Hive::Commands::Evidence.new("rework", task.slug)
+      budget = Object.new
+      budget.define_singleton_method(:record_expiry!) { |reason:| reason }
+      with_replaced_singleton_method(Hive::ReviewBudget, :new, ->(**) { budget }) do
+        command.send(:archive_review_passes!, task, 1)
+      end
+
+      refute File.exist?(File.join(reviews, receipt))
+      assert_equal "grant\n", File.read(File.join(reviews, "archive", "rework-01", receipt))
+    end
+  end
+
+  def test_review_rework_records_expiry_before_archiving_an_intact_grant
+    with_review_grant_task do |task, _cfg|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      capture_io do
+        Hive::Commands::ReviewGrant.new(task.folder, project: task.project_name,
+          passes: 1, reason: "Finish accepted fixes", evidence_token: budget.observe.evidence_token).call
+      end
+      command = Hive::Commands::Evidence.new("rework", task.slug)
+      Hive::Lock.with_task_lock(task.folder, create: false) do
+        command.send(:archive_review_passes!, task, 1)
+      end
+
+      assert_equal %w[grant expiry], File.readlines(budget.audit_path).map { |line| JSON.parse(line).fetch("event") }
+      refute budget.present?
+      assert_equal 1, Dir[File.join(task.reviews_dir, "archive", "rework-01", "review-grant-*.json")].length
     end
   end
 

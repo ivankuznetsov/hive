@@ -5,9 +5,11 @@ require "digest"
 require "hive/operational_action"
 require "hive/stages/base"
 require "hive/task_meta"
+require_relative "../support/review_grant_fixture"
 
 class OperationalActionTest < Minitest::Test
   include HiveTestHelper
+  include ReviewGrantFixture
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
   RecoveryReceipt = Data.define(:payload) do
@@ -47,6 +49,27 @@ class OperationalActionTest < Minitest::Test
     refute Hive::OperationalAction.const_defined?(:PROVIDER_BLOCK_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:PROVIDER_RESET_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)
+  end
+
+  def test_review_grant_is_operator_attested_and_routine_action_rejects_even_fresh_grant_evidence
+    with_review_grant_task do |task, _config|
+      snapshot = Hive::ReviewBudget.new(task: task, project: task.project_name).observe
+      descriptor = Hive::OperationalAction.review_grant_descriptor(project: task.project_name, row: { "slug" => task.slug, "action" => "review_stale" })
+
+      assert_equal "workflow.grant_fix_passes", descriptor.fetch("action_id")
+      assert_equal "#{task.project_name}:#{task.slug}", descriptor.fetch("target")
+      assert_equal "operator_attested", descriptor.fetch("risk_class")
+      refute descriptor.fetch("confirmation_required"), "the dedicated non-interactive CLI records the explicit operator decision"
+      assert_equal({ "source" => "hive-operational-status", "task_action" => "review_stale" }, descriptor.fetch("provenance"))
+      refute descriptor.key?("observation_token")
+      before = Dir[File.join(task.folder, "**", "*")].to_h { |path| [ path, File.file?(path) ? File.binread(path) : :directory ] }
+      error = assert_raises(Hive::OperationalActionUsageError) do
+        Hive::OperationalAction::Executor.new.execute(action_id: descriptor.fetch("action_id"), target: descriptor.fetch("target"), observation_token: snapshot.evidence_token)
+      end
+      assert_match(/unknown operational action/, error.message)
+      assert_equal before, Dir[File.join(task.folder, "**", "*")].to_h { |path| [ path, File.file?(path) ? File.binread(path) : :directory ] }
+      refute File.exist?(File.join(task.folder, "review-budget"))
+    end
   end
 
   def test_unobservable_or_live_manual_attempts_suppress_routine_actions_across_consumers

@@ -2282,3 +2282,14 @@ Observed lag on PR #1419 was under 3 seconds; GitHub documents no upper bound.
 A longer lag still ends `pr_head_moved`, and a workflow retry confirms the
 already-pushed head. A record anchor left stale by earlier review pushes is an
 ancestor of the hosted head, so the next review push admits and advances it.
+
+## Publication scan upstream scoping
+
+`SecretScanner.git_findings(upstream_branch:)` trusts the local
+`refs/remotes/origin/<base>` tip. If it is older than the upstream commit the
+task merged, that merge parent is not an ancestor of it and upstream findings
+stay reported (fail closed; fetch and retry). Upstream content moved to a new
+path during conflict resolution is reported because the match is path-bound.
+Review does not yet reconcile `github-publication.json` automatically after a
+manual operator push that descends from the anchor; the `base_conflict` hint
+documents the manual `hive publication-reconcile` step instead.

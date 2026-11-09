@@ -825,6 +825,8 @@ class CommandsRunTest < Minitest::Test
     assert_equal [ "review_ci_stale" ], conflict.fetch("markers_to_clear")
     assert_match(/merge origin\/<base> into the task branch with a merge commit/, conflict.fetch("instructions"))
     assert_match(/no force-push/, conflict.fetch("instructions"))
+    assert_match(/hive publication-reconcile TASK --project P --pr URL --head <full sha>.*workflow\.retry/,
+                 conflict.fetch("instructions"))
     assert_match(/\Afix CI failures/, red.fetch("instructions"))
 
     out, = capture_io do

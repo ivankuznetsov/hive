@@ -31,21 +31,86 @@ module Hive
 
       Dir.mktmpdir("hive-secret-scan-") do |directory|
         run(directory, "stdin", "--set-attr", "path=#{path}", input: text)
-      end
+      end.map { |hit| hit.except(:commit) }
     end
 
-    def git_match?(path, base_oid:, head_oid:)
-      !git_findings(path, base_oid: base_oid, head_oid: head_oid).empty?
+    def git_match?(path, base_oid:, head_oid:, upstream_branch: nil)
+      !git_findings(path, base_oid: base_oid, head_oid: head_oid, upstream_branch: upstream_branch).empty?
     end
 
-    def git_findings(path, base_oid:, head_oid:)
+    # `upstream_branch` (the PR base branch) scopes the history scan to the
+    # task's own content. Commits already on upstream are excluded, and a
+    # finding attributed to a merge commit is dropped only when an
+    # upstream-side parent already carries that exact finding at that path:
+    # merging origin/<default> re-diffs every upstream change against the
+    # task-side parent, and that content is not the task's. Conflict
+    # resolution and task-side content stay reported. An unresolvable
+    # upstream ref, no merge base, or a head already on upstream keeps the
+    # full scan; Git failures while scoping raise Unavailable.
+    def git_findings(path, base_oid:, head_oid:, upstream_branch: nil)
       # These closed reads validate exact OIDs, repository custody, and unsafe
       # local Git helpers before Betterleaks invokes Git itself.
       [ base_oid, head_oid ].each do |oid|
         read!(path, :commit_oid, oid: oid)
       end
-      git_scan(path, "--log-opts",
-               "--full-history --diff-merges=separate --text --no-ext-diff --no-textconv #{base_oid}..#{head_oid} --")
+      upstream = scan_upstream_oid(path, upstream_branch, head_oid)
+      exclusion = upstream ? " ^#{upstream}" : ""
+      findings = git_scan(path, "--log-opts",
+                          "--full-history --diff-merges=separate --text --no-ext-diff --no-textconv " \
+                          "#{base_oid}..#{head_oid}#{exclusion} --")
+      findings = drop_upstream_merge_findings(path, upstream, findings) if upstream
+      findings.map { |hit| hit.except(:commit) }
+    end
+
+    def scan_upstream_oid(path, branch, head_oid)
+      return nil if branch.to_s.strip.empty?
+
+      target = Hive::AgentGitGate.read(path, :branch_oid, branch: branch, remote: true)
+      target = Hive::AgentGitGate.read(path, :branch_oid, branch: branch) unless target.success?
+      return nil unless target.success?
+
+      upstream = target.stdout.strip
+      return nil unless Hive::AgentGitGate.read(path, :merge_base, base_oid: upstream, head_oid: head_oid).success?
+      return nil if ancestor?(path, head_oid, upstream)
+
+      upstream
+    rescue Hive::AgentGitGate::Error
+      nil
+    end
+
+    def drop_upstream_merge_findings(path, upstream, findings)
+      upstream_parents = Hash.new do |cache, commit|
+        parents = commit_parents(path, commit)
+        cache[commit] = parents.one? ? [] : parents.select { |parent| ancestor?(path, parent, upstream) }
+      end
+      findings.reject do |hit|
+        upstream_parents[hit[:commit]].any? { |parent| carried_by?(path, parent, hit) }
+      end
+    end
+
+    def commit_parents(path, commit)
+      read!(path, :object_content, oid: commit).each_line.take_while { |line| line != "\n" }
+                                                .filter_map { |line| line[/\Aparent ([0-9a-f]{40,64})$/, 1] }
+    end
+
+    def ancestor?(path, ancestor, descendant)
+      result = Hive::AgentGitGate.read(path, :ancestor, base_oid: ancestor, head_oid: descendant)
+      return result.success? if [ 0, 1 ].include?(result.exitstatus)
+
+      raise Unavailable, "secret scan Git ancestry is unavailable"
+    rescue Hive::AgentGitGate::Error
+      raise Unavailable, "secret scan Git input is invalid"
+    end
+
+    # A missing path on the upstream parent means the content is not
+    # upstream's; keep the finding (fail closed).
+    def carried_by?(path, parent, hit)
+      blob = Hive::AgentGitGate.read(path, :object_content, oid: parent, path: hit.fetch(:path))
+      return false unless blob.success?
+
+      scan(blob.stdout, path: hit.fetch(:path)).any? { |prior| prior.values_at(:name, :sha256) == hit.values_at(:name, :sha256) }
+    rescue Hive::AgentGitGate::Error
+      false
     end
 
     def staged_findings(path, entries:, head_objects:)
@@ -102,7 +167,8 @@ module Hive
           line: record.fetch("StartLine"), column: record.fetch("StartColumn"),
           path: record.fetch("File"),
           fingerprint: record.fetch("Fingerprint", ""),
-          sha256: Digest::SHA256.hexdigest(record.fetch("Secret")) }
+          sha256: Digest::SHA256.hexdigest(record.fetch("Secret")),
+          commit: record.fetch("Commit", "").to_s }
       end
 
     rescue JSON::ParserError, KeyError, TypeError
@@ -119,6 +185,7 @@ module Hive
     rescue Hive::AgentGitGate::Error
       raise Unavailable, "secret scan Git input is invalid"
     end
-    private_class_method :run, :read!, :git_scan
+    private_class_method :run, :read!, :git_scan, :scan_upstream_oid, :drop_upstream_merge_findings,
+                         :commit_parents, :ancestor?, :carried_by?
   end
 end

@@ -825,6 +825,8 @@ class CommandsRunTest < Minitest::Test
     assert_equal [ "review_ci_stale" ], conflict.fetch("markers_to_clear")
     assert_match(/merge origin\/<base> into the task branch with a merge commit/, conflict.fetch("instructions"))
     assert_match(/no force-push/, conflict.fetch("instructions"))
+    assert_match(/hive publication-reconcile TASK --project P --pr URL --head <full sha>.*workflow\.retry/,
+                 conflict.fetch("instructions"))
     assert_match(/\Afix CI failures/, red.fetch("instructions"))
 
     out, = capture_io do
@@ -1049,6 +1051,77 @@ class CommandsRunTest < Minitest::Test
     assert_match(/stage recorded :review_error/, @error.message)
     assert_includes err, "phase: fix"
     assert_includes err, "reason: failed"
+  end
+
+  RESIDUAL_SHA = "5c7fb43e02f93ca3db5b156c4dfb5f589c3b7a86".freeze
+
+  def ci_limit_attrs(extra = {})
+    { "phase" => "ci", "gate" => "github", "reason" => "limits_reached", "limit_source" => "agent",
+      "retry_after" => (Time.now.utc + (3 * 86_400)).iso8601 }.merge(extra)
+  end
+
+  def test_review_error_with_residual_commit_surfaces_it_and_the_agent_profile_key
+    run = command
+    t = task
+    limited = marker(:review_error, ci_limit_attrs("residual_commit" => RESIDUAL_SHA,
+                                                    "residual_published" => "false"))
+
+    _out, err = capture_io do
+      assert_raises(Hive::TaskInErrorState) { run.send(:report_text, t, {}, limited) }
+    end
+    assert_includes err, "next: residual commit #{RESIDUAL_SHA} in /tmp/worktree"
+    assert_includes err, "git -C /tmp/worktree reset --keep #{RESIDUAL_SHA}^"
+    assert_includes err, "`review.ci.agent`"
+
+    action = run.send(:json_next_action, t, limited)
+    assert_equal Hive::Schemas::NextActionKind::NO_OP, action.fetch("kind")
+    assert_equal RESIDUAL_SHA, action.fetch("residual_commit")
+    assert_equal false, action.fetch("residual_published")
+    assert_match(/\Ainvestigate, then refresh/, action.fetch("instructions"))
+    assert_includes action.fetch("instructions"), "residual commit #{RESIDUAL_SHA}"
+    assert_includes action.fetch("instructions"), "`review.ci.agent`"
+  end
+
+  def test_stale_review_markers_surface_residual_commits
+    run = command
+    t = task
+    residual = { "residual_commit" => RESIDUAL_SHA, "residual_published" => "false" }
+
+    out, = capture_io do
+      run.send(:report_text, t, {}, marker(:review_stale, residual))
+      run.send(:report_text, t, {}, marker(:review_ci_stale, residual.merge("gate" => "github")))
+    end
+
+    assert_equal 2, out.scan("next: residual commit #{RESIDUAL_SHA}").length
+    stale = run.send(:json_next_action, t, marker(:review_stale, residual))
+    assert_equal RESIDUAL_SHA, stale.fetch("residual_commit")
+    assert_equal [ "review_stale" ], stale.fetch("markers_to_clear")
+  end
+
+  def test_review_error_without_residual_commit_keeps_existing_guidance
+    run = command
+    t = task
+    plain = marker(:review_error, "phase" => "fix", "reason" => "agent_crashed")
+
+    _out, err = capture_io do
+      assert_raises(Hive::TaskInErrorState) { run.send(:report_text, t, {}, plain) }
+    end
+    refute_includes err, "residual commit"
+    assert_equal 1, err.scan("next:").length
+    assert_equal(
+      { "kind" => Hive::Schemas::NextActionKind::NO_OP, "phase" => "fix", "reason" => "agent_crashed",
+        "error" => plain.attrs,
+        "instructions" => "investigate, then refresh `hive status --operational --json` " \
+                          "and invoke this task's workflow.retry action with `hive act`" },
+      run.send(:json_next_action, t, plain)
+    )
+    hosted = marker(:review_error, ci_limit_attrs("limit_source" => "hosted_ci"))
+    refute run.send(:json_next_action, t, hosted).fetch("instructions").include?("review.ci.agent")
+    limit_only = run.send(:json_next_action, t, marker(:review_error, ci_limit_attrs))
+    refute limit_only.key?("residual_commit")
+    assert_includes limit_only.fetch("instructions"), "`review.ci.agent`"
+    refute run.send(:review_recovery_hints, t, marker(:error, ci_limit_attrs)).any?
+    assert_nil run.send(:task_worktree, Object.new)
   end
 
   def test_emit_error_envelope_swallows_json_generation_errors

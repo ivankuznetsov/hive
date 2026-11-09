@@ -10,6 +10,7 @@ require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
+require "hive/stages/review/limit_fallback"
 
 module Hive
   module Stages
@@ -34,6 +35,13 @@ module Hive
       # tooling.
       module CiFix
         Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text)
+        # Agent label on hosted-check limit errors; distinguishes a hosted CI
+        # account wall from the CI-fix agent's own provider limit.
+        HOSTED_CI_LIMIT_AGENT = "hosted-ci".freeze
+
+        def self.hosted_limit?(error_message)
+          error_message.to_s.start_with?(Hive::AgentLimit.error_message("", agent: HOSTED_CI_LIMIT_AGENT))
+        end
 
         # ANSI escape sequence regex — matches CSI sequences (ESC [ ... letter)
         # which cover colors, cursor movement, text styling. Some CI
@@ -139,7 +147,7 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: Hive::AgentLimit.error_message(output, agent: "hosted-ci"),
+                error_message: Hive::AgentLimit.error_message(output, agent: HOSTED_CI_LIMIT_AGENT),
                 limit_text: output
               )
             end
@@ -173,30 +181,26 @@ module Hive
               identity: fix_identity,
               agent_custody: agent_custody
             )
-            custody_report = agent_custody.report
-            if !custody_report && spawn_result[:status] == :ok
-              return Result.new(
-                status: :error, attempts: attempts, last_output: output,
-                error_message: "ci fix agent custody was not invoked",
-                limit_text: nil
-              )
-            end
-            if custody_report&.tampered?
-              return Result.new(
-                status: :error,
-                attempts: attempts,
-                last_output: output,
-                error_message: "ci fix agent modified protected files: " \
-                               "#{custody_report.tampered_labels.join(', ')}; " \
-                               "restored=#{custody_report.restored?}" \
-                               "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}",
-                limit_text: nil
-              )
-            end
+            custody_failure = custody_failure_result(agent_custody.report, spawn_result, attempts, output)
+            return custody_failure if custody_failure
 
             Hive::Stages::Base.record_deferred_agent_observation(
               synthetic_task(ctx), cfg, "review.ci", spawn_result
             )
+
+            decision = spawn_result[:status] != :ok &&
+                       limit_fallback_decision(cfg, fix_identity, spawn_result)
+            if decision
+              fallback_result = run_limit_fallback(
+                cfg: cfg, ctx: ctx, command: command, attempt: attempts,
+                max_attempts: max_attempts, captured_output: output, decision: decision
+              )
+              return fallback_result if fallback_result.is_a?(Result)
+
+              # A failed substitute keeps the primary's limit result so the
+              # gate is marked limits_reached exactly as without it.
+              spawn_result = fallback_result if fallback_result[:status] == :ok
+            end
 
             if spawn_result[:status] != :ok
               return Result.new(
@@ -421,11 +425,88 @@ module Hive
           status.success? && !out.empty?
         end
 
+        # A custody failure Result for a CI-fix spawn, or nil when custody
+        # was invoked and clean (or the agent itself failed first).
+        def custody_failure_result(custody_report, spawn_result, attempts, output)
+          if !custody_report && spawn_result[:status] == :ok
+            return Result.new(
+              status: :error, attempts: attempts, last_output: output,
+              error_message: "ci fix agent custody was not invoked",
+              limit_text: nil
+            )
+          end
+          return nil unless custody_report&.tampered?
+
+          Result.new(
+            status: :error,
+            attempts: attempts,
+            last_output: output,
+            error_message: "ci fix agent modified protected files: " \
+                           "#{custody_report.tampered_labels.join(', ')}; " \
+                           "restored=#{custody_report.restored?}" \
+                           "#{": #{custody_report.restore_diagnostic}" if custody_report.restore_diagnostic}",
+            limit_text: nil
+          )
+        end
+
+        # See Review::LimitFallback. The CI-fix provider pinned in the task's
+        # implementation identity for its current input generation is
+        # bypassed (not re-pinned, not observed) for the one substitute run.
+        def limit_fallback_decision(cfg, identity, spawn_result)
+          return nil unless Hive::Stages::Review::LimitFallback.settings(cfg)
+
+          primary = identity&.provider || cfg.dig("review", "ci", "agent") || "claude"
+          decision = Hive::Stages::Review::LimitFallback.decide(
+            cfg, phase: "ci", primary: primary,
+            limit_text: spawn_result[:limit_text], error_message: spawn_result[:error_message]
+          )
+          if decision && identity
+            Hive::Stages::Review::LimitFallback.log(
+              "ci: bypassing #{identity.provider} pinned for the task's current input generation " \
+              "for this one #{decision.fallback} run; the pin is unchanged"
+            )
+          end
+          decision
+        end
+
+        # Run the substitute CI-fix agent once. Returns a terminal Result on
+        # a custody failure, else the substitute's spawn result hash.
+        def run_limit_fallback(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:, decision:)
+          agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
+            Hive::ArtifactFirewall::Manifest.new(
+              root: ctx.task_folder,
+              protected_anchors: PROTECTED_FILES,
+              permitted_writable_roots: [ ctx.task_folder, ctx.worktree_path ]
+            )
+          )
+          spawn_result = spawn_fix_agent(
+            cfg: cfg, ctx: ctx, command: command, attempt: attempt,
+            max_attempts: max_attempts, captured_output: captured_output,
+            agent_custody: agent_custody, limit_fallback: decision
+          )
+          custody_failure = custody_failure_result(agent_custody.report, spawn_result, attempt, captured_output)
+          return custody_failure if custody_failure
+
+          Hive::Stages::Review::LimitFallback.record!(
+            task_folder: ctx.task_folder, pass: ctx.pass, decision: decision,
+            outcome: fallback_outcome(spawn_result),
+            error: spawn_result[:error_message]
+          )
+          spawn_result
+        end
+
+        def fallback_outcome(spawn_result)
+          Hive::Stages::Review::LimitFallback.outcome(
+            ok: spawn_result[:status] == :ok,
+            limit_text: spawn_result[:limit_text], error_message: spawn_result[:error_message]
+          )
+        end
+
         def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:,
-                            identity: nil, agent_custody: nil)
+                            identity: nil, agent_custody: nil, limit_fallback: nil)
           task = synthetic_task(ctx)
-          identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.ci")
-          profile_name = identity&.provider || cfg.dig("review", "ci", "agent") || "claude"
+          identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.ci") unless limit_fallback
+          profile_name = limit_fallback&.fallback || identity&.provider || cfg.dig("review", "ci", "agent") || "claude"
           profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
 
           template = cfg.dig("review", "ci", "prompt_template") || "ci_fix_prompt.md.erb"
@@ -460,9 +541,10 @@ module Hive
             cwd: ctx.worktree_path,
             max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_ci", profile, default: 25),
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
-            log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
+            log_label: "review-ci-fix-attempt#{format('%02d', attempt)}" \
+                       "#{"-fallback-#{limit_fallback.fallback}" if limit_fallback}",
             profile: profile,
-            implementation_stage: "review.ci",
+            implementation_stage: (limit_fallback ? nil : "review.ci"),
             mcp_scope: "review.ci",
             agent_custody: agent_custody,
             **Hive::Stages::Base.tool_scope_kwargs(scope),

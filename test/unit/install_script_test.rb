@@ -261,6 +261,121 @@ class InstallScriptTest < Minitest::Test
     end
   end
 
+  FIXTURE_TOKEN = "ghs_fixtureTokenValue123".freeze
+
+  def test_installer_downloads_anonymously_with_bounded_retry_when_no_token_is_set
+    Dir.mktmpdir("hive-installer-anonymous") do |dir|
+      log = File.join(dir, "curl.log")
+      out, err, status = run_installer(dir, "none", hive_version: nil, curl_log: log)
+
+      assert status.success?, err
+      calls = curl_calls(log)
+      assert_equal 5, calls.size, "latest-release API + gem + SHA256SUMS + .sig + .pem"
+      calls.each do |call|
+        assert_includes call[:argv], "--retry 4 --retry-delay 5 --retry-max-time 60"
+        refute_includes call[:argv], "-H"
+        refute_includes call[:argv], "--proto-redir"
+        assert_empty call[:header]
+      end
+      refute_includes out + err, "token"
+    end
+  end
+
+  def test_installer_authenticates_github_downloads_without_exposing_the_token
+    %w[GITHUB_TOKEN GH_TOKEN].each do |variable|
+      Dir.mktmpdir("hive-installer-token") do |dir|
+        log = File.join(dir, "curl.log")
+        out, err, status = run_installer(
+          dir, "none", hive_version: nil, curl_log: log,
+          github_env: { variable => FIXTURE_TOKEN }
+        )
+
+        assert status.success?, err
+        calls = curl_calls(log)
+        assert_equal 5, calls.size
+        calls.each do |call|
+          assert_match %r{ https://(api\.)?github\.com/}, call[:argv]
+          assert_equal "Authorization: Bearer #{FIXTURE_TOKEN}", call[:header], variable
+          refute_includes call[:argv], FIXTURE_TOKEN, "token must not appear in curl argv"
+          assert_includes call[:argv], "--proto-redir =https"
+          refute_includes call[:argv], "--location-trusted"
+          assert_includes call[:argv], "--retry 4"
+        end
+        refute_includes out + err, FIXTURE_TOKEN
+      end
+    end
+  end
+
+  def test_installer_skips_auth_when_curl_could_forward_it_across_redirects
+    [ "7.82.0", "7.58.0", "garbage" ].each do |version|
+      Dir.mktmpdir("hive-installer-old-curl") do |dir|
+        log = File.join(dir, "curl.log")
+        _out, err, status = run_installer(
+          dir, "none", hive_version: nil, curl_log: log, curl_version: version,
+          github_env: { "GITHUB_TOKEN" => FIXTURE_TOKEN }
+        )
+
+        assert status.success?, err
+        curl_calls(log).each do |call|
+          assert_empty call[:header], "curl #{version} must not receive the token"
+          assert_includes call[:argv], "--retry 4"
+        end
+      end
+    end
+  end
+
+  def test_installer_ignores_a_malformed_token
+    Dir.mktmpdir("hive-installer-bad-token") do |dir|
+      log = File.join(dir, "curl.log")
+      bad = "#{FIXTURE_TOKEN}\nX-Injected: 1"
+      out, err, status = run_installer(
+        dir, "none", hive_version: nil, curl_log: log,
+        github_env: { "GITHUB_TOKEN" => bad }
+      )
+
+      assert status.success?, err
+      assert_includes err, "ignoring malformed GitHub token; downloading anonymously"
+      curl_calls(log).each { |call| assert_empty call[:header] }
+      refute_includes out + err, FIXTURE_TOKEN
+    end
+  end
+
+  def test_installer_falls_back_to_anonymous_when_github_rejects_the_token
+    Dir.mktmpdir("hive-installer-rejected-token") do |dir|
+      log = File.join(dir, "curl.log")
+      out, err, status = run_installer(
+        dir, "none", hive_version: nil, curl_log: log, reject_auth: true,
+        github_env: { "GITHUB_TOKEN" => FIXTURE_TOKEN }
+      )
+
+      assert status.success?, err
+      assert_includes err, "GitHub rejected the configured token (HTTP 401); retrying anonymously"
+      assert_includes err, "GitHub rejected the configured token for release gem (HTTP 403); retrying anonymously"
+      calls = curl_calls(log)
+      assert_equal 10, calls.size, "every authenticated request is retried once anonymously"
+      assert_equal 5, calls.count { |call| call[:header].empty? }
+      refute_includes out + err, FIXTURE_TOKEN
+    end
+  end
+
+  def test_installer_limits_token_to_exact_github_hosts
+    script = File.read(INSTALL_SCRIPT)
+    applies = script[/^github_auth_applies\(\) \{\n(?<body>.*?)\n\}/m, :body]
+
+    refute_nil applies
+    assert_includes applies, "https://github.com/*|https://api.github.com/*) ;;"
+    refute_match(/\*github\.com|githubusercontent/, applies)
+    refute_includes script, "--location-trusted"
+  end
+
+  def curl_calls(log)
+    return [] unless File.exist?(log)
+
+    File.read(log).scan(/^ARGV(.*)\nHEADER ?(.*)$/).map do |argv, header|
+      { argv: argv, header: header }
+    end
+  end
+
   def test_installer_normalizes_relative_prefix_before_writing_sidecars
     Dir.mktmpdir("hive-installer-relative-prefix") do |dir|
       _out, err, status = run_installer(
@@ -630,7 +745,9 @@ class InstallScriptTest < Minitest::Test
                     qmd_pack_failure: false, qmd_install_failure: false,
                     qmd_pack_tampered: false,
                     qmd_missing_bin: false, qmd_version_failure: false,
-                    qmd_hang: nil, qmd_timeout_seconds: nil)
+                    qmd_hang: nil, qmd_timeout_seconds: nil,
+                    github_env: {}, curl_log: nil, curl_version: nil,
+                    reject_auth: false)
     fake_bin = create_installer_fakes(dir)
     install_script = INSTALL_SCRIPT
     if install_qmd
@@ -669,8 +786,13 @@ class InstallScriptTest < Minitest::Test
       "HIVE_INSTALL_TEST_QMD_VERSION_FAILURE" => qmd_version_failure ? "1" : nil,
       "HIVE_INSTALL_TEST_QMD_HANG" => qmd_hang,
       "HIVE_INSTALL_TEST_QMD_ASSET_ROOT" => QMD_LOCK_ROOT,
-      "HIVE_INSTALL_TEST_HIVE_ARGS" => File.join(dir, "hive-args")
+      "HIVE_INSTALL_TEST_HIVE_ARGS" => File.join(dir, "hive-args"),
+      "HIVE_INSTALL_TEST_CURL_LOG" => curl_log,
+      "HIVE_INSTALL_TEST_CURL_VERSION" => curl_version,
+      "HIVE_INSTALL_TEST_REJECT_AUTH" => reject_auth ? "1" : nil
     }.compact
+    # Hermetic by default: never inherit a developer's or CI's GitHub token.
+    env = env.merge("GITHUB_TOKEN" => nil, "GH_TOKEN" => nil).merge(github_env)
     Open3.capture3(
       env,
       "/bin/bash", install_script,
@@ -695,7 +817,31 @@ class InstallScriptTest < Minitest::Test
     FileUtils.mkdir_p(fake_bin)
     write_executable(File.join(fake_bin, "curl"), <<~'SH')
       #!/bin/bash
+      if [[ "${1:-}" == "--version" ]]; then
+        printf 'curl %s (x86_64-pc-linux-gnu) libcurl/fixture\n' "${HIVE_INSTALL_TEST_CURL_VERSION:-8.5.0}"
+        exit 0
+      fi
+      # Record argv plus the content of any `-H @file` header file, so tests can
+      # prove the token travels only via the header file, never argv.
+      auth=""
+      args=("$@")
+      for ((i = 0; i < ${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "-H" && "${args[$((i + 1))]:-}" == @* ]]; then
+          auth="$(cat "${args[$((i + 1))]#@}")"
+        fi
+      done
+      if [[ -n "${HIVE_INSTALL_TEST_CURL_LOG:-}" ]]; then
+        {
+          printf 'ARGV'
+          printf ' %s' "$@"
+          printf '\nHEADER %s\n' "$auth"
+        } >> "$HIVE_INSTALL_TEST_CURL_LOG"
+      fi
       if [[ "$*" == *'/releases/latest'* ]]; then
+        if [[ -n "$auth" && "${HIVE_INSTALL_TEST_REJECT_AUTH:-}" == "1" ]]; then
+          printf '{"message":"Bad credentials"}\n401'
+          exit 0
+        fi
         printf '{"tag_name":"v0.0.0"}\n200'
         exit 0
       fi
@@ -707,6 +853,10 @@ class InstallScriptTest < Minitest::Test
         fi
         shift
       done
+      if [[ -n "$auth" && "${HIVE_INSTALL_TEST_REJECT_AUTH:-}" == "1" ]]; then
+        printf '403'
+        exit 0
+      fi
       case "$(basename "$out")" in
         hive-cli-*.gem) printf 'fixture gem\n' > "$out" ;;
         SHA256SUMS)

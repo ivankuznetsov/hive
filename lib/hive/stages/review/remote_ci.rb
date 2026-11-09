@@ -199,7 +199,7 @@ module Hive
           private
 
           def publication
-            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh)
+            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh, sleeper: @sleeper)
           end
 
           def resolve_identity!
@@ -323,6 +323,11 @@ module Hive
 
                   git -C #{@ctx.worktree_path} fetch origin
                   git -C #{@ctx.worktree_path} merge --no-ff origin/#{base}
+
+              If you push the merge commit yourself, first record it as the publication head
+              (the manual push leaves github-publication.json stale):
+
+                  hive publication-reconcile #{File.basename(@ctx.task_folder.to_s)} --project <project> --pr #{rollup['url']} --head <full merge sha>
 
               Then refresh `hive status --operational --json` and invoke this task's
               workflow.retry action so review re-runs on the merged head.

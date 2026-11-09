@@ -356,6 +356,16 @@ review:
   adhoc:
     reviewers: null
     fix: <%= adhoc_auto_fix ? "true" : "false" %>
+  # Opt-in: when a review role's primary provider hits a usage/credit limit
+  # (and its reset is absent or at least min_wait_sec away), retry that role
+  # once on the mapped fallback agent. Substitutions are logged and recorded
+  # in reviews/limit-fallback-NN.jsonl; fallback reviewer output is written
+  # as <output_basename>-fallback-<agent>-NN.md.
+  # limit_fallback:
+  #   enabled: true
+  #   min_wait_sec: 3600
+  #   agents:
+  #     codex: claude
   # Two fix passes, then one verify-only pass. From
   # severity_gate_from_pass on, only High findings with concrete evidence are
   # fixed; Medium/Low/Nit findings are DEFERRED to reviews/deferred-findings.md.

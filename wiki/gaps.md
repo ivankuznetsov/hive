@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -15,6 +15,32 @@ runtime format (base schema v2). A main-era binary that reads a proposal-bound
 attempt row fails closed with an invalid attempt record rather than a clean
 newer-schema refusal. Whether a dedicated fence (schema v3 plus a
 QuiescenceUpgrade source) is wanted is undecided.
+
+## Authenticated release downloads (2026-11-09)
+
+- Not verified: whether an authenticated `github.com/.../releases/download/...`
+  request is exempt from GitHub's anonymous-traffic throttling. The 302 is
+  served by `github.com` (where the token is sent); the asset itself is served
+  by `release-assets.githubusercontent.com`, which never receives the token, so
+  auth may only help the first hop. The bounded curl retry is the part that
+  covers the CDN hop.
+- The install CI cosign download is now authenticated (`gh release download`
+  through the API asset endpoint with the job token, 5 attempts, pinned
+  SHA-256), via `.github/actions/install-cosign`. Still open:
+  - The checksum digests are trusted from the upstream release's unsigned
+    `cosign_checksums.txt`. They are cross-checked only against the identical
+    digests that cosign-installer v3 hardcoded. They are not verified with
+    sigstore's signature.
+  - The action supports Linux X64/ARM64 only. macOS jobs don't use it.
+  - Moving to a newer cosign means updating the version and both digests by
+    hand.
+  - Even an authenticated API asset download redirects to the release-asset
+    CDN, so a CDN-side outage longer than the ~75s of backoff still fails.
+- `release.yml` still pins cosign-installer v3.10.1 for signing, so its
+  bootstrap download is still anonymous. It was not changed.
+- The token is attached only when `curl --version` reports >= 7.83. Distro
+  curls that backport the redirect fixes without bumping the version stay
+  anonymous. Curl builds that report a version they do not have are trusted.
 
 ## Attempt memory cap (2026-11-08)
 
@@ -2282,3 +2308,51 @@ guarded update-branch before merge, and generation-scoped review pass counters
 after backward recovery into `6-review` — remain open. Finalize's summary.md
 gate treats a legacy `summary.md` without a recorded `head_oid` as drift and
 re-runs finalize once; no live task has been observed in that shape.
+
+## Review publication PR-head lag bound (2026-11-09)
+
+Exact-head confirmation after a review or CI-repair push waits at most about
+19 seconds (1+2+3+5+8) for GitHub's PR `headRefOid` to reach the pushed head.
+Observed lag on PR #1419 was under 3 seconds; GitHub documents no upper bound.
+A longer lag still ends `pr_head_moved`, and a workflow retry confirms the
+already-pushed head. A record anchor left stale by earlier review pushes is an
+ancestor of the hosted head, so the next review push admits and advances it.
+
+## Publication scan upstream scoping
+
+`SecretScanner.git_findings(upstream_branch:)` trusts the local
+`refs/remotes/origin/<base>` tip. If it is older than the upstream commit the
+task merged, that merge parent is not an ancestor of it and upstream findings
+stay reported (fail closed; fetch and retry). Upstream content moved to a new
+path during conflict resolution is reported because the match is path-bound.
+Review does not yet reconcile `github-publication.json` automatically after a
+manual operator push that descends from the anchor; the `base_conflict` hint
+documents the manual `hive publication-reconcile` step instead.
+
+## Review limit fallback limits (2026-11-09)
+
+`review.limit_fallback` substitutes a whole provider profile. It has no
+per-role or per-reviewer override, and no `fallback_model`, so the substitute
+always runs the fallback profile's default model. The fix and CI-fix fallbacks
+bypass the task's pinned implementation identity for one run instead of
+re-pinning it. Every later retry therefore tries the limited primary first
+and spends one failed launch before substituting again, and the
+implementation-identity journal does not record that a substitute produced
+the commit; only the `limit-fallback-NN.jsonl` receipt and the log do. The fix
+commit trailers do not name the substitute. A substitute that fails partway
+through a fix can leave edits for the CleanExit residual commit, as the
+primary can. The fallback is never attempted under explicit provider-account
+routing, or for hosted-CI account walls. The integration test asserts the
+pin-bypass log line only when the test attempt actually resolves a pinned
+identity.
+
+## Rebase conflict-agent limit fallback scope (2026-11-09)
+
+The auto-rebase conflict agent applies `review.limit_fallback` only when the
+task's current stage runs the review runner. A rebase ahead of execute or
+open-PR still aborts as `agent_failed` on a provider limit, because there is
+no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+before the review runner starts; if review later resolves a different pass,
+the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
+failed rebase substitute writes no marker attrs (the rebase writes no marker
+at all); only the log line and receipt record it.

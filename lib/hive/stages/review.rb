@@ -22,6 +22,7 @@ require "hive/agent_profiles"
 require "hive/stages/review/context"
 require "hive/stages/review/orchestrator_owned"
 require "hive/stages/review/reviewer_reuse"
+require "hive/stages/review/limit_fallback"
 require "hive/stages/review/suppression"
 require "hive/stages/review/ci_fix"
 require "hive/stages/review/remote_ci"
@@ -143,6 +144,7 @@ module Hive
         @publication_attempt_withheld = nil
         @reviewed_head = nil
         @review_ci_evidence = {}
+        Hive::Stages::Review::LimitFallback.reset_run!
         result = run_review_body!(task, cfg)
         finalize_review_outcome(task, cfg, result)
       rescue StandardError
@@ -225,7 +227,8 @@ module Hive
            (fix_success_head(task.folder, initial_disk_pass).nil? || fix_success_head(task.folder, initial_disk_pass) == @admissible_head)
           @withheld_reason = nil unless marker.attrs["reason"] == "fix_guardrail"
         elsif initial_pass <= (cfg.dig("review", "max_passes") || 3) &&
-              pass_completion_status(task.folder, initial_pass) == :fix_incomplete
+              pass_completion_status(task.folder, initial_pass) == :fix_incomplete &&
+              !prior_receipt_holds_head?(task.folder, initial_pass)
           @withheld_reason ||= "fix_guardrail_receipt_required"
         end
         @verify_mode = initial_pass > (cfg.dig("review", "max_passes") || 3)
@@ -550,6 +553,7 @@ module Hive
                 # the limit marker gets a retry_after for display; both errors
                 # follow the daemon's shared cooldown retry policy.
                 attrs[:retry_after] = Hive::AgentLimit.retry_after_for(reviewer_limit_texts)
+                attrs.merge!(Hive::Stages::Review::LimitFallback.marker_attrs("reviewers"))
               end
               Hive::Markers.set(task.state_file, :review_error, attrs)
               return { commit: "reviewers_#{reason}_pass_#{format('%02d', pass)}",
@@ -803,33 +807,42 @@ module Hive
             protected_anchors: protected_set,
             permitted_writable_roots: [ task.folder, worktree_path ]
           )
-          agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-          fix_result = spawn_fix_agent(
+          fix_run = run_fix_agent_with_custody(
             task, cfg, ctx_pass, accepted: accepted, identity: fix_identity,
-            agent_custody: agent_custody
+            custody_manifest: custody_manifest, pass: pass
           )
-          custody_report = agent_custody.report
-          if !custody_report && !agent_failed?(fix_result)
-            Hive::Markers.set(task.state_file, :review_error,
-                              phase: :fix, reason: "fix_custody_missing", pass: pass)
-            return { commit: "fix_custody_missing_pass_#{format('%02d', pass)}",
-                     status: :review_error }
-          end
-          after_fix_head = git_head(worktree_path)
+          return fix_run[:terminal] if fix_run[:terminal]
 
-          if custody_report&.tampered?
-            Hive::Markers.set(task.state_file, :review_error,
-                              phase: :fix, reason: "fix_tampered",
-                              files: custody_report.tampered_labels.join(","), pass: pass,
-                              restored: custody_report.restored?,
-                              restore_error: custody_report.restore_diagnostic.to_s[0, 200])
-            return { commit: "fix_tampered_pass_#{format('%02d', pass)}",
-                     status: :review_error }
-          end
+          fix_result = fix_run[:result]
+          after_fix_head = fix_run[:head]
 
           Hive::Stages::Base.record_deferred_agent_observation(
             task, cfg, "review.fix", fix_result
           )
+
+          fix_fallback = agent_failed?(fix_result) &&
+                         fix_limit_fallback_decision(task, cfg, fix_identity, fix_result)
+          if fix_fallback
+            fallback_run = run_fix_agent_with_custody(
+              task, cfg, ctx_pass, accepted: accepted, identity: nil,
+              custody_manifest: custody_manifest, pass: pass, limit_fallback: fix_fallback
+            )
+            return fallback_run[:terminal] if fallback_run[:terminal]
+
+            fallback_result = fallback_run[:result]
+            Hive::Stages::Review::LimitFallback.record!(
+              task_folder: task.folder, pass: pass, decision: fix_fallback,
+              outcome: limit_fallback_outcome(
+                !agent_failed?(fallback_result), fallback_result&.dig(:limit_text),
+                fallback_result&.dig(:error_message)
+              ),
+              error: fallback_result&.dig(:error_message)
+            )
+            after_fix_head = fallback_run[:head]
+            # A failed substitute leaves the primary's limit result in place
+            # so the phase is marked limits_reached exactly as without it.
+            fix_result = fallback_result unless agent_failed?(fallback_result)
+          end
 
           if agent_failed?(fix_result)
             limited = mark_review_phase_failure(
@@ -1302,7 +1315,8 @@ module Hive
                             message: "#{phase} hit a usage/credit limit",
                             retry_after: Hive::AgentLimit.retry_after(
                               text: limit_failure_text(limit_text, error_message)
-                            ))
+                            ),
+                            **Hive::Stages::Review::LimitFallback.marker_attrs(phase))
           true
         else
           reason = Hive::ReviewErrorReason.classify(error_message.to_s)
@@ -1372,7 +1386,9 @@ module Hive
 
           return result if result.status == :ok
           return result if result.status == :tampered
-          return result if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
+          if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
+            return run_triage_limit_fallback(cfg, ctx_pass, result)
+          end
           return result if Hive::ModelUnsupported.detected?(result.error_message.to_s)
           return result if attempt >= max_attempts
 
@@ -1384,6 +1400,31 @@ module Hive
 
           triage_retry_backoff(attempt)
         end
+      end
+
+      # One substitute triage run after the primary hit a usage/credit limit
+      # (see Review::LimitFallback). A successful or tampering substitute
+      # result is returned as-is; any other substitute failure returns the
+      # primary's limit result so the phase is still marked limits_reached.
+      def run_triage_limit_fallback(cfg, ctx_pass, result)
+        decision = Hive::Stages::Review::LimitFallback.decide(
+          cfg, phase: "triage", primary: Hive::Stages::Review::Triage.primary_agent(cfg),
+          limit_text: result.limit_text, error_message: result.error_message
+        )
+        return result unless decision
+
+        fallback = Hive::Stages::Review::Triage.run!(cfg: cfg, ctx: ctx_pass, limit_fallback: decision)
+        tampered = fallback.status == :tampered || fallback.tampered_files.any?
+        Hive::Stages::Review::LimitFallback.record!(
+          task_folder: ctx_pass.task_folder, pass: ctx_pass.pass, decision: decision,
+          outcome: tampered ? "failed" : limit_fallback_outcome(
+            fallback.status == :ok, fallback.limit_text, fallback.error_message
+          ),
+          error: fallback.error_message
+        )
+        return fallback if fallback.status == :ok || tampered
+
+        result
       end
 
       # Attempt budget for the triage phase. Defaults to the shared reviewer
@@ -1532,6 +1573,15 @@ module Hive
 
         FIX_SUCCESS_UNREVIEWED_KINDS.include?(fix_success_kind(task_folder, disk_pass)) &&
           fix_success_head(task_folder, disk_pass) == @admissible_head
+      end
+
+      # A :fix_incomplete pass whose HEAD still equals the previous pass's
+      # receipt has no commit that escaped the fix guardrail: Phase 4 never
+      # moved HEAD (e.g. a reviewer-clean pass stopped at its completion CI
+      # gate). Any Phase 4 that does run re-withholds until its own receipt.
+      def prior_receipt_holds_head?(task_folder, pass)
+        head = fix_success_head(task_folder, pass - 1)
+        !head.nil? && head == @admissible_head
       end
 
       def completed_pass_receipt?(task_folder, pass)
@@ -1742,6 +1792,15 @@ module Hive
             next
           end
 
+          if (reused_fallback = reusable_limit_fallback_output(cfg, ctx, spec, reuse))
+            warn "[hive.review] reusing limit-fallback reviewer output #{reused_fallback.inspect} " \
+                 "for #{spec['name'].inspect} pass #{format('%02d', ctx.pass)} produced before the provider-limit retry"
+            statuses << :ok
+            succeeded << reused_fallback
+            remaining_specs -= 1
+            next
+          end
+
           result = run_reviewer_spec(
             cfg, ctx, spec,
             reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
@@ -1750,11 +1809,35 @@ module Hive
           )
           return :wall_clock_exceeded if result == :wall_clock_exceeded
 
+          fallback = run_reviewer_limit_fallback(
+            cfg, ctx, spec, result,
+            started_at: started_at, max_wall_clock_sec: max_wall_clock_sec,
+            specs_remaining: remaining_specs
+          )
+          return :wall_clock_exceeded if fallback == :wall_clock_exceeded
+
+          if fallback&.last&.ok?
+            # The substitute's findings replace the limited primary's: no
+            # infra error is recorded for the primary, so the pass is not
+            # paused as reviewer_partial_failure.
+            fallback_spec, fallback_result = fallback
+            statuses << :ok
+            succeeded << fallback_spec["output_basename"]
+            handle_reviewer_result(task, cfg, ctx, fallback_spec, fallback_result)
+            remaining_specs -= 1
+            next
+          end
+
           statuses << result.status
           error_messages << result.error_message if result.error?
           limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
           succeeded << spec["output_basename"] if result.ok? && spec["output_basename"]
           handle_reviewer_result(task, cfg, ctx, spec, result)
+          if fallback
+            fallback_spec, fallback_result = fallback
+            limit_texts << fallback_result.limit_text unless fallback_result.limit_text.to_s.empty?
+            handle_reviewer_result(task, cfg, ctx, fallback_spec, fallback_result)
+          end
           remaining_specs -= 1
         end
 
@@ -1782,6 +1865,61 @@ module Hive
         else
           :ok
         end
+      end
+
+      # Output basename of this reviewer's limit-fallback substitute when the
+      # cooled retry may reuse it (same pass, same HEAD, unchanged bytes).
+      # Otherwise any stale substitute output for this pass is removed so
+      # triage never reads it beside a fresh primary review. Nil when the
+      # option is disabled or names no fallback for this reviewer.
+      def reusable_limit_fallback_output(cfg, ctx, spec, reuse)
+        fallback_agent = Hive::Stages::Review::LimitFallback.configured_fallback(
+          cfg, Hive::Stages::Review::LimitFallback.reviewer_primary(spec)
+        )
+        return nil unless fallback_agent && spec["output_basename"]
+
+        basename = Hive::Stages::Review::LimitFallback.reviewer_output_basename(spec, fallback_agent)
+        return basename if Hive::Stages::Review::ReviewerReuse.reusable?(ctx, basename, reuse)
+
+        FileUtils.rm_f(Hive::Stages::Review::LimitFallback.reviewer_output_path(ctx, spec, fallback_agent))
+        nil
+      end
+
+      # Run the configured substitute once for a reviewer whose primary
+      # failed on a usage/credit limit. Returns nil when no fallback applies,
+      # :wall_clock_exceeded, or [fallback_spec, fallback_result].
+      def run_reviewer_limit_fallback(cfg, ctx, spec, result, started_at:, max_wall_clock_sec:, specs_remaining:)
+        return nil unless result.error? && spec["output_basename"]
+
+        decision = Hive::Stages::Review::LimitFallback.decide(
+          cfg, phase: "reviewers", role: "reviewer #{spec['name']}",
+          primary: Hive::Stages::Review::LimitFallback.reviewer_primary(spec),
+          limit_text: result.limit_text, error_message: result.error_message
+        )
+        return nil unless decision
+
+        fallback_spec = Hive::Stages::Review::LimitFallback.reviewer_spec(
+          spec, decision, templates: Hive::Reviewers::ROUTED_REVIEW_TEMPLATES
+        )
+        fallback_result = run_reviewer_spec(
+          Hive::Stages::Review::LimitFallback.fallback_cfg(cfg), ctx, fallback_spec,
+          reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: specs_remaining),
+          started_at: started_at, max_wall_clock_sec: max_wall_clock_sec
+        )
+        return :wall_clock_exceeded if fallback_result == :wall_clock_exceeded
+
+        Hive::Stages::Review::LimitFallback.record!(
+          task_folder: ctx.task_folder, pass: ctx.pass, decision: decision,
+          outcome: limit_fallback_outcome(fallback_result.ok?, fallback_result.limit_text,
+                                          fallback_result.error_message),
+          output: (File.basename(fallback_result.output_path.to_s) if fallback_result.ok?),
+          error: fallback_result.error_message
+        )
+        [ fallback_spec, fallback_result ]
+      end
+
+      def limit_fallback_outcome(ok, limit_text, error_message)
+        Hive::Stages::Review::LimitFallback.outcome(ok: ok, limit_text: limit_text, error_message: error_message)
       end
 
       def reviewer_specs_for(cfg, task)
@@ -2220,10 +2358,63 @@ module Hive
         File.write(path, body)
       end
 
+      # Spawn the fix agent under a fresh single-use custody and apply the
+      # custody checks. Returns `{ terminal: result_hash }` when custody is
+      # missing or tampered, else `{ result: spawn_result, head: sha }`.
+      def run_fix_agent_with_custody(task, cfg, ctx_pass, accepted:, identity:, custody_manifest:,
+                                     pass:, limit_fallback: nil)
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+        spawn_kwargs = { accepted: accepted, identity: identity, agent_custody: agent_custody }
+        spawn_kwargs[:limit_fallback] = limit_fallback if limit_fallback
+        fix_result = spawn_fix_agent(task, cfg, ctx_pass, **spawn_kwargs)
+        custody_report = agent_custody.report
+        if !custody_report && !agent_failed?(fix_result)
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: :fix, reason: "fix_custody_missing", pass: pass)
+          return { terminal: { commit: "fix_custody_missing_pass_#{format('%02d', pass)}",
+                               status: :review_error } }
+        end
+        head = git_head(ctx_pass.worktree_path)
+
+        if custody_report&.tampered?
+          Hive::Markers.set(task.state_file, :review_error,
+                            phase: :fix, reason: "fix_tampered",
+                            files: custody_report.tampered_labels.join(","), pass: pass,
+                            restored: custody_report.restored?,
+                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
+          return { terminal: { commit: "fix_tampered_pass_#{format('%02d', pass)}",
+                               status: :review_error } }
+        end
+
+        { result: fix_result, head: head }
+      end
+
+      # The fix role's provider is the one pinned in the task's
+      # implementation identity for its current input generation when one
+      # exists, else review.fix.agent. A substitute launch deliberately
+      # bypasses that pin for this one run (it is neither re-pinned nor
+      # observed) and says so in the log.
+      def fix_limit_fallback_decision(task, cfg, identity, fix_result)
+        return nil unless Hive::Stages::Review::LimitFallback.settings(cfg)
+
+        primary = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
+        decision = Hive::Stages::Review::LimitFallback.decide(
+          cfg, phase: "fix", primary: primary,
+          limit_text: fix_result&.dig(:limit_text), error_message: fix_result&.dig(:error_message)
+        )
+        if decision && identity
+          Hive::Stages::Review::LimitFallback.log(
+            "fix: bypassing #{identity.provider} pinned for #{task.slug}'s current input generation " \
+            "for this one #{decision.fallback} run; the pin is unchanged"
+          )
+        end
+        decision
+      end
+
       def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil,
-                          agent_custody: nil)
-        identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
-        profile_name = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
+                          agent_custody: nil, limit_fallback: nil)
+        identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix") unless limit_fallback
+        profile_name = limit_fallback&.fallback || identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
         scope = Hive::Stages::Base.stage_permission_scope(
           cfg, "review.fix", task, profile,
@@ -2257,9 +2448,10 @@ module Hive
           cwd: ctx.worktree_path,
           max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_fix", profile, default: 100),
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
-          log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
+          log_label: "review-fix-pass#{format('%02d', ctx.pass)}" \
+                     "#{"-fallback-#{limit_fallback.fallback}" if limit_fallback}",
           profile: profile,
-          implementation_stage: "review.fix",
+          implementation_stage: (limit_fallback ? nil : "review.fix"),
           mcp_scope: "review.fix",
           agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
@@ -2434,11 +2626,13 @@ module Hive
             Hive::Markers.set(
               task.state_file, :review_error,
               phase: :ci, gate: gate, reason: "limits_reached", pass: pass,
+              limit_source: CiFix.hosted_limit?(ci_result.error_message) ? "hosted_ci" : "agent",
               message: gate == "local" ?
                 "ci hit a usage/credit limit" : "#{gate} CI hit a usage/credit limit",
               retry_after: Hive::AgentLimit.retry_after(
                 text: limit_failure_text(ci_result.limit_text, ci_result.error_message)
-              )
+              ),
+              **Hive::Stages::Review::LimitFallback.marker_attrs("ci")
             )
             return { commit: "ci_#{gate}_limits_reached", status: :review_error }
           end

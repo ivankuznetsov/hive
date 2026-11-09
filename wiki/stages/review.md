@@ -25,7 +25,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 |----------------|--------|
 | `:review_complete` | print "already complete; run `hive artifacts` or move this folder to 7-artifacts/", return |
 | `:review_ci_stale` | warn; user fixes CI, then submits the current observation through the TUI/web/bot retry action or `hive act workflow.retry` |
-| `:review_stale` | warn; `reason=final_fix_unverified` always requires operator remediation and explicit retry, even without an escalations file. Other incomplete passes retain ordinary recovery rules. |
+| `:review_stale` | warn; `reason=final_fix_unverified` always requires operator remediation and explicit retry, even without an escalations file; for an evidenced park, refresh operational status and use its dedicated `hive review-grant` command. Other incomplete passes retain ordinary recovery rules. |
 | `:review_error` | warn with attrs. Every reason enters the shared recovery lifecycle: the daemon submits automatically after the marker-age cooldown when safety permits, and operator surfaces can submit immediately for coordinator assessment. `retry_after` remains a display hint for provider limits, not a separate mechanism. Old id-less rows require one `hive migrate` before retry. |
 | task PR observed merged / closed (`Hive::PullRequestOutcome`) | warn and return `status: :pull_request_merged` / `:pull_request_closed_unmerged` with the marker untouched; no CI-fix, reviewer, triage, or fix agent runs. The merged warning names `hive archive <slug> --reason already_delivered --evidence <pr_url>`. No observation (or an `open` one) keeps the normal flow. |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
@@ -55,6 +55,39 @@ Pass cap (`review.max_passes`, default 2 since 2026-11-03; was 3) means **max_pa
 Any accepted finding or unanswered escalation writes `REVIEW_STALE reason=final_fix_unverified accepted=N escalations=M pass=NN` after publication. Reviewer infrastructure failures remain errors, never clean proof. A publication failure takes precedence on terminal outcomes and retains the original reason and counts in diagnostics; waiting guardrail markers keep their exact approval bindings and do not publish withheld fixes. With the default cap, a task whose pass 2 fixes something completes or stops at `pass=03`.
 
 `fix-success-NN.md` binds each completed fix to its exact HEAD. A restart still owes a `fixed` or `approved` head a reviewer pass. `Review.admitted_pass_ceiling` admits legacy `kind=ci_repaired` receipt chains and `kind=approved` guardrail receipts, each allowing exactly one further reviewer pass. Approval during final verification therefore remains restartable after interruption, findings, or reviewer errors. These extra passes stay verify-only and cannot create more repair passes. A reviewer file above that ceiling still raises `ConfigError` (`REVIEW_ERROR reason=config_error`). A backward `hive approve` whose rewind interval includes 6-review archives the prior generation's numbered pass files first (see [approve](../commands/approve.md)), so a rewind from 7-artifacts/8-finalize starts again at pass 01 instead of tripping this check. Wall-clock limits are checked at phase boundaries and between reviewers; expiry stops verification but still attempts admissible publication under the Git gate's bounded network timeout. No agent budget is reset to finish verification.
+
+Without a task grant, every pass above the configured cap is verify-only. An operator may extend only an evidenced `final_fix_unverified` park with
+[[commands/review-grant]]. Refresh `hive status --operational --json`, then
+supply its grant-specific token, an explicit 1–3 passes and a non-sensitive
+reason. The first resumed fix uses the preserved accepted findings without
+rerunning reviewers/triage. Sealed controller `kind=fixed` completion receipts
+spend logical grant slots; verification, CI repairs and escalation-only work
+are free. Spending and guardrail admission are separate: a granted pass
+needs a `kind=fixed` success sentinel bound to its sealed completion HEAD.
+A restart without it rechecks the receipt's input/output diff before CI or
+reviewers advance, or preserves the existing guardrail approval pause.
+Changed HEAD or dirty worktree edits refuse that recovery. A guardrail-approved
+granted fix still spends its slot and owes verification. The final fix always
+receives another review; new findings then create a fresh eligible exhaustion. No global cap or configuration is
+changed, and `hive act` cannot grant allowance.
+
+If a granted fix commits and then reports a provider error, recovery retains
+the original slot input HEAD. A successful retry uses that validated input
+for both its immediate guardrail diff and its sealed completion receipt, even
+when the retry makes no commits. Further failures retain the same input;
+commits from failed attempts therefore still require guardrail approval.
+
+Unused slots survive ordinary commits, restarts and non-final parks inside
+the original review scope. Existing recovery rules decide whether a suspended
+review may resume. Changed HEAD/findings/scope evidence refuses without
+spending or clearing a new marker. A pending receipt cannot launch a fix
+until the coordinator reconciles its audit and clears its exact stale marker.
+Completion, a task-input generation change or a new review/reset expires the
+scope. Reset archives grant/completion receipts with pass artifacts and retains
+`review-budget/audit.jsonl`. Receipt names are protected individually, with a
+separate sorted listing checked around each agent spawn. Pass suffixes have
+two or more digits and sort numerically, so pass 100 is supported; admission
+still requires the durable grant/completion and CI-repair chain.
 
 Reviewers run in roster order, one at a time. A Claude reviewer is an
 independent headless `claude -p` spawn through `Base.spawn_agent`, like every
@@ -290,8 +323,18 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 `Stages::Review#pass_completion_status(folder, N)` classifies the highest-pass on disk as one of:
 
 - **`:complete`** — `reviews/fix-success-NN.md` sentinel exists AND its mtime is ≥ `escalations-NN.md`'s mtime, OR pass `N+1` reviewer files exist. `next_pass_for` advances to `N+1`. New sentinels also record the exact completion HEAD and a `kind=` (`clean`, `fixed`, `ci_repaired`, `approved`).
+- **`:guardrail_incomplete`** — a sealed granted-fix completion exists without a matching `kind=fixed` success sentinel at its output HEAD. The slot stays spent; the runner recovers the guardrail disposition before any CI or reviewer work. This takes precedence over other pass artifacts, including later reviewer files.
 - **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
 - **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, AND one of: (a) neither the sentinel nor pass `N+1` reviewer files exist (fix never finished), OR (b) the sentinel exists but the operator edited `escalations-NN.md` strictly after the sentinel was written (`escalations.mtime > fix-success.mtime`). `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's current `[x]` marks (mirrors a `REVIEW_WAITING` resume).
+
+Granted fixes use sealed answer proofs instead of the mtime rule. With an
+unused slot, filling an originally empty escalation answer after completion
+returns `:fix_incomplete` for that pass and sends only newly answered work to
+the next logical slot. Earlier accepted findings and answers stay applied;
+their completion receipt is immutable. Completion lookup and guardrail
+recovery use the latest slot for a pass. Later-slot success sentinels also bind
+the decision and slot, so an earlier no-op fix at the same HEAD cannot supply
+the new fix's guardrail disposition.
 
 A `:fix_incomplete` restart withholds PR publication with `fix_guardrail_receipt_required` until a fix receipt binds the current HEAD, because an interrupted Phase 4 may have committed past the guardrail. The exception: HEAD still equals the previous pass's `fix-success-(N-1).md` `head=`. Then nothing escaped the guardrail, so the restart is not withheld. This is the reviewer-clean pass that stopped at its completion CI gate (`REVIEW_CI_STALE`) before writing `kind=clean`. Any Phase 4 that the restart runs still withholds until its own receipt.
 

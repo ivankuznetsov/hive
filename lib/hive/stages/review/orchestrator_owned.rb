@@ -1,3 +1,5 @@
+require "hive/review_pass"
+
 module Hive
   module Stages
     module Review
@@ -29,10 +31,19 @@ module Hive
 
       module_function
 
+      # Shared by the runner and the standalone grant evidence reader.
+      def auto_fix_finding_line?(line)
+        return false unless line =~ /^\s*-\s+\[x\]\s+/
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED|DEFERRED)\b/i
+
+        true
+      end
+
       # True for filenames that originate from a reviewer (not the
       # orchestrator). Used by every consumer of `reviews/*.md`.
       def reviewer_file?(name)
-        ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
+        !Hive::ReviewPass.budget_receipt?(name) &&
+          ORCHESTRATOR_OWNED_PREFIXES.none? { |p| name.start_with?(p) }
       end
     end
   end

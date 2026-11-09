@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-10-02
+updated: 2026-11-02
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -986,6 +986,30 @@ advances a workflow stage directly:
    remains. Coordinator
    submissions log `recovery_requested` / `recovery_blocked`; stale ownership
    rewrites retain `marker_healed` / `marker_heal_failed`.
+
+## Operator grants for final review verification
+
+[[commands/review-grant]] is a dedicated operator decision, independent of
+routine retry observation tokens. The recovery coordinator acquires the task
+lock and verifies source, exact marker/evidence and worktree/task ownership.
+It fsyncs an immutable grant receipt and its idempotent task-root audit entry
+before clearing only the bound final-fix-unverified stale marker. Replay and
+daemon entry reconcile interrupted receipt/audit application. An old recovery
+request must still pass its existing marker and generation checks; a grant
+cannot make an obsolete request clear a later park.
+
+The command does not spawn an agent. Normal scheduler, provider, CI and
+recovery holds still govern admission. Non-final parks suspend unused slots
+inside the original review scope; budget cannot authorize marker clearing.
+Before same-cycle recovery, the coordinator revalidates the grant and retains
+exact controller partial-fix HEAD/slot evidence in authoritative task history
+when available. Ambiguous evidence refuses. Ordinary restarts/commits retain
+allowance; generation changes, review completion and reset/new review expire
+it. Archived receipts and `review-budget/audit.jsonl` retain history without
+reactivating a grant. Status reads current evidence independently of ordinary
+scheduler recovery payloads and never scans the historical audit to invent
+allowance. Managed agents are denied grants across every supported adapter;
+only the operator command records caller/source attribution.
 
 ## External liveness and capacity
 

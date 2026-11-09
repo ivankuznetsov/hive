@@ -253,6 +253,8 @@ module Hive
           # approval_head_mismatch on resume. Rebase on the run after the
           # approved pass advances instead.
           result = Hive::Rebase::Result.skipped(:pending_head_bound_approval)
+        elsif preserved_review_grant_pending?(task)
+          result = Hive::Rebase::Result.skipped(:pending_review_grant_fix)
         elsif @no_rebase
           result = Hive::Rebase::Result.skipped(:cli_override)
         else
@@ -266,6 +268,24 @@ module Hive
         marker&.name == :review_waiting &&
           marker.attrs["reason"] == "fix_guardrail" &&
           !marker.attrs["head"].to_s.empty?
+      end
+
+      def preserved_review_grant_pending?(task)
+        return false unless %w[review 6-review].include?(task.stage_name.to_s) # coding-scoped: preserve the coding review's granted fix HEAD.
+
+        require "hive/review_budget"
+        budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+        return false unless budget.present?
+
+        snapshot = budget.observe
+        budget.validate_resume!(snapshot: snapshot)
+        return false unless snapshot.applicable? && snapshot.remaining.positive?
+
+        latest = snapshot.receipts.last
+        count = snapshot.completions.count { |entry| entry.fetch("decision_id") == latest.fetch("decision_id") }
+        proof = snapshot.evidence.fetch("resume_evidence")
+        count.zero? || (proof.is_a?(Hash) && proof["grant_decision"] == latest.fetch("decision_id") &&
+          proof["grant_slot"].to_s == (count + 1).to_s)
       end
 
       def log_rebase_outcome(task, result)

@@ -116,6 +116,16 @@ before/after custody.
 
 ## Restoration
 
+`Hive::ArtifactFirewall::PathCustody` supports controller-owned receipt sets.
+The owner supplies explicit absolute paths, including absent fixed paths, and
+retains a pre-spawn receipt-name listing. After the spawn, it supplies paths
+proven absent by that listing to `restore_changes!`. The facade restores edits
+and deletions and removes unauthorized additions through the same no-follow
+engine. Overlapping absence claims and unsafe restoration fail closed.
+[[commands/review-grant]] uses this process-local custody boundary alongside
+its sorted listing digest; the snapshot never becomes a persisted budget
+ledger. The owner still validates receipt names, parents and listing bounds.
+
 `lib/hive/protected_files.rb` is the internal no-follow capture/restore engine
 behind the facade. `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` remains the
 compatibility source for:

@@ -6357,6 +6357,14 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
   end
 
+  def test_review_escalations_file_accepts_pass_100_and_rejects_other_prefixes
+    assert @model.send(:review_escalations_file?, "/tmp/reviews/escalations-100.md")
+    assert @model.send(:review_escalations_file?, "/tmp/reviews/escalations-0100.md")
+    refute @model.send(:review_escalations_file?, "/tmp/reviews/escalations-other-100.md")
+    refute @model.send(:review_escalations_file?, "/tmp/reviews/escalations-1.md")
+    refute @model.send(:review_escalations_file?, "/tmp/reviews/escalations-100.json")
+  end
+
   def test_review_marker_state_open_for_matching_review_waiting
     Dir.mktmpdir("u6-marker-check") do |folder|
       task_md = File.join(folder, "task.md")

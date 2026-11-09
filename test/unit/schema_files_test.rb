@@ -5,6 +5,7 @@ require "json_schemer"
 require "pathname"
 require "hive/commands/answer_digest"
 require "hive/commands/approve"
+require "hive/commands/review_grant"
 require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
@@ -37,6 +38,32 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_review_grant_status_is_required_nullable_and_its_action_is_advertisement_only
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    assert_includes doc.dig("$defs", "Task", "required"), "review_grant"
+    assert_equal [ { "type" => "null" }, { "$ref" => "#/$defs/ReviewGrant" } ],
+      doc.dig("$defs", "Task", "properties", "review_grant", "oneOf")
+    refute_includes doc.dig("$defs", "Action", "properties", "action_id", "enum"), "workflow.grant_fix_passes"
+    assert_equal %w[workflow.advance workflow.retry], Hive::OperationalAction::EXECUTABLE_ACTION_IDS
+    assert_equal 5, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-operational-status")
+  end
+
+  def test_review_grant_closed_schema_and_error_registry_agree
+    assert_equal 1, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-review-grant")
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-review-grant")))
+    assert_equal Hive::Schemas::ReviewGrantErrorKind::ALL.sort,
+      doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    schema = JSONSchemer.schema(doc)
+    Hive::Schemas::ReviewGrantErrorKind::ALL.each do |kind|
+      payload = Hive::Schemas::ErrorEnvelope.build(schema: "hive-review-grant",
+        error: Hive::UsageError.new("refused"), error_kind: kind)
+      assert schema.valid?(payload), "review grant error kind #{kind} must be published"
+    end
+    payload = Hive::Schemas::ErrorEnvelope.build(schema: "hive-review-grant",
+      error: Hive::UsageError.new("refused"), error_kind: "invented")
+    refute schema.valid?(payload)
+  end
+
   def test_closure_diagnostics_preserve_legacy_shape_and_validate_retained_commit_identifiers
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input")))
     diagnostic = JSONSchemer.schema({ "$defs" => document.fetch("$defs"), "$ref" => "#/$defs/Diagnostic" })
@@ -1310,6 +1337,7 @@ class SchemaFilesTest < Minitest::Test
 
     assert_includes reasons, "controller_workflow"
     assert_includes reasons, "managed_draft_pr_handoff"
+    assert_includes reasons, "pending_review_grant_fix"
   end
 
   # OPTIONAL_PAYLOAD_KEYS documents fields that are valid in SuccessPayload

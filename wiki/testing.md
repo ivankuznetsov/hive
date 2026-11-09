@@ -1638,6 +1638,14 @@ The packaged-Web bootstrap archives committed `HEAD:web`, so it is reserved
 for changes to that packaging boundary rather than ordinary view changes. See
 [[modules/task_workspace]].
 
+## Review grant refusal coverage
+
+Review grant CI regressions in `test/unit/review_budget_test.rb` reject
+malformed completion escalation proofs and proofs naming a different pass.
+`test/unit/stages/review/grant_recovery_test.rb` verifies that a changed HEAD
+or dirty worktree blocks pending guardrail recovery before CI, and that
+standalone escalation reads find later answers with an unused grant slot.
+
 ## Launch-path fixtures
 
 `test/unit/launch_path_fixture_test.rb` pins the public Build and Content

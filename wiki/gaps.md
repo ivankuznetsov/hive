@@ -2293,3 +2293,20 @@ path during conflict resolution is reported because the match is path-bound.
 Review does not yet reconcile `github-publication.json` automatically after a
 manual operator push that descends from the anchor; the `base_conflict` hint
 documents the manual `hive publication-reconcile` step instead.
+
+## Review limit fallback limits (2026-11-09)
+
+`review.limit_fallback` substitutes a whole provider profile. It has no
+per-role or per-reviewer override, and no `fallback_model`, so the substitute
+always runs the fallback profile's default model. The fix and CI-fix fallbacks
+bypass the task's pinned implementation identity for one run instead of
+re-pinning it. Every later retry therefore tries the limited primary first
+and spends one failed launch before substituting again, and the
+implementation-identity journal does not record that a substitute produced
+the commit; only the `limit-fallback-NN.jsonl` receipt and the log do. The fix
+commit trailers do not name the substitute. A substitute that fails partway
+through a fix can leave edits for the CleanExit residual commit, as the
+primary can. The fallback is never attempted under explicit provider-account
+routing, or for hosted-CI account walls. The integration test asserts the
+pin-bypass log line only when the test attempt actually resolves a pinned
+identity.

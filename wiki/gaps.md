@@ -2353,3 +2353,14 @@ primary can. The fallback is never attempted under explicit provider-account
 routing, or for hosted-CI account walls. The integration test asserts the
 pin-bypass log line only when the test attempt actually resolves a pinned
 identity.
+
+## Rebase conflict-agent limit fallback scope (2026-11-09)
+
+The auto-rebase conflict agent applies `review.limit_fallback` only when the
+task's current stage runs the review runner. A rebase ahead of execute or
+open-PR still aborts as `agent_failed` on a provider limit, because there is
+no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+before the review runner starts; if review later resolves a different pass,
+the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
+failed rebase substitute writes no marker attrs (the rebase writes no marker
+at all); only the log line and receipt record it.

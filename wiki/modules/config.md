@@ -1058,7 +1058,8 @@ review:
 `min_wait_sec` must be an Integer from 0 to 366 days in seconds. `agents` must
 map registered profile names to different registered profile names, so a
 provider can never fall back to itself. One map covers every review role that
-launches an agent: reviewers, triage, fix, and CI fix. Runtime semantics are in
+launches an agent: reviewers, triage, fix, and CI fix, plus the auto-rebase
+conflict-resolution agent when `hive run` rebases a task in the review stage. Runtime semantics are in
 [[stages/review]] under "Provider-limit fallback".
 
 ## Stage runners reach into config like this

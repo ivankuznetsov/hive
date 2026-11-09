@@ -65,6 +65,12 @@ custody, and the U15 live runner now composes them into the final passing claim.
 The default local test remains credential-free and skipped; only an explicitly
 authorized run on the unchanged exact head can produce authenticated evidence.
 
+The registered-process quiescence integration test uses a ten-second timeout
+so its 15% finalization reserve allows real SQLite checkpoint and proof I/O on
+shared CI runners. Deadline enforcement remains covered by the controlled-clock
+tests in `test/unit/daemon/quiescence_test.rb` and
+`test/unit/daemon/quiescence_failure_paths_test.rb`.
+
 ## Local feedback loop
 
 The checkout inventory in `remote_access_acceptance_test.rb` runs its Git reads
@@ -1659,3 +1665,33 @@ Active-row reuse regressions in `commands/status_test.rb`,
 classification per candidate, prepared-folder admission, project-local fallback,
 captured invalid-row membership, and matching TUI admission context. Status
 tests also preserve retention-boundary and internal archive-index contracts.
+
+## Direct v1 benchmark credential proofs
+
+`test/unit/bench_harness/isolation_exec_test.rb` and `isolation_shell_test.rb`
+are default-suite tests of the packaged `IsolationExec`/`hb_isolated` boundary.
+They use all three decoy keys and fake auth files, never real logins/provider
+commands. Run them with `bin/test` alongside `pipeline_test.rb`.
+`test/integration/bench_workflow_install_test.rb` proves fresh runtime bytes and
+refresh/revert of an actual pre-declaration runtime fixture, preserving
+unrelated state and writing `tmp/bench-credential-refresh-evidence.json`.
+
+`test:bench_isolation_proof` is registered in `HIVE_CI_GATE_TESTS`: its expensive
+`isolation_proof_test.rb` is excluded from defaults and all six coverage shards.
+Run `bundle exec rake test:bench_isolation_proof`, optionally with
+`HB_TEST_BASH_32=/absolute/path/to/bash-3.2`. The named `bench-isolation-proof`
+CI job has `ubuntu-24.04`/`macos-15` lanes; macOS requires `/bin/bash` 3.2 and
+records `bash --version`. Linux without an override records its local 3.2 skip.
+The real Docker decoy matrix checks the three API routes, both OAuth variants
+and gate with digest-pinned stock Alpine 3.22.2, using multi-argument
+`sh -c` probes. The real Docker matrix requests one CPU so it can run on
+hosted runners with fewer CPUs than the eight-CPU fake-Docker fixture.
+Daemon unavailability is distinct from image setup failure,
+which fails the proof. The owning `harness/CREDENTIAL_ISOLATION.md` documents
+the exact image digest and protocol. Canonical hive-bench keeps corresponding
+tests under `test/` and owns runtime Ruby style. Only the two isolation files
+are synchronized; unrelated pre-existing snapshot divergence stays unchanged.
+
+This contract covers direct `run_all.rb`/`pipeline_run.rb` v1 runs. Packaged v2
+`generate.md` → `hive_run.rb` → `HiveDriver`, including `env_args`/`auth_mounts`
+and `hive_stages.sh` in-container `auth.json`, is byte-for-byte unaffected.

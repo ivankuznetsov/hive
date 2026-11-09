@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -22,7 +22,11 @@ from persisted claim diagnostics. Restart and timer changes cannot move this
 ceiling. Reconciliation rechecks the row, wrapper and worker custody: a proven
 live worker still reserves capacity; otherwise valid pending completion wins
 before the distinct `first_heartbeat_owner_unverifiable_ceiling` loss. Running
-unverifiable owners retain their existing conservative policy.
+unverifiable owners retain their existing conservative policy. Once the wrapper
+is gone or mismatched, mismatched worker identities permit pending completion
+replay or loss and do not keep lost recovery pending. Matching live workers,
+unverifiable groups and permission-denied termination still fence successors;
+termination reports unresolved custody as `still_alive` instead of a mismatch.
 
 Worker registration continues through cancellation, timeout and short worker
 exit, without releasing a cancelled worker's execution gate. During quiescence

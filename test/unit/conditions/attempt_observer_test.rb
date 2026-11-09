@@ -179,25 +179,28 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_lost_attempt_replaces_live_health_with_fail_closed_observation
-    with_tmp_dir do |dir|
-      task = build_task(dir)
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      launching = create_attempt(store)
-      lost = store.mark_lost(launching, reason: "launch_timeout", now: NOW + 1)
-      status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: lost, classification: :lost,
-        owner_status: :not_claimed, evidence: {}
-      )
-      observer = Hive::Conditions::AttemptObserver.new(
-        store: store, task_locator: ->(_attempt) { task }
-      )
+  %w[launch_timeout runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+    define_method("test_lost_attempt_replaces_live_health_with_fail_closed_observation_#{reason}") do
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
+        launching = create_attempt(store)
+        lost = store.mark_lost(launching, reason: reason, now: NOW + 1)
+        status = Hive::Attempts::ReconciledAttempt.new(
+          attempt: lost, classification: :lost,
+          owner_status: :not_claimed, evidence: {}
+        )
+        observer = Hive::Conditions::AttemptObserver.new(
+          store: store, task_locator: ->(_attempt) { task }
+        )
 
-      assert observer.call(status, now: NOW + 1)
-      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
-      health = projection.current_condition("AgentHealthy")
-      assert_equal "unsatisfied", health.fetch("state")
-      assert_equal "attempt_lost", health.fetch("reason")
+        assert observer.call(status, now: NOW + 1)
+        projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
+        health = projection.current_condition("AgentHealthy")
+        assert_equal "unsatisfied", health.fetch("state")
+        assert_equal reason == "launch_timeout" ? "attempt_lost" : reason, health.fetch("reason")
+        assert_equal :acknowledged, observer.observe(status, now: NOW + 2)
+      end
     end
   end
 

@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -1295,6 +1295,9 @@ continuously.
 Retrying a terminal markerless recovery creates a deterministic fresh delivery
 request from the prior request id and next retry count, copies the bounded
 recovery ledger into it, and removes the superseded terminal queue receipt.
+The stored `failure_origin` remains the original markerless lookup key when a
+replacement ends with a bookkeeping loss; its attempt retains the typed loss
+reason. Terminalization cannot rewrite that key and bypass paced rearming.
 The attempt proof remains immutable. This preserves ordinary request
 idempotency—replaying one request still returns its first receipt—while an
 authorized cooled retry can launch a new worker for the unchanged controller

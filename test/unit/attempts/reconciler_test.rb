@@ -927,8 +927,8 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
-  def test_orphan_worker_custody_blocks_loss_until_absence_or_termination
-    [ :unverifiable, :absent, :matching ].each do |worker_status|
+  def test_orphan_worker_custody_retains_only_live_or_unverifiable_workers
+    [ :unverifiable, :absent, :matching, :mismatched ].each do |worker_status|
       with_store do |store|
         running = running_attempt(store, stale_sec: 30)
         worker = OWNER.merge("pid" => 456, "start_fingerprint" => "worker", "process_group_id" => 456)
@@ -943,6 +943,54 @@ class AttemptsReconcilerTest < Minitest::Test
           .reconcile(now: NOW + 3).attempts.first
         assert_equal worker_status == :unverifiable ? :suspect : :lost, result.classification
         assert_equal worker_status == :matching ? [ worker ] : [], terminated
+      end
+    end
+  end
+
+  def test_worker_identity_mismatch_releases_capacity_and_replays_pending_completion
+    [ :mismatched, :identity_mismatch, :identity_changed ].each do |custody|
+      [ false, true ].each do |pending_completion|
+        with_store do |store|
+          running = running_attempt(store, stale_sec: 30)
+          worker = OWNER.merge("pid" => 456, "start_fingerprint" => "worker", "process_group_id" => 456)
+          running = store.checkpoint(running, checkpoint: running.checkpoint, worker: worker, now: NOW + 2)
+          receipt = prepare_pending_completion(store, running) if pending_completion
+          identity = InterruptionIdentity.new(:missing, custody == :mismatched ? custody : :matching)
+          identity.define_singleton_method(:terminate_orphan_group) { |**| custody }
+
+          snapshot = Hive::Attempts::Reconciler.new(store: store, process_identity: identity)
+            .reconcile(now: NOW + 100_000)
+          result = snapshot.attempts.first
+          assert_equal pending_completion ? :terminal : :lost, result.classification, custody.to_s
+          assert_equal custody.to_s, result.evidence.fetch("worker_group")
+          assert_equal 0, snapshot.capacity.global_count
+          refute snapshot.capacity.task_reserved?(project: "demo", task_slug: "durable-task")
+          if pending_completion
+            assert_equal receipt, result.attempt.receipt
+            assert_equal "replayed", result.evidence.fetch("pending_bookkeeping")
+          else
+            assert_equal "owner_gone", result.attempt["loss"].fetch("reason")
+          end
+        end
+      end
+    end
+  end
+
+  def test_worker_termination_that_cannot_prove_disposition_retains_capacity
+    [ :matching, :still_alive, :unverifiable ].each do |custody|
+      with_store do |store|
+        running = running_attempt(store, stale_sec: 30)
+        worker = OWNER.merge("pid" => 456, "start_fingerprint" => "worker", "process_group_id" => 456)
+        running = store.checkpoint(running, checkpoint: running.checkpoint, worker: worker, now: NOW + 2)
+        prepare_pending_completion(store, running)
+        identity = InterruptionIdentity.new(:missing, :matching)
+        identity.define_singleton_method(:terminate_orphan_group) { |**| custody }
+
+        snapshot = Hive::Attempts::Reconciler.new(store: store, process_identity: identity)
+          .reconcile(now: NOW + 100_000)
+        assert_equal :suspect, snapshot.attempts.first.classification, custody.to_s
+        assert_equal "running", snapshot.attempts.first.attempt.state
+        assert_equal 1, snapshot.capacity.global_count
       end
     end
   end

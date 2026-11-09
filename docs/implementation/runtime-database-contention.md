@@ -87,7 +87,10 @@ Review-pass implementation based on `3335aef8d0` adds the default
 `test/unit/runtime_database_contention_invariants_test.rb` and the named
 `bundle exec rake test:runtime_database_contention` gate. CI runs the gate
 separately and retains `tmp/runtime-database-contention-evidence.json`.
-The final gate passed locally: three tests, 113 assertions. Its ten held-lock cases
+The November 8 capture reported three tests, 113 assertions. That fixture did
+not establish detached supervisor sessions, so its restart-replay claim depended
+on the caller's session layout; the November 9 qualification below supersedes
+that claim. Its ten held-lock cases
 run one daemon publisher/reconciler and four actual supervisors through claim,
 first heartbeat, worker registration, heartbeat and terminal publication.
 A barrier places the SQLite writer hold at the selected operation. Each
@@ -154,3 +157,29 @@ With the broad workers stopped and the checkout quiet, the unmodified public-
 help snapshot test passes in isolation: two tests / 52 assertions. This
 confirms the snapshot failure depends on concurrent checkout activity; it does
 not erase the failed broad checkpoint or the OpenCode procfs errors.
+
+
+## Review-pass recovery qualification, November 9
+
+The forked qualification supervisors now call `Process.setsid`, matching
+`DetachedLauncher`. Before replay, the exhaustion fixture verifies that each
+wrapper is its session leader, its worker shares that session, and the recorded
+worker group is absent. The named gate now passes from an ordinary shell:
+11 tests / 349 assertions, including all held-lock operations, four successful
+terminal replays and one invocation per started worker.
+
+With the wrapper gone or mismatched, worker identity mismatch permits pending
+completion replay or loss instead of reserving capacity forever. The same rule
+applies to lost-outcome cleanup. Permission-denied termination and custody that
+becomes unverifiable during cleanup report `still_alive`, retaining the live
+or unresolved worker fence. Bookkeeping losses publish `AgentHealthy` as
+`unsatisfied` with the typed reason. Markerless recovery preserves its original
+failure-origin lookup key through terminalization and rearms at retry count two
+without a duplicate request-id conflict.
+
+Nine focused test files pass: 255 tests / 1514 assertions, covering reconciliation,
+process identity, loss cleanup, pending bookkeeping, finalization, condition
+observation, recovery coordination, stale healing and contention invariants.
+All eleven changed Ruby files pass RuboCop. The earlier broad-suite failures and
+historical incident qualification limits above remain open; this fix pass did
+not rerun the full suite or coverage.

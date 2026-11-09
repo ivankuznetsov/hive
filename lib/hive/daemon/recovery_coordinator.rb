@@ -1176,8 +1176,12 @@ module Hive
         if terminal
           changes["terminal_outcome"] = outcome
           changes["terminal_at"] = now.utc.iso8601(6)
-          if (reason = terminal_bookkeeping_reason(current, attempt_id))
-            changes["failure_origin"] = reason
+          # Markerless recovery uses the original failure origin as its lookup
+          # key, including after terminalization and before paced rearming.
+          unless markerless_failure_recovery?(recovery)
+            if (reason = terminal_bookkeeping_reason(current, attempt_id))
+              changes["failure_origin"] = reason
+            end
           end
         end
         transitioned = request_queue.update_recovery!(

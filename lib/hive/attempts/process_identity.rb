@@ -83,6 +83,7 @@ module Hive
       def terminate_orphan_group(wrapper:, worker:, grace_sec: 2)
         state = orphan_group_status(wrapper: wrapper, worker: worker)
         return :absent if state == :absent
+        return :still_alive if state == :unverifiable
         return :identity_mismatch unless state == :matching
 
         pgid = worker["process_group_id"] || worker[:process_group_id]
@@ -91,6 +92,7 @@ module Hive
         loop do
           state = orphan_group_status(wrapper: wrapper, worker: worker)
           return :terminated if state == :absent
+          return :still_alive if state == :unverifiable
           return :identity_changed unless state == :matching
           now = @monotonic.call
           break if now >= deadline
@@ -98,12 +100,15 @@ module Hive
           @sleeper.call([ 0.05, [ deadline - now, 0.0 ].max ].min)
         end
 
-        return :identity_changed unless orphan_group_status(wrapper: wrapper, worker: worker) == :matching
+        state = orphan_group_status(wrapper: wrapper, worker: worker)
+        return :still_alive if state == :unverifiable
+        return :identity_changed unless state == :matching
 
         @signaler.call("KILL", -Integer(pgid))
         20.times do
           state = orphan_group_status(wrapper: wrapper, worker: worker)
           return :terminated if state == :absent
+          return :still_alive if state == :unverifiable
           return :identity_changed unless state == :matching
 
           @sleeper.call(0.01)
@@ -111,7 +116,9 @@ module Hive
         :still_alive
       rescue Errno::ESRCH
         :terminated
-      rescue Errno::EPERM, ArgumentError, TypeError
+      rescue Errno::EPERM
+        :still_alive
+      rescue ArgumentError, TypeError
         :identity_mismatch
       end
 

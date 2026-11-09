@@ -312,7 +312,11 @@ module Hive
           else
             resolve_worker_custody(current)
           end
-          if custody == :matching || (!bounded_unverifiable && !%i[absent terminated no_worker].include?(custody))
+          # A mismatched identity cannot establish custody of this attempt's
+          # worker. Keep live or unresolved custody fenced, but allow completion
+          # replay or loss when the recorded identity no longer matches.
+          released = %i[absent terminated no_worker mismatched identity_mismatch identity_changed].include?(custody)
+          if custody == :matching || (!bounded_unverifiable && !released)
             return reconciled(current, :suspect, owner_status, { "worker_group" => custody.to_s })
           end
           diagnostics = diagnostics.merge("worker_group" => custody.to_s)

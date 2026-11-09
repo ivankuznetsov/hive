@@ -60,7 +60,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        identity = FakeIdentity.new(:identity_mismatch, [])
+        identity = FakeIdentity.new(:still_alive, [])
         processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: store, outcome_store: outcomes, process_identity: identity,
           task_resolver: ->(_attempt) { task }
@@ -87,6 +87,28 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert_equal "pending", still_pending.fetch("phase")
         assert_equal "ready", ready.fetch("phase")
         assert_equal 2, identity.calls.size
+      end
+    end
+  end
+
+  def test_mismatched_worker_identity_allows_loss_recovery
+    %i[identity_mismatch identity_changed].each do |cleanup|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
+        lost = lost_attempt(store)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        identity = FakeIdentity.new(cleanup, [])
+        processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: store, outcome_store: outcomes, process_identity: identity,
+          task_resolver: ->(_attempt) { nil }
+        )
+
+        ready = processor.process(lost, now: NOW + 3)
+        assert_equal "ready", ready.fetch("phase")
+        assert_equal cleanup.to_s, ready.fetch("cleanup")
+        assert_equal outcomes.recovery_request_id(lost), ready.fetch("request_id")
+        assert_equal ready, processor.process(lost, now: NOW + 4)
+        assert_equal 1, identity.calls.size
       end
     end
   end

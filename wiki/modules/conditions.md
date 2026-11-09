@@ -3,7 +3,7 @@ title: Generation-scoped task conditions
 type: module
 source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/task_projection/reader.rb
 created: 2026-07-17
-updated: 2026-09-01
+updated: 2026-11-09
 tags: [conditions, projection, journal, execute, migration, bounded-storage]
 ---
 
@@ -82,7 +82,10 @@ then exact commit generation for branch facts. Current `AgentHealthy` also
 reconciles terminal/lost SQLite attempt state before its journal observation is
 appended. Successful terminal attempts satisfy the condition; ordinary
 failed/cancelled/lost attempts fail closed. Exit 75 remains pending because it
-is scheduler contention rather than an agent verdict.
+is scheduler contention rather than an agent verdict. Bookkeeping loss reasons
+annotate the observation without changing its state: `runtime_bookkeeping_busy`
+and `first_heartbeat_owner_unverifiable_ceiling` losses remain `unsatisfied`,
+so required health blocks the gate and recovery can proceed.
 Displaced facts stay in history. Required conditions pass only when satisfied.
 `AwaitingHuman=satisfied` blocks its named transition; an answered or
 superseding observation removes it from current gates.

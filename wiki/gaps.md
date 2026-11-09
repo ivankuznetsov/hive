@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -2111,6 +2111,12 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+- The November 8 contention fixture did not create detached supervisor sessions,
+  so its terminal-replay claim depended on the caller's session layout. The
+  November 9 review fix mirrors production `setsid` and asserts wrapper/worker
+  session custody and group absence before restart replay. Local qualification
+  does not replace the hosted merge gate or the historical incident proof below.
 
 - Runtime contention qualification has not reproduced the historical long
   publisher hold. Initial measurements retain one residual manual hold over

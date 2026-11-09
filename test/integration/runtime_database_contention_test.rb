@@ -457,6 +457,7 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
     daemon = fork { daemon_workload(root, path, daemon_stop) }
     children = Array.new(4) do |index|
       fork do
+        Process.setsid
         ready_read.close
         go_write.close
         measurements = []
@@ -535,6 +536,13 @@ class RuntimeAttemptBookkeepingContentionTest < Minitest::Test
     # success must win before any missing-owner loss or replacement admission.
     restarted = Hive::Attempts::Repository.new(root: root)
     if operation == :terminalize && exhaust
+      identity = Hive::Attempts::ProcessIdentity.new
+      4.times do |index|
+        record = restarted.fetch(index.to_s)
+        assert_equal record.wrapper.fetch("pid"), record.wrapper.fetch("session_id")
+        assert_equal record.wrapper.fetch("session_id"), record.worker.fetch("session_id")
+        assert_equal :absent, identity.orphan_group_status(wrapper: record.wrapper, worker: record.worker)
+      end
       Hive::Attempts::Reconciler.new(store: restarted).reconcile
       Hive::Attempts::Reconciler.new(store: restarted).reconcile
     end

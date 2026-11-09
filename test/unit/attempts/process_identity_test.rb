@@ -86,7 +86,7 @@ class AttemptsProcessIdentityTest < Minitest::Test
     worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
 
     assert_equal :unverifiable, verifier.orphan_group_status(wrapper: wrapper, worker: worker)
-    assert_equal :identity_mismatch,
+    assert_equal :still_alive,
                  verifier.terminate_orphan_group(wrapper: wrapper, worker: worker)
     assert_includes probes, [ 0, -456 ]
     refute probes.any? { |signal, _pid| %w[TERM KILL].include?(signal) }
@@ -168,6 +168,25 @@ class AttemptsProcessIdentityTest < Minitest::Test
                  persistent.terminate_orphan_group(wrapper: wrapper, worker: worker, grace_sec: 0)
   end
 
+  def test_unverifiable_custody_during_termination_never_becomes_an_identity_mismatch
+    (0..3).each do |matching_checks|
+      signals = []
+      states = [ *Array.new(matching_checks, :matching), :unverifiable ]
+      verifier = Hive::Attempts::ProcessIdentity.new(
+        signaler: ->(signal, _pid) { signals << signal },
+        sleeper: ->(_seconds) { }, monotonic: -> { 1 }
+      )
+      verifier.define_singleton_method(:orphan_group_status) { |**| states.shift || :unverifiable }
+      wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+      worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
+
+      assert_equal :still_alive,
+                   verifier.terminate_orphan_group(wrapper: wrapper, worker: worker, grace_sec: 0)
+      expected = matching_checks.zero? ? [] : matching_checks < 3 ? [ "TERM" ] : %w[TERM KILL]
+      assert_equal expected, signals
+    end
+  end
+
   def test_default_timing_hooks_and_status_argument_error_paths
     verifier = Hive::Attempts::ProcessIdentity.new
     verifier.instance_variable_get(:@sleeper).call(0)
@@ -201,7 +220,7 @@ class AttemptsProcessIdentityTest < Minitest::Test
       signaler: ->(signal, _pid) { raise Errno::EPERM if signal == "TERM" },
       session_reader: ->(_pid) { 10 }, group_reader: ->(_pid) { 456 }
     )
-    assert_equal :identity_mismatch, denied.terminate_orphan_group(wrapper: wrapper, worker: worker)
+    assert_equal :still_alive, denied.terminate_orphan_group(wrapper: wrapper, worker: worker)
   end
 
   def test_process_group_presence_handles_permission_and_probe_errors

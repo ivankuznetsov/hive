@@ -335,6 +335,23 @@ class ProposalCommandTest < Minitest::Test
       assert_empty payload.fetch("proposals")
       assert_equal [ "source_index_quarantined" ],
                    payload.fetch("diagnostics").map { |item| item.fetch("code") }
+
+      original_binread = File.method(:binread)
+      replacement = lambda do |candidate, *arguments|
+        raise Errno::ENOENT if candidate == path
+
+        original_binread.call(candidate, *arguments)
+      end
+      raced_output = StringIO.new
+      with_replaced_singleton_method(File, :binread, replacement) do
+        Hive::Commands::Proposal.new(
+          "list", dir, input: nil, json: true, stdout: raced_output,
+          project_root: dir, include_quarantine: true
+        ).call
+      end
+      raced_diagnostic = JSON.parse(raced_output.string).fetch("diagnostics").first
+      assert_equal Digest::SHA256.hexdigest(""), raced_diagnostic.fetch("sha256")
+      assert_equal 0, raced_diagnostic.fetch("bytes")
     end
   end
 

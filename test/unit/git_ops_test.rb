@@ -469,6 +469,36 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_skips_when_a_selected_index_entry_vanishes_before_commit
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      task_path = "stages/1-inbox/raced-task"
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, task_path))
+      File.write(File.join(ops.hive_state_path, task_path, "idea.md"), "raced\n")
+      head_before = ops.hive_state_head_sha
+      original_capture3 = Open3.method(:capture3)
+      reset = false
+      replacement = lambda do |*arguments|
+        if arguments.include?("--quiet") && arguments.include?("--cached") && !reset
+          reset = true
+          original_capture3.call(
+            "git", "-C", ops.hive_state_path, "reset", "-q", "HEAD", "--", task_path
+          )
+        end
+        original_capture3.call(*arguments)
+      end
+
+      result = with_replaced_singleton_method(Open3, :capture3, replacement) do
+        ops.hive_commit(stage_name: "1-inbox", slug: "raced-task", action: "captured")
+      end
+
+      assert reset, "the test must remove the selected entry at the pre-commit diff boundary"
+      assert_equal :nothing_to_commit, result
+      assert_equal head_before, ops.hive_state_head_sha
+    end
+  end
+
   def test_hive_commit_allow_empty_ignores_unknown_paths_and_preserves_unrelated_staging
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

@@ -39,7 +39,10 @@ state, not the potentially lagging wiki branch. On a pre-feature project they
 return an empty result without creating `proposals/v1` or scanning historical
 task journals; only a newly admitted typed source event initializes the ledger.
 `--include-quarantine` also exposes safe terminal diagnostics for source receipts
-that could not be admitted into canonical history.
+that could not be admitted into canonical history. If reconciliation encounters
+a quarantined source index, read commands retain discovery and emit a bounded
+content-digest diagnostic even when the index disappears during that diagnostic
+read.
 
 JSON discovery uses `hive-proposal-list.v1` and `hive-proposal-show.v1`.
 Terminal rendering escapes control syntax; JSON and Markdown use their own

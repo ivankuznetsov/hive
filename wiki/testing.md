@@ -1641,7 +1641,10 @@ Proposal coverage proceeds from independently validated immutable files through
 the production task-bound transaction and outward consumers. Focused unit tests
 under `test/unit/proposals/` own schemas, redaction/classification, per-file
 quarantine, replay, quotas, historical evaluator admission, lifecycle CAS,
-lineage, context budgets, and deterministic compilation. CLI, attempt,
+lineage, context budgets, and deterministic compilation. Proposal command
+coverage also preloads the sibling digest command before exercising quarantined
+source-index diagnostics, pinning top-level digest resolution and the
+disappearing-index fallback. CLI, attempt,
 activity, GitOps, schema, and llm-wiki tests own the surrounding boundaries.
 
 `test/integration/proposal_tracking_test.rb` drives the curated lifecycle using

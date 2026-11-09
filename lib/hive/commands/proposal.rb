@@ -279,7 +279,7 @@ module Hive
             end
             diagnostics << Hive::Proposals::Diagnostic.new(
               code: "source_index_quarantined", path: logical,
-              sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize,
+              sha256: ::Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize,
               proposal_id: nil
             )
           end

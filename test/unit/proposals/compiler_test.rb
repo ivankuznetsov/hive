@@ -146,6 +146,24 @@ class ProposalCompilerTest < Minitest::Test
     end
   end
 
+  def test_pinned_compilation_rejects_a_tree_above_the_path_limit
+    with_tmp_dir do |dir|
+      entry = "100644 blob #{'b' * 40}\tproposals/v1/records/record.json"
+      output = Array.new(Hive::Proposals::Store::MAX_TREE_PATHS + 1, entry).join("\0")
+      git_ops = Object.new
+      git_ops.define_singleton_method(:hive_state_path) { dir }
+      git_ops.define_singleton_method(:run_git!) { |*_arguments| output }
+      source = Hive::Proposals::Compiler::PinnedSource.new(
+        git_ops:, source_ref: "HEAD"
+      )
+
+      error = assert_raises(Hive::Proposals::QuotaExceeded) do
+        source.send(:materialize, File.join(dir, "materialized"), "a" * 40)
+      end
+      assert_equal "proposal pinned tree has too many paths", error.message
+    end
+  end
+
   def test_compilation_exposes_terminal_source_quarantine_diagnostics
     path = File.join(
       @store.root, "inbox", "quarantine", "pse-#{'f' * 64}.json"

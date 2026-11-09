@@ -35,6 +35,18 @@ class ProposalStoreTest < Minitest::Test
     assert_equal first.to_h, @store.fetch_record(first.proposal_id).to_h
   end
 
+  def test_existing_record_paths_are_idempotent_and_immutable
+    proposal = @store.create_record!(**record_attributes)
+
+    assert_equal proposal, @store.send(:write_record_unlocked!, proposal)
+    changed = Hive::Proposals::Record.new(
+      proposal.to_h.merge("motivation" => "changed")
+    )
+    assert_raises(Hive::Proposals::Conflict) do
+      @store.send(:write_record_unlocked!, changed)
+    end
+  end
+
   def test_unicode_canonical_records_and_events_round_trip
     proposal = @store.create_record!(**record_attributes.merge(motivation: "Café — déjà vu"))
     event = @store.append_event!(
@@ -219,6 +231,36 @@ class ProposalStoreTest < Minitest::Test
     assert_equal [ dependent, invalid_predecessor ],
                  snapshot.diagnostics.select { |item| item.code == "dangling_or_mismatched_retry" }
                    .map(&:proposal_id).sort
+  end
+
+  def test_replay_invalidates_a_supersession_dependent_of_an_invalid_successor
+    predecessor = "prp-00000000-0000-4000-8000-000000000051"
+    successor = "prp-00000000-0000-4000-8000-000000000052"
+    missing = "prp-00000000-0000-4000-8000-000000000099"
+    create_record(predecessor, source: "1")
+    successor_record = Hive::Proposals::Record.build(
+      proposal_id: successor,
+      **record_attributes.merge(
+        source_event_id: source_id("2"),
+        lineage: { "retries" => missing, "requested_supersedes" => predecessor }
+      )
+    )
+    @store.send(:write_record_unlocked!, successor_record)
+    @store.append_event!(
+      proposal_id: predecessor, type: "supersession", source_event_id: source_id("3"),
+      provenance: provenance, occurred_at: "2026-08-30T12:01:00Z",
+      data: {
+        "successor_id" => successor, "authority" => authority,
+        "observed_head" => { "version" => 0, "digest" => "d" * 64 }
+      }
+    )
+
+    snapshot = @store.load
+
+    assert_empty snapshot.projections
+    diagnostics = snapshot.diagnostics.to_h { |item| [ item.proposal_id, item.code ] }
+    assert_equal "dangling_or_mismatched_retry", diagnostics.fetch(successor)
+    assert_equal "dangling_or_mismatched_supersession", diagnostics.fetch(predecessor)
   end
 
   def test_changed_source_event_payload_conflicts_without_appending
@@ -493,6 +535,22 @@ class ProposalStoreTest < Minitest::Test
     assert_equal "", with_replaced_singleton_method(File, :binread, replacement) {
       @store.send(:bounded_file_digest_input, path)
     }
+  end
+
+  def test_tree_path_limit_tolerates_a_path_removed_during_the_walk
+    path = File.join(@store.records_root, "vanished.json")
+    FileUtils.mkdir_p(File.dirname(path))
+    File.write(path, "{}")
+    original_lstat = File.method(:lstat)
+    replacement = lambda do |candidate|
+      raise Errno::ENOENT if candidate == path
+
+      original_lstat.call(candidate)
+    end
+
+    with_replaced_singleton_method(File, :lstat, replacement) do
+      @store.send(:enforce_tree_path_limit!)
+    end
   end
 
   def test_directory_and_lock_safety_helpers_fail_closed

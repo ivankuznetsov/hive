@@ -130,6 +130,16 @@ class ProposalSourceEventTest < Minitest::Test
       )
     end
 
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.evaluation(
+        source_event_id: source_id("c"), proposal_id: proposal_id,
+        proposal_binding: proposal_binding, task_binding: task_binding,
+        method: method_fact, result: result_fact, rationale: "pass", evidence: [],
+        links: [ { "kind" => "task\nlink", "reference" => "https://example.test/task" } ],
+        created_at: "2026-08-30T12:00:00Z"
+      )
+    end
+
     persisted = submission_event.to_h
     persisted.fetch("actor")["id"] = "alice\nadmin"
     assert_raises(Hive::Proposals::InvalidRecord) do

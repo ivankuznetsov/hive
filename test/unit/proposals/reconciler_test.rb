@@ -123,6 +123,34 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
+  def test_failed_quarantine_restore_reports_both_failures
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      event = submission
+      source_store.admit!(event)
+      snapshot = Object.new
+      snapshot.define_singleton_method(:restore!) { raise IOError, "simulated restore failure" }
+      ops.define_singleton_method(:hive_commit) do |**_options|
+        raise Hive::GitError, "simulated quarantine commit failure"
+      end
+
+      replacement = ->(*_arguments) { snapshot }
+      error = with_replaced_singleton_method(
+        Hive::Proposals::Ingestor::PathSnapshot, :capture, replacement
+      ) do
+        assert_raises(Hive::Proposals::SourceUnavailable) do
+          reconciler(ops, source_store, store).send(
+            :quarantine_source!, event.source_event_id,
+            Hive::Proposals::InvalidRecord.new("bad receipt")
+          )
+        end
+      end
+
+      assert_includes error.message, "Hive::GitError"
+      assert_includes error.message, "IOError"
+    end
+  end
+
   def test_failed_quarantine_commit_does_not_report_false_convergence
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)

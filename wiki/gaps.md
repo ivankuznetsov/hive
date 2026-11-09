@@ -3,9 +3,35 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Authenticated release downloads (2026-11-09)
+
+- Not verified: whether an authenticated `github.com/.../releases/download/...`
+  request is exempt from GitHub's anonymous-traffic throttling. The 302 is
+  served by `github.com` (where the token is sent); the asset itself is served
+  by `release-assets.githubusercontent.com`, which never receives the token, so
+  auth may only help the first hop. The bounded curl retry is the part that
+  covers the CDN hop.
+- The install CI cosign download is now authenticated (`gh release download`
+  through the API asset endpoint with the job token, 5 attempts, pinned
+  SHA-256), via `.github/actions/install-cosign`. Still open:
+  - The checksum digests are trusted from the upstream release's unsigned
+    `cosign_checksums.txt`. They are cross-checked only against the identical
+    digests that cosign-installer v3 hardcoded. They are not verified with
+    sigstore's signature.
+  - The action supports Linux X64/ARM64 only. macOS jobs don't use it.
+  - Moving to a newer cosign means updating the version and both digests by
+    hand.
+  - Even an authenticated API asset download redirects to the release-asset
+    CDN, so a CDN-side outage longer than the ~75s of backoff still fails.
+- `release.yml` still pins cosign-installer v3.10.1 for signing, so its
+  bootstrap download is still anonymous. It was not changed.
+- The token is attached only when `curl --version` reports >= 7.83. Distro
+  curls that backport the redirect fixes without bumping the version stay
+  anonymous. Curl builds that report a version they do not have are trusted.
 
 ## Attempt memory cap (2026-11-08)
 

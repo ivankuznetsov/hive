@@ -47,6 +47,15 @@ QMD env knobs:
                         and \`hive doctor\`; points at an executable
                         \`qmd\` when PATH or the managed install path is
                         not enough.
+
+GitHub download knobs:
+  GITHUB_TOKEN / GH_TOKEN
+                        Optional. When set, the installer authenticates its
+                        requests to github.com and api.github.com (never to
+                        the redirected asset host) so CI runners and heavy
+                        users avoid anonymous rate limits. A token GitHub
+                        rejects falls back to an anonymous request. The
+                        token is never printed.
 USAGE
 }
 
@@ -147,14 +156,76 @@ detect_platform() {
   esac
 }
 
+# Bounded retry for transient GitHub failures. curl treats HTTP 408/429/5xx
+# and timeouts as transient for --retry even without --fail, so a short 504
+# window (anonymous-traffic throttling) is ridden out. Only options from curl
+# 7.12+ are used so older distro curls keep working.
+CURL_RETRY_ARGS=(--retry 4 --retry-delay 5 --retry-max-time 60)
+
+# Optional GitHub credential, matching packaging/betterleaks.rb: GITHUB_TOKEN
+# first, then GH_TOKEN. Tokens with whitespace/control characters are ignored
+# (they could inject extra headers). The value is never logged.
+GITHUB_AUTH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+if [[ -n "$GITHUB_AUTH_TOKEN" && "$GITHUB_AUTH_TOKEN" =~ [[:space:][:cntrl:]] ]]; then
+  printf 'hive install: ignoring malformed GitHub token; downloading anonymously\n' >&2
+  GITHUB_AUTH_TOKEN=""
+fi
+
+# curl stopped forwarding a custom Authorization header to a different host on
+# redirect in 7.58.0, and to a different port/scheme in 7.83.0. Only attach a
+# token when the local curl has both protections; older curls download
+# anonymously, exactly as before.
+curl_auth_redirect_safe() {
+  local version major minor
+  version="$(curl --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+  major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 7 || (major == 7 && minor >= 83) ))
+}
+
+# True when $1 should carry the GitHub token: a token is configured, the URL
+# is https on github.com or api.github.com exactly, and curl drops the header
+# on cross-origin redirects (release assets redirect to
+# release-assets.githubusercontent.com, which must never see the token).
+github_auth_applies() {
+  [[ -n "$GITHUB_AUTH_TOKEN" ]] || return 1
+  case "$1" in
+    https://github.com/*|https://api.github.com/*) ;;
+    *) return 1 ;;
+  esac
+  curl_auth_redirect_safe
+}
+
+# curl with bounded retries and optional GitHub auth. The URL must be the last
+# argument. The Authorization header is fed through a process-substitution
+# file (printf is a builtin) so the token never appears in argv / ps output.
+# Set GITHUB_CURL_ANONYMOUS=1 to force an unauthenticated request.
+github_curl() {
+  local url="${!#}"
+  if [[ "${GITHUB_CURL_ANONYMOUS:-0}" != 1 ]] && github_auth_applies "$url"; then
+    curl "${CURL_RETRY_ARGS[@]}" --proto-redir =https \
+      -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_AUTH_TOKEN") "$@"
+  else
+    curl "${CURL_RETRY_ARGS[@]}" "$@"
+  fi
+}
+
 latest_version() {
   local api body tag http_code response rc
   api="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
   # `set -e` short-circuits command substitutions on non-zero exit, so
   # capture under `|| true` and recover the real exit via PIPESTATUS.
-  response="$(curl -sS -L -w '\n%{http_code}' "$api" 2>/dev/null)" || rc=$?
+  response="$(github_curl -sS -L -w '\n%{http_code}' "$api" 2>/dev/null)" || rc=$?
   rc="${rc:-0}"
   http_code="${response##*$'\n'}"
+  if [[ "$http_code" == 401 || "$http_code" == 403 ]] && github_auth_applies "$api"; then
+    warn "GitHub rejected the configured token (HTTP ${http_code}); retrying anonymously"
+    rc=0
+    response="$(GITHUB_CURL_ANONYMOUS=1 github_curl -sS -L -w '\n%{http_code}' "$api" 2>/dev/null)" || rc=$?
+    http_code="${response##*$'\n'}"
+  fi
   body="${response%$'\n'*}"
   if [[ "$rc" -ne 0 || "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
     case "$http_code" in
@@ -176,8 +247,13 @@ latest_version() {
 # the user-visible error.
 download_with_status() {
   local url="$1" out_path="$2" what="${3:-resource}" http_code rc
-  http_code="$(curl -sS -L -o "$out_path" -w '%{http_code}' "$url" 2>/dev/null)" || rc=$?
+  http_code="$(github_curl -sS -L -o "$out_path" -w '%{http_code}' "$url" 2>/dev/null)" || rc=$?
   rc="${rc:-0}"
+  if [[ "$http_code" == 401 || "$http_code" == 403 ]] && github_auth_applies "$url"; then
+    warn "GitHub rejected the configured token for ${what} (HTTP ${http_code}); retrying anonymously"
+    rc=0
+    http_code="$(GITHUB_CURL_ANONYMOUS=1 github_curl -sS -L -o "$out_path" -w '%{http_code}' "$url" 2>/dev/null)" || rc=$?
+  fi
   if [[ "$rc" -ne 0 || "$http_code" -lt 200 || "$http_code" -ge 300 ]]; then
     case "$http_code" in
       403) die "could not fetch ${what} from ${url} (HTTP 403 — likely rate limit / forbidden); retry later or set HIVE_VERSION=vX.Y.Z" ;;

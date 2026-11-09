@@ -2434,6 +2434,7 @@ module Hive
             Hive::Markers.set(
               task.state_file, :review_error,
               phase: :ci, gate: gate, reason: "limits_reached", pass: pass,
+              limit_source: CiFix.hosted_limit?(ci_result.error_message) ? "hosted_ci" : "agent",
               message: gate == "local" ?
                 "ci hit a usage/credit limit" : "#{gate} CI hit a usage/credit limit",
               retry_after: Hive::AgentLimit.retry_after(

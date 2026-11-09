@@ -34,6 +34,13 @@ module Hive
       # tooling.
       module CiFix
         Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text)
+        # Agent label on hosted-check limit errors; distinguishes a hosted CI
+        # account wall from the CI-fix agent's own provider limit.
+        HOSTED_CI_LIMIT_AGENT = "hosted-ci".freeze
+
+        def self.hosted_limit?(error_message)
+          error_message.to_s.start_with?(Hive::AgentLimit.error_message("", agent: HOSTED_CI_LIMIT_AGENT))
+        end
 
         # ANSI escape sequence regex — matches CSI sequences (ESC [ ... letter)
         # which cover colors, cursor movement, text styling. Some CI
@@ -139,7 +146,7 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: Hive::AgentLimit.error_message(output, agent: "hosted-ci"),
+                error_message: Hive::AgentLimit.error_message(output, agent: HOSTED_CI_LIMIT_AGENT),
                 limit_text: output
               )
             end

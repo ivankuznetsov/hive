@@ -3,6 +3,7 @@ require "hive/rebase"
 require "hive/agent_profiles"
 require "fileutils"
 require "yaml"
+require "json"
 
 # Unit tests for Hive::Rebase. The orchestration is exercised against
 # a stubbed Hive::GitOps and a stubbed Hive::Stages::Base.spawn_agent
@@ -1485,5 +1486,183 @@ class HiveRebaseTest < Minitest::Test
     yield
   ensure
     Hive::Stages::Base.singleton_class.define_method(:stage_profile, original)
+  end
+
+  # ---- review.limit_fallback for the conflict-resolution agent ----
+
+  ReviewTask = Struct.new(:worktree_path, :folder, :log_dir, :state_file, :stage_name, :workflow)
+
+  REBASE_LIMIT_TEXT = "You've hit your usage limit. Upgrade to Pro or try again at Nov 11th, 2026 10:25 AM.".freeze
+  REBASE_LIMIT_MESSAGE = "limits reached for codex: #{REBASE_LIMIT_TEXT}".freeze
+
+  def make_review_task(worktree:, folder:, stage_name: "review")
+    ReviewTask.new(worktree, folder, File.join(folder, "logs"), File.join(folder, "task.md"),
+                   stage_name, Hive::Workflows::Registry.default)
+  end
+
+  def limit_fallback_cfg(enabled: true)
+    base_cfg(
+      "execute" => { "agent" => "codex" },
+      "rebase" => { "enabled" => true, "conflict_resolution_timeout_sec" => 60,
+                    "model" => "gpt-5.6-sol" },
+      "review" => {
+        "limit_fallback" => { "enabled" => enabled, "min_wait_sec" => 3600, "agents" => { "codex" => "claude" } }
+      }
+    )
+  end
+
+  def conflicted_git(worktree, unmerged: [ [ "a.txt" ], [] ])
+    File.write(File.join(worktree, "a.txt"), "resolved\n")
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 2
+    git.rebase_onto_outcome = :conflict
+    git.unmerged_files_sequence = unmerged
+    git.rebase_continue_outcomes = [ :ok ]
+    git
+  end
+
+  # Runs Rebase.perform with spawn_agent answering `responses` in order;
+  # returns [result, recorded spawn kwargs, stderr].
+  def perform_with_spawns(task, cfg, git, responses)
+    spawns = []
+    result = nil
+    original = Hive::Stages::Base.singleton_class.instance_method(:spawn_agent)
+    Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+      spawns << kwargs
+      responses.shift
+    end
+    _out, err = capture_io do
+      stub_gitops!(git) { result = Hive::Rebase.perform(task, cfg) }
+    end
+    [ result, spawns, err ]
+  ensure
+    Hive::Stages::Base.singleton_class.define_method(:spawn_agent, original)
+  end
+
+  def limited_spawn
+    { status: :error, error_message: REBASE_LIMIT_MESSAGE, limit_text: REBASE_LIMIT_TEXT }
+  end
+
+  def fallback_receipts(folder, pass: 1)
+    path = File.join(folder, "reviews", "limit-fallback-#{format('%02d', pass)}.jsonl")
+    File.readlines(path).map { |line| JSON.parse(line) }
+  end
+
+  def test_review_stage_conflict_agent_limit_retries_once_on_fallback_agent
+    worktree, folder = make_worktree_and_folder
+    task = make_review_task(worktree: worktree, folder: folder)
+    git = conflicted_git(worktree)
+
+    result, spawns, err = perform_with_spawns(task, limit_fallback_cfg, git, [ limited_spawn, { status: :ok } ])
+
+    assert result.succeeded, "a successful substitute must complete the rebase"
+    assert_equal 1, result.agent_resolutions
+    assert_equal [ :codex, :claude ], spawns.map { |kwargs| kwargs.fetch(:profile).name }
+    assert_equal "rebase_conflict", spawns[0].fetch(:log_label)
+    assert spawns[0].key?(:routing_arguments) || spawns[0].key?(:model),
+           "the primary keeps its rebase model pin"
+    assert_equal "rebase_conflict-fallback-claude", spawns[1].fetch(:log_label)
+    refute spawns[1].key?(:routing_arguments), "the substitute runs the fallback profile's default model"
+    refute spawns[1].key?(:model)
+    assert_nil spawns[1][:implementation_stage], "the substitute neither reads nor rewrites an identity pin"
+    assert_equal :exit_code_only, spawns[1].fetch(:status_mode)
+    assert_equal [], spawns[1].fetch(:add_dirs)
+    assert_match(/limit fallback: rebase conflict resolution: codex hit a usage\/credit limit.*fallback claude used/, err)
+    refute_match(/rebase conflict-resolution agent failed/, err)
+
+    receipt = fallback_receipts(folder).last
+    assert_equal "rebase", receipt.fetch("phase")
+    assert_equal "rebase conflict resolution", receipt.fetch("role")
+    assert_equal "codex", receipt.fetch("primary")
+    assert_equal "claude", receipt.fetch("fallback")
+    assert_equal "used", receipt.fetch("outcome")
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_review_stage_conflict_agent_fallback_also_limited_keeps_agent_failed
+    worktree, folder = make_worktree_and_folder
+    task = make_review_task(worktree: worktree, folder: folder)
+    git = conflicted_git(worktree, unmerged: [ [ "a.txt" ] ])
+    fallback_limit = { status: :error, error_message: "limits reached for claude: usage limit reached",
+                       limit_text: "usage limit reached" }
+
+    result, spawns, err = perform_with_spawns(task, limit_fallback_cfg, git, [ limited_spawn, fallback_limit ])
+
+    refute result.succeeded
+    assert_equal :agent_failed, result.reason
+    assert_equal 2, spawns.size
+    assert git.rebase_abort_called
+    assert_match(/rebase conflict-resolution agent failed: limits reached for codex/, err,
+                 "a failed substitute surfaces the primary's limit, as the review roles do")
+    assert_equal "limited", fallback_receipts(folder).last.fetch("outcome")
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_review_stage_conflict_agent_fallback_generic_failure_is_recorded_as_failed
+    worktree, folder = make_worktree_and_folder
+    task = make_review_task(worktree: worktree, folder: folder)
+    git = conflicted_git(worktree, unmerged: [ [ "a.txt" ] ])
+
+    result, _spawns, _err = perform_with_spawns(
+      task, limit_fallback_cfg, git, [ limited_spawn, { status: :error, error_message: "crashed" } ]
+    )
+
+    assert_equal :agent_failed, result.reason
+    receipt = fallback_receipts(folder).last
+    assert_equal "failed", receipt.fetch("outcome")
+    assert_equal "crashed", receipt.fetch("error")
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_review_stage_conflict_agent_limit_without_option_is_unchanged
+    worktree, folder = make_worktree_and_folder
+    task = make_review_task(worktree: worktree, folder: folder)
+    git = conflicted_git(worktree, unmerged: [ [ "a.txt" ] ])
+
+    result, spawns, _err = perform_with_spawns(task, limit_fallback_cfg(enabled: false), git, [ limited_spawn ])
+
+    assert_equal :agent_failed, result.reason
+    assert_equal 1, spawns.size
+    refute File.exist?(File.join(folder, "reviews", "limit-fallback-01.jsonl"))
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  def test_conflict_agent_limit_outside_review_stage_never_falls_back
+    # review.limit_fallback is review config: a rebase ahead of any other
+    # stage (here 4-execute, and the workflow-less task shape) keeps the
+    # fail-soft agent_failed result even when the option is enabled.
+    [ ->(w, f) { make_review_task(worktree: w, folder: f, stage_name: "execute") },
+      ->(w, f) { make_task(worktree: w, folder: f) } ].each do |build|
+      worktree, folder = make_worktree_and_folder
+      begin
+        git = conflicted_git(worktree, unmerged: [ [ "a.txt" ] ])
+        task = build.call(worktree, folder)
+        result, spawns, err = perform_with_spawns(task, limit_fallback_cfg, git, [ limited_spawn ])
+        assert_equal :agent_failed, result.reason, task.stage_name
+        assert_equal 1, spawns.size
+        refute_match(/limit fallback/, err)
+      ensure
+        teardown_dirs(worktree, folder)
+      end
+    end
+  end
+
+  def test_review_stage_receipt_uses_the_upcoming_review_pass
+    worktree, folder = make_worktree_and_folder
+    task = make_review_task(worktree: worktree, folder: folder)
+    FileUtils.mkdir_p(File.join(folder, "reviews"))
+    File.write(File.join(folder, "reviews", "claude-ce-code-review-01.md"), "findings\n")
+    File.write(File.join(folder, "reviews", "escalations-01.md"), "none\n")
+    File.write(File.join(folder, "reviews", "claude-ce-code-review-02.md"), "findings\n")
+
+    # Pass 2 has reviewer output but no triage yet, so the review run this
+    # rebase precedes retries pass 2 and the receipt belongs beside it.
+    assert_equal 2, Hive::Rebase.review_receipt_pass(task)
+  ensure
+    teardown_dirs(worktree, folder)
   end
 end

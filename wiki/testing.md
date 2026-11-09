@@ -65,6 +65,12 @@ custody, and the U15 live runner now composes them into the final passing claim.
 The default local test remains credential-free and skipped; only an explicitly
 authorized run on the unchanged exact head can produce authenticated evidence.
 
+The registered-process quiescence integration test uses a ten-second timeout
+so its 15% finalization reserve allows real SQLite checkpoint and proof I/O on
+shared CI runners. Deadline enforcement remains covered by the controlled-clock
+tests in `test/unit/daemon/quiescence_test.rb` and
+`test/unit/daemon/quiescence_failure_paths_test.rb`.
+
 ## Local feedback loop
 
 The checkout inventory in `remote_access_acceptance_test.rb` runs its Git reads
@@ -849,7 +855,7 @@ cleanup fails, while a cleanup failure still fails an otherwise-green test.
 | `daemon/stale_agent_healer_test.rb` | `Hive::Daemon::StaleAgentHealer` — stale `AGENT_WORKING` healing, wedged `REVIEW_WORKING` lock cleanup, marker-id/live-owner guards, attempt-loss successor release, delegation of cooled durable errors/CI-stale/resolved review-stale observations, and preservation of newer operator escalation edits. |
 | `daemon/{recovery_coordinator,dispatch_request_queue,dispatcher,operational_snapshot}_test.rb`, `recovery_authority_test.rb`, `operational_{action,status}_test.rb`, `commands/act_test.rb` | Universal durable-error recovery — one destructive coordinator for every adapter; retry count derived from durable request history; shared cooldown/safety; strict marker-id, requestor, and canonical task identity validation; active-workflow terminal agent/council retry; restartable admitted/cleared/dispatched/terminal phases; post-clear dispatch-failure pacing; request-lock serialization; one shared queue scan per tick; hourly terminal pruning; terminal replay/retention; no phantom queued state without a canonical request id; max-pass review input enforcement across action, bot, and web; and source guards preventing adapters or attempt-loss processing from owning another marker lifecycle. |
 | `hv_test.rb` | `bin/hv` — refuses unsafe Apache Hive fallback paths (`/usr/bin/hive`, `/opt/hive/bin/hive`), verifies `HIVE_BIN_OVERRIDE` can point at a custom Hive CLI install path, pins watchdog cleanup for timeout-present probes whose bad candidates fork stdout-inheriting helpers, and rejects a candidate that prints a bare semver then hangs and traps the watchdog's TERM to exit 0 (watchdog-fired sentinel forces a non-zero status). |
-| `gemspec_test.rb`, `install_script_test.rb` | RubyGem/install packaging — direct runtime dependencies include Fiddle for descriptor-relative managed storage, the architecture manifest validator, PKCE Base64, and the exact managed-web Bundler; `hv` stays out of `spec.executables` so RubyGems does not create a broken Ruby binstub for the bash launcher; the bash installer writes its own `hv` wrapper and does not expect a gem-installed `hv` shim. Fault-injected installer executions also pin exact wrapper/shim byte and mode restoration across gem failure, missing output, shim staging, wrapper write, and chmod failures, while the latest-release path proves cosign receives the resolved tag identity even without an explicit version environment variable. |
+| `gemspec_test.rb`, `install_script_test.rb` | RubyGem/install packaging — direct runtime dependencies include Fiddle for descriptor-relative managed storage, the architecture manifest validator, PKCE Base64, and the exact managed-web Bundler; `hv` stays out of `spec.executables` so RubyGems does not create a broken Ruby binstub for the bash launcher; the bash installer writes its own `hv` wrapper and does not expect a gem-installed `hv` shim. Fault-injected installer executions also pin exact wrapper/shim byte and mode restoration across gem failure, missing output, shim staging, wrapper write, and chmod failures, while the latest-release path proves cosign receives the resolved tag identity even without an explicit version environment variable. Download-policy cases pin bounded curl retries on every request, anonymous behavior with no token, `GITHUB_TOKEN`/`GH_TOKEN` delivered only via a `-H @file` header (never argv/output) with `--proto-redir =https` and no `--location-trusted`, no auth on curl < 7.83 or unparseable versions, malformed-token rejection, and anonymous retry after 401/403. |
 | `babysitter/dry_run_env_test.rb` | `Hive::Babysitter::DryRunEnv`, shared `StubEnvironment`, and Git/GitHub stubs — default-deny classification, Git 2.45+ lazy-fetch preflight, hosts-only per-invocation `gh` auth views, prompt suppression, shared startup/dynamic-loader env scrubbing, direct Ruby GH launcher handoff, invalid-byte argv, executable-path scrubbing, working-tree diff/verbose-status/filter guards, `gh api` value-consuming option parsing, private pre-agent skip-log creation, concurrent append serialization, and deterministic direct-stub creation/replacement race rejection. |
 | `bot/router_test.rb`, `bot/slash_handlers_test.rb`, `bot/supervisor_test.rb`, `bot/status_watcher_test.rb`, `bot/format_test.rb`, `bot/notification_builders_test.rb`, `bot/notification_dispatcher_test.rb`, `bot/pairing_store_test.rb`, `daemon/pairing_approval_queue_test.rb`, `commands/pairing_test.rb` | Telegram bot slash/menu/status/notification/pairing surface — router classification for supported slash commands including first-contact `/start`, identity-bound typed/voice answer conversations with same-number replacement-round refusal, first-contact pairing-code reply/throttle, `PairingStore` code lifecycle and expiry, approval-notice queue persistence/drain semantics, `hive pairing list`/`approve` config mutation and JSON, `SlashHandlers#start` welcome copy with concrete next steps, the `setMyCommands` quick-actions list (`/idea`, `/status`, `/queue`, `/answer`, `/approve`, `/autofix`, `/details`, `/done`, `/help`), `StatusWatcher` parsing of status rows including id/display name/`pr_url`, HTML escaping and PR-link formatting, `/status` and `/queue` PR-link rows, ready-for-review push enrichment, parse-mode forwarding, fingerprint stability, live `agent_running` stale-marker notification suppression, and recovery confirmation holds while a retry lock is active. |
 | `openclaw_skills_test.rb` | OpenClaw skill metadata — only the umbrella `@ivankuznetsov/hive-cli` listing is published; setup stays visible before the CLI is installed and preserves package-manager confirmation; core provisioning uses `setup --no-init` before separate interactive enrollment; setup-agents retain preview/approval boundaries while verified Honeycomb workflow installs are disclosure-only; workflow publication requires a JSON dry-run plus exact name/version/release-digest confirmation and schema-v2 state/freshness handling; patrol dry-runs stay consent-gated; TUI token totals remain a human-only handoff; current workflow/patrol/bench/TUI/web paths stay present; patrol tiers name subscription/token limits and the higher architecture allowance; direct installed-runtime/service overrides stay absent; daemon auto-advance remains bound to prior enrollment consent; normal recovery uses fresh `hive act workflow.retry`; id-less markers point at `hive migrate`; low-level marker clearing stays explicitly exceptional; forbidden remote/release actions remain guarded; and README publishing avoids shortcut listings. |
@@ -1078,7 +1084,14 @@ and only falls back to apt provisioning when missing. If that fallback's
 `apt-get update` is blocked by transient `packages.microsoft.com` repository
 errors, the workflow disables those Microsoft source files and retries so an
 unrelated third-party apt outage does not hide the verifier's actual behavior.
-`test/unit/packaging/verify_release_test.rb` pins the safety boundary that
+`test/unit/packaging/verify_release_test.rb` also extracts and runs
+`release_fetch` against a recording fake curl (token only for exact
+`https://github.com/` URLs on curl >= 7.83, never in argv, anonymous retry on
+401). It also pins the install workflows to the local authenticated
+`.github/actions/install-cosign` action, with no `sigstore/cosign-installer` and
+a step-scoped `GITHUB_TOKEN`, and pins that action's `gh release download`, its
+5-attempt retry, the v2.5.2 SHA-256 digests, and verify-before-`$GITHUB_PATH`
+ordering. It pins the safety boundary that
 inert per-prefix `systemctl`/`launchctl` stubs enter `PATH` before any installed
 Hive command can contact the host's live user service manager. It also pins the
 published-release path through `packaging/verify-managed-web-setup.sh`: after
@@ -1676,3 +1689,33 @@ Active-row reuse regressions in `commands/status_test.rb`,
 classification per candidate, prepared-folder admission, project-local fallback,
 captured invalid-row membership, and matching TUI admission context. Status
 tests also preserve retention-boundary and internal archive-index contracts.
+
+## Direct v1 benchmark credential proofs
+
+`test/unit/bench_harness/isolation_exec_test.rb` and `isolation_shell_test.rb`
+are default-suite tests of the packaged `IsolationExec`/`hb_isolated` boundary.
+They use all three decoy keys and fake auth files, never real logins/provider
+commands. Run them with `bin/test` alongside `pipeline_test.rb`.
+`test/integration/bench_workflow_install_test.rb` proves fresh runtime bytes and
+refresh/revert of an actual pre-declaration runtime fixture, preserving
+unrelated state and writing `tmp/bench-credential-refresh-evidence.json`.
+
+`test:bench_isolation_proof` is registered in `HIVE_CI_GATE_TESTS`: its expensive
+`isolation_proof_test.rb` is excluded from defaults and all six coverage shards.
+Run `bundle exec rake test:bench_isolation_proof`, optionally with
+`HB_TEST_BASH_32=/absolute/path/to/bash-3.2`. The named `bench-isolation-proof`
+CI job has `ubuntu-24.04`/`macos-15` lanes; macOS requires `/bin/bash` 3.2 and
+records `bash --version`. Linux without an override records its local 3.2 skip.
+The real Docker decoy matrix checks the three API routes, both OAuth variants
+and gate with digest-pinned stock Alpine 3.22.2, using multi-argument
+`sh -c` probes. The real Docker matrix requests one CPU so it can run on
+hosted runners with fewer CPUs than the eight-CPU fake-Docker fixture.
+Daemon unavailability is distinct from image setup failure,
+which fails the proof. The owning `harness/CREDENTIAL_ISOLATION.md` documents
+the exact image digest and protocol. Canonical hive-bench keeps corresponding
+tests under `test/` and owns runtime Ruby style. Only the two isolation files
+are synchronized; unrelated pre-existing snapshot divergence stays unchanged.
+
+This contract covers direct `run_all.rb`/`pipeline_run.rb` v1 runs. Packaged v2
+`generate.md` → `hive_run.rb` → `HiveDriver`, including `env_args`/`auth_mounts`
+and `hive_stages.sh` in-container `auth.json`, is byte-for-byte unaffected.

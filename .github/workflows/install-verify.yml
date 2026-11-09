@@ -71,10 +71,20 @@ jobs:
 
       - name: Install cosign (bash channel)
         if: ${{ matrix.channel == 'bash' }}
-        uses: sigstore/cosign-installer@v3
+        uses: ./.github/actions/install-cosign
+        # Authenticated, SHA-256-pinned cosign v2.5.2 download.
+        # (replaces the cosign-installer action, whose anonymous bootstrap downloads
+        # kept failing with HTTP 504 during GitHub's anonymous-traffic throttling).
+        with:
+          github-token: ${{ github.token }}
 
       - name: Verify channel
         if: ${{ matrix.channel != 'aur' }}
+        env:
+          # Bash channel only: install.sh/verify-release.sh authenticate
+          # github.com release downloads with it (never forwarded to the asset
+          # CDN). Other channels get an empty value.
+          GITHUB_TOKEN: ${{ matrix.channel == 'bash' && github.token || '' }}
         run: bash packaging/verify-channel.sh --channel "$CHANNEL" --version "$VERSION"
 
       - name: Verify channel (AUR, as non-root builder)

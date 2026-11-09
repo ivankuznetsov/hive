@@ -34,7 +34,8 @@ class CiTestPartitionTest < Minitest::Test
         "test:status_read_only" => "test/integration/status_read_only_test.rb",
         "test:runtime_database_contention" => "test/integration/runtime_database_contention_test.rb",
         "test:babysitter_dry_run_security_matrix" =>
-          "test/unit/babysitter/dry_run_security_matrix_test.rb"
+          "test/unit/babysitter/dry_run_security_matrix_test.rb",
+        "test:bench_isolation_proof" => "test/unit/bench_harness/isolation_proof_test.rb"
       }, gate_tests)
       gate_files.each { |file| assert_path_exists File.join(ROOT, file) }
       assert_empty default_files & gate_files
@@ -138,7 +139,12 @@ class CiTestPartitionTest < Minitest::Test
         }
       ], matrix
       assert_equal "${{ matrix.name }}", gate_job.fetch("name")
-      assert_equal Object.const_get(:HIVE_CI_GATE_TESTS).keys, matrix.map { |entry| entry.fetch("task") }
+      proof_job = workflow.fetch("jobs").fetch("bench-isolation-proof")
+      assert_equal %w[ubuntu-24.04 macos-15], proof_job.dig("strategy", "matrix", "os")
+      assert_equal "${{ matrix.os }}", proof_job.fetch("runs-on")
+      assert proof_job.fetch("steps").any? { |step| step["run"] == "bundle exec rake test:bench_isolation_proof" }
+      assert_equal Object.const_get(:HIVE_CI_GATE_TESTS).keys,
+                   matrix.map { |entry| entry.fetch("task") } + [ "test:bench_isolation_proof" ]
 
       run_step = gate_job.fetch("steps").find { |step| step["name"] == "Run merge gate" }
       assert_equal 'bundle exec rake "$HIVE_CI_GATE_TASK"', run_step.fetch("run")
@@ -247,7 +253,7 @@ class CiTestPartitionTest < Minitest::Test
     jobs = workflow.fetch("jobs")
 
     refute jobs.key?("changes"), "required CI must not classify broad path groups as proof-free"
-    %w[coverage-shards expensive-test-gates systemd-user-gate e2e web-tests].each do |job_name|
+    %w[coverage-shards expensive-test-gates bench-isolation-proof systemd-user-gate e2e web-tests].each do |job_name|
       job = jobs.fetch(job_name)
       refute_equal "changes", job["needs"]
       refute_includes job.fetch("if", ""), "needs.changes"
@@ -262,7 +268,7 @@ class CiTestPartitionTest < Minitest::Test
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     jobs = workflow.fetch("jobs")
 
-    %w[coverage-shards expensive-test-gates systemd-user-gate tui-reactivity-latency e2e launchd-macos].each do |job_name|
+    %w[coverage-shards expensive-test-gates bench-isolation-proof systemd-user-gate tui-reactivity-latency e2e launchd-macos].each do |job_name|
       upload = jobs.fetch(job_name).fetch("steps").find do |step|
         step["uses"] == UPLOAD_ARTIFACT_ACTION &&
           step.dig("with", "path").to_s.include?("tmp/ci-failure-evidence.json")
@@ -489,8 +495,9 @@ class CiTestPartitionTest < Minitest::Test
     refute_includes integrity.fetch("run"), "--timing-only"
     assert_equal "incident duration budget (advisory)", advisory.fetch("name")
     assert_equal "e2e", advisory.fetch("needs")
-    refute advisory.key?("continue-on-error"),
-           "an advisory lane must finish green so exact-head automation can reach terminal success"
+    # Job-level continue-on-error still publishes a red check run, which Hive
+    # review gates read as a CI failure; the tolerance must be step-level.
+    refute advisory.key?("continue-on-error")
 
     ruby_setup = advisory.fetch("steps").find { |step| step["uses"] == "ruby/setup-ruby@v1" }
     assert_equal({ "ruby-version" => "3.4" }, ruby_setup.fetch("with"))
@@ -506,18 +513,17 @@ class CiTestPartitionTest < Minitest::Test
     end
     assert_equal 1, enforce_steps.length
     enforce = enforce_steps.fetch(0)
-    assert_equal "measure", enforce.fetch("id")
-    assert_equal true, enforce.fetch("continue-on-error")
+    assert_equal "budget", enforce.fetch("id")
     assert_equal(
       'ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only',
       enforce.fetch("run")
     )
     refute_includes enforce.fetch("run"), "--integrity-only"
-    report = advisory.fetch("steps").find { |step| step["name"] == "Report incident duration budgets" }
-    assert report, "timing overruns must remain visible in the job summary"
+    assert_equal true, enforce.fetch("continue-on-error")
+    report = advisory.fetch("steps").find { |step| step["name"] == "Report incident duration budget" }
     assert_equal "${{ always() }}", report.fetch("if")
-    assert_equal "${{ steps.measure.outcome }}",
-                 report.fetch("env").fetch("HIVE_INCIDENT_TIMING_OUTCOME")
+    assert_equal "${{ steps.#{enforce.fetch('id')}.outcome }}",
+                 report.fetch("env").fetch("HIVE_INCIDENT_BUDGET_OUTCOME")
     assert_includes report.fetch("run"), "GITHUB_STEP_SUMMARY"
     assert_operator advisory.fetch("steps").index(report), :>, advisory.fetch("steps").index(enforce)
     assert_equal(
@@ -545,14 +551,14 @@ class CiTestPartitionTest < Minitest::Test
   def test_incident_duration_summary_reports_timing_outcomes_and_skipped_measurements
     workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
     steps = workflow.fetch("jobs").fetch("incident-duration-budget").fetch("steps")
-    report = steps.find { |step| step["name"] == "Report incident duration budgets" }
+    report = steps.find { |step| step["name"] == "Report incident duration budget" }
     assert report, "timing overruns must remain visible in the job summary"
 
     Dir.mktmpdir("incident-summary") do |dir|
       { "failure" => "exceeded", "success" => "stayed within", "skipped" => "was not measured" }.each do |outcome, expected|
         summary = File.join(dir, "#{outcome}.md")
         output, status = Open3.capture2e(
-          { "HIVE_INCIDENT_TIMING_OUTCOME" => outcome, "GITHUB_STEP_SUMMARY" => summary },
+          { "HIVE_INCIDENT_BUDGET_OUTCOME" => outcome, "GITHUB_STEP_SUMMARY" => summary },
           "bash", "-e", "-c", report.fetch("run")
         )
 

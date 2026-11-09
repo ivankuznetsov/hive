@@ -675,6 +675,95 @@ class HiveTuiBubbleModelTest < Minitest::Test
     refute_includes out, "Projects"
   end
 
+  def test_two_column_idea_preview_frame_preserves_oversized_graphemes_and_pads_siblings
+    # Lipgloss pads siblings with its own grapheme widths, which count an RGI
+    # ZWJ sequence as two cells. Pin unicode-display_width to the same RGI
+    # mode so both measurements agree wherever the suite runs; at `cols: 2`
+    # the one-cell body budget makes every two-cell sentinel oversized.
+    with_emoji_width_mode(:rgi) do
+      [ "界", "👨‍👩‍👧‍👦" ].each do |sentinel|
+        state = Hive::Tui::Model::InfoPanelState.new(
+          slug: "tiny", stage: "1-inbox", created_at: nil, original_text: sentinel,
+          folder_path: nil, latest_log_path: nil, stage_extra: nil
+        )
+        @model = Hive::Tui::BubbleModel.new(
+          hive_model: Hive::Tui::Model.initial.with(mode: :idea_preview, info_panel_state: state, cols: 2, rows: 11),
+          dispatch: @dispatch
+        )
+        out = with_zero_usage { @model.view }
+        lines = out.lines(chomp: true)
+        cells = Hive::Tui::Views::Format.display_width(sentinel)
+
+        assert_equal 2, cells
+        assert_equal 1, out.scan(sentinel).length
+        assert_equal sentinel, lines[8]
+        refute_includes out, "…"
+        assert_equal 11, lines.length
+        assert_equal [ cells ], lines.map { |line| Hive::Tui::Views::Format.display_width(line) }.uniq
+        assert_equal "─".ljust(cells), lines[1]
+        assert_equal cells, Hive::Tui::Views::Format.display_width(lines.last)
+      end
+    end
+  end
+
+  def test_two_column_frame_keeps_wide_zwj_body_lossless_without_widening_siblings
+    # Under :none (the default on a local terminal) the family ZWJ sequence
+    # measures far wider than two cells, so this exercises the real over-budget
+    # path the :rgi case above cannot: there every sentinel is exactly two cells,
+    # so the frame-wide uniq check only ever proves "all rows are two cells" and
+    # would still pass if horizontal body truncation were reintroduced. Here the
+    # body row keeps the intact, over-budget grapheme at its full width while
+    # Lipgloss — which measures the same cluster as two cells — leaves every
+    # chrome/footer sibling padded to two. The plan's predicted
+    # max(chrome, over-budget row) frame width does NOT hold under :none; the
+    # lossless body row is simply the sole row wider than its siblings.
+    with_emoji_width_mode(:none) do
+      sentinel = "👨‍👩‍👧‍👦"
+      body_cells = Hive::Tui::Views::Format.display_width(sentinel)
+      assert_operator body_cells, :>, 2, "sentinel must exercise the real >2-cell over-budget path"
+
+      state = Hive::Tui::Model::InfoPanelState.new(
+        slug: "tiny", stage: "1-inbox", created_at: nil, original_text: sentinel,
+        folder_path: nil, latest_log_path: nil, stage_extra: nil
+      )
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(mode: :idea_preview, info_panel_state: state, cols: 2, rows: 11),
+        dispatch: @dispatch
+      )
+      out = with_zero_usage { @model.view }
+      lines = out.lines(chomp: true)
+      widths = lines.map { |line| Hive::Tui::Views::Format.display_width(line) }
+
+      assert_equal sentinel, lines[8]
+      assert_equal body_cells, widths[8]
+      assert_equal 1, out.scan(sentinel).length
+      refute_includes out, "…"
+      assert_equal 11, lines.length
+      # The lossless body row is the only wide row; every sibling stays at two
+      # cells. This pins lossless body width distinctly from the siblings — a
+      # truncating implementation could not produce a body row wider than the frame.
+      assert_equal [ 2, body_cells ], widths.uniq.sort
+      (widths[0...8] + widths[9..]).each { |w| assert_equal 2, w }
+    end
+  end
+
+  def test_live_idea_preview_at_zero_content_capacity_replaces_hint_with_marker
+    with_tmp_dir do |root|
+      folder = make_task_folder(root, stage: "1-inbox")
+      write_idea_md(folder, original_text: "body")
+      @model = Hive::Tui::BubbleModel.new(
+        hive_model: Hive::Tui::Model.initial.with(cols: 80, rows: 2), dispatch: @dispatch
+      )
+      @model.update(Hive::Tui::Messages::OpenIdeaPreview.new(row: make_task_row(folder: folder, stage: "1-inbox")))
+
+      out = with_zero_usage { @model.view }
+      assert_equal :idea_preview, @model.hive_model.mode
+      assert_equal "…", out.lines.first.rstrip
+      assert_equal 2, out.lines.length
+      refute_includes out, Hive::Tui::Views::IdeaPreview::DISMISS_HINT
+    end
+  end
+
   # Regression: paste-truncated / paste-timeout / overflow flashes
   # raised inside :filter mode were invisible because compose_filter_view
   # passed the filter prompt as the footer, replacing default_footer

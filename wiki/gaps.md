@@ -7,6 +7,75 @@ updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Direct benchmark isolation delivery (2026-11-02)
+
+The canonical hive-bench baseline is `432e730ea7812246496726fcc9153e98be58eb30`;
+Hive's execution baseline is `966211001e76d53da50879a582668b5b2e381607`.
+The two isolation files agreed before this fix and agree byte-for-byte after it.
+Outside that boundary, the baselines already differ in 37 harness files,
+including `hive_driver.rb`, `hive_stages.sh`, campaign/judge code and Slate
+comments. Those differences are retained; this is not a wholesale runtime sync.
+The original canonical checkout contains unrelated uncommitted changes and is
+untouched. The credential changes from the original local branch, including
+the CPU proof follow-up, are now published as canonical commit
+[`c1e5696944f590ea58985e174b8aff3409191f24`](https://github.com/ivankuznetsov/hive-bench/commit/c1e5696944f590ea58985e174b8aff3409191f24)
+in [hive-bench PR #16](https://github.com/ivankuznetsov/hive-bench/pull/16), on
+`fix/profile-credential-isolation-delivery`. The branch starts at upstream
+`243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326`, excluding unrelated unpublished
+benchmark-results commits from the original clone. Both delivered isolation
+files still match Hive's packaged copies byte-for-byte. Publication is complete;
+the canonical PR remains open, with its own hosted proof pending in
+[CI run 41463576434](https://github.com/ivankuznetsov/hive-bench/actions/runs/41463576434).
+
+Actual GNU Bash 3.2.57 and 5.3.20 passed locally, together with real Docker
+credential probes. Both hosted `bench credential isolation` lanes passed on
+`ubuntu-24.04` and `macos-15` in
+[CI run 41454797098](https://github.com/ivankuznetsov/hive/actions/runs/41454797098)
+at `715cbeeeb72ce15e51278a155e40a4c43f6b51d8`. Only wiki documents changed
+between that tested commit and the reviewed HEAD. The macOS lane requires
+`/bin/bash` 3.2 and fails absent/wrong interpreters.
+`minimax-3` and `qwen-2.6-coder` remain
+unqualified in `PI_MODELS`; direct default unfiltered v1 passes park them in
+`failed` and exit 2 until their routes are verified and configured.
+
+The first hosted Ubuntu credential proof failed before probe execution because
+the shared fixture requested eight CPUs on a four-CPU daemon. The real Docker
+matrix now requests one CPU; the successful hosted run above confirms that
+correction.
+Canonical follow-up `8d562e148902dfbfc9b32c4b333ce3d8593f31e3` applies the same
+override in `tmp/bench-credential-canonical`. Both local proof gates passed
+under a four-CPU rejection shim with actual Bash 3.2.57/5.3.20 and real Docker,
+with zero skips (canonical 3 tests/40 assertions; Hive 3/55). That simulation
+is separate from the hosted evidence above. The correction is included in the
+published canonical commit and PR linked above; canonical hosted proof and
+merge remain pending.
+
+## Authenticated release downloads (2026-11-09)
+
+- Not verified: whether an authenticated `github.com/.../releases/download/...`
+  request is exempt from GitHub's anonymous-traffic throttling. The 302 is
+  served by `github.com` (where the token is sent); the asset itself is served
+  by `release-assets.githubusercontent.com`, which never receives the token, so
+  auth may only help the first hop. The bounded curl retry is the part that
+  covers the CDN hop.
+- The install CI cosign download is now authenticated (`gh release download`
+  through the API asset endpoint with the job token, 5 attempts, pinned
+  SHA-256), via `.github/actions/install-cosign`. Still open:
+  - The checksum digests are trusted from the upstream release's unsigned
+    `cosign_checksums.txt`. They are cross-checked only against the identical
+    digests that cosign-installer v3 hardcoded. They are not verified with
+    sigstore's signature.
+  - The action supports Linux X64/ARM64 only. macOS jobs don't use it.
+  - Moving to a newer cosign means updating the version and both digests by
+    hand.
+  - Even an authenticated API asset download redirects to the release-asset
+    CDN, so a CDN-side outage longer than the ~75s of backoff still fails.
+- `release.yml` still pins cosign-installer v3.10.1 for signing, so its
+  bootstrap download is still anonymous. It was not changed.
+- The token is attached only when `curl --version` reports >= 7.83. Distro
+  curls that backport the redirect fixes without bumping the version stay
+  anonymous. Curl builds that report a version they do not have are trusted.
+
 ## Attempt memory cap (2026-11-08)
 
 - `memory_limit_exceeded` is recorded in the attempt log and in synthesized
@@ -27,6 +96,30 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
   intended behavior. This has been verified only on systemd 262.
 - `oom_kill` is a cumulative counter for the scope, so concurrent descendant
   kills just before the worker's own `SIGKILL` are attributed to it.
+
+## Attempt scope leftover reaping (2026-11-09)
+
+- What was reaped is recorded in the attempt log only. The terminal receipt
+  has an exact key set (`receipt_version` 2), so a structured
+  `scope_leftovers` field would need a receipt version bump.
+- Killing podman's `conmon` skips podman's own exit cleanup, so the
+  container can stay in podman's state as `Exited` or `Stopping` until the
+  next `podman` command repairs it. The container's processes are killed
+  only when they share the attempt scope's cgroup. Under the systemd
+  cgroup manager they run in a separate `libpod-*.scope`, which this reaper
+  never touches, so a container can outlive the attempt there. Not verified
+  against a live podman run.
+- Pid reuse between the membership read and the signal is narrowed by a
+  `/proc/<pid>/cgroup` re-check, not closed. Closing it needs pidfds or
+  cgroup v2 `cgroup.kill` on a sub-cgroup that excludes the supervisor.
+- Attempts started by an older supervisor, or ones whose supervisor is
+  killed with SIGKILL, still leave their leftovers behind. No sweeper
+  reaps orphaned `hive-attempt-*` scopes whose attempt record is terminal,
+  and no status surface lists them.
+- The hivedev window that failed on 2026-11-09 08:20-08:31 recorded Hive
+  status `running=3`/`live=3`, and the user journal shows other attempt
+  scopes really active at the time. So that drain timeout may have been
+  counting live attempts, not only the leftover scope.
 
 ## Review base-conflict gate and rewind archive (2026-11-08)
 
@@ -2337,3 +2430,31 @@ path during conflict resolution is reported because the match is path-bound.
 Review does not yet reconcile `github-publication.json` automatically after a
 manual operator push that descends from the anchor; the `base_conflict` hint
 documents the manual `hive publication-reconcile` step instead.
+
+## Review limit fallback limits (2026-11-09)
+
+`review.limit_fallback` substitutes a whole provider profile. It has no
+per-role or per-reviewer override, and no `fallback_model`, so the substitute
+always runs the fallback profile's default model. The fix and CI-fix fallbacks
+bypass the task's pinned implementation identity for one run instead of
+re-pinning it. Every later retry therefore tries the limited primary first
+and spends one failed launch before substituting again, and the
+implementation-identity journal does not record that a substitute produced
+the commit; only the `limit-fallback-NN.jsonl` receipt and the log do. The fix
+commit trailers do not name the substitute. A substitute that fails partway
+through a fix can leave edits for the CleanExit residual commit, as the
+primary can. The fallback is never attempted under explicit provider-account
+routing, or for hosted-CI account walls. The integration test asserts the
+pin-bypass log line only when the test attempt actually resolves a pinned
+identity.
+
+## Rebase conflict-agent limit fallback scope (2026-11-09)
+
+The auto-rebase conflict agent applies `review.limit_fallback` only when the
+task's current stage runs the review runner. A rebase ahead of execute or
+open-PR still aborts as `agent_failed` on a provider limit, because there is
+no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+before the review runner starts; if review later resolves a different pass,
+the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
+failed rebase substitute writes no marker attrs (the rebase writes no marker
+at all); only the log line and receipt record it.

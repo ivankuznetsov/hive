@@ -277,6 +277,17 @@ module Hive
           "reviewers" => nil,
           "fix" => false
         },
+        # Opt-in substitute agent for review roles (reviewers, triage, fix,
+        # CI fix) whose primary provider hits a classified usage/credit
+        # limit. `agents` maps a primary profile to its fallback profile;
+        # `min_wait_sec` skips the fallback when the provider's explicit
+        # reset hint is sooner than that. Disabled by default: no
+        # substitution ever happens unless `enabled: true`.
+        "limit_fallback" => {
+          "enabled" => false,
+          "min_wait_sec" => 3600,
+          "agents" => {}
+        },
         "triage" => {
           "enabled" => true,
           "agent" => "claude",
@@ -2205,6 +2216,7 @@ module Hive
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
+      validate_review_limit_fallback!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
@@ -3151,6 +3163,40 @@ module Hive
       raise ConfigError,
             "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
+
+    REVIEW_LIMIT_FALLBACK_KEYS = %w[enabled min_wait_sec agents].freeze
+
+    def validate_review_limit_fallback!(cfg, source_path)
+      fallback = cfg.dig("review", "limit_fallback")
+      label = "review.limit_fallback"
+      unless fallback.is_a?(Hash)
+        raise ConfigError,
+              "#{label} in #{describe_source(source_path)} must be a Hash; got #{fallback.inspect} (#{fallback.class})"
+      end
+
+      validate_closed_mapping!(fallback, REVIEW_LIMIT_FALLBACK_KEYS, label, source_path)
+      validate_required_boolean!(fallback["enabled"], "#{label}.enabled", source_path)
+      validate_bounded_integer!(fallback["min_wait_sec"], "#{label}.min_wait_sec", 0, MAX_LIMIT_FALLBACK_WAIT_SEC, source_path)
+      agents = fallback["agents"]
+      unless agents.is_a?(Hash)
+        raise ConfigError,
+              "#{label}.agents in #{describe_source(source_path)} must be a Hash of " \
+              "primary agent => fallback agent; got #{agents.inspect} (#{agents.class})"
+      end
+
+      agents.each do |primary, substitute|
+        validate_agent_name!(primary, "#{label}.agents key", source_path)
+        validate_agent_name!(substitute, "#{label}.agents.#{primary}", source_path)
+        if substitute.nil? || substitute.to_s == primary.to_s
+          raise ConfigError,
+                "#{label}.agents.#{primary} in #{describe_source(source_path)} must name a " \
+                "different agent profile; a provider cannot fall back to itself"
+        end
+      end
+    end
+
+    # One year: the longest provider reset hint Hive::AgentLimit parses.
+    MAX_LIMIT_FALLBACK_WAIT_SEC = 366 * 24 * 60 * 60
 
     def validate_reviewer_entries!(reviewers, label, source_path)
       seen_names = {}

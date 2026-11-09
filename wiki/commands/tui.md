@@ -235,10 +235,30 @@ Pressing `o` from grid mode opens the focused row's task folder in `$EDITOR` for
 
 Pressing `i` from grid mode opens a full-screen read-only info panel for the focused task. `BubbleModel#open_idea_preview` reads the task's `idea.md` once, builds `Hive::Tui::Model::InfoPanelState`, and the view renders common identity fields (slug, stage, `created_at`, absolute stage folder, latest `.hive-state/logs/<slug>/*.log` path, and original idea text). Stage extras are plain-text snapshots: `brainstorm.md` for `2-brainstorm`, `plan.md` for `3-plan`, the latest execute-log tail for `4-execute`, and no extra block for `1-inbox`. The panel uses the existing `:idea_preview` mode and `OpenIdeaPreview` / `Back` messages; it mutates no files and spawns no subprocess. Only `q`, `Esc`, or `i` closes it, so accidental unmapped keys are no-ops.
 
-The idea composer and read-only preview share
-`Views::Format.character_chunks` for fixed-width character slicing. Composer
-cursor placement, attachment badges, row-windowing, and preview panel fitting
-remain view-specific.
+The idea composer and read-only preview slice text by different width domains.
+The composer uses `Views::Format.character_chunks` (character-indexed) for cursor
+placement, attachment badges, and row-windowing. The preview uses
+`Views::Format.cell_chunks` (terminal-cell-indexed) so wide graphemes wrap
+losslessly. Preview body rows (`original_text` and the stage extra) are wrapped by
+display cells and rendered without horizontal truncation: every supplied grapheme
+survives in source order, and a grapheme wider than the whole row budget is
+emitted intact on its own over-budget logical row rather than being split or
+dropped. Only vertical capacity may omit body text, and every omission is
+signalled — an overflowing block allotted at least two rows ends with a
+standalone `…` marker row (rendered through `Styles::HINT`, left-aligned with the
+dividers, no label or count, so a literal source `…` is indistinguishable); a
+one-row allocation keeps today's inline `…` on its chrome (the Info slug/stage
+header within the existing width limit); a zero-row block adds no marker because
+its sibling already signals omission; and at zero content capacity a single `…`
+replaces the dismiss hint whenever `original_text` or `stage_extra` is non-empty
+(evaluated before fitting). Every live `open_idea_preview` supplies original text,
+so that zero-capacity marker always replaces the hint; the hint-only fallback is
+a view-level contract for directly constructed empty-body state, not a reachable
+live case. Exact ANSI-byte preservation does not isolate SGR styles: an open
+style in `original_text` can bleed into later body, marker, divider, and footer
+rows (including Lipgloss padding), matching main; scrubbing ESC at acquisition is
+deferred. Composer cursor placement, attachment badges, row-windowing, and
+preview panel fitting remain view-specific.
 
 Pressing `s` from grid mode is the manual-steering escape hatch. `KeyMap` emits `Messages::OpenInAgent`, and `BubbleModel` resolves the task's project config, looks up `execute.agent`, verifies the feature worktree exists, then writes `MANUAL_STEERING` to the row's state file before handing the terminal to the configured development agent in that worktree. Existing stage folders for the slug are passed in `Hive::Stages::DIRS` order with the agent profile's add-dir flag, so the agent can read the idea, brainstorm, plan, task, logs, reviews, and later-stage artifacts without the operator copying paths by hand. `MANUAL_STEERING` classifies as `manual_steering` with no suggested command, so `hive run`, the daemon policy, and workflow verb keys skip it. When the interactive agent exits, `Messages::AgentSteerExited` moves the active stage folder to `.hive-state/stages/archived-manual/<slug>/` (or a numeric suffix on collision), which makes the slug disappear from `hive status` and the TUI without treating it as an `9-done` pipeline archive.
 

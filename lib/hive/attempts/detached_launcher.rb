@@ -1,9 +1,9 @@
 require "json"
 require "rbconfig"
-require "digest"
 require "hive/attempts/contracts"
 require "hive/attempts/memory_limit"
 require "hive/attempts/repository"
+require "hive/attempts/scope_reaper"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/process_registry"
 
@@ -206,7 +206,7 @@ module Hive
       end
 
       def systemd_scope_command(record, command, scope_properties = [])
-        unit = "hive-attempt-#{Digest::SHA256.hexdigest(record.attempt_id.to_s)[0, 24]}"
+        unit = ScopeReaper.unit_name(record.attempt_id)
         [
           @systemd_run, "--user", "--scope", "--quiet", "--collect",
           "--property=Delegate=yes", *scope_properties,

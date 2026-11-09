@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-11-04
+updated: 2026-11-09
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
@@ -461,6 +461,8 @@ reference.
      "prompt_template" => "ci_fix_prompt.md.erb"},
    "reviewers" => [],
    "adhoc" => {"reviewers" => nil, "fix" => false},
+   "limit_fallback" =>
+    {"enabled" => false, "min_wait_sec" => 3600, "agents" => {}},
    "triage" =>
     {"enabled" => true,
      "agent" => "claude",
@@ -1044,6 +1046,30 @@ discovery-only route; `models.patrol` is deliberately coarse and therefore
 applies to both review and fix identities.
 
 `timeout_sec.review_ci` (default 3600) is enforced as a hard per-attempt deadline for both `Review::CiFix#run_ci_once` and `Review::RemoteCi` hosted-check settlement. Local subprocess expiry TERM/KILLs the pgid; hosted settlement expiry fails closed on the exact unsatisfied PR head. `review.github_checks.enabled` defaults true and is independent of `review.github_publish.enabled`: the former gates exact-head completion, while the latter only controls reviewer-comment mirroring.
+
+## Review limit fallback (`review.limit_fallback`)
+
+Opt-in, disabled by default. The default block is
+`{ enabled: false, min_wait_sec: 3600, agents: {} }`, so a config that omits
+it, or sets `enabled: false`, behaves exactly as before.
+
+```yaml
+review:
+  limit_fallback:
+    enabled: true
+    min_wait_sec: 3600   # skip the fallback when the provider's reset hint is sooner
+    agents:
+      codex: claude      # primary profile => fallback profile
+```
+
+`validate_review_limit_fallback!` keeps the mapping closed to `enabled`,
+`min_wait_sec`, and `agents`. `enabled` must be a boolean, and
+`min_wait_sec` must be an Integer from 0 to 366 days in seconds. `agents` must
+map registered profile names to different registered profile names, so a
+provider can never fall back to itself. One map covers every review role that
+launches an agent: reviewers, triage, fix, and CI fix, plus the auto-rebase
+conflict-resolution agent when `hive run` rebases a task in the review stage. Runtime semantics are in
+[[stages/review]] under "Provider-limit fallback".
 
 ## Stage runners reach into config like this
 

@@ -5,6 +5,11 @@ require "sqlite3"
 module Hive
   module RuntimeControlPlane
     module SQLiteSupport
+      # Upper bound on Exception#cause links inspected by caused_by?. Ruby
+      # permits cyclic cause chains (e.g. an error re-raised as its own
+      # cause's cause), so the walk is bounded and identity-deduplicated.
+      MAX_CAUSE_DEPTH = 16
+
       module_function
 
       def pragma_integer(connection, name)
@@ -40,8 +45,12 @@ module Hive
 
       def caused_by?(error)
         current = error
-        while current
+        seen = {}.compare_by_identity
+        MAX_CAUSE_DEPTH.times do
+          return false if current.nil? || seen.key?(current)
           return true if yield(current)
+
+          seen[current] = true
           current = current.cause
         end
         false

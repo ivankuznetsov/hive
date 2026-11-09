@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -23,6 +23,32 @@ was not exercised. Provider failure after a guarded commit followed by a
 successful no-op retry is covered with deterministic failure injection,
 including a restart before the retry's guardrail scan; no live-provider
 failure was induced.
+
+## Authenticated release downloads (2026-11-09)
+
+- Not verified: whether an authenticated `github.com/.../releases/download/...`
+  request is exempt from GitHub's anonymous-traffic throttling. The 302 is
+  served by `github.com` (where the token is sent); the asset itself is served
+  by `release-assets.githubusercontent.com`, which never receives the token, so
+  auth may only help the first hop. The bounded curl retry is the part that
+  covers the CDN hop.
+- The install CI cosign download is now authenticated (`gh release download`
+  through the API asset endpoint with the job token, 5 attempts, pinned
+  SHA-256), via `.github/actions/install-cosign`. Still open:
+  - The checksum digests are trusted from the upstream release's unsigned
+    `cosign_checksums.txt`. They are cross-checked only against the identical
+    digests that cosign-installer v3 hardcoded. They are not verified with
+    sigstore's signature.
+  - The action supports Linux X64/ARM64 only. macOS jobs don't use it.
+  - Moving to a newer cosign means updating the version and both digests by
+    hand.
+  - Even an authenticated API asset download redirects to the release-asset
+    CDN, so a CDN-side outage longer than the ~75s of backoff still fails.
+- `release.yml` still pins cosign-installer v3.10.1 for signing, so its
+  bootstrap download is still anonymous. It was not changed.
+- The token is attached only when `curl --version` reports >= 7.83. Distro
+  curls that backport the redirect fixes without bumping the version stay
+  anonymous. Curl builds that report a version they do not have are trusted.
 
 ## Attempt memory cap (2026-11-08)
 
@@ -2327,3 +2353,14 @@ primary can. The fallback is never attempted under explicit provider-account
 routing, or for hosted-CI account walls. The integration test asserts the
 pin-bypass log line only when the test attempt actually resolves a pinned
 identity.
+
+## Rebase conflict-agent limit fallback scope (2026-11-09)
+
+The auto-rebase conflict agent applies `review.limit_fallback` only when the
+task's current stage runs the review runner. A rebase ahead of execute or
+open-PR still aborts as `agent_failed` on a provider limit, because there is
+no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+before the review runner starts; if review later resolves a different pass,
+the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
+failed rebase substitute writes no marker attrs (the rebase writes no marker
+at all); only the log line and receipt record it.

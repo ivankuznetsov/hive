@@ -126,6 +126,13 @@ class ReviewLimitFallbackTest < Minitest::Test
     assert_equal LIMIT_MESSAGE, absent.limit_detail
   end
 
+  def test_outcome_classifies_substitute_result
+    assert_equal "used", LimitFallback.outcome(ok: true, limit_text: LONG_LIMIT, error_message: nil)
+    assert_equal "limited", LimitFallback.outcome(ok: false, limit_text: LONG_LIMIT, error_message: nil)
+    assert_equal "limited", LimitFallback.outcome(ok: false, limit_text: nil, error_message: LIMIT_MESSAGE)
+    assert_equal "failed", LimitFallback.outcome(ok: false, limit_text: nil, error_message: "boom")
+  end
+
   def test_min_wait_sec_falls_back_to_default_for_invalid_values
     assert_equal 3600, LimitFallback.min_wait_sec("min_wait_sec" => "soon")
     assert_equal 0, LimitFallback.min_wait_sec("min_wait_sec" => 0)

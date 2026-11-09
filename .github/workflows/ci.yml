@@ -365,7 +365,6 @@ jobs:
   incident-duration-budget:
     name: incident duration budget (advisory)
     needs: e2e
-    continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -379,9 +378,24 @@ jobs:
           name: hive-e2e-report
           path: ${{ runner.temp }}/hive-e2e-runs
       - name: Check incident duration budgets
+        id: budget
+        # Step-level (not job-level) continue-on-error: a job-level one still
+        # publishes a red check run, which Hive review gates read as a CI failure.
+        continue-on-error: true
         env:
           HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only
+      - name: Report incident duration budget
+        if: ${{ always() }}
+        env:
+          HIVE_INCIDENT_BUDGET_OUTCOME: ${{ steps.budget.outcome }}
+        run: |
+          if [[ "$HIVE_INCIDENT_BUDGET_OUTCOME" == "failure" ]]; then
+            echo "::warning title=Incident duration budget::advisory budget exceeded on this runner"
+            echo "### ⚠️ Incident scenarios exceeded their advisory duration budget" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ Incident scenarios stayed within their advisory duration budget" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   web-tests:
     name: ${{ matrix.name }}

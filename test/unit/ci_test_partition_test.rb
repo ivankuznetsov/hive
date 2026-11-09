@@ -489,7 +489,9 @@ class CiTestPartitionTest < Minitest::Test
     refute_includes integrity.fetch("run"), "--timing-only"
     assert_equal "incident duration budget (advisory)", advisory.fetch("name")
     assert_equal "e2e", advisory.fetch("needs")
-    assert_equal true, advisory.fetch("continue-on-error")
+    # Job-level continue-on-error still publishes a red check run, which Hive
+    # review gates read as a CI failure; the tolerance must be step-level.
+    refute advisory.key?("continue-on-error")
 
     ruby_setup = advisory.fetch("steps").find { |step| step["uses"] == "ruby/setup-ruby@v1" }
     assert_equal({ "ruby-version" => "3.4" }, ruby_setup.fetch("with"))
@@ -510,6 +512,11 @@ class CiTestPartitionTest < Minitest::Test
       enforce.fetch("run")
     )
     refute_includes enforce.fetch("run"), "--integrity-only"
+    assert_equal true, enforce.fetch("continue-on-error")
+    report = advisory.fetch("steps").find { |step| step["name"] == "Report incident duration budget" }
+    assert_equal "${{ always() }}", report.fetch("if")
+    assert_equal "${{ steps.#{enforce.fetch('id')}.outcome }}",
+                 report.fetch("env").fetch("HIVE_INCIDENT_BUDGET_OUTCOME")
     assert_equal(
       "${{ runner.temp }}/hive-e2e-runs",
       enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR")

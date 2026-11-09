@@ -94,7 +94,12 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-cosign
+        # Authenticated, SHA-256-pinned cosign v2.5.2 download.
+        # (replaces the cosign-installer action, whose anonymous bootstrap downloads
+        # kept failing with HTTP 504 during GitHub's anonymous-traffic throttling).
+        with:
+          github-token: ${{ github.token }}
       - name: Check pinned release supports managed web verification
         id: release
         env:
@@ -113,6 +118,9 @@ jobs:
           XDG_DATA_HOME: ${{ github.workspace }}/xdg-data
           XDG_BIN_HOME: ${{ github.workspace }}/xdg-bin
           HIVE_VERSION: v0.1.0
+          # Authenticates install.sh's github.com release downloads so they
+          # are not throttled as anonymous traffic (never sent to the asset CDN).
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$XDG_DATA_HOME" "$XDG_BIN_HOME"
           bash install.sh --version="$HIVE_VERSION"
@@ -135,7 +143,12 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - uses: sigstore/cosign-installer@v3
+      - uses: ./.github/actions/install-cosign
+        # Authenticated, SHA-256-pinned cosign v2.5.2 download.
+        # (replaces the cosign-installer action, whose anonymous bootstrap downloads
+        # kept failing with HTTP 504 during GitHub's anonymous-traffic throttling).
+        with:
+          github-token: ${{ github.token }}
       - name: Check pinned release exists
         id: release
         env:
@@ -180,6 +193,9 @@ jobs:
         if: ${{ steps.release.outputs.capable == 'true' }}
         env:
           HIVE_VERSION: v0.1.0
+          # Authenticates install.sh + verify-release.sh github.com downloads
+          # (never forwarded to the redirected release-asset host).
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           bash packaging/verify-release.sh --version="$HIVE_VERSION"
 

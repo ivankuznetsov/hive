@@ -1909,9 +1909,7 @@ module Hive
       end
 
       def limit_fallback_outcome(ok, limit_text, error_message)
-        return "used" if ok
-
-        Hive::Stages::Review::LimitFallback.limited?(limit_text: limit_text, error_message: error_message) ? "limited" : "failed"
+        Hive::Stages::Review::LimitFallback.outcome(ok: ok, limit_text: limit_text, error_message: error_message)
       end
 
       def reviewer_specs_for(cfg, task)

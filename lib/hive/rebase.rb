@@ -238,6 +238,7 @@ module Hive
         # prevents the agent from reaching `task.folder`.
 
         result = dispatch_conflict_agent(task, cfg, profile, git, unmerged)
+        result = conflict_agent_limit_fallback(task, cfg, profile, git, unmerged, result) unless result[:status] == :ok
         unless result[:status] == :ok
           detail = result[:error_message] || result[:status]
           warn "[hive] rebase conflict-resolution agent failed: #{detail}"
@@ -398,9 +399,22 @@ module Hive
       warnings << message
     end
 
-    def dispatch_conflict_agent(task, cfg, profile, git, conflict_files)
+    # `limit_fallback` (a Review::LimitFallback::Decision) launches the
+    # substitute: the fallback profile's own default model (the `rebase`
+    # model pin and `models:` routes name the primary provider's models)
+    # and a `-fallback-<agent>` log label.
+    def dispatch_conflict_agent(task, cfg, profile, git, conflict_files, limit_fallback: nil)
       timeout = cfg.dig("rebase", "conflict_resolution_timeout_sec") || 2700
       budget = cfg.dig("budget_usd", "execute_implementation") || 500
+      model_arguments =
+        if limit_fallback
+          {}
+        else
+          Hive::Stages::Base.model_launch_arguments(
+            cfg, "rebase", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
+          )
+        end
 
       Hive::Stages::Base.spawn_agent(
         task,
@@ -409,16 +423,61 @@ module Hive
         timeout_sec: timeout,
         add_dirs: [],
         cwd: task.worktree_path,
-        log_label: "rebase_conflict",
+        log_label: "rebase_conflict#{"-fallback-#{limit_fallback.fallback}" if limit_fallback}",
         profile: profile,
         status_mode: :exit_code_only,
-        **Hive::Stages::Base.model_launch_arguments(
-          cfg, "rebase", profile,
-          current: Hive::Stages::Base.model_routing_current(cfg["rebase"])
-        ),
-        cfg: cfg,
+        **model_arguments,
+        cfg: limit_fallback ? Hive::Stages::Review::LimitFallback.fallback_cfg(cfg) : cfg,
         mcp_scope: "rebase"
       )
+    end
+
+    # One substitute conflict-resolution run after the primary agent hit a
+    # usage/credit limit, using the same `review.limit_fallback` decision,
+    # receipt, and log line as the 6-review roles (see
+    # Hive::Stages::Review::LimitFallback). Scoped to tasks whose current
+    # stage runs the review runner: `review.limit_fallback` is review
+    # config, so a rebase ahead of any other stage keeps today's
+    # fail-soft `agent_failed` behaviour. The conflict agent's profile comes
+    # from `execute.agent` (no implementation-identity pin is resolved for
+    # it), so the substitute neither reads nor rewrites any pin. A
+    # successful substitute's result replaces the primary's; any other
+    # substitute outcome returns the primary's limit result.
+    def conflict_agent_limit_fallback(task, cfg, profile, git, unmerged, result)
+      return result unless review_stage?(task)
+
+      require "hive/stages/review/limit_fallback"
+      decision = Hive::Stages::Review::LimitFallback.decide(
+        cfg, phase: "rebase", role: "rebase conflict resolution", primary: profile.name.to_s,
+        limit_text: result[:limit_text], error_message: result[:error_message]
+      )
+      return result unless decision
+
+      fallback_profile = Hive::AgentProfiles.lookup(decision.fallback, cfg: cfg)
+      fallback = dispatch_conflict_agent(task, cfg, fallback_profile, git, unmerged, limit_fallback: decision)
+      ok = fallback[:status] == :ok
+      Hive::Stages::Review::LimitFallback.record!(
+        task_folder: task.folder, pass: review_receipt_pass(task), decision: decision,
+        outcome: Hive::Stages::Review::LimitFallback.outcome(
+          ok: ok, limit_text: fallback[:limit_text], error_message: fallback[:error_message]
+        ),
+        error: fallback[:error_message]
+      )
+      ok ? fallback : result
+    end
+
+    def review_stage?(task)
+      return false unless task.respond_to?(:workflow) && task.workflow
+
+      task.workflow.stage_named(task.stage_name)&.execution_strategy == :review
+    end
+
+    # The review pass this run is about to execute, so the receipt lands
+    # beside that pass's `limit-fallback-NN.jsonl`.
+    def review_receipt_pass(task)
+      require "hive/stages/review"
+      require "hive/markers"
+      Hive::Stages::Review.next_pass_for(task, Hive::Markers.current(task.state_file))
     end
 
     def render_conflict_prompt(task, cfg, git, conflict_files)

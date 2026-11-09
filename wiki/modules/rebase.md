@@ -3,7 +3,7 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb, lib/hive/commands/run.rb
 created: 2026-05-14
-updated: 2026-08-27
+updated: 2026-11-09
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -71,7 +71,8 @@ When `git rebase <origin/default>` raises `Hive::RebaseConflict`:
       - `max_budget_usd: cfg.budget_usd.execute_implementation || 500`.
       - `prompt:` rendered from `templates/rebase_conflict_resolution.md.erb` with the commit message + conflict file paths + file contents inside a per-spawn `<user_supplied_<hex>>` nonce block (ADR-008/019).
    4. After the agent returns:
-      - If `status != :ok` → abort with `:agent_failed`.
+      - If `status != :ok` and the task's current stage runs the review runner, the failure goes through `review.limit_fallback` first (`conflict_agent_limit_fallback`): on a classified provider limit with an approved `LimitFallback.decide` (phase `rebase`), the conflict agent is dispatched once more on the fallback profile (log label `rebase_conflict-fallback-<agent>`, no `rebase` model pin or `models:` routes, same isolation), the substitution is logged and appended to `reviews/limit-fallback-NN.jsonl` for the upcoming review pass, and a successful substitute replaces the primary's result. Outside the review stage, or when the option is off, nothing changes. See [[stages/review]].
+      - If `status != :ok` (still) → abort with `:agent_failed`.
       - If `rebase_in_progress?` is now false:
         - Check if the agent completed the rebase cleanly (no markers, worktree clean). If yes, **accept** the work (PR #69 review B9). If no, abort with `:agent_called_continue_itself`.
       - If conflict markers still in any resolved file → abort with `:markers_remaining`. The marker check **fails closed** (returns true on read error) so unreadable files default to abort.

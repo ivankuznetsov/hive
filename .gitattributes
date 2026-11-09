@@ -1,0 +1,10 @@
+# wiki/gaps.md is an append-mostly list that nearly every PR adds a section
+# to, so concurrent PRs conflict on it constantly (13 of 20 recent main
+# commits touched it). Git's built-in union driver keeps both sides of a
+# conflicting hunk, which is the correct resolution for independent gap
+# entries. It applies to local merges and rebases (Hive's review-stage
+# rebase, operator `git merge origin/main`); GitHub's own mergeability check
+# ignores merge drivers, so a PR still shows a conflict until it is merged
+# locally. Review the result for duplicated lines when both sides edited the
+# same entry.
+wiki/gaps.md merge=union

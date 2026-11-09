@@ -15,6 +15,22 @@ runtime format (base schema v2). A main-era binary that reads a proposal-bound
 attempt row fails closed with an invalid attempt record rather than a clean
 newer-schema refusal. Whether a dedicated fence (schema v3 plus a
 QuiescenceUpgrade source) is wanted is undecided.
+## Original final-fix incident artifacts (2026-11-02)
+
+The original stalled review's artifacts were not supplied for the per-task
+fix-pass grant change. Eligibility is exercised with representative
+pre-feature tasks, including missing scheduler observations; the completeness
+of the original incident's retained HEAD, pass and task-history evidence is
+unknown. The command reports specific missing or contradictory evidence
+instead of adopting an incomplete review. Native provider execution is
+covered by deterministic adapter/launch tests; no live-provider run was part
+of the local acceptance evidence. Guardrail restart regressions simulate
+process loss after sealing a granted fix, after writing its trip report, and
+before writing the post-guardrail sentinel; physical power-loss durability
+was not exercised. Provider failure after a guarded commit followed by a
+successful no-op retry is covered with deterministic failure injection,
+including a restart before the retry's guardrail scan; no live-provider
+failure was induced.
 ## Direct benchmark isolation delivery (2026-11-02)
 
 The canonical hive-bench baseline is `432e730ea7812246496726fcc9153e98be58eb30`;

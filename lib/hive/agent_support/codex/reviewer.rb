@@ -532,7 +532,7 @@ module Hive::AgentSupport::Codex
 
       @runtime.capture(
         environment: mcp_launch.environment_for(profile.subscription_environment),
-        argv:, chdir: ctx.worktree_path,
+        argv:, chdir: ctx.worktree_path, task_folder: ctx.task_folder,
         timeout_sec:, timeout_message: "codex review timed out after #{timeout_sec}s"
       )
     end

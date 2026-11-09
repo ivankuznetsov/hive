@@ -10,6 +10,8 @@ module Hive::AgentSupport::Claude
 
   module_function
 
+  def operator_tool_denials = [ "Bash(*review-grant*)" ]
+
   def credential_path(home: nil) = File.join(home || Dir.home, ".claude", ".credentials.json")
   def execution_identity(model) = [ "anthropic", model.to_s.empty? ? nil : model.to_s ]
   def legacy_control(cfg, name) = cfg.dig("claude", name.to_s)

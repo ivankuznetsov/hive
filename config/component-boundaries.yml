@@ -744,6 +744,7 @@ components:
       - lib/hive/protected_files.rb
     state_contracts:
       - "In-memory no-follow protected-anchor capture plus bounded post-spawn custody report"
+      - "PathCustody restores explicit receipt paths and caller-proven absent listing additions without a persisted ledger"
     schema_contracts:
       - "Manifest, Snapshot, Violation, Restoration, and Report schema v1; stage markers and outcomes remain Hive-owned"
     lock_contracts:
@@ -758,6 +759,7 @@ components:
     authorized_internal_constructions: []
     hive_consumers:
       - lib/hive/agent.rb
+      - lib/hive/review_budget/custody.rb
       - lib/hive/claude_launcher.rb
       - lib/hive/stages/execute.rb
       - lib/hive/stages/finalize.rb

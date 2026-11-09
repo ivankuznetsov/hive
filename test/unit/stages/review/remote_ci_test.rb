@@ -272,6 +272,8 @@ class ReviewRemoteCiTest < Minitest::Test
       assert_includes runner.blocked.detail, "mergeStateStatus=DIRTY"
       assert_includes runner.blocked.detail, "git -C #{repo} merge --no-ff origin/trunk"
       assert_includes runner.blocked.detail, "no force-push"
+      assert_match(/hive publication-reconcile \S+ --project <project> --pr \S+ --head <full merge sha>/,
+                   runner.blocked.detail)
       assert_equal 2, gh.rollup_calls, "a conflict is reported on first observation, not after the wait"
     end
   end

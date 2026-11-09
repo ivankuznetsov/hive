@@ -700,8 +700,9 @@ module Hive
       def review_ci_stale_instructions(marker)
         if marker.attrs["reason"].to_s == "base_conflict"
           return "the PR conflicts with its base: merge origin/<base> into the task branch with a merge " \
-                 "commit (no rebase, no force-push) as reviews/ci-blocked.md describes, then refresh " \
-                 "`hive status --operational --json` and invoke this task's workflow.retry action"
+                 "commit (no rebase, no force-push) as reviews/ci-blocked.md describes; if you pushed it " \
+                 "yourself, run `hive publication-reconcile TASK --project P --pr URL --head <full sha>`; " \
+                 "then refresh `hive status --operational --json` and invoke this task's workflow.retry action"
         end
 
         "fix CI failures, edit reviews/ci-blocked.md, then refresh " \

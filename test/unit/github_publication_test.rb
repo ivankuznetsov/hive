@@ -1052,6 +1052,25 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_commit_secret_scan_is_scoped_to_the_pr_base_branch
+    with_local_remote do |repo, remote, head|
+      calls = []
+      clean = lambda do |*args, **kwargs|
+        calls << [ args, kwargs ]
+        raise Hive::SecretScanner::Unavailable, "stop after scan"
+      end
+      with_replaced_singleton_method(Hive::SecretScanner, :git_match?, clean) do
+        assert_raises(Hive::GithubPublication::Blocked) do
+          Hive::GithubPublication::Controller.new(
+            state_path: state_path(repo), git_gateway: CountingGit.new(remote), github_gateway: FakeGithub.new
+          ).publish!(request_for(repo, head), revalidate: ->(_) { true })
+        end
+      end
+      assert_equal [ [ [ File.expand_path(repo) ], { base_oid: capture("git", "-C", repo, "rev-parse", "HEAD~1").strip,
+                                                     head_oid: head, upstream_branch: "main" } ] ], calls
+    end
+  end
+
   def test_unavailable_secret_scanner_blocks_publication_before_remote_mutation
     with_local_remote do |repo, remote, head|
       git = CountingGit.new(remote)

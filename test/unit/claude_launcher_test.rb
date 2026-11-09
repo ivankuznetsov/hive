@@ -431,6 +431,30 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  # Exhausted attempt bookkeeping returns a typed envelope; the stage marker
+  # carries that transient reason instead of a generic launch failure.
+  def test_spawn_claude_with_failure_marker_records_bookkeeping_busy_envelopes
+    with_tmp_task do |task|
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      envelope = { status: :error, error_reason: "runtime_bookkeeping_busy",
+                   error_message: "runtime_bookkeeping_busy: heartbeat exhausted" }
+      original = Hive::ClaudeLauncher.method(:launch!)
+      capture_unbound_method(:launch!, original) do
+        Hive::ClaudeLauncher.define_singleton_method(:launch!) { |**_kwargs| envelope }
+
+        result = Hive::Stages::Base.spawn_claude_with_failure_marker!(
+          task, {}, prompt: "prompt", max_budget_usd: 1, timeout_sec: 1
+        )
+
+        assert_same envelope, result
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal :error, marker.name
+        assert_equal "runtime_bookkeeping_busy", marker.attrs["reason"]
+        assert_includes marker.attrs["message"], "heartbeat exhausted"
+      end
+    end
+  end
+
   def test_spawn_claude_with_failure_marker_reraises_provider_route_failures
     with_tmp_task do |task|
       original = Hive::ClaudeLauncher.method(:launch!)

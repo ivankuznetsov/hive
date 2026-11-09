@@ -138,4 +138,31 @@ class HiveTuiViewsFormatTest < Minitest::Test
       Hive::Tui::Views::Format.ljust_cells("#{REVERSE}ab#{RESET}", 5)
     assert_equal "ab   ", Hive::Tui::Views::Format.ljust_cells("ab", 5)
   end
+
+  def test_rjust_cells_pads_on_the_left_by_visible_width
+    assert_equal "   ab", Hive::Tui::Views::Format.rjust_cells("ab", 5)
+    assert_equal "   #{REVERSE}ab#{RESET}",
+      Hive::Tui::Views::Format.rjust_cells("#{REVERSE}ab#{RESET}", 5)
+  end
+
+  # Matches `hive status` age humanization across every magnitude band, plus
+  # the nil-tolerance contract (nil coerces to 0s, never raises).
+  def test_age_humanizes_each_magnitude_band
+    assert_equal "30s", Hive::Tui::Views::Format.age(30)
+    assert_equal "5m", Hive::Tui::Views::Format.age(300)
+    assert_equal "2h", Hive::Tui::Views::Format.age(7200)
+    assert_equal "3d", Hive::Tui::Views::Format.age(259_200)
+    assert_equal "0s", Hive::Tui::Views::Format.age(nil)
+  end
+
+  def test_viewport_start_tracks_the_selected_row_within_capacity
+    # total fits within capacity: no scrolling.
+    assert_equal 0, Hive::Tui::Views::Format.viewport_start(total: 3, capacity: 5, selected_index: 2)
+    # selection already visible from the top.
+    assert_equal 0, Hive::Tui::Views::Format.viewport_start(total: 10, capacity: 5, selected_index: 2)
+    # selection past the first page scrolls to keep it in view.
+    assert_equal 4, Hive::Tui::Views::Format.viewport_start(total: 10, capacity: 5, selected_index: 8)
+    # an out-of-range index clamps to the last row and stops at the final page.
+    assert_equal 5, Hive::Tui::Views::Format.viewport_start(total: 10, capacity: 5, selected_index: 99)
+  end
 end

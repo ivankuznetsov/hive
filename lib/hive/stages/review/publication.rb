@@ -3,6 +3,7 @@ require "hive/gh"
 require "hive/config"
 require "hive/worktree"
 require "hive/review_publication_recovery"
+require "hive/github_publication"
 
 module Hive
   module Stages
@@ -17,10 +18,18 @@ module Hive
             super(reason)
           end
         end
+        # GitHub moves a PR's headRefOid asynchronously after a branch push.
+        # Bounded waits (seconds) while the PR still reports an ancestor of
+        # the receipt-proven head; any other head fails closed at once.
+        PR_HEAD_SETTLE_DELAYS = [ 1, 2, 3, 5, 8 ].freeze
+        PUBLICATION_STATE_FILE = "github-publication.json".freeze
+
         attr_reader :evidence, :identity
 
-        def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh, gate: Hive::AgentGitGate)
+        def initialize(task:, cfg:, ctx:, pr_url:, gh: Hive::Gh, gate: Hive::AgentGitGate,
+                       anchor: nil, sleeper: ->(seconds) { sleep(seconds) })
           @task, @cfg, @ctx, @pr_url, @gh, @gate = task, cfg, ctx, pr_url, gh, gate
+          @anchor, @sleeper = anchor, sleeper
           @evidence = { "worktree" => ctx.worktree_path, "publication" => "unknown",
                         "verification" => "pending", "pr_url" => pr_url }
         end
@@ -55,10 +64,12 @@ module Hive
           raise Hive::AgentGitGate::RemoteConflict, "divergent history" if classification["classification"] == "divergent"
           # Safe gate uses an exact lease; require ahead-only history above so
           # it can never turn operator guidance into a forceful rewrite.
-          receipt = @gate.publish_local_branch(
-            repository_path: @ctx.worktree_path, branch: identity[:branch],
-            expected_remote_oid: identity[:remote_head], expected_local_oid: expected_head
-          )
+          receipt = with_publication_anchor(identity[:branch], identity[:remote_head], expected_head) do
+            @gate.publish_local_branch(
+              repository_path: @ctx.worktree_path, branch: identity[:branch],
+              expected_remote_oid: identity[:remote_head], expected_local_oid: expected_head
+            )
+          end
           raise Stop, "publication_receipt_mismatch" unless receipt.after_oid == expected_head
           @evidence.merge!("publication" => "published", "remote_head" => receipt.after_oid,
                            "unpushed_shas" => [], "classification" => "equal", "failure_reason" => nil)
@@ -77,6 +88,14 @@ module Hive
         rescue Stop => e
           @evidence["failure_reason"] = e.reason
           self
+        rescue Hive::GithubPublication::Blocked => e
+          # The task's publication record does not admit this head (for
+          # example an unrecorded external rewrite); operators reconcile it.
+          @evidence["failure_reason"] = "publication_record_#{e.code}"
+          self
+        rescue Hive::ManagedDirectory::UnsafeError
+          @evidence["failure_reason"] = "publication_record_unsafe_state"
+          self
         rescue Hive::AgentGitGate::Error, Hive::GhError, Hive::WorktreeError,
                KeyError, SystemCallError, IOError, ArgumentError
           @evidence["failure_reason"] = "publication_identity_unavailable"
@@ -88,7 +107,7 @@ module Hive
 
         def confirm!(head)
           verify_local!(head)
-          current = resolve_identity!
+          current = settled_identity(head)
           @evidence["remote_head"] = current[:remote_head]
           @evidence["observed_at"] = Time.now.utc.iso8601
           raise Stop, "pr_head_moved" unless current[:remote_head] == head
@@ -104,6 +123,43 @@ module Hive
         end
 
         private
+
+        def settled_identity(head)
+          delays = PR_HEAD_SETTLE_DELAYS.dup
+          loop do
+            current = resolve_identity!
+            return current if current[:remote_head] == head || delays.empty? || !lagging_pr_head?(current[:remote_head], head)
+
+            @sleeper.call(delays.shift)
+          end
+        end
+
+        # Lag only when this publisher holds a push receipt for `head` and the
+        # PR still names a strict ancestor of it (the pre-push head).
+        def lagging_pr_head?(pr_head, head)
+          @evidence["publication"] == "published" && @evidence["local_head"] == head &&
+            !Hive::ReviewPublicationRecovery.git(@ctx.worktree_path, "merge-base", "--is-ancestor", pr_head, head).nil?
+        end
+
+        # Hive-initiated review/CI-repair pushes advance the task's
+        # github-publication.json anchor through the same intent-before-push,
+        # advance-after-observe path as auto-rebase. Tasks without a record
+        # (ad-hoc reviews) keep the plain leased push.
+        def with_publication_anchor(branch, before_oid, after_oid, &push)
+          anchor = @anchor
+          unless anchor
+            state_path = File.join(@task.folder, PUBLICATION_STATE_FILE)
+            return push.call unless File.file?(state_path)
+
+            anchor = Hive::GithubPublication::Controller.new(
+              state_path: state_path,
+              git_gateway: Hive::GithubPublication::GitGateway.new(cfg: @cfg),
+              github_gateway: Hive::GithubPublication::GithubGateway.new(cfg: @cfg)
+            )
+          end
+          anchor.publish_fast_forward!(worktree_path: @ctx.worktree_path, branch: branch,
+                                       before_oid: before_oid, after_oid: after_oid, &push)
+        end
 
         def verify_local!(head)
           current = Hive::ReviewPublicationRecovery.git(@ctx.worktree_path, "rev-parse", "HEAD")&.strip

@@ -199,7 +199,7 @@ module Hive
           private
 
           def publication
-            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh)
+            @publication ||= Publication.new(task: @task, cfg: @cfg, ctx: @ctx, pr_url: @pr_url, gh: @gh, sleeper: @sleeper)
           end
 
           def resolve_identity!

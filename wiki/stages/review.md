@@ -340,6 +340,7 @@ Final verification determines its mode before entry CI on restart. Local and
 hosted checks run once without repair agents; settlement polling is still allowed.
 A moved head invalidates verification, including movement during browser testing.
 Publication attempts are cached by both HEAD and withholding reason, so approval of an unchanged HEAD triggers publication with the new receipt. Reusing a publisher for a different HEAD starts fresh publication evidence.
+Each review or CI-repair push records an intent in `github-publication.json` and advances `published_head_oid` after observing the remote. Exact-head confirmation tolerates bounded GitHub `headRefOid` lag only for an ancestor of the pushed head (see [publication recovery](../publication-recovery.md)).
 
 Completion rechecks the open PR identity and exact head, then rechecks the local
 HEAD and branch after the remote identity lookups. Movement during those lookups

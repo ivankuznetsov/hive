@@ -45,6 +45,11 @@ head, reruns secret scanning, and changes only the local publication record.
 It does not push, edit GitHub, clear a failure marker, or approve code. Normal
 workflow retry and validation remain responsible for subsequent advancement.
 
+Any manual push to a task branch (for example the merge commit a
+`base_conflict` recovery asks for) leaves `github-publication.json` behind the
+PR head, so the next review reports `pr_head_moved`. Run
+`hive publication-reconcile` with the pushed full SHA before `workflow.retry`.
+
 ## Patrol Fix
 
 Independent review uses the same disposable exact-HEAD materialization as
@@ -68,6 +73,23 @@ home (normally `~/.config/hive`). Each line binds a commit, path, rule and line.
 Task-authored ignore files and inline suppression comments remain ineffective.
 An exception does not exempt other occurrences, future commits, titles or bodies.
 Never use a blanket rule or directory exception for a fixture finding.
+
+### Upstream content merged into the task branch
+
+The commit scan (`SecretScanner.git_findings`) walks `--full-history
+--diff-merges=separate <scan base>..<head>`. Publication passes the PR base
+branch as `upstream_branch` (resolved as `refs/remotes/origin/<branch>`, then
+the local branch). With an upstream tip resolved, the scan excludes commits
+already on upstream (`^<upstream>`), and a finding attributed to a merge commit
+is dropped only when a parent that is an ancestor of upstream already carries
+the same rule and secret digest at that path. Merging `origin/<default>` into a
+task branch therefore no longer re-reports upstream fixtures against the merge
+commit, while task commits and conflict-resolution content stay reported. An
+unset/unresolvable upstream, no merge base, or a head already on upstream keeps
+the full unscoped scan; failed ancestry or commit reads raise `Unavailable`
+(publication blocks as `secret_scan_unavailable`), and an unreadable upstream
+blob keeps the finding. Patrol Fix draft-PR handoff is unchanged: its base is
+pinned to the current base tip, so it cannot contain an upstream merge.
 
 Operational status preserves a receipt-bound controller failure and its owner
 ahead of the generic no-progress scheduler brake. A controller's lack of a text

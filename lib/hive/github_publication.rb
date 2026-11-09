@@ -987,8 +987,11 @@ module Hive
       def ensure_secret_free!(request)
         fields = { "title" => request.title, "body" => request.published_body }
         detected = fields.keys.select { |key| Hive::SecretScanner.match?(fields.fetch(key)) }
+        # Scope to the PR base branch so upstream content brought in by
+        # merging it into the task branch is not re-attributed to the task.
         if Hive::SecretScanner.git_match?(
-          request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
+          request.worktree_path,
+          base_oid: request.scan_base_oid, head_oid: request.head_oid, upstream_branch: request.base_branch
         )
           detected << "commits"
         end

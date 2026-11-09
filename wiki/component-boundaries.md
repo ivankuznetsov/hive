@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-09-26
+updated: 2026-11-09
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 

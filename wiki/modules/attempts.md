@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-09
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 

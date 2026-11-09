@@ -151,6 +151,7 @@ state_dir="$common_dir/llm-wiki"
 pending_dir="$state_dir/pending"
 failed_dir="$state_dir/failed"
 failure_count_file="$state_dir/consecutive-failures"
+proposal_failure_count_file="$state_dir/proposal-consecutive-failures"
 breaker_file="$state_dir/refresh-disabled"
 publication_blocked_file="$state_dir/publication-blocked"
 canonical_config="$state_dir/config.json"
@@ -186,6 +187,17 @@ max_path_bytes="$(positive_integer_or_default "${LLM_WIKI_MAX_PATH_BYTES:-200}" 
 
 log_line() {
   printf '[llm-wiki][%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$log_file" 2>/dev/null || true
+}
+
+primary_checkout() {
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      printf '%s\n' "${line#worktree }"
+      return 0
+    fi
+  done < <(git worktree list --porcelain 2>/dev/null)
+  return 1
 }
 
 configure_qmd_environment() {
@@ -968,7 +980,7 @@ protect_generated_proposals() {
 compile_proposals() {
   local source_commit="$1" owner_root compiler
   [ -n "$source_commit" ] || return 0
-  owner_root="$(git worktree list --porcelain | awk '/^worktree /{print $2; exit}')"
+  owner_root="$(primary_checkout || true)"
   [ -n "$owner_root" ] || {
     log_line "ERROR: proposal compiler could not resolve the primary checkout"
     return 1
@@ -1073,7 +1085,11 @@ prune_receipted_queue_files() {
 }
 
 record_batch_failure() {
-  local file queued_sha queued_branch count max_attempts count_tmp unreceipted=0
+  local failure_kind="$1"
+  local file queued_sha queued_branch count counter_file max_attempts count_tmp unreceipted=0
+  local failed_count breaker_tmp
+  counter_file="$failure_count_file"
+  [ "$failure_kind" = "provider" ] || counter_file="$proposal_failure_count_file"
   max_attempts="${LLM_WIKI_MAX_REFRESH_ATTEMPTS:-2}"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || max_attempts=2
 
@@ -1091,17 +1107,17 @@ record_batch_failure() {
     unreceipted=1
   done
   if [ "$unreceipted" -eq 0 ]; then
-    rm -f -- "$failure_count_file"
+    rm -f -- "$counter_file"
     reconcile_circuit_after_success
     return 0
   fi
 
-  count="$(sed -n '1p' "$failure_count_file" 2>/dev/null || true)"
+  count="$(sed -n '1p' "$counter_file" 2>/dev/null || true)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   count="$((count + 1))"
   count_tmp="$state_dir/.consecutive-failures.$$"
   printf '%s\n' "$count" >"$count_tmp"
-  mv -f "$count_tmp" "$failure_count_file"
+  mv -f "$count_tmp" "$counter_file"
 
   if [ "$count" -ge "$max_attempts" ]; then
     for file in "${QUEUE_FILES[@]}"; do
@@ -1109,11 +1125,27 @@ record_batch_failure() {
       IFS=$'\t' read -r queued_sha queued_branch <"$file"
       mv -f -- "$file" "$failed_dir/$queued_sha"
     done
-    printf 'failures:%s\n' "$count" >"$breaker_file"
-    log_line "ERROR: automatic refresh disabled after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    if [ "$failure_kind" = "provider" ]; then
+      printf 'failures:%s\n' "$count" >"$breaker_file"
+      log_line "ERROR: automatic refresh disabled after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    else
+      failed_count="$(failed_source_count)"
+      breaker_tmp="$state_dir/.refresh-disabled.$$"
+      printf 'quarantined:%s\n' "$failed_count" >"$breaker_tmp"
+      mv -f "$breaker_tmp" "$breaker_file"
+      log_line "ERROR: proposal compilation quarantined after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    fi
   else
     log_line "refresh batch failed ($count/$max_attempts consecutive failures); queue retained"
   fi
+}
+
+record_provider_batch_failure() {
+  record_batch_failure provider
+}
+
+record_proposal_batch_failure() {
+  record_batch_failure proposal
 }
 
 process_queue_batch() {
@@ -1124,7 +1156,7 @@ process_queue_batch() {
   BATCH_PROPOSAL_ONLY=0
   prune_receipted_queue_files
   if [ "${#QUEUE_FILES[@]}" -eq 0 ]; then
-    rm -f -- "$failure_count_file"
+    rm -f -- "$failure_count_file" "$proposal_failure_count_file"
     return 0
   fi
   proposal_source="$(latest_proposal_source)"
@@ -1253,7 +1285,11 @@ PROMPT
     return 1
   fi
   rm -f -- "${QUEUE_FILES[@]}"
-  rm -f -- "$failure_count_file"
+  if [ "$proposal_only" -eq 1 ]; then
+    rm -f -- "$proposal_failure_count_file"
+  else
+    rm -f -- "$failure_count_file"
+  fi
   ( cd "$refresh_root" && run_qmd update ) >>"$log_file" 2>&1 || true
   ( cd "$refresh_root" && run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 ) >>"$log_file" 2>&1 || true
   return 0
@@ -1352,9 +1388,10 @@ while snapshot_queue; do
     exit 0
   elif [ "$batch_status" -ne 0 ]; then
     if [ "$BATCH_PROPOSAL_ONLY" -eq 1 ]; then
-      log_line "proposal-only compile failed; queue retained without opening the provider circuit"
+      log_line "proposal-only compile failed without opening the provider failure circuit"
+      record_proposal_batch_failure
     else
-      record_batch_failure
+      record_provider_batch_failure
     fi
     if [ -n "$retry_selector" ]; then
       printf 'llm-wiki: retry failed; see %s\n' "$log_file" >&2
@@ -1385,7 +1422,7 @@ if [ -n "$retry_selector" ]; then
   fi
 fi
 
-main_checkout="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+main_checkout="$(primary_checkout || true)"
 project_name="$(basename "${main_checkout:-$committing_tree}")"
 for sync_dir in "$HOME/wikis/.sync-needed" "$(dirname "${main_checkout:-$committing_tree}")/wikis/.sync-needed"; do
   if [ -d "$(dirname "$sync_dir")" ]; then

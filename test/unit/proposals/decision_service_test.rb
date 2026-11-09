@@ -83,6 +83,62 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_evaluation_can_append_while_decision_uses_a_fixed_considered_set
+    first = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
+    observation = @store.projection(proposal_id).lifecycle_head
+    entered_quota = Queue.new
+    release_decision = Queue.new
+    source_store = Hive::Proposals::SourceEventStore.new(root: @tmp)
+    source_store.define_singleton_method(:enforce_lifecycle!) do |**|
+      entered_quota << true
+      release_decision.pop
+      true
+    end
+    service = Hive::Proposals::DecisionService.new(
+      store: @store, authority: @authority, source_store:,
+      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+    )
+    decision = Thread.new do
+      service.decide(
+        proposal_id:, outcome: "accepted", considered_evaluations: observations(first),
+        rationale_category: "evaluated", rationale: "accept", links: [],
+        expected_head: observation, **authority_args("fixed-set-concurrent")
+      )
+    end
+    entered_quota.pop
+    evaluation = Thread.new do
+      append_evaluation(proposal_id, source: "c", outcome: "mixed", metric: 0.88)
+    end
+    release_decision << true
+    decision_result = decision.value
+    evaluation_result = evaluation.value
+
+    assert decision_result.applied
+    assert_equal "evaluation", evaluation_result.type
+    projection = @store.projection(proposal_id)
+    assert_equal "accepted", projection.status
+    assert_equal 2, projection.evaluations.length
+    assert_equal [ first.event_id ], projection.decision.fetch("considered_evaluation_ids")
+  end
+
+  def test_configured_link_scheme_applies_during_lifecycle_normalization
+    custom_policy = policy.merge("allowed_link_schemes" => [ "artifact" ])
+    service = Hive::Proposals::DecisionService.new(
+      store: @store, authority: @authority, policy: custom_policy,
+      clock: -> { Time.utc(2026, 8, 30, 12, 30, 0) }
+    )
+
+    result = service.decide(
+      proposal_id:, outcome: "rejected", considered_evaluations: [],
+      rationale_category: "no_evaluation", rationale: "reject",
+      links: [ { "kind" => "evidence", "reference" => "artifact://review-1" } ],
+      expected_head: @store.projection(proposal_id).lifecycle_head,
+      **authority_args("custom-link-scheme")
+    )
+
+    assert_equal "artifact://review-1", result.event.data.fetch("links").first.fetch("reference")
+  end
+
   def test_changed_considered_evaluation_digest_is_stale
     evaluation = append_evaluation(proposal_id, source: "b", outcome: "pass", metric: 0.91)
     considered = observations(evaluation)
@@ -165,7 +221,7 @@ class ProposalDecisionServiceTest < Minitest::Test
     replay = @service.supersede(
       proposal_id:, successor_id: successor,
       expected_head: { "version" => 0,
-                       "digest" => Hive::Proposals::Projection.empty_head_digest(proposal_id) },
+                       "digest" => empty_head_digest(proposal_id) },
       **authority_args("supersede-v2")
     )
     assert replay.noop?
@@ -483,6 +539,46 @@ class ProposalDecisionServiceTest < Minitest::Test
     end
   end
 
+  def test_lifecycle_commit_preserves_original_error_when_head_cannot_be_verified
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = decision_store(root)
+      with_store(store) do
+        create_record(proposal_id)
+        evaluation = append_evaluation(proposal_id, source: "i", outcome: "pass", metric: 0.9)
+        seed_proposal_history(ops, store, proposal_id, evaluation)
+        original_head = ops.method(:hive_state_head_sha)
+        head_reads = 0
+        ops.define_singleton_method(:hive_state_head_sha) do
+          head_reads += 1
+          raise Hive::GitError, "simulated head failure" if head_reads > 1
+
+          original_head.call
+        end
+        ops.define_singleton_method(:hive_commit) do |**_options|
+          raise Hive::GitError, "simulated lifecycle commit failure"
+        end
+        service = durable_service(store, ops)
+
+        _out, err = capture_io do
+          error = assert_raises(Hive::GitError) do
+            service.decide(
+              proposal_id:, outcome: "accepted", considered_evaluations: observations(evaluation),
+              rationale_category: "evaluated", rationale: "accept", links: [],
+              expected_head: store.projection(proposal_id).lifecycle_head,
+              **authority_args("unverifiable-head")
+            )
+          end
+          assert_equal "simulated lifecycle commit failure", error.message
+        end
+        assert_includes err, "rollback skipped: unable to verify state head"
+        assert_equal %w[evaluation decision], store.projection(proposal_id).events.map(&:type)
+      end
+    end
+  end
+
   def test_lifecycle_rejects_commit_results_without_a_new_durable_head
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)
@@ -697,6 +793,10 @@ class ProposalDecisionServiceTest < Minitest::Test
 
   def source_id(value)
     "pse-#{Digest::SHA256.hexdigest("source-#{value}")}"
+  end
+
+  def empty_head_digest(id)
+    Hive::Proposals.digest("proposal_id" => id, "lifecycle_events" => [])
   end
 
   def evidence

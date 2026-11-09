@@ -19,7 +19,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
   def setup
     @dir = Dir.mktmpdir("llmwiki-hook-")
-    @main = File.join(@dir, "main")
+    @main = File.join(@dir, "main checkout")
     @wt = File.join(@dir, "wt")
     @runtime_dir = File.join(@dir, "runtime")
     @stub = File.join(@dir, "stub bin", "stub-refresh.sh")
@@ -129,7 +129,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
                   "refs/heads/llm-wiki/refresh")
   end
 
-  def test_proposal_only_batch_compiles_without_launching_the_wiki_agent
+  def test_proposal_only_batch_compiles_from_a_space_bearing_primary_checkout_without_launching_the_wiki_agent
     compiler_calls = File.join(@dir, "proposal-compiler-calls")
     compiler = File.join(@dir, "stub bin", "proposal-compiler")
     File.write(compiler, <<~STUB)
@@ -370,7 +370,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     assert_includes File.read(compiler_calls), "--source-ref #{proposal_sha}"
   end
 
-  def test_proposal_only_compile_failure_keeps_the_queue_for_retry
+  def test_proposal_only_compile_failure_is_bounded_without_opening_the_provider_failure_circuit
     compiler = File.join(@dir, "stub bin", "failing-proposal-compiler")
     File.write(compiler, "#!/usr/bin/env bash\nexit 17\n")
     FileUtils.chmod("+x", compiler)
@@ -385,9 +385,28 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
     assert_equal 0, result.fetch(:status), result.fetch(:out)
     common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
-    assert_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    state_dir = File.join(common, "llm-wiki")
+    pending = File.join(state_dir, "pending", source_sha)
+    failed = File.join(state_dir, "failed", source_sha)
+    failure_count = File.join(state_dir, "proposal-consecutive-failures")
+    breaker = File.join(state_dir, "refresh-disabled")
+    assert_path_exists pending
+    assert_equal "1", File.read(failure_count).strip
+    refute_path_exists breaker
     refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
                   "refs/llm-wiki/receipts/#{source_sha}")
+
+    retry_result = run_refresh_from(
+      @wt,
+      "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, retry_result.fetch(:status), retry_result.fetch(:out)
+    refute_path_exists pending
+    assert_path_exists failed
+    assert_equal "2", File.read(failure_count).strip
+    assert_equal "quarantined:1", File.read(breaker).strip
   end
 
   def test_refresh_branch_is_pushed_without_touching_main

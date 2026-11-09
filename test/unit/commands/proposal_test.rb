@@ -1,5 +1,7 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/proposal"
+require "hive/schemas"
 
 class ProposalCommandTest < Minitest::Test
   include HiveTestHelper
@@ -108,10 +110,26 @@ class ProposalCommandTest < Minitest::Test
       refute_path_exists File.join(dir, "wiki", "proposals.json")
       refute_path_exists File.join(dir, "wiki", "proposals.md")
 
-      checked = Hive::Commands::Proposal.new(
-        "refresh", dir, input: nil, check: true, stdout: StringIO.new
-      ).call
-      assert_equal ops.hive_state_head_sha, checked.source_commit
+      managed = File.join(Dir.tmpdir, "hive-managed-check-#{SecureRandom.hex(4)}")
+      run!("git", "-C", dir, "worktree", "add", managed, "llm-wiki/refresh")
+      begin
+        project_before = repository_snapshot(dir)
+        managed_before = repository_snapshot(managed)
+        state_head_before = ops.hive_state_head_sha
+        scratch_before = Dir.glob(File.join(Dir.tmpdir, "hive-proposal-refresh-check-*"))
+
+        checked = Hive::Commands::Proposal.new(
+          "refresh", dir, input: nil, check: true, stdout: StringIO.new
+        ).call
+        assert_equal state_head_before, checked.source_commit
+        assert_equal project_before, repository_snapshot(dir)
+        assert_equal managed_before, repository_snapshot(managed)
+        assert_equal state_head_before, ops.hive_state_head_sha
+        assert_equal scratch_before,
+                     Dir.glob(File.join(Dir.tmpdir, "hive-proposal-refresh-check-*"))
+      ensure
+        run!("git", "-C", dir, "worktree", "remove", "--force", managed) if File.exist?(managed)
+      end
 
       publish_managed_wiki_pair(dir, output, stale: true)
       assert_raises(Hive::Proposals::StaleObservation) do
@@ -262,6 +280,61 @@ class ProposalCommandTest < Minitest::Test
         command.send(:run_managed_refresh, dir, ops)
       end
       assert_equal "managed proposal refresh failed", error.message
+
+      timeout = ->(*_arguments, &_block) { raise Timeout::Error, "simulated hang" }
+      with_replaced_singleton_method(Timeout, :timeout, timeout) do
+        error = assert_raises(Hive::Proposals::SourceUnavailable) do
+          command.send(:run_managed_refresh, dir, ops)
+        end
+        assert_includes error.message, "timed out"
+      end
+    end
+  end
+
+  def test_managed_refresh_failure_keeps_unicode_json_error_valid
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      script = File.join(dir, ".llm-wiki", "post-commit-refresh.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      File.write(script, "#!/usr/bin/env bash\nprintf 'x#{'é' * 600}' >&2\nexit 1\n")
+      output = StringIO.new
+
+      assert_raises(Hive::Proposals::SourceUnavailable) do
+        Hive::Commands::Proposal.new(
+          "refresh", dir, input: nil, json: true, stdout: output
+        ).call
+      end
+
+      payload = JSON.parse(output.string)
+      assert payload.fetch("message").valid_encoding?
+      assert_equal "source_unavailable", payload.fetch("error_kind")
+    end
+  end
+
+  def test_read_commands_survive_a_quarantined_source_index
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      relative = "proposals/v1/inbox/index.json"
+      path = File.join(ops.hive_state_path, relative)
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "{malformed")
+      ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded malformed index",
+        pathspecs: [ relative ]
+      )
+      output = StringIO.new
+
+      Hive::Commands::Proposal.new(
+        "list", dir, input: nil, json: true, stdout: output,
+        project_root: dir, include_quarantine: true
+      ).call
+
+      payload = JSON.parse(output.string)
+      assert_empty payload.fetch("proposals")
+      assert_equal [ "source_index_quarantined" ],
+                   payload.fetch("diagnostics").map { |item| item.fetch("code") }
     end
   end
 
@@ -401,8 +474,11 @@ class ProposalCommandTest < Minitest::Test
         "filter", dir, input: nil, json: true, stdout: filter_output,
         project_root: dir, filters: { "method" => "cost-threshold" }, include_drafts: true
       ).call
-      assert_equal proposal_id,
-                   JSON.parse(filter_output.string).fetch("proposals").first.fetch("proposal_id")
+      filtered = JSON.parse(filter_output.string)
+      assert_equal proposal_id, filtered.fetch("proposals").first.fetch("proposal_id")
+      assert JSONSchemer.schema(JSON.parse(File.read(
+        Hive::Schemas.schema_path("hive-proposal-list")
+      ))).valid?(filtered), "real proposal list payload must satisfy its published schema"
 
       config = Hive::Config.load(dir)
       authority = Hive::Proposals::Authority.new(config)
@@ -436,7 +512,11 @@ class ProposalCommandTest < Minitest::Test
         "show", proposal_id, input: nil, json: true, stdout: show_output,
         project_root: dir
       ).call
-      shown = JSON.parse(show_output.string).fetch("proposal")
+      show_payload = JSON.parse(show_output.string)
+      assert JSONSchemer.schema(JSON.parse(File.read(
+        Hive::Schemas.schema_path("hive-proposal-show")
+      ))).valid?(show_payload), "real proposal show payload must satisfy its published schema"
+      shown = show_payload.fetch("proposal")
       assert_equal "accepted", shown.fetch("status")
       assert_equal %w[evaluation decision], shown.fetch("history").map { |row| row.fetch("type") }
 
@@ -479,6 +559,15 @@ class ProposalCommandTest < Minitest::Test
   end
 
   private
+
+  def repository_snapshot(path)
+    {
+      "head" => run!("git", "-C", path, "rev-parse", "HEAD").strip,
+      "status" => run!(
+        "git", "-C", path, "status", "--porcelain=v1", "-z", "--untracked-files=all"
+      )
+    }
+  end
 
   def publish_managed_wiki_pair(project, compiled, create: false, stale: false)
     managed = File.join(Dir.tmpdir, "hive-managed-wiki-#{SecureRandom.hex(4)}")

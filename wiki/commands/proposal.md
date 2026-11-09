@@ -3,7 +3,7 @@ title: hive proposal
 type: command
 source: lib/hive/commands/proposal.rb, lib/hive/cli.rb, lib/hive/proposals/
 created: 2026-08-30
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [command, proposals, skills, workflows, evidence]
 ---
 
@@ -113,6 +113,8 @@ state source. Both files publish in one wiki commit. `--check` compiles to an
 external disposable directory, compares bytes with the pair at the managed wiki
 branch, removes the scratch output, and does not publish or modify a managed
 worktree or the primary checkout.
+The managed refresh subprocess is time-bounded, and its redacted diagnostic
+output is truncated on a valid UTF-8 boundary.
 
 An explicit refresh enqueues the selected pinned proposal source even when the
 current state `HEAD` changes only inbox/cursor/task-state paths. Queued proposal

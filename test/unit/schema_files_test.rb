@@ -65,6 +65,24 @@ class SchemaFilesTest < Minitest::Test
     })
   end
 
+  def test_proposal_cli_projection_objects_are_closed_and_match_the_index_shape
+    index = JSON.parse(File.read(Hive::Schemas.schema_path("hive-proposal-index")))
+    list = JSON.parse(File.read(Hive::Schemas.schema_path("hive-proposal-list")))
+    show = JSON.parse(File.read(Hive::Schemas.schema_path("hive-proposal-show")))
+    index_projection = index.dig("$defs", "Projection")
+    list_projection = list.dig("$defs", "Projection")
+    show_proposal = show.dig("properties", "proposal")
+
+    assert_equal false, list_projection.fetch("additionalProperties")
+    assert_equal index_projection.fetch("required").sort,
+                 list_projection.fetch("required").sort
+    assert_equal index_projection.fetch("properties").keys.sort,
+                 list_projection.fetch("properties").keys.sort
+    assert_equal false, show_proposal.fetch("additionalProperties")
+    assert_equal (index_projection.fetch("required") + %w[history diagnostics result_digest]).sort,
+                 show_proposal.fetch("required").sort
+  end
+
   def test_proposal_source_index_and_status_schemas_accept_the_durable_shapes
     proposal_id = "prp-00000000-0000-4000-8000-000000000001"
     source_event_id = "pse-#{'a' * 64}"

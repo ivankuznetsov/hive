@@ -52,8 +52,6 @@ module Hive
       def provenance = self["provenance"]
       def source_event_id = self["source_event_id"]
       def policy = self["policy"]
-      def initial_status = "draft"
-
       private
 
       def validate!

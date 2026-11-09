@@ -91,7 +91,14 @@ module Hive
             verify_committed_terminal!(@source_store.status(source_event_id), result)
           rescue StandardError => error
             if committed
-              restore_committed_target!(source) rescue nil
+              begin
+                restore_committed_target!(source)
+              rescue StandardError => compensation_error
+                raise SourceUnavailable,
+                      "proposal recovery failed after #{error.class}: #{error.message}; " \
+                      "compensation failed with #{compensation_error.class}: " \
+                      "#{compensation_error.message}", cause: error
+              end
             else
               snapshot.restore!
               event_snapshot.restore!
@@ -111,7 +118,7 @@ module Hive
         raise SourceUnavailable, "committed proposal source receipt is missing" unless bytes
 
         SourceEvent.new(JSON.parse(bytes))
-      rescue JSON::ParserError, InvalidRecord
+      rescue JSON::ParserError, InvalidRecord, Unauthorized
         raise QuarantinedSource, "committed proposal source receipt is malformed"
       end
 
@@ -129,7 +136,7 @@ module Hive
           @git_ops.hive_state_head_sha, status_path,
           max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
         )
-        unless status_bytes == Proposals.canonical(terminal)
+        unless status_bytes&.b == Proposals.canonical(terminal).b
           raise SourceUnavailable, "proposal consumed status is not durably committed"
         end
 
@@ -149,7 +156,7 @@ module Hive
         committed = @git_ops.read_hive_state_blob_at(
           @git_ops.hive_state_head_sha, relative, max_bytes: Store::MAX_FILE_BYTES + 1
         )
-        unless committed == Proposals.canonical(canonical.to_h)
+        unless committed&.b == Proposals.canonical(canonical.to_h).b
           raise SourceUnavailable, "proposal canonical mutation is not durably committed"
         end
       end

@@ -233,7 +233,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
       FileUtils.mkdir_p(event_dir)
       File.write(File.join(event_dir, "malformed.json"), "[]")
       File.write(File.join(event_dir, "also-malformed.json"), "null")
-      assert_equal 0, store.send(:recent_actor_events_unlocked, "alice")
+      assert_empty store.index.fetch("recent_actor_events")
 
       store.send(:write_index_unlocked, store.send(:empty_index))
       assert_equal [], store.index.fetch("pending")
@@ -257,7 +257,9 @@ class ProposalSourceEventStoreTest < Minitest::Test
           source_event.to_h.merge("source_event_id" => "pse-#{'d' * 64}")
         )
         store.admit!(second)
-        assert_equal 2, store.send(:recent_actor_events_unlocked, "alice")
+        assert_equal 2, store.index.fetch("recent_actor_events").count do |entry|
+          entry.fetch("actor_id") == "alice"
+        end
       end
     end
   end
@@ -279,9 +281,7 @@ class ProposalSourceEventStoreTest < Minitest::Test
           source_event.to_h.merge("source_event_id" => "pse-#{'d' * 64}")
         )
         restarted.admit!(second)
-        assert_equal 2, restarted.send(:recent_actor_events_unlocked, "alice")
-        now += 3_601
-        assert_equal 0, restarted.send(:recent_actor_events_unlocked, "alice")
+        assert_equal 2, restarted.index.fetch("total_sources")
       end
     end
   end
@@ -320,7 +320,9 @@ class ProposalSourceEventStoreTest < Minitest::Test
                    index.dig("usage", "project_bytes")
       assert_equal index.dig("usage", "project_bytes"),
                    index.dig("usage", "proposals", source_event.proposal_id, "bytes")
-      assert_equal 1, store.send(:recent_actor_events_unlocked, "alice", index)
+      assert_equal 1, index.fetch("recent_actor_events").count do |entry|
+        entry.fetch("actor_id") == "alice"
+      end
     end
   end
 

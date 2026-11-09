@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-11-03
+updated: 2026-11-09
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -1645,16 +1645,18 @@ lineage, context budgets, and deterministic compilation. CLI, attempt,
 activity, GitOps, schema, and llm-wiki tests own the surrounding boundaries.
 
 `test/integration/proposal_tracking_test.rb` drives the curated lifecycle using
-a real durable attempt, committed inbox, ingestor, lifecycle authority, live
-query, typed context selector, and pinned compiler. It accepts a review-prompt
-candidate, rejects a planning-prompt candidate while retaining positive and
-negative evaluations, exercises authority-only `no_evaluation`, links a
-distinct successor, records rollback without executing it, isolates a malformed
-neighbor, and proves the active skill/workflow fixtures stay byte-identical
-after each lifecycle, context, and compile boundary. It also compares every
-pinned compiler row with the live normalized projection by identity and digest,
-and proves read-only discovery neither imports a pre-feature task journal nor
-initializes `proposals/v1`; the first new typed source event does.
+the real `Attempts::Entrypoint` and `Attempts::Dispatcher` admission composition,
+a committed inbox, ingestor, lifecycle authority, live query, typed context
+selector, and pinned compiler. It accepts a review-prompt candidate, rejects a
+planning-prompt candidate while retaining positive and negative evaluations,
+exercises authority-only `no_evaluation`, links a distinct successor, records
+rollback without executing it, and isolates a malformed neighbor. A static
+dependency fence over the complete proposal source boundary prevents proposal
+code from reaching active skill provisioners, workflow mutation commands, or
+workflow-package stores. The lifecycle test also compares every pinned compiler
+row with the live normalized projection by identity and digest, and proves
+read-only discovery neither imports a pre-feature task journal nor initializes
+`proposals/v1`; the first new typed source event does.
 
 ```bash
 bin/test --changed --list

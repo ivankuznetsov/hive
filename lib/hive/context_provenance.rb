@@ -248,6 +248,8 @@ module Hive
       return unavailable_proposal_selection(remaining_bytes, "unbound") unless context.proposal_binding
 
       require "hive/config"
+      require "hive/git_ops"
+      require "hive/proposals/compiler"
       require "hive/proposals/context_selector"
       cfg = Hive::Config.load(task.project_root)
       proposal_root = File.join(
@@ -256,16 +258,19 @@ module Hive
       )
       return unavailable_proposal_selection(remaining_bytes, "empty_store") unless File.directory?(proposal_root)
 
-      selector = Hive::Proposals::ContextSelector.new(
-        query: Hive::Proposals::Query.new(
-          store: Hive::Proposals::Store.new(root: proposal_root)
-        )
-      )
       context_cfg = cfg.dig("proposals", "context")
-      selector.select(
-        context:, max_items: context_cfg.fetch("max_items"),
-        max_bytes: context_cfg.fetch("max_bytes"), remaining_bytes:
-      )
+      git_ops = Hive::GitOps.new(task.project_root)
+      Hive::Proposals::Compiler::PinnedSource.new(
+        git_ops:, source_ref: git_ops.hive_state_head_sha
+      ).with_store do |store, _source_commit|
+        selector = Hive::Proposals::ContextSelector.new(
+          query: Hive::Proposals::Query.new(store:)
+        )
+        selector.select(
+          context:, max_items: context_cfg.fetch("max_items"),
+          max_bytes: context_cfg.fetch("max_bytes"), remaining_bytes:
+        )
+      end
     rescue StandardError
       unavailable_proposal_selection(remaining_bytes, "unavailable")
     end

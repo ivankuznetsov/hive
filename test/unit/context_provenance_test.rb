@@ -1,6 +1,8 @@
 require "test_helper"
 require "json_schemer"
 require "hive/context_provenance"
+require "hive/git_ops"
+require "hive/proposals/store"
 
 class ContextProvenanceTest < Minitest::Test
   include HiveTestHelper
@@ -377,7 +379,71 @@ class ContextProvenanceTest < Minitest::Test
                  recorded.first.fetch(:operation_id)
   end
 
+  def test_proposal_context_reads_only_the_committed_state_snapshot
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      store = Hive::Proposals::Store.new(root:)
+      proposal_id = "prp-00000000-0000-4000-8000-000000000001"
+      record = store.create_record!(
+        proposal_id:, subject_kind: "skill", subject_ref: "agent-skills/reviewer",
+        revision: "v2", proposed_change: "Change review", motivation: "Improve recall",
+        evidence: [
+          { "label" => "benchmark", "content" => "recall=0.91", "media_type" => "text/plain" }
+        ], author: { "id" => "alice", "kind" => "proposer", "binding" => "team" },
+        provenance: proposal_provenance, source_event_id: "pse-#{'a' * 64}",
+        created_at: "2026-08-30T12:00:00Z"
+      )
+      ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded candidate",
+        pathspecs: [ "proposals/v1/records/#{record.proposal_id}.json" ]
+      )
+      head = store.projection(proposal_id).lifecycle_head
+      store.append_event!(
+        proposal_id:, type: "decision", source_event_id: "pse-#{'b' * 64}",
+        occurred_at: "2026-08-30T12:10:00Z", provenance: proposal_provenance,
+        data: {
+          "outcome" => "rejected", "considered_evaluation_ids" => [],
+          "considered_evaluations" => [], "rationale_category" => "no_evaluation",
+          "rationale" => "reject", "links" => [],
+          "authority" => {
+            "id" => "operator", "kind" => "operator", "policy_fingerprint" => "c" * 64
+          },
+          "observed_head" => head
+        }
+      )
+      assert_equal "rejected", store.projection(proposal_id).status
+      context = Struct.new(:proposal_binding).new(
+        {
+          "subject" => {
+            "kind" => "skill", "reference" => "agent-skills/reviewer",
+            "revision" => "v2", "proposal_id" => proposal_id
+          }
+        }
+      )
+      task = Struct.new(:project_root).new(dir)
+
+      selection = Hive::ContextProvenance.send(
+        :proposal_context_selection, task, context, remaining_bytes: 4_096
+      )
+
+      assert_empty selection.items
+      assert_equal "no_terminal_matches", selection.reason
+    end
+  end
+
   private
+
+  def proposal_provenance
+    {
+      "task_id" => "43059", "task_generation" => 1,
+      "ownership_generation" => "owner-1", "attempt_id" => "attempt-1",
+      "workflow_id" => "coding", "stage" => "4-execute",
+      "actor" => { "id" => "alice", "kind" => "configured_identity" },
+      "source_commit" => "a" * 40
+    }
+  end
 
   def with_fixture(wiki: true)
     with_tmp_dir do |outer|

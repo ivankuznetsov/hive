@@ -347,11 +347,6 @@ module Hive
           relative.match?(%r{\Ainbox/pse-[0-9a-f]{64}\.json\z})
       end
 
-      def recent_actor_events_unlocked(actor_id, index = read_index_unlocked)
-        prune_recent_actor_events(index).fetch("recent_actor_events")
-          .count { |entry| entry["actor_id"] == actor_id }
-      end
-
       def prune_recent_actor_events(index)
         cutoff = @clock.call - 3_600
         copy = Proposals.stringify(index)
@@ -375,7 +370,6 @@ module Hive
           raise QuotaExceeded, "proposal namespace path quota exceeded" if paths > MAX_NAMESPACE_PATHS
           stat = File.lstat(path)
           if stat.symlink?
-            Find.prune if stat.directory?
             next
           end
           next unless stat.file?

@@ -10,7 +10,7 @@ module Hive
     class Reconciler
       PERMANENT_ERRORS = [
         InvalidRecord, InvalidEvent, Conflict, InconsistentHistory,
-        QuarantinedSource, Unauthorized
+        QuarantinedSource, Unauthorized, QuotaExceeded
       ].freeze
 
       def initialize(git_ops:, source_store: nil, store: nil, ingestor: nil, max_batch: 64)
@@ -30,18 +30,23 @@ module Hive
         Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
           cleaned = clean_uncommitted_state!
         end
-        pending = @source_store.pending_ids.first(@max_batch)
+        pending = @source_store.pending_ids
+        resolved = 0
         pending.each do |source_event_id|
           processed += 1
           begin
             source_commit = committed_source_commit!(source_event_id)
             @ingestor.ingest!(source_event_id, source_commit:)
             consumed += 1
+            resolved += 1
           rescue *PERMANENT_ERRORS => error
-            quarantined += 1 if quarantine_source!(source_event_id, error)
-          rescue SourceUnavailable, QuotaExceeded
+            quarantine_source!(source_event_id, error)
+            quarantined += 1
+            resolved += 1
+          rescue SourceUnavailable
             next
           end
+          break if resolved >= @max_batch
         end
         ReconciliationResult.new(
           processed:, consumed:, quarantined:,
@@ -98,9 +103,14 @@ module Hive
             )
             raise SourceUnavailable, "proposal source quarantine was not committed" unless result == :committed
             true
-          rescue StandardError
-            snapshot.restore!
-            false
+          rescue StandardError => error
+            begin
+              snapshot.restore!
+            rescue StandardError => restore_error
+              raise SourceUnavailable,
+                    "proposal quarantine recovery failed after #{error.class}: #{restore_error.class}"
+            end
+            raise error
           end
         end
       end

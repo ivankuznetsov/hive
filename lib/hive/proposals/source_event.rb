@@ -20,7 +20,7 @@ module Hive
       EVALUATOR_KEYS = %w[id fingerprint configuration_fingerprint admission].freeze
       ADMISSION_KEYS = EVALUATOR_CONFIG_KEYS
       SUBMISSION_KEYS = %w[proposed_change motivation evidence lineage].freeze
-      EVALUATION_KEYS = %w[method result rationale evidence links].freeze
+      IDENTIFIER_CONTROLS = /[\u0000-\u001f\u007f]/
 
       attr_reader :data
 
@@ -87,7 +87,7 @@ module Hive
             raise InvalidRecord, "durable proposal binding has an unsupported version"
           end
           binding["subject"] = normalize_subject(binding.fetch("subject"))
-          binding["actor"] = Proposals.author!(binding.fetch("actor"))
+          binding["actor"] = normalize_actor(binding.fetch("actor"))
           binding["evaluator"] = normalize_evaluator(binding["evaluator"])
           binding["configuration_fingerprint"] = Proposals.digest!(
             binding.fetch("configuration_fingerprint"), label: "proposal configuration fingerprint"
@@ -102,7 +102,7 @@ module Hive
             raise InvalidRecord, "proposal source subject kind is invalid"
           end
           subject["reference"] = Proposals.subject_ref!(subject["reference"])
-          subject["revision"] = Proposals.label!(subject["revision"], label: "proposal source revision")
+          subject["revision"] = identifier!(subject["revision"], label: "proposal source revision")
           if subject["proposal_id"]
             subject["proposal_id"] = Proposals.proposal_id!(subject["proposal_id"])
           end
@@ -112,11 +112,14 @@ module Hive
         def normalize_task_binding(value)
           binding = Proposals.closed_hash!(value, required: BINDING_KEYS, label: "proposal task binding")
           %w[project task_id task_slug workflow_id stage ownership_generation attempt_id].each do |key|
-            binding[key] = Proposals.label!(binding[key], label: "proposal task binding #{key}")
+            binding[key] = identifier!(binding[key], label: "proposal task binding #{key}")
           end
           generation = binding["task_generation"]
-          unless (generation.is_a?(Integer) && generation >= 0) ||
-                 (generation.is_a?(String) && !generation.empty?)
+          if generation.is_a?(String)
+            binding["task_generation"] = Proposals.label!(
+              generation, label: "proposal task binding task_generation"
+            )
+          elsif !(generation.is_a?(Integer) && generation >= 0)
             raise InvalidRecord, "proposal task generation is malformed"
           end
           binding
@@ -126,7 +129,7 @@ module Hive
           return nil if value.nil?
 
           evaluator = Proposals.closed_hash!(value, required: EVALUATOR_KEYS, label: "proposal evaluator binding")
-          evaluator["id"] = Proposals.label!(evaluator["id"], label: "proposal evaluator id")
+          evaluator["id"] = identifier!(evaluator["id"], label: "proposal evaluator id")
           %w[fingerprint configuration_fingerprint].each do |key|
             evaluator[key] = Proposals.digest!(evaluator[key], label: "proposal evaluator #{key}")
           end
@@ -139,7 +142,7 @@ module Hive
               raise InvalidRecord, "proposal evaluator admission #{key} is malformed"
             end
             admission[key] = values.map do |entry|
-              Proposals.label!(entry, label: "proposal evaluator admission #{key}")
+              identifier!(entry, label: "proposal evaluator admission #{key}")
             end.sort
           end
           evaluator["admission"] = admission
@@ -157,15 +160,17 @@ module Hive
             %w[retries requested_supersedes].each do |key|
               lineage[key] = Proposals.proposal_id!(lineage[key]) if lineage[key]
             end
-            payload.merge(
+            normalized = payload.merge(
               "proposed_change" => Proposals.text!(payload["proposed_change"], label: "proposed_change"),
               "motivation" => Proposals.text!(payload["motivation"], label: "motivation"),
               "evidence" => Proposals.evidence!(payload["evidence"], policy:, admission:),
               "lineage" => { "retries" => lineage["retries"],
                              "requested_supersedes" => lineage["requested_supersedes"] }
             )
+            validate_payload_identifiers!(kind, normalized)
           when "evaluation_recorded"
-            normalize_evaluation_payload(value, policy:, admission:)
+            normalized = normalize_evaluation_payload(value, policy:, admission:)
+            validate_payload_identifiers!(kind, normalized)
           else
             raise InvalidRecord, "unknown proposal source event kind #{kind.inspect}"
           end
@@ -195,10 +200,42 @@ module Hive
           unless artifact["bytes"].is_a?(Integer) && artifact["bytes"] >= 0
             raise InvalidRecord, "proposal source artifact bytes must be non-negative"
           end
-          artifact["media_type"] = Proposals.label!(
+          artifact["media_type"] = identifier!(
             artifact["media_type"], label: "proposal source artifact media type"
           )
           artifact
+        end
+
+        def identifier!(value, label:)
+          identifier = Proposals.label!(value, label:)
+          if identifier.match?(IDENTIFIER_CONTROLS)
+            raise InvalidRecord, "#{label} contains a disallowed control character"
+          end
+
+          identifier
+        end
+
+        def normalize_actor(value)
+          actor = Proposals.author!(value)
+          actor.each do |key, entry|
+            actor[key] = identifier!(entry, label: "proposal author #{key}")
+          end
+          actor
+        end
+
+        def validate_payload_identifiers!(kind, payload)
+          payload.fetch("evidence").each_with_index do |evidence, index|
+            %w[label media_type].each do |key|
+              identifier!(evidence.fetch(key), label: "proposal evidence #{index} #{key}")
+            end
+          end
+          return payload if kind == "candidate_submitted"
+
+          identifier!(payload.dig("method", "label"), label: "proposal evaluation method label")
+          payload.fetch("links").each_with_index do |link, index|
+            identifier!(link.fetch("kind"), label: "proposal evaluation link #{index} kind")
+          end
+          payload
         end
       end
 
@@ -262,7 +299,7 @@ module Hive
           raise InvalidRecord, "proposal source subject does not match the target proposal"
         end
         data["binding"] = self.class.normalize_task_binding(data["binding"])
-        data["actor"] = Proposals.author!(data["actor"])
+        data["actor"] = self.class.normalize_actor(data["actor"])
         data["evaluator"] = self.class.normalize_evaluator(data["evaluator"])
         if data["kind"] == "evaluation_recorded" && data["evaluator"].nil?
           raise Unauthorized, "proposal evaluation requires an admitted evaluator binding"

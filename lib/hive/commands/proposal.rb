@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "pathname"
 require "tmpdir"
+require "timeout"
 require "hive/git_ops"
 require "hive/git_ref"
 require "hive/config"
@@ -24,6 +25,7 @@ module Hive
       LIFECYCLE_COMMANDS = %w[decide supersede rollback].freeze
       COMMANDS = (SOURCE_COMMANDS + READ_COMMANDS + LIFECYCLE_COMMANDS + %w[refresh]).freeze
       MANAGED_WIKI_BRANCH = "llm-wiki/refresh".freeze
+      MANAGED_REFRESH_TIMEOUT_SEC = 120
 
       def initialize(subcommand, target, input:, project: nil, json: false, stdout: $stdout,
                      task_resolver: nil, producer_factory: nil, reconciler: nil,
@@ -235,16 +237,22 @@ module Hive
         unless File.file?(script) && !File.symlink?(script)
           raise Hive::Proposals::SourceUnavailable, "managed llm-wiki refresh runner is unavailable"
         end
-        stdout, stderr, status = Open3.capture3(
-          { "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "" },
-          "bash", script, "--project", ops.hive_state_path,
-          "--proposal-source", source_ref
-        )
+        stdout, stderr, status = Timeout.timeout(MANAGED_REFRESH_TIMEOUT_SEC) do
+          Open3.capture3(
+            { "HIVE_SKIP_LLM_WIKI_POST_COMMIT" => "" },
+            "bash", script, "--project", ops.hive_state_path,
+            "--proposal-source", source_ref
+          )
+        end
         return if status.success?
 
-        detail = Hive::SecretPatterns.redact("#{stdout}\n#{stderr}").strip.byteslice(0, 1_024)
+        detail = Hive::SecretPatterns.redact("#{stdout}\n#{stderr}").strip
+          .byteslice(0, 1_024).to_s.force_encoding(Encoding::UTF_8).scrub("")
         raise Hive::Proposals::SourceUnavailable,
               "managed proposal refresh failed#{detail.empty? ? '' : ": #{detail}"}"
+      rescue Timeout::Error
+        raise Hive::Proposals::SourceUnavailable,
+              "managed proposal refresh timed out after #{MANAGED_REFRESH_TIMEOUT_SEC} seconds"
       end
 
       def live_components(project_root)
@@ -255,8 +263,28 @@ module Hive
                 "proposal command requires an initialized hive/state worktree"
         end
         proposal_root = File.join(ops.hive_state_path, "proposals", "v1")
-        Hive::Proposals::Reconciler.new(git_ops: ops).reconcile! if File.exist?(proposal_root)
-        store = Hive::Proposals::Store.new(root: proposal_root)
+        diagnostics = []
+        if File.exist?(proposal_root)
+          begin
+            Hive::Proposals::Reconciler.new(git_ops: ops).reconcile!
+          rescue Hive::Proposals::QuarantinedSource
+            raise unless READ_COMMANDS.include?(@subcommand)
+
+            logical = "inbox/index.json"
+            path = File.join(proposal_root, logical)
+            bytes = begin
+              File.binread(path, Hive::Proposals::SourceEventStore::MAX_FILE_BYTES + 1)
+            rescue Errno::ENOENT, SystemCallError, IOError
+              ""
+            end
+            diagnostics << Hive::Proposals::Diagnostic.new(
+              code: "source_index_quarantined", path: logical,
+              sha256: Digest::SHA256.hexdigest(bytes), bytes: bytes.bytesize,
+              proposal_id: nil
+            )
+          end
+        end
+        store = Hive::Proposals::Store.new(root: proposal_root, diagnostics:)
         [ ops, store, Hive::Proposals::Query.new(store:), config ]
       end
 

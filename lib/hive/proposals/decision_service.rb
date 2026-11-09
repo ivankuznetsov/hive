@@ -45,7 +45,7 @@ module Hive
               "rationale_category" => rationale_category, "rationale" => rationale,
               "authority" => authority, "links" => links, "observed_head" => expected_head
             }
-            normalized = Event.normalize_data("decision", data)
+            normalized = Event.normalize_data("decision", data, policy: @policy)
             if (existing = exact_retry(snapshot, source_event_id, proposal_id, "decision", normalized))
               next LifecycleResult.new(applied: false, event: existing, projection: projection)
             end
@@ -89,7 +89,7 @@ module Hive
               "successor_id" => successor_id, "authority" => authority,
               "observed_head" => expected_head
             }
-            normalized = Event.normalize_data("supersession", data)
+            normalized = Event.normalize_data("supersession", data, policy: @policy)
             if (existing = exact_retry(snapshot, source_event_id, proposal_id, "supersession", normalized))
               next LifecycleResult.new(applied: false, event: existing, projection: projection)
             end
@@ -132,7 +132,7 @@ module Hive
               "external_revert" => external_revert, "authority" => authority,
               "observed_head" => expected_head
             }
-            normalized = Event.normalize_data("rollback", data)
+            normalized = Event.normalize_data("rollback", data, policy: @policy)
             if (existing = exact_retry(snapshot, source_event_id, proposal_id, "rollback", normalized))
               next LifecycleResult.new(applied: false, event: existing, projection: projection)
             end
@@ -241,13 +241,13 @@ module Hive
             projection.superseded_by == successor.proposal_id
         end
         raise Conflict, "proposal successor already supersedes another candidate" if duplicate
-        edges = snapshot.projections.to_h do |projection|
-          [
-            projection.proposal_id,
-            projection.superseded_by || projection.record["lineage"]["retries"]
-          ]
-        end.compact
-        edges[predecessor.proposal_id] = successor.proposal_id
+        edges = Hash.new { |hash, key| hash[key] = [] }
+        snapshot.projections.each do |projection|
+          edges[projection.proposal_id] << projection.superseded_by if projection.superseded_by
+          retry_id = projection.record["lineage"]["retries"]
+          edges[projection.proposal_id] << retry_id if retry_id
+        end
+        edges[predecessor.proposal_id] << successor.proposal_id
         if Proposals.lineage_cycle_nodes(edges).include?(predecessor.proposal_id)
           raise Conflict, "proposal supersession would create a lineage cycle"
         end
@@ -314,14 +314,23 @@ module Hive
                 committed = @git_ops.read_hive_state_blob_at(
                   head, path, max_bytes: bytes.bytesize + 1
                 )
-                unless committed == bytes
+                unless committed&.b == bytes.b
                   raise SourceUnavailable, "proposal lifecycle transaction was not durably committed"
                 end
               end
             end
             result
           rescue StandardError => error
-            head_advanced = @git_ops && @git_ops.hive_state_head_sha != head_before
+            head_advanced = false
+            if @git_ops
+              begin
+                head_advanced = @git_ops.hive_state_head_sha != head_before
+              rescue StandardError => head_error
+                warn "[hive] proposal lifecycle rollback skipped: unable to verify state head " \
+                     "after #{error.class} (#{head_error.class})"
+                raise error
+              end
+            end
             unless head_advanced
               snapshot.restore!
               lifecycle_snapshot.restore!

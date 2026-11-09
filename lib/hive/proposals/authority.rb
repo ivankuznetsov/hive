@@ -7,8 +7,6 @@ module Hive
     class Authority
       CAPABILITIES = AUTHORITY_CAPABILITIES
       KINDS = AUTHORITY_KINDS
-      ROW_REQUIRED = AUTHORITY_REQUIRED_KEYS
-      ROW_OPTIONAL = AUTHORITY_OPTIONAL_KEYS
       RECEIPT_KEYS = %w[authority_id capability policy_fingerprint issued_at].freeze
 
       def initialize(config, clock: -> { Time.now.utc })

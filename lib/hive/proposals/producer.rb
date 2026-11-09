@@ -197,7 +197,7 @@ module Hive
         bytes = @git_ops.read_hive_state_blob_at(
           source_commit, receipt_path, max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
         )
-        bytes == Proposals.canonical(event.to_h)
+        bytes&.b == Proposals.canonical(event.to_h).b
       end
 
       def committed_source_event?(event)
@@ -213,13 +213,10 @@ module Hive
         evaluator = @proposal_binding.fetch("evaluator")
         raise Unauthorized, "proposal evaluation requires an admitted evaluator binding" unless evaluator
 
-        current = EvaluatorAuthority.new(@config).bind!(
+        EvaluatorAuthority.new(@config).bind!(
           identity: evaluator.fetch("id"), workflow: task_binding.fetch("workflow_id"),
           stage: task_binding.fetch("stage"), agent_profile: attempt_provider
         )
-        return if current.fetch("id") == evaluator.fetch("id")
-
-        raise Unauthorized, "proposal evaluator is no longer configured"
       end
 
       def attempt_provider

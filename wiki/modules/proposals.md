@@ -3,7 +3,7 @@ title: Skill and workflow proposal tracking
 type: module
 source: lib/hive/proposals.rb, lib/hive/proposals/, schemas/hive-proposal-*.v1.json
 created: 2026-08-30
-updated: 2026-09-08
+updated: 2026-11-09
 tags: [proposals, skills, workflows, evidence, lifecycle, history]
 ---
 
@@ -42,8 +42,9 @@ Invalid JSON, unsafe files, unknown versions, duplicate identity, broken event
 versions, and inconsistent histories become safe logical quarantine diagnostics;
 valid neighbors remain queryable and compilable. Malformed source-quarantine
 reason values are rejected as isolated diagnostics instead of aborting discovery.
-Malformed event filenames
-reserve their numeric version so recovery never overwrites unknown bytes. Both
+Malformed event filenames reserve their numeric version so recovery never
+overwrites unknown bytes, and any reserved slot without a valid canonical event
+quarantines that proposal projection rather than exposing an unknowable lifecycle head. Both
 the canonical store and source inbox use bounded lock acquisition.
 
 ## Durable source admission
@@ -58,8 +59,11 @@ inbox paths, and only then starts canonical ingestion in a second commit.
 Committed `hive/state` blobs are authoritative. `Reconciler` ignores or restores
 worktree-only remnants, scans only the bounded unconsumed index, replays a
 committed receipt idempotently, and records permanent failures in a committed
-terminal quarantine fact. Transient source/blob failures remain pending, and
-each receipt takes the commit lock only for its own mutation. It never scans old task journals, benchmarks, skills,
+terminal quarantine fact. Permanent quota/validation failures are quarantined;
+transient source/blob failures remain pending without blocking later receipts in
+the bounded queue. A failed quarantine commit is reported as a reconciliation
+failure rather than clean convergence, and each receipt takes the commit lock
+only for its own mutation. It never scans old task journals, benchmarks, skills,
 workflows, or wiki prose, so existing projects are not backfilled.
 
 Admission enforces configured project/proposal event and byte ceilings plus a
@@ -131,10 +135,13 @@ diagnosis, never as live symlink targets. The managed llm-wiki hook compiles
 proposal-only batches without an LLM provider or ordinary breaker budget and
 publishes the pair in one wiki commit. Refresh checks compare scratch compiler
 output with that atomically published managed-ref pair, not files in the primary
-checkout.
+checkout. Transient Git or filesystem failures during pinned materialization
+abort publication so the previously committed pair remains visible.
 
 Automatic proposal context is available only when a durable attempt carries a
-matching typed subject. It includes closed facts—IDs, enums, timestamps, method
+matching typed subject. Selection materializes one exact committed `hive/state`
+snapshot, so uncommitted lifecycle writes that may still roll back never reach a
+prompt. It includes closed facts—IDs, enums, timestamps, method
 kinds, evaluator IDs, outcomes, fixed-label numeric metric values, and fixed
 digests—ranked by exact subject and lineage. Arbitrary metric keys, free-form
 method labels, revision/reference text, candidate prose, evidence summaries,

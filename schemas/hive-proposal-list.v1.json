@@ -32,15 +32,46 @@
   ],
   "$defs": {
     "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "LifecycleHead": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "digest"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
     "Projection": {
       "type": "object",
-      "required": ["proposal_id", "subject", "revision", "status", "lifecycle_head", "projection_digest"],
+      "additionalProperties": false,
+      "required": [
+        "proposal_id", "subject", "revision", "proposed_change", "motivation",
+        "evidence", "author", "status", "evaluations", "decision", "lineage",
+        "rollback", "lifecycle_head", "retention", "provenance", "source_event_id",
+        "created_at", "event_count", "projection_digest"
+      ],
       "properties": {
-        "proposal_id": { "type": "string", "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+        "proposal_id": { "$ref": "#/$defs/ProposalId" },
         "subject": { "type": "object" },
         "revision": { "type": "string" },
+        "proposed_change": { "type": "string" },
+        "motivation": { "type": "string" },
+        "evidence": { "type": "array" },
+        "author": { "type": "object" },
         "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
-        "lifecycle_head": { "type": "object" },
+        "evaluations": { "type": "array" },
+        "decision": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lineage": { "type": "object" },
+        "rollback": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lifecycle_head": { "$ref": "#/$defs/LifecycleHead" },
+        "retention": { "type": "object" },
+        "provenance": { "type": "object" },
+        "source_event_id": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "event_count": { "type": "integer", "minimum": 0 },
         "projection_digest": { "$ref": "#/$defs/Digest" }
       }
     },

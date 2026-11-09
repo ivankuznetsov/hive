@@ -22,16 +22,30 @@ class ProposalStoreTest < Minitest::Test
 
   def test_immutable_record_creation_is_idempotent_and_conflicts_on_changed_content
     first = @store.create_record!(**record_attributes)
-    replay = @store.write_record!(first)
+    replay = @store.create_record!(proposal_id: first.proposal_id, **record_attributes)
 
     assert_equal first.to_h, replay.to_h
     assert_equal 1, Dir.glob(File.join(@root, "records", "*.json")).length
 
-    changed = first.to_h.merge("motivation" => "Different")
     assert_raises(Hive::Proposals::Conflict) do
-      @store.write_record!(Hive::Proposals::Record.new(changed))
+      @store.create_record!(
+        proposal_id: first.proposal_id, **record_attributes.merge(motivation: "Different")
+      )
     end
     assert_equal first.to_h, @store.fetch_record(first.proposal_id).to_h
+  end
+
+  def test_unicode_canonical_records_and_events_round_trip
+    proposal = @store.create_record!(**record_attributes.merge(motivation: "Café — déjà vu"))
+    event = @store.append_event!(
+      proposal_id: proposal.proposal_id, type: "evaluation",
+      source_event_id: "pse-#{'b' * 64}", provenance: provenance,
+      occurred_at: "2026-08-30T12:01:00Z",
+      data: evaluation_data.merge("rationale" => "Mesuré à Montréal")
+    )
+
+    assert_equal "Café — déjà vu", @store.fetch_record(proposal.proposal_id)["motivation"]
+    assert_equal "Mesuré à Montréal", @store.fetch_event(event.event_id).data.fetch("rationale")
   end
 
   def test_independently_quarantines_invalid_oversize_and_symlinked_neighbors
@@ -129,11 +143,11 @@ class ProposalStoreTest < Minitest::Test
     assert File.file?(File.join(events, "00000000000000000008-#{event.event_id}.json"))
     snapshot = @store.load
     assert_equal "invalid_event_filename", snapshot.diagnostics.first.code
-    assert_equal [ proposal.proposal_id ], snapshot.projections.map(&:proposal_id)
-    assert_equal [ event.event_id ], snapshot.projections.first.evaluations.map { |item| item["event_id"] }
+    assert_empty snapshot.projections
+    assert_includes snapshot.diagnostics.map(&:code), "inconsistent_history"
   end
 
-  def test_later_malformed_reserved_slot_does_not_hide_valid_earlier_history
+  def test_later_malformed_reserved_slot_quarantines_the_projection
     proposal = @store.create_record!(**record_attributes)
     event = @store.append_event!(
       proposal_id: proposal.proposal_id, type: "evaluation",
@@ -145,9 +159,9 @@ class ProposalStoreTest < Minitest::Test
 
     snapshot = @store.load
 
-    assert_equal [ proposal.proposal_id ], snapshot.projections.map(&:proposal_id)
-    assert_equal [ event.event_id ], snapshot.projections.first.evaluations.map { |item| item["event_id"] }
+    assert_empty snapshot.projections
     assert_includes snapshot.diagnostics.map(&:code), "invalid_event_filename"
+    assert_includes snapshot.diagnostics.map(&:code), "inconsistent_history"
   end
 
   def test_retry_requires_an_existing_distinct_matching_subject
@@ -183,6 +197,28 @@ class ProposalStoreTest < Minitest::Test
     assert_equal [ predecessor ], snapshot.projections.map(&:proposal_id)
     diagnostic = snapshot.diagnostics.find { |item| item.proposal_id == dangling }
     assert_equal "dangling_or_mismatched_retry", diagnostic.code
+  end
+
+  def test_replay_invalidates_transitive_retry_dependents_to_a_fixpoint
+    dependent = "prp-00000000-0000-4000-8000-000000000041"
+    invalid_predecessor = "prp-00000000-0000-4000-8000-000000000042"
+    missing = "prp-00000000-0000-4000-8000-000000000099"
+    [ [ dependent, "1", invalid_predecessor ], [ invalid_predecessor, "2", missing ] ].each do |id, source, retry_id|
+      record = Hive::Proposals::Record.build(
+        proposal_id: id,
+        **record_attributes.merge(
+          source_event_id: source_id(source), lineage: { "retries" => retry_id }
+        )
+      )
+      @store.send(:write_record_unlocked!, record)
+    end
+
+    snapshot = @store.load
+
+    assert_empty snapshot.projections
+    assert_equal [ dependent, invalid_predecessor ],
+                 snapshot.diagnostics.select { |item| item.code == "dangling_or_mismatched_retry" }
+                   .map(&:proposal_id).sort
   end
 
   def test_changed_source_event_payload_conflicts_without_appending

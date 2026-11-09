@@ -36,7 +36,6 @@ class ProposalRecordTest < Minitest::Test
       }
     )
 
-    assert_equal "draft", record.initial_status
     assert_equal "skill", record.subject.fetch("kind")
     assert_includes record["proposed_change"], "[REDACTED:generic_api_key]"
     refute record.evidence.first.key?("summary")

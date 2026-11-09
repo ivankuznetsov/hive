@@ -29,8 +29,14 @@ class ProposalCompilerTest < Minitest::Test
     second = File.join(@tmp, "second")
     compiler = Hive::Proposals::Compiler.new(store: @store)
 
-    result = compiler.compile(output_root: first, source_commit: "a" * 40)
-    compiler.compile(output_root: second, source_commit: "a" * 40)
+    result = with_replaced_singleton_method(Time, :now, -> { Time.utc(2026, 8, 30, 12) }) do
+      compiler.compile(output_root: first, source_commit: "a" * 40)
+    end
+    ordered_children = @store.method(:children)
+    @store.define_singleton_method(:children) { |path| ordered_children.call(path).reverse }
+    with_replaced_singleton_method(Time, :now, -> { Time.utc(2036, 1, 1) }) do
+      compiler.compile(output_root: second, source_commit: "a" * 40)
+    end
 
     assert_equal File.binread(File.join(first, "wiki", "proposals.json")),
                  File.binread(File.join(second, "wiki", "proposals.json"))
@@ -119,7 +125,7 @@ class ProposalCompilerTest < Minitest::Test
     end
   end
 
-  def test_pinned_compilation_quarantines_unreadable_blobs
+  def test_pinned_compilation_propagates_transient_unreadable_blobs
     with_tmp_dir do |dir|
       git_ops = Object.new
       git_ops.define_singleton_method(:read_hive_state_blob_at) do |*_arguments, **_options|
@@ -131,12 +137,12 @@ class ProposalCompilerTest < Minitest::Test
       relative = "records/#{draft_id}.json"
       entry = "100644 blob #{'b' * 40}\tproposals/v1/#{relative}"
       root = File.join(dir, "proposals", "v1")
-      unsafe_paths = {}
+      error = assert_raises(Hive::Proposals::SourceUnavailable) do
+        source.send(:materialize_entry, root, "a" * 40, entry, {})
+      end
 
-      source.send(:materialize_entry, root, "a" * 40, entry, unsafe_paths)
-
-      assert_equal({ "code" => "unreadable_file" }, unsafe_paths.fetch(relative))
-      assert_equal "", File.binread(File.join(root, relative))
+      assert_includes error.message, "Hive::GitError"
+      refute_path_exists File.join(root, relative)
     end
   end
 

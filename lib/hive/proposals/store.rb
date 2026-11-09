@@ -1,4 +1,5 @@
 require "fileutils"
+require "find"
 require "json"
 require "pathname"
 require "securerandom"
@@ -24,6 +25,7 @@ module Hive
 
     class Store
       MAX_FILE_BYTES = 256 * 1024
+      MAX_TREE_PATHS = 20_000
       MAX_DIAGNOSTICS = 1_024
       EVENT_FILENAME = /\A(\d+)-(pev-[0-9a-f-]+)\.json\z/i
 
@@ -44,12 +46,13 @@ module Hive
       end
 
       def initialize(root:, id_generator: -> { SecureRandom.uuid }, unsafe_paths: {},
-                     lock_timeout: STATE_LOCK_TIMEOUT_SEC)
+                     diagnostics: [], lock_timeout: STATE_LOCK_TIMEOUT_SEC)
         @root = File.expand_path(root)
         @records_root = File.join(@root, "records")
         @events_root = File.join(@root, "events")
         @id_generator = id_generator
         @unsafe_paths = Proposals.stringify(unsafe_paths || {})
+        @initial_diagnostics = Array(diagnostics).select { |item| item.is_a?(Diagnostic) }.freeze
         @lock_timeout = lock_timeout
       end
 
@@ -72,11 +75,6 @@ module Hive
           validate_retry_predecessor!(record)
           write_record_unlocked!(record)
         end
-      end
-
-      def write_record!(record)
-        record = record.is_a?(Record) ? record : Record.new(record)
-        with_lock { write_record_unlocked!(record) }
       end
 
       def fetch_record(proposal_id)
@@ -163,7 +161,7 @@ module Hive
         bytes = Proposals.canonical(record.to_h)
         if path_exists?(path)
           existing = safe_read(path, logical_path: logical(path))
-          if existing.is_a?(String) && existing == bytes
+          if existing.is_a?(String) && existing.b == bytes.b
             return record
           end
           raise Conflict, "immutable proposal record already exists with different content"
@@ -178,7 +176,7 @@ module Hive
         bytes = Proposals.canonical(event.to_h)
         if path_exists?(path)
           existing = safe_read(path, logical_path: logical(path))
-          return event if existing.is_a?(String) && existing == bytes
+          return event if existing.is_a?(String) && existing.b == bytes.b
 
           raise Conflict, "immutable proposal event path already exists with different content"
         end
@@ -199,7 +197,8 @@ module Hive
       end
 
       def load_unlocked
-        diagnostics = []
+        enforce_tree_path_limit!
+        diagnostics = @initial_diagnostics.dup
         records = load_records(diagnostics)
         events, reserved_versions = load_events(diagnostics)
         load_source_quarantine(diagnostics)
@@ -310,39 +309,60 @@ module Hive
           diagnostics << collection_diagnostic("dangling_proposal_reference", proposal_id)
         end
         valid = projections.to_h { |projection| [ projection.proposal_id, projection ] }
-        supersession_edges = {}
-        projections.each do |projection|
-          successor = projection.superseded_by
-          next unless successor
-          successor_projection = valid[successor]
-          unless successor_projection && same_subject?(projection, successor_projection) &&
-                 successor_projection.record["lineage"]["requested_supersedes"] == projection.proposal_id
-            diagnostics << collection_diagnostic("dangling_or_mismatched_supersession", projection.proposal_id)
-            valid.delete(projection.proposal_id)
-            next
-          end
-          supersession_edges[projection.proposal_id] = successor
-        end
+        supersession_edges = projections.to_h do |projection|
+          [ projection.proposal_id, projection.superseded_by ]
+        end.compact
         retry_edges = projections.to_h do |projection|
           [ projection.proposal_id, projection.record["lineage"]["retries"] ]
         end.compact
+        invalid = {}
+        dependents = Hash.new { |hash, key| hash[key] = [] }
+        supersession_edges.each do |proposal_id, successor_id|
+          dependents[successor_id] << proposal_id
+          projection = valid[proposal_id]
+          successor = valid[successor_id]
+          next if successor && same_subject?(projection, successor) &&
+                  successor.record["lineage"]["requested_supersedes"] == proposal_id
+
+          invalid[proposal_id] = "dangling_or_mismatched_supersession"
+        end
         retry_edges.each do |proposal_id, predecessor_id|
+          dependents[predecessor_id] << proposal_id
           projection = valid[proposal_id]
           predecessor = valid[predecessor_id]
-          next if projection && predecessor && proposal_id != predecessor_id &&
-                  same_subject?(projection, predecessor)
+          next if predecessor && proposal_id != predecessor_id && same_subject?(projection, predecessor)
 
-          diagnostics << collection_diagnostic("dangling_or_mismatched_retry", proposal_id)
-          valid.delete(proposal_id)
+          invalid[proposal_id] ||= "dangling_or_mismatched_retry"
         end
-        retry_edges.select! { |proposal_id, predecessor_id| valid.key?(proposal_id) && valid.key?(predecessor_id) }
-        cycle_nodes = Proposals.lineage_cycle_nodes(supersession_edges.merge(retry_edges))
-        cycle_nodes.each do |proposal_id|
-          diagnostics << collection_diagnostic("lineage_cycle", proposal_id)
-          valid.delete(proposal_id)
+        adjacency = Hash.new { |hash, key| hash[key] = [] }
+        supersession_edges.each { |source, target| adjacency[source] << target if valid.key?(target) }
+        retry_edges.each { |source, target| adjacency[source] << target if valid.key?(target) }
+        Proposals.lineage_cycle_nodes(adjacency).each do |proposal_id|
+          invalid[proposal_id] ||= "lineage_cycle"
+        end
+        queue = invalid.keys.sort
+        cursor = 0
+        while cursor < queue.length
+          proposal_id = queue[cursor]
+          cursor += 1
+          next unless valid.delete(proposal_id)
+
+          diagnostics << collection_diagnostic(invalid.fetch(proposal_id), proposal_id)
+          dependents[proposal_id].sort.each do |dependent_id|
+            next unless valid.key?(dependent_id) && !invalid.key?(dependent_id)
+
+            invalid[dependent_id] = if supersession_edges[dependent_id] == proposal_id
+              "dangling_or_mismatched_supersession"
+            else
+              "dangling_or_mismatched_retry"
+            end
+            queue << dependent_id
+          end
         end
         reciprocal = Hash.new { |hash, key| hash[key] = [] }
-        supersession_edges.each { |predecessor, successor| reciprocal[successor] << predecessor }
+        supersession_edges.each do |predecessor, successor|
+          reciprocal[successor] << predecessor if valid.key?(predecessor) && valid.key?(successor)
+        end
         valid.values.map do |projection|
           Projection.new(
             record: projection.record, events: projection.events,
@@ -473,7 +493,7 @@ module Hive
 
       def parse_record(bytes, expected_id:)
         data = JSON.parse(bytes)
-        raise InvalidRecord, "proposal record is not canonical" unless Proposals.canonical(data) == bytes
+        raise InvalidRecord, "proposal record is not canonical" unless Proposals.canonical(data).b == bytes.b
         record = Record.new(data)
         raise InvalidRecord, "proposal record path identity conflicts" unless record.proposal_id == expected_id
         record
@@ -481,7 +501,7 @@ module Hive
 
       def parse_event(bytes, expected_proposal_id:, expected_version:, expected_event_id:)
         data = JSON.parse(bytes)
-        raise InvalidEvent, "proposal event is not canonical" unless Proposals.canonical(data) == bytes
+        raise InvalidEvent, "proposal event is not canonical" unless Proposals.canonical(data).b == bytes.b
         event = Event.new(data)
         unless event.proposal_id == expected_proposal_id && event.version == expected_version &&
                event.event_id == expected_event_id
@@ -518,6 +538,26 @@ module Hive
         diagnostic("missing_file", path, logical_path:)
       rescue SystemCallError, IOError
         diagnostic("unreadable_file", path, logical_path:)
+      end
+
+      def enforce_tree_path_limit!
+        count = 0
+        [ records_root, events_root, File.join(root, "inbox", "quarantine") ].each do |directory|
+          next unless File.exist?(directory) || File.symlink?(directory)
+
+          Find.find(directory) do |path|
+            next if path == directory
+            stat = File.lstat(path)
+            if stat.directory? && !stat.symlink?
+              next
+            end
+            Find.prune if stat.symlink?
+            count += 1
+            raise QuotaExceeded, "proposal tree has too many paths" if count > MAX_TREE_PATHS
+          rescue Errno::ENOENT, Errno::ENOTDIR
+            next
+          end
+        end
       end
 
       def diagnostic(code, path, bytes: nil, logical_path:, size: nil, proposal_id: nil)

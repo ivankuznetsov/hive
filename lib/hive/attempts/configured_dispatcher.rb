@@ -78,7 +78,8 @@ module Hive
         return unless File.exist?(File.join(ops.hive_state_path, "proposals", "v1"))
 
         Hive::Proposals::Reconciler.new(git_ops: ops).reconcile!
-      rescue Hive::Proposals::Error, Hive::GitError, SystemCallError => error
+      rescue Hive::Proposals::Error, Hive::GitError, Hive::ConcurrentRunError,
+             SystemCallError => error
         warn "[hive] proposal reconciliation deferred: #{error.class}"
         nil
       end

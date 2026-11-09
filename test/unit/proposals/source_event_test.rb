@@ -74,6 +74,15 @@ class ProposalSourceEventTest < Minitest::Test
       Hive::Proposals::SourceEvent.normalize_task_binding(invalid_task)
     end
 
+    [
+      task_binding.merge("task_id" => "task\tid"),
+      task_binding.merge("task_generation" => "g" * 513)
+    ].each do |invalid_identifier|
+      assert_raises(Hive::Proposals::InvalidRecord) do
+        Hive::Proposals::SourceEvent.normalize_task_binding(invalid_identifier)
+      end
+    end
+
     evaluator = Marshal.load(Marshal.dump(proposal_binding.fetch("evaluator")))
     evaluator.dig("admission")["workflows"] = %w[coding coding]
     assert_raises(Hive::Proposals::InvalidRecord) do
@@ -91,6 +100,40 @@ class ProposalSourceEventTest < Minitest::Test
           "bytes" => -1, "media_type" => "application/json" },
         policy: proposal_binding.fetch("policy")
       )
+    end
+  end
+
+  def test_source_event_identifiers_reject_control_characters_at_admission
+    invalid_binding = Marshal.load(Marshal.dump(proposal_binding))
+    invalid_binding.dig("actor")["id"] = "alice\nadmin"
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.normalize_proposal_binding(invalid_binding)
+    end
+
+    invalid_evidence = evidence.merge("label" => "benchmark\tresult")
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.submission(
+        source_event_id: source_id("c"), proposal_id: proposal_id,
+        proposal_binding: proposal_binding, task_binding: task_binding,
+        proposed_change: "Change review", motivation: "Improve recall",
+        evidence: [ invalid_evidence ], created_at: "2026-08-30T12:00:00Z"
+      )
+    end
+
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.evaluation(
+        source_event_id: source_id("c"), proposal_id: proposal_id,
+        proposal_binding: proposal_binding, task_binding: task_binding,
+        method: method_fact.merge("label" => "held-out\nrecall"),
+        result: result_fact, rationale: "pass", evidence: [], links: [],
+        created_at: "2026-08-30T12:00:00Z"
+      )
+    end
+
+    persisted = submission_event.to_h
+    persisted.fetch("actor")["id"] = "alice\nadmin"
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals::SourceEvent.new(persisted)
     end
   end
 

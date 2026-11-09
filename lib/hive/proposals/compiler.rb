@@ -230,7 +230,6 @@ module Hive
       end
 
       class PinnedSource
-        MAX_TREE_PATHS = 20_000
         MAX_BLOB_BYTES = Store::MAX_FILE_BYTES + 1
 
         def initialize(git_ops:, source_ref:)
@@ -266,7 +265,9 @@ module Hive
             "proposals/v1/inbox/quarantine"
           )
           entries = output.split("\0").reject(&:empty?)
-          raise QuotaExceeded, "proposal pinned tree has too many paths" if entries.length > MAX_TREE_PATHS
+          if entries.length > Store::MAX_TREE_PATHS
+            raise QuotaExceeded, "proposal pinned tree has too many paths"
+          end
 
           unsafe_paths = {}
           entries.each { |entry| materialize_entry(root, source_commit, entry, unsafe_paths) }
@@ -287,9 +288,9 @@ module Hive
             unsafe_paths[relative] = { "code" => "symlink" }
           end
           Hive::AtomicFile.write(destination, bytes, mode: 0o600)
-        rescue Hive::GitError, SystemCallError, IOError
-          unsafe_paths[relative] = { "code" => "unreadable_file" }
-          Hive::AtomicFile.write(destination, "", mode: 0o600)
+        rescue Hive::GitError, SystemCallError, IOError => error
+          raise SourceUnavailable,
+                "proposal pinned source could not be materialized: #{error.class}"
         end
 
         def safe_tree_path?(path)

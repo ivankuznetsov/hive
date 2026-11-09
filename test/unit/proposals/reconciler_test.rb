@@ -103,7 +103,7 @@ class ProposalReconcilerTest < Minitest::Test
     end
   end
 
-  def test_failed_quarantine_commit_restores_pending_state
+  def test_failed_quarantine_commit_restores_pending_state_and_propagates
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)
       event = submission
@@ -113,15 +113,17 @@ class ProposalReconcilerTest < Minitest::Test
       ops.define_singleton_method(:hive_commit) do |**_options|
         raise Hive::GitError, "simulated quarantine commit failure"
       end
-      refute reconciler.send(
-        :quarantine_source!, event.source_event_id,
-        Hive::Proposals::InvalidRecord.new("bad receipt")
-      )
+      assert_raises(Hive::GitError) do
+        reconciler.send(
+          :quarantine_source!, event.source_event_id,
+          Hive::Proposals::InvalidRecord.new("bad receipt")
+        )
+      end
       assert_equal "pending", source_store.status(event.source_event_id).fetch("state")
     end
   end
 
-  def test_failed_quarantine_commit_does_not_skip_a_valid_pending_neighbor
+  def test_failed_quarantine_commit_does_not_report_false_convergence
     with_tmp_git_repo do |dir|
       ops, source_store, store = stores(dir)
       malformed = submission
@@ -147,12 +149,47 @@ class ProposalReconcilerTest < Minitest::Test
         original_commit.call(**options)
       end
 
-      result = reconciler(ops, source_store, store).reconcile!
+      assert_raises(Hive::GitError) do
+        reconciler(ops, source_store, store).reconcile!
+      end
+      assert_equal "pending", source_store.status(malformed.source_event_id).fetch("state")
+      assert_equal "pending", source_store.status(valid.source_event_id).fetch("state")
+    end
+  end
+
+  def test_transient_receipt_does_not_starve_later_pending_receipts
+    with_tmp_git_repo do |dir|
+      ops, source_store, store = stores(dir)
+      blocked = submission
+      valid = Hive::Proposals::SourceEvent.new(
+        submission.to_h.merge(
+          "source_event_id" => "pse-#{'b' * 64}",
+          "proposal_id" => "prp-00000000-0000-4000-8000-000000000002",
+          "subject" => submission.to_h.fetch("subject").merge(
+            "proposal_id" => "prp-00000000-0000-4000-8000-000000000002"
+          )
+        )
+      )
+      [ blocked, valid ].each do |event|
+        source_store.admit!(event)
+        commit_admission(ops, source_store, event)
+      end
+      real = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops: ops)
+      ingestor = Object.new
+      ingestor.define_singleton_method(:ingest!) do |source_event_id, source_commit:|
+        if source_event_id == blocked.source_event_id
+          raise Hive::Proposals::SourceUnavailable, "temporary outage"
+        end
+        real.ingest!(source_event_id, source_commit:)
+      end
+
+      result = Hive::Proposals::Reconciler.new(
+        git_ops: ops, source_store:, store:, ingestor:, max_batch: 1
+      ).reconcile!
 
       assert_equal 2, result.processed
       assert_equal 1, result.consumed
-      assert_equal 0, result.quarantined
-      assert_equal "pending", source_store.status(malformed.source_event_id).fetch("state")
+      assert_equal "pending", source_store.status(blocked.source_event_id).fetch("state")
       assert_equal "consumed", source_store.status(valid.source_event_id).fetch("state")
     end
   end

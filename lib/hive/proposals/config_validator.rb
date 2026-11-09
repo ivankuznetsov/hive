@@ -6,7 +6,6 @@ module Hive
   module Proposals
     class ConfigValidator
       KEYS = %w[evaluators authorities evidence limits context].freeze
-      AUTHORITY_KEYS = (AUTHORITY_REQUIRED_KEYS + AUTHORITY_OPTIONAL_KEYS).freeze
       EVIDENCE_KEYS = %w[visibility retention allowed_link_schemes].freeze
       LIMIT_KEYS = %w[
         max_pending_sources max_project_events max_proposal_events max_project_bytes

@@ -14,7 +14,7 @@ class ProposalProjectionTest < Minitest::Test
         ],
         "rationale_category" => "evaluated", "rationale" => "Passed",
         "authority" => authority, "links" => [],
-        "observed_head" => { "version" => 0, "digest" => Hive::Proposals::Projection.empty_head_digest(record.proposal_id) }
+        "observed_head" => { "version" => 0, "digest" => empty_head_digest(record.proposal_id) }
       }
     )
     contradictory = build_event(3, "evaluation", evaluation_data("fail", 0.70))
@@ -57,7 +57,7 @@ class ProposalProjectionTest < Minitest::Test
       "rationale" => "Not worth evaluating", "authority" => authority, "links" => [],
       "observed_head" => {
         "version" => 0,
-        "digest" => Hive::Proposals::Projection.empty_head_digest(build_record.proposal_id)
+        "digest" => empty_head_digest(build_record.proposal_id)
       }
     }
     assert_raises(Hive::Proposals::InconsistentHistory) do
@@ -94,14 +94,14 @@ class ProposalProjectionTest < Minitest::Test
     end
   end
 
-  def test_ignores_reserved_slots_after_the_last_valid_event
+  def test_rejects_reserved_slots_without_valid_events
     event = build_event(1, "evaluation", evaluation_data("pass", 0.9))
 
-    projection = Hive::Proposals::Projection.new(
-      record: build_record, events: [ event ], reserved_versions: [ 1, 7 ]
-    )
-
-    assert_equal [ event.event_id ], projection.evaluations.map { |item| item["event_id"] }
+    assert_raises(Hive::Proposals::InconsistentHistory) do
+      Hive::Proposals::Projection.new(
+        record: build_record, events: [ event ], reserved_versions: [ 1, 7 ]
+      )
+    end
   end
 
   def test_rejects_cross_proposal_events_and_invalid_rollbacks
@@ -122,7 +122,7 @@ class ProposalProjectionTest < Minitest::Test
         "considered_evaluations" => [], "rationale_category" => "no_evaluation",
         "rationale" => "Not worth evaluating", "authority" => authority, "links" => [],
         "observed_head" => {
-          "version" => 0, "digest" => Hive::Proposals::Projection.empty_head_digest(record.proposal_id)
+          "version" => 0, "digest" => empty_head_digest(record.proposal_id)
         }
       }
     )
@@ -219,7 +219,7 @@ class ProposalProjectionTest < Minitest::Test
       "rationale_category" => "evaluated", "rationale" => "Passed",
       "authority" => authority, "links" => [],
       "observed_head" => {
-        "version" => 0, "digest" => Hive::Proposals::Projection.empty_head_digest(build_record.proposal_id)
+        "version" => 0, "digest" => empty_head_digest(build_record.proposal_id)
       }
     }
   end
@@ -232,6 +232,10 @@ class ProposalProjectionTest < Minitest::Test
       "actor" => { "id" => "alice", "kind" => "configured_identity" },
       "source_commit" => "a" * 40
     }
+  end
+
+  def empty_head_digest(proposal_id)
+    Hive::Proposals.digest("proposal_id" => proposal_id, "lifecycle_events" => [])
   end
 
   def authority

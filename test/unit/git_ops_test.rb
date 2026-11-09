@@ -446,6 +446,29 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_empty_selection_ignores_unrelated_staging_and_unmatched_directories
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "stages", "1-inbox", "empty-task"))
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "logs"))
+      unrelated = "stages/1-inbox/unrelated.txt"
+      File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated)
+      head_before = ops.hive_state_head_sha
+
+      result = ops.hive_commit(
+        stage_name: "1-inbox", slug: "empty-task", action: "noop"
+      )
+
+      assert_equal :nothing_to_commit, result
+      assert_equal head_before, ops.hive_state_head_sha
+      assert_equal "A  #{unrelated}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+      ).strip
+    end
+  end
+
   def test_hive_commit_allow_empty_ignores_unknown_paths_and_preserves_unrelated_staging
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)

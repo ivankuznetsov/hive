@@ -36,6 +36,7 @@ module Hive
     FORBIDDEN_CONTROLS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/
     MAX_TEXT_BYTES = 16 * 1024
     MAX_EVIDENCE_ITEMS = 64
+    MAX_LINK_ITEMS = 64
     STATE_LOCK_TIMEOUT_SEC = 30
     DEFAULT_POLICY = {
       "visibility" => "restricted", "retention" => "task",
@@ -78,21 +79,43 @@ module Hive
     def digest(value) = Hive::CanonicalJSON.digest(value)
 
     def lineage_cycle_nodes(edges)
+      adjacency = Hash.new { |hash, key| hash[key] = [] }
+      edges.each do |source, targets|
+        Array(targets).compact.each { |target| adjacency[source] << target }
+      end
+      adjacency.each_value(&:sort!)
       cycles = []
-      finished = {}
-      edges.keys.sort.each do |start|
-        next if finished[start]
+      state = {}
+      path = []
+      positions = {}
+      adjacency.keys.sort.each do |start|
+        next if state[start]
 
-        path = []
-        positions = {}
-        current = start
-        while current && !finished[current] && !positions.key?(current)
-          positions[current] = path.length
-          path << current
-          current = edges[current]
+        state[start] = :visiting
+        positions[start] = path.length
+        path << start
+        frames = [ [ start, 0 ] ]
+        until frames.empty?
+          node, index = frames.last
+          targets = adjacency[node]
+          if index < targets.length
+            target = targets[index]
+            frames[-1][1] += 1
+            if state[target] == :visiting
+              cycles.concat(path.drop(positions.fetch(target)))
+            elsif state[target] != :finished
+              state[target] = :visiting
+              positions[target] = path.length
+              path << target
+              frames << [ target, 0 ]
+            end
+          else
+            frames.pop
+            path.pop
+            positions.delete(node)
+            state[node] = :finished
+          end
         end
-        cycles.concat(path.drop(positions.fetch(current))) if current && positions.key?(current)
-        path.each { |node| finished[node] = true }
       end
       cycles.uniq.sort
     end
@@ -159,16 +182,6 @@ module Hive
       absolute.delete_prefix(prefix)
     end
 
-    def unstage_hive_state_paths(git_ops, paths)
-      paths = Array(paths)
-      return if paths.empty?
-
-      git_ops.run_git!("-C", git_ops.hive_state_path, "reset", "-q", "HEAD", "--", *paths)
-      nil
-    rescue Hive::GitError
-      nil
-    end
-
     def restore_committed_proposal_state!(git_ops)
       output = git_ops.run_git!(
         "-C", git_ops.hive_state_path, "status", "--porcelain=v1", "-z",
@@ -231,7 +244,7 @@ module Hive
       missing = required - value.keys
       unknown = value.keys - required - optional
       raise error, "#{label} missing fields: #{missing.join(', ')}" unless missing.empty?
-      raise error, "#{label} has unknown fields: #{unknown.join(', ')}" unless unknown.empty?
+      raise error, "#{label} has unknown fields: #{safe_field_names(unknown)}" unless unknown.empty?
 
       value
     end
@@ -254,6 +267,9 @@ module Hive
 
     def subject_ref!(value, error: InvalidRecord)
       reference = value.to_s
+      if Hive::SecretPatterns.redact(reference) != reference
+        raise error, "proposal subject reference must not contain secret-like text"
+      end
       unless reference.match?(SAFE_SUBJECT) && reference.split("/").none? { |part| part == ".." }
         raise error, "proposal subject reference must be a safe project-relative reference"
       end
@@ -540,7 +556,10 @@ module Hive
     end
 
     def links!(items, allowed_schemes: [ "https" ], error: InvalidEvent)
-      Array(items).map do |item|
+      items = Array(items)
+      raise error, "proposal links exceed #{MAX_LINK_ITEMS} items" if items.length > MAX_LINK_ITEMS
+
+      items.map do |item|
         data = item.is_a?(Hash) ? stringify(item) : { "kind" => "reference", "reference" => item }
         data = closed_hash!(data, required: %w[kind reference], label: "proposal link", error:)
         {
@@ -550,6 +569,17 @@ module Hive
           )
         }
       end
+    end
+
+    def safe_field_names(values)
+      values = Array(values)
+      rendered = values.first(16).map do |value|
+        Hive::SecretPatterns.redact(value.to_s)
+          .gsub(/[\u0000-\u001f\u007f]/, "?")
+          .byteslice(0, 128).to_s.force_encoding(Encoding::UTF_8).scrub("")
+      end
+      rendered << "…" if values.length > rendered.length
+      rendered.join(", ").byteslice(0, 2_048).to_s.force_encoding(Encoding::UTF_8).scrub("")
     end
   end
 end

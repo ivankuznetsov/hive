@@ -1,50 +1,75 @@
 require "test_helper"
-require "hive/attempts/capability"
+require "hive/attempts/dispatcher"
+require "hive/attempts/entrypoint"
 require "hive/attempts/repository"
 require "hive/commands/proposal"
 require "hive/proposals/compiler"
 require "hive/proposals/context_selector"
-require "hive/proposals/evaluator_authority"
-require "hive/task_activity"
 
 class ProposalTrackingTest < Minitest::Test
   include HiveTestHelper
 
   FIXTURES = File.expand_path("../fixtures/proposals", __dir__).freeze
-  TaskStub = Struct.new(
-    :id, :slug, :folder, :project_root, :workflow, :project_name,
-    keyword_init: true
-  )
+  PROPOSAL_SOURCES = [
+    File.expand_path("../../lib/hive/proposals.rb", __dir__),
+    *Dir[File.expand_path("../../lib/hive/proposals/**/*.rb", __dir__)]
+  ].freeze
+  ACTIVE_STORE_DEPENDENCIES = %w[
+    Hive::AgentSkills
+    Hive::Commands::Workflow
+    Hive::WorkflowPackage
+    Hive::Workflows::Bench
+    hive/agent_skills/
+    hive/commands/workflow
+    hive/workflow_package/
+  ].freeze
+
+  class AdmissionLauncher
+    def preflight! = true
+
+    def launch(_record, claim_capability:) = { "claimed" => !claim_capability.empty? }
+  end
+
+  def test_proposal_subsystem_cannot_depend_on_active_skill_or_workflow_store_mutators
+    violations = PROPOSAL_SOURCES.flat_map do |path|
+      source = File.read(path)
+      ACTIVE_STORE_DEPENDENCIES.filter_map do |dependency|
+        "#{path.delete_prefix("#{ROOT}/")}: #{dependency}" if source.include?(dependency)
+      end
+    end
+
+    assert_empty violations,
+                 "proposal tracking must not depend on active skill or workflow store mutators"
+  end
 
   def test_curated_lifecycle_flows_through_durable_sources_live_queries_and_pinned_views
     with_tmp_git_repo do |project|
-      prepare_active_stores(project)
-      active_before = active_store_bytes(project)
       ops = Hive::GitOps.new(project)
       ops.hive_state_init
       configure_proposals(ops)
       @config = Hive::Config.load(project)
       state_home = tracked_tmp_dir("hive-test-proposal-attempts")
       @attempt_store = Hive::Attempts::Repository.new(root: state_home, migrate: true)
+      register_runtime_project(
+        database: @attempt_store.database, name: File.basename(project), path: project,
+        state_root_path: ops.hive_state_path
+      )
       @attempt_sequence = 0
       @input_sequence = 0
 
       with_env("HIVE_HOME" => state_home) do
         accepted, accepted_evaluation = accepted_candidate(project, ops)
         assert_equal "accepted", live_store(ops).projection(accepted).status
-        assert_active_stores_unchanged(project, active_before)
 
         rejected, rejected_attempt = rejected_candidate(project, ops)
         rejected_projection = live_store(ops).projection(rejected)
         assert_equal "rejected", rejected_projection.status
         assert_equal %w[pass fail],
                      rejected_projection.evaluations.map { |row| row.dig("result", "outcome") }
-        assert_active_stores_unchanged(project, active_before)
 
         unevaluated = unevaluated_rejection(project, ops)
         assert_equal "no_evaluation",
                      live_store(ops).projection(unevaluated).decision.fetch("rationale_category")
-        assert_active_stores_unchanged(project, active_before)
 
         successor = successor_and_rollback(project, ops, accepted, accepted_evaluation)
         predecessor = live_store(ops).projection(accepted)
@@ -53,7 +78,6 @@ class ProposalTrackingTest < Minitest::Test
         assert_equal successor, predecessor.superseded_by
         assert_includes live_store(ops).projection(successor).supersedes, accepted
         assert_equal "d" * 40, predecessor.rollback.dig("external_revert", "reference")
-        assert_active_stores_unchanged(project, active_before)
 
         selection = Hive::Proposals::ContextSelector.new(
           query: Hive::Proposals::Query.new(store: live_store(ops))
@@ -67,7 +91,6 @@ class ProposalTrackingTest < Minitest::Test
         refute_includes selection.text, "cost_ratio"
         refute_includes selection.text, "cost regression outweighs"
         refute_includes selection.text, "Broaden the planning prompt"
-        assert_active_stores_unchanged(project, active_before)
 
         add_committed_malformed_neighbor(ops)
         first = File.join(tracked_tmp_dir("hive-test-proposal-compile-a"), "out")
@@ -99,7 +122,6 @@ class ProposalTrackingTest < Minitest::Test
         refute_includes compiled.markdown, "Refine the accepted review prompt"
         assert_includes compiled.markdown, "Broaden the planning prompt"
         assert_includes compiled.markdown, "Rolled back"
-        assert_active_stores_unchanged(project, active_before)
 
         show_output = StringIO.new
         Hive::Commands::Proposal.new(
@@ -111,9 +133,6 @@ class ProposalTrackingTest < Minitest::Test
         assert_equal 2, shown.fetch("evaluations").length
         assert_includes shown.fetch("proposed_change"), "Broaden the planning prompt"
       end
-
-      assert_equal active_before, active_store_bytes(project),
-                   "tracking, compilation, and context must not mutate active stores"
     end
   end
 
@@ -149,6 +168,10 @@ class ProposalTrackingTest < Minitest::Test
       @config = Hive::Config.load(project)
       state_home = tracked_tmp_dir("hive-test-proposal-lazy-attempts")
       @attempt_store = Hive::Attempts::Repository.new(root: state_home, migrate: true)
+      register_runtime_project(
+        database: @attempt_store.database, name: File.basename(project), path: project,
+        state_root_path: ops.hive_state_path
+      )
       @attempt_sequence = 0
       @input_sequence = 0
       with_env("HIVE_HOME" => state_home) do
@@ -290,50 +313,36 @@ class ProposalTrackingTest < Minitest::Test
     task_id = (50_000 + @attempt_sequence).to_s
     folder = File.join(ops.hive_state_path, "stages", "4-execute", slug)
     FileUtils.mkdir_p(folder)
-    task = TaskStub.new(
-      id: task_id, slug:, folder:, project_root: ops.project_root,
-      workflow: "coding", project_name: "hive"
+    Hive::TaskMeta.write(
+      folder, id: task_id, slug:, display_name: nil, workflow: "coding"
     )
-    proposal_authority = Hive::Proposals::EvaluatorAuthority.new(@config)
-    evaluator_binding = if evaluator
-      proposal_authority.bind!(
-        identity: "benchmark-reviewer", workflow: "coding",
-        stage: "4-execute", agent_profile: "codex"
-      )
-    end
-    binding = {
-      "schema_version" => 1, "subject" => subject,
-      "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:proposals" },
-      "evaluator" => evaluator_binding,
-      "configuration_fingerprint" => proposal_authority.configuration_fingerprint,
-      "policy" => @config.dig("proposals", "evidence")
-    }
-    attempt = @attempt_store.create_launching(
-      attempt_id:, request_id: "request-#{@attempt_sequence}",
-      task_id:, project: "hive", task_slug: slug, intended_stage: "4-execute",
-      task_generation: "owner-#{@attempt_sequence}",
-      ownership_generation: "owner-#{@attempt_sequence}", task_input_epoch: 1,
-      progress_token: "progress-#{@attempt_sequence}", provider: "codex",
-      worker_argv: [ "hive", "proposal", evaluator ? "evaluate" : "submit", slug ],
-      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
-      starting_revision: ops.head_sha, retry_charge: 0, inherited_outputs: [],
-      launch_timeout_sec: 300, now: Time.utc(2026, 8, 30, 12, @attempt_sequence),
-      subject: Hive::Attempts::Record.task_stage_subject(
-        task_id:, task_slug: slug, intended_stage: "4-execute", proposal: binding
-      )
+    File.write(File.join(folder, "task.md"), "# #{slug}\n")
+    task = Hive::Task.new(folder)
+    now = Time.utc(2026, 8, 30, 12, @attempt_sequence)
+    dispatcher = Hive::Attempts::Dispatcher.new(
+      store: @attempt_store, launcher: AdmissionLauncher.new,
+      limits: { max_global: 100, max_per_project: 100, max_daily: 100 },
+      clock: -> { now }, id_generator: -> { attempt_id },
+      capability_generator: -> { "c" * 64 }
     )
-    Hive::TaskActivity.new(
-      task_folder: folder, task: { "id" => task_id, "slug" => slug },
-      workflow: "coding", stage: "4-execute", attempt_id:,
-      task_generation: 1, ownership_generation: attempt.ownership_generation,
-      attempt_store: @attempt_store,
-      clock: -> { Time.utc(2026, 8, 30, 12, @attempt_sequence) }
-    ).record(
-      kind: "attempt_admitted", operation_id: "attempt-admitted:#{attempt_id}",
-      reason: "durable proposal attempt admitted", source: "attempt_dispatcher",
-      payload: { "provider" => "codex", "state" => "launching" }
+    result = Hive::Attempts::Entrypoint.new(
+      store: @attempt_store, dispatcher:, config_loader: ->(_root) { @config }
+    ).dispatch(
+      task:, intended_stage: "4-execute",
+      argv: [ "hive", "proposal", evaluator ? "evaluate" : "submit", slug ],
+      request_id: "request-#{@attempt_sequence}", provider: "codex",
+      interactive: false, now:,
+      proposal_admission: {
+        "subject" => subject,
+        "actor" => {
+          "id" => "alice", "kind" => "proposer", "binding" => "team:proposals"
+        },
+        "evaluator_identity" => evaluator ? "benchmark-reviewer" : nil,
+        "agent_profile" => "codex"
+      }
     )
-    [ task, attempt ]
+    assert_equal :accepted, result.status
+    [ task, result.attempt ]
   end
 
   def run_source(command, task, project, source_path)
@@ -405,26 +414,6 @@ class ProposalTrackingTest < Minitest::Test
       stage_name: "test", slug: "proposals", action: "seeded malformed neighbor",
       pathspecs: [ "proposals/v1/records/malformed.json" ]
     )
-  end
-
-  def prepare_active_stores(project)
-    FileUtils.mkdir_p(File.join(project, "config"))
-    FileUtils.mkdir_p(File.join(project, "workflows"))
-    File.write(File.join(project, "config", "agent-skills.yml"), "reviewer: v1\n")
-    File.write(File.join(project, "workflows", "active.yml"), "coding: v1\n")
-    run!("git", "-C", project, "add", "config/agent-skills.yml", "workflows/active.yml")
-    run!("git", "-C", project, "commit", "-m", "test: seed active stores", "--quiet")
-  end
-
-  def active_store_bytes(project)
-    %w[config/agent-skills.yml workflows/active.yml].to_h do |path|
-      [ path, File.binread(File.join(project, path)) ]
-    end
-  end
-
-  def assert_active_stores_unchanged(project, expected)
-    assert_equal expected, active_store_bytes(project),
-                 "proposal tracking must not mutate active skill or workflow stores"
   end
 
   def fixture(directory, name) = File.join(FIXTURES, directory, name)

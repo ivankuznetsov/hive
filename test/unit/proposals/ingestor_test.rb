@@ -263,6 +263,54 @@ class ProposalIngestorTest < Minitest::Test
     end
   end
 
+  def test_committed_unauthorized_receipt_is_normalized_to_quarantine
+    with_tmp_dir do |dir|
+      source_store, store, = stores(dir)
+      malformed = evaluation.to_h.merge("evaluator" => nil)
+      git_ops = Object.new
+      git_ops.define_singleton_method(:read_hive_state_blob_at) do |*_arguments, **_options|
+        Hive::Proposals.canonical(malformed)
+      end
+      ingestor = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops:)
+
+      assert_raises(Hive::Proposals::QuarantinedSource) do
+        ingestor.send(:committed_source!, evaluation.source_event_id, "a" * 40)
+      end
+    end
+  end
+
+  def test_failed_post_commit_compensation_reports_both_failures
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      root = File.join(ops.hive_state_path, "proposals", "v1")
+      source_store = Hive::Proposals::SourceEventStore.new(root: root)
+      store = Hive::Proposals::Store.new(root: root, id_generator: id_sequence)
+      source_store.admit!(submission)
+      paths = source_store.paths_for_admission(submission.source_event_id).map do |path|
+        path.delete_prefix("#{ops.hive_state_path}/")
+      end
+      ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "source only", pathspecs: paths
+      )
+      source_commit = ops.hive_state_head_sha
+      ops.define_singleton_method(:hive_commit) { |**_options| :committed }
+      ingestor = Hive::Proposals::Ingestor.new(source_store:, store:, git_ops: ops)
+      restores = 0
+      ingestor.define_singleton_method(:restore_committed_target!) do |_source|
+        restores += 1
+        raise Errno::ENOSPC, "simulated recovery failure" if restores > 1
+      end
+
+      error = assert_raises(Hive::Proposals::SourceUnavailable) do
+        ingestor.ingest!(submission.source_event_id, source_commit:)
+      end
+      assert_includes error.message, "proposal consumed status is not durably committed"
+      assert_includes error.message, "simulated recovery failure"
+      assert_instance_of Hive::Proposals::SourceUnavailable, error.cause
+    end
+  end
+
   def test_committed_target_cleanup_removes_files_directories_and_missing_paths
     with_tmp_dir do |dir|
       ingestor = Hive::Proposals::Ingestor.new(source_store: Object.new, store: Object.new)

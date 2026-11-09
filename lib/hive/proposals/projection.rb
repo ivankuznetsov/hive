@@ -9,10 +9,6 @@ module Hive
       attr_reader :record, :events, :evaluations, :decision, :superseded_by, :rollback,
                   :status, :lifecycle_head, :supersedes, :reserved_versions
 
-      def self.empty_head_digest(proposal_id)
-        Proposals.digest("proposal_id" => proposal_id, "lifecycle_events" => [])
-      end
-
       def initialize(record:, events:, supersedes: [], reserved_versions: nil)
         @record = record.is_a?(Record) ? record : Record.new(record)
         @events = Array(events).map { |event| event.is_a?(Event) ? event : Event.new(event) }
@@ -87,17 +83,10 @@ module Hive
           raise InconsistentHistory, "proposal history contains an event for another proposal"
         end
         event_versions = events.map(&:version)
-        last_event_version = event_versions.max || 0
-        first_reserved = reserved_versions.first
-        first_required = if first_reserved && !event_versions.include?(first_reserved)
-          first_reserved
-        else
-          1
-        end
-        required_slots = last_event_version.positive? ? (first_required..last_event_version).to_a : []
         unless event_versions.uniq.length == event_versions.length &&
                (event_versions - reserved_versions).empty? &&
-               (required_slots - reserved_versions).empty?
+               reserved_versions == event_versions.sort &&
+               event_versions == (1..event_versions.length).to_a
           raise InconsistentHistory, "proposal event versions must be contiguous and unique"
         end
         EVENT_TYPES.each do |type|

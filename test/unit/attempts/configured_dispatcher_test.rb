@@ -322,13 +322,18 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
       result = adapter.send(:reconcile_proposals, task)
       assert_equal 0, result.processed
 
-      erroring = ->(**_options) { raise Hive::Proposals::InvalidRecord, "bad receipt" }
-      _stdout, stderr = capture_io do
-        with_replaced_singleton_method(Hive::Proposals::Reconciler, :new, erroring) do
-          assert_nil adapter.send(:reconcile_proposals, task)
+      [
+        Hive::Proposals::InvalidRecord.new("bad receipt"),
+        Hive::ConcurrentRunError.new("commit lock busy")
+      ].each do |error|
+        erroring = ->(**_options) { raise error }
+        _stdout, stderr = capture_io do
+          with_replaced_singleton_method(Hive::Proposals::Reconciler, :new, erroring) do
+            assert_nil adapter.send(:reconcile_proposals, task)
+          end
         end
+        assert_includes stderr, "proposal reconciliation deferred"
       end
-      assert_includes stderr, "proposal reconciliation deferred"
     end
   end
 end

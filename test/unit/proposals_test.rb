@@ -57,13 +57,47 @@ class ProposalsTest < Minitest::Test
     end
   end
 
-  def test_hive_state_transaction_paths_are_contained_and_reset_failures_are_fail_soft
-    git_ops = Struct.new(:hive_state_path, :reset_calls) do
-      def run_git!(*arguments)
-        reset_calls << arguments
-        raise Hive::GitError, "reset failed" if arguments.include?("fail.json")
-      end
-    end.new("/tmp/project/.hive-state", [])
+  def test_links_are_bounded_to_the_published_schema_limit
+    links = Array.new(65) do |index|
+      { "kind" => "reference", "reference" => "https://example.test/#{index}" }
+    end
+
+    assert_raises(Hive::Proposals::InvalidEvent) do
+      Hive::Proposals.links!(links)
+    end
+  end
+
+  def test_subject_references_reject_secret_shaped_identifiers
+    assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals.subject_ref!("skills/ghp_#{'a' * 36}")
+    end
+  end
+
+  def test_unknown_field_diagnostics_are_redacted_bounded_and_control_safe
+    secret = "ghp_#{'a' * 36}"
+    fields = 40.times.to_h { |index| [ "#{secret}\nfield-#{index}", true ] }
+
+    error = assert_raises(Hive::Proposals::InvalidRecord) do
+      Hive::Proposals.closed_hash!(fields, required: [], label: "artifact")
+    end
+
+    assert error.message.valid_encoding?
+    assert_operator error.message.bytesize, :<=, 2_100
+    refute_includes error.message, secret
+    refute_includes error.message, "\n"
+  end
+
+  def test_lineage_cycle_detection_preserves_multiple_edge_kinds
+    cycles = Hive::Proposals.lineage_cycle_nodes(
+      "proposal-a" => %w[proposal-b proposal-c],
+      "proposal-b" => "proposal-a"
+    )
+
+    assert_equal %w[proposal-a proposal-b], cycles
+  end
+
+  def test_hive_state_transaction_paths_are_contained
+    git_ops = Struct.new(:hive_state_path).new("/tmp/project/.hive-state")
 
     assert_equal "proposals/v1/record.json",
                  Hive::Proposals.hive_state_relative_path(
@@ -72,10 +106,6 @@ class ProposalsTest < Minitest::Test
     assert_raises(Hive::Proposals::Error) do
       Hive::Proposals.hive_state_relative_path(git_ops, "/tmp/project/outside.json")
     end
-    assert_nil Hive::Proposals.unstage_hive_state_paths(git_ops, [])
-    assert_nil Hive::Proposals.unstage_hive_state_paths(git_ops, [ "record.json" ])
-    assert_nil Hive::Proposals.unstage_hive_state_paths(git_ops, [ "fail.json" ])
-    assert_equal 2, git_ops.reset_calls.length
   end
 
   def test_committed_state_restore_removes_untracked_directories_and_skips_vanished_paths

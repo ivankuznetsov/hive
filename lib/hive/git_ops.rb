@@ -324,6 +324,14 @@ module Hive
         commit_pathspecs.reject!(&:empty?)
         commit_pathspecs.uniq!
         after_stage&.call
+        commit_pathspecs.select! do |pathspec|
+          output, _error, status = Open3.capture3(
+            "git", "-C", hive_state_path, "diff", "--cached", "--name-only", "-z", "--", pathspec
+          )
+          status.success? && !output.empty?
+        end
+        return :nothing_to_commit if commit_pathspecs.empty? && !allow_empty
+
         _, _, status = Open3.capture3(
           "git", "-C", hive_state_path, "diff", "--cached", "--quiet", "--", *commit_pathspecs
         )

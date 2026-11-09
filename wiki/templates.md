@@ -3,7 +3,7 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-09
 tags: [template, erb, prompt, llm-wiki]
 ---
 
@@ -36,6 +36,11 @@ filename still identifies an available source commit are reconstructed from
 that commit and returned to the normal queue; unavailable or unrecognized temp
 files remain retained for inspection. A reconstruction that cannot read the
 source commit's changed paths also retains the original temp for a later retry.
+Proposal-only batches remain exempt from the provider-failure circuit and
+ordinary pending budget, but compile failures still increment their retry count,
+move exhausted sources to `failed/`, and open the quarantined-backlog breaker.
+Primary-checkout discovery reads the complete porcelain worktree path, including
+ordinary spaces.
 
 Hive-installed runtimes record a `scheduler-service` in the shared state. A
 commit-triggered runner queues its source and dispatches that memory-bounded

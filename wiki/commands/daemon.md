@@ -30,6 +30,11 @@ discovery/action resumes.
 
 ## Subcommands
 
+Managed service startup and daemon code-refresh re-exec explicitly select
+`--context local`, so a saved remote client context cannot interrupt the local
+daemon lifecycle. Installing an updated definition still follows the existing
+drift and `--force` rules.
+
 ```
 hive daemon start [--detach] [--dry-run]
 hive daemon stop
@@ -77,9 +82,49 @@ daemon are reserved by their parent before `Process.spawn`, remain blocked at
 `bin/hive`'s launch gate until the parent registers their process identity, and
 then adopt that exact durable row for exit cleanup. A parent crash during the
 handoff leaves unresolved ownership in the registry rather than an invisible
-child. (The former Hivebox container supervisor and its
+child.
+
+A reservation that can never be registered is released as abandoned, so it
+does not keep quiescence ineligible forever. That applies to an
+attempt-wrapper reservation whose attempt is no longer `launching` or `running`
+(reason `attempt_settled`), and to any other reservation whose reserving owner
+(pid plus start fingerprint) is proven missing or replaced (reason
+`owner_gone`). Owner death is enough here: the gated child exits before any
+work unless the parent registered it first. Rows with a live, unverifiable or
+unrecorded owner, and rows whose attempt is still live, stay unresolved. The
+daemon releases them after each attempt reconciliation and logs
+`launch_reservations_released`. `hive daemon quiesce` does the same before its
+entry capability check and again under the controller writer after it settles
+pre-close reservations. A failed release leaves the rows reserved, so the
+capability still refuses. (The former Hivebox container supervisor and its
 `.hivebox-supervisor.pid` receipt were removed by ADR-055; legacy service
 discovery now covers only the daemon, bot, and babysitter pid files.)
+
+Registered owned-process rows can also outlive their processes: a direct
+CLI's `at_exit` cleanup write can lose to a busy runtime database (the
+`Sequel::Error` is swallowed in `bin/hive`), a wrapper can be killed, and an
+attempt wrapper without delegated cgroup custody deliberately leaves its row
+active with `descendant_absence_unverified`. Each such row kept quiescence
+ineligible forever (`agent_attempt_root` or `unproven_launch_surface`).
+`ProcessRegistry#reconcile_exited_processes!` closes only `unverified`-custody
+rows whose root (pid plus start fingerprint) is proven missing or replaced, as
+`stopped` with reason `owner_gone_custody_unverified`. An attempt-linked row
+also needs its attempt `terminal` or `lost` and a host-wide `/proc` read
+(`Hive::Attempts::ProcessTable`) showing no live process in its recorded
+session or process group; the detached launcher gives every attempt its own
+session. Any other row needs only the session or group it led (id equal to its
+pid) to be empty, the same bar its own `command_exited` cleanup applies.
+Delegated-custody rows, live or unverifiable roots, unsettled or unknown
+attempts, missing session ids and an unreadable process table keep the row
+active. The daemon runs it (500 rows per pass) next to the reservation release
+and logs `owned_processes_reconciled`; `hive daemon quiesce` runs it at the
+same two points. An attempt row in a dispatch-disabled project only settles
+because the daemon reconciles such projects under a transient maintenance guard
+(see [[modules/daemon]]); before that, a paused project's dead wrapper kept its
+attempt `running` and therefore its owned-process row active. This does not relax the capability itself: with no delegated
+custody, any live attempt still refuses with `agent_attempt_root`, and any live
+direct CLI (for example `hive babysit` or `hive watch`) with
+`unproven_launch_surface`.
 
 For the narrow backup-safe result, the two observations are inseparable:
 
@@ -274,7 +319,7 @@ never rewrites the id itself. See [[state-model]].
 | `ready_to_run` | Dispatch a generic workflow stage once. A stage transition discards the previous stage's persisted mtime baseline so its successor remains eligible. An unchanged state-file mtime after dispatch is surfaced as `markerless_stalled`; marker-driven workflows atomically convert it to `ERROR reason=agent_exited_without_terminal_marker`, while controller workflows enqueue the same generation on the durable markerless recovery route without modifying structured state. After a daemon restart, an older current mtime can recover once only when the baseline was loaded from the persisted store; same-process observations never gain that recovery authority. |
 | Any coding task with `pr_url` in stages `5-open-pr` through `8-finalize` | **Observe before policy dispatch.** Persist the exact task generation and PR binding, poll with per-candidate durable backoff, verify the observed head and reachable merge SHA, checkpoint required architecture intake, then use a daemon-owned `remote_merge` closure receipt to move the same generation to `9-done`. This includes recoverable error rows; no marker-reason allowlist or archive child exists. |
 | Held PR-bearing task | Keep the candidate in `pr-merge-reconciliation.json` with its hold reason. Current dependency, admission, repository, and PR-identity holds take precedence over historical head drift and do not poll or archive until a later status observation clears them. An `observed_head_changed` hold may poll only the identity-matched bound PR's remote state: `OPEN` or closed-unmerged releases ordinary error recovery so the new generation can be reviewed, while merged, delivered-elsewhere, or ambiguous evidence remains durably blocked before architecture intake or automatic archive and is not polled again. |
-| `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. |
+| `plan_reviewing` or due `plan_review_retry` at coding `3-plan` | Dispatch `hive plan-review-run ...`. This automation can start/retry critique, perform an already-authorized revision, and verify, but cannot create approvals, answers, waivers, or mandatory downgrades. A failed run of an unchanged generation (plan bytes, plan-review projection version, dependency fingerprint, Hive build) waits on the shared `RetryPolicy` ladder (`transition_retry`, scheduler-owned); after `REPEATED_FAILURE_LIMIT` (3) consecutive `failed` attempts with the same non-`TEMPFAIL` exit status, admission returns `repeated_failure_limit` and the row becomes operator-owned `needs_repair` (`attempt_failure_limit`, naming the command, exit status, and latest attempt) until that generation changes or an operator reruns the command interactively. |
 | future `plan_review_retry` | Hold until the projection's `retry_at`; provider/transient evidence remains attached to the same attempt lineage. Exhausted mandatory initial-review series widen from five minutes to a 24-hour cap and reopen automatically instead of requiring a coverage waiver. |
 | `plan_review_decision`, `plan_review_unsupported`, or `plan_review_blocked` | Skip. The row names the operator/configuration action; daemon enrollment creates no authority. |
 | `ready_to_develop` or `plan_review_degraded` at coding `3-plan` | `PlanApproval.prepare` rewrites to `hive develop ...`, revalidates the exact current plan-review observation under the task lock, and only then flips `:waiting` to `:complete`. A missing/stale/blocked review leaves the marker and folder untouched. |
@@ -386,7 +431,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | Durable per-candidate merge reconciliation cadence. Min 60 to respect GitHub rate limits; failure counts remain uncapped and backoff is persisted. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
-| `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
+| `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. A project may lower its own cap with `daemon.max_concurrent_per_project` in `<project>/.hive-state/config.yml` (read per tick like `daemon.enabled`); a project value can only lower the daemon-wide cap, never raise it. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |
 | `transient_retry_backoff_sec` | 60 | First retry hold for a durable task attempt that exits `75 (TEMPFAIL)`; also the base of the ancillary-child `60 → 120 → 300 s` transient backoff schedule. |
 | `shutdown_grace_sec` | 600 | TERM→KILL window for in-flight children on `daemon stop`. |
@@ -512,3 +557,10 @@ original typed failure.
 - [[modules/daemon]] · [[modules/plan_review]]
 - [[decisions]] (ADR-024)
 - [[architecture]]
+
+A disabled project's action-originated recovery requests remain eligible for a
+live daemon's existing explicit-action carve-out. Local attached retry and the
+daemon share transactional attempt admission, so concurrent consumers converge
+on one attempt. Receipt projection uses actual project dispatch configuration;
+the carve-out does not imply scheduler ownership for a manual project. Enabled
+projects retain scheduler snapshot joins and queued admission during outages.

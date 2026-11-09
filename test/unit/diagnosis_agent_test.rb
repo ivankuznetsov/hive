@@ -714,12 +714,31 @@ def test_drain_reader_threads_timeout_terminates_child_and_kills_readers
   assert_match(/timed out after 9s/, error.message)
 end
 
-def test_feed_stdin_ignores_epipe_and_close_errors
+def test_spawn_hands_the_prompt_over_as_a_regular_file
+  # Muse reads `--prompt-file=/dev/stdin` and rejects a pipe; diagnosis
+  # must give the child a regular-file stdin like stage runs do.
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
-  stdin = FakeStdin.new(write_error: Errno::EPIPE.new, close_error: IOError.new("already closed"))
+  script = 'test -f /dev/stdin || { echo "not a regular file" >&2; exit 3; }; cat'
 
-  assert_nil agent.send(:feed_stdin, stdin, "prompt")
-  assert_equal true, stdin.closed
+  out = agent.send(:run_with_timeout, [ "sh", "-c", script ], Dir.pwd, "the prompt", 10)
+
+  assert_equal "the prompt", out
+end
+
+def test_spawn_failure_closes_pipes_and_removes_the_prompt_file
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  before = Dir.glob(File.join(Dir.tmpdir, "hive-diagnose-prompt-*"))
+
+  assert_raises(Errno::ENOENT) do
+    agent.send(:run_with_timeout, [ "/nonexistent/hive-diagnose-bin" ], Dir.pwd, "prompt", 10)
+  end
+  assert_equal before, Dir.glob(File.join(Dir.tmpdir, "hive-diagnose-prompt-*"))
+end
+
+def test_spawn_without_prompt_reads_empty_stdin
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+
+  assert_equal "", agent.send(:run_with_timeout, [ "cat" ], Dir.pwd, nil, 10)
 end
 
 def test_read_stream_returns_empty_string_for_io_error
@@ -842,25 +861,6 @@ class FakeReaderThread
 
   def kill
     @killed = true
-  end
-end
-
-class FakeStdin
-  attr_reader :closed
-
-  def initialize(write_error: nil, close_error: nil)
-    @write_error = write_error
-    @close_error = close_error
-    @closed = false
-  end
-
-  def write(_data)
-    raise @write_error if @write_error
-  end
-
-  def close
-    @closed = true
-    raise @close_error if @close_error
   end
 end
 end

@@ -83,6 +83,26 @@ class CommandsStatusOperationalTest < Minitest::Test
     super
   end
 
+  def test_operational_text_renders_publication_commands_and_retained_commit_evidence
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      folder = File.join(state, "stages", "6-review", "fix-261101-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "# Fix\n")
+      Hive::Markers.set(File.join(folder, "task.md"), :review_error, reason: "review_publication_failed",
+        **Hive::ReviewPublicationRecovery.encode("publication" => "unpublished", "verification" => "pending",
+          "worktree" => "/owned/a b", "branch" => "fix", "unpushed_shas" => [ "a" * 40 ],
+          "push_command" => "cd /owned/a\\ b && git push origin HEAD:fix"))
+      command = Hive::Commands::Status.new(operational: true)
+      payload = command.operational_payload([ { "name" => "demo", "path" => project_root, "hive_state_path" => state } ])
+      output, = capture_io { command.render_operational(payload) }
+      assert_includes output, "Publication: unpublished"
+      assert_includes output, "Worktree: /owned/a b"
+      assert_includes output, "a" * 40
+      assert_includes output, "git push origin HEAD:fix"
+    end
+  end
+
   def test_operational_payload_is_additive_and_keeps_current_status_v9_unchanged
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

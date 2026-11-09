@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-10-02
+updated: 2026-11-08
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -34,6 +34,15 @@ Supervisor self-reentry preserves canonical directories from the running Ruby
 interpreter's resolved load path. This includes dependencies loaded without
 RubyGems activation, as in the isolated CLI scenario harness. It does not re-read
 ambient `RUBYLIB`; `bin/hive` places its own source directories first.
+That resolved `RUBYLIB` (Hive's lib, agent-cli-runtime, and every activated
+gem) is private to Hive and is inherited by the supervisor and worker. Commands
+the worker runs for the project (review CI in `CiFix.run_ci_once`, council
+`CommandRunner`, agent CLI launches) therefore merge
+`Hive::ProjectCommandEnvironment.overrides`, which unsets `RUBYLIB`, `RUBYOPT`,
+`RUBYGEMS_GEMDEPS`, `GEM_HOME`, `GEM_PATH`, Bundler keys, and `BUNDLER_ORIG_*`.
+Child `hive` calls do not need the inherited path: `bin/hive` (and the HIVE_BIN
+wrapper that execs it) put Hive's lib and agent-cli-runtime on `$LOAD_PATH`
+themselves and resolve gems through RubyGems.
 
 The private supervisor route is selected before public CLI dispatch. Its detached
 wrapper removes inherited Bundler and Ruby toolchain variables before it re-enters
@@ -82,6 +91,44 @@ generation's finalization reserve. The same signal outside quiescing remains
 an ordinary cancellation. The installation controller aggregates any receipt
 the supervisor already committed for that generation with interruptions it
 finishes after verified wrapper and worker-group absence.
+
+## Attempt memory cap
+
+On Linux hosts with a systemd user manager, `DetachedLauncher` starts each
+durable attempt wrapper in a transient `hive-attempt-<digest>.scope`
+(`systemd-run --user --scope --collect -p Delegate=yes`). The scope contains the
+supervisor, the agent CLI, and every tool shell, ad-hoc probe, test run, and
+review CI command the attempt starts, so a cap on the scope bounds the whole
+attempt. `ConfiguredDispatcher` reads `daemon.attempt_memory_max` (default
+`"6G"`) and `daemon.attempt_memory_swap_max` (default `"0"`) from the freshly
+loaded global daemon block via `LaunchPolicy.memory_limits` and the launcher
+adds `--property=MemoryMax=…`, `--property=MemorySwapMax=…`, and, on systemd
+>= 253 (probed once per launch with `systemd-run --version`),
+`--property=OOMPolicy=continue`.
+
+- `OOMPolicy=continue` is load-bearing: with systemd's default `stop`, one
+  kernel OOM kill inside the scope tears down the whole scope, including the
+  supervisor, which turns a bounded failure into a lost attempt. With
+  `continue`, the kernel kills only the largest process (typically the runaway
+  probe), and the agent keeps running and sees its tool command die.
+- Default reasoning: on the 16 GB dogfood host, runaway Codex reviewer probes
+  reached 4-4.6 GB within seconds and nearly OOMed the host. 6G stays above
+  normal agent and test peaks while stopping a runaway well before the host
+  limit. Swap 0 makes the cap take effect immediately instead of after a swap
+  storm. Large projects whose test suites need more memory raise
+  `daemon.attempt_memory_max`; `false` disables the cap (and the swap cap,
+  which applies only together with the memory cap).
+- No-op on macOS, on hosts without a user bus or `systemd-run`, and for plain
+  spawn paths. Those keep the previous uncapped behavior.
+- OOM classification: the supervisor reads its own cgroup v2
+  `memory.events` `oom_kill` counter before it spawns the worker and after
+  the worker exits. If the counter increased and the worker died by `SIGKILL`
+  without a Hive-forced termination, it appends
+  `hive-attempt: failure_reason=memory_limit_exceeded oom_kills=N` to the
+  attempt log and sets the synthesized patrol-fix diagnostic's `agent_reason`
+  to `memory_limit_exceeded`. If only a descendant was killed, it logs a
+  `memory_limit_oom_kills=N` notice and keeps the worker's own outcome. The
+  terminal receipt schema is unchanged (see `wiki/gaps.md`).
 
 Process-tree polling, a PID/start fingerprint, inherited invocation tokens, and
 an ambient or transient systemd scope are not complete descendant custody. The
@@ -259,3 +306,31 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Guarded attached recovery uses `Recovery::API` with an explicit manual execution
+policy. The coordinator alone validates a persisted recovery observation and
+repairs markers. Its query-only evidence is scoped by project and task before
+applying a bound; tokens include the request revision, phase and post-clear
+binding. A fresh operator action can expedite an admitted or cleared request
+without charging another retry. Other recovery callers retain queued admission.
+
+The bounded restart investigation is recorded in
+[[log.d/20261108-004-operator-attempt-restart-investigation]]. On the exercised
+Linux host, real external supervisors survived disposable services modeling
+all three shipped kill policies, for direct execute and attached review work.
+Actual application-service restarts and the historical incident remain
+unverified; no production orphan policy was changed based on that probe.
+
+`Attempts::API#fetch` and `#attach` expose canonical observation and read-only
+attachment without constructing internal repositories or clients in recovery
+adapters. A contended request admission re-reads the canonical request attempt
+and verifies its task/stage/generation binding before returning existing-live
+or terminal replay. Genuine loss remains a ledger state; manual recovery maps
+it to the `lost` outcome and retains its canonical end time.
+
+Manual retry validates every accepted, existing-live, or terminal-replay
+admission result against the recovery request's task, project, slug, stage,
+generation and post-clear progress before binding or attaching. The daemon's
+marker-recovery consumer applies the same fence. A foreign semantic owner
+leaves the request cleared and unbound, so a fresh operator retry remains
+available after that owner ends.

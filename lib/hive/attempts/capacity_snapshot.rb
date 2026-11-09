@@ -88,6 +88,10 @@ module Hive
       def successful_attempt(**args) = lookup(:successful_attempt_id, **args)
       def unresolved_loss(**args) = lookup(:unresolved_loss_attempt_id, **args)
 
+      def recent_terminal_attempts(**args)
+        store.recent_terminal_attempt_ids(**args).filter_map { |attempt_id| find(attempt_id) }
+      end
+
       private
 
       def lookup(method, **args) = find(store.public_send(method, **args))

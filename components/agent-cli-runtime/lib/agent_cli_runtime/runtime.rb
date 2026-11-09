@@ -13,6 +13,7 @@ module AgentCliRuntime
       argv = [ request.executable || profile.bin ]
       prompt_style = profile.prompt_style
       argv << profile.headless_flag
+      argv << profile.prompt_argument if profile.prompt_argument
       argv << request.prompt if prompt_style == :headless_flag_value
 
       argv.concat(

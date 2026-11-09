@@ -14,6 +14,10 @@ module Hive
       MAX_BYTES = 1024 * 1024
       OUTCOMES = Adapters::Base::OUTCOMES
       LENS_NAME = /\A[a-z][a-z0-9_-]{0,63}\z/.freeze
+      COVERAGE_RESULT_KEYS = %w[name required status reason retry_at].freeze
+      # Keys Hive writes on its own coverage rows (Record::COVERAGE_KEYS) that
+      # a reviewer never owns.
+      COVERAGE_REQUEST_KEYS = (Record::COVERAGE_KEYS - COVERAGE_RESULT_KEYS).freeze
       KEYS = %w[
         schema schema_version attempt_id plan_digest policy_fingerprint outcome findings coverage
         selected_lenses residual_evidence diagnostic retry_at decision_assessments
@@ -139,18 +143,36 @@ module Hive
       def validate_coverage!(value)
         raise InvalidRecord, "plan review coverage must be an Array" unless value.is_a?(Array)
         names = Set.new
-        value.map do |entry|
-          unless entry.is_a?(Hash) && (entry.keys - %w[name required status reason retry_at]).empty? &&
-                 entry["name"].to_s.match?(/\A[a-z][a-z0-9_]{0,63}\z/) &&
-                 (entry["required"] == true || entry["required"] == false) &&
-                 Record::COVERAGE_STATUSES.include?(entry["status"])
-            raise InvalidRecord, "invalid plan review coverage entry"
-          end
+        value.map.with_index do |entry, index|
+          # A reviewer that echoes a requested coverage row back carries the
+          # request's Hive-owned identity keys. They are not reviewer
+          # evidence, so drop them instead of failing the whole attempt.
+          entry = entry.except(*COVERAGE_REQUEST_KEYS) if entry.is_a?(Hash)
+          problem = coverage_entry_problem(entry)
+          raise InvalidRecord, "invalid plan review coverage entry #{index}: #{problem}" if problem
           raise InvalidRecord, "duplicate plan review coverage item" unless names.add?(entry["name"])
 
           validate_retry_at!(entry["retry_at"], "coverage retry_at") if entry["retry_at"]
           Hive::PlanReview.deep_freeze(entry)
         end
+      end
+
+      # Names the first offending key or value so an operator can see what the
+      # reviewer produced without the raw output.
+      def coverage_entry_problem(entry)
+        return "must be an object, got #{entry.class.name}" unless entry.is_a?(Hash)
+
+        unknown = entry.keys - COVERAGE_RESULT_KEYS
+        return "unknown keys #{unknown.map(&:to_s).sort.join(', ')}" unless unknown.empty?
+        unless entry["name"].to_s.match?(/\A[a-z][a-z0-9_]{0,63}\z/)
+          return "name #{entry['name'].inspect[0, 80]} is not a lowercase coverage name"
+        end
+        unless [ true, false ].include?(entry["required"])
+          return "required #{entry['required'].inspect[0, 80]} is not a boolean"
+        end
+        return if Record::COVERAGE_STATUSES.include?(entry["status"])
+
+        "status #{entry['status'].inspect[0, 80]} is not one of #{Record::COVERAGE_STATUSES.join(', ')}"
       end
 
       def validate_names!(value, label)

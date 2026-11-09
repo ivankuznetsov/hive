@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hive-operation.v1.json",
+  "title": "Hive remote operation lookup",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "instance_id", "data"],
+      "properties": {
+        "schema": {"const": "hive-operation"},
+        "schema_version": {"const": 1},
+        "ok": {"const": true},
+        "instance_id": {"type": "string"},
+        "data": {
+          "type": "object",
+          "required": ["id", "command", "state", "command_outcome", "result_available", "result_expired", "acknowledgement", "progress"],
+          "properties": {
+            "id": {"type": "string"},
+            "command": {"type": "string"},
+            "state": {"enum": ["accepted", "queued", "running", "succeeded", "failed", "unresolved", "settled", "result_expired"]},
+            "command_outcome": {"type": "string"},
+            "result_available": {"type": "boolean"},
+            "result_expired": {"type": "boolean"},
+            "acknowledgement": {"type": ["object", "null"]},
+            "progress": {"type": ["object", "null"]}
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-operation"},
+        "schema_version": {"const": 1},
+        "ok": {"const": false},
+        "error_class": {"type": "string"},
+        "error_kind": {"enum": ["usage", "config", "remote"]},
+        "exit_code": {"type": "integer"},
+        "message": {"type": "string"}
+      }
+    }
+  ]
+}

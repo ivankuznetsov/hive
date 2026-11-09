@@ -22,11 +22,21 @@ module Hive
         # as the gate (rather than `is_draft=false` in the marker)
         # makes a partial completion that ran `gh pr ready` but
         # crashed before write_summary recoverable via `hive run`.
+        # summary.md alone is not proof, though: a later failed merge,
+        # head push, or draft revert leaves it behind while the PR is no
+        # longer what finalize delivered. Only short-circuit when the
+        # recorded PR still matches a completed finalize; otherwise re-run
+        # the normal path, which re-validates identity and fails closed with
+        # typed markers.
         if File.exist?(File.join(task.folder, "summary.md"))
-          marker = Hive::Markers.current(task.state_file)
-          warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
-               "mv this folder to #{Hive::Stages::DIRS.last}/ to continue"
-          return { commit: nil, status: :complete }
+          completed = completed_finalize_state(task, cfg)
+          if completed[:complete]
+            warn "hive: already complete (#{completed.fetch(:pr_url)}); " \
+                 "mv this folder to #{Hive::Stages::DIRS.last}/ to continue"
+            return { commit: nil, status: :complete }
+          end
+          warn "hive: summary.md exists but finalize is not complete (#{completed.fetch(:drift)}); " \
+               "re-running finalize"
         end
 
         pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
@@ -198,6 +208,48 @@ module Hive
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
+      end
+
+      # Decide whether an existing summary.md still describes a completed
+      # finalize. Requires the controller-recorded identity (canonical pr_url
+      # and head_oid persisted by refresh_pr_identity!), a ready COMPLETE
+      # marker bound to that URL, and GitHub agreeing: MERGED, or OPEN,
+      # non-draft, at the recorded head. Returns { complete: true, pr_url: }
+      # or { complete: false, drift: "<reason>" }; never mutates the marker.
+      def completed_finalize_state(task, cfg)
+        frontmatter = Hive::Gh.pr_frontmatter(task.state_file)
+        parsed = Hive::Gh.parse_pull_request_url(frontmatter["pr_url"])
+        return { complete: false, drift: "pr_url_unresolved" } unless parsed
+
+        pr_url = parsed.fetch("url")
+        marker = Hive::Markers.current(task.state_file)
+        unless marker.name == :complete && marker.attrs["is_draft"] == "false" &&
+               Hive::Gh.parse_pull_request_url(marker.attrs["pr_url"]) == parsed
+          return { complete: false, drift: "marker_not_complete marker=#{marker.name}" }
+        end
+
+        recorded_head = frontmatter["head_oid"].to_s.downcase
+        unless recorded_head.match?(/\A[a-f0-9]{40,64}\z/)
+          return { complete: false, drift: "recorded_head_missing" }
+        end
+
+        metadata = Hive::Gh.pr_metadata(pr_url, cfg: cfg)
+        unless metadata.number == parsed.fetch("number") &&
+               Hive::Gh.parse_pull_request_url(metadata.url) == parsed
+          return { complete: false, drift: "pr_identity_mismatch" }
+        end
+        return { complete: true, pr_url: pr_url } if metadata.state == "MERGED"
+        return { complete: false, drift: "pr_state=#{metadata.state}" } unless metadata.state == "OPEN"
+        return { complete: false, drift: "pr_not_ready is_draft=#{metadata.is_draft.inspect}" } unless metadata.is_draft == false
+
+        remote_head = metadata.head_ref_oid.to_s.downcase
+        unless remote_head == recorded_head
+          return { complete: false, drift: "pr_head_moved recorded=#{recorded_head} remote=#{remote_head}" }
+        end
+
+        { complete: true, pr_url: pr_url }
+      rescue Hive::GhError => e
+        { complete: false, drift: "pr_state_unobservable: #{e.message.to_s.lines.first.to_s.strip[0, 200]}" }
       end
 
       # True when the PR already merged out-of-band. A GhError (gh not yet

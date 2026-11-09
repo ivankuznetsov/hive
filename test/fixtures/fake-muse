@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# Minimal fake Muse for tests.
+#
+#   --version        prints the real CLI's dual-form version line
+#                    ("Muse Code X.Y.Z (X.Y.Z-R1.1)"); override the version
+#                    with HIVE_FAKE_MUSE_VERSION.
+#
+#   plugins ...      a small registry implementation over
+#                    $XDG_DATA_HOME/muse/plugins/installed.json mirroring the
+#                    real list/install/update/enable shapes Hive consumes,
+#                    including the real CLI's refusal to install bundles
+#                    that contain symlinks.
+#
+#   exec [...]       logs argv/cwd/env to
+#                    $HIVE_FAKE_MUSE_LOG_DIR/fake-muse-argv.log, emits a
+#                    small MSP JSONL stream (prompt echo, usage, terminal),
+#                    optionally writes $HIVE_FAKE_MUSE_WRITE_FILE, sleeps
+#                    $HIVE_FAKE_MUSE_HANG seconds, and exits with
+#                    HIVE_FAKE_MUSE_EXIT (default 0).
+#                    HIVE_FAKE_MUSE_TERMINAL=failed emits a failed terminal
+#                    event instead of the completed one.
+set -u
+
+if [[ "${1:-}" == "--version" ]]; then
+  v="${HIVE_FAKE_MUSE_VERSION:-1.4.14}"
+  printf 'Muse Code %s (%s-R7309.1)\n' "$v" "$v"
+  exit 0
+fi
+
+LOG_DIR="${HIVE_FAKE_MUSE_LOG_DIR:-/tmp}"
+mkdir -p "$LOG_DIR"
+{
+  echo "---"
+  echo "cwd=$(pwd)"
+  printf 'env_META_API_KEY=%s\n' "${META_API_KEY-__unset__}"
+  for a in "$@"; do
+    printf 'arg=%s\n' "$a"
+  done
+} >> "${LOG_DIR}/fake-muse-argv.log"
+
+if [[ "${1:-}" == "plugins" ]]; then
+  exec ruby -rjson -rdigest -rfileutils -e '
+    data = File.join(ENV["XDG_DATA_HOME"] || File.join(Dir.home, ".local", "share"), "muse")
+    registry_path = File.join(data, "plugins", "installed.json")
+    read_registry = lambda do
+      File.file?(registry_path) ? JSON.parse(File.read(registry_path)) : { "version" => 1, "plugins" => {} }
+    end
+    write_registry = lambda do |doc|
+      FileUtils.mkdir_p(File.dirname(registry_path))
+      File.write(registry_path, JSON.pretty_generate(doc) + "\n")
+    end
+    digest_of = lambda do |root|
+      digest = Digest::SHA256.new
+      Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).sort.each do |path|
+        next unless File.file?(path)
+        digest.update(path.delete_prefix(root))
+        digest.update(File.binread(path))
+      end
+      digest.hexdigest
+    end
+    install = lambda do |source|
+      if Dir.glob(File.join(source, "**", "*"), File::FNM_DOTMATCH).any? { |p| File.symlink?(p) }
+        warn "plugin contains symlink entries and cannot be installed; replace symlinks with regular files"
+        exit 1
+      end
+      manifest = JSON.parse(File.read(File.join(source, ".claude-plugin", "plugin.json")))
+      id = manifest.fetch("name")
+      sha = digest_of.call(source)
+      relative = File.join("plugins", "cache", "local", id, sha, "package")
+      cache = File.join(data, relative)
+      FileUtils.rm_rf(cache)
+      FileUtils.mkdir_p(File.dirname(cache))
+      FileUtils.cp_r(source, cache)
+      doc = read_registry.call
+      record = {
+        "id" => id, "version" => manifest["version"], "enabled" => true,
+        "source" => { "provenance" => "foreign-import", "path" => File.expand_path(source) },
+        "cache_path" => relative
+      }
+      (doc["plugins"] ||= {})[id] = record
+      write_registry.call(doc)
+      record
+    end
+
+    case ARGV[0]
+    when "list"
+      plugins = read_registry.call.fetch("plugins").values.map do |record|
+        {
+          "active" => record["enabled"] != false, "valid" => true,
+          "plugin" => { "id" => record["id"], "version" => record["version"] },
+          "record" => record.merge("cache_path" => File.join(data, record["cache_path"]))
+        }
+      end
+      puts JSON.generate("plugins" => plugins)
+    when "install"
+      record = install.call(ARGV[1].to_s)
+      puts JSON.generate("diagnostics" => [], "plugin" => { "id" => record["id"], "version" => record["version"] })
+    when "update"
+      record = read_registry.call.fetch("plugins").fetch(ARGV[1].to_s)
+      updated = install.call(record.fetch("source").fetch("path"))
+      puts JSON.generate("diagnostics" => [], "updated" => updated)
+    when "enable"
+      doc = read_registry.call
+      doc.fetch("plugins").fetch(ARGV[1].to_s)["enabled"] = true
+      write_registry.call(doc)
+      puts JSON.generate("enabled" => true)
+    else
+      warn "fake-muse: unsupported plugins invocation: #{ARGV.join(%q{ })}"
+      exit 2
+    end
+  ' -- "${@:2}"
+fi
+
+if [[ "${1:-}" != "exec" ]]; then
+  echo "fake-muse: unsupported invocation: $*" >&2
+  exit 2
+fi
+
+# Hive delivers the prompt with stdin redirected from a regular file and
+# --prompt-file=/dev/stdin; drain it like the real CLI reads that file.
+for a in "$@"; do
+  if [[ "$a" == --prompt-file=* ]]; then
+    cat > /dev/null
+    break
+  fi
+done
+
+if [[ -n "${HIVE_FAKE_MUSE_HANG:-}" ]]; then
+  sleep "${HIVE_FAKE_MUSE_HANG}"
+fi
+
+if [[ -n "${HIVE_FAKE_MUSE_WRITE_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${HIVE_FAKE_MUSE_WRITE_FILE}")"
+  printf '%s\n' "${HIVE_FAKE_MUSE_WRITE_CONTENT:-fake muse output}" > "${HIVE_FAKE_MUSE_WRITE_FILE}"
+fi
+
+final="${HIVE_FAKE_MUSE_FINAL:-fake muse final}"
+printf '%s\n' '{"payload_type":"turn.input.user","payload":{"kind":"turn_input_user","prompt":"PROMPT-ECHO-MARKER"}}'
+printf '%s\n' '{"payload_type":"run.usage","payload":{"kind":"run_usage","models":[{"model":"muse-fake-1","input_tokens":120,"output_tokens":45,"cached_tokens":10,"reasoning_tokens":7}]}}'
+if [[ "${HIVE_FAKE_MUSE_TERMINAL:-completed}" == "failed" ]]; then
+  printf '%s\n' '{"payload_type":"run.terminal.failed","payload":{"kind":"run_terminal","terminal":"failed","reason":"fake provider failure"}}'
+else
+  printf '{"payload_type":"run.terminal.completed","payload":{"kind":"run_terminal","terminal":"completed","reason":null,"text":"%s"}}\n' "$final"
+fi
+
+exit "${HIVE_FAKE_MUSE_EXIT:-0}"

@@ -1,4 +1,5 @@
 require "hive/reviewers/base"
+require "hive/stages/review/convergence"
 require "hive/reviewers/plan_context"
 require "hive/agent_limit"
 require "hive/model_unsupported"
@@ -264,7 +265,8 @@ module Hive
               profile, skill, project_root: ctx.worktree_path
             ),
             user_supplied_tag: tag,
-            plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder, tag)
+            plan_context_section: Hive::Reviewers::PlanContext.render(ctx.task_folder, tag),
+            review_policy_section: Hive::Stages::Review::Convergence.reviewer_section(@cfg || {}, ctx.pass)
           )
         )
       end

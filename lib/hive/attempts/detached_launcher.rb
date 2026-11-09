@@ -2,6 +2,7 @@ require "json"
 require "rbconfig"
 require "digest"
 require "hive/attempts/contracts"
+require "hive/attempts/memory_limit"
 require "hive/attempts/repository"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/process_registry"
@@ -22,6 +23,8 @@ module Hive
                      capability: -> { self.class.supported? },
                      systemd_scope: -> { self.class.systemd_scope_available? },
                      systemd_run: "systemd-run",
+                     memory_max: false, memory_swap_max: false,
+                     systemd_version: nil,
                      process_registry: nil,
                      hive_executable: File.expand_path("../../../bin/hive", __dir__))
         @store = store
@@ -34,6 +37,9 @@ module Hive
         @capability = capability
         @systemd_scope = systemd_scope
         @systemd_run = systemd_run
+        @memory_max = memory_max
+        @memory_swap_max = memory_swap_max
+        @systemd_version = systemd_version || -> { MemoryLimit.systemd_version(@systemd_run) }
         @process_registry = process_registry
         @hive_executable = hive_executable
       end
@@ -74,6 +80,7 @@ module Hive
           timeout_sec: @ready_timeout_sec
         )
         use_systemd_scope = @systemd_scope.call == true
+        scope_properties = use_systemd_scope ? memory_scope_properties : []
         reader, writer = IO.pipe
         launcher_pid = fork do
           reader.close
@@ -81,7 +88,7 @@ module Hive
             Process.setsid
             fork_wrapper(
               record, claim_capability, writer, use_systemd_scope:,
-              reservation_id: reservation&.id
+              scope_properties:, reservation_id: reservation&.id
             )
           rescue StandardError => e
             writer.write(JSON.generate(
@@ -118,7 +125,7 @@ module Hive
       end
 
       def fork_wrapper(record, claim_capability, writer, use_systemd_scope: false,
-                       reservation_id: nil)
+                       scope_properties: [], reservation_id: nil)
         claim_reader, claim_writer = IO.pipe
         claim_writer.write(claim_capability)
         claim_writer.close
@@ -126,7 +133,7 @@ module Hive
           writer.close_on_exec = false
           claim_reader.close_on_exec = false
           command = [
-            RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
+            RbConfig.ruby, @hive_executable, "--context", "local", "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
             "--database-path", @store.database.path,
             "--heartbeat-sec", @heartbeat_sec.to_s,
@@ -135,7 +142,7 @@ module Hive
             "--kill-grace-sec", @kill_grace_sec.to_s
           ]
           command.concat([ "--timeout-sec", @timeout_sec.to_s ]) if @timeout_sec
-          command = systemd_scope_command(record, command) if use_systemd_scope
+          command = systemd_scope_command(record, command, scope_properties) if use_systemd_scope
           env = ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }.merge(
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
             "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s,
@@ -166,11 +173,23 @@ module Hive
         claim_writer&.close unless claim_writer&.closed?
       end
 
-      def systemd_scope_command(record, command)
+      # Resolved in the launcher parent, before forking, so the systemd
+      # version probe never runs inside the detached session. Only probed
+      # when a cap is configured.
+      def memory_scope_properties
+        return [] if @memory_max == false || @memory_max.nil?
+
+        MemoryLimit.scope_properties(
+          memory_max: @memory_max, memory_swap_max: @memory_swap_max,
+          systemd_version: @systemd_version.call
+        )
+      end
+
+      def systemd_scope_command(record, command, scope_properties = [])
         unit = "hive-attempt-#{Digest::SHA256.hexdigest(record.attempt_id.to_s)[0, 24]}"
         [
           @systemd_run, "--user", "--scope", "--quiet", "--collect",
-          "--property=Delegate=yes",
+          "--property=Delegate=yes", *scope_properties,
           "--unit=#{unit}", "--description=Hive durable attempt #{record.attempt_id}",
           *command
         ]

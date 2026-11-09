@@ -10,7 +10,7 @@ module Hive
       SCHEMA_VERSION = 1
       ACTIONS = %w[
         approve_finding answer_finding waive_coverage downgrade_level
-        raise_level retry request_review
+        raise_level retry request_review restart
       ].freeze
       AUTHORITY_ACTIONS = %w[
         approve_finding answer_finding waive_coverage downgrade_level

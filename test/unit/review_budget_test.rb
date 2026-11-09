@@ -588,6 +588,9 @@ class ReviewBudgetTest < Minitest::Test
         worktrees = File.join(repository, "worktrees")
         path = File.join(worktrees, task.slug)
         run!("git", "-C", repository, "worktree", "add", "-b", task.slug, path)
+        # Bind the fixture's three fix passes to the cap they were admitted under.
+        FileUtils.mkdir_p(File.join(repository, ".hive-state"))
+        File.write(File.join(repository, ".hive-state", "config.yml"), YAML.dump("review" => { "max_passes" => 3 }))
         task.project_root = repository
         task.worktree_path = path
         File.write(File.join(task.folder, "worktree.yml"), YAML.dump("path" => path, "branch" => task.slug))

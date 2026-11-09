@@ -1,0 +1,25 @@
+HTTP/2 200
+last-modified: REDACTED
+etag: REDACTED
+server: REDACTED
+x-ms-request-id: REDACTED
+x-ms-version: REDACTED
+x-ms-creation-time: REDACTED
+x-ms-lease-status: REDACTED
+x-ms-lease-state: REDACTED
+x-ms-blob-type: REDACTED
+x-ms-server-encrypted: REDACTED
+x-ms-access-tier: REDACTED
+x-ms-access-tier-inferred: REDACTED
+via: REDACTED
+accept-ranges: REDACTED
+age: REDACTED
+date: REDACTED
+x-served-by: REDACTED
+x-cache: REDACTED
+x-cache-hits: REDACTED
+x-timer: REDACTED
+content-disposition: REDACTED
+content-type: application/octet-stream
+content-length: REDACTED
+

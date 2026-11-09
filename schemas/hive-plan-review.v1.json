@@ -167,7 +167,7 @@
         "action": {
           "enum": [
             "approve_finding", "answer_finding", "waive_coverage",
-            "downgrade_level", "raise_level", "retry", "request_review"
+            "downgrade_level", "raise_level", "retry", "request_review", "restart"
           ]
         },
         "value": {

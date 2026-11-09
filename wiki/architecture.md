@@ -3,7 +3,7 @@ title: Architecture
 type: architecture
 source: lib/hive/, web/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-09-09
+updated: 2026-11-07
 tags: [architecture, overview]
 ---
 
@@ -47,8 +47,10 @@ when it genuinely loses the lease: a lost compare-and-swap, a non-transient
 store failure, or SQLite lock contention that outlasts the busy tolerance
 (`busy_tolerance_sec`, default 600s and never below `stale_sec`). A heartbeat
 that loses a lock race is deferred and retried at the heartbeat cadence, and
-the worker checkpoint and terminal receipt writes retry through lock
-contention for the same tolerance; each failed write rolled back, so the
+the launch claim, first heartbeat, worker checkpoint and terminal receipt
+writes retry through lock contention for the same tolerance (the claim and
+first heartbeat stay bounded by their own launch deadlines, which the
+repository re-checks on every retry); each failed write rolled back, so the
 observed record stays the CAS base. The tolerance may exceed the lease window
 because the reconciler only ever classifies a stale owner whose process still
 matches as a capacity-reserving suspect, never as lost. A supervisor that
@@ -583,6 +585,67 @@ and recovery, and brainstorm answers. `Project` owns idea capture; the
 `Daemon` resource owns liveness and queued repair. These models delegate
 pipeline mechanics to the canonical gem commands, queue writer, and bot
 recovery/answer primitives rather than duplicating a web orchestration layer.
+`Hive::Remote::CommandService` admits only creation, literal answers, guarded
+workflow actions and forward approval. Its structured command seams return
+values without capturing process stdout or changing the working directory.
+Creation in a request omits the optional background display-name generator.
+Long workflow actions, including any run/rebase work, enter the existing daemon
+dispatch queue. The request payload carries the exact authorized effect and
+non-secret installation/token principal; the worker rechecks task identity,
+stage, workflow and unchanged input before the command's locked mutation.
+Any transition that derives force remains a local operator action, including
+the coding workflow's first brainstorm promotion.
+
+The API's durable caller receipt records admission, while the task-attempt
+receipt records later execution. An admitted worker validates the persisted
+receipt/principal binding and retains it for correlation and pin management,
+but does not reopen the completed admission effect as a writable command
+context. Worker freshness uses the observed task inputs and input epoch so
+its own attempt-journal bookkeeping cannot invalidate its admission. Genuine
+input, marker, workflow or stage changes still fail the worker's locked check.
+The daemon waits for the admission receipt to finish before dispatching; an
+unresolved admission remains queued. API requests retain their queue position
+when the daemon is offline, and terminal or rejected deliveries acknowledge
+the existing dispatch result to release their original receipt pin.
+
+`Hive::Remote::ReadService` reuses the native semantic task workspace, scoped
+status producer, literal-answer inventory, owned-worktree diff and bounded
+artifact/log readers. The HTTP layer selects authorized projects before these
+readers and publishes explicit DTOs instead of serializing native objects.
+API responses use the registered `hive-remote.v1` envelope and name any native
+projection schema/version as provenance. Status pagination counts only granted
+projects and binds opaque cursors to those project registration fingerprints
+and the selected task snapshot. Read-only handle records (questions, artifact
+references and cursors) are private server metadata, separate from command
+receipts; they never admit work or represent mutation outcomes. Native answer
+bindings stay server-side. Unknown API base paths fail with typed
+`unsupported_version` and currently served base paths before parsing a mutation.
+The API middleware consumes and closes bounded JSON responses while ordinary
+request logging is silenced, then emits its fixed audit fields after Rails has
+removed request tags.
+
+Native connection routing freezes a named installation before local activation,
+process registration or project discovery. Context administration reads only
+client configuration; remote task requests carry exact registered project names
+and task IDs/slugs. The HTTPS client verifies fresh token metadata and the pinned
+installation before each mutation, announces its authority/target/retry key on
+stderr, and sends no credentials through redirects. Local filesystem commands
+require an explicit local context while a remote installation is selected.
+Daemon-owned attempt wrappers and native workers explicitly select `local` in
+their execution argv. The server operator's saved client context cannot retarget
+accepted work; the recorded logical worker argv remains unchanged for attempt
+capability verification.
+Local name-generation, daemon, bot, one-shot and TUI native children likewise
+receive a local execution selection without changing logical command metadata
+or arguments for non-Hive executables.
+Rendered managed-service startup and native daemon/babysitter re-exec also keep
+their local target. Existing installed definitions retain drift protection and
+require explicit force-install to adopt the new argv; see [[remote-access]].
+Installed workflow packages and agents retain local operator authority within
+their checkout; the token effect allowlist does not sandbox package internals or
+prompts formed from remotely supplied task text and answers. Deployment and
+incident-response limits are documented in [[remote-access]].
+
 Dashboard snapshots are wrapped as `Project`/`Task` models before rendering,
 so the grid and detail page use the same behavior rather than helper-owned
 filesystem reads or action tables. `TasksController` renders that resource.

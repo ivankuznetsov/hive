@@ -39,6 +39,11 @@ module Hive
       attr_reader :max_concurrent_runs, :max_concurrent_per_project,
                   :max_runs_per_day_per_project, :max_concurrent_patrol_scans
 
+      # Optional callable `project -> Integer or nil` naming a project's own
+      # concurrency cap (its config's daemon.max_concurrent_per_project).
+      # It can only lower the daemon-wide per-project cap, never raise it.
+      attr_writer :project_cap
+
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
                      max_concurrent_patrol_scans: 1, dispatch_state: nil,
                      schedule_state_factory: nil, persistence_scope_projects: nil)
@@ -95,6 +100,13 @@ module Hive
       # Apply SIGHUP-reloaded budget limits without replacing the controller.
       # Rebuilding it would discard live child accounting, cooldowns,
       # quarantine, daily counters, and persisted-baseline state.
+      # The effective task cap for one project: the daemon-wide cap, lowered
+      # by the project's own positive integer cap when it declares one.
+      def project_limit(project)
+        own = @project_cap&.call(project)
+        own.is_a?(Integer) && own.positive? ? [ own, @max_concurrent_per_project ].min : @max_concurrent_per_project
+      end
+
       def update_limits(max_concurrent_runs:, max_concurrent_per_project:,
                         max_runs_per_day_per_project:, max_concurrent_patrol_scans:)
         @max_concurrent_runs = max_concurrent_runs
@@ -135,7 +147,7 @@ module Hive
         active_project_count = task_running_count(project: project) + external_project
 
         return :global_cap  if active_global_count >= @max_concurrent_runs
-        return :project_cap if active_project_count >= @max_concurrent_per_project
+        return :project_cap if active_project_count >= project_limit(project)
         return :daily_cap   if daily_count_for(project, now) >= @max_runs_per_day_per_project
 
         :ok

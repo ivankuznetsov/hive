@@ -9,7 +9,7 @@
 Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
 feedback, and release discussions.
 
-Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, and opt-in OpenCode to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
+Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, opt-in OpenCode, and Muse to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).
 
 The mental model is folders. Every task is a directory; the folder's location is the task state. Moving a task from `2-brainstorm/` to `3-plan/` is the approval gesture, and every stage writes a durable artefact the next stage can trust. That practice — making each step's output strong enough for the next one to run autonomously — is called *compound engineering*. It's how Hive carries work from rough idea to merged PR while letting humans drop in on their own terms instead of a chat thread's.
 
@@ -80,7 +80,7 @@ hive setup
 
 `hive setup` checks Ruby 3.4, git, `gh`, Claude, Codex, Node/npm,
 QMD, SQLite, and the Rails bundle. Before other mutations it previews and
-provisions Hive's operating skill for Claude, Codex, Pi, and OpenCode. It then installs
+provisions Hive's operating skill for Claude, Codex, Pi, OpenCode, and Muse. It then installs
 the Hive-owned pieces it can manage, installs the daemon, PR babysitter, and Hive web services,
 enrolls the current project, and reports the effective URL plus installed,
 enabled, running, and readiness state. Interactive setup confirms once; JSON

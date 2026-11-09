@@ -13,7 +13,7 @@
         <p>Closure cannot be confirmed yet.</p>
         <ul>
           <% (@preview.errors + @preview.blockers).each do |entry| %>
-            <li><%= entry["field"].present? ? "#{entry["field"]}: " : "" %><%= entry.fetch("message") %></li>
+            <li style="white-space: pre-wrap; overflow-wrap: anywhere"><%= entry["field"].present? ? "#{entry["field"]}: " : "" %><%= Hive::TaskClosure.format_diagnostic(entry) %></li>
           <% end %>
         </ul>
       </div>

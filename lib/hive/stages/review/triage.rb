@@ -7,6 +7,7 @@ require "hive/reviewers/plan_context"
 require "hive/reviewers/synthetic_task"
 require "hive/stages/base"
 require "hive/stages/review/orchestrator_owned"
+require "hive/stages/review/convergence"
 
 module Hive
   module Stages
@@ -306,6 +307,7 @@ module Hive
             task_context_section: build_task_context_section(ctx, tag),
             prior_escalations_section: build_prior_escalations_context(ctx, tag),
             escalations_path: escalations_path,
+            convergence_section: Hive::Stages::Review::Convergence.triage_section(cfg, ctx.pass),
             user_supplied_tag: tag
           )
           require "erb"

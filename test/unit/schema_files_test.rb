@@ -64,6 +64,17 @@ class SchemaFilesTest < Minitest::Test
     refute schema.valid?(payload)
   end
 
+  def test_closure_diagnostics_preserve_legacy_shape_and_validate_retained_commit_identifiers
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input")))
+    diagnostic = JSONSchemer.schema({ "$defs" => document.fetch("$defs"), "$ref" => "#/$defs/Diagnostic" })
+    legacy = { "code" => "unique_worktree_changes", "message" => "retained", "owner" => "operator" }
+    assert diagnostic.valid?(legacy)
+    enriched = legacy.merge("details" => { "reference_head" => "a" * 40, "local_fix_shas" => [ "b" * 64 ] })
+    assert diagnostic.valid?(enriched)
+    enriched["details"]["reference_head"] = "short"
+    refute diagnostic.valid?(enriched), "references must remain full commit identifiers"
+  end
+
   def test_one_shot_schema_is_registered_closed_and_accepts_all_report_arms
     path = Hive::Schemas.schema_path("hive-one-shot")
     document = JSON.parse(File.read(path))

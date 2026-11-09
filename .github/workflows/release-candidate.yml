@@ -142,9 +142,18 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        if: inputs.source_run_id == ''
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Build the manifest-bound candidate exactly once
         if: inputs.source_run_id == ''
         env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
           CANDIDATE_SHA: ${{ inputs.candidate_sha }}
         run: |
           ruby -I. -r./packaging/release_candidate/artifacts -e '
@@ -327,7 +336,16 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
         run: ruby packaging/betterleaks.rb
       - name: Run semantic release profile
         env:

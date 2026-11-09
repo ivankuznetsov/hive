@@ -34,7 +34,7 @@ module Hive
       # Shared by the runner and the standalone grant evidence reader.
       def auto_fix_finding_line?(line)
         return false unless line =~ /^\s*-\s+\[x\]\s+/
-        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED)\b/i
+        return false if line =~ /^\s*-\s+\[x\]\s+(RESOLVED\/NO-FIX|RESOLVED|NO-FIX|SUPPRESSED|DEFERRED)\b/i
 
         true
       end

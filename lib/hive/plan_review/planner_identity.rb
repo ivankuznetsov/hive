@@ -6,8 +6,13 @@ module Hive
   module PlanReview
     module PlannerIdentity
       CONTRACT_VERSION = 1
+      # Model family per built-in planner. An unmapped planner reports
+      # "unknown", and RouteResolver then can never verify reviewer
+      # independence, so the required adversarial coverage fails closed.
+      # Muse serves Meta models (Muse.execution_identity provider "meta").
       FAMILIES = {
-        claude: "anthropic", codex: "openai", grok: "grok", pi: "pi"
+        claude: "anthropic", codex: "openai", grok: "grok", pi: "pi",
+        muse: "meta"
       }.freeze
 
       module_function

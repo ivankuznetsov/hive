@@ -44,7 +44,25 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Install web gems for remote API fixtures
+        # Remote access integration tests boot the web API fixture with
+        # BUNDLE_GEMFILE=web/Gemfile, so shards need the web bundle too.
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+          working-directory: web
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Collect coverage shard
         env:
@@ -140,6 +158,8 @@ jobs:
             task: test:setup_agents_integration
           - name: operational status read-only mounts
             task: test:status_read_only
+          - name: runtime database contention
+            task: test:runtime_database_contention
           - name: babysitter dry-run security matrix
             task: test:babysitter_dry_run_security_matrix
     steps:
@@ -148,7 +168,17 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Run merge gate
         env:
@@ -292,7 +322,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes tmux
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: Run harness library tests
         run: bundle exec rake e2e:lib_test
@@ -367,7 +407,17 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
           working-directory: web
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         working-directory: .
         run: ruby packaging/betterleaks.rb
       - name: Cache Playwright browsers
@@ -493,7 +543,17 @@ jobs:
         with:
           ruby-version: "3.4"
           bundler-cache: true
+      - name: Cache pinned Betterleaks archives
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/betterleaks-archives
+          key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+          restore-keys: |
+            betterleaks-archives-v1-${{ runner.os }}-
       - name: Bundle pinned Betterleaks
+        env:
+          HIVE_BETTERLEAKS_CACHE_DIR: ${{ runner.temp }}/betterleaks-archives
+          GITHUB_TOKEN: ${{ github.token }}
         run: ruby packaging/betterleaks.rb
       - name: workflow creator native publication happy path
         run: >-

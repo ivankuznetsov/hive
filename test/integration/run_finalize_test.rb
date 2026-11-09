@@ -676,22 +676,183 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
+  def finalize_pr_metadata(head:, state: "OPEN", is_draft: false, number: 9,
+                           url: "https://github.com/acme/app/pull/9")
+    Hive::Gh::PrMetadata.new(
+      number: number, url: url, base_ref_name: "main", head_ref_oid: head,
+      is_cross_repository: false, state: state, is_draft: is_draft
+    )
+  end
+
+  # Mark the task as a genuinely completed finalize: summary.md, a ready
+  # COMPLETE marker, and the controller-recorded head_oid.
+  def mark_finalize_completed!(task_dir, pr_md, head)
+    File.write(File.join(task_dir, "summary.md"), "previously written summary\n")
+    File.write(pr_md, <<~MD)
+      ---
+      pr_url: https://github.com/acme/app/pull/9
+      pr_number: 9
+      head_oid: #{head}
+      ---
+
+      ## Summary
+      final
+
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+    MD
+  end
+
+  def finalize_agent_completes!(pr_md)
+    ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+    ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+      ---
+      pr_url: https://github.com/acme/app/pull/9
+      pr_number: 9
+      ---
+
+      ## Summary
+      final
+
+      <!-- COMPLETE pr_url=https://github.com/acme/app/pull/9 is_draft=false -->
+    MD
+  end
+
   # plan U6 idempotency: a second `hive run` on a task whose summary.md
-  # already exists must short-circuit (no agent spawn, no `gh pr ready`).
+  # already exists — and whose PR is still ready at the recorded head —
+  # must short-circuit (no agent spawn, no `gh pr ready`).
   def test_finalize_already_complete_short_circuits
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
-        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
-        File.write(File.join(task_dir, "summary.md"), "previously written summary\n")
-        # Re-mark pr.md as already-complete so warn includes the URL.
-        Hive::Markers.set(pr_md, :complete, pr_url: "https://github.com/acme/app/pull/9", is_draft: "false")
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        head = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        mark_finalize_completed!(task_dir, pr_md, head)
 
-        _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
-        assert_match(/already complete/, err)
+        err = nil
+        metadata = finalize_pr_metadata(head: head)
+        with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+          _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
+        end
+        assert_match(%r{already complete \(https://github\.com/acme/app/pull/9\)}, err)
         # gh pr ready must NOT fire on the idempotent path — argv log
         # may not exist at all if no gh call was issued.
         refute_match(/arg=ready\n/, gh_argv_log,
                      "idempotent already-complete path must NOT invoke gh pr ready")
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+      end
+    end
+  end
+
+  # Observed 2026-11-08: finalize wrote summary.md, the merge then failed,
+  # and a re-run printed "already complete ((no url))" leaving marker :none.
+  # A summary.md whose PR is a draft again must not be reported complete;
+  # finalize re-runs its normal path and re-readies the PR.
+  def test_finalize_with_summary_reruns_when_pr_is_draft
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        head = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        mark_finalize_completed!(task_dir, pr_md, head)
+        finalize_agent_completes!(pr_md)
+
+        err = nil
+        metadata = finalize_pr_metadata(head: head, is_draft: true)
+        with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+          _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
+        end
+
+        refute_match(/already complete/, err)
+        assert_includes err, "summary.md exists but finalize is not complete (pr_not_ready is_draft=true)"
+        assert_match(%r{arg=ready\n.*arg=https://github\.com/acme/app/pull/9}m, gh_argv_log,
+                     "a draft PR behind an old summary.md must be readied again")
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :complete, marker.name
+        assert_equal "false", marker.attrs["is_draft"]
+      end
+    end
+  end
+
+  def test_finalize_with_summary_reruns_when_pr_head_moved
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, worktree_path, pr_md = setup_finalize_task(dir)
+        head = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+        mark_finalize_completed!(task_dir, pr_md, "c" * 40)
+        finalize_agent_completes!(pr_md)
+
+        err = nil
+        metadata = finalize_pr_metadata(head: head)
+        with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+          _out, err = capture_io { Hive::Commands::Run.new(task_dir).call }
+        end
+
+        refute_match(/already complete/, err)
+        assert_includes err, "pr_head_moved recorded=#{'c' * 40} remote=#{head}"
+        assert_equal head, Hive::Gh.pr_frontmatter(pr_md)["head_oid"],
+                     "the re-run must re-record the PR's current head"
+        assert_equal :complete, Hive::Markers.current(pr_md).name
+      end
+    end
+  end
+
+  # The literal observed shape: summary.md plus a cleared (:none) marker.
+  # No "(no url)" and no completion claim.
+  def test_finalize_with_summary_and_cleared_marker_does_not_claim_completion
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        File.write(File.join(task_dir, "summary.md"), "previously written summary\n")
+        File.write(pr_md, "---\npr_url: https://github.com/acme/app/pull/9\npr_number: 9\n---\n\nbody\n")
+        task = Hive::Task.new(task_dir)
+
+        with_stubbed_singleton_method(
+          Hive::Stages::Base, :worktree_pointer_or_exit, ->(*) { raise "normal path entered" }
+        ) do
+          _out, err = capture_io do
+            assert_raises(RuntimeError, "normal path entered") { Hive::Stages::Finalize.run!(task, {}) }
+          end
+          refute_includes err, "(no url)"
+          assert_includes err, "finalize is not complete (marker_not_complete marker=none)"
+        end
+      end
+    end
+  end
+
+  def test_completed_finalize_state_classifies_hosted_drift
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        task = Hive::Task.new(task_dir)
+        head = "a" * 40
+        state = ->() { Hive::Stages::Finalize.completed_finalize_state(task, {}) }
+
+        File.write(pr_md, "---\npr_url: not-a-pr\n---\n\n<!-- COMPLETE is_draft=false -->\n")
+        assert_equal({ complete: false, drift: "pr_url_unresolved" }, state.call)
+
+        mark_finalize_completed!(task_dir, pr_md, head)
+        File.write(pr_md, File.read(pr_md).sub(/^head_oid: .*\n/, ""))
+        assert_equal({ complete: false, drift: "recorded_head_missing" }, state.call)
+
+        mark_finalize_completed!(task_dir, pr_md, head)
+        {
+          finalize_pr_metadata(head: head, url: "https://github.com/acme/other/pull/9") =>
+            { complete: false, drift: "pr_identity_mismatch" },
+          finalize_pr_metadata(head: "b" * 40, state: "MERGED", is_draft: nil) =>
+            { complete: true, pr_url: "https://github.com/acme/app/pull/9" },
+          finalize_pr_metadata(head: head, state: "CLOSED") =>
+            { complete: false, drift: "pr_state=CLOSED" },
+          finalize_pr_metadata(head: head, is_draft: nil) =>
+            { complete: false, drift: "pr_not_ready is_draft=nil" }
+        }.each do |metadata, expected|
+          with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
+            assert_equal expected, state.call
+          end
+        end
+
+        with_stubbed_singleton_method(
+          Hive::Gh, :pr_metadata, ->(*, **) { raise Hive::GhError, "gh offline\nmore" }
+        ) do
+          assert_equal({ complete: false, drift: "pr_state_unobservable: gh offline" }, state.call)
+        end
       end
     end
   end
@@ -939,7 +1100,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "b" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(
           Hive::Stages::Finalize,
@@ -1009,7 +1170,7 @@ class RunFinalizeTest < Minitest::Test
           base_ref_name: "main",
           head_ref_oid: "a" * 40,
           is_cross_repository: false,
-          state: "OPEN"
+          state: "OPEN", is_draft: nil
         )
         with_stubbed_singleton_method(Hive::Gh, :pr_metadata, ->(*, **) { metadata }) do
           result = Hive::Stages::Finalize.validate_pr_reference!(

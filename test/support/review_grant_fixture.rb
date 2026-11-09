@@ -14,6 +14,10 @@ module ReviewGrantFixture
         cfg["review"]["ci"]["command"] = nil
         cfg["review"]["reviewers"] = []
         cfg["review"]["browser_test"]["enabled"] = false
+        # The fixture models three completed fix passes and a pass-04 final
+        # verification, so pin the cap those artifacts were admitted under
+        # instead of inheriting the project default.
+        cfg["review"]["max_passes"] = 3
         File.write(config_path, cfg.to_yaml)
         slug = "grant-example-261030-abcd"
         folder = File.join(root, ".hive-state", "stages", "6-review", slug)

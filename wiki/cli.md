@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-version.v1.json
 created: 2026-04-25
-updated: 2026-11-02
+updated: 2026-11-07
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review]
 ---
 
@@ -22,6 +22,67 @@ recommends an answer nor advances a stage.
 ## Entry point
 
 `bin/hive` is a thin runner that loads `lib/hive` and calls `Hive::CLI.start(ARGV)`, catching `Hive::Error` to render `hive: <message>` to stderr with the error's `exit_code` (default `ExitCodes::GENERIC = 1`).
+
+`Hive::Remote::CommandPolicy` resolves the client connection context before
+runtime activation, process registration, scheduler reconciliation, or project
+discovery. The implicit selection is `local`; `--context NAME` overrides a saved
+selection for one invocation and is never read after a literal `--`. Local
+mutations announce their context, unrestricted local-operator authority, and
+target on stderr without changing JSON stdout. The explicit command vocabulary
+rejects local filesystem commands and unknown commands under a remote selection;
+`--context local` selects the local installation explicitly. `hv` delegates to
+the same executable, including this boundary.
+
+`Hive::ConnectionContexts` stores versioned client metadata and separate
+credentials beneath `Hive::Paths.config_home/connections`, using locked atomic
+writes, owner-only files, and an owner-only directory. Unknown newer schemas
+require an upgrade and never fall back to a local target. Remote metadata stores
+a confirmed installation ID instead of project paths. Add, show, and selection
+use an injected fresh metadata verifier; invalid HTTPS URLs are rejected before
+reading credentials. The context command boundary owns `hive-context.v1.json`
+and its pre-dispatch usage contract. `hive context add/list/use/show` runs before
+the local runtime lifecycle, so a fresh client home can configure a remote
+installation. Token create/list/revoke stays local to the server installation.
+
+The native transport supports remote `status`, `task`, `new`, `act`, `answer`,
+`approve`, and `operation`. Remote task targets require `PROJECT:TASK`, or an
+exact task ID/slug plus `--project PROJECT`; paths and cwd-derived targets are
+rejected. Status accepts an optional authorized `--project` filter. Remote
+JSON DTO commands retain the `hive-remote.v1` API envelope; they do not claim
+the richer local status/task schema. Context/token/operation retain their own
+CLI schemas, including pre-dispatch errors. Errors emit one document and fixed
+safe diagnostics, without raw HTTP exceptions, bodies or headers.
+
+Each remote mutation freshly verifies `/api/v1/context`, its `api_version: v1`
+and the pinned installation. Its flushed stderr line names context, URL,
+installation, scopes, project limits, target and supplied or random idempotency
+key before POST. The invocation retains its original URL, pin and credential
+even if another process changes the selected context. TLS verification stays
+enabled; redirects are refused and connect/read timeouts and response bytes
+are bounded. A disconnect or timeout after submission reports an unknown
+outcome with the same key and target. No POST is automatically retried.
+
+Internal native `hive`/`hv` children from task naming, daemon, bot, one-shot,
+and TUI execution carry an explicit local context, so a saved remote selection
+cannot redirect work already admitted to this installation. The execution
+arguments are separate from logged commands, verbs and roles. Explicit child
+context options remain authoritative, and arbitrary Ruby/shell executables or
+custom fixture commands retain their original arguments.
+
+Remote `task` retains `--log` and adds mutually exclusive `--diff`,
+`--artifacts`, and `--artifact ID`. Content goes to stdout or an explicit local
+`--output PATH`; no remote path is mapped into the checkout. The three new
+selectors fail under a local context before runtime effects, with guidance to
+the existing local `hive task TARGET --json` artifact panel or an explicit
+remote context. Local `--log`/`--json` incompatibility is preserved.
+
+Remote `act --observation TOKEN` needs no general task read. Remote
+`answer --binding HANDLE` sends the opaque question handle and bounded literal
+stdin without exposing a native folder-bearing binding. An answer-only token
+can approve using explicit `--from STAGE --generation GENERATION`; with read
+scope, omitted approval metadata comes from fresh task details. Remote force
+and destination bypass options are rejected before a request. See
+[[commands/context]], [[commands/operation]], and [[remote-access]].
 
 Before Thor dispatch, `bin/hive` delegates shared wrapper grammar to the pure
 `Hive::CliArgvPolicy`, while retaining command-specific JSON error contracts
@@ -44,7 +105,8 @@ values can be treated as a command argument or task target. `hive new` has a
 special lift-and-rebuild path: standalone allow-listed options are lifted from
 before the project, between project and text, or after text, then the remaining
 `PROJECT TEXT...` tail is protected with `--` so Thor does not parse literal
-task text as options. The allow-list is `--workflow`/`--depends-on`/`--base` (whose value
+task text as options. The allow-list is `--workflow`/`--depends-on`/`--base`/
+`--idempotency-key`/`--context` (whose value
 is the next token, but only when that token exists and is not option-like — a
 trailing or value-less `--workflow`/`--depends-on`/`--base` stays literal text rather than
 swallowing PROJECT), their `--workflow=VALUE`/`--depends-on=VALUE`/`--base=VALUE` `name=`-prefix
@@ -176,10 +238,27 @@ contracts retain their established unversioned or schema-less shapes.
 | 4 | `WRONG_STAGE` | `hive run` invoked on an inert stage (e.g. `1-inbox`) | `Hive::WrongStage` |
 | 64 | `USAGE` | EX_USAGE — bad arguments, or setup-agents consent declined/missing without TTY/`--yes` | `Hive::UsageError`; `Hive::InvalidTaskPath` for task/path failures and preserved `invalid_task_path` contracts; `SetupAgents` |
 | 70 | `SOFTWARE` | EX_SOFTWARE — git, worktree, agent, or stage-runner failure | `GitError`, `WorktreeError`, `AgentError`, `StageError` |
-| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError` |
+| 75 | `TEMPFAIL` | EX_TEMPFAIL — retryable lock contention | `Hive::ConcurrentRunError`; `Hive::OneShot::ProjectGuard::OwnershipError`; `Hive::RuntimeControlPlane::Busy` |
 | 78 | `CONFIG` | EX_CONFIG — bad project/global config or invalid agent-skills manifest/filter | `Hive::ConfigError`, `SetupAgents` |
 
 Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb`. See [CONTRIBUTING.md](../CONTRIBUTING.md) "CLI contract for agent callers".
+
+Runtime SQLite startup contention is retryable. Ordinary commands preserve the
+15-second busy timeout **per operation**, including registration; they have no
+new cumulative startup deadline. On exhaustion, startup stops before the
+requested action, exits `75`, and emits exactly one stderr line:
+`runtime database busy, retry`. A JSON request also receives a schema-valid
+`hive-runtime-maintenance.v1` error document (`ok: false`, `exit_code: 75`,
+`error_kind: runtime`, `runtime_code: runtime_database_busy`, the requested
+command as `action`, and a populated `next_action`).
+
+Default `hive status` and `hive status --json` instead share one second of SQLite
+busy waiting through activation, registration, observation, and cleanup. They
+return partial status with exit `0` when the source is unavailable. The v2 JSON
+contract uses `complete: false` and false count-exactness flags without new
+fields. Human output retains independent daemon/runtime information and says
+`RUNNING TASKS UNAVAILABLE` plus `STATUS PARTIAL — runtime database busy`.
+Other status modes retain their existing contracts. See [[commands/status]].
 
 ## Authentication / preconditions
 

@@ -109,9 +109,12 @@ module Hive
   end
 
   class CommandReplayFailure < Error
-    def initialize(message, exit_code:)
+    attr_reader :payload
+
+    def initialize(message, exit_code:, payload: nil)
       super(message)
       @replay_exit_code = Integer(exit_code)
+      @payload = payload
     end
 
     def exit_code = @replay_exit_code
@@ -402,6 +405,33 @@ module Hive
       @next_action = next_action
     end
   end
+
+  # Ordinary `hive archive` from finalize refused because GitHub does not
+  # confirm the task's recorded PR as MERGED. Archive is the terminal
+  # transition; a ready-but-open PR (merge refused on pending checks, BEHIND,
+  # CONFLICTING) must not be recorded as delivered. Exit code stays
+  # WRONG_STAGE (4) like the other "cannot advance from here" refusals; the
+  # concrete subclass and `reason` carry the typed cause. Explicit operator
+  # closures (`--reason ...`) take the evidence-bound TaskClosure path and
+  # never reach this guard.
+  class ArchiveMergeUnconfirmed < WrongStage
+    attr_reader :reason, :pr_url, :pr_state
+
+    def initialize(message, reason:, pr_url: nil, pr_state: nil, **stage_context)
+      super(message, **stage_context)
+      @reason = reason
+      @pr_url = pr_url
+      @pr_state = pr_state
+    end
+  end
+
+  # GitHub answered and the PR is OPEN/CLOSED (reason=pr_not_merged).
+  class ArchivePrNotMerged < ArchiveMergeUnconfirmed; end
+
+  # Hive could not observe the PR state at all: gh failed
+  # (reason=pr_state_unobservable) or pr.md carries no canonical PR URL
+  # (reason=pr_url_unresolved). Archive fails closed instead of guessing.
+  class ArchivePrStateUnobservable < ArchiveMergeUnconfirmed; end
 
   # Raised by `hive init` when the project is already initialized. The
   # operation is idempotent at the contract level — code 2 lets a caller

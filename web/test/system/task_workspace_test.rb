@@ -12,6 +12,28 @@ class TaskWorkspaceTest < ApplicationSystemTestCase
 
   teardown { StatusBroadcaster.stop! }
 
+  test "review publication detail preserves full commands at desktop and mobile widths" do
+    destination = stage_dir(@project, "6-review").join(@slug)
+    FileUtils.mv(@folder, destination)
+    state = destination.join("task.md")
+    state.write("# Review publication\n")
+    Hive::Markers.set(state, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1,
+      **Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending",
+        "worktree" => "/owned/work tree", "branch" => @slug, "is_draft" => true, "pr_state" => "OPEN",
+        "ready_command" => "cd /owned/work\\ tree && gh pr ready 42", "local_head" => "a" * 40))
+    sign_in!
+    visit task_path(@project, @slug)
+    assert_text "Review publication and verification"
+    assert_text "Commit fixes locally"
+    [ [ 1280, 800 ], [ 375, 812 ] ].each do |width, height|
+      page.current_window.resize_to(width, height)
+      assert_text "gh pr ready 42"
+      assert_text "successful current secret scan"
+      metrics = page.evaluate_script("({viewport:document.documentElement.clientWidth, width:document.documentElement.scrollWidth})")
+      assert_operator metrics["width"], :<=, metrics["viewport"] + 1
+    end
+  end
+
   test "one semantic workspace reflows from wide desktop through actual 400 percent zoom" do
     sign_in!
     visit task_path(@project, @slug)

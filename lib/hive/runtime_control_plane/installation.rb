@@ -1,4 +1,8 @@
+require "json"
+require "time"
 require "tmpdir"
+require "hive/atomic_file"
+require "hive/runtime_identity"
 require "hive/runtime_control_plane"
 require "hive/daemon/activation_lock"
 require "hive/runtime_control_plane/command_schema_installation"
@@ -9,6 +13,8 @@ module Hive
     # Setup publishes a complete current database once. Existing storage is
     # validated, never imported, upgraded, or replaced.
     module Installation
+      COMMAND_RECEIPT_INSTALLATION_RECORD = "command-receipts-installation.json"
+
       module_function
 
       def setup(state_home: Hive::Paths.state_home, install_command_receipts: false,
@@ -46,17 +52,47 @@ module Hive
           if install_command_receipts
             extension_database = Database.new(path: path)
             begin
-              CommandSchemaInstallation.install!(
+              receipts = CommandSchemaInstallation.install!(
                 database: extension_database, package_coordinates: rollback_package
               )
             ensure
               extension_database.disconnect
             end
+            receipts = record_command_receipt_installation(state_home, receipts)
           end
-          status(state_home: state_home)
+          result = status(state_home: state_home)
+          receipts ? result.merge("command_receipts" => receipts) : result
         ensure
           database&.disconnect
         end
+      end
+
+      def command_receipt_installation_record_path(state_home = Hive::Paths.state_home)
+        File.join(state_home, COMMAND_RECEIPT_INSTALLATION_RECORD)
+      end
+
+      # The receipt extension has no in-database place for rollback provenance
+      # (its version ledger is part of the pinned schema digest), so the
+      # installing run writes it beside the database. A later already-installed
+      # run keeps the original record and reports it back.
+      def record_command_receipt_installation(state_home, receipts)
+        path = command_receipt_installation_record_path(state_home)
+        if receipts.fetch("status") == "installed"
+          record = {
+            "schema" => "hive-command-receipts-installation.v1",
+            "installed_at" => Time.now.utc.iso8601,
+            "command_schema_version" => receipts.fetch("version"),
+            "command_schema_sha256" => receipts.fetch("schema_sha256"),
+            "runtime" => Hive::RuntimeIdentity.new.to_h,
+            "rollback" => receipts.fetch("rollback")
+          }
+          Hive::AtomicFile.write(path, "#{JSON.pretty_generate(record)}\n", mode: 0o600)
+        elsif File.file?(path)
+          record = JSON.parse(File.read(path))
+        end
+        receipts.merge("record_path" => path, "record" => record)
+      rescue JSON::ParserError, SystemCallError => error
+        receipts.merge("record_path" => path, "record" => nil, "record_error" => "#{error.class}: #{error.message}")
       end
 
       def status(state_home: Hive::Paths.state_home)

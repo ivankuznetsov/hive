@@ -2,6 +2,7 @@ require "test_helper"
 require "hive/stages/review/ci_fix"
 require "hive/reviewers"
 require "hive/agent_profiles"
+require "hive/task_journal"
 
 # Direct coverage for the CI-fix loop. Uses tiny bash scripts as the
 # CI command (deterministic exit codes, optional output) and fake-claude
@@ -71,6 +72,17 @@ class CiFixTest < Minitest::Test
   def deep_merge(base, over)
     base.merge(over) do |_k, b, o|
       b.is_a?(Hash) && o.is_a?(Hash) ? deep_merge(b, o) : o
+    end
+  end
+
+  def test_no_repair_stops_after_one_failed_check_without_a_fix_agent
+    with_ci_dir do |dir, folder|
+      ci = write_ci_script(dir, "echo failure; exit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = "unexpected-repair"
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, folder), no_repair: true)
+      assert_equal :stale, result.status
+      assert_equal 1, result.attempts
+      refute File.exist?(File.join(dir, "unexpected-repair"))
     end
   end
 
@@ -287,6 +299,72 @@ class CiFixTest < Minitest::Test
                      File.binread(task_md)
       end
     end
+  end
+
+  # Regression (f417): Hive's own writers (agent runtime, daemon GitHub/hold
+  # observers) append to task-journal.jsonl while the fix agent's custody
+  # window is open. That append is controller history, not agent tampering,
+  # and must survive.
+  def test_controller_journal_append_during_fix_agent_custody_is_not_tampering
+    with_ci_dir do |dir, task_folder|
+      journal = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      controller_journal_append(task_folder, "before-fix")
+      baseline = File.binread(journal)
+      marker = File.join(dir, ".ci-fixed")
+      ci = write_ci_script(dir, "[ -f \"#{marker}\" ] && exit 0\necho red >&2\nexit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = marker
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "fix landed\n"
+      original = Hive::ArtifactFirewall.method(:validate_and_restore)
+      append = method(:controller_journal_append)
+      during_custody = lambda do |manifest, snapshot|
+        append.call(task_folder, "pr-merged-during-fix")
+        original.call(manifest, snapshot)
+      end
+
+      result = with_replaced_singleton_method(
+        Hive::ArtifactFirewall, :validate_and_restore, during_custody
+      ) do
+        Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, task_folder))
+      end
+
+      assert_equal :green, result.status, result.error_message
+      assert File.binread(journal).start_with?(baseline)
+      assert_includes File.binread(journal), "pr-merged-during-fix"
+    end
+  end
+
+  def test_fix_agent_journal_truncation_is_still_tampering_and_restored
+    with_ci_dir do |dir, task_folder|
+      journal = File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      controller_journal_append(task_folder, "before-fix")
+      baseline = File.binread(journal)
+      ci = write_ci_script(dir, "echo red >&2\nexit 1")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = journal
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{}\n"
+
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg_with(ci), ctx: make_ctx(dir, task_folder))
+
+      assert_equal :error, result.status
+      assert_includes result.error_message, "protected files: task-journal.jsonl"
+      assert_includes result.error_message, "restored=true"
+      assert File.binread(journal).start_with?(baseline)
+    end
+  end
+
+  def controller_journal_append(task_folder, event_id)
+    record = Hive::TaskJournal::Envelope.authoritative(
+      {
+        event_id: event_id, event_type: "activity_recorded",
+        task: { "slug" => File.basename(task_folder) }, stage: "6-review",
+        attempt_id: "attempt-1", task_generation: 1, reason: "observed",
+        provenance: { "source" => "github" }
+      }
+    )
+    Hive::WorkLedger.journal(
+      path: File.join(task_folder, Hive::TaskJournal::JOURNAL_BASENAME),
+      lock_path: File.join(task_folder, Hive::TaskJournal::LOCK_BASENAME),
+      record_id: ->(entry) { entry.fetch("event_id") }
+    ).append([ record ])
   end
 
   def test_reports_restore_failure_when_fix_agent_tampers_with_protected_files
@@ -521,6 +599,25 @@ class CiFixTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/timed out/, result.error_message)
+      assert_includes result.last_output, "started",
+                      "a timed-out run keeps what it printed before the kill"
+      refute_includes result.last_output, "never_printed"
+    end
+  end
+
+  def test_ci_timeout_output_is_tail_truncated_like_a_normal_run
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, %(for i in 1 2 3 4 5 6; do echo "line $i"; done; sleep 30))
+      cfg = cfg_with(ci,
+                     "review" => { "ci" => { "max_attempts" => 1, "tail_lines" => 2 } },
+                     "timeout_sec" => { "review_ci" => 2 })
+
+      result = Hive::Stages::Review::CiFix.run!(cfg: cfg, ctx: make_ctx(dir, task_folder))
+
+      assert_equal :error, result.status
+      assert_match(/4 earlier lines truncated/, result.last_output)
+      assert_includes result.last_output, "line 6"
+      refute_includes result.last_output, "line 1\n"
     end
   end
 
@@ -542,6 +639,7 @@ class CiFixTest < Minitest::Test
 
       assert_equal :error, result.status
       assert_match(/no output for 0.3s \(idle-output timeout\)/, result.error_message)
+      assert_includes result.last_output, "started"
       assert_operator elapsed, :<, 10,
                       "idle deadline must fire long before the 30s wall clock"
     end
@@ -691,6 +789,29 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_run_ci_once_does_not_leak_hive_private_ruby_load_path_to_project_ci
+    deployment_lib = "/srv/hive/deployments/hive-dogfood-abc/lib"
+    hive_env = {
+      "RUBYLIB" => "#{deployment_lib}:/srv/hive/deployments/hive-dogfood-abc/components/agent-cli-runtime/lib",
+      "RUBYOPT" => "-rbundler/setup", "GEM_HOME" => "/srv/hive/gems",
+      "GEM_PATH" => "/srv/hive/gems", "BUNDLE_GEMFILE" => "/srv/hive/Gemfile",
+      "BUNDLER_ORIG_RUBYLIB" => deployment_lib, "HIVE_PROJECT_MARKER" => "kept"
+    }
+    probe = "for key in RUBYLIB RUBYOPT GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLER_ORIG_RUBYLIB " \
+            'HIVE_PROJECT_MARKER; do eval "printf \"%s=%s\n\" $key \"\${$key-unset}\""; done'
+
+    with_tmp_dir do |dir|
+      run = with_env(hive_env) { Hive::Stages::Review::CiFix.run_ci_once([ "sh", "-c", probe ], dir, 4096, 10) }
+
+      assert_equal 0, run.exit_code, run.combined
+      refute_includes run.combined, deployment_lib
+      %w[RUBYLIB RUBYOPT GEM_HOME GEM_PATH BUNDLE_GEMFILE BUNDLER_ORIG_RUBYLIB].each do |key|
+        assert_includes run.combined, "#{key}=unset\n"
+      end
+      assert_includes run.combined, "HIVE_PROJECT_MARKER=kept\n"
+    end
+  end
+
   def test_run_ci_once_reports_empty_command_after_shell_parsing
     result = Hive::Stages::Review::CiFix.run_ci_once("   ", Dir.pwd, 1024, 1)
 
@@ -704,6 +825,8 @@ class CiFixTest < Minitest::Test
 
       assert_instance_of Hive::Stages::Review::CiFix::CommandError, result
       assert_equal "CI command failed to launch: pipe exploded", result.reason
+      assert_nil result.output, "a command that never started has no output"
+      assert_nil result.to_result(attempts: 1).last_output
     end
   end
 

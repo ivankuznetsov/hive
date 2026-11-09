@@ -26,6 +26,24 @@ module Hive
     def state_home = ENV.fetch("HIVE_HOME", "/state")
   end
 
+  module Remote
+    module CommandPolicy
+      Invocation = Struct.new(:argv) do
+        def handled? = false
+      end
+
+      def self.preflight!(argv, contexts:, dispatcher:) = Invocation.new(argv)
+      def self.with_invocation(_invocation)
+        yield
+      end
+    end
+
+    class Dispatcher
+      def self.contexts = nil
+      def initialize(contexts:); end
+    end
+  end
+
   module Schemas
     module ErrorEnvelope
       module_function
@@ -48,6 +66,11 @@ module Hive
 
     class Error < Hive::Error; end
     class Unavailable < Error; end
+    class Busy < Error; end
+
+    module ContentionBudget
+      def self.clear! = nil
+    end
 
     def self.storage_error
       Unavailable.new(
@@ -66,6 +89,7 @@ module Hive
 
       def command(argv) = Array(argv).find { |word| !word.start_with?("-") }
       def strict_no_write_route?(_argv) = false
+      def default_status_route?(_argv) = false
     end
 
     class Registration
@@ -124,6 +148,7 @@ module Hive
 
   module CliJsonOptions
     BOOLEAN_OPTIONS = [].freeze
+    def self.requested?(argv) = argv.include?("--json")
   end
 
   module CliArgvPolicy
@@ -168,6 +193,8 @@ module BootstrapFixture
 end
 
 %w[
+  hive/remote/command_policy.rb
+  hive/remote/dispatcher.rb
   hive/runtime_control_plane/activation_gate.rb
   hive/runtime_control_plane/command_registration.rb
   hive/runtime_control_plane/operational_inspection.rb

@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb, lib/hive/commands/worktree.rb, lib/hive/draft_pr_receipt.rb, lib/hive/agent_git_gate.rb, lib/hive/stages/agent_worktree.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-07
 tags: [worktree, git, pointer, dependencies, draft-pr, handoff]
 ---
 
@@ -130,12 +130,22 @@ Local `<default>` is never modified — any unpushed commits there are preserved
 ### Dependency base override
 
 `base_override` is used by [[modules/task_dependencies]] when a dependent task
-enters `4-execute`. Hive tries to fetch and branch from
+enters `4-execute`; `DependencySnapshot` supplies it only for an undelivered
+prerequisite (a `9-done` or PR-merged prerequisite yields no override, so the
+dependent bases on the default branch). Hive tries to fetch and branch from
 `origin/<base_override>` so stacked tasks start from their prerequisite branch.
 If there is no origin, the fetch fails, or the remote branch is unavailable,
 Hive next checks local `refs/heads/<base_override>` and stacks on that local
-branch when present. It warns and falls back through `freshest_base(default_branch)`
+branch when present, with a loud warning (`stacking on local <prereq>
+(undelivered prerequisite with no remote branch; the local branch is unverified
+and may be stale ...)`). It warns and falls back through `freshest_base(default_branch)`
 only when neither the remote nor local prerequisite branch is available.
+
+`create!` exposes the start-point it branched from as `#resolved_base`
+(`origin/<default>`, `refs/heads/<default>`, `origin/<prereq>`, or
+`refs/heads/<prereq>`; nil when it attached an existing branch). Execute
+records it as `base_ref` in `worktree.yml`, so `base_oid` is always traceable to
+the ref it came from.
 
 ## `remove!`
 
@@ -196,8 +206,9 @@ path: /home/asterio/Dev/<project>.worktrees/<slug>
 branch: <slug>
 created_at: 2026-04-25T10:23:45Z
 execute_base_head: <sha>   # optional; set by 4-execute for commit-baseline checks
-base_branch: main          # strict draft-PR path only
-base_oid: <sha>            # strict draft-PR path only
+base_branch: main          # integration/PR-target branch (4-execute and strict draft-PR path)
+base_oid: <sha>            # commit the task branch started from (4-execute and strict draft-PR path)
+base_ref: origin/main      # optional; 4-execute only — exact start ref of base_oid (origin/<prereq> or refs/heads/<prereq> when stacked)
 repository: github.com/owner/name # strict draft-PR path only
 ```
 

@@ -20,10 +20,12 @@ require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
 require "hive/task_meta"
 require "hive/plan_review/transition_guard"
+require "hive/stages/review/pass_archive"
 require "hive/task_activity"
 require "hive/command_operation"
 require "hive/command_error_kind"
 require "hive/review_budget"
+require "hive/workflow_admission"
 
 module Hive
   module Commands
@@ -51,7 +53,7 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
       DEFAULT_CLOCK = -> { Time.now.utc }.freeze
 
-      VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
+      VALID_TERMINAL_MARKERS = Hive::WorkflowAdmission::VALID_TERMINAL_MARKERS
 
       def self.error_kind_for(error)
         typed = Hive::CommandErrorKind.typed(error)
@@ -73,7 +75,8 @@ module Hive
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
                      observation_guard: nil, post_rearm_mutation: nil, commit_lock: true,
                      clock: DEFAULT_CLOCK, dependency_admission: true,
-                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil)
+                     idempotency_key: nil, command_receipt_store: nil, task_observation: nil,
+                     structured: false, principal: nil, principal_source: "local_cli")
         @target = target
         @to = to
         @from = from
@@ -83,7 +86,10 @@ module Hive
         # Suppress all stdout/stderr emission. Used by composing callers
         # (e.g. StageAction) that emit their own unified envelope.
         # State changes and typed exceptions still propagate normally.
-        @quiet = quiet
+        @quiet = quiet || structured
+        @structured = structured
+        @principal = principal
+        @principal_source = principal_source
         @observation_guard = observation_guard
         @post_rearm_mutation = post_rearm_mutation
         @commit_lock = commit_lock
@@ -140,6 +146,10 @@ module Hive
           },
           project_root: -> { resolve_task.project_root },
           json: @json,
+          structured: @structured,
+          display_json: @json && !@structured,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: ->(error) { envelope_payload_for(error) },
           text_renderer: ->(payload) { approval_text(payload) },
           store: @command_receipt_store || Hive::CommandReceiptStore.new
@@ -149,6 +159,7 @@ module Hive
       # ── Pipeline ────────────────────────────────────────────────────────
 
       def do_call
+        install_remote_guard!
         task = resolve_task
         if task.workflow.controller?
           require "hive/patrol_fix/stage_transition"
@@ -157,6 +168,26 @@ module Hive
           end
         end
         do_call_for(task)
+      end
+
+      def install_remote_guard!
+        context = Hive::Attempts::Context.current
+        authority = context&.remote_authority
+        return unless authority && authority.fetch("effect").fetch("kind") == "approve"
+
+        if @force || @to
+          raise Hive::OperationalActionUsageError, "remote approval requires the guarded forward transition; advance locally"
+        end
+        existing_guard = @observation_guard
+        @observation_guard = lambda do |task|
+          if authority["action_id"]
+            Hive::WorkflowAdmission.verify_action!(task: task, project: @project_filter,
+              action_id: authority.fetch("action_id"), observation: authority.fetch("observation"), authority: authority)
+          else
+            Hive::WorkflowAdmission.verify_approval!(task: task, project: @project_filter, authority: authority)
+          end
+          existing_guard&.call(task)
+        end
       end
 
       def do_call_for(task, patrol_transition: nil)
@@ -419,6 +450,7 @@ module Hive
         commit_action = nil
         human_state_snapshot = nil
         rewind_state_snapshots = []
+        review_archive_moves = []
         completion_snapshot = nil
         review_reset_snapshot = {}
         with_optional_commit_lock(task.hive_state_path) do
@@ -443,6 +475,7 @@ module Hive
               archive_review_budget_for_reset!(task, dest_stage, snapshot: review_reset_snapshot)
               rearm_backward_stages!(task, dest_stage, snapshots: rewind_state_snapshots)
               @post_rearm_mutation&.call(task)
+              archive_rewound_review_passes!(task, dest_stage, moves: review_archive_moves)
               human_state_snapshot = initialize_human_destination!(task, dest_stage)
               if completion_on_terminal_entry?(task, dest_stage)
                 completion_snapshot = Hive::TaskMeta.snapshot(task.folder)
@@ -462,6 +495,9 @@ module Hive
                 ),
                 restore_rearmed_stages!(
                   task, new_folder, rewind_state_snapshots, observation: observation
+                ),
+                Hive::Stages::Review::PassArchive.restore!(
+                  rollback_folder(task, new_folder), review_archive_moves
                 ),
                 restore_review_budget_reset!(
                   task, new_folder, review_reset_snapshot, observation: observation
@@ -573,6 +609,27 @@ module Hive
       rescue Hive::TaskMeta::InvalidMetadata, Hive::TaskMeta::StaleTask, Hive::ReviewBudget::Refused,
              SystemCallError, IOError, ArgumentError => error
         rollback_skip("review budget reset", error)
+      end
+
+      # A rewind through the workflow's review stage starts a new review
+      # generation. Review numbers passes from the top-level
+      # `reviews/*-NN.md` files and refuses a pass above its admitted
+      # ceiling, so prior-generation pass files would make the next
+      # `hive review` fail pre-flight (`reason=config_error`). Move them to
+      # `reviews/archive/<utc>-<from>-to-<to>/`; unnumbered review state
+      # (`ci-blocked.md`, `deferred-findings.md`, `suppressed.md`) stays.
+      # Runs after `post_rearm_mutation` so a composing caller that archives
+      # with its own label (outcome-evidence rework) keeps that label.
+      def archive_rewound_review_passes!(task, dest_stage, moves:)
+        destination = stage_for_dest!(task, dest_stage)
+        return unless destination.index < task.stage_index
+
+        review_stage = task.workflow.stages.find { |stage| stage.kind == :review_council }
+        return unless review_stage&.index&.between?(destination.index, task.stage_index)
+
+        label = "#{@clock.call.utc.strftime('%Y%m%dT%H%M%SZ')}-" \
+                "#{task.stage_index}-#{task.stage_name}-to-#{dest_stage}"
+        Hive::Stages::Review::PassArchive.archive!(task.folder, label: label, moves: moves)
       end
 
       def read_rewind_state_snapshot!(path, state_file)

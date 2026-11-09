@@ -35,7 +35,7 @@ module Hive
             claim = claim_from(row, :replay, project_root: project_root)
             claim = resume_maintenance(claim) if row.fetch(:state) == "unresolved"
             return finalize!(
-              claim, state: "succeeded", result: result, status: status,
+              claim, state: Integer(status).zero? ? "succeeded" : "failed", result: result, status: status,
               reason: nil, retry_eligible: false
             )
           rescue Hive::CommandConflict

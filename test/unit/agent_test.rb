@@ -149,6 +149,19 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_agent_child_environment_unsets_hive_private_ruby_load_path
+    with_tmp_dir do |dir|
+      with_env("RUBYLIB" => "/srv/hive/deployments/hive-dogfood-abc/lib", "RUBYGEMS_GEMDEPS" => "-") do
+        agent = Hive::Agent.new(task: make_task(dir), prompt: "test", max_budget_usd: nil, timeout_sec: 5)
+
+        Hive::ProjectCommandEnvironment::TOOLCHAIN_KEYS.each do |key|
+          assert agent.child_environment.key?(key), "#{key} must be explicitly unset"
+          assert_nil agent.child_environment.fetch(key)
+        end
+      end
+    end
+  end
+
   def test_pi_child_environment_cannot_reach_controller_credential_transports
     with_tmp_dir do |dir|
       with_env(

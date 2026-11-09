@@ -61,9 +61,16 @@ module Hive
           @target, project_filter: @project_filter
         ).resolve
         project = registered_project!(native_task)
+        document = payload_for(project: project, task: native_task)
+        emit(document)
+        document
+      end
+
+      def payload_for(project:, task:)
+        native_task = task
         attributes, archived, observed_at = status_attributes(project, native_task)
         task = ProjectionTask.new(native_task: native_task, attributes: attributes)
-        document = Hive::TaskWorkspace::Builder.new(
+        Hive::TaskWorkspace::Builder.new(
           task: task,
           native_task: native_task,
           project: project.fetch("name"),
@@ -73,9 +80,6 @@ module Hive
           archive: archived,
           clock: @clock
         ).semantic
-
-        emit(document)
-        document
       end
 
       private

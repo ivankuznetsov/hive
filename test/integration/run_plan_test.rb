@@ -254,7 +254,10 @@ class RunPlanTest < Minitest::Test
           assert_equal expected_level, review.fetch("effective_level")
           assert_equal "cleared", review.fetch("state")
           assert review.fetch("execution_allowed")
-          assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+          # The adversarial leg runs only at plan_review.adversarial_min_level
+          # (default mandatory).
+          expected_legs = expected_level == "mandatory" ? %w[primary adversarial verification] : %w[primary verification]
+          assert_equal expected_legs, adapter.calls.map(&:kind)
           assert_equal 1, revision.calls.length
           assert_equal candidate, File.read(plan_md)
         end

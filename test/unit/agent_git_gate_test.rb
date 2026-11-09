@@ -190,6 +190,22 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_local_branch_publication_refuses_movement_from_the_admitted_head
+    with_local_remote do |repo, remote|
+      branch = run!("git", "-C", repo, "branch", "--show-current").strip
+      admitted = commit_file(repo, "admitted.txt", "admitted\n", "admitted")
+      commit_file(repo, "unapproved.txt", "unapproved\n", "moved branch")
+      assert_raises(Hive::AgentGitGate::RemoteConflict) do
+        Hive::AgentGitGate.publish_local_branch(repository_path: repo, branch: branch,
+          remote: remote, expected_remote_absent: true, expected_local_oid: admitted,
+          allow_local_transport: true)
+      end
+      observation = Hive::AgentGitGate.observe_remote_branch(repository_path: repo,
+        remote: remote, branch: branch, allow_local_transport: true)
+      refute observation.present?, "an unapproved replacement commit must never be pushed"
+    end
+  end
+
   def test_exact_publication_requires_expected_state_and_returns_remote_proof
     with_local_remote do |repo, remote|
       first = commit_file(repo, "first.txt", "first\n", "first")

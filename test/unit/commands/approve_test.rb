@@ -464,6 +464,59 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_backward_commit_failure_restores_archived_review_passes
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "8-finalize", "slug-260522-abcd")
+      FileUtils.mkdir_p(File.join(source, "reviews"))
+      File.write(File.join(source, "task.md"), "implementation\n<!-- REVIEW_COMPLETE pass=6 -->\n")
+      File.write(File.join(source, "reviews", "claude-ce-code-review-06.md"), "pass six\n")
+      File.write(File.join(source, "reviews", "ci-blocked.md"), "kept\n")
+      prepare_test_task_lease_repository(source)
+      current = task(
+        folder: source, hive_state_path: state, project_root: root,
+        stage_index: 8, stage_name: "finalize"
+      )
+      archived = nil
+      cmd = command(clock: -> { Time.utc(2026, 11, 8, 20, 1, 2) })
+      cmd.define_singleton_method(:record_hive_commit) do |locked, *|
+        archived = Dir[File.join(locked.folder.sub("8-finalize", "6-review"), "reviews", "archive", "*", "*")]
+        raise Hive::GitError, "no commit"
+      end
+      fake_ops = Object.new
+      fake_ops.define_singleton_method(:run_git!) { |*| nil }
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(*) { fake_ops }) do
+        assert_raises(Hive::GitError) do
+          cmd.send(:perform_move_and_commit, current, "6-review")
+        end
+      end
+
+      assert_equal [ "reviews/archive/20261108T200102Z-8-finalize-to-6-review/claude-ce-code-review-06.md" ],
+                   archived.map { |path| path.delete_prefix("#{File.join(state, 'stages', '6-review', 'slug-260522-abcd')}/") }
+      assert_equal "pass six\n", File.read(File.join(source, "reviews", "claude-ce-code-review-06.md"))
+      assert_equal "kept\n", File.read(File.join(source, "reviews", "ci-blocked.md"))
+      assert_empty Dir[File.join(source, "reviews", "archive", "*")],
+                   "rollback removes the emptied generation directory"
+    end
+  end
+
+  def test_backward_move_that_skips_review_keeps_review_passes
+    with_tmp_dir do |root|
+      source = File.join(root, "8-finalize", "slug")
+      FileUtils.mkdir_p(File.join(source, "reviews"))
+      File.write(File.join(source, "reviews", "claude-ce-code-review-02.md"), "pass\n")
+      moves = []
+      current = task(folder: source, stage_index: 8, stage_name: "finalize")
+
+      command.send(:archive_rewound_review_passes!, current, "7-artifacts", moves: moves)
+      command.send(:archive_rewound_review_passes!, current, "8-finalize", moves: moves)
+
+      assert_empty moves
+      assert File.exist?(File.join(source, "reviews", "claude-ce-code-review-02.md"))
+    end
+  end
+
   def test_backward_rearm_restores_earlier_files_when_a_later_state_file_is_invalid
     with_tmp_dir do |root|
       state = File.join(root, ".hive-state")

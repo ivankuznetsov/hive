@@ -3,7 +3,7 @@ title: Hive::ArtifactFirewall
 type: module
 source: lib/hive/artifact_firewall.rb, lib/hive/protected_files.rb
 created: 2026-04-26
-updated: 2026-11-02
+updated: 2026-11-06
 tags: [security, artifacts, custody, integrity, orchestrator]
 ---
 
@@ -151,6 +151,21 @@ agent-created directory. An originally non-regular path is unreconstructable;
 if it changes, the report becomes `restore_failed` rather than claiming
 rollback. A restored protected anchor still makes the spawn fail stage policy:
 restoration repairs custody but does not erase the tampering event.
+
+`task-journal.jsonl` is an append-only, controller-owned log
+(`Hive::ProtectedFiles::APPEND_ONLY_LOGS`, keyed to its `.task-journal.lock`).
+Hive writers outside the provider call (agent runtime, daemon GitHub PR/hold
+observers) legitimately append to it while a custody window is open. Custody
+therefore treats the journal as unchanged when the captured bytes and mode are
+preserved and every appended byte is complete, previously unseen
+`hive-task-journal-event` records; capture, validation, and restore take the
+journal's own flock. Truncation, rewritten or replayed records, partial lines,
+and non-journal content remain `protected_changed` (diagnostic names the
+"append-only anchor"). Restoration rebuilds the log as the captured bytes plus
+the complete journal records found after them, so it never deletes
+controller entries appended during the window. Appended records are admitted
+by shape, not by cryptographic provenance: a same-user agent could still forge
+a well-formed record (see `wiki/gaps.md`).
 
 ## Threat contract
 

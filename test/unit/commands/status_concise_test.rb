@@ -23,13 +23,13 @@ class CommandsStatusConciseTest < Minitest::Test
 
     def running_payload(_projects, **)
       @routes << :running_payload
-      {
+      [ {
         "daemon" => { "running" => false, "pid" => nil, "uptime_sec" => nil },
         "complete" => true, "source" => {}, "tasks" => []
-      }
+      }, false ]
     end
 
-    def render_running(_payload)
+    def render_running(_payload, **)
       @routes << :running
     end
 
@@ -74,6 +74,30 @@ class CommandsStatusConciseTest < Minitest::Test
       capture_io { operational_json.call }
       assert_equal [ :operational_payload ], operational_json.routes
     end
+  end
+
+  def test_startup_busy_uses_same_renderer_and_json_excludes_internal_metadata
+    with_tmp_global_config do
+      with_replaced_singleton_method(Hive::Lock, :task_lease_repository, -> { flunk "busy fallback probed runtime" }) do
+        output, error = capture_io { Hive::Commands::Status.new(runtime_unavailable: true).call }
+        assert_equal "", error
+        assert_includes output, "RUNNING TASKS UNAVAILABLE"
+        refute_includes output, "NO RUNNING TASKS"
+        assert_equal 1, output.scan("runtime database busy").length
+        assert_equal 1, output.scan("STATUS PARTIAL").length
+        json, error = capture_io do
+          Hive::Commands::Status.new(json: true, runtime_unavailable: true).call
+        end
+        assert_equal "", error
+        payload = JSON.parse(json)
+        refute payload.fetch("complete")
+        refute payload.fetch("observed_count_exact")
+        refute payload.key?("runtime_busy")
+        require "json_schemer"
+        assert JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-running-status")))).valid?(payload)
+      end
+    end
+    assert_nil Hive::RuntimeControlPlane::ContentionBudget.current
   end
 
   def test_invalid_mode_combinations_are_usage_errors

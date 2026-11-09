@@ -28,7 +28,7 @@ module Hive
       def initialize(subcommand, target, project: nil, stage: nil, json: false,
                      generation: nil, recovery_digest: nil, task_resolver: nil,
                      command: [], environment: ENV, approve_factory: nil,
-                     quiet: false)
+                     quiet: false, observation_guard: nil)
         @subcommand = subcommand.to_s
         @target = target.to_s
         @project_filter = project
@@ -43,6 +43,7 @@ module Hive
           Hive::Commands::Approve.new(target, **options)
         end
         @quiet = quiet
+        @observation_guard = observation_guard
       end
 
       def call
@@ -283,6 +284,7 @@ module Hive
         package = nil
         receipt = nil
         observation_guard = lambda do |locked_task|
+          @observation_guard&.call(locked_task)
           marker = Hive::Markers.current(locked_task.state_file)
           unless marker.name == :error &&
                  Hive::TerminalOutcome.outcome_evidence_rework?(marker.attrs) &&

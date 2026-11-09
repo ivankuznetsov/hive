@@ -11,12 +11,24 @@ require "hive/paths"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/payload_store"
 require "hive/runtime_control_plane/admission_transition"
+require "hive/runtime_control_plane/sqlite_support"
 require "hive/stringify_keys"
 
 module Hive
   module Attempts
     class RepositoryError < Hive::Error; end
     class CompareAndSwapFailed < RepositoryError; end
+    # The attempt record built for one task failed its own validation (for
+    # example a task without an id). That is a per-task data problem, not a
+    # storage failure, so callers may block just that task.
+    class InvalidAttemptRecord < RepositoryError; end
+    # SQLite lock contention outlasted the runtime database busy timeout:
+    # another Hive process held the write lock. Nothing was written, and the
+    # same operation can be retried later, so callers may defer instead of
+    # failing. Corruption, schema, and storage errors never take this class.
+    class RuntimeDatabaseBusy < RepositoryError
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 
@@ -649,6 +661,9 @@ module Hive
       def translate_store_error(error, prefix)
         raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
           error.is_a?(RuntimeControlPlane::AdmissionClosed) || storage_unavailable?(error)
+        raise InvalidAttemptRecord, "#{prefix}: #{error.message}" if error.is_a?(InvalidRecord)
+        raise RuntimeDatabaseBusy, "#{prefix}: #{error.message}" if RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+
         raise RepositoryError, "#{prefix}: #{error.message}"
       end
 

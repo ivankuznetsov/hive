@@ -67,6 +67,38 @@ class AttemptsContextTest < Minitest::Test
     assert_nil legacy.admitted_route
   end
 
+  def test_admitted_billing_evidence_and_nested_collections_are_immutable
+    routing = explicit_routing
+    routing.fetch("route").merge!("billing_route" => "api", "billing_evidence_source" => "provider_account_config")
+    routing["exclusions"] = [ { "reason" => "hard_pin_mismatch" } ]
+    context = Hive::Attempts::Context.send(:new, attempt_id: "billing-evidence", task_generation: 0, routing: routing)
+    assert_equal "provider_account_config", context.billing_evidence_source
+    assert_equal "api", context.billing_route
+    routing.fetch("exclusions").first["reason"] = "changed-after-admission"
+    assert_equal "hard_pin_mismatch", context.routing.fetch("exclusions").first.fetch("reason")
+    assert_raises(FrozenError) { context.routing.fetch("exclusions") << "forged" }
+    assert_raises(FrozenError) { context.routing.fetch("exclusions").first["reason"].replace("forged") }
+    legacy = Hive::Attempts::Context.send(:new, attempt_id: "legacy-billing", task_generation: 0)
+    assert_equal "unavailable", legacy.billing_evidence_source
+  end
+
+  def test_qualified_operational_worker_binding_requires_its_admitted_project_and_stage
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = { "project" => "demo", "task_id" => "42", "task_slug" => "task", "intended_stage" => "4-execute" }
+    argv = %w[hive act workflow.retry demo:task --observation observation]
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_, **_) { resolver }) do
+      assert_nil Hive::Attempts::Context.send(:validate_task_binding!, record, argv)
+      error = assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record, argv.take(3) + [ "foreign:task" ])
+      end
+      assert_includes error.message, "project does not match admission"
+      assert_raises(Hive::Attempts::RepositoryError) do
+        Hive::Attempts::Context.send(:validate_task_binding!, record.merge("intended_stage" => "3-plan"), argv)
+      end
+    end
+  end
+
   def test_environment_context_is_authenticated_bound_and_scrubbed
     with_running_attempt do |store, _record|
       resolver = Struct.new(:task) { def resolve = task }.new(
@@ -104,16 +136,18 @@ class AttemptsContextTest < Minitest::Test
       }
       command_contexts = Object.new
       command_contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+      catalog = Sequel.mock(fetch: { name: "command_dispatch_contexts" })[:sqlite_master]
       real_database = store.database
       database = Object.new
       database.define_singleton_method(:read) do |&block|
         real_database.read do |real_connection|
           connection = Object.new
-          connection.define_singleton_method(:table_exists?) do |name|
-            name == :command_dispatch_contexts || real_connection.table_exists?(name)
-          end
           connection.define_singleton_method(:[]) do |name|
-            name == :command_dispatch_contexts ? command_contexts : real_connection[name]
+            case name
+            when :command_dispatch_contexts then command_contexts
+            when :sqlite_master then catalog
+            else real_connection[name]
+            end
           end
           block.call(connection)
         end
@@ -142,9 +176,9 @@ class AttemptsContextTest < Minitest::Test
     }
     contexts = Object.new
     contexts.define_singleton_method(:[]) { |request_id:| request_id == "request-1" ? row : nil }
+    catalog = Sequel.mock(fetch: { name: "command_dispatch_contexts" })[:sqlite_master]
     connection = Object.new
-    connection.define_singleton_method(:table_exists?) { |_name| true }
-    connection.define_singleton_method(:[]) { |_name| contexts }
+    connection.define_singleton_method(:[]) { |name| name == :sqlite_master ? catalog : contexts }
     database = Object.new
     database.define_singleton_method(:read) { |&block| block.call(connection) }
     repository = Struct.new(:database).new(database)
@@ -162,9 +196,9 @@ class AttemptsContextTest < Minitest::Test
     [ false, true ].each do |table_exists|
       contexts = Object.new
       contexts.define_singleton_method(:[]) { |**| nil }
+      catalog = Sequel.mock(fetch: table_exists ? { name: "command_dispatch_contexts" } : [])[:sqlite_master]
       connection = Object.new
-      connection.define_singleton_method(:table_exists?) { |_name| table_exists }
-      connection.define_singleton_method(:[]) { |_name| contexts }
+      connection.define_singleton_method(:[]) { |name| name == :sqlite_master ? catalog : contexts }
       database = Object.new
       database.define_singleton_method(:read) { |&block| block.call(connection) }
       repository = Struct.new(:database).new(database)

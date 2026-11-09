@@ -326,6 +326,76 @@ class HiveStagesBaseCleanExitHookTest < Minitest::Test
     assert_equal "", `git -C #{worktree} status --porcelain`
   end
 
+  # The 2026-11-09 PR #1419 shape: the CI-fix agent hit its provider limit
+  # mid-run, review recorded REVIEW_ERROR, and stage-exit CleanExit then
+  # committed the agent's leftover edits. That commit is never pushed by
+  # this run, so it must be stamped on the failure marker.
+  def test_review_failure_marker_records_unpublished_residual_commit
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    result = Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      FileUtils.mkdir_p(File.join(worktree, "test"))
+      File.write(File.join(worktree, "test", "coverage_test.rb"), "# new coverage\n")
+      Hive::Markers.set(task.state_file, :review_error,
+                        phase: "ci", gate: "github", reason: "limits_reached", pass: 1,
+                        message: "github CI hit a usage/credit limit",
+                        retry_after: "2026-11-11T10:26:00Z")
+      { commit: "ci_github_limits_reached", status: :review_error }
+    end
+
+    head = `git -C #{worktree} rev-parse HEAD`.strip
+    assert_equal "chore(6-review): commit residual worktree changes",
+                 `git -C #{worktree} log -1 --pretty=%s`.strip
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal :review_error, marker.name
+    assert_equal "limits_reached", marker.attrs.fetch("reason")
+    assert_equal "2026-11-11T10:26:00Z", marker.attrs.fetch("retry_after")
+    assert_equal head, marker.attrs.fetch("residual_commit")
+    assert_equal "false", marker.attrs.fetch("residual_published")
+    assert_match(/residual commit #{head[0, 12]} is local-only/, marker.attrs.fetch("message"))
+    assert_equal "ci_github_limits_reached", result[:commit]
+  end
+
+  def test_review_success_and_clean_exits_record_no_residual_commit
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      FileUtils.mkdir_p(File.join(worktree, "wiki"))
+      File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+      Hive::Markers.set(task.state_file, :review_complete, attempts: 1)
+    end
+    refute Hive::Markers.current(task.state_file).attrs.key?("residual_commit")
+
+    Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+      Hive::Markers.set(task.state_file, :review_error, phase: "fix", reason: "agent_crashed")
+    end
+    refute Hive::Markers.current(task.state_file).attrs.key?("residual_commit")
+  end
+
+  def test_residual_commit_annotation_failure_warns_and_keeps_the_marker
+    root, task, worktree = make_task_and_worktree("6-review")
+    remember(root, worktree)
+
+    _out, err = capture_io do
+      with_replaced_singleton_method(
+        Hive::ReviewResidualCommit, :annotate!, ->(*, **) { raise IOError, "disk gone" }
+      ) do
+        Hive::Stages::Base.with_stage_events(task, cfg: @cfg) do
+          FileUtils.mkdir_p(File.join(worktree, "wiki"))
+          File.write(File.join(worktree, "wiki", "page.md"), "edits\n")
+          Hive::Markers.set(task.state_file, :review_error, phase: "fix", reason: "agent_crashed")
+        end
+      end
+    end
+
+    assert_match(/could not record residual commit \h+ on the marker: disk gone/, err)
+    marker = Hive::Markers.current(task.state_file)
+    assert_equal "agent_crashed", marker.attrs.fetch("reason")
+    refute marker.attrs.key?("residual_commit")
+  end
+
   # The clean / auto_committed branch must leave the stage's own
   # `result[:commit]` alone — only the overwrite branch mutates.
   def test_with_stage_events_preserves_result_commit_when_auto_committing

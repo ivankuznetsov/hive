@@ -131,6 +131,7 @@ module Hive
           state, entry = settled
           pre_settled = true
         else
+          release_abandoned_reservations(timeout_sec: remaining(@budget.drain_cutoff))
           entry = @capability.call
         end
         return ownership_refusal(state, entry) unless entry.eligible?
@@ -216,6 +217,9 @@ module Hive
               @registry.settle_preclose_reservations!(
                 generation: state.generation, authority: authority,
                 timeout_sec: remaining(@budget.drain_cutoff)
+              )
+              release_abandoned_reservations(
+                authority: authority, timeout_sec: remaining(@budget.drain_cutoff)
               )
               verdict = @capability.call
             end
@@ -303,6 +307,28 @@ module Hive
       end
 
       def installation_id = @database.installation_identity.fetch(:installation_id)
+      # Best effort: a failure leaves the rows reserved (or the owned-process
+      # rows active), and the capability check that follows still refuses.
+      def release_abandoned_reservations(authority: nil, timeout_sec: nil)
+        released = begin
+          @registry.release_abandoned_reservations!(authority: authority, timeout_sec: timeout_sec)
+        rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+          []
+        end
+        reconcile_exited_processes(authority: authority, timeout_sec: timeout_sec)
+        released
+      end
+
+      # Best effort, like the reservation release: a failure leaves the
+      # owned-process rows active and the capability check still refuses.
+      def reconcile_exited_processes(authority:, timeout_sec:)
+        return [] unless @registry.respond_to?(:reconcile_exited_processes!)
+
+        @registry.reconcile_exited_processes!(authority: authority, timeout_sec: timeout_sec)
+      rescue Hive::RuntimeControlPlane::Error, Sequel::Error
+        []
+      end
+
       def remaining(cutoff) = [ cutoff - @monotonic.call, 0.0 ].max
       def expired?(cutoff) = @monotonic.call >= cutoff
 

@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock, .github/workflows, install.sh, components/agent-cli-runtime/mirror, .llm-wiki/post-commit-refresh.sh
 created: 2026-04-25
-updated: 2026-11-02
+updated: 2026-11-08
 tags: [dependencies, gems, runtime, sequel, sqlite]
 ---
 
@@ -24,11 +24,147 @@ constraints; CI audits both the root and web lockfiles.
 ## Bundled secret detection
 
 Hive's release gem includes Betterleaks 1.8.1 for Linux/macOS on x64/arm64,
-plus its MIT license. `ruby packaging/betterleaks.rb` downloads the pinned
-upstream archives and checks the per-platform SHA-256 values in
-`lib/hive/betterleaks.rb` before bundling. The release-candidate builder runs this step; Homebrew, AUR, and install.sh consume that gem.
-Generated binaries are ignored by Git. Source developers run the same bundling
-step or install Betterleaks locally. Runtime scans never download tools.
+plus its MIT license. `ruby packaging/betterleaks.rb` bundles all four pinned
+archives from `lib/hive/betterleaks.rb`, preserving executable mode 0755 and
+license mode 0644. The release-candidate builder runs this step; Homebrew, AUR,
+and install.sh consume that gem. Generated binaries are ignored by Git.
+Source developers run the bundling step or install Betterleaks locally.
+Runtime scans never download tools.
+
+### Verified archive cache
+
+Persistent caching is opt-in with `HIVE_BETTERLEAKS_CACHE_DIR`. Unset or empty
+values keep temporary-download operation. For local use, choose an absolute
+cache directory outside the repository working tree, specifically outside
+`lib/hive/assets/`: the gem's asset glob could otherwise package the cached
+archives themselves. This path constraint is an operator responsibility,
+without a new code gate. For example, from a checkout outside `$HOME/.cache`:
+
+```sh
+HIVE_BETTERLEAKS_CACHE_DIR="$HOME/.cache/hive/betterleaks-archives" ruby packaging/betterleaks.rb
+```
+
+Entries are `<cache_dir>/<pinned-sha256>.tar.gz`. Every use copies an entry into
+a private build directory and hashes that copy before extracting those same
+bytes. Only absent, corrupt, or inaccessible entries require downloads. Cache
+I/O failures emit concise diagnostics and fall back to verified temporary
+downloads. A verified download is published through a unique temporary file
+and atomic rename; failed publication still permits installation from the
+verified private archive. Invalid bytes never reach extraction or installation.
+Partial cache publications and private build files are cleaned up.
+
+For unchanged pins, all four readable, verified entries make packaging
+independent of release-download availability: it sends zero release requests.
+An incomplete cache, restoration failure, or access failure removes this outage
+guarantee. A cold run or a new-pin rollout can still fail.
+
+### Authentication, redirects, and retry limits
+
+Downloads prefer a nonblank `GITHUB_TOKEN`, then a nonblank `GH_TOKEN`, and
+support neither. CR/LF in a selected token is rejected with a redacted error
+before surrounding whitespace is stripped.
+Authorization is supplied through a private mode-0600 header file, cleaned up
+on success or failure. It is sent only to the HTTPS `github.com` origin on
+effective port 443, including same-origin redirects. A credentialed 401 or 403
+switches once to anonymous mode for the rest of that archive, restarting from
+the original release URL within the original deadline. This recovery rule does
+not assert that every 403 means an invalid token. CDN 403 responses are permanent
+failures; 429 responses are retryable and do not trigger authentication fallback.
+Raw headers, bodies, redirect URLs, curl stderr, and credentials are not logged.
+
+Ruby owns redirects and retries. Every hop requires HTTPS with normal TLS
+certificate verification. Relative redirects are resolved; HTTP downgrades,
+URL userinfo, malformed response chains, and chains exceeding ten redirects
+fail closed. Ambient curlrc files are disabled with `--disable` first;
+proxy and certificate environment settings remain inherited. Curl performs
+neither automatic redirects nor nested retries. The
+[curl manual](https://curl.se/docs/manpage.html) describes the header-file,
+response-header, and timeout options used here.
+
+An anonymous out-of-band capture on 2026-11-08 observed HTTP/2 302 from
+`github.com` to `release-assets.githubusercontent.com`, followed by HTTP/2 200.
+Sanitized fixtures preserve those header blocks, replacing signed/expiring
+values. Tests also cover proxy CONNECT and interim response blocks. This capture
+used a separate curl command, not the rewritten transport. The production
+endpoint limitation remains recorded in [[gaps]].
+
+Each required archive starts one monotonic download deadline set by
+`DOWNLOAD_BUDGET` in `packaging/betterleaks.rb` (currently 300 seconds).
+Requests, redirects, auth fallback, and backoff share it; each curl hop receives
+a total timeout no larger than the remaining time and a connection timeout no
+larger than 15 seconds or that remainder. A parent process deadline kills and
+reaps an overdue subprocess. Transient transport failures, HTTP 408/429/5xx,
+and checksum mismatches retry with delays of 5, 10, 20, then 30 seconds, capped
+by remaining time. Missing/unusable curl, non-transient curl exits, TLS/policy errors, and
+other permanent HTTP failures stop promptly with redacted diagnostics.
+Exhaustion reports the budget and last failure category (HTTP status, transport
+exit code, checksum mismatch, or no prior failure), and stops packaging before a
+later platform starts. Post-transfer hashing may finish after the deadline;
+verified bytes from an in-budget transfer are accepted. Every cache and
+successful-response path retains authoritative digest verification.
+
+A cold four-archive run can approach 4 × 300s = 1200s (20m) if earlier archives
+succeed near their deadlines. The existing `ci.yml` job limits remain:
+
+| Job | Whole-job timeout |
+| --- | --- |
+| `coverage-shards` | 20m |
+| `expensive-test-gates` | 15m |
+| `e2e` | 20m |
+| `web-tests` | 20m |
+| `launchd-macos` | 15m |
+
+These budgets include setup and actual tests. In that worst-case cold run the
+runner cancels packaging before the active archive deadline expires: no deadline
+diagnostic is emitted, and the operator sees an opaque maximum-execution-time
+cancellation. The old `--retry 3 --retry-max-time 60 --max-time 120` settings put
+a simple stalled-transfer four-archive scenario near 8 minutes, versus the new
+near-20-minute allowance. That old estimate was not a strict end-to-end bound:
+retry-max-time limits starting another attempt. There is no whole-invocation
+budget setting and neither 15-minute job timeout is raised. This work does not
+promise that every cold run succeeds or prove execution on all architectures.
+
+### CI cache visibility and pin changes
+
+All eight packaging paths in `ci.yml`, `live-agent-skills.yml`, and
+`release-candidate.yml` restore `actions/cache` at the repository's pinned
+revision. They pass `${{ runner.temp }}/betterleaks-archives`, outside source
+exports. Each cache contains all four target archives and uses:
+
+```text
+key: betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}
+restore-keys: betterleaks-archives-v1-${{ runner.os }}-
+```
+
+Packaging always revalidates, including on a cache hit. Only digest-named
+archives are cached, never extracted binaries or authentication files.
+The five dedicated CI packaging steps and the live-agent-skills build step
+receive `GITHUB_TOKEN: ${{ github.token }}`. The latter is a multiline step and
+shares that environment with `gem build` and the live-agent artifact builder.
+Both release-candidate consumers use anonymous downloads; the candidate cache
+step has the same fresh-build condition as its builder. See [[release-candidate]].
+
+An exact-key warm cache needs a prior successful save for that source-file hash
+and runner OS on an accessible ref. GitHub searches the current ref and default
+branch, plus a pull request's base branch; arbitrary sibling refs are not
+visible. PR merge-ref saves do not warm main. The prefix can restore entries
+from another file hash, so an exact-key miss need not mean cold archives.
+These are the [Actions cache matching and scope rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+
+A full version/pin bump changes the exact key and introduces four digests
+without prior saved entries. All eight paths are fully cold until successful
+jobs save the new archives within accessible ref/OS scopes. PR re-runs remain
+cold until that save. A later push to main is cold again if only PR-scoped
+saves exist, until a main job succeeds and saves. A partial pin bump reuses
+unchanged digests through the prefix; a comment or host-detection-only edit
+can remain fully warm. Stale entries cannot substitute for required pins:
+filenames are digest-specific, and private copies are rehashed before use.
+
+Actions caches are immutable. Local repairs work immediately, but persisting a
+repair to an exact-key corrupt remote cache can require eviction or a cache-key
+namespace bump. Failed jobs might never save new entries, and concurrent jobs
+may race to save the same key. Neither a restore nor a save is an availability
+guarantee.
 
 Detection uses the upstream rules with network validation disabled. Hive turns
 off global path exclusions, supplies a private policy-free Git view, and ignores
@@ -121,7 +257,7 @@ dying in seconds rather than as a test failure.
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon processes; also reused by the e2e schema validator. |
 | `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sequel` | `~> 5.107` (root locked 5.108.0; Web locked 5.107.0) | Sequel Core datasets, transactions, and IntegerMigrator for the machine-local runtime control-plane SQLite database. Hive uses no Sequel models, callbacks, Active Record integration, or generic backend layer. |
-| `sqlite3` | `~> 2.0` (locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. The root and packaged-web lockfiles stay at 2.9.6 or newer to avoid GHSA-mwm8-39rw-8826. |
+| `sqlite3` | `~> 2.0` (root and web locked 2.10.2) | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. Both lockfiles use 2.10.2 or newer to avoid GHSA-4fqr-96q8-xrfx (possible query truncation for strings of 4 GiB or larger), while retaining the earlier GHSA-mwm8-39rw-8826 fix. |
 | `tzinfo` | `~> 2.0` (locked 2.0.6) | IANA timezone rules for the digest-only Europe/London calendar window, including spring-forward and fall-back days without changing the process timezone. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -145,9 +281,14 @@ The root bundle locks transitive Rack at 3.2.8 or newer. The
 3.2.6 for four 2026 Rack advisories; no direct dependency constraint needs to
 change for the compatible patch update.
 
-The root bundle also locks transitive Addressable at 2.9.1 or newer. The
-advisory database flags 2.9.0 for seven 2026 advisories, including template
-regular-expression denial of service and URI host/path normalization flaws.
+Both root and packaged-web bundles lock transitive `addressable` at 2.9.2.
+The advisory database flags 2.9.0 for seven 2026 advisories. The 2.9.1
+security floor fixes the November 2026 template regular-expression denial-of-service,
+URI host/path normalization, and misleading display-host advisories reported by
+`bundler-audit`; compatible patch updates preserve the existing dependency
+constraints.
+CI audits both lockfiles, so security updates must cover both dependency
+resolutions and every locked native `sqlite3` platform.
 
 ## Web app bundle
 
@@ -159,7 +300,7 @@ workflow identity and expected version tag before dependency installation.
 The explicit `fiddle` runtime gem compiles against libffi headers, so hosts
 building it need the libffi development package.
 
-Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.3.1),
+Direct web runtime dependencies include Rails `~> 8.1.3` (locked 8.1.4.1),
 propshaft, sqlite3, puma, importmap-rails, turbo-rails, stimulus-rails,
 jbuilder, solid_cache, solid_queue, solid_cable, bootsnap, thruster,
 image_processing, and `hive-cli` from the parent checkout. Redcarpet
@@ -174,12 +315,25 @@ Direct web development/test dependencies include `debug`,
 `capybara`, and `capybara-playwright-driver`. `rack-test` is not a direct
 `web/Gemfile` entry, but the web lock resolves it transitively through
 Rails/Capybara and the web integration upload tests use
-`Rack::Test::UploadedFile`.
+`Rack::Test::UploadedFile`. The web lock also pins the sanitization chain at
+`nokogiri` 1.19.7, `loofah` 2.25.3, and `rails-html-sanitizer` 1.7.2: the
+2026-11 advisory refresh requires those patch levels for the active
+`bundler-audit` database.
 
-Rails 8.1.3.1 is the minimum locked web release for the
-CVE-2026-66066 Active Storage/libvips security fix. Production images install
+Rails 8.1.4.1 is the minimum locked web release. 8.1.3.1 carried the
+CVE-2026-66066 Active Storage/libvips security fix. 8.1.4.1 adds the
+2026-11-04 Active Support fixes: MessagePack serializer XSS
+(GHSA-2w9f-fxwj-w2qf) and `safe_constantize` DoS (GHSA-8474-xrp6-wh69).
+The root lock's transitive `activesupport`, pulled in by the RuboCop Rails
+plugin, is held at the same 8.1.4.1. Production images install
 the distribution `libvips` package, which must remain at libvips 8.13 or newer
 for the patched Active Storage safety checks.
+
+The web lock pins Nokogiri 1.19.7, rails-html-sanitizer 1.7.2, and Loofah
+2.25.3 following the November 2026 HTML/XML parsing and sanitization
+advisories. All eight existing Nokogiri platform variants use the patched
+release. These compatible patch updates require no direct Gemfile changes;
+the CI audit checks the web lock as well as the root lock.
 
 The `curses` gem was removed in U11 of plan #003 alongside the legacy curses TUI backend. `HIVE_TUI_BACKEND=curses` now raises a typed error pointing at the removal instead of routing to the deleted code.
 

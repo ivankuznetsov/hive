@@ -331,6 +331,7 @@ class GhUnitTest < Minitest::Test
       [
         {
           "number" => 197,
+          "isDraft" => true,
           "url" => "https://github.com/o/r/pull/197",
           "baseRefName" => "main",
           "headRefOid" => "abc123",
@@ -345,6 +346,7 @@ class GhUnitTest < Minitest::Test
     with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { responses.shift }) do
       metadata = Hive::Gh.pr_metadata(197)
 
+      assert_equal true, metadata.is_draft
       assert_equal 197, metadata.number
       assert_equal "https://github.com/o/r/pull/197", metadata.url
       assert_equal "main", metadata.base_ref_name
@@ -496,6 +498,64 @@ class GhUnitTest < Minitest::Test
       assert_equal "b" * 40, frontmatter["head_oid"]
       assert_equal "keep", frontmatter["custom"]
       assert_includes File.read(path), "Body"
+    end
+  end
+
+  def test_required_status_check_contexts_unions_contexts_and_app_checks
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    calls = []
+    doc = {
+      "contexts" => [ "rubocop", "unit" ],
+      "checks" => [ { "context" => "unit", "app_id" => 1 }, { "context" => "brakeman" }, "junk", { "context" => "" } ]
+    }
+    with_replaced_singleton_method(
+      Hive::Gh, :capture3, lambda { |*args, **kwargs|
+        calls << [ args, kwargs ]
+        [ JSON.generate(doc), "", ok ]
+      }
+    ) do
+      contexts = Hive::Gh.required_status_check_contexts(
+        host: "github.com", repository: "acme/app", branch: "release/1.0", cfg: { "gh" => {} }
+      )
+      assert_equal %w[brakeman rubocop unit], contexts
+    end
+    args, kwargs = calls.first
+    assert_equal [ "gh", "api", "--hostname", "github.com",
+                   "repos/acme/app/branches/release%2F1.0/protection/required_status_checks" ], args
+    assert_equal({ "gh" => {} }, kwargs.fetch(:cfg))
+  end
+
+  def test_required_status_check_contexts_treats_absent_protection_as_nothing_required
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    [ "gh: Not Found (HTTP 404)", "gh: Resource not accessible by integration (HTTP 403)" ].each do |stderr|
+      with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { [ "{}", stderr, failed ] }) do
+        assert_equal [], Hive::Gh.required_status_check_contexts(host: "github.com", repository: "acme/app", branch: "main")
+      end
+    end
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { [ "gh: Not Found (HTTP 404)", "", failed ] }) do
+      assert_equal [], Hive::Gh.required_status_check_contexts(host: "github.com", repository: "acme/app", branch: "main")
+    end
+  end
+
+  def test_required_status_check_contexts_raises_on_transport_and_shape_failures
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failed = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    lookup = -> { Hive::Gh.required_status_check_contexts(host: "github.com", repository: "acme/app", branch: "main") }
+    {
+      [ "", "gh: HTTP 502 Bad Gateway", failed ] => /HTTP 502/,
+      [ "", "", failed ] => /required_status_checks` failed: \z/,
+      [ "{", "", ok ] => /unparseable JSON/,
+      [ "[]", "", ok ] => /returned Array; expected Hash/
+    }.each do |response, message|
+      with_replaced_singleton_method(Hive::Gh, :capture3, ->(*, **) { response }) do
+        error = assert_raises(Hive::GhError, &lookup)
+        assert_match message, error.message
+      end
+    end
+    [ "", "-main", "a b" ].each do |branch|
+      assert_raises(Hive::GhError) do
+        Hive::Gh.required_status_check_contexts(host: "github.com", repository: "acme/app", branch: branch)
+      end
     end
   end
 

@@ -153,7 +153,69 @@ class PlanReviewActionIntegrationTest < Minitest::Test
 
         assert_equal Hive::ExitCodes::TEMPFAIL, status
         assert_equal "stale_decision", payload.fetch("error_kind")
+        assert_match(/plan review is stale \(canonical plan changed after plan review\); run `hive plan-review #{slug} restart`/,
+                     payload.fetch("message"))
         assert_empty Hive::PlanReview::Store.new(task_folder: folder).current["decisions"]
+      end
+    end
+  end
+
+  # hivedev C11: a review made stale under it rejected every action copied
+  # from `show`. `restart` is the supported exit: it records the operator's
+  # decision on the stale review and starts a linked review for the current
+  # task generation.
+  def test_restart_supersedes_a_stale_review_with_a_linked_current_review
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(File.basename(dir), "restart stale plan review").call
+        end
+        inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", File.basename(inbox))
+        FileUtils.mkdir_p(File.dirname(folder))
+        FileUtils.mv(inbox, folder)
+        File.write(File.join(folder, "plan.md"), lifecycle_plan)
+        task = Hive::Task.new(folder)
+        run_review = lambda do
+          Hive::PlanReview::Orchestrator.new(
+            task: Hive::Task.new(folder), cfg: Hive::Config.load(dir), planner_identity: planner_identity,
+            adapter: LifecycleAdapter.new(lifecycle_finding),
+            planner_revision: LifecycleRevision.new(lifecycle_plan),
+            route_resolver: method(:lifecycle_route),
+            clock: -> { Time.utc(2026, 8, 12, 12) }
+          ).advance!
+        end
+        stale = run_review.call.record
+        File.open(task.meta_yml_path, "a") { |file| file << "owner: platform\n" }
+        build = lambda do |action, current|
+          Hive::Commands::PlanReview.new(
+            folder, action, **command_arguments(current), json: true,
+            resolver: -> { task },
+            service_factory: lambda do |resolved|
+              Hive::PlanReview::DecisionService.new(
+                task: resolved, task_locker: ->(&block) { block.call },
+                commit_locker: ->(&block) { block.call }, committer: ->(*) { }
+              )
+            end,
+            resumer: ->(_task) { run_review.call }
+          )
+        end
+
+        out, = capture_io { build.call("restart", stale).call }
+        payload = JSON.parse(out)
+
+        assert schema.valid?(payload), schema.validate(payload).to_a.inspect
+        assert_equal "restart", payload.fetch("action")
+        assert_equal stale.review_id, payload.fetch("review_id")
+        current = Hive::PlanReview::Store.new(task_folder: folder).current
+        assert_equal payload.fetch("current_review_id"), current.review_id
+        assert_equal stale.review_id, current.prior_review_id
+        assert Hive::PlanReview::Identity.task_generation_current?(task, current.task_generation)
+
+        error, = with_captured_exit { build.call("restart", current).call }
+        assert_match(/restart applies only to a stale plan review; this review is current; use retry/,
+                     JSON.parse(error).fetch("message"))
       end
     end
   end

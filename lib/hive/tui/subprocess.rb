@@ -5,6 +5,7 @@ require "shellwords"
 require "tmpdir"
 require "fileutils"
 require "bubbletea"
+require "hive/cli_argv_policy"
 require "hive/runtime_control_plane/command_registration"
 require "hive/tui/debug"
 require "hive/tui/messages"
@@ -186,7 +187,8 @@ module Hive
         Hive::Tui::Debug.log("takeover_command", "argv=#{argv.inspect} chdir=#{chdir.inspect}")
         spawn_id = generate_correlation_id
         stamp_subprocess_log("BEGIN(interactive)", argv, id: spawn_id)
-        pid = chdir ? Process.spawn(*argv, chdir: chdir) : Process.spawn(*argv)
+        launch_argv = Hive::CliArgvPolicy.local_child_argv(argv)
+        pid = chdir ? Process.spawn(*launch_argv, chdir: chdir) : Process.spawn(*launch_argv)
         with_parent_terminal_signals_quiesced do
           _, status = Process.wait2(pid)
           exit_code = translate_status(status)
@@ -219,7 +221,7 @@ module Hive
         path = spawn_capture_path(spawn_id)
         FileUtils.mkdir_p(File.dirname(path))
         Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: argv[1] || "tui-child",
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "tui-child",
           pgroup: true,
           out: [ path, "a" ],
           err: [ path, "a" ]
@@ -659,7 +661,7 @@ module Hive
       # cannot leave a captured-stdio helper behind.
       def run_quiet!(argv)
         Hive::Tui::Debug.log("run_quiet", "argv=#{argv.inspect}")
-        out, err, status = bounded_capture3(*argv, timeout: RUN_QUIET_TIMEOUT_SECONDS)
+        out, err, status = bounded_capture3(*Hive::CliArgvPolicy.local_child_argv(argv), timeout: RUN_QUIET_TIMEOUT_SECONDS)
         exit_code = translate_status(status)
         Hive::Tui::Debug.log("run_quiet", "exit=#{exit_code} out_bytes=#{out.bytesize} err_bytes=#{err.bytesize}")
         [ exit_code, out, err ]

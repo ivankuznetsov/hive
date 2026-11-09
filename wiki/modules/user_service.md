@@ -3,7 +3,7 @@ title: UserService
 type: module
 source: lib/hive/user_service.rb, lib/hive/user_service/, lib/hive/commands/service_installer/, examples/systemd/
 created: 2026-07-26
-updated: 2026-08-30
+updated: 2026-11-07
 tags: [module, services, systemd, launchd, recovery, offline, boundaries]
 ---
 
@@ -13,6 +13,16 @@ tags: [module, services, systemd, launchd, recovery, offline, boundaries]
 its installed file, and the corresponding systemd-user or launchd lifecycle.
 Daemon, babysitter, bot, web, setup, init, migration cutover, status, and
 uninstall remain thin command adapters around this boundary.
+
+Managed daemon, web, bot and babysitter service definitions explicitly pass
+`--context local` after their existing startup arguments. Their local installation
+therefore remains the startup target even when the operator has selected a remote
+client context. The shipped systemd and launchd examples carry the same argument;
+rendering preserves the resolved binary and service environment. Existing drift
+and force-upgrade rules still govern replacement of an installed definition.
+Existing bare definitions require `hive --context local SERVICE install --force`
+for each installed service before a saved remote client selection can coexist
+with managed startup (`SERVICE` is `daemon`, `web`, `bot`, or `babysit`).
 
 ## Linux user-unit invariant
 
@@ -156,6 +166,13 @@ failed stop followed by an indeterminate observation retains its journal.
 Linux `ActiveState=deactivating` with a positive `MainPID` is transitional, not
 stopped: stop and removal keep waiting through the manager's bounded action or
 retain pending intent until no live main process remains.
+A stopped systemd unit reports `MainPID=0` but keeps the previous run's
+`ExecMainStartTimestampMonotonic`; `Manager::Inspection` drops that start
+together with the non-positive PID, so a stopped unit has no process identity.
+Recording the stale start as `prior_process_start` made the journal reject
+every force-replace/lifecycle transition of a stopped unit as an incoherent
+identity (surfaced by installers as "retained unverified recovery evidence",
+although nothing had been written).
 
 ## Verified endpoint modes
 

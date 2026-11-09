@@ -347,6 +347,48 @@ module Hive
         end
       end
 
+      # Review and CI-repair commits extend the hosted PR head. Like a rebase,
+      # the exact intent is persisted before the caller's leased push and the
+      # anchor advances only after the remote branch is observed at the new
+      # head; a lost acknowledgement is replayed by later publication. An
+      # intent that never reached the remote (its before_oid is still hosted)
+      # is superseded; any other unrecorded remote state fails closed.
+      def publish_fast_forward!(worktree_path:, branch:, before_oid:, after_oid:)
+        @directory.with_lock(".#{@state_name}.lock") do
+          state = read_state
+          return yield unless state && state["pr"]
+
+          intent = { "before_oid" => before_oid, "after_oid" => after_oid }
+          pending = state["pending_rewrite"]
+          if pending && pending != intent
+            remote_oid = @git.observe(worktree_path: worktree_path, branch: branch).fetch("oid")
+            if remote_oid == pending.fetch("after_oid")
+              state = record_published_head(state, remote_oid)
+            elsif remote_oid == pending.fetch("before_oid")
+              state = write_state(state.except("pending_rewrite").merge("updated_at" => timestamp))
+            else
+              blocked!("revision_history_rewritten", "another publication rewrite requires reconciliation")
+            end
+          end
+          anchor = state.fetch("published_head_oid", state.fetch("head_oid"))
+          unless state["branch"] == branch && after_oid.to_s.match?(OID) &&
+                 @git.ancestor?(worktree_path: worktree_path, ancestor_oid: anchor, head_oid: before_oid).equal?(true) &&
+                 @git.ancestor?(worktree_path: worktree_path, ancestor_oid: before_oid, head_oid: after_oid).equal?(true)
+            blocked!("revision_history_rewritten", "review publication does not extend the recorded publication")
+          end
+          state = write_state(state.merge("pending_rewrite" => intent, "updated_at" => timestamp))
+          result = yield
+          begin
+            observed = @git.observe(worktree_path: worktree_path, branch: branch).fetch("oid")
+          rescue Hive::AgentGitGate::Error, Hive::GhError
+            # The retained intent lets ordinary publication finish the record.
+            observed = nil
+          end
+          record_published_head(state, after_oid) if observed == after_oid
+          result
+        end
+      end
+
       def publish!(request, revalidate:, existing_pr_url: nil)
         unless request.is_a?(Request) && revalidate.respond_to?(:call)
           raise ArgumentError, "publication requires a strict request and revalidator"
@@ -945,8 +987,11 @@ module Hive
       def ensure_secret_free!(request)
         fields = { "title" => request.title, "body" => request.published_body }
         detected = fields.keys.select { |key| Hive::SecretScanner.match?(fields.fetch(key)) }
+        # Scope to the PR base branch so upstream content brought in by
+        # merging it into the task branch is not re-attributed to the task.
         if Hive::SecretScanner.git_match?(
-          request.worktree_path, base_oid: request.scan_base_oid, head_oid: request.head_oid
+          request.worktree_path,
+          base_oid: request.scan_base_oid, head_oid: request.head_oid, upstream_branch: request.base_branch
         )
           detected << "commits"
         end

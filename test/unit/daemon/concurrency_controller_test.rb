@@ -142,6 +142,32 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s1", now: T0)
   end
 
+  def test_project_own_cap_lowers_the_daemon_wide_per_project_cap
+    c = make(global: 6, per_project: 3)
+    c.project_cap = ->(project) { project == "hive" ? 1 : nil }
+    dispatch(c, 100, "hive", "s1")
+    assert_equal :project_cap, c.can_dispatch?(project: "hive", slug: "s2", now: T0)
+    dispatch(c, 101, "dev", "s1")
+    dispatch(c, 102, "dev", "s2")
+    assert_equal :ok, c.can_dispatch?(project: "dev", slug: "s3", now: T0)
+  end
+
+  def test_project_own_cap_never_raises_the_daemon_wide_cap
+    c = make(global: 6, per_project: 1)
+    c.project_cap = ->(_project) { 4 }
+    dispatch(c, 100, "dev", "s1")
+    assert_equal :project_cap, c.can_dispatch?(project: "dev", slug: "s2", now: T0)
+  end
+
+  def test_project_own_cap_ignores_non_positive_and_non_integer_values
+    [ 0, -2, "1", 1.5, nil ].each do |value|
+      c = make(global: 6, per_project: 2)
+      c.project_cap = ->(_project) { value }
+      dispatch(c, 100, "dev", "s1")
+      assert_equal :ok, c.can_dispatch?(project: "dev", slug: "s2", now: T0), value.inspect
+    end
+  end
+
   def test_external_active_agents_count_toward_global_cap
     c = make(global: 1, per_project: 5)
     assert_equal :global_cap,

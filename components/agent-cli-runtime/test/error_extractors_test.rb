@@ -159,6 +159,26 @@ class AgentCliRuntimeErrorExtractorsTest < Minitest::Test
     assert_includes error[:message], "temporarily rate-limited upstream"
   end
 
+  def test_opencode_extractor_reads_opencode_two_flat_error
+    event = {
+      "type" => "error",
+      "sessionID" => "ses_auth",
+      "error" => {
+        "type" => "provider.auth",
+        "message" => "This API key has expired. Create a new API key in OpenCode Console.",
+        "status" => 401
+      }
+    }
+
+    error = AgentCliRuntime.extract_provider_error(:opencode, event)
+
+    assert_equal :opencode, error[:provider]
+    assert_includes error[:message], "This API key has expired"
+    assert_nil AgentCliRuntime.extract_provider_error(
+      :opencode, { "type" => "error", "error" => { "type" => "unknown", "message" => " " } }
+    )
+  end
+
   def test_ordinary_events_are_not_errors
     [
       { "type" => "result", "is_error" => false, "message" => "done" },

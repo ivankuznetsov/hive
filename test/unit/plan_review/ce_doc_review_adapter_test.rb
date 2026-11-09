@@ -37,6 +37,28 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     assert_equal runner, adapter.instance_variable_get(:@capability_probe).receiver
   end
 
+  def test_codex_reviewer_without_a_served_model_keeps_the_openai_family
+    # Production regression: a Codex gpt-6-astra adversary's result carried
+    # an empty :model (Codex --json names no served model), the configured
+    # family was dropped, and plan review blocked on reviewer_family_unknown.
+    runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(task: nil, cfg: Hive::Config::DEFAULTS)
+    request = Struct.new(:reviewer).new(
+      { "provider" => "codex", "model" => "gpt-6-astra", "family" => "openai",
+        "effort" => "high", "route" => "native_codex" }
+    )
+
+    with_tmp_dir do |home|
+      with_env("CODEX_HOME" => home) do
+        normalized = runner.send(:normalize_result, { status: :ok, model: nil }, request)
+        assert_equal "openai", normalized.fetch("actual_route").fetch("family")
+
+        File.write(File.join(home, "config.toml"), "model_provider = \"ollama\"\n")
+        normalized = runner.send(:normalize_result, { status: :ok, model: nil }, request)
+        refute normalized.fetch("actual_route").key?("family")
+      end
+    end
+  end
+
   def test_hive_runner_capability_probe_degrades_profile_faults_to_unsupported
     runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
       task: nil, cfg: Hive::Config::DEFAULTS
@@ -207,6 +229,9 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
       assert_equal request.reviewer, result.route_receipt.fetch("actual")
       assert_equal "different_model_family", result.route_receipt.fetch("independence_reason")
       assert_equal "parser", result.route_receipt.fetch("diagnostic_source")
+      assert_equal "invalid", JSON.parse(result.rejected_output).fetch("coverage"),
+                   "the refused bytes are kept for the operator"
+      refute result.to_h.key?("rejected_output"), "raw output is not part of the parsed result"
     end
   end
 
@@ -534,16 +559,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
           File.write(expected_output, JSON.generate(payload))
           { status: :ok, model: main_model, usage: { model: "helper-model" } }
         end
-        observed = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
-          runner.call(prompt: "review", cwd: request.output_directory, output_path:, request:)
+        observed = with_tmp_dir do |codex_home|
+          with_env("CODEX_HOME" => codex_home) do
+            with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+              runner.call(prompt: "review", cwd: request.output_directory, output_path:, request:)
+            end
+          end
         end
 
+        # The helper subagent's usage model is never the reviewer identity.
+        refute_equal "helper-model", observed.dig("actual_route", "model")
         if main_model
           assert_equal main_model, observed.dig("actual_route", "model")
           assert_equal request.reviewer["family"], observed.dig("actual_route", "family")
         else
           refute observed.fetch("actual_route").key?("model")
-          refute observed.fetch("actual_route").key?("family")
+          # Codex reports no served model; its built-in OpenAI provider
+          # (no replayed model_provider) attests the family by launch.
+          assert_equal "codex", request.reviewer["provider"]
+          assert_equal "openai", observed.dig("actual_route", "family")
         end
       end
     end

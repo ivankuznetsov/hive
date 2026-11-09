@@ -118,7 +118,8 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
       refute_equal first.record.review_id, second.record.review_id
       assert_equal first.record.review_id, second.record.prior_review_id
       assert_equal "cleared", second.record.state
-      assert_equal %w[primary adversarial verification], adapter.calls.map(&:kind)
+      # Standard-level reviews skip the adversarial leg by default.
+      assert_equal %w[primary verification], adapter.calls.map(&:kind)
       review_root = File.join(task.folder, "plan-review", "reviews")
       assert File.file?(File.join(review_root, first.record.review_id, "manifest.json"))
       assert File.file?(File.join(review_root, second.record.review_id, "manifest.json"))

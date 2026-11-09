@@ -87,6 +87,7 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        SQLiteSupport.raise_if_busy!(error)
         disconnect
         raise IntegrityError.new("runtime control-plane migration failed: #{error.message}",
                                  code: :migration_failed,
@@ -104,6 +105,9 @@ module Hive
         ensure
           @connection&.run("PRAGMA query_only = OFF")
         end
+      rescue Sequel::Error, SQLite3::Exception => error
+        SQLiteSupport.raise_if_busy!(error)
+        raise
       end
 
       # Inspection path for receipt dry-runs. It deliberately avoids
@@ -220,6 +224,7 @@ module Hive
             ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?
             prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
             @connection.run("PRAGMA busy_timeout = #{(sqlite_timeout * 1000).floor}") if prior
+            apply_contention_budget(@connection)
             begin
               @connection.transaction(mode: mode, rollback: :reraise) do
                 authorize_mutation!(@connection, authority: authority,
@@ -229,9 +234,13 @@ module Hive
               end
             ensure
               @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+              apply_contention_budget(@connection)
             end
           end
         end
+      rescue Sequel::Error, SQLite3::Exception => error
+        SQLiteSupport.raise_if_busy!(error)
+        raise
       end
 
       def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
@@ -256,6 +265,7 @@ module Hive
           ensure_open!(timeout_sec: timeout_sec)
           prior = integer_pragma(@connection, "busy_timeout")
           @connection.run("PRAGMA busy_timeout = #{timeout_ms}")
+          apply_contention_budget(@connection)
           row = @connection.fetch("PRAGMA wal_checkpoint(FULL)").first
           values = row.values.map { |value| Integer(value) }
           busy, log_frames, checkpointed_frames = values
@@ -265,6 +275,7 @@ module Hive
           }
         ensure
           @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+          apply_contention_budget(@connection)
         end
       end
 
@@ -346,6 +357,7 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        SQLiteSupport.raise_if_busy!(error)
         raise IntegrityError.new(
           "runtime quiescence upgrade failed: #{error.message}", code: :quiescence_upgrade_failed,
           action: BACKUP_ACTION, details: { error_class: error.class.name }
@@ -355,6 +367,17 @@ module Hive
         remove_file_if_present(temporary_path) if temporary_path && temporary_path != path
         remove_file_if_present("#{temporary_path}-wal") if temporary_path
         remove_file_if_present("#{temporary_path}-shm") if temporary_path
+      end
+
+      # Request authentication needs only this immutable row, not a database
+      # diagnosis or a ProcessGuard checkout. Re-read in a forked process.
+      def cached_installation_identity
+        cached = @cached_installation_identity
+        return cached.last if cached && cached.first == Process.pid
+
+        identity = inspect_database { |database| database[:installations].first }.freeze
+        @cached_installation_identity = [ Process.pid, identity ]
+        identity
       end
 
       def installation_identity
@@ -392,6 +415,7 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        SQLiteSupport.raise_if_busy!(error)
         storage_error = storage_error_for(error)
         raise storage_error if storage_error
 
@@ -418,6 +442,7 @@ module Hive
 
       def diagnostics = ProcessGuard.checkout { diagnostics_uncoordinated }
       def disconnect
+        @cached_installation_identity = nil
         connection = @connection
         @connection = nil
         @validated = false
@@ -430,6 +455,27 @@ module Hive
       def disconnected? = @connection.nil?
 
       private
+
+      def runtime_connection(**options)
+        budget = ContentionBudget.current
+        if budget
+          restore_timeout = options.fetch(:timeout)
+          # Sequel's adapter sets its integer timeout before after_connect.
+          # Its initial connection pragmas do not access the database file.
+          options = options.merge(timeout: 0, after_connect: ->(raw) {
+            budget.install(raw, restore_timeout_ms: restore_timeout)
+          })
+        end
+        Sequel.connect(**options)
+      rescue Sequel::Error, SQLite3::Exception => error
+        SQLiteSupport.raise_if_busy!(error)
+        raise
+      end
+
+      def apply_contention_budget(connection)
+        budget = ContentionBudget.current
+        connection.synchronize { |raw| budget.install(raw) } if connection && budget
+      end
 
       def operational_inspection_active?
         defined?(RuntimeControlPlane::OperationalInspection) &&
@@ -444,9 +490,10 @@ module Hive
       end
 
       def table_has_columns?(database, table, *columns)
-        database.table_exists?(table) &&
+        SQLiteSupport.table_exists?(database, table) &&
           columns.all? { |column| database.schema(table).any? { |entry| entry.first == column } }
-      rescue Sequel::Error
+      rescue Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         false
       end
 
@@ -457,10 +504,11 @@ module Hive
       end
 
       def first_row(database, table)
-        return unless database.table_exists?(table)
+        return unless SQLiteSupport.table_exists?(database, table)
 
         database[table].first
-      rescue Sequel::Error
+      rescue Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         nil
       end
 
@@ -468,7 +516,8 @@ module Hive
         return [] unless table_has_columns?(database, table, :state)
 
         database[table].where(state: states).all
-      rescue Sequel::Error
+      rescue Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         []
       end
 
@@ -476,7 +525,8 @@ module Hive
         return [] unless table_has_columns?(database, table, :state)
 
         database[table].exclude(state: state).all
-      rescue Sequel::Error
+      rescue Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         []
       end
 
@@ -527,6 +577,7 @@ module Hive
       rescue Error
         raise
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+        SQLiteSupport.raise_if_busy!(error)
         storage_error = storage_error_for(error)
         raise storage_error if storage_error
 
@@ -540,6 +591,7 @@ module Hive
       def ensure_open!(timeout_sec: nil)
         ensure_process_owner!
         open_uncoordinated!(timeout_sec: timeout_sec) unless @connection && @validated
+        apply_contention_budget(@connection)
       end
 
       def open_uncoordinated!(timeout_sec: nil)
@@ -566,11 +618,14 @@ module Hive
       end
 
       def connect!(timeout_sec: nil)
-        return @connection if @connection
+        if @connection
+          apply_contention_budget(@connection)
+          return @connection
+        end
         validate_database_custody!
         timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
           [ (Float(timeout_sec) * 1000).floor, 0 ].max
-        @connection = Sequel.connect(adapter: "sqlite", database: path, max_connections: 1,
+        @connection = runtime_connection(adapter: "sqlite", database: path, max_connections: 1,
                                      timeout: timeout_ms, disable_dqs: true)
         ProcessGuard.register(self)
         journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
@@ -590,6 +645,7 @@ module Hive
       rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
         storage_error = storage_error_for(error)
         disconnect_preserving_error
+        SQLiteSupport.raise_if_busy!(error)
         raise storage_error if storage_error
 
         raise
@@ -599,7 +655,7 @@ module Hive
         timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
           [ (Float(timeout_sec) * 1000).floor, 0 ].max
         unless sidecar_policy
-          database = Sequel.connect(adapter: "sqlite", database: path, readonly: true,
+          database = runtime_connection(adapter: "sqlite", database: path, readonly: true,
                                     max_connections: 1, timeout: timeout_ms, disable_dqs: true)
           return yield database
         end
@@ -622,7 +678,7 @@ module Hive
         end
 
         begin
-          database = Sequel.connect(**options)
+          database = runtime_connection(**options)
           if immutable && inspection_sidecars.any? { |_candidate, status| status }
             raise Unavailable.new(
               "Hive state is mounted read-only and sidecars appeared while immutable inspection was opening",
@@ -637,6 +693,7 @@ module Hive
         rescue Error
           raise
         rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => error
+          SQLiteSupport.raise_if_busy!(error)
           storage_error = storage_error_for(error)
           raise storage_error if storage_error
 
@@ -644,6 +701,9 @@ module Hive
         end
 
         yield database
+      rescue Sequel::Error, SQLite3::Exception => error
+        SQLiteSupport.raise_if_busy!(error)
+        raise
       ensure
         disconnect_preserving_error(database)
       end
@@ -838,6 +898,7 @@ module Hive
       rescue Gem::Requirement::BadRequirementError, ArgumentError => error
         unavailable!(:sqlite_version_unsupported, "SQLite version is unreadable: #{error.message}")
       rescue Sequel::Error, SQLite3::Exception => error
+        SQLiteSupport.raise_if_busy!(error)
         unavailable!(:sqlite_feature_missing, "SQLite required-feature probe failed: #{error.message}",
                      error: error)
       ensure
@@ -958,7 +1019,8 @@ module Hive
              CommandSchema::EXPECTED_SCHEMA_SHA256 &&
            CommandSchema.version_ledger_exact?(database))
         base_valid && extension_valid
-      rescue Sequel::Error
+      rescue Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         false
       end
 
@@ -973,11 +1035,11 @@ module Hive
       end
 
       def copy_quiescence_source!(temporary_path, now:, preserve_lifecycle:)
-        source = Sequel.connect(
+        source = runtime_connection(
           adapter: "sqlite", database: path, readonly: true, max_connections: 1,
           timeout: @busy_timeout_ms, disable_dqs: true
         )
-        target = Sequel.connect(
+        target = runtime_connection(
           adapter: "sqlite", database: temporary_path, max_connections: 1,
           timeout: @busy_timeout_ms, disable_dqs: true
         )
@@ -992,7 +1054,7 @@ module Hive
             target[table].delete
           end
           retained.each do |table|
-            next unless source.table_exists?(table)
+            next unless SQLiteSupport.table_exists?(source, table)
 
             source_columns = source.schema(table).map(&:first)
             target_columns = target.schema(table).map(&:first)
@@ -1075,7 +1137,7 @@ module Hive
       end
 
       def checkpoint_upgrade_source!
-        source = Sequel.connect(
+        source = runtime_connection(
           adapter: "sqlite", database: path, max_connections: 1,
           timeout: @busy_timeout_ms, disable_dqs: true
         )
@@ -1163,10 +1225,11 @@ module Hive
       end
 
       def schema_version_for(database)
-        return unless database.table_exists?(:schema_info)
+        return unless SQLiteSupport.table_exists?(database, :schema_info)
         value = database[:schema_info].get(:version)
         value.nil? ? nil : Integer(value)
-      rescue ArgumentError, TypeError, Sequel::Error
+      rescue ArgumentError, TypeError, Sequel::Error => error
+        SQLiteSupport.raise_if_busy!(error)
         nil
       end
 

@@ -369,7 +369,8 @@ module Hive
 
         # Render a systemd unit from `template_path`, substituting the
         # resolved binary into ExecStart (with `exec_suffix` as the hive
-        # subcommand), HIVE_BIN, and PATH. systemd .service files are
+        # subcommand), HIVE_BIN, and PATH. Services always select their local
+        # installation independently of the saved client context. systemd files are
         # POSIX-shell-ish, so the resolved binary path is shell-escaped —
         # whitespace, `%`, or other specials would otherwise produce a
         # malformed unit. Shared by the daemon and web installers, which
@@ -378,7 +379,7 @@ module Hive
           template = File.read(template_path)
           escaped = Shellwords.escape(resolved_binary)
           template
-            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} #{exec_suffix}")
+            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} #{exec_suffix} --context local")
             .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
             .sub(/^Environment=PATH=.*$/, build_path_line)
         end

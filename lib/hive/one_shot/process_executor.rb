@@ -1,6 +1,7 @@
 require "json"
 require "shellwords"
 require "hive/config"
+require "hive/cli_argv_policy"
 require "hive/daemon/child_supervisor"
 require "hive/errors"
 require "hive/runtime_control_plane/command_registration"
@@ -71,7 +72,7 @@ module Hive
         # Register the child in the installation process registry (when this
         # invocation has one) so quiescence can account for it.
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: argv[1] || "one-shot-child",
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "one-shot-child",
           in: File::NULL, out: out_write, err: err_write, pgroup: true
         )
         Hive::RuntimeControlPlane::ProcessGuard.after_fork_parent!

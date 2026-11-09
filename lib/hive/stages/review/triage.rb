@@ -62,7 +62,12 @@ module Hive
 
         module_function
 
-        def run!(cfg:, ctx:)
+        # `limit_fallback` (a Review::LimitFallback::Decision) runs this
+        # triage on the substitute profile chosen after the primary hit a
+        # usage/credit limit. The primary's model/effort pins and `models:`
+        # routes are not applied to it: they name the primary provider's
+        # models, so the substitute runs on its own default model.
+        def run!(cfg:, ctx:, limit_fallback: nil)
           escalations = escalations_path(ctx)
           reviewer_files = discover_reviewer_files(ctx)
 
@@ -79,7 +84,7 @@ module Hive
           end
 
           template_name = resolve_template(cfg, ctx)
-          profile_name = cfg.dig("review", "triage", "agent") || "claude"
+          profile_name = limit_fallback&.fallback || primary_agent(cfg)
           profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
 
           prompt = render_prompt(
@@ -112,15 +117,11 @@ module Hive
             cwd: ctx.worktree_path,
             max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "review_triage", profile, default: 75),
             timeout_sec: cfg.dig("timeout_sec", "review_triage") || 1800,
-            log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
+            log_label: "review-triage-pass#{format('%02d', ctx.pass)}" \
+                       "#{"-fallback-#{limit_fallback.fallback}" if limit_fallback}",
             profile: profile,
             expected_output: escalations,
-            **Hive::Stages::Base.model_launch_arguments(
-              cfg, "review_triage", profile,
-              current: Hive::Stages::Base.model_routing_current(
-                cfg.dig("review", "triage")
-              )
-            ),
+            **triage_model_arguments(cfg, profile, limit_fallback),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists,
             agent_custody: agent_custody,
@@ -193,6 +194,20 @@ module Hive
               limit_text: spawn_result[:limit_text]
             )
           end
+        end
+
+        # Profile the triage role launches when no limit fallback applies.
+        def primary_agent(cfg)
+          cfg.dig("review", "triage", "agent") || "claude"
+        end
+
+        def triage_model_arguments(cfg, profile, limit_fallback)
+          return {} if limit_fallback
+
+          Hive::Stages::Base.model_launch_arguments(
+            cfg, "review_triage", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg.dig("review", "triage"))
+          )
         end
 
         # Best-effort delete of a partial escalations file written by a

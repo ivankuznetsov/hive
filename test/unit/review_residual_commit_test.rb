@@ -108,6 +108,19 @@ class ReviewResidualCommitTest < Minitest::Test
     assert_includes ci_hint, "resets at 2026-11-11T10:26:00Z"
     assert_includes ci_hint, "`review.ci.agent`"
     assert_includes Hive::ReviewResidualCommit.agent_profile_hint(fix, now: NOW), "`review.fix.agent`"
+    assert_includes ci_hint, "opt into `review.limit_fallback`"
+  end
+
+  def test_agent_profile_hint_names_an_already_failed_limit_fallback
+    attrs = { "phase" => "fix", "reason" => "limits_reached", "retry_after" => "2026-11-11T10:26:00Z",
+              "primary_agent" => "codex", "fallback_agent" => "claude" }
+    hint = Hive::ReviewResidualCommit.agent_profile_hint(
+      marker(:review_error, attrs.merge("fallback_outcome" => "limited")), now: NOW
+    )
+    assert_includes hint, "the configured limit fallback claude was tried and limited"
+    refute_includes hint, "opt into"
+    assert_includes Hive::ReviewResidualCommit.agent_profile_hint(marker(:review_error, attrs), now: NOW),
+                    "was tried and failed"
   end
 
   def test_agent_profile_hint_skips_short_hosted_unrelated_and_malformed_limits

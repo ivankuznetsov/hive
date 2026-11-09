@@ -4399,4 +4399,176 @@ class RunReviewTest < Minitest::Test
       end
     end
   end
+
+  # --- review.limit_fallback ------------------------------------------------
+
+  LIMIT_FALLBACK_CFG = {
+    "review" => {
+      "limit_fallback" => {
+        "enabled" => true, "min_wait_sec" => 3600,
+        "agents" => { "claude" => "codex", "codex" => "claude" }
+      }
+    }
+  }.freeze
+
+  def seed_fix_ready_pass(folder)
+    FileUtils.mkdir_p(File.join(folder, "reviews"))
+    File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+    Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+  end
+
+  def limit_spawn_result
+    { status: :error, error_message: "limits reached for claude: You've hit your usage limit.",
+      limit_text: "You've hit your usage limit. Try again at Nov 11th." }
+  end
+
+  def run_with_fix_spawns(folder, responses)
+    seen = []
+    spawn = lambda do |_task, _cfg, _ctx, accepted:, identity: nil, agent_custody: nil, limit_fallback: nil|
+      seen << [ identity, limit_fallback ]
+      response = responses.shift
+      INVOKE_AGENT_CUSTODY.call(agent_custody) { response.call }
+    end
+    status = nil
+    err = nil
+    with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, spawn) do
+      _out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+    end
+    [ status, seen, err ]
+  end
+
+  def test_fix_limit_falls_back_and_records_the_substitution
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: LIMIT_FALLBACK_CFG)
+        seed_fix_ready_pass(folder)
+
+        status, seen, err = run_with_fix_spawns(folder, [ -> { limit_spawn_result }, -> { { status: :ok } } ])
+
+        assert_equal 0, status
+        assert_equal :review_complete, Hive::Markers.current(File.join(folder, "task.md")).name
+        primary_identity, = seen.first
+        fallback_identity, decision = seen.last
+        assert_nil fallback_identity, "the substitute launch must not reuse the primary's pinned identity"
+        assert_equal "fix", decision.phase
+        refute_equal decision.primary, decision.fallback
+        entry = JSON.parse(File.read(Hive::Stages::Review::LimitFallback.receipt_path(folder, 1)).lines.first)
+        assert_equal [ "fix", "used" ], entry.values_at("role", "outcome")
+        assert_match(/limit fallback: fix: .* hit a usage\/credit limit/, err)
+        assert_match(/bypassing .* pinned/, err) if primary_identity
+      end
+    end
+  end
+
+  def test_fix_fallback_also_limited_keeps_limits_reached_and_names_the_attempt
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: LIMIT_FALLBACK_CFG)
+        seed_fix_ready_pass(folder)
+
+        status, seen, = run_with_fix_spawns(folder, [ -> { limit_spawn_result }, -> { limit_spawn_result } ])
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_equal 2, seen.length
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal [ :review_error, "fix", "limits_reached", "limited" ],
+                     [ marker.name, marker.attrs["phase"], marker.attrs["reason"], marker.attrs["fallback_outcome"] ]
+        assert_equal seen.last.last.fallback, marker.attrs["fallback_agent"]
+        assert_equal seen.last.last.primary, marker.attrs["primary_agent"]
+      end
+    end
+  end
+
+  def test_fix_fallback_tamper_is_terminal
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: LIMIT_FALLBACK_CFG)
+        seed_fix_ready_pass(folder)
+        plan_path = File.join(folder, "plan.md")
+        tamper = lambda do
+          File.write(plan_path, "## Tampered\n", mode: "a")
+          { status: :ok }
+        end
+
+        status, = run_with_fix_spawns(folder, [ -> { limit_spawn_result }, tamper ])
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal "fix_tampered", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_fix_limit_without_fallback_option_is_unchanged
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        seed_fix_ready_pass(folder)
+
+        status, seen, = run_with_fix_spawns(folder, [ -> { limit_spawn_result } ])
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        assert_equal [ nil ], seen.map(&:last)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal "limits_reached", marker.attrs["reason"]
+        refute marker.attrs.key?("fallback_agent")
+        refute File.exist?(Hive::Stages::Review::LimitFallback.receipt_path(folder, 1))
+      end
+    end
+  end
+
+  def failed_fallback_decision(phase)
+    Hive::Stages::Review::LimitFallback::Decision.new(
+      phase: phase, role: phase, primary: "codex", fallback: "claude", retry_after: nil, limit_detail: "limit"
+    )
+  end
+
+  def test_reviewers_limit_marker_names_the_failed_fallback
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: LIMIT_FALLBACK_CFG)
+        decision = failed_fallback_decision("reviewers")
+        reviewer_stub = lambda do |_cfg, ctx, _task, limit_texts:, **_kwargs|
+          Hive::Stages::Review::LimitFallback.record!(task_folder: ctx.task_folder, pass: ctx.pass,
+                                                      decision: decision, outcome: "limited")
+          limit_texts << "You've hit your usage limit."
+          :all_failed_limit
+        end
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, reviewer_stub) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal %w[reviewers limits_reached codex claude limited],
+                     marker.attrs.values_at("phase", "reason", "primary_agent", "fallback_agent", "fallback_outcome")
+      end
+    end
+  end
+
+  def test_ci_limit_marker_names_the_failed_fallback
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: LIMIT_FALLBACK_CFG)
+        decision = failed_fallback_decision("ci")
+        ci_stub = lambda do |ctx:, **_kwargs|
+          Hive::Stages::Review::LimitFallback.record!(task_folder: ctx.task_folder, pass: ctx.pass,
+                                                      decision: decision, outcome: "failed")
+          Hive::Stages::Review::CiFix::Result.new(
+            status: :error, attempts: 1, last_output: "red",
+            error_message: "limits reached for codex: You've hit your usage limit.",
+            limit_text: "You've hit your usage limit."
+          )
+        end
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ci_stub) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal %w[ci limits_reached codex claude failed],
+                     marker.attrs.values_at("phase", "reason", "primary_agent", "fallback_agent", "fallback_outcome")
+      end
+    end
+  end
 end

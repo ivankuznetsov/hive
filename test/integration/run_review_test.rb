@@ -2859,6 +2859,70 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # A reviewer-clean pass that stopped at its completion CI gate
+  # (REVIEW_CI_STALE) leaves escalations-NN.md without fix-success-NN.md, so
+  # the retry classifies it :fix_incomplete. Phase 4 never ran and HEAD still
+  # equals the prior pass's receipt, so publication must not be withheld.
+  def seed_ci_stale_clean_pass(folder, worktree)
+    head = review_head(worktree)
+    seed_completed_review_pass(folder, 1, head: head)
+    seed_completed_review_pass(folder, 2, head: head)
+    File.write(File.join(folder, "reviews", "fix-success-02.md"),
+      "<!-- HIVE: fix-success sentinel; head=#{head} kind=fixed -->\n")
+    File.write(File.join(folder, "reviews", "stub-reviewer-03.md"), "## Medium\n- [ ] deferred nit\n")
+    File.write(File.join(folder, "reviews", "escalations-03.md"), "# Escalations\n")
+    head
+  end
+
+  def test_retry_after_ci_stale_on_a_clean_pass_publishes_the_receipted_head
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 3, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        head = seed_ci_stale_clean_pass(folder, worktree)
+        assert_equal :fix_incomplete, Hive::Stages::Review.pass_completion_status(folder, 3)
+        spawns = install_committing_fix_driver(worktree)
+        with_review_pr(folder, worktree) do
+          passes, ci_calls = drive_review_loop(folder, worktree, findings: {})
+          assert_empty passes, "the retry resumes pass 3 without re-running reviewers"
+          assert_equal [ [ 1, head ] ], ci_calls, "the entry gate proves the unchanged receipted head"
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name, marker.attrs.inspect
+        assert_equal "3", marker.attrs.fetch("pass")
+        assert_equal 0, spawns.call
+        assert_match(/head=#{head} kind=clean/, File.read(File.join(folder, "reviews", "fix-success-03.md")))
+      end
+    end
+  end
+
+  def test_retry_after_ci_stale_still_withholds_unreceipted_head_movement
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 3, "reviewers" => [ STUB_REVIEWER_SPEC ] }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        seed_ci_stale_clean_pass(folder, worktree)
+        # An interrupted Phase 4 could have committed before dying: HEAD no
+        # longer matches any guardrail receipt, so the retry stays withheld.
+        File.write(File.join(worktree, "unreceipted.txt"), "interrupted fix\n")
+        run!("git", "-C", worktree, "add", "unreceipted.txt")
+        run!("git", "-C", worktree, "commit", "-qm", "interrupted fix")
+        with_review_pr(folder, worktree) do |published|
+          drive_review_loop(folder, worktree, findings: {}, expect_error: true)
+          assert_empty published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "review_publication_withheld", marker.attrs["reason"]
+        assert_equal "fix_guardrail_receipt_required", marker.attrs["publication_reason"]
+      end
+    end
+  end
+
   def test_interrupted_fix_phase_with_no_findings_records_a_clean_pass
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -7,6 +7,7 @@ require "hive/attempts/evidence_channel"
 require "hive/attempts/memory_limit"
 require "hive/attempts/command_progress"
 require "hive/attempts/repository"
+require "hive/attempts/scope_reaper"
 require "hive/attempts/stream_log"
 require "hive/lock"
 require "hive/patrol_fix/attempt_diagnostic"
@@ -37,7 +38,8 @@ module Hive
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      install_signal_handlers: false, process_registry: nil,
                      reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"],
-                     oom_kill_counter: -> { MemoryLimit.oom_kill_count })
+                     oom_kill_counter: -> { MemoryLimit.oom_kill_count },
+                     scope_reaper: nil)
         @store = store
         @attempt_id = attempt_id
         @claim_io = claim_io
@@ -54,6 +56,8 @@ module Hive
         @process_registry = process_registry
         @reservation_id = reservation_id
         @oom_kill_counter = oom_kill_counter
+        @scope_reaper = scope_reaper || ScopeReaper.new(attempt_id: attempt_id)
+        @scope_reaped = false
         @failure_reason = nil
         @wrapper_registered = false
         @ready_sent = false
@@ -93,6 +97,7 @@ module Hive
         install_signal_handlers! if @install_signal_handlers
 
         exit_status, outcome, record, provider_signal, diagnostic_frame = run_worker(record, log)
+        reap_scope_leftovers(log)
         log.close
         log_reference = OutputReference.build(log.path, root: @store.root)
         if provider_signal
@@ -143,6 +148,7 @@ module Hive
         Hive::ExitCodes::TEMPFAIL
       rescue StandardError => e
         terminate_worker_group
+        reap_scope_leftovers(log)
         begin
           log&.append(:supervisor, "hive attempt supervisor failed: #{e.class}: #{e.message}\n")
           log&.close
@@ -167,6 +173,7 @@ module Hive
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => e.message)
         Hive::ExitCodes::SOFTWARE
       ensure
+        reap_scope_leftovers(log)
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => "wrapper_exited")
         @ready_io&.close unless @ready_io&.closed?
         @claim_io&.close unless @claim_io&.closed?
@@ -175,6 +182,24 @@ module Hive
       end
 
       private
+
+      # Once the worker is gone nothing else may keep the attempt's scope
+      # alive: a leftover (podman's conmon, a daemon an agent started with
+      # setsid) holds the scope `active` after the attempt is terminal and
+      # blocks anything that waits for attempt scopes to drain. Runs on every
+      # exit path, at most once, and records what it killed in the attempt
+      # log so an operator can see it. Never raises.
+      def reap_scope_leftovers(log)
+        return if @scope_reaped
+
+        @scope_reaped = true
+        result = @scope_reaper.reap(term_grace_sec: effective_kill_grace)
+        return unless result.notable?
+
+        log.append(:supervisor, result.journal_line) if log && !log.closed?
+      rescue StandardError
+        nil
+      end
 
       def register_wrapper!
         registry.register!(

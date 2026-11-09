@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
@@ -50,6 +50,32 @@ is separate from the hosted evidence above. The correction is included in the
 published canonical commit and PR linked above; canonical hosted proof and
 merge remain pending.
 
+## Authenticated release downloads (2026-11-09)
+
+- Not verified: whether an authenticated `github.com/.../releases/download/...`
+  request is exempt from GitHub's anonymous-traffic throttling. The 302 is
+  served by `github.com` (where the token is sent); the asset itself is served
+  by `release-assets.githubusercontent.com`, which never receives the token, so
+  auth may only help the first hop. The bounded curl retry is the part that
+  covers the CDN hop.
+- The install CI cosign download is now authenticated (`gh release download`
+  through the API asset endpoint with the job token, 5 attempts, pinned
+  SHA-256), via `.github/actions/install-cosign`. Still open:
+  - The checksum digests are trusted from the upstream release's unsigned
+    `cosign_checksums.txt`. They are cross-checked only against the identical
+    digests that cosign-installer v3 hardcoded. They are not verified with
+    sigstore's signature.
+  - The action supports Linux X64/ARM64 only. macOS jobs don't use it.
+  - Moving to a newer cosign means updating the version and both digests by
+    hand.
+  - Even an authenticated API asset download redirects to the release-asset
+    CDN, so a CDN-side outage longer than the ~75s of backoff still fails.
+- `release.yml` still pins cosign-installer v3.10.1 for signing, so its
+  bootstrap download is still anonymous. It was not changed.
+- The token is attached only when `curl --version` reports >= 7.83. Distro
+  curls that backport the redirect fixes without bumping the version stay
+  anonymous. Curl builds that report a version they do not have are trusted.
+
 ## Attempt memory cap (2026-11-08)
 
 - `memory_limit_exceeded` is recorded in the attempt log and in synthesized
@@ -70,6 +96,30 @@ merge remain pending.
   intended behavior. This has been verified only on systemd 262.
 - `oom_kill` is a cumulative counter for the scope, so concurrent descendant
   kills just before the worker's own `SIGKILL` are attributed to it.
+
+## Attempt scope leftover reaping (2026-11-09)
+
+- What was reaped is recorded in the attempt log only. The terminal receipt
+  has an exact key set (`receipt_version` 2), so a structured
+  `scope_leftovers` field would need a receipt version bump.
+- Killing podman's `conmon` skips podman's own exit cleanup, so the
+  container can stay in podman's state as `Exited` or `Stopping` until the
+  next `podman` command repairs it. The container's processes are killed
+  only when they share the attempt scope's cgroup. Under the systemd
+  cgroup manager they run in a separate `libpod-*.scope`, which this reaper
+  never touches, so a container can outlive the attempt there. Not verified
+  against a live podman run.
+- Pid reuse between the membership read and the signal is narrowed by a
+  `/proc/<pid>/cgroup` re-check, not closed. Closing it needs pidfds or
+  cgroup v2 `cgroup.kill` on a sub-cgroup that excludes the supervisor.
+- Attempts started by an older supervisor, or ones whose supervisor is
+  killed with SIGKILL, still leave their leftovers behind. No sweeper
+  reaps orphaned `hive-attempt-*` scopes whose attempt record is terminal,
+  and no status surface lists them.
+- The hivedev window that failed on 2026-11-09 08:20-08:31 recorded Hive
+  status `running=3`/`live=3`, and the user journal shows other attempt
+  scopes really active at the time. So that drain timeout may have been
+  counting live attempts, not only the leftover scope.
 
 ## Review base-conflict gate and rewind archive (2026-11-08)
 

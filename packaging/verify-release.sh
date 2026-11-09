@@ -319,10 +319,47 @@ WEB_BUNDLE="hive-web-${HIVE_VERSION#v}.tar.gz"
 WEB_TRUST_DIR="$PREFIX/web-trust"
 RELEASE_BASE="https://github.com/ivankuznetsov/hive/releases/download/${HIVE_VERSION}"
 mkdir -p "$WEB_TRUST_DIR"
-curl -fsSL "$RELEASE_BASE/$WEB_BUNDLE" -o "$WEB_TRUST_DIR/$WEB_BUNDLE"
-curl -fsSL "$RELEASE_BASE/SHA256SUMS" -o "$WEB_TRUST_DIR/SHA256SUMS"
-curl -fsSL "$RELEASE_BASE/SHA256SUMS.sig" -o "$WEB_TRUST_DIR/SHA256SUMS.sig"
-curl -fsSL "$RELEASE_BASE/SHA256SUMS.pem" -o "$WEB_TRUST_DIR/SHA256SUMS.pem"
+
+# Same download policy as install.sh: bounded retries for transient GitHub
+# failures (HTTP 408/429/5xx, timeouts), plus optional GITHUB_TOKEN/GH_TOKEN
+# auth sent only to https://github.com and only with a curl (>= 7.83) that
+# drops custom Authorization headers on cross-origin redirects, so the
+# redirected release-asset host never receives the token. The header is fed
+# via process substitution so the token never appears in argv. A token GitHub
+# rejects (401/403) falls back to one anonymous attempt.
+RELEASE_CURL_RETRY_ARGS=(--retry 4 --retry-delay 5 --retry-max-time 60)
+RELEASE_AUTH_TOKEN="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+if [[ -n "$RELEASE_AUTH_TOKEN" && "$RELEASE_AUTH_TOKEN" =~ [[:space:][:cntrl:]] ]]; then
+  echo "verify-release: ignoring malformed GitHub token; downloading anonymously" >&2
+  RELEASE_AUTH_TOKEN=""
+fi
+release_curl_auth_safe() {
+  local version major minor
+  version="$(curl --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
+  major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 7 || (major == 7 && minor >= 83) ))
+}
+release_fetch() {
+  local url="$1" out="$2" code
+  if [[ -n "$RELEASE_AUTH_TOKEN" && "$url" == https://github.com/* ]] && release_curl_auth_safe; then
+    code="$(curl -sSL "${RELEASE_CURL_RETRY_ARGS[@]}" --proto-redir =https \
+      -H @<(printf 'Authorization: Bearer %s\n' "$RELEASE_AUTH_TOKEN") \
+      -o "$out" -w '%{http_code}' "$url")" || true
+    case "$code" in
+      2??) return 0 ;;
+      401|403) echo "verify-release: GitHub rejected the configured token (HTTP ${code}); retrying anonymously" >&2 ;;
+      *) echo "verify-release: could not fetch ${url} (HTTP ${code:-000})" >&2; return 1 ;;
+    esac
+  fi
+  curl -fsSL "${RELEASE_CURL_RETRY_ARGS[@]}" "$url" -o "$out"
+}
+release_fetch "$RELEASE_BASE/$WEB_BUNDLE" "$WEB_TRUST_DIR/$WEB_BUNDLE"
+release_fetch "$RELEASE_BASE/SHA256SUMS" "$WEB_TRUST_DIR/SHA256SUMS"
+release_fetch "$RELEASE_BASE/SHA256SUMS.sig" "$WEB_TRUST_DIR/SHA256SUMS.sig"
+release_fetch "$RELEASE_BASE/SHA256SUMS.pem" "$WEB_TRUST_DIR/SHA256SUMS.pem"
 cosign verify-blob \
   --certificate "$WEB_TRUST_DIR/SHA256SUMS.pem" \
   --signature "$WEB_TRUST_DIR/SHA256SUMS.sig" \

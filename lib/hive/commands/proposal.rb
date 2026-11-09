@@ -16,10 +16,13 @@ require "hive/proposals/query"
 require "hive/proposals/reconciler"
 require "hive/task_resolver"
 require "hive/attempts/api"
+require "hive/attempts/command_dispatch"
 
 module Hive
   module Commands
     class Proposal
+      include Hive::Attempts::CommandDispatch
+
       MAX_INPUT_BYTES = 256 * 1024
       SOURCE_COMMANDS = %w[submit evaluate].freeze
       READ_COMMANDS = %w[list show filter].freeze
@@ -607,12 +610,15 @@ module Hive
         Hive::Proposals::Producer.for_task(project_root: task.project_root, task: task)
       end
 
+      # The worker re-enters this command inside the admitted attempt; its exit
+      # status and JSON output follow the shared durable attach-result policy.
       def dispatch_source_command(task)
-        (@attempts_api || Hive::Attempts::API.new).dispatch(
+        result = (@attempts_api || Hive::Attempts::API.new).dispatch(
           task:, intended_stage: "#{task.stage_index}-#{task.stage_name}",
           argv: source_worker_argv(task), interactive: true,
           proposal_admission: source_admission(task)
         )
+        interpret_durable_result!(result)
       end
 
       def source_admission(task)

@@ -197,7 +197,11 @@ module Hive
           require "hive/workflows"
           verb = argv[1].to_s
           evidence_rework = verb == "evidence" && argv[2].to_s == "rework"
-          target = argv[evidence_rework || verb == "act" ? 3 : 2].to_s
+          # `hive proposal submit|evaluate TASK` source workers bind to the
+          # task's current stage, like approve; other proposal subcommands
+          # never run as attempts and fall through to fail closed.
+          proposal_source = verb == "proposal" && %w[submit evaluate].include?(argv[2].to_s)
+          target = argv[evidence_rework || proposal_source || verb == "act" ? 3 : 2].to_s
           if verb == "act"
             project, target = target.split(":", 2)
             raise RepositoryError, "remote action project does not match admission" unless project == record["project"]
@@ -208,7 +212,7 @@ module Hive
           intended_stage = if verb == "act"
             require "hive/operational_action"
             Hive::OperationalAction.intended_stage_for(task, action_id: argv[2])
-          elsif evidence_rework || %w[run approve plan-review-run].include?(verb)
+          elsif evidence_rework || proposal_source || %w[run approve plan-review-run].include?(verb)
             "#{task.stage_index}-#{task.stage_name}"
           else
             Hive::Workflows.for_verb(verb).fetch(:target)

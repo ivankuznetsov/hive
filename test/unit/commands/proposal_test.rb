@@ -2,6 +2,8 @@ require "test_helper"
 require "json_schemer"
 require "hive/commands/proposal"
 require "hive/schemas"
+require "hive/attempts/context"
+require "hive/attempts/contracts"
 
 class ProposalCommandTest < Minitest::Test
   include HiveTestHelper
@@ -98,10 +100,11 @@ class ProposalCommandTest < Minitest::Test
         "evidence" => []
       ))
       dispatches = []
+      attached = attach_result(exit_status: 0)
       attempts = Object.new
       attempts.define_singleton_method(:dispatch) do |**attributes|
         dispatches << attributes
-        :attached
+        attached
       end
       missing_binding = lambda do |_task|
         raise Hive::Proposals::MissingBinding, "durable attempt has no proposal subject binding"
@@ -116,7 +119,7 @@ class ProposalCommandTest < Minitest::Test
         }
       ).call
 
-      assert_equal :attached, result
+      assert_same attached, result
       assert_equal 1, dispatches.length
       dispatch = dispatches.first
       assert_equal task, dispatch.fetch(:task)
@@ -128,6 +131,76 @@ class ProposalCommandTest < Minitest::Test
       assert_nil admission.fetch("evaluator_identity")
       assert_includes dispatch.fetch(:argv), "--subject"
       assert_includes dispatch.fetch(:argv), "agent-skills/reviewer"
+
+      # The supervised worker re-enters `hive proposal submit TASK ...`; its
+      # durable context must bind that argv to the admitted task and stage.
+      record = {
+        "project" => "demo", "task_id" => "42", "task_slug" => "task",
+        "intended_stage" => dispatch.fetch(:intended_stage)
+      }
+      resolved = []
+      resolver = Struct.new(:task) { def resolve = task }.new(task)
+      with_replaced_singleton_method(Hive::TaskResolver, :new, lambda { |target, **_options|
+        resolved << target
+        resolver
+      }) do
+        assert_nil Hive::Attempts::Context.send(
+          :validate_task_binding!, record, dispatch.fetch(:argv)
+        )
+        assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(
+            :validate_task_binding!, record.merge("intended_stage" => "3-plan"),
+            dispatch.fetch(:argv)
+          )
+        end
+        assert_raises(Hive::Attempts::RepositoryError) do
+          Hive::Attempts::Context.send(
+            :validate_task_binding!, record, [ "hive", "proposal", "list", folder ]
+          )
+        end
+      end
+      assert_equal [ folder, folder, "list" ], resolved
+    end
+  end
+
+  def test_failed_source_worker_propagates_its_exit_status
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        project_root: dir, folder:, id: 42, slug: "task",
+        stage_index: 4, stage_name: "execute"
+      )
+      input = File.join(dir, "candidate.json")
+      File.write(input, JSON.generate(
+        "proposed_change" => "Change review", "motivation" => "Improve recall",
+        "evidence" => []
+      ))
+      build = lambda do |result, json: false|
+        attempts = Object.new
+        attempts.define_singleton_method(:dispatch) { |**_attributes| result }
+        Hive::Commands::Proposal.new(
+          "submit", "task", input:, json:, stdout: StringIO.new,
+          task_resolver: ->(_target, _project) { task },
+          producer_factory: lambda { |_task|
+            raise Hive::Proposals::MissingBinding, "durable attempt has no proposal subject binding"
+          },
+          reconciler: ->(_task) { }, attempts_api: attempts,
+          filters: {
+            "kind" => "skill", "subject" => "agent-skills/reviewer", "revision" => "v2"
+          }
+        )
+      end
+
+      exited = assert_raises(SystemExit) { build.call(attach_result(exit_status: 64)).call }
+      assert_equal 64, exited.status
+      silent = assert_raises(Hive::AttemptExecutionError) do
+        build.call(attach_result(exit_status: 65), json: true).call
+      end
+      assert_equal 65, silent.exit_code
+      assert_raises(Hive::ConcurrentRunError) do
+        build.call(attach_result(exit_status: 75, status: :lost)).call
+      end
     end
   end
 
@@ -164,10 +237,11 @@ class ProposalCommandTest < Minitest::Test
         "rationale" => "Measured", "evidence" => []
       ))
       dispatches = []
+      attached = attach_result(exit_status: 0)
       attempts = Object.new
       attempts.define_singleton_method(:dispatch) do |**attributes|
         dispatches << attributes
-        :attached
+        attached
       end
       missing_binding = lambda do |_task|
         raise Hive::Proposals::MissingBinding, "durable attempt has no proposal subject binding"
@@ -180,7 +254,7 @@ class ProposalCommandTest < Minitest::Test
         filters: { "evaluator" => "benchmark-reviewer" }, proposal_id:
       ).call
 
-      assert_equal :attached, result
+      assert_same attached, result
       admission = dispatches.first.fetch(:proposal_admission)
       assert_equal "workflow", admission.dig("subject", "kind")
       assert_equal "coding", admission.dig("subject", "reference")
@@ -533,6 +607,33 @@ class ProposalCommandTest < Minitest::Test
     previous.nil? ? ENV.delete("LLM_WIKI_REFRESH_BRANCH") : ENV["LLM_WIKI_REFRESH_BRANCH"] = previous
   end
 
+  def test_refresh_check_source_falls_back_to_state_head_when_the_published_pin_is_unusable
+    command = Hive::Commands::Proposal.new("refresh", nil, input: nil)
+    head = "a" * 40
+    pinned = "c" * 40
+    ops = Struct.new(:blob, :resolvable, :log_fails, keyword_init: true) do
+      define_method(:hive_state_head_sha) { "a" * 40 }
+      define_method(:hive_state_path) { "/state" }
+      define_method(:read_blob_at) { |_commit, _path, max_bytes:| blob }
+      define_method(:run_git!) do |*args|
+        raise Hive::GitError, "unknown source commit" if args.include?("rev-parse") && !resolvable
+        raise Hive::GitError, "log failed" if args.include?("log") && log_fails
+
+        args.include?("rev-parse") ? "#{'c' * 40}\n" : ""
+      end
+    end
+    published = JSON.generate("source_commit" => pinned)
+
+    assert_equal head, command.send(:current_check_source, ops.new(blob: "{not json"), "b" * 40)
+    assert_equal head, command.send(:current_check_source, ops.new(blob: published), "b" * 40)
+    assert_equal head, command.send(
+      :current_check_source, ops.new(blob: published, resolvable: true, log_fails: true), "b" * 40
+    )
+    assert_equal pinned, command.send(
+      :current_check_source, ops.new(blob: published, resolvable: true), "b" * 40
+    )
+  end
+
   def test_terminal_renderer_escapes_every_control_family
     command = Hive::Commands::Proposal.new("list", nil, input: nil)
     assert_equal "\\t\\n\\r\\u0001\\u007f", command.send(:terminal, "\t\n\r\u0001\u007f")
@@ -725,6 +826,13 @@ class ProposalCommandTest < Minitest::Test
   end
 
   private
+
+  def attach_result(exit_status:, status: :terminal)
+    Hive::Attempts::ClientResult.new(
+      status:, exit_status:, outcome: exit_status.zero? ? "success" : "failure",
+      receipt: nil, attempt_id: "attempt-proposal-source"
+    )
+  end
 
   def repository_snapshot(path)
     {

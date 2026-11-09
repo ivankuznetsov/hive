@@ -37,6 +37,13 @@ module Hive
           )
         end
         result = (@attempts_api || Hive::Attempts::API.new).dispatch(**attributes)
+        interpret_durable_result!(result)
+      end
+
+      # Applies the single attach-result policy to a foreground durable
+      # dispatch. Commands that need extra admission attributes dispatch
+      # themselves and then hand the attach result here.
+      def interpret_durable_result!(result)
         if @json && result.output_status == :expired
           raise Hive::ConcurrentRunError,
                 "raw output for successful durable attempt #{result.attempt_id} expired; " \

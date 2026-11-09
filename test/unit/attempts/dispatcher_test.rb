@@ -265,6 +265,11 @@ class AttemptsDispatcherTest < Minitest::Test
           argv.map { |value| value == "agent-skills/reviewer" ? "agent-skills/planner" : value },
           task
         )
+        assert_nil Hive::Attempts::CommandProgress.proposal_input_digest(argv.take(5))
+        unreadable = ->(*) { raise Errno::EACCES, input }
+        with_replaced_singleton_method(::Digest::SHA256, :file, unreadable) do
+          assert_nil Hive::Attempts::CommandProgress.proposal_input_digest(argv)
+        end
       end
     end
   end

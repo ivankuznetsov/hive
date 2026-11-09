@@ -227,7 +227,8 @@ module Hive
            (fix_success_head(task.folder, initial_disk_pass).nil? || fix_success_head(task.folder, initial_disk_pass) == @admissible_head)
           @withheld_reason = nil unless marker.attrs["reason"] == "fix_guardrail"
         elsif initial_pass <= (cfg.dig("review", "max_passes") || 3) &&
-              pass_completion_status(task.folder, initial_pass) == :fix_incomplete
+              pass_completion_status(task.folder, initial_pass) == :fix_incomplete &&
+              !prior_receipt_holds_head?(task.folder, initial_pass)
           @withheld_reason ||= "fix_guardrail_receipt_required"
         end
         @verify_mode = initial_pass > (cfg.dig("review", "max_passes") || 3)
@@ -1572,6 +1573,15 @@ module Hive
 
         FIX_SUCCESS_UNREVIEWED_KINDS.include?(fix_success_kind(task_folder, disk_pass)) &&
           fix_success_head(task_folder, disk_pass) == @admissible_head
+      end
+
+      # A :fix_incomplete pass whose HEAD still equals the previous pass's
+      # receipt has no commit that escaped the fix guardrail: Phase 4 never
+      # moved HEAD (e.g. a reviewer-clean pass stopped at its completion CI
+      # gate). Any Phase 4 that does run re-withholds until its own receipt.
+      def prior_receipt_holds_head?(task_folder, pass)
+        head = fix_success_head(task_folder, pass - 1)
+        !head.nil? && head == @admissible_head
       end
 
       def completed_pass_receipt?(task_folder, pass)

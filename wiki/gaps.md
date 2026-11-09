@@ -2273,3 +2273,12 @@ guarded update-branch before merge, and generation-scoped review pass counters
 after backward recovery into `6-review` — remain open. Finalize's summary.md
 gate treats a legacy `summary.md` without a recorded `head_oid` as drift and
 re-runs finalize once; no live task has been observed in that shape.
+
+## Review publication PR-head lag bound (2026-11-09)
+
+Exact-head confirmation after a review or CI-repair push waits at most about
+19 seconds (1+2+3+5+8) for GitHub's PR `headRefOid` to reach the pushed head.
+Observed lag on PR #1419 was under 3 seconds; GitHub documents no upper bound.
+A longer lag still ends `pr_head_moved`, and a workflow retry confirms the
+already-pushed head. A record anchor left stale by earlier review pushes is an
+ancestor of the hosted head, so the next review push admits and advances it.

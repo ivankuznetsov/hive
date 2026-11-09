@@ -763,6 +763,98 @@ class GithubPublicationTest < Minitest::Test
     end
   end
 
+  def test_fast_forward_publication_advances_the_anchor_after_observing_the_push
+    with_published_revision do |repo, remote, original, revised, controller, _github|
+      push = ->(head) { capture("git", "-C", repo, "push", "origin", "#{head}:#{original.branch}") }
+      # An interrupted attempt leaves its intent; the remote still hosts its
+      # before_oid, so a later head supersedes it rather than blocking.
+      assert_raises(IOError) do
+        controller.publish_fast_forward!(worktree_path: repo, branch: original.branch,
+                                         before_oid: original.head_oid, after_oid: revised.head_oid) do
+          raise IOError, "interrupted before the push"
+        end
+      end
+      assert_equal({ "before_oid" => original.head_oid, "after_oid" => revised.head_oid },
+                   JSON.parse(File.read(state_path(repo))).fetch("pending_rewrite"))
+      second = commit(repo, "second.txt", "second\n", "Second repair")
+      assert_equal :pushed, controller.publish_fast_forward!(
+        worktree_path: repo, branch: original.branch, before_oid: original.head_oid, after_oid: second
+      ) { push.call(second) && :pushed }
+      state = JSON.parse(File.read(state_path(repo)))
+      assert_equal second, state.fetch("published_head_oid")
+      refute state.key?("pending_rewrite")
+
+      # A lost acknowledgement is recorded by the next fast-forward.
+      third = commit(repo, "third.txt", "third\n", "Third repair")
+      assert_raises(IOError) do
+        controller.publish_fast_forward!(worktree_path: repo, branch: original.branch,
+                                         before_oid: second, after_oid: third) do
+          push.call(third)
+          raise IOError, "lost acknowledgement"
+        end
+      end
+      fourth = commit(repo, "fourth.txt", "fourth\n", "Fourth repair")
+      controller.publish_fast_forward!(worktree_path: repo, branch: original.branch,
+                                       before_oid: third, after_oid: fourth) { push.call(fourth) }
+      assert_equal fourth, JSON.parse(File.read(state_path(repo))).fetch("published_head_oid")
+      assert_equal fourth, remote_oid(remote, original.branch)
+    end
+  end
+
+  def test_fast_forward_publication_fails_closed_on_unrecorded_history
+    with_published_revision do |repo, _remote, original, revised, controller, _github|
+      blocked = lambda do |overrides|
+        values = { worktree_path: repo, branch: original.branch,
+                   before_oid: original.head_oid, after_oid: revised.head_oid }.merge(overrides)
+        error = assert_raises(Hive::GithubPublication::Blocked) do
+          controller.publish_fast_forward!(**values) { flunk "blocked publication must not push" }
+        end
+        assert_equal "revision_history_rewritten", error.code
+      end
+      blocked.call({ branch: "foreign" })
+      rewritten = capture("git", "-C", repo, "commit-tree", "#{revised.head_oid}^{tree}",
+                          "-p", original.creation_base_oid, "-m", "External rewrite").strip
+      blocked.call({ before_oid: rewritten })
+      blocked.call({ after_oid: rewritten })
+      state = JSON.parse(File.read(state_path(repo)))
+      controller.send(:write_state, state.merge("pending_rewrite" => { "before_oid" => "e" * 40, "after_oid" => "f" * 40 }))
+      blocked.call({})
+    end
+  end
+
+  def test_fast_forward_publication_retains_intent_when_the_push_is_unobservable
+    with_published_revision do |repo, remote, original, revised, _controller, github|
+      observed = false
+      git = Hive::GithubPublication::GitGateway.new(remote: remote, allow_local_transport: true)
+      git.define_singleton_method(:observe) do |**values|
+        raise Hive::AgentGitGate::CommandFailed, "ls-remote failed" if observed
+
+        super(**values)
+      end
+      unobservable = controller_for(repo, remote, github, git_gateway: git)
+      result = unobservable.publish_fast_forward!(worktree_path: repo, branch: original.branch,
+                                                  before_oid: original.head_oid, after_oid: revised.head_oid) do
+        capture("git", "-C", repo, "push", "origin", "#{revised.head_oid}:#{original.branch}")
+        observed = true
+        :pushed
+      end
+      assert_equal :pushed, result
+      state = JSON.parse(File.read(state_path(repo)))
+      assert_equal({ "before_oid" => original.head_oid, "after_oid" => revised.head_oid }, state.fetch("pending_rewrite"))
+      refute state.key?("published_head_oid")
+    end
+  end
+
+  def test_fast_forward_without_a_publication_record_only_pushes
+    with_local_remote do |repo, remote, head|
+      controller = controller_for(repo, remote, FakeGithub.new)
+      assert_equal :pushed, controller.publish_fast_forward!(
+        worktree_path: repo, branch: "main", before_oid: head, after_oid: head
+      ) { :pushed }
+      refute File.exist?(state_path(repo))
+    end
+  end
+
   def test_rebase_without_a_publication_record_preserves_existing_push_behavior
     with_local_remote do |repo, remote, head|
       controller = controller_for(repo, remote, FakeGithub.new)

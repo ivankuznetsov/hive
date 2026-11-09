@@ -16,6 +16,23 @@ A lost push response is reconciled from that intent. GitHub and a local file
 cannot participate in one transaction; this is crash-resumable reconciliation,
 not a claim of cross-system atomicity.
 
+Review fix and hosted-CI repair pushes (`Review::Publication`) use the same
+anchor through `GithubPublication::Controller#publish_fast_forward!`: the exact
+`{before_oid, after_oid}` intent is written before the gate's leased push and
+`published_head_oid` advances once the remote branch is observed at the new
+head. The record must still admit the push (owned branch, anchor an ancestor of
+the leased remote head, new head a descendant of it); otherwise review fails
+closed with `publication_reason=publication_record_<code>`, for example
+`publication_record_revision_history_rewritten`. A previous intent is superseded
+only while the remote still hosts its `before_oid`; a lost acknowledgement is
+recorded by the next publication. Tasks without `github-publication.json`
+(ad-hoc reviews) keep the plain leased push.
+
+GitHub updates a PR's `headRefOid` asynchronously after a push. Exact-head
+confirmation therefore waits a bounded 1+2+3+5+8 seconds while the PR still
+reports a strict ancestor of the receipt-proven head. Any other head is an
+external move and reports `pr_head_moved` immediately.
+
 Unknown external rewrites remain inspection-required. After comparing the old
 and current patches, an operator can use:
 

@@ -956,6 +956,126 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  # An imported, PR-observed task publication record anchored at `anchor`.
+  def write_publication_record(task, anchor, branch: task.slug)
+    digest = "0" * 64
+    identity = {
+      "publication_id" => "pub-#{'a' * 32}", "host" => "github.com", "repository" => "acme/app",
+      "base_branch" => "master", "creation_base_oid" => anchor, "branch" => branch, "head_oid" => anchor,
+      "diff_digest" => digest, "title_digest" => digest, "body_digest" => digest, "marker_digest" => digest
+    }
+    state = identity.merge(
+      "schema" => "hive-github-publication", "schema_version" => 1, "phase" => "pr_observed",
+      "draft" => true, "expected_remote_oid" => nil, "push_attempted_at" => nil, "push_observation" => nil,
+      "create_attempts" => 0, "create_attempted_at" => nil, "updated_at" => Time.now.utc.iso8601,
+      "pr" => identity.merge("number" => 42, "url" => "https://github.com/acme/app/pull/42",
+                             "hosted_state" => "draft", "observed_at" => Time.now.utc.iso8601)
+    )
+    path = File.join(task.folder, "github-publication.json")
+    File.write(path, JSON.generate(state))
+    File.chmod(0o600, path)
+    path
+  end
+
+  # Mirror the fixture gate's pushes as the observed remote branch.
+  def with_observed_remote(repo, gh, base)
+    test_case = self
+    observe = lambda do |**|
+      oid = gh.pushes.empty? ? base : test_case.run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      Struct.new(:oid, :remote_fingerprint).new(oid, "b" * 64)
+    end
+    with_replaced_singleton_method(Hive::AgentGitGate, :observe_remote_branch, observe) { yield }
+  end
+
+  # GitHub reports the pre-push headRefOid for `lag` lookups after a push.
+  def lag_pr_head(gh, stale_head, lag:)
+    lookups = 0
+    fresh = gh.method(:pr_metadata)
+    gh.define_singleton_method(:pr_metadata) do |*args|
+      metadata = fresh.call(*args)
+      next metadata if pushes.empty?
+
+      lookups += 1
+      lookups <= lag ? metadata.with(head_ref_oid: stale_head) : metadata
+    end
+  end
+
+  def test_ci_repair_publication_advances_the_anchor_through_pr_head_lag
+    with_fixture do |repo, head, task, ctx, gh, clock, _runner|
+      record = write_publication_record(task, head)
+      File.write(File.join(repo, "repair.rb"), "REPAIRED = true\n")
+      run!("git", "-C", repo, "add", "repair.rb")
+      run!("git", "-C", repo, "commit", "-m", "safe ci repair", "--quiet")
+      repaired = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      lag_pr_head(gh, head, lag: 2)
+      gh.rollups = [ rollup(head: head, checks: [ check ]) ] +
+                   Array.new(3) { rollup(head: repaired, checks: [ check ]) }
+      published = nil
+      runner = Hive::Stages::Review::RemoteCi::Runner.new(
+        task: task, cfg: cfg, ctx: ctx, pr_url: gh.metadata.url, gh: gh,
+        publication_base_head: head, publication_observer: ->(publisher) { published = publisher },
+        clock: -> { clock.now }, sleeper: ->(seconds) { clock.now += seconds },
+        poll_interval_sec: 1, quiet_settlement_sec: 1, no_checks_grace_sec: 1
+      )
+
+      result = with_observed_remote(repo, gh, head) { runner.call(max_bytes: 1_024, timeout_sec: 30) }
+
+      assert_equal 0, result.exit_code
+      assert_equal [ head ], gh.pushes.map { |push| push.last.fetch(:expected_remote_oid) }
+      assert_nil published.evidence["failure_reason"]
+      assert_equal "published", published.evidence["publication"]
+      assert_equal repaired, published.evidence["remote_head"]
+      state = JSON.parse(File.read(record))
+      assert_equal repaired, state.fetch("published_head_oid")
+      refute state.key?("pending_rewrite")
+    end
+  end
+
+  def test_pr_head_confirmation_waits_only_for_bounded_ancestor_lag
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "review fix")
+      fixed = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      lag_pr_head(gh, head, lag: 100)
+      sleeps = []
+      lagging = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, sleeper: ->(seconds) { sleeps << seconds }).publish!(expected_head: fixed)
+      assert_equal "published", lagging.evidence["publication"]
+      assert_equal "pr_head_moved", lagging.evidence["failure_reason"]
+      assert_equal Hive::Stages::Review::Publication::PR_HEAD_SETTLE_DELAYS, sleeps
+
+      external = run!("git", "-C", repo, "commit-tree", "#{fixed}^{tree}", "-m", "external").strip
+      moved = gh.metadata.with(head_ref_oid: external)
+      gh.define_singleton_method(:pr_metadata) { |*| moved }
+      sleeps.clear
+      error = assert_raises(Hive::Stages::Review::Publication::Stop) { lagging.confirm!(fixed) }
+      assert_equal "pr_head_moved", error.reason
+      assert_empty sleeps
+    end
+  end
+
+  def test_review_publication_fails_closed_when_the_record_does_not_admit_the_head
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      foreign = run!("git", "-C", repo, "commit-tree", "#{head}^{tree}", "-m", "unrecorded").strip
+      write_publication_record(task, foreign)
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "review fix")
+      fixed = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      result = with_observed_remote(repo, gh, head) do
+        Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+          pr_url: gh.metadata.url, gh: gh).publish!(expected_head: fixed)
+      end
+      assert_equal "publication_record_revision_history_rewritten", result.evidence["failure_reason"]
+      assert_equal "unknown", result.evidence["publication"]
+      assert_empty gh.pushes
+
+      unsafe = Object.new
+      unsafe.define_singleton_method(:publish_fast_forward!) { |**| raise Hive::ManagedDirectory::UnsafeError, "unsafe" }
+      result = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh, anchor: unsafe).publish!(expected_head: fixed)
+      assert_equal "publication_record_unsafe_state", result.evidence["failure_reason"]
+      assert_empty gh.pushes
+    end
+  end
+
   def test_runner_default_clock_and_sleeper_are_callable
     with_fixture do |_repo, _head, task, ctx, gh, _clock, _runner|
       runner = Hive::Stages::Review::RemoteCi::Runner.new(
@@ -965,6 +1085,8 @@ class ReviewRemoteCiTest < Minitest::Test
 
       assert_kind_of Numeric, runner.instance_variable_get(:@clock).call
       assert_equal 0, runner.instance_variable_get(:@sleeper).call(0)
+      publisher = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx, pr_url: gh.metadata.url, gh: gh)
+      assert_equal 0, publisher.instance_variable_get(:@sleeper).call(0)
     end
   end
 end

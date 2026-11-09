@@ -57,16 +57,20 @@ hive proposal evaluate TASK --input evaluation.json \
   --proposal-id PROPOSAL_ID --evaluator ID [--project NAME] [--json]
 ```
 
-Both run through a real durable proposal-bound task attempt. When the task's
-current attempt already carries a proposal binding, the command uses it. When
-it does not, the command controller dispatches a distinct durable source
-attempt: submit validates the typed subject options, evaluate resolves the
+Both run through a real durable proposal-bound task attempt. Only the
+authenticated worker of the task's live admitted proposal attempt uses that
+attempt's binding. Every other invocation, including a later command on a task
+whose earlier proposal attempt has finished, makes the command controller
+dispatch a fresh durable source attempt for its own typed options: submit validates the typed subject options, evaluate resolves the
 named proposal's canonical subject, the actor is bound to the local UID, and a
 configured evaluator is admitted against workflow, stage, and agent profile.
 The command and bounded input digest form the source attempt's progress token,
 so changed inputs or typed subjects receive a fresh attempt while exact retries
 remain replayable. `--input` cannot supply or replace actor, subject, evaluator,
-or configuration identity.
+or configuration identity. The dispatched worker's exit status and JSON output
+follow the same attach-result policy as `hive run`: a failed or lost source
+attempt exits non-zero, and `--json` yields exactly one document even when the
+worker failed before emitting one.
 
 A submission artifact contains `proposed_change`, `motivation`, `evidence`, and
 optional `lineage`, `source_event_id`, or `idempotency_key`. An evaluation

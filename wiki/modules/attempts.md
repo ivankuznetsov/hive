@@ -214,7 +214,9 @@ controller-admitted typed proposal binding stored in the existing
 `subject_json` column. Under the current-format-only runtime database model
 there is no separate version-fence migration for this member; the base schema
 stays at v2 and an older binary rejects such a row as an invalid attempt record
-when it decodes the closed subject.
+when it decodes the closed subject. Worker context validation binds
+`hive proposal submit|evaluate TASK` source workers to the task's current
+stage, like `approve`; every other `proposal` subcommand fails closed.
 
 For the preceding SQLite layout only, explicit `Database#migrate!` recognizes
 the exact old schema fingerprint and atomically rebuilds the attempts table

@@ -1665,7 +1665,12 @@ quarantine, replay, quotas, historical evaluator admission, lifecycle CAS,
 lineage, context budgets, and deterministic compilation. Proposal command
 coverage also preloads the sibling digest command before exercising quarantined
 source-index diagnostics, pinning top-level digest resolution and the
-disappearing-index fallback. CLI, attempt,
+disappearing-index fallback. The unbound source-command test feeds the exact
+controller-built worker argv (`hive proposal submit|evaluate TASK ...`) through
+`Attempts::Context` task-binding validation and proves a failed worker's exit
+status, JSON-less failure, and lost attempt surface through the shared
+`CommandDispatch` attach-result policy. Producer tests prove a direct service
+retry restores a crash-left malformed receipt before its lookup. CLI, attempt,
 activity, GitOps, schema, and llm-wiki tests own the surrounding boundaries.
 
 `test/integration/proposal_tracking_test.rb` drives the curated lifecycle using
@@ -1680,7 +1685,10 @@ code from reaching active skill provisioners, workflow mutation commands, or
 workflow-package stores. The lifecycle test also compares every pinned compiler
 row with the live normalized projection by identity and digest, and proves
 read-only discovery neither imports a pre-feature task journal nor initializes
-`proposals/v1`; the first new typed source event does.
+`proposals/v1`; the first new typed source event does. Source commands run as
+the admitted attempt's authenticated worker, and a later command on the same
+task outside that worker dispatches a fresh attempt for its own typed subject
+instead of reusing the finished one.
 
 ```bash
 bin/test --changed --list

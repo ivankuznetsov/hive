@@ -52,11 +52,19 @@ the canonical store and source inbox use bounded lock acquisition.
 `Producer` is the only submission/evaluation persistence boundary. It reconstructs
 the proposal subject, actor, optional evaluator, configuration fingerprint, and
 evidence policy from the durable `Attempts::Record`; CLI text and artifact fields
-cannot replace those bindings. The source-command controller creates a proposal-
-bound durable attempt when the task has none: typed submit options define the
+cannot replace those bindings. `Producer.for_task` reuses a binding only inside
+the authenticated worker (`Attempts::Context`) of the task's live admitted
+attempt, so a finished earlier proposal attempt can never capture a later
+command's subject. Otherwise the source-command controller creates a fresh
+proposal-bound durable attempt: typed submit options define the
 candidate subject, evaluations resolve an existing canonical proposal, the actor
 is derived from the local UID, and evaluator admission remains configuration-
-gated. It writes an immutable `pse-*` inbox receipt and a
+gated. The supervised worker re-enters `hive proposal submit|evaluate TASK`;
+`Attempts::Context` binds that argv to the admitted task and its current stage
+(other proposal subcommands never run as attempts and fail closed), and the
+controller applies the shared `Attempts::CommandDispatch` attach-result policy,
+so a failed or lost worker exits non-zero instead of reporting success. It
+writes an immutable `pse-*` inbox receipt and a
 bounded task-activity correlation, commits the normal task paths plus the exact
 inbox paths, and only then starts canonical ingestion in a second commit.
 
@@ -81,7 +89,10 @@ receipts use `hive-proposal-source-status.v1`. Lifecycle mutations use the same
 aggregate and authority-rate ceilings. Before either Producer admission or a
 lifecycle mutation reads that shared index, the service restores the committed
 proposal namespace while holding the Git commit lock; reconciliation uses the
-same restoration primitive. Source IDs are idempotency keys: the
+same restoration primitive. Producer also restores before its source-ID retry
+lookup, so a direct service caller ignores crash-left worktree receipts and
+judges historical retries from committed bytes without a separate CLI
+reconciliation pass. Source IDs are idempotency keys: the
 exact retry is a no-op and changed bytes under an existing ID are a conflict.
 
 ## Authority and lifecycle

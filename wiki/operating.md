@@ -248,6 +248,7 @@ bash "$tmpdir/hive-install.sh"
 | `--dry-run` | Resolve target + version + URLs and run the runtime preflight without downloading or writing anything. |
 | `--prefix=<dir>` (or `HIVE_PREFIX=<dir>`) | Normalize the prefix to an absolute path, stage the versioned payload + prefix marker under `<dir>/hive/…`, and mirror `install-channel`/`install-prefix` under `${XDG_DATA_HOME}/hive`, so `hive update` can re-use the prefix without re-exporting `HIVE_PREFIX`. |
 | `--version=<tag>` (or `HIVE_VERSION=<tag>`) | Skip the GitHub API call and install a specific `vX.Y.Z` tag. |
+| `GITHUB_TOKEN` (or `GH_TOKEN`) | Optional. Authenticates the latest-release API call and the `github.com/.../releases/download/...` requests so CI runners and heavy users are not throttled as anonymous traffic. Sent only to `https://github.com` / `https://api.github.com`, via a process-substitution header file (never argv or logs), and only when local curl is >= 7.83 (drops custom `Authorization` on cross-host/port/scheme redirects, so the `release-assets.githubusercontent.com` CDN never sees it). Malformed tokens are ignored; a 401/403 retries that request anonymously. Unset → unchanged anonymous behavior. |
 | `HIVE_REPO_OWNER` / `HIVE_REPO_NAME` | Override the upstream owner/repo (for forks or mirror staging). Inputs are shape-validated. |
 | `HIVE_BIN_OVERRIDE` (read by `hv` wrapper) | Point `hv` at a custom install path when Apache Hive shadows it. |
 | `HIVE_INSTALL_QMD=0` | Skip the managed QMD install step. Use only when npm is unavailable or a host policy forbids npm package installs. |
@@ -483,6 +484,17 @@ post-pin subcommands (e.g., `daemon install` shipped in PR #113) and
 gracefully skips assertions the released binary doesn't support — so
 the script keeps providing value during the gap between when a feature
 lands on main and when the next release tag is cut.
+
+Every `install.sh` / `verify-release.sh` GitHub download uses a bounded curl
+retry (`--retry 4 --retry-delay 5 --retry-max-time 60`; curl treats HTTP
+408/429/5xx and timeouts as transient even without `--fail`) and the optional
+`GITHUB_TOKEN` auth above. The `full-smoke`, `verify-release`, and
+`install-verify.yml` bash-channel steps pass `${{ github.token }}` step-scoped,
+and `sigstore/cosign-installer` is SHA-pinned to v4.1.3 (installing cosign
+v2.5.2) because that action has no token input; its own per-download retry
+(6 tries, fixed 5s delay, `--retry-all-errors`, 120s cap) rides out the 504s
+from GitHub's 2026-11-09 anonymous-traffic incident that failed the floating
+`@v3` bootstrap.
 
 ## Prerequisites
 

@@ -7,6 +7,9 @@ class PackagingVerifyReleaseTest < Minitest::Test
   INSTALL_SMOKE_WORKFLOW = File.expand_path("../../../.github/workflows/install-smoke.yml", __dir__).freeze
   MANAGED_WEB_SETUP = File.expand_path("../../../packaging/verify-managed-web-setup.sh", __dir__).freeze
   CHANNEL_SCRIPT = File.expand_path("../../../packaging/verify-channel.sh", __dir__).freeze
+  INSTALL_VERIFY_WORKFLOW = File.expand_path("../../../.github/workflows/install-verify.yml", __dir__).freeze
+  COSIGN_INSTALLER = "sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532".freeze
+  FIXTURE_TOKEN = "ghs_fixtureTokenValue123".freeze
 
   def test_release_and_channel_smokes_use_the_public_status_contracts_for_their_jobs
     release = File.read(SCRIPT)
@@ -178,7 +181,121 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_includes body, "steps.release.outputs.capable == 'true'"
   end
 
+  def test_install_jobs_pin_a_retrying_cosign_installer_and_scope_the_token_to_release_downloads
+    smoke = YAML.safe_load_file(INSTALL_SMOKE_WORKFLOW, aliases: true).fetch("jobs")
+    verify = YAML.safe_load_file(INSTALL_VERIFY_WORKFLOW, aliases: true).fetch("jobs")
+    jobs = {
+      "full-smoke" => [ smoke.fetch("full-smoke"), [ "install + verify" ] ],
+      "verify-release" => [ smoke.fetch("verify-release"), [ "Run verify-release.sh" ] ],
+      "verify" => [ verify.fetch("verify"), [ "Verify channel" ] ]
+    }
+
+    jobs.each do |name, (job, token_steps)|
+      steps = job.fetch("steps")
+      installers = steps.select { |step| step["uses"].to_s.start_with?("sigstore/cosign-installer@") }
+      assert_equal 1, installers.size, name
+      assert_equal COSIGN_INSTALLER, installers.first.fetch("uses"), "#{name}: pin v4.1.3 (download retries)"
+      assert_equal "v2.5.2", installers.first.fetch("with").fetch("cosign-release"), name
+
+      actual = steps.filter_map { |step| step["name"] if step.fetch("env", {}).key?("GITHUB_TOKEN") }
+      assert_equal token_steps, actual, "#{name}: GITHUB_TOKEN is scoped to the release-download step"
+      refute job.fetch("env", {}).key?("GITHUB_TOKEN"), name
+    end
+    assert_equal "${{ github.token }}",
+                 smoke.fetch("verify-release").fetch("steps").find { |step| step["name"] == "Run verify-release.sh" }
+                      .fetch("env").fetch("GITHUB_TOKEN")
+    assert_equal "${{ matrix.channel == 'bash' && github.token || '' }}",
+                 verify.fetch("verify").fetch("steps").find { |step| step["name"] == "Verify channel" }
+                       .fetch("env").fetch("GITHUB_TOKEN")
+    [ INSTALL_SMOKE_WORKFLOW, INSTALL_VERIFY_WORKFLOW ].each do |path|
+      refute_includes File.read(path), "sigstore/cosign-installer@v3"
+    end
+  end
+
+  def test_release_fetch_authenticates_only_github_with_a_redirect_safe_curl
+    [
+      [ { "GITHUB_TOKEN" => FIXTURE_TOKEN }, "8.5.0", "https://github.com/o/r/releases/download/v1/SHA256SUMS", true ],
+      [ { "GH_TOKEN" => FIXTURE_TOKEN }, "8.5.0", "https://github.com/o/r/releases/download/v1/SHA256SUMS", true ],
+      [ { "GITHUB_TOKEN" => FIXTURE_TOKEN }, "7.82.0", "https://github.com/o/r/releases/download/v1/SHA256SUMS", false ],
+      [ { "GITHUB_TOKEN" => FIXTURE_TOKEN }, "8.5.0", "https://example.com/github.com/SHA256SUMS", false ],
+      [ { "GITHUB_TOKEN" => FIXTURE_TOKEN }, "8.5.0", "https://github.com.evil.test/SHA256SUMS", false ],
+      [ {}, "8.5.0", "https://github.com/o/r/releases/download/v1/SHA256SUMS", false ]
+    ].each do |env, version, url, authenticated|
+      out, err, calls = run_release_fetch(env, version, url)
+
+      assert_equal 1, calls.size, url
+      call = calls.first
+      assert_includes call[:argv], "--retry 4 --retry-delay 5 --retry-max-time 60"
+      refute_includes call[:argv], FIXTURE_TOKEN
+      refute_includes call[:argv], "--location-trusted"
+      refute_includes out + err, FIXTURE_TOKEN
+      if authenticated
+        assert_equal "Authorization: Bearer #{FIXTURE_TOKEN}", call[:header], url
+        assert_includes call[:argv], "--proto-redir =https"
+      else
+        assert_empty call[:header], "#{url} / curl #{version} must stay anonymous"
+        assert_includes call[:argv], "-fsSL"
+      end
+    end
+  end
+
+  def test_release_fetch_retries_anonymously_when_github_rejects_the_token
+    out, err, calls = run_release_fetch(
+      { "GITHUB_TOKEN" => FIXTURE_TOKEN }, "8.5.0",
+      "https://github.com/o/r/releases/download/v1/SHA256SUMS", reject_auth: true
+    )
+
+    assert_includes err, "GitHub rejected the configured token (HTTP 401); retrying anonymously"
+    assert_equal 2, calls.size
+    assert_equal "Authorization: Bearer #{FIXTURE_TOKEN}", calls.first[:header]
+    assert_empty calls.last[:header]
+    refute_includes out + err, FIXTURE_TOKEN
+  end
+
   private
+
+  # Extract verify-release.sh's download helpers and run release_fetch against
+  # a fake curl that records argv and the content of any `-H @file` header.
+  def run_release_fetch(env, curl_version, url, reject_auth: false)
+    body = File.read(SCRIPT)
+    helpers = body[/^RELEASE_CURL_RETRY_ARGS=.*?^release_fetch\(\) \{\n.*?^\}\n/m]
+    refute_nil helpers, "release_fetch helpers not found"
+    Dir.mktmpdir("hive-release-fetch") do |dir|
+      fake_bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      log = File.join(dir, "curl.log")
+      write_executable(File.join(fake_bin, "curl"), <<~'SH')
+        #!/bin/bash
+        if [[ "${1:-}" == "--version" ]]; then
+          printf 'curl %s (fixture)\n' "$FAKE_CURL_VERSION"
+          exit 0
+        fi
+        auth=""
+        out=""
+        args=("$@")
+        for ((i = 0; i < ${#args[@]}; i++)); do
+          [[ "${args[$i]}" == "-H" && "${args[$((i + 1))]:-}" == @* ]] && auth="$(cat "${args[$((i + 1))]#@}")"
+          [[ "${args[$i]}" == "-o" ]] && out="${args[$((i + 1))]}"
+        done
+        { printf 'ARGV'; printf ' %s' "$@"; printf '\nHEADER %s\n' "$auth"; } >> "$FAKE_CURL_LOG"
+        printf 'fixture\n' > "$out"
+        if [[ -n "$auth" && "$FAKE_CURL_REJECT" == "1" ]]; then printf '401'; exit 0; fi
+        printf '200'
+      SH
+      script = File.join(dir, "run.sh")
+      File.write(script, "set -euo pipefail\n#{helpers}release_fetch \"$1\" \"$2\"\n")
+      run_env = {
+        "PATH" => "#{fake_bin}:/usr/bin:/bin",
+        "GITHUB_TOKEN" => nil, "GH_TOKEN" => nil,
+        "FAKE_CURL_VERSION" => curl_version, "FAKE_CURL_LOG" => log,
+        "FAKE_CURL_REJECT" => reject_auth ? "1" : "0"
+      }.merge(env)
+      out, err, status = Open3.capture3(run_env, "/bin/bash", script, url, File.join(dir, "out"))
+      assert status.success?, err
+      calls = File.read(log).scan(/^ARGV(.*)\nHEADER ?(.*)$/).map { |argv, header| { argv: argv, header: header } }
+      [ out, err, calls ]
+    end
+  end
 
   def write_executable(path, body)
     File.write(path, body)

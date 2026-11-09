@@ -94,7 +94,14 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        # v4.1.3 retries each bootstrap/release download (6 tries, 5s fixed
+        # delay, --retry-all-errors, 120s cap) so transient GitHub 504s from
+        # anonymous-traffic throttling no longer fail the job. The action has
+        # no token input, so retries are the only lever. Keep cosign v2.5.2 so
+        # verification semantics match the previous v3 action default.
+        with:
+          cosign-release: v2.5.2
       - name: Check pinned release supports managed web verification
         id: release
         env:
@@ -113,6 +120,9 @@ jobs:
           XDG_DATA_HOME: ${{ github.workspace }}/xdg-data
           XDG_BIN_HOME: ${{ github.workspace }}/xdg-bin
           HIVE_VERSION: v0.1.0
+          # Authenticates install.sh's github.com release downloads so they
+          # are not throttled as anonymous traffic (never sent to the asset CDN).
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           mkdir -p "$XDG_DATA_HOME" "$XDG_BIN_HOME"
           bash install.sh --version="$HIVE_VERSION"
@@ -135,7 +145,14 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: "3.4"
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        # v4.1.3 retries each bootstrap/release download (6 tries, 5s fixed
+        # delay, --retry-all-errors, 120s cap) so transient GitHub 504s from
+        # anonymous-traffic throttling no longer fail the job. The action has
+        # no token input, so retries are the only lever. Keep cosign v2.5.2 so
+        # verification semantics match the previous v3 action default.
+        with:
+          cosign-release: v2.5.2
       - name: Check pinned release exists
         id: release
         env:
@@ -180,6 +197,9 @@ jobs:
         if: ${{ steps.release.outputs.capable == 'true' }}
         env:
           HIVE_VERSION: v0.1.0
+          # Authenticates install.sh + verify-release.sh github.com downloads
+          # (never forwarded to the redirected release-asset host).
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           bash packaging/verify-release.sh --version="$HIVE_VERSION"
 

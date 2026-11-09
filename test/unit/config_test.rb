@@ -2898,6 +2898,54 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # --- review.limit_fallback ---------------------------------------------
+
+  def load_limit_fallback_yaml(yaml)
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+      return Hive::Config.load(dir)
+    end
+  end
+
+  def test_review_limit_fallback_defaults_to_disabled
+    cfg = load_limit_fallback_yaml("{}\n")
+
+    assert_equal({ "enabled" => false, "min_wait_sec" => 3600, "agents" => {} },
+                 cfg.dig("review", "limit_fallback"))
+  end
+
+  def test_review_limit_fallback_accepts_a_provider_map
+    cfg = load_limit_fallback_yaml(<<~YAML)
+      review:
+        limit_fallback:
+          enabled: true
+          min_wait_sec: 0
+          agents:
+            codex: claude
+    YAML
+
+    assert_equal({ "enabled" => true, "min_wait_sec" => 0, "agents" => { "codex" => "claude" } },
+                 cfg.dig("review", "limit_fallback"))
+  end
+
+  def test_review_limit_fallback_rejects_invalid_shapes
+    {
+      "review:\n  limit_fallback: yes\n" => /review\.limit_fallback .*must be a Hash/,
+      "review:\n  limit_fallback:\n    agent: claude\n" => /unknown field\(s\): agent/,
+      "review:\n  limit_fallback:\n    enabled: maybe\n" => /limit_fallback\.enabled .*must be a boolean/,
+      "review:\n  limit_fallback:\n    min_wait_sec: -1\n" => /limit_fallback\.min_wait_sec .*Integer at least 0/,
+      "review:\n  limit_fallback:\n    agents: claude\n" => /limit_fallback\.agents .*must be a Hash/,
+      "review:\n  limit_fallback:\n    agents:\n      codex: nonesuch\n" => /limit_fallback\.agents\.codex "nonesuch".*not a registered/,
+      "review:\n  limit_fallback:\n    agents:\n      nonesuch: claude\n" => /limit_fallback\.agents key "nonesuch"/,
+      "review:\n  limit_fallback:\n    agents:\n      codex: codex\n" => /cannot fall back to itself/,
+      "review:\n  limit_fallback:\n    agents:\n      codex:\n" => /cannot fall back to itself/
+    }.each do |yaml, pattern|
+      err = assert_raises(Hive::ConfigError, yaml) { load_limit_fallback_yaml(yaml) }
+      assert_match pattern, err.message, yaml
+    end
+  end
+
   # --- Validation --------------------------------------------------------
 
   def test_load_raises_when_reviewers_is_not_an_array

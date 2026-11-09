@@ -65,7 +65,9 @@ module Hive
     end
 
     # Hint for a fix/CI-fix agent parked on a provider limit that resets far
-    # in the future. Text only: Hive never switches agents automatically.
+    # in the future. Text only: Hive switches agents automatically only when
+    # the operator opted into `review.limit_fallback`; a marker that already
+    # names a failed fallback attempt says so instead of suggesting it.
     def agent_profile_hint(marker, now: Time.now.utc)
       return nil unless marker.attrs["reason"].to_s == "limits_reached"
       return nil if marker.attrs["limit_source"].to_s == "hosted_ci"
@@ -76,11 +78,21 @@ module Hive
       retry_after = Time.iso8601(marker.attrs["retry_after"].to_s)
       return nil if retry_after - now <= LONG_LIMIT_SEC
 
-      "the #{marker.attrs['phase']} agent's provider limit resets at #{retry_after.utc.iso8601}; to continue " \
-        "sooner, point `#{key}` in the project's hive config at another agent profile, then retry (a " \
-        "provider already pinned for the task's current input generation is kept until that generation advances)"
+      hint = "the #{marker.attrs['phase']} agent's provider limit resets at #{retry_after.utc.iso8601}; to continue " \
+             "sooner, point `#{key}` in the project's hive config at another agent profile, then retry (a " \
+             "provider already pinned for the task's current input generation is kept until that generation advances)"
+      hint + limit_fallback_hint(marker)
     rescue ArgumentError
       nil
+    end
+
+    def limit_fallback_hint(marker)
+      fallback = marker.attrs["fallback_agent"].to_s
+      if fallback.empty?
+        ", or opt into `review.limit_fallback` so a long limit retries the role once on a fallback agent"
+      else
+        "; the configured limit fallback #{fallback} was tried and #{marker.attrs['fallback_outcome'] || 'failed'}"
+      end
     end
   end
 end

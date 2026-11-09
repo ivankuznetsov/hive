@@ -727,6 +727,21 @@ reference.
    "log_max_bytes" => 10485760,
    "log_max_files" => 5,
    "last_seen_state_file" => "~/Dev/hive/.bot.last_seen_update_id"},
+ "proposals" =>
+  {"evaluators" => {},
+   "authorities" => {},
+   "evidence" =>
+    {"visibility" => "restricted",
+     "retention" => "task",
+     "allowed_link_schemes" => ["https"]},
+   "limits" =>
+    {"max_pending_sources" => 256,
+     "max_project_events" => 10000,
+     "max_proposal_events" => 1000,
+     "max_project_bytes" => 67108864,
+     "max_proposal_bytes" => 8388608,
+     "max_sources_per_actor_per_hour" => 100},
+   "context" => {"max_items" => 20, "max_bytes" => 2048}},
  "stages" => {"ensure_clean_on_exit" => true},
  "rebase" => {"enabled" => true, "conflict_resolution_timeout_sec" => 2700}}
 ```

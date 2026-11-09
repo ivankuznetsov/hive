@@ -1,0 +1,8 @@
+{
+  "method": { "kind": "benchmark", "label": "planning-target-score" },
+  "result": { "outcome": "pass", "metrics": { "target_score": 0.94 } },
+  "rationale": "The candidate improved the target score.",
+  "evidence": [],
+  "links": [],
+  "idempotency_key": "rejected-planning-positive"
+}

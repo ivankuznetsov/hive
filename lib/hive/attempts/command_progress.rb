@@ -1,3 +1,4 @@
+require "digest"
 require "hive/canonical_json"
 
 module Hive
@@ -34,9 +35,28 @@ module Hive
             ).progress_token,
             "runtime" => runtime_digest
           )
+        when "proposal"
+          Hive::CanonicalJSON.digest(
+            "artifact" => fallback,
+            "command" => Array(argv).map(&:to_s),
+            "input_digest" => proposal_input_digest(argv)
+          )
         else
           fallback
         end
+      end
+
+      # Proposal source workers are always admitted with the controller-built
+      # `--input ABSOLUTE_PATH` pair (Commands::Proposal#source_worker_argv).
+      def proposal_input_digest(argv)
+        values = Array(argv).map(&:to_s)
+        index = values.rindex("--input")
+        path = index && values[index + 1]
+        return unless path && File.file?(path) && !File.symlink?(path)
+
+        ::Digest::SHA256.file(path).hexdigest
+      rescue SystemCallError, IOError
+        nil
       end
 
       def task_progress?(task)

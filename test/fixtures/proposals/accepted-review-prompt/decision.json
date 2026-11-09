@@ -1,0 +1,7 @@
+{
+  "outcome": "accepted",
+  "rationale_category": "evaluated",
+  "rationale": "The held-out improvement clears the configured acceptance policy.",
+  "links": [],
+  "idempotency_key": "accepted-review-prompt-decision"
+}

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-11-03
+updated: 2026-11-09
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -1656,11 +1656,59 @@ claims, and checks the published state words against the native web/status
 source strings. The fixture suite is structural evidence only; clean live
 provider replays and timing remain separate verification gates.
 
+## Proposal tracking verification
+
+Proposal coverage proceeds from independently validated immutable files through
+the production task-bound transaction and outward consumers. Focused unit tests
+under `test/unit/proposals/` own schemas, redaction/classification, per-file
+quarantine, replay, quotas, historical evaluator admission, lifecycle CAS,
+lineage, context budgets, and deterministic compilation. Proposal command
+coverage also preloads the sibling digest command before exercising quarantined
+source-index diagnostics, pinning top-level digest resolution and the
+disappearing-index fallback. The unbound source-command test feeds the exact
+controller-built worker argv (`hive proposal submit|evaluate TASK ...`) through
+`Attempts::Context` task-binding validation and proves a failed worker's exit
+status, JSON-less failure, and lost attempt surface through the shared
+`CommandDispatch` attach-result policy. Producer tests prove a direct service
+retry restores a crash-left malformed receipt before its lookup. CLI, attempt,
+activity, GitOps, schema, and llm-wiki tests own the surrounding boundaries.
+
+`test/integration/proposal_tracking_test.rb` drives the curated lifecycle using
+the real `Attempts::Entrypoint` and `Attempts::Dispatcher` admission composition,
+a committed inbox, ingestor, lifecycle authority, live query, typed context
+selector, and pinned compiler. It accepts a review-prompt candidate, rejects a
+planning-prompt candidate while retaining positive and negative evaluations,
+exercises authority-only `no_evaluation`, links a distinct successor, records
+rollback without executing it, and isolates a malformed neighbor. A static
+dependency fence over the complete proposal source boundary prevents proposal
+code from reaching active skill provisioners, workflow mutation commands, or
+workflow-package stores. The lifecycle test also compares every pinned compiler
+row with the live normalized projection by identity and digest, and proves
+read-only discovery neither imports a pre-feature task journal nor initializes
+`proposals/v1`; the first new typed source event does. Source commands run as
+the admitted attempt's authenticated worker, and a later command on the same
+task outside that worker dispatches a fresh attempt for its own typed subject
+instead of reusing the finished one.
+
+```bash
+bin/test --changed --list
+bin/test --changed
+bin/test --all   # broad checkpoint when warranted
+```
+
+Wiki-refresh integration separately proves pinned-source, provider-free
+proposal-only compilation and one-commit publication. It also covers Unicode
+byte comparison, unrelated state-HEAD advancement, and proposal-compiler
+quarantine without opening the ordinary refresh circuit. The generated pair is
+never used as canonical test input, and no live provider, activation,
+publication, deployment, or compensating revert is part of the gate.
+
 ## Backlinks
 
 - [[architecture]]
 - [[modules/agent]]
 - [[modules/task_workspace]]
+- [[modules/proposals]] · [[commands/proposal]]
 - [[e2e]]
 - [[gaps]]
 

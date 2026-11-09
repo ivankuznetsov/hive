@@ -19,7 +19,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
 
   def setup
     @dir = Dir.mktmpdir("llmwiki-hook-")
-    @main = File.join(@dir, "main")
+    @main = File.join(@dir, "main checkout")
     @wt = File.join(@dir, "wt")
     @runtime_dir = File.join(@dir, "runtime")
     @stub = File.join(@dir, "stub bin", "stub-refresh.sh")
@@ -94,6 +94,330 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
                   "refs/llm-wiki/sources/#{source_sha}")
     refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
                   "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_compiled_proposal_pair_only_commit_does_not_queue_or_launch_refresh
+    File.write(File.join(@wt, "wiki", "proposals.json"), "{}\n")
+    File.write(File.join(@wt, "wiki", "proposals.md"), "# Proposal History\n")
+    git(@wt, "add wiki/proposals.json wiki/proposals.md")
+    git(@wt, "commit -qm 'docs(wiki): compile proposal projection'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_proposal_inbox_only_commit_does_not_queue_a_wiki_refresh
+    receipt = File.join(@wt, "proposals", "v1", "inbox", "source.json")
+    FileUtils.mkdir_p(File.dirname(receipt))
+    File.write(receipt, "{}\n")
+    git(@wt, "add proposals/v1/inbox/source.json")
+    git(@wt, "commit -qm 'hive: admitted proposal source'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    refute_path_exists File.join(common, "llm-wiki", "pending", source_sha)
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/heads/llm-wiki/refresh")
+  end
+
+  def test_proposal_only_batch_compiles_from_a_space_bearing_primary_checkout_without_launching_the_wiki_agent
+    compiler_calls = File.join(@dir, "proposal-compiler-calls")
+    compiler = File.join(@dir, "stub bin", "proposal-compiler")
+    File.write(compiler, <<~STUB)
+      #!/usr/bin/env bash
+      printf '%s\n' "$*" >>#{q(compiler_calls)}
+      output_root="${!#}"
+      mkdir -p "$output_root/wiki"
+      printf '{"schema":"hive-proposal-index"}\n' >"$output_root/wiki/proposals.json"
+      printf '# Proposal History\n' >"$output_root/wiki/proposals.md"
+    STUB
+    FileUtils.chmod("+x", compiler)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: proposals fixture recorded candidate'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(
+      @wt,
+      "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+      "LLM_WIKI_REFRESH_CMD" => File.join(@dir, "missing-provider")
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal 1, File.readlines(compiler_calls).length
+    assert_includes File.read(compiler_calls), "--source-ref #{source_sha}"
+    assert_equal "{\"schema\":\"hive-proposal-index\"}\n",
+                 git(@main, "show llm-wiki/refresh:wiki/proposals.json") + "\n"
+    assert_equal "", git(@main, "status --porcelain")
+    assert_equal "", git(@wt, "status --porcelain")
+  end
+
+  def test_proposal_batch_selects_the_newest_queued_descendant_with_equal_timestamps
+    compiler_calls = File.join(@dir, "proposal-compiler-ancestry-calls")
+    compiler = proposal_compiler_stub(compiler_calls)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    FileUtils.mkdir_p(pending)
+    shas = 2.times.map do |index|
+      path = File.join(@wt, "proposals", "v1", "records", "candidate-#{index}.json")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "{}\n")
+      git(@wt, "add proposals/v1/records/candidate-#{index}.json")
+      env = "GIT_AUTHOR_DATE='2026-09-08T12:00:00Z' GIT_COMMITTER_DATE='2026-09-08T12:00:00Z'"
+      sh "cd #{q(@wt)} && #{env} git commit -qm #{q("proposal #{index}")}"
+      git(@wt, "rev-parse HEAD")
+    end
+    shas.each_with_index do |sha, index|
+      File.write(
+        File.join(pending, sha),
+        "#{sha}\tfeat\nproposals/v1/records/candidate-#{index}.json\n"
+      )
+    end
+
+    result = run_refresh_from(
+      @wt,
+      {
+        "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+        "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
+      },
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_includes File.read(compiler_calls), "--source-ref #{shas.last}"
+    refute_includes File.read(compiler_calls), "--source-ref #{shas.first}"
+  end
+
+  def test_later_proposal_batch_does_not_regress_a_compiled_descendant
+    compiler_calls = File.join(@dir, "monotonic-proposal-compiler-calls")
+    compiler = File.join(@dir, "stub bin", "monotonic-proposal-compiler")
+    File.write(compiler, <<~'STUB')
+      #!/usr/bin/env bash
+      output_root="${!#}"
+      source_ref=""
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--source-ref" ]; then
+          source_ref="$2"
+          break
+        fi
+        shift
+      done
+      printf '%s\n' "$source_ref" >>CALLS_FILE
+      mkdir -p "$output_root/wiki"
+      printf '{"source_commit":"%s"}\n' "$source_ref" >"$output_root/wiki/proposals.json"
+      printf '# Proposal History\n\nPinned state: %s\n' "$source_ref" >"$output_root/wiki/proposals.md"
+    STUB
+    File.write(compiler, File.read(compiler).sub("CALLS_FILE", q(compiler_calls)))
+    FileUtils.chmod("+x", compiler)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: record proposal ancestor'")
+    ancestor = git(@wt, "rev-parse HEAD")
+    descendant = nil
+    128.times do |index|
+      git(@wt, "commit --allow-empty -qm 'test: find descendant #{index}'")
+      candidate = git(@wt, "rev-parse HEAD")
+      if candidate < ancestor
+        descendant = candidate
+        break
+      end
+    end
+    refute_nil descendant, "could not create a descendant ordered before its ancestor"
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    FileUtils.mkdir_p(pending)
+    File.write(
+      File.join(pending, descendant),
+      "#{descendant}\tfeat\nproposals/v1/events/candidate/evaluation.json\n"
+    )
+    File.write(
+      File.join(pending, ancestor),
+      "#{ancestor}\tfeat\nproposals/v1/records/candidate.json\n"
+    )
+
+    result = run_refresh_from(
+      @wt,
+      {
+        "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+        "LLM_WIKI_MAX_BATCH_SOURCES" => "1",
+        "LLM_WIKI_MAX_DRAIN_BATCHES" => "2",
+        "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
+      },
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal [ descendant, descendant ], File.readlines(compiler_calls, chomp: true)
+    compiled = JSON.parse(git(@main, "show llm-wiki/refresh:wiki/proposals.json"))
+    assert_equal descendant, compiled.fetch("source_commit")
+  end
+
+  def test_later_ordinary_batch_acquires_the_provider_lock_after_a_proposal_batch
+    compiler_calls = File.join(@dir, "lazy-lock-proposal-compiler-calls")
+    compiler = proposal_compiler_stub(compiler_calls)
+    provider_marker = File.join(@dir, "lazy-lock-provider-ran")
+    provider = File.join(@dir, "stub bin", "lazy-lock-provider")
+    File.write(provider, "#!/bin/sh\ntouch #{q(provider_marker)}\n")
+    FileUtils.chmod("+x", provider)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: record proposal before ordinary work'")
+    proposal_sha = git(@wt, "rev-parse HEAD")
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo ordinary\n")
+    git(@wt, "add bin/tool.sh")
+    git(@wt, "commit -qm 'feat: queue ordinary wiki work'")
+    ordinary_sha = git(@wt, "rev-parse HEAD")
+    128.times do |index|
+      break if ordinary_sha > proposal_sha
+
+      git(@wt, "commit --allow-empty -qm 'test: order ordinary source #{index}'")
+      ordinary_sha = git(@wt, "rev-parse HEAD")
+    end
+    assert_operator ordinary_sha, :>, proposal_sha
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    pending = File.join(common, "llm-wiki", "pending")
+    FileUtils.mkdir_p(pending)
+    File.write(
+      File.join(pending, proposal_sha),
+      "#{proposal_sha}\tfeat\nproposals/v1/records/candidate.json\n"
+    )
+    File.write(File.join(pending, ordinary_sha), "#{ordinary_sha}\tfeat\nbin/tool.sh\n")
+    lock = File.open(File.join(@runtime_dir, "llm-wiki-refresh.lock"), File::RDWR | File::CREAT, 0o600)
+    assert lock.flock(File::LOCK_EX | File::LOCK_NB)
+
+    result = run_refresh_from(
+      @wt,
+      {
+        "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+        "LLM_WIKI_REFRESH_CMD" => provider,
+        "LLM_WIKI_MAX_BATCH_SOURCES" => "1",
+        "LLM_WIKI_MAX_DRAIN_BATCHES" => "2",
+        "LLM_WIKI_DRAIN_SETTLE_SECONDS" => "0"
+      },
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    refute_path_exists provider_marker
+    refute_path_exists File.join(pending, proposal_sha)
+    assert_path_exists File.join(pending, ordinary_sha)
+  ensure
+    lock&.close
+  end
+
+  def test_ordinary_refresh_restores_generated_proposal_pair_before_publication
+    File.write(File.join(@main, "wiki", "proposals.json"), "canonical json\n")
+    File.write(File.join(@main, "wiki", "proposals.md"), "canonical markdown\n")
+    git(@main, "add wiki/proposals.json wiki/proposals.md")
+    git(@main, "commit -qm 'docs: seed generated proposals'")
+    tampering_stub = File.join(@dir, "stub bin", "tamper-generated.sh")
+    File.write(tampering_stub, <<~STUB)
+      #!/usr/bin/env bash
+      root="$1"
+      mkdir -p "$root/wiki/log.d"
+      printf 'ordinary refresh\n' >"$root/wiki/log.d/ordinary.md"
+      printf 'fabricated json\n' >"$root/wiki/proposals.json"
+      printf 'fabricated markdown\n' >"$root/wiki/proposals.md"
+    STUB
+    FileUtils.chmod("+x", tampering_stub)
+    File.write(File.join(@wt, "bin", "tool.sh"), "echo ordinary\n")
+    git(@wt, "add bin/tool.sh")
+    git(@wt, "commit -qm 'feat: ordinary change'")
+
+    result = run_refresh_from(@wt, "LLM_WIKI_REFRESH_CMD" => tampering_stub)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_equal "canonical json", git(@main, "show llm-wiki/refresh:wiki/proposals.json")
+    assert_equal "canonical markdown", git(@main, "show llm-wiki/refresh:wiki/proposals.md")
+  end
+
+  def test_explicit_proposal_refresh_compiles_the_pinned_source_after_unrelated_head
+    compiler_calls = File.join(@dir, "proposal-compiler-explicit-calls")
+    compiler = proposal_compiler_stub(compiler_calls)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: recorded proposal candidate'")
+    proposal_sha = git(@wt, "rev-parse HEAD")
+    inbox = File.join(@wt, "proposals", "v1", "inbox", "cursor.json")
+    FileUtils.mkdir_p(File.dirname(inbox))
+    File.write(inbox, "{}\n")
+    git(@wt, "add proposals/v1/inbox/cursor.json")
+    git(@wt, "commit -qm 'hive: unrelated proposal cursor'")
+
+    result = run_refresh_from(
+      @wt, "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+      arguments: [ "--proposal-source", proposal_sha ]
+    )
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    assert_includes File.read(compiler_calls), "--source-ref #{proposal_sha}"
+  end
+
+  def test_proposal_only_compile_failure_is_bounded_without_opening_the_provider_failure_circuit
+    compiler = File.join(@dir, "stub bin", "failing-proposal-compiler")
+    File.write(compiler, "#!/usr/bin/env bash\nexit 17\n")
+    FileUtils.chmod("+x", compiler)
+    record = File.join(@wt, "proposals", "v1", "records", "candidate.json")
+    FileUtils.mkdir_p(File.dirname(record))
+    File.write(record, "{}\n")
+    git(@wt, "add proposals/v1/records/candidate.json")
+    git(@wt, "commit -qm 'hive: recorded proposal candidate'")
+    source_sha = git(@wt, "rev-parse HEAD")
+
+    result = run_refresh_from(@wt, "HIVE_PROPOSAL_COMPILER_BIN" => compiler)
+
+    assert_equal 0, result.fetch(:status), result.fetch(:out)
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    state_dir = File.join(common, "llm-wiki")
+    pending = File.join(state_dir, "pending", source_sha)
+    failed = File.join(state_dir, "failed", source_sha)
+    failure_count = File.join(state_dir, "proposal-consecutive-failures")
+    breaker = File.join(state_dir, "refresh-disabled")
+    assert_path_exists pending
+    assert_equal "1", File.read(failure_count).strip
+    refute_path_exists breaker
+    refute system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/receipts/#{source_sha}")
+
+    retry_result = run_refresh_from(
+      @wt,
+      "HIVE_PROPOSAL_COMPILER_BIN" => compiler,
+      arguments: [ "--drain" ]
+    )
+
+    assert_equal 0, retry_result.fetch(:status), retry_result.fetch(:out)
+    refute_path_exists pending
+    assert_path_exists failed
+    assert_equal "2", File.read(failure_count).strip
+    refute_path_exists breaker
+
+    File.write(File.join(@wt, "bin", "ordinary-after-proposal-failure.sh"), "echo ordinary\n")
+    git(@wt, "add bin/ordinary-after-proposal-failure.sh")
+    git(@wt, "commit -qm 'feat: ordinary refresh remains available'")
+    ordinary_sha = git(@wt, "rev-parse HEAD")
+    ordinary_result = run_refresh_from(@wt)
+
+    assert_equal 0, ordinary_result.fetch(:status), ordinary_result.fetch(:out)
+    assert system("git", "-C", @main, "show-ref", "--verify", "--quiet",
+                  "refs/llm-wiki/receipts/#{ordinary_sha}")
+    refute_path_exists breaker
   end
 
   def test_refresh_branch_is_pushed_without_touching_main
@@ -1162,6 +1486,20 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
       source_sha="$(printf '%s' "$prompt" | sed -nE 's/^- commit ([0-9a-f]+).*/\\1/p' | tail -n 1)"
       mkdir -p "$root/wiki/log.d"
       printf 'stub refresh for %s\n' "$source_sha" >"$root/wiki/log.d/$source_sha.md"
+    STUB
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def proposal_compiler_stub(calls)
+    path = File.join(@dir, "stub bin", "proposal-compiler-#{File.basename(calls)}")
+    File.write(path, <<~STUB)
+      #!/usr/bin/env bash
+      printf '%s\n' "$*" >>#{q(calls)}
+      output_root="${!#}"
+      mkdir -p "$output_root/wiki"
+      printf '{"schema":"hive-proposal-index"}\n' >"$output_root/wiki/proposals.json"
+      printf '# Proposal History\n' >"$output_root/wiki/proposals.md"
     STUB
     FileUtils.chmod("+x", path)
     path

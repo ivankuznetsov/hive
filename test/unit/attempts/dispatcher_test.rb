@@ -245,6 +245,35 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_proposal_progress_token_tracks_the_typed_command_and_input_bytes
+    with_dispatcher do |dispatcher, _launcher, task|
+      with_tmp_dir do |dir|
+        input = File.join(dir, "candidate.json")
+        File.write(input, "{\"revision\":1}\n")
+        argv = [
+          "hive", "proposal", "submit", task.slug, "--input", input,
+          "--kind", "skill", "--subject", "agent-skills/reviewer", "--revision", "v2"
+        ]
+        first = dispatcher.send(:command_progress_token, argv, task)
+
+        assert_equal first, dispatcher.send(:command_progress_token, argv, task)
+        File.write(input, "{\"revision\":2}\n")
+        second = dispatcher.send(:command_progress_token, argv, task)
+        refute_equal first, second
+        refute_equal second, dispatcher.send(
+          :command_progress_token,
+          argv.map { |value| value == "agent-skills/reviewer" ? "agent-skills/planner" : value },
+          task
+        )
+        assert_nil Hive::Attempts::CommandProgress.proposal_input_digest(argv.take(5))
+        unreadable = ->(*) { raise Errno::EACCES, input }
+        with_replaced_singleton_method(::Digest::SHA256, :file, unreadable) do
+          assert_nil Hive::Attempts::CommandProgress.proposal_input_digest(argv)
+        end
+      end
+    end
+  end
+
   def test_launch_context_is_captured_after_attempt_creation_and_before_handoff
     events = []
     provenance = Object.new
@@ -1700,5 +1729,38 @@ class AttemptsDispatcherTest < Minitest::Test
         "blocker_owner" => "inbox_gate", "head_revision" => "b" * 40
       }
     }
+  end
+
+  public
+
+  def test_dispatch_persists_the_controller_authored_proposal_subject
+    with_dispatcher do |dispatcher, _launcher, task, _store|
+      proposal = {
+        "schema_version" => 1,
+        "subject" => {
+          "kind" => "skill", "reference" => "agent-skills/reviewer",
+          "revision" => "v2", "proposal_id" => nil
+        },
+        "actor" => { "id" => "alice", "kind" => "proposer", "binding" => "team:skills" },
+        "evaluator" => nil, "configuration_fingerprint" => "c" * 64,
+        "policy" => {
+          "visibility" => "restricted", "retention" => "task",
+          "allowed_link_schemes" => [ "https" ]
+        }
+      }
+      subject = Hive::Attempts::Record.task_stage_subject(
+        task_id: task.id.to_s, task_slug: task.slug,
+        intended_stage: "4-execute", proposal: proposal
+      )
+
+      result = dispatcher.dispatch(
+        task: task, project: "demo", intended_stage: "4-execute",
+        argv: [ "hive", "run", task.slug ], request_id: "proposal-request",
+        provider: "codex", interactive: false, now: NOW, subject: subject
+      )
+
+      assert_equal :accepted, result.status
+      assert_equal proposal, result.attempt.proposal_binding
+    end
   end
 end

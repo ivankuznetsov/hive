@@ -17,6 +17,8 @@ module Hive
         "attempt_admitted" => :noise,
         "context_launch_captured" => :noise,
         "context_selection_reported" => :noise,
+        "proposal_source_recorded" => :noise,
+        "proposal_context_supplied" => :noise,
         "session_started" => :noise,
         "session_finished" => :conditional_session,
         "usage_observed" => :noise,

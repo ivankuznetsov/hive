@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-source-index.v1.json",
+  "title": "Hive proposal source index (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "pending", "consumed_count", "quarantined_count",
+    "total_sources", "pending_proposals", "reservations", "usage", "recent_actor_events"
+  ],
+  "properties": {
+    "schema": { "const": "hive-proposal-source-index" },
+    "schema_version": { "const": 1 },
+    "pending": {
+      "type": "array", "maxItems": 50000, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/SourceEventId" }
+    },
+    "consumed_count": { "type": "integer", "minimum": 0 },
+    "quarantined_count": { "type": "integer", "minimum": 0 },
+    "total_sources": { "type": "integer", "minimum": 0 },
+    "pending_proposals": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/SourceEventId" },
+      "additionalProperties": { "$ref": "#/$defs/ProposalId" }
+    },
+    "reservations": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/SourceEventId" },
+      "additionalProperties": { "$ref": "#/$defs/Reservation" }
+    },
+    "usage": { "$ref": "#/$defs/Usage" },
+    "recent_actor_events": {
+      "type": "array", "maxItems": 50000,
+      "items": { "$ref": "#/$defs/ActorEvent" }
+    }
+  },
+  "$defs": {
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "SourceEventId": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+    "Reservation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "events"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "events": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "UsageCounters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["bytes", "events"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 0 },
+        "events": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["project_bytes", "project_events", "proposals"],
+      "properties": {
+        "project_bytes": { "type": "integer", "minimum": 0 },
+        "project_events": { "type": "integer", "minimum": 0 },
+        "proposals": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/ProposalId" },
+          "additionalProperties": { "$ref": "#/$defs/UsageCounters" }
+        }
+      }
+    },
+    "ActorEvent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["actor_id", "occurred_at"],
+      "properties": {
+        "actor_id": {
+          "type": "string", "minLength": 1, "maxLength": 512,
+          "pattern": "^[^\\u0000-\\u0008\\u000b\\u000c\\u000e-\\u001f\\u007f]+$"
+        },
+        "occurred_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

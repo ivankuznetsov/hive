@@ -261,6 +261,55 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  def test_hive_commit_additional_pathspecs_extend_default_task_staging_only
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      task_path = "stages/4-execute/proposal-task"
+      receipt_path = "proposals/v1/inbox/pse-#{'a' * 64}.json"
+      unrelated_path = "proposals/v1/records/unrelated.json"
+      [ task_path, File.dirname(receipt_path), File.dirname(unrelated_path) ].each do |path|
+        FileUtils.mkdir_p(File.join(ops.hive_state_path, path))
+      end
+      File.write(File.join(ops.hive_state_path, task_path, "task-journal.jsonl"), "task\n")
+      File.write(File.join(ops.hive_state_path, receipt_path), "receipt\n")
+      File.write(File.join(ops.hive_state_path, unrelated_path), "unrelated\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated_path)
+
+      result = ops.hive_commit(
+        stage_name: "4-execute", slug: "proposal-task", action: "admitted proposal source",
+        additional_pathspecs: [ receipt_path ]
+      )
+
+      assert_equal :committed, result
+      changed = run!(
+        "git", "-C", ops.hive_state_path, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+      ).lines.map(&:strip)
+      assert_equal [ receipt_path, "#{task_path}/task-journal.jsonl" ].sort, changed.sort
+      assert File.exist?(File.join(ops.hive_state_path, unrelated_path))
+      assert_equal "A  #{unrelated_path}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated_path
+      ).strip
+    end
+  end
+
+  def test_hive_state_commit_queries_and_additive_staging_reject_ambiguous_paths
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+
+      assert_nil ops.hive_state_commit_for_path("proposals/v1/missing.json")
+      assert_raises(ArgumentError) do
+        ops.hive_commit(
+          stage_name: "proposals", slug: "fixture", action: "ambiguous",
+          pathspecs: [ "proposals/v1/records" ],
+          additional_pathspecs: [ "proposals/v1/inbox/receipt.json" ]
+        )
+      end
+      assert_raises(Hive::GitError) { ops.hive_state_commit_for_path("../outside") }
+    end
+  end
+
   def test_hive_commit_serializes_staging_callback_and_commit
     with_tmp_git_repo do |dir|
       ops = Hive::GitOps.new(dir)
@@ -287,8 +336,8 @@ class GitOpsTest < Minitest::Test
       end
       original_capture3 = Open3.method(:capture3)
       capture3_replacement = lambda do |*args, **kwargs|
-        cached_diff_lock_states << lock_held if args == [
-          "git", "-C", ops.hive_state_path, "diff", "--cached", "--quiet"
+        cached_diff_lock_states << lock_held if args.take(7) == [
+          "git", "-C", ops.hive_state_path, "diff", "--cached", "--quiet", "--"
         ]
         original_capture3.call(*args, **kwargs)
       end
@@ -394,6 +443,83 @@ class GitOpsTest < Minitest::Test
       ops.hive_state_init
       result = ops.hive_commit(stage_name: "1-inbox", slug: "x", action: "noop")
       assert_equal :nothing_to_commit, result
+    end
+  end
+
+  def test_hive_commit_empty_selection_ignores_unrelated_staging_and_unmatched_directories
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "stages", "1-inbox", "empty-task"))
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, "logs"))
+      unrelated = "stages/1-inbox/unrelated.txt"
+      File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated)
+      head_before = ops.hive_state_head_sha
+
+      result = ops.hive_commit(
+        stage_name: "1-inbox", slug: "empty-task", action: "noop"
+      )
+
+      assert_equal :nothing_to_commit, result
+      assert_equal head_before, ops.hive_state_head_sha
+      assert_equal "A  #{unrelated}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+      ).strip
+    end
+  end
+
+  def test_hive_commit_skips_when_a_selected_index_entry_vanishes_before_commit
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      task_path = "stages/1-inbox/raced-task"
+      FileUtils.mkdir_p(File.join(ops.hive_state_path, task_path))
+      File.write(File.join(ops.hive_state_path, task_path, "idea.md"), "raced\n")
+      head_before = ops.hive_state_head_sha
+      original_capture3 = Open3.method(:capture3)
+      reset = false
+      replacement = lambda do |*arguments|
+        if arguments.include?("--quiet") && arguments.include?("--cached") && !reset
+          reset = true
+          original_capture3.call(
+            "git", "-C", ops.hive_state_path, "reset", "-q", "HEAD", "--", task_path
+          )
+        end
+        original_capture3.call(*arguments)
+      end
+
+      result = with_replaced_singleton_method(Open3, :capture3, replacement) do
+        ops.hive_commit(stage_name: "1-inbox", slug: "raced-task", action: "captured")
+      end
+
+      assert reset, "the test must remove the selected entry at the pre-commit diff boundary"
+      assert_equal :nothing_to_commit, result
+      assert_equal head_before, ops.hive_state_head_sha
+    end
+  end
+
+  def test_hive_commit_allow_empty_ignores_unknown_paths_and_preserves_unrelated_staging
+    with_tmp_git_repo do |dir|
+      ops = Hive::GitOps.new(dir)
+      ops.hive_state_init
+      unrelated = "stages/1-inbox/unrelated.txt"
+      FileUtils.mkdir_p(File.dirname(File.join(ops.hive_state_path, unrelated)))
+      File.write(File.join(ops.hive_state_path, unrelated), "preserve me\n")
+      run!("git", "-C", ops.hive_state_path, "add", unrelated)
+
+      result = ops.hive_commit(
+        stage_name: "dropped", slug: "missing", action: "dropped",
+        pathspecs: [ "stages/4-execute/missing", "logs/missing" ], allow_empty: true
+      )
+
+      assert_equal :committed, result
+      assert_equal "", run!(
+        "git", "-C", ops.hive_state_path, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+      ).strip
+      assert_equal "A  #{unrelated}", run!(
+        "git", "-C", ops.hive_state_path, "status", "--porcelain=v1", "--", unrelated
+      ).strip
     end
   end
 

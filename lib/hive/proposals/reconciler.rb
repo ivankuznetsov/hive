@@ -1,0 +1,128 @@
+require "hive/git_ops"
+require "hive/lock"
+require "hive/proposals/ingestor"
+require "hive/secret_patterns"
+
+module Hive
+  module Proposals
+    ReconciliationResult = Data.define(:processed, :consumed, :quarantined, :pending, :cleaned)
+
+    class Reconciler
+      PERMANENT_ERRORS = [
+        InvalidRecord, InvalidEvent, Conflict, InconsistentHistory,
+        QuarantinedSource, Unauthorized, QuotaExceeded
+      ].freeze
+
+      def initialize(git_ops:, source_store: nil, store: nil, ingestor: nil, max_batch: 64)
+        @git_ops = git_ops
+        root = File.join(git_ops.hive_state_path, "proposals", "v1")
+        @source_store = source_store || SourceEventStore.new(root: root)
+        @store = store || Store.new(root: root)
+        @ingestor = ingestor || Ingestor.new(
+          source_store: @source_store, store: @store, git_ops: @git_ops
+        )
+        @max_batch = Integer(max_batch)
+        raise ArgumentError, "proposal reconciliation batch must be positive" unless @max_batch.positive?
+      end
+
+      def reconcile!
+        processed = consumed = quarantined = cleaned = 0
+        Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          cleaned = clean_uncommitted_state!
+        end
+        pending = @source_store.pending_ids
+        resolved = 0
+        pending.each do |source_event_id|
+          processed += 1
+          begin
+            source_commit = committed_source_commit!(source_event_id)
+            @ingestor.ingest!(source_event_id, source_commit:)
+            consumed += 1
+            resolved += 1
+          rescue *PERMANENT_ERRORS => error
+            quarantine_source!(source_event_id, error)
+            quarantined += 1
+            resolved += 1
+          rescue SourceUnavailable
+            next
+          end
+          break if resolved >= @max_batch
+        end
+        ReconciliationResult.new(
+          processed:, consumed:, quarantined:,
+          pending: @source_store.pending_ids.length, cleaned:
+        )
+      end
+
+      private
+
+      def committed_source_commit!(source_event_id)
+        path = "proposals/v1/inbox/#{source_event_id}.json"
+        commit = @git_ops.hive_state_commit_for_path(path)
+        raise SourceUnavailable, "committed proposal source receipt is missing" unless commit
+        bytes = @git_ops.read_hive_state_blob_at(
+          @git_ops.hive_state_head_sha, path,
+          max_bytes: SourceEventStore::MAX_FILE_BYTES + 1
+        )
+        if bytes.nil? && committed_blob_size(path).to_i > SourceEventStore::MAX_FILE_BYTES
+          raise QuarantinedSource, "committed proposal source receipt is oversize"
+        end
+        raise SourceUnavailable, "committed proposal source receipt is missing" unless bytes
+        commit
+      end
+
+      def committed_blob_size(path)
+        output = @git_ops.run_git!(
+          "-C", @git_ops.hive_state_path, "cat-file", "-s", "--",
+          "#{@git_ops.hive_state_head_sha}:#{path}"
+        )
+        Integer(output.to_s.strip, exception: false)
+      rescue Hive::GitError
+        nil
+      end
+
+      def quarantine_source!(source_event_id, error)
+        Hive::Lock.with_commit_lock(@git_ops.hive_state_path) do
+          snapshot = Ingestor::PathSnapshot.capture(
+            @source_store.paths_for_terminal(source_event_id, state: "quarantine")
+          )
+          begin
+            @source_store.quarantine!(
+              source_event_id, code: quarantine_code(error),
+              reason: "committed proposal source failed permanent validation"
+            )
+            paths = @source_store.paths_for_terminal(source_event_id, state: "quarantine")
+                         .map do |path|
+                           Proposals.hive_state_relative_path(
+                             @git_ops, path, label: "proposal reconciliation path"
+                           )
+                         end
+            result = @git_ops.hive_commit(
+              stage_name: "proposal-reconcile", slug: source_event_id,
+              action: "quarantined proposal source", pathspecs: paths
+            )
+            raise SourceUnavailable, "proposal source quarantine was not committed" unless result == :committed
+            true
+          rescue StandardError => error
+            begin
+              snapshot.restore!
+            rescue StandardError => restore_error
+              raise SourceUnavailable,
+                    "proposal quarantine recovery failed after #{error.class}: #{restore_error.class}"
+            end
+            raise error
+          end
+        end
+      end
+
+      def quarantine_code(error)
+        error.class.name.split("::").last
+             .gsub(/([a-z\d])([A-Z])/, '\\1_\\2').downcase[0, 128]
+      end
+
+      def clean_uncommitted_state!
+        Proposals.restore_committed_proposal_state!(@git_ops)
+      end
+    end
+  end
+end

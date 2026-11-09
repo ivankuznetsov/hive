@@ -1,5 +1,6 @@
 require "json"
 require "open3"
+require "hive/cli_argv_policy"
 
 module Hive
   module Bot
@@ -106,8 +107,9 @@ module Hive
       def tick = fetch
 
       def fetch
+        argv = [ @hive_bin, "status", "--internal-task-graph", "--json" ]
         out, err, status = Open3.capture3(
-          @extra_env, @hive_bin, "status", "--internal-task-graph", "--json"
+          @extra_env, *Hive::CliArgvPolicy.local_child_argv(argv)
         )
         unless status.success?
           message = "hive status exited #{status.exitstatus}: #{err.strip}"

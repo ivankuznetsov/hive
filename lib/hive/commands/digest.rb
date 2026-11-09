@@ -121,8 +121,15 @@ module Hive
           "coverage_started_at" => view["coverage_started_at"],
           "precoverage" => view.fetch("precoverage", false) == true,
           "pruned_at" => view["pruned_at"],
+          "generation_failure" => generation_failure(view["generation_failure"]),
           "web_url" => web_url(local_date, view["document"] ? nil : @project || view["selected_project"])
         }.merge(view["document"].is_a?(String) ? { "document" => view["document"], "repository_stats" => view["repository_stats"] } : {}))
+      end
+
+      def generation_failure(value)
+        return nil unless value.is_a?(Hash)
+
+        value.slice("local_date", "failed_at", "error_class", "message")
       end
 
       def normalized_requested_date
@@ -150,6 +157,13 @@ module Hive
       end
 
       def render_text(payload)
+        if (failure = payload["generation_failure"])
+          @stdout.puts(
+            "Digest generation for #{safe(failure.fetch('local_date'))} failed at " \
+            "#{safe(failure.fetch('failed_at'))}: #{safe(failure.fetch('message'))}"
+          )
+          @stdout.puts("Fix the cause, then run `hive digest refresh --date #{safe(failure.fetch('local_date'))}`.\n\n")
+        end
         case payload.fetch("reader_status")
         when "missing"
           render_missing(payload)

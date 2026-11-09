@@ -32,6 +32,9 @@ class ExitCodesTest < Minitest::Test
     assert_equal Hive::ExitCodes::USAGE,               Hive::AmbiguousSlug.new("x", slug: "s", candidates: []).exit_code
     assert_equal Hive::ExitCodes::GENERIC,             Hive::DestinationCollision.new("x", path: "/p").exit_code
     assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::FinalStageReached.new("x", stage: "9-done").exit_code
+    assert_equal Hive::ExitCodes::WRONG_STAGE,         Hive::ArchivePrNotMerged.new("x", reason: "pr_not_merged").exit_code
+    assert_equal Hive::ExitCodes::WRONG_STAGE,
+                 Hive::ArchivePrStateUnobservable.new("x", reason: "pr_state_unobservable").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoReviewFile.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::NoLogFiles.new("x").exit_code
     assert_equal Hive::ExitCodes::USAGE,               Hive::UnknownFinding.new("x", id: 1).exit_code

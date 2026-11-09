@@ -431,7 +431,7 @@ module Hive
       end
 
       def reexec_detached_start!
-        argv = [ "babysit", "start", "--detach" ]
+        argv = [ "babysit", "start", "--detach", "--context", "local" ]
         argv << "--dry-run" if @dry_run
         binary = Hive::InvokedBinary.path
         unless binary

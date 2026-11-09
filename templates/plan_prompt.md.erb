@@ -77,6 +77,10 @@ Constraints:
   unsupported collection a prerequisite for implementation or completion.
   Record the missing evidence and verification limitation, use available checks,
   and keep actual product requirements and demonstrated failures actionable.
+- Keep release and acceptance evidence gates out of `## Requirements Trace`:
+  CI signoff, pushed-head or exact-commit checks, and re-running acceptance or
+  smoke on the final commit belong in a `## Definition of Done` section. As
+  requirements they become review findings that every fix commit re-triggers.
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->`.
 

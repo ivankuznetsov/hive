@@ -13,6 +13,7 @@ require "hive/markers"
 require "hive/model_routing"
 require "hive/permission_scope"
 require "hive/stages/clean_exit"
+require "hive/review_residual_commit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
@@ -665,6 +666,7 @@ module Hive
         case result[:status]
         when :clean, :auto_committed
           log_clean_exit_event(task, stage, result)
+          surface_residual_commit(task, stage, result, existing_marker)
           { status: result[:status], overwrote_marker: false }
         when :scope_violation, :safety_violation, :git_failed
           overwrote = mark_clean_exit_failure(task, result, existing_marker)
@@ -754,6 +756,19 @@ module Hive
         )
       rescue StandardError
         nil
+      end
+
+      # A residue commit made after review recorded an agent failure is never
+      # published by that run; stamp it on the failure marker so it cannot
+      # sit unreported in the worktree (see Hive::ReviewResidualCommit).
+      def surface_residual_commit(task, stage, result, existing_marker)
+        return unless result[:status] == :auto_committed
+
+        Hive::ReviewResidualCommit.annotate!(
+          task, stage: stage, observed_marker: existing_marker, head: result[:head]
+        )
+      rescue StandardError => e
+        warn "[hive] could not record residual commit #{result[:head]} on the marker: #{e.message}"
       end
 
       def mark_clean_exit_failure(task, result, existing_marker = nil)

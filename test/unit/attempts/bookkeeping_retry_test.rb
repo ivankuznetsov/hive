@@ -102,6 +102,18 @@ class AttemptsBookkeepingRetryTest < Minitest::Test
     assert Hive::Attempts::BookkeepingRetry.busy?(sequel)
     assert Hive::Attempts::BookkeepingRetry.busy?(Hive::RuntimeControlPlane::FileFence::Busy.new("fence", lock_path: "/fence"))
     refute Hive::Attempts::BookkeepingRetry.busy?(Hive::ConcurrentRunError.new("unrelated"))
+    assert Hive::Attempts::BookkeepingRetry.busy?(Hive::RuntimeControlPlane::Busy.new)
+    assert Hive::Attempts::BookkeepingRetry.busy?(Sequel::DatabaseLockTimeout.new("lock timeout"))
+    typed = begin
+      begin
+        raise Hive::RuntimeControlPlane::Busy
+      rescue Hive::RuntimeControlPlane::Busy
+        raise Hive::Attempts::RuntimeDatabaseBusy, "attempt transition failed: runtime database busy, retry"
+      end
+    rescue Hive::Attempts::RuntimeDatabaseBusy => error
+      error
+    end
+    assert Hive::Attempts::BookkeepingRetry.busy?(typed)
     cycle = RuntimeError.new("database is locked")
     cycle.define_singleton_method(:cause) { self }
     refute Hive::Attempts::BookkeepingRetry.busy?(cycle)

@@ -29,7 +29,6 @@ module Hive
         binding = binding_id.to_s
         profile = Hive::AgentProfiles.lookup(adapter_name)
         key = profile.configuration_environment_key
-        raise Hive::ConfigError, "provider route uses an unsupported adapter" unless key
         unless IDENTIFIER.match?(binding)
           raise Hive::ConfigError, "provider route launch binding is invalid"
         end
@@ -43,6 +42,14 @@ module Hive
             selector_name: nil,
             environment: selector_scrub.merge(profile.subscription_environment)
           )
+        end
+
+        # A profile without a configuration-directory variable can only run
+        # against its default directory.
+        unless key
+          raise Hive::ConfigError,
+                "provider route uses an adapter without launch binding support " \
+                "(#{adapter_name} supports only the default binding)"
         end
 
         selector = selector_name(adapter_name, binding)

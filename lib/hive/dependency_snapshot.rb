@@ -10,6 +10,7 @@ require "hive/dependency_admission"
 require "hive/plan_frontmatter"
 require "hive/repository_identity"
 require "hive/markers"
+require "hive/pull_request_outcome"
 require "hive/task"
 require "hive/task_action"
 require "hive/workflows/project"
@@ -28,6 +29,13 @@ module Hive
     ActiveProjectInput = Data.define(:task_folders)
     BaseSelection = Data.define(:branch, :mode)
     BranchRefInventory = Data.define(:needed, :refs)
+
+    # Terminal (archive) stage of a delivered prerequisite — the same fixed
+    # gate list edges use, derived from the coding descriptor. Its branch has
+    # landed on the default branch (often squash-merged, so the prerequisite's
+    # own commits are not ancestors of the default branch) and its remote
+    # branch is usually deleted, so it is never a valid stacked base.
+    DELIVERED_STAGE = Hive::Stages::DIRS.last
 
     def semantic_fingerprint(context)
       projects = context.project_snapshot_layers.each_with_index.flat_map do |layer_projects, layer|
@@ -72,7 +80,8 @@ module Hive
             slug: meta[:slug] || entry,
             id: meta[:id],
             stage: stage,
-            stage_index: index + 1
+            stage_index: index + 1,
+            folder: folder
           }
         end
       end
@@ -147,6 +156,16 @@ module Hive
         return BaseSelection.new(branch: nil, mode: "default")
       end
 
+      delivery = delivery_evidence(candidates.find { |candidate| Hive::Dependencies.task_slug(candidate) == base })
+      if delivery
+        if warn_on_fallback
+          warn "[hive] dependency: #{task.slug} depends_on #{dependency.inspect} but " \
+               "prerequisite #{base} is already delivered (#{delivery}); branching from " \
+               "#{default_branch} instead of stacking on its branch"
+        end
+        return BaseSelection.new(branch: nil, mode: "default")
+      end
+
       BaseSelection.new(branch: base, mode: "stacked")
     rescue Hive::Dependencies::InvalidReference => e
       if warn_on_fallback
@@ -158,6 +177,34 @@ module Hive
 
     def stacked_base(task, default_branch)
       base_selection(task, default_branch).branch
+    end
+
+    # Stacking exists only to build on a prerequisite that has NOT landed yet.
+    # Once Hive holds delivered evidence — the prerequisite reached the
+    # terminal stage, or its current PR was observed merged — its branch is at
+    # best redundant and at worst a stale pre-squash commit that is not an
+    # ancestor of the default branch. Returns a short reason string, or nil
+    # when the prerequisite is undelivered (or unknown).
+    def delivery_evidence(prerequisite)
+      return nil if prerequisite.nil?
+      return "stage #{DELIVERED_STAGE}" if prerequisite_value(prerequisite, :stage).to_s == DELIVERED_STAGE
+
+      folder = prerequisite_value(prerequisite, :folder).to_s
+      return nil if folder.empty?
+
+      outcome = Hive::PullRequestOutcome.latest(folder)
+      outcome&.merged? ? "pull request merged: #{outcome.pr_url}" : nil
+    end
+
+    # Snapshot rows are symbol-keyed hashes (`tasks`) or
+    # `DependencyAdmission::TaskSnapshot` readers; a shape without the field
+    # simply carries no delivery evidence.
+    def prerequisite_value(prerequisite, key)
+      if prerequisite.respond_to?(:key?)
+        prerequisite[key] || prerequisite[key.to_s]
+      elsif prerequisite.respond_to?(key)
+        prerequisite.public_send(key)
+      end
     end
 
     # Status uses the same remote-tracking/local-ref fallback choices as

@@ -7,6 +7,7 @@ require "hive/mcp"
 require "hive/paths"
 require "hive/secret_patterns"
 require "hive/stages/base"
+require "hive/daily_digest/document_prompt"
 
 module Hive
   module DailyDigest
@@ -18,14 +19,39 @@ module Hive
         @config_loader, @timeout_sec = config_loader, timeout_sec
       end
 
+      # Tries the configured digest route, then each `fallback_agents` entry in
+      # order. Every failure is kept so an all-routes failure names each cause
+      # instead of only the last one.
       def generate(facts)
         require "prdigest"
         config = @config_loader.call
-        profile = Hive::Stages::Base.stage_profile(config, "execute", explicit_agent: config.dig("daily_digest", "agent"))
+        failures = []
+        routes(config).each do |route|
+          return generate_with(facts, config, route)
+        rescue Hive::AgentError, AgentCliRuntime::Error => error
+          failures << "#{route_label(route)}: #{error.message}"
+        end
+        raise Hive::AgentError, failures.join("; ")[0, 4_000]
+      end
+
+      private
+
+      def routes(config)
+        digest = config.fetch("daily_digest", {}) || {}
+        primary = digest.slice("agent", "model", "effort")
+        [ primary, *Array(digest["fallback_agents"]) ].uniq
+      end
+
+      def route_label(route)
+        [ route["agent"] || "execute agent", route["model"] ].compact.join(" ")
+      end
+
+      def generate_with(facts, config, route)
+        profile = Hive::Stages::Base.stage_profile(config, "execute", explicit_agent: route["agent"])
         request = Hive::AgentRuntime::Request.new(
-          profile: profile, prompt: Prdigest::Document.prompt(facts),
+          profile: profile, prompt: DocumentPrompt.build(facts),
           permission_mode: Hive::Config.claude_permission_mode(config),
-          **Hive::Stages::Base.model_launch_arguments(config, "execute", profile, current: config.fetch("daily_digest", {}))
+          **Hive::Stages::Base.model_launch_arguments(config, "execute", profile, current: route)
         )
         output = Hive::Mcp.with_launch(profile: profile, cfg: config, scope: "daily_digest", cwd: Paths.state_home) do |launch|
           @mcp_launch = launch
@@ -39,8 +65,6 @@ module Hive
         end
         Hive::SecretPatterns.redact(text)
       end
-
-      private
 
       def final_message(profile, output)
         begin
@@ -64,6 +88,19 @@ module Hive
         messages.source == :structured ? text : nil
       end
 
+      # A failed run is not a document: read the provider's own error event
+      # instead of strictly parsing it as a successful transcript, which would
+      # replace the real cause (for example an expired API key) with a
+      # MalformedOutput about the event shape.
+      def provider_error(profile, output)
+        output.to_s.each_line do |line|
+          event = Hive::Agent::MessageExtractor.parse_json_line(line)
+          error = Hive::AgentRuntime.extract_provider_error(profile, event)
+          return error[:message] if error && !error[:message].to_s.empty?
+        end
+        nil
+      end
+
       def capture(invocation, profile)
         files = Array.new(3) { Tempfile.new("hive-digest-agent") }
         input, output, errors = files
@@ -82,8 +119,7 @@ module Hive
             unless waited.last.success?
               errors.rewind
               output.rewind
-              detail = errors.read(2_000).to_s
-              detail = final_message(profile, output.read(OUTPUT_LIMIT)).to_s if detail.empty?
+              detail = provider_error(profile, output.read(OUTPUT_LIMIT)) || errors.read(2_000).to_s
               raise Hive::AgentError, "digest agent failed (exit #{waited.last.exitstatus}): #{Hive::SecretPatterns.redact(detail)[0, 2_000]}"
             end
             raise Hive::AgentError, "digest agent output exceeded the limit" if output.size > OUTPUT_LIMIT

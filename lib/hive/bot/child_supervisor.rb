@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "time"
 require "tmpdir"
+require "hive/cli_argv_policy"
 require "hive/runtime_control_plane/command_registration"
 
 module Hive
@@ -48,7 +49,7 @@ module Hive
         log_io.flush
 
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: argv[1] || "bot-child",
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "bot-child",
           chdir: cwd, pgroup: true, out: log_io, err: log_io
         )
         log_io.close

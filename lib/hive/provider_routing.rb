@@ -65,6 +65,12 @@ module Hive
       "grok" => {
         "tools" => %w[filesystem shell web].freeze,
         "permissions" => PERMISSION_CAPABILITIES
+      },
+      # No "mcp": Hive has no Muse MCP renderer yet, so a Muse launch keeps
+      # the operator's own MCP config instead of the Hive-granted servers.
+      "muse" => {
+        "tools" => %w[filesystem shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
       }
     }.freeze
 

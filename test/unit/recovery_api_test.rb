@@ -4,6 +4,33 @@ require "hive/recovery/api"
 class HiveRecoveryAPITest < Minitest::Test
   include HiveTestHelper
 
+  def test_unsupported_observation_carriers_cannot_supply_recovery_identity
+    observation = Hive::Recovery::API.observation(Object.new)
+    assert_nil observation.project
+    assert_nil observation.slug
+    assert_nil observation.task_generation
+    assert_nil observation.suggested_command
+  end
+
+  def test_missing_optional_activity_does_not_prevent_the_canonical_recovery_outcome
+    with_tmp_dir do |root|
+      folder = File.join(root, "missing-task")
+      row = { "project" => "demo", "slug" => "missing-task", "folder" => folder,
+              "state_file" => File.join(folder, "task.md"), "stage" => "4-execute", "marker" => "error",
+              "state_file_mtime" => Time.utc(2026, 11, 7, 12) }
+      expected = { "status" => "unavailable", "reason" => "task_missing" }
+      calls = []
+      coordinator = Object.new
+      coordinator.define_singleton_method(:observation_token_for) { |_| "fresh-observation" }
+      coordinator.define_singleton_method(:request) { |**arguments| calls << arguments; expected }
+      result = Hive::Recovery::API.recover!(row: row, coordinator: coordinator)
+      assert_same expected, result
+      assert_equal 1, calls.length
+      assert_equal "missing-task", calls.first.fetch(:row).slug
+      refute File.exist?(folder)
+    end
+  end
+
   def test_observation_derives_the_state_file_from_a_task_folder
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "4-execute", "task")
@@ -38,6 +65,14 @@ class HiveRecoveryAPITest < Minitest::Test
         unreadable = Hive::Recovery::API.observation({ "state_file" => path })
         assert_nil unreadable.state_file_mtime
       end
+    end
+  end
+
+  def test_observation_tokens_need_no_control_plane_coordinator
+    row = { "project" => "demo", "slug" => "task", "marker" => "error", "state_file_mtime" => Time.utc(2026, 11, 8) }
+    expected = Hive::Daemon::RecoveryCoordinator.observation_token(Hive::Recovery::API.observation(row))
+    with_replaced_singleton_method(Hive::Daemon::RecoveryCoordinator, :new, ->(**) { flunk "token hashing must stay query-only" }) do
+      assert_equal expected, Hive::Recovery::API.observation_token(row)
     end
   end
 
@@ -103,6 +138,30 @@ class HiveRecoveryAPITest < Minitest::Test
     end
     assert_same task, seen_task
     assert_equal Time.utc(2026, 8, 12, 12), seen_clock.call
+  end
+
+  def test_manual_execution_normalizes_the_observation_and_uses_only_the_attached_runner
+    coordinator = Object.new # Queued admission must not be invoked.
+    calls = []
+    retry_runner = Object.new
+    expected = Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+      "status" => "terminal", "terminal_outcome" => "failed", "attempt_id" => "attempt-1"
+    })
+    retry_runner.define_singleton_method(:call) do |**arguments|
+      calls << arguments
+      expected
+    end
+    now = Time.utc(2026, 11, 8)
+    result = Hive::Recovery::API.recover!(row: { "slug" => "task", "marker" => "ERROR" },
+      project: "demo", observation_token: "a" * 64, now: now,
+      execution: :manual, coordinator: coordinator, manual_retry: retry_runner)
+    assert_same expected, result
+    assert_equal 1, calls.size
+    assert_instance_of Hive::Recovery::API::Observation, calls.first.fetch(:row)
+    assert_equal "demo", calls.first.fetch(:row).project
+    assert_equal "ERROR", calls.first.fetch(:row).marker
+    assert_equal "a" * 64, calls.first.fetch(:observation_token)
+    assert_equal now, calls.first.fetch(:now)
   end
 
   def test_recover_reuses_one_completed_intent_when_cooldown_becomes_queued

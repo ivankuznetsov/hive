@@ -4,6 +4,17 @@
          <% if @digest.record_reference %>data-record-id="<%= @digest.record_reference %>"<% end %>>
   <%= render "digests/header", digest: @digest %>
 
+  <% if (failure = @digest.generation_failure) %>
+    <div class="digest-state digest-state-stale digest-generation-failure" role="alert">
+      <strong>Digest generation for <%= failure["local_date"] %> failed.</strong>
+      <% if failure["local_date"] != @digest.local_date %>
+        You are seeing the last saved digest (<%= @digest.local_date %>).
+      <% end %>
+      <p class="digest-meta">Failed <%= digest_time_tag(failure["failed_at"]) %>: <%= failure["message"] %></p>
+      <p>Fix the cause, then run <code>hive digest refresh --date <%= failure["local_date"] %></code>.</p>
+    </div>
+  <% end %>
+
   <% if @digest.missing? %>
     <section class="digest-state digest-state-missing" aria-labelledby="digest-missing-heading">
       <h2 id="digest-missing-heading">No digest is saved for this day</h2>

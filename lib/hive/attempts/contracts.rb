@@ -4,6 +4,17 @@ module Hive
   module Attempts
     class RepositoryError < Hive::Error; end
     class CompareAndSwapFailed < RepositoryError; end
+    # The attempt record built for one task failed its own validation (for
+    # example a task without an id). That is a per-task data problem, not a
+    # storage failure, so callers may block just that task.
+    class InvalidAttemptRecord < RepositoryError; end
+    # SQLite lock contention outlasted the runtime database busy timeout:
+    # another Hive process held the write lock. Nothing was written, and the
+    # same operation can be retried later, so callers may defer instead of
+    # failing. Corruption, schema, and storage errors never take this class.
+    class RuntimeDatabaseBusy < RepositoryError
+      def exit_code = Hive::ExitCodes::TEMPFAIL
+    end
     class CapacityExceeded < RepositoryError; end
     class StaleTaskSource < RepositoryError; end
 

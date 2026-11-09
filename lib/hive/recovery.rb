@@ -68,6 +68,8 @@ module Hive
       return :not_applicable unless marker.to_s.downcase == "review_stale"
 
       normalized = attrs.to_h.transform_keys(&:to_s)
+      return :operator if normalized["reason"] == "final_fix_unverified"
+
       pass = normalized["pass"].to_s
       return :not_applicable unless pass.match?(/\A[1-9]\d*\z/)
 

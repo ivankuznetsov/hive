@@ -4,6 +4,7 @@ require "shellwords"
 require "time"
 require "tmpdir"
 require "hive/lock"
+require "hive/cli_argv_policy"
 require "hive/process_kill"
 require "hive/runtime_control_plane/command_registration"
 
@@ -250,7 +251,7 @@ module Hive
         log_io.flush
 
         pid = Hive::RuntimeControlPlane::CommandRegistration.spawn_registered_hive!(
-          *argv, role: argv[1] || "daemon-child",
+          *Hive::CliArgvPolicy.local_child_argv(argv), role: argv[1] || "daemon-child",
           pgroup: true, out: log_io, err: log_io, close_others: true
         )
         log_io.close

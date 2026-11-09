@@ -15,6 +15,7 @@ require "hive/paths"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/payload_store"
 require "hive/runtime_control_plane/admission_transition"
+require "hive/runtime_control_plane/sqlite_support"
 require "hive/stringify_keys"
 
 module Hive
@@ -712,6 +713,9 @@ module Hive
       def translate_store_error(error, prefix)
         raise error if error.is_a?(RepositoryError) || error.is_a?(CompareAndSwapFailed) ||
           error.is_a?(RuntimeControlPlane::AdmissionClosed) || storage_unavailable?(error)
+        raise InvalidAttemptRecord, "#{prefix}: #{error.message}" if error.is_a?(InvalidRecord)
+        raise RuntimeDatabaseBusy, "#{prefix}: #{error.message}" if RuntimeControlPlane::SQLiteSupport.busy_error?(error)
+
         raise RepositoryError, "#{prefix}: #{error.message}"
       end
 

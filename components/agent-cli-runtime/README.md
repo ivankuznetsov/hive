@@ -1,7 +1,7 @@
 # Agent CLI Runtime
 
 Agent CLI Runtime gives Ruby applications one stable integration layer for
-Claude Code, Codex CLI, Pi, Grok CLI, and OpenCode. It builds provider-specific
+Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, and Muse Code. It builds provider-specific
 commands from a shared request model, checks local versions and named
 capabilities, and normalizes usage and results afterward. Centralized profiles,
 environment rules, and parsers make agent providers easier to add, switch, and

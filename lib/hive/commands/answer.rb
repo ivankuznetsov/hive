@@ -35,11 +35,12 @@ module Hive
       class InvalidBinding < Hive::UsageError; end
       class InvalidAnswer < Hive::UsageError; end
 
-      def self.inventory(target, project: nil)
-        new(target, project: project, output: StringIO.new).call
+      def self.inventory(target, project: nil, state_reader: nil)
+        new(target, project: project, output: StringIO.new, state_reader: state_reader).call
       end
 
-      def self.write(target, project: nil, binding:, answer:)
+      def self.write(target, project: nil, binding:, answer:, idempotency_key: nil,
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil, remote_handle: nil)
         if binding.to_s.empty?
           raise InvalidBinding, "brainstorm answer binding is required for writes"
         end
@@ -48,14 +49,20 @@ module Hive
           target,
           project: project,
           binding: binding,
+          idempotency_key: idempotency_key,
+          command_receipt_store: command_receipt_store,
+          principal: principal,
+          principal_source: principal_source,
           input: StringIO.new(answer.to_s),
-          output: StringIO.new
+          output: StringIO.new,
+          state_reader: state_reader,
+          remote_handle: remote_handle
         ).call
       end
 
       def initialize(target, project: nil, binding: nil, json: false,
                      input: $stdin, output: $stdout, idempotency_key: nil,
-                     command_receipt_store: nil)
+                     command_receipt_store: nil, principal: nil, principal_source: "local_cli", state_reader: nil, remote_handle: nil)
         @target = target.to_s
         @project_filter = project
         @binding_token = binding.to_s
@@ -64,6 +71,10 @@ module Hive
         @output = output
         @idempotency_key = idempotency_key
         @command_receipt_store = command_receipt_store
+        @principal = principal
+        @principal_source = principal_source
+        @state_reader = state_reader
+        @remote_handle = remote_handle
       end
 
       def call
@@ -175,7 +186,9 @@ module Hive
             "binding" => binding,
             "binding_sha256" => ::Digest::SHA256.hexdigest(@binding_token),
             "answer_sha256" => answer_fingerprint(answer_text)
-          },
+          }.merge(@remote_handle ? {
+            "remote_binding" => { "handle_sha256" => ::Digest::SHA256.hexdigest(@remote_handle), "binding" => @binding_token }
+          } : {}),
           project_roots: lambda {
             Hive::CommandOperation.registered_project_roots(
               target: @target, project: binding.fetch("project")
@@ -185,6 +198,8 @@ module Hive
           json: true,
           structured: true,
           display_json: @json,
+          principal: @principal,
+          principal_source: @principal_source,
           failure_payload: lambda { |error|
             Hive::Schemas::ErrorEnvelope.build(
               schema: SCHEMA, error: error, error_kind: error_kind(error)
@@ -563,6 +578,7 @@ module Hive
       end
 
       def read_brainstorm!(task)
+        return @state_reader.call(task) if @state_reader
         File.read(task.state_file, encoding: "UTF-8").scrub
       rescue Errno::ENOENT, Errno::EACCES, IOError => e
         raise Hive::InvalidTaskPath,

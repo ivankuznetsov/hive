@@ -32,6 +32,11 @@ module Hive
     end
 
     attr_reader :project_root, :slug
+    # The start-point ref `create!` branched the task branch from (e.g.
+    # `origin/main`, `origin/<prereq>`, `refs/heads/<prereq>`), or nil when it
+    # attached an existing branch. Lets callers record which ref their base
+    # commit actually came from instead of assuming the default branch.
+    attr_reader :resolved_base
 
     def initialize(project_root, slug, worktree_root: nil)
       @project_root = File.expand_path(project_root)
@@ -62,6 +67,7 @@ module Hive
 
     def create!(branch_name, default_branch:, base_override: nil)
       FileUtils.mkdir_p(File.dirname(path))
+      @resolved_base = nil
 
       _, _, exists = Open3.capture3("git", "-C", @project_root,
                                     "show-ref", "--verify", "refs/heads/#{branch_name}")
@@ -111,6 +117,8 @@ module Hive
       unless status.success?
         raise WorktreeError, "git worktree add failed: #{err.strip.empty? ? out : err}"
       end
+
+      @resolved_base = base unless reuse_existing
 
       :created
     end
@@ -432,7 +440,7 @@ module Hive
     end
 
     def write_pointer!(task_folder, branch_name, execute_base_head: nil, base_branch: nil,
-                       base_oid: nil, repository: nil)
+                       base_oid: nil, repository: nil, base_ref: nil)
       data = {
         "path" => path,
         "branch" => branch_name,
@@ -441,6 +449,7 @@ module Hive
       data["execute_base_head"] = execute_base_head if execute_base_head
       data["base_branch"] = base_branch if base_branch
       data["base_oid"] = base_oid if base_oid
+      data["base_ref"] = base_ref if base_ref
       data["repository"] = repository if repository
       Hive::AtomicFile.write(File.join(task_folder, "worktree.yml"), data.to_yaml, mode: 0o600)
     end
@@ -852,7 +861,14 @@ module Hive
     # a successful fetch and only local `<default>` if that fetch also fails.
     def override_local_or_default(branch, default_branch, reason)
       if self.class.local_branch_ref_exists?(@project_root, branch)
-        warn "[hive] worktree base: #{reason}; stacking on local #{branch}"
+        # Loud by design: stacking applies only to an UNDELIVERED prerequisite
+        # (DependencySnapshot drops delivered ones), but a local-only branch
+        # cannot be proven current. Name the hazard so a stale stack is
+        # diagnosable from the log, and `resolved_base` lets execute record
+        # `base_ref: refs/heads/<branch>` in worktree.yml.
+        warn "[hive] worktree base: #{reason}; stacking on local #{branch} " \
+             "(undelivered prerequisite with no remote branch; the local branch is unverified " \
+             "and may be stale — check refs/heads/#{branch} if execution reports a missing prerequisite)"
         # Fully-qualify the start-point: a bare `<branch>` resolves through
         # gitrevisions precedence, where a same-named tag (refs/tags/<branch>)
         # shadows refs/heads/<branch>. The local ref was just verified to

@@ -524,7 +524,7 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
 
     refute_nil captured_argv, "Kernel.exec stub must have been called"
-    assert_equal Process.argv0, captured_argv.first
+    assert_equal [ Process.argv0, "daemon", "start", "--context", "local", "--dry-run" ], captured_argv
     assert_includes captured_argv, "daemon"
     assert_includes captured_argv, "start"
     assert_includes captured_argv, "--dry-run",

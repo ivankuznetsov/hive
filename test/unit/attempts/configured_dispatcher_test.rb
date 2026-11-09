@@ -65,7 +65,9 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     daemon = Hive::Config::DEFAULTS.fetch("daemon").merge(
       "child_timeout_sec" => 90,
       "child_verb_timeouts" => { "review" => 600 },
-      "child_kill_grace_sec" => 8
+      "child_kill_grace_sec" => 8,
+      "attempt_memory_max" => "5G",
+      "attempt_memory_swap_max" => "512M"
     )
     adapter = Hive::Attempts::ConfiguredDispatcher.new(
       store: :store,
@@ -92,6 +94,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal 17, launcher_options.fetch(:first_heartbeat_timeout_sec)
     assert_equal 600, launcher_options.fetch(:timeout_sec)
     assert_equal 8, launcher_options.fetch(:kill_grace_sec)
+    assert_equal "5G", launcher_options.fetch(:memory_max)
+    assert_equal "512M", launcher_options.fetch(:memory_swap_max)
     assert_equal 13, dispatcher_options.fetch(:launch_timeout_sec)
     assert_equal 19.5, launcher_options.fetch(:bookkeeping_timeout_sec)
     assert_equal 19.5, dispatcher_options.fetch(:bookkeeping_timeout_sec)
@@ -102,6 +106,13 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal :launcher, dispatcher_options.fetch(:launcher)
     assert_same task, dispatcher_options.fetch(:task_resolver).call(nil)
     assert dispatcher_options.fetch(:routing_policy_resolver).call(nil, "4-execute").legacy?
+  end
+
+  def test_memory_limits_default_to_disabled_for_daemon_blocks_without_the_keys
+    assert_equal(
+      { memory_max: false, memory_swap_max: false },
+      Hive::Attempts::LaunchPolicy.memory_limits(daemon: {})
+    )
   end
 
   def test_routing_decision_uses_resolved_project_configuration_without_dispatch

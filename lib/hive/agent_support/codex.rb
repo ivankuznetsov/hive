@@ -15,6 +15,24 @@ module Hive::AgentSupport::Codex
 
   def credential_path(home: nil) = File.join(home || Dir.home, ".codex", "auth.json")
   def execution_identity(model) = [ "openai", model.to_s.empty? ? nil : model.to_s ]
+  # Codex's `--json` stream never names the model that served a turn, so a
+  # Codex reviewer cannot prove its family from a served-model field. Hive
+  # launches Codex with `--ignore-user-config` and replays only
+  # `model_provider` / `profile` from the operator's config (see Mcp), so when
+  # neither selects a non-OpenAI provider the launch itself guarantees the
+  # built-in OpenAI provider, and the OpenAI family is attested. Any other
+  # provider, or an unreadable config, stays unattested (fail closed).
+  def attests_family_without_served_model?(family:, environment: ENV)
+    return false unless family.to_s.strip.downcase == "openai"
+
+    config = UserConfig.load(UserConfig.path(env: environment))
+    providers = [ config["model_provider"] ]
+    profile = UserConfig.string(config["profile"])
+    providers << config.table("profiles", profile)["model_provider"] if profile
+    providers.compact.all? { |raw| UserConfig.string(raw) == "openai" }
+  rescue StandardError
+    false
+  end
   def recoverable_planner_identity?(identity)
     identity["model"].to_s.match?(LEGACY_CLAUDE_MODEL)
   end

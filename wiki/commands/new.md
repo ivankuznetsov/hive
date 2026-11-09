@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-10-15
+updated: 2026-11-07
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
@@ -232,6 +232,10 @@ an idempotency key retain the existing capture behavior. The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
 
+The internal structured adapter also records `task_id` in its original durable
+result. This lets the remote API acknowledge the captured native task without
+reopening an old folder after advancement. Local CLI JSON remains unchanged.
+
 ## Serialization fallback
 
 Without an idempotency key, `hive new --json` retains its legacy text output.
@@ -254,6 +258,7 @@ re-raises that encoding error and emits no fallback document. Programmatic
 
 ## Backlinks
 
+- [[remote-access]] — remote creation requires `create` in an authorized registered project and uses `hive-remote.v1` JSON. Supplied task text becomes an installed workflow's agent prompt with local operator authority inside that project.
 - [[cli]] · [[commands/run]] · [[stages/inbox]]
 - [[modules/config]] · [[modules/git_ops]]
 - [[state-model]]

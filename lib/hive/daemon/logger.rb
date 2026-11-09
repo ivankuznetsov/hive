@@ -26,10 +26,14 @@ module Hive
         dispatcher_stopping
         tick_begin
         tick_end
+        tick_deferred
+        startup_deferred
+        dispatch_deferred
         status_failure
         status_warning
         admission_check_failed
         operational_snapshot_publish_failed
+        operational_snapshot_incomplete
         runtime_checkpoint_maintenance
         dispatched
         completed
@@ -80,8 +84,13 @@ module Hive
         attempt_terminal
         attempt_lost
         attempt_duplicate
+        launch_reservations_released
+        launch_reservation_release_failed
+        owned_processes_reconciled
+        owned_process_reconcile_failed
         attempt_terminal_replay
         attempt_transient_retry
+        attempt_failure_limit
         attempt_patrol_retry_deferred
         attempt_capacity_deferred
         attempt_route_unavailable

@@ -6,6 +6,7 @@ require "hive/daily_digest/coordinator"
 require "hive/daily_digest/store"
 require "hive/daily_digest/prdigest_source"
 require "hive/daily_digest/document_generator"
+require "hive/daily_digest/generation_failures"
 
 module Hive
   module DailyDigest
@@ -18,6 +19,7 @@ module Hive
                      generator: DocumentGenerator.new, clock: -> { Time.now.utc })
         @config_loader, @projects_loader, @store = config_loader, projects_loader, store
         @facts_loader, @generator, @clock = facts_loader, generator, clock
+        @failures = GenerationFailures.new(root: store.root, clock: clock)
       end
 
       def refresh(date: nil)
@@ -71,7 +73,14 @@ module Hive
             record.merge!("document" => text, "evidence_id" => evidence_id,
                           "repository_stats" => repository_stats(repositories))
           end
-          result(@store.write_base(record), lifecycle)
+          written = result(@store.write_base(record), lifecycle)
+          @failures.clear(date)
+          written
+        rescue PrunedRecord
+          raise
+        rescue StandardError => error
+          @failures.record(date, error)
+          raise
         end
       end
 

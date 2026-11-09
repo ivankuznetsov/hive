@@ -8,7 +8,8 @@ class TaskMutationsTest < ActiveSupport::TestCase
 
   test "derives queueable actions from the canonical task action vocabulary" do
     expected = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
-      Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
+      Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb) &&
+        !%w[act approve].include?(verb)
     end
 
     assert_equal expected, TaskMutations::STAGE_VERB_BY_ACTION

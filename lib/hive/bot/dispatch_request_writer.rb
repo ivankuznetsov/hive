@@ -31,7 +31,7 @@ module Hive
                  task_generation: nil,
                  inherited_outputs: [], task_id: nil, expected_stage: nil,
                  state_home: Hive::Paths.state_home, now: Time.now, repository: nil,
-                 command_context: nil, command_lifecycle: nil)
+                 command_context: nil, command_lifecycle: nil, remote_authority: nil)
         repository ||= repository_for(state_home)
         command_context ||= current_command_context
         request_id ||= command_context&.transport_request_id || repository.generate_request_id
@@ -63,6 +63,7 @@ module Hive
           task_id: task_id,
           expected_stage: expected_stage,
           command_context: command_context,
+          remote_authority: remote_authority,
           state_home: state_home,
           now: now
         )
@@ -231,7 +232,8 @@ module Hive
 
       def intended_stage_for(argv, task)
         verb = Array(argv)[1].to_s
-        return "#{task.stage_index}-#{task.stage_name}" if %w[run plan-review-run].include?(verb)
+        return Hive::OperationalAction.intended_stage_for(task, action_id: Array(argv)[2]) if verb == "act"
+        return "#{task.stage_index}-#{task.stage_name}" if %w[run approve plan-review-run].include?(verb)
 
         Hive::Workflows.for_verb(verb).fetch(:target)
       end

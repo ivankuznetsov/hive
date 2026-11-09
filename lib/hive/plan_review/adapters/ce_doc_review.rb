@@ -294,9 +294,10 @@ module Hive
             # A well-confined reviewer that emitted malformed JSON or one bad
             # diagnostic field did not judge the plan. Treat the producer's
             # output failure like other retryable provider output, while the
-            # orchestrator's max_transient bound prevents a retry loop.
+            # orchestrator's max_transient bound prevents a retry loop. Keep
+            # the rejected bytes so the operator can see what was refused.
             return result(
-              "retryable_failure", diagnostic: e.message,
+              "retryable_failure", diagnostic: e.message, rejected_output: bytes,
               route_receipt: route_receipt(
                 request, actual: runner_result["actual_route"], diagnostic_source: "parser"
               )

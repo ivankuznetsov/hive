@@ -646,6 +646,50 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_busy_claim_and_first_heartbeat_are_retried
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      claims = fail_store_calls(store, :claim, times: 2)
+      first_heartbeats = fail_store_calls(store, :first_heartbeat, times: 2)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 5
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      assert_equal 0, supervisor.run
+      assert_equal [ 3, 3 ], [ claims.call, first_heartbeats.call ]
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  # Busy retries never outlive the first-heartbeat deadline: the retry budget
+  # is capped inside it and the repository re-checks it, so the attempt fails closed.
+  def test_busy_first_heartbeat_fails_closed_at_its_deadline
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+      store.define_singleton_method(:first_heartbeat) do |observed, **kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed, "first heartbeat deadline expired" if
+          observed.active_deadline && kwargs.fetch(:now) > observed.active_deadline
+        raise Hive::Attempts::RepositoryError, AttemptsSupervisorTest::BUSY,
+              cause: SQLite3::BusyException.new("database is locked")
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 5, first_heartbeat_timeout_sec: 0.2
+      )
+      supervisor.define_singleton_method(:sleep) { |seconds| Kernel.sleep([ seconds, 0.01 ].min) }
+
+      _, err = capture_io do
+        assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run }
+      end
+      # The bounded retry is capped inside the persisted first-heartbeat
+      # deadline, so it exhausts as typed bookkeeping busy before expiry.
+      assert_includes err, "runtime_bookkeeping_busy: first_heartbeat exhausted"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
+
   # A swapping host can hold the write lock past the lease window; a live
   # owner is only a reconciler suspect then, so busy heartbeats keep deferring.
   def test_busy_heartbeats_outlast_the_lease_window
@@ -1339,6 +1383,101 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_worker_killed_by_scope_oom_records_typed_memory_limit_reason
+    worker_argv = [ "/bin/sh", "-c", "kill -KILL $$" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      counts = [ 2, 3 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "failure_reason=memory_limit_exceeded oom_kills=1"
+    end
+  end
+
+  def test_descendant_oom_kill_is_a_notice_when_the_worker_survives
+    worker_argv = [ "/bin/sh", "-c", "exit 0" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      counts = [ 0, 2 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "memory_limit_oom_kills=2"
+      refute_includes log, "failure_reason="
+    end
+  end
+
+  def test_unavailable_oom_counter_leaves_the_log_untouched
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "kill -KILL $$" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { nil }
+      )
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      refute_includes attempt_log_text(store, store.fetch(attempt.attempt_id)), "memory_limit"
+    end
+  end
+
+  def test_memory_limit_log_failures_do_not_break_terminalization
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      oom_kill_counter: -> { 1 }
+    )
+    supervisor.instance_variable_set(:@worker_signal, "KILL")
+    log = Object.new
+    log.define_singleton_method(:append) { |*| raise IOError, "attempt log is closed" }
+
+    assert_nil supervisor.send(:record_memory_limit_kills, 0, log)
+    assert_equal "memory_limit_exceeded", supervisor.instance_variable_get(:@failure_reason)
+  end
+
+  def test_signalled_patrol_attempt_reports_memory_limit_agent_reason
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "2-fix",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      counts = [ 0, 1 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        worker = <<~'RUBY'
+          gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+          abort "gate not released" unless gate.read(1) == "1"
+          Process.kill("KILL", Process.pid)
+        RUBY
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
+      assert_equal "memory_limit_exceeded", diagnostic.fetch("agent_reason")
+      assert_equal "KILL", diagnostic.fetch("signal")
+    end
+  end
+
   def test_cancel_signal_synthesizes_cancelled_artifact_and_log_reference
     worker_argv = [ "hive", "run", "durable-task" ]
     with_attempt(
@@ -1624,7 +1763,9 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_equal 137, supervisor.send(:status_exit, status)
     assert_equal Hive::ExitCodes::SOFTWARE, supervisor.send(:status_exit, nil)
     record = { "worker_argv" => [ "hive", "run", "task" ] }
-    assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv, record).first
+    assert_equal [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", "run", "task" ],
+                 supervisor.send(:resolved_worker_argv, record)
+    assert_equal [ "hive", "run", "task" ], record.fetch("worker_argv")
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise Errno::ESRCH }) do
       assert_raises(Hive::Attempts::RepositoryError) { supervisor.send(:process_identity, 99) }
@@ -1692,6 +1833,12 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   private
+
+  def attempt_log_text(store, terminal)
+    Hive::Attempts::StreamLog.read(
+      File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+    ).map(&:bytes).join
+  end
 
   def inject_torn_log_separator_failure(archive, persistent:)
     original = archive.method(:open_writer)

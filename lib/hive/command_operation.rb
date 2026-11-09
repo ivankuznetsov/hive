@@ -158,6 +158,7 @@ module Hive
                    structured: false, maintenance: false,
                    display_json: json,
                    failure_payload: nil,
+                   result_status: nil,
                    text_renderer: nil,
                    retry_horizon_expires_at: nil,
                    store: Hive::CommandReceiptStore.new)
@@ -177,6 +178,7 @@ module Hive
       @display_json = display_json
       @maintenance = maintenance
       @failure_payload = failure_payload
+      @result_status = result_status
       @text_renderer = text_renderer
       @retry_horizon_expires_at = retry_horizon_expires_at
       Hive::CommandMutations.validate_keyed!(
@@ -230,10 +232,11 @@ module Hive
       context = operation_context(claim, effect)
       result, captured = with_context(context) { capture { yield } }
       payload = response_payload(result, captured)
+      status = @result_status ? Integer(@result_status.call(payload)) : Hive::ExitCodes::SUCCESS
       public_receipt = {
         "id" => claim.receipt_id,
         "generation" => claim.generation + 1,
-        "state" => "succeeded"
+        "state" => status.zero? ? "succeeded" : "failed"
       }
       canonical_source = canonical_payload(result, captured)
       canonical = canonical_source&.merge("command_receipt" => public_receipt)
@@ -246,10 +249,14 @@ module Hive
       begin
         @store.complete_effect(
           claim, effect_id: effect.fetch(:effect_id), result: stored,
-          status: Hive::ExitCodes::SUCCESS
+          status: status
         )
-        @store.succeed(claim, result: stored, status: Hive::ExitCodes::SUCCESS)
-      rescue Sequel::Error, SQLite3::Exception, SystemCallError, IOError => persistence_error
+        if status.zero?
+          @store.succeed(claim, result: stored, status: status)
+        else
+          @store.fail_applied(claim, result: stored, status: status)
+        end
+      rescue Hive::RuntimeControlPlane::Busy, Sequel::Error, SQLite3::Exception, SystemCallError, IOError => persistence_error
         persist_uncertainty(claim, effect, persistence_error)
         persistence_failed = true
         raise Hive::CommandUnresolved.new(
@@ -589,7 +596,7 @@ module Hive
       if claim.state == "failed" && @structured && !@display_json
         raise Hive::CommandReplayFailure.new(
           payload.fetch("message", "the original keyed command failed"),
-          exit_code: claim.status
+          exit_code: claim.status, payload: exact_payload || payload
         )
       end
       if claim.state == "failed" && @structured
@@ -651,7 +658,8 @@ module Hive
     def failure_error_kind(_error) = "usage"
 
     def deterministic_non_application?(error)
-      error.is_a?(Hive::UsageError) ||
+      (error.respond_to?(:deterministic_non_application?) && error.deterministic_non_application?) ||
+        error.is_a?(Hive::UsageError) ||
         error.is_a?(Hive::OperationalActionUsageError) || error.is_a?(Hive::WrongStage)
     end
 

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/reconciler"
 require "hive/runtime_control_plane/lifecycle_repository"
+require "hive/runtime_control_plane/process_registry"
 
 class AttemptsReconcilerTest < Minitest::Test
   include HiveTestHelper
@@ -864,6 +865,68 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_maintained_disabled_project_settles_dead_attempt_and_stops_its_owned_process
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: store.database, state_home: File.dirname(store.database.path),
+        process_table: lambda {
+          Hive::Attempts::ProcessTableSnapshot.new(session_ids: Set.new, process_group_ids: Set.new)
+        }
+      )
+      reservation = registry.reserve!(
+        origin: "attempt", role: "attempt_wrapper", attempt_id: running.attempt_id
+      )
+      process_id = registry.register!(reservation.id, pid: Process.pid).process_id
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      store.database.transaction do |db|
+        db[:owned_processes].where(process_id: process_id).update(
+          pid: gone_pid, session_id: gone_pid, process_group_id: gone_pid
+        )
+      end
+      assert_empty registry.reconcile_exited_processes!
+      requested = []
+      maintain = lambda do |projects, &block|
+        requested << projects
+        block.call(projects)
+      end
+
+      snapshot = reconciler(store, :missing).reconcile(
+        now: NOW + 2, mutate_projects: [ "owned" ], maintain_projects: maintain
+      )
+
+      assert_equal [ [ "demo" ] ], requested
+      assert_equal [ running.attempt_id ], snapshot.newly_lost_attempts.map(&:attempt_id)
+      assert_equal "owner_gone", store.fetch(running.attempt_id)["loss"]["reason"]
+      assert_equal [ "attempt_settled_session_empty" ],
+                   registry.reconcile_exited_processes!.map { |row| row["evidence"] }
+      assert_equal "stopped", store.database.read { |db| db[:owned_processes].get(:state) }
+    end
+  end
+
+  def test_maintenance_leaves_live_and_foreign_held_attempts_alone
+    with_store do |store|
+      running = running_attempt(store, stale_sec: 30)
+      foreign = ->(_projects, &block) { block.call([]) }
+      snapshot = reconciler(store, :missing).reconcile(
+        now: NOW + 2, mutate_projects: [], maintain_projects: foreign
+      )
+
+      assert_equal :unowned, snapshot.attempts.first.classification
+      assert_equal "running", store.fetch(running.attempt_id).state
+
+      held = ->(projects, &block) { block.call(projects) }
+      snapshot = reconciler(store, :matching).reconcile(
+        now: NOW + 2, mutate_projects: [], maintain_projects: held
+      )
+
+      assert_equal :adopted, snapshot.attempts.first.classification
+      assert_equal "running", store.fetch(running.attempt_id).state
+    end
+  end
+
   def test_orphan_worker_custody_blocks_loss_until_absence_or_termination
     [ :unverifiable, :absent, :matching ].each do |worker_status|
       with_store do |store|
@@ -881,6 +944,18 @@ class AttemptsReconcilerTest < Minitest::Test
         assert_equal worker_status == :unverifiable ? :suspect : :lost, result.classification
         assert_equal worker_status == :matching ? [ worker ] : [], terminated
       end
+    end
+  end
+
+  def test_maintenance_is_not_requested_when_every_live_attempt_is_owned
+    with_store do |store|
+      running_attempt(store, stale_sec: 30)
+      maintain = ->(*) { flunk "owned projects need no maintenance ownership" }
+      snapshot = reconciler(store, :matching).reconcile(
+        now: NOW + 2, mutate_projects: [ "demo" ], maintain_projects: maintain
+      )
+
+      assert_equal :adopted, snapshot.attempts.first.classification
     end
   end
 

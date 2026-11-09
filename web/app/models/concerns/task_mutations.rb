@@ -41,7 +41,8 @@ module TaskMutations
   extend ActiveSupport::Concern
 
   STAGE_VERB_BY_ACTION = Hive::TaskAction::DISPATCH_COMMANDS.select do |_action, verb|
-    Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb)
+    Hive::RuntimeControlPlane::DispatchRepository::ALLOWED_VERBS.include?(verb) &&
+      !%w[act approve].include?(verb)
   end.freeze
   OUTCOME_EVIDENCE_REWORK_ACTION =
     Hive::Schemas::TaskActionKind::OUTCOME_EVIDENCE_REWORK
@@ -53,7 +54,8 @@ module TaskMutations
       from:,
       to:,
       force:,
-      json: true
+      json: true,
+      structured: true
     ).call
   end
 

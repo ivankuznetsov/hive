@@ -2,6 +2,7 @@ require "date"
 require "json"
 require "time"
 require "hive/config"
+require "hive/daily_digest/generation_failures"
 require "hive/daily_digest/materiality"
 require "hive/daily_digest/public_view"
 require "hive/daily_digest/store"
@@ -21,9 +22,18 @@ module Hive
         @store = store
         @config_loader = config_loader
         @clock = clock
+        @failures = GenerationFailures.new(root: store.root) if store.respond_to?(:root)
       end
 
       def read(date: nil, project: nil)
+        view = read_view(date: date, project: project)
+        failure = generation_failure(date ? view["local_date"] : nil, view["local_date"])
+        return view unless failure
+
+        view.merge("generation_failure" => failure, "stale" => true)
+      end
+
+      def read_view(date: nil, project: nil)
         config = @config_loader.call
         selected_date = date ? normalize_date(date) : covering_date(@clock.call)
         return missing(selected_date, config) unless selected_date
@@ -84,6 +94,16 @@ module Hive
       end
 
       private
+
+      # An explicit date reports only its own failure. An implicit "today"
+      # read also reports a newer failed day, because it silently falls back
+      # to the last saved document.
+      def generation_failure(requested_date, shown_date)
+        return nil unless @failures
+        return @failures.for(requested_date) if requested_date
+
+        @failures.newer_than(shown_date) || (shown_date && @failures.for(shown_date))
+      end
 
       def covering_date(value)
         now = utc(value)

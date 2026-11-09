@@ -194,6 +194,36 @@ class PlanReviewResultParserTest < Minitest::Test
     assert_match(/line range is outside the immutable plan snapshot/, error.message)
   end
 
+  # hivedev F4: a reviewer echoing a requested coverage row back carried
+  # Hive's request-only keys and every verification attempt was rejected.
+  def test_echoed_request_only_coverage_keys_are_dropped
+    echoed = valid_result.fetch("coverage").map do |row|
+      row.merge("fingerprint" => "prc-#{'e' * 64}", "decision_id" => nil)
+    end
+    parsed = Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result.merge("coverage" => echoed)))
+
+    assert_equal [ %w[name required status] ], parsed.coverage.map(&:keys).uniq
+  end
+
+  def test_invalid_coverage_entry_names_the_offending_key_or_value
+    {
+      { "name" => "whole_document", "required" => true, "status" => "done", "notes" => "x" } =>
+        /entry 0: unknown keys notes/,
+      { "name" => "whole_document", "required" => true, "status" => "done" } =>
+        /entry 0: status "done" is not one of requested, completed/,
+      { "name" => "Whole Document", "required" => true, "status" => "completed" } =>
+        /entry 0: name "Whole Document" is not a lowercase coverage name/,
+      { "name" => "whole_document", "required" => "yes", "status" => "completed" } =>
+        /entry 0: required "yes" is not a boolean/,
+      "whole_document" => /entry 0: must be an object, got String/
+    }.each do |entry, pattern|
+      error = assert_raises(Hive::PlanReview::InvalidRecord) do
+        Hive::PlanReview::ResultParser.parse(JSON.generate(valid_result.merge("coverage" => [ entry ])))
+      end
+      assert_match pattern, error.message
+    end
+  end
+
   private
 
   def valid_result

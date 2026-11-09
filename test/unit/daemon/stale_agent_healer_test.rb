@@ -214,6 +214,17 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_final_findings_stale_without_escalations_never_requests_automatic_recovery
+    with_marker_file do |state_file|
+      Hive::Markers.set(state_file, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1, escalations: 0)
+      row = make_row(state_file, pid_alive: nil, stage: "6-review", marker: "review_stale",
+        marker_attrs: Hive::Markers.current(state_file).attrs, action: "recover_review", live_task_lock: false)
+      3.times { heal([ row ]) }
+      assert_empty @coordinator.requests
+      assert_equal :review_stale, Hive::Markers.current(state_file).name
+    end
+  end
+
   def test_resolved_review_stale_delegates_but_unresolved_review_stale_waits
     with_marker_file do |state_file|
       reviews = File.join(File.dirname(state_file), "reviews")

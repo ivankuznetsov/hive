@@ -49,7 +49,7 @@ Type=simple
 #      system-Ruby installs.
 Environment=HIVE_BIN=%h/.local/bin/hive
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive web
+ExecStart=%h/.local/bin/hive web --context local
 Restart=on-failure
 RestartSec=10
 

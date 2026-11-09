@@ -22,7 +22,7 @@ class PlanReviewShowCommandTest < Minitest::Test
       { "fingerprint" => "prf-3", "classification" => "safe_auto", "risk" => "low",
         "lifecycle" => "resolved", "title" => "done", "display_order" => 3 }
     ]
-    FakeProjection.new(summary, { "findings" => findings })
+    FakeProjection.new(summary, { "findings" => findings, "blockers" => @blockers })
   end
 
   def run_show(json:, freshness: { "status" => "current", "reason" => nil })
@@ -73,6 +73,34 @@ class PlanReviewShowCommandTest < Minitest::Test
 
     _payload, stdout = run_show(json: false, freshness: stale)
     assert_match(/freshness: stale \(canonical plan changed after plan review\); decisions need a linked review first/, stdout)
+  end
+
+  # hivedev C11: show returned only the stale review's generation and no
+  # action that could act on it.
+  def test_stale_review_exposes_the_current_generation_and_the_restart_action
+    stale = { "status" => "stale", "reason" => "task generation changed after plan review" }
+    task = FakeTask.new("demo-task", "/tmp/demo-task", "/tmp/demo-project")
+    payload, = run_show(json: true, freshness: stale)
+
+    assert_equal "restart", payload.fetch("next_action")
+    assert_equal Hive::PlanReview::Identity.task_generation(task), payload.fetch("current_task_generation")
+    refute_equal payload.fetch("task_generation"), payload.fetch("current_task_generation")
+    assert_nil run_show(json: true).first.fetch("next_action")
+
+    _payload, stdout = run_show(json: false, freshness: stale)
+    assert_match(/current_task_generation: \h{64}/, stdout)
+    assert_match(/next_action: hive plan-review demo-task restart --review-id/, stdout)
+  end
+
+  def test_show_lists_review_blockers_with_their_diagnostic
+    blocker = { "owner" => "operator", "reason" => "reviewer_output_rejected",
+                "diagnostic" => "verification output was rejected 3 times in a row" }
+    @blockers = [ "legacy", { "owner" => "hive", "reason" => "plain" }, blocker ]
+    payload, stdout = run_show(json: false)
+
+    assert_equal @blockers, payload.fetch("blockers")
+    assert_includes stdout, "blocker: reviewer_output_rejected: verification output was rejected 3 times in a row"
+    refute_includes stdout, "blocker: plain"
   end
 
   def test_default_dependencies_resolve_the_task_and_calculate_freshness

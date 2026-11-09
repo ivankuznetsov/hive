@@ -27,12 +27,38 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  def test_legacy_task_without_state_or_metadata_uses_its_owned_folder_for_freshness
+    with_tmp_dir do |folder|
+      workflow = Struct.new(:controller?).new(false)
+      task = Struct.new(:workflow, :folder, :state_file, :meta_yml_path).new(
+        workflow, folder, File.join(folder, "task.md"), File.join(folder, "meta.yml")
+      )
+      before = File.stat(folder)
+      assert_equal folder, Hive::OperationalAction.observation_mtime_source(task)
+      assert_equal before, File.stat(folder)
+      refute File.exist?(task.state_file)
+      refute File.exist?(task.meta_yml_path)
+    end
+  end
+
   def test_provider_administration_is_not_a_confirmation_free_operational_action
     assert_equal %w[workflow.advance workflow.retry],
                  Hive::OperationalAction::EXECUTABLE_ACTION_IDS
     refute Hive::OperationalAction.const_defined?(:PROVIDER_BLOCK_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:PROVIDER_RESET_ACTION_ID, false)
     refute Hive::OperationalAction.const_defined?(:FORCED_PROBE_ACTION_ID, false)
+  end
+
+  def test_unobservable_or_live_manual_attempts_suppress_routine_actions_across_consumers
+    row = { "slug" => "manual-task", "action" => "ready_for_review", "marker" => "none", "attrs" => {},
+      "recovery_observation" => { "request_id" => "request-1" } }
+    %w[attempt_observation_unavailable attempt_identity_conflict recovery_observation_unavailable].each do |reason|
+      unavailable = row.merge("manual_recovery_receipt" => { "status" => "unavailable", "reason" => reason })
+      assert_nil Hive::OperationalAction.descriptor(project: "demo", row: unavailable)
+    end
+    assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row.merge("live_task_lock" => true))
+    provider = row.merge("manual_recovery_receipt" => { "status" => "unavailable", "reason" => "no_eligible_provider_route" })
+    assert_equal "workflow.retry", Hive::OperationalAction.descriptor(project: "demo", row: provider).fetch("action_id")
   end
 
   def test_closure_is_advertised_but_cannot_be_executed_with_an_observation_token
@@ -95,14 +121,15 @@ class OperationalActionTest < Minitest::Test
 
     writer = RecoveryWriter.new(calls: [])
     executor = Hive::OperationalAction::Executor.new(recovery_writer: writer)
-    task = Object.new
+    task = Struct.new(:project_root).new("/tmp")
     executor.define_singleton_method(:registered_project) { |_name| { "path" => "/tmp" } }
     executor.define_singleton_method(:resolve_task) { |_slug, _project| task }
     assertions = []
+    with_replaced_singleton_method(Hive::Config, :load, ->(*) { { "daemon" => { "enabled" => true } } }) do
     with_replaced_singleton_method(
       Hive::OperationalAction,
       :observed_row,
-      ->(_task, project:) { observed.merge("project" => project) }
+      ->(_task, project:, **) { observed.merge("project" => project) }
     ) do
       with_replaced_singleton_method(
         Hive::OperationalAction,
@@ -120,6 +147,7 @@ class OperationalActionTest < Minitest::Test
 
         assert_equal "queued", result.dig("recovery", "status")
       end
+    end
     end
 
     assert_equal action.fetch("observation_token"),
@@ -257,6 +285,15 @@ class OperationalActionTest < Minitest::Test
       action = Hive::OperationalAction.descriptor(project: "demo", row: row)
 
       assert_equal "workflow.retry", action.fetch("action_id")
+    end
+  end
+
+  def test_final_fix_unverified_without_escalations_has_no_routine_action
+    with_tmp_dir do |folder|
+      row = { "marker" => "review_stale", "attrs" => { "reason" => "final_fix_unverified", "pass" => "3", "accepted" => "1", "escalations" => "0" },
+              "folder" => folder, "slug" => "task", "action" => "recover_review" }
+      assert_equal :operator, Hive::Recovery.review_stale_recovery_state(marker: row["marker"], attrs: row["attrs"], folder: folder)
+      assert_nil Hive::OperationalAction.descriptor(project: "app", row: row)
     end
   end
 

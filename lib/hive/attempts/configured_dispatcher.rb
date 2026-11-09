@@ -85,7 +85,8 @@ module Hive
           first_heartbeat_timeout_sec: cfg.fetch("attempt_first_heartbeat_timeout_sec"),
           bookkeeping_timeout_sec: cfg.fetch("attempt_bookkeeping_timeout_sec"),
           timeout_sec: LaunchPolicy.timeout_sec(daemon: daemon, argv: argv),
-          kill_grace_sec: LaunchPolicy.kill_grace_sec(daemon: daemon)
+          kill_grace_sec: LaunchPolicy.kill_grace_sec(daemon: daemon),
+          **LaunchPolicy.memory_limits(daemon: daemon)
         )
         @dispatcher_class.new(
           store: @store,

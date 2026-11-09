@@ -326,6 +326,10 @@ module Hive
       finalize!(claim, state: "succeeded", result: result, status: status, reason: nil)
     end
 
+    def fail_applied(claim, result:, status:)
+      finalize!(claim, state: "failed", result: result, status: status, reason: nil)
+    end
+
     def fail_non_application(claim, result:, status:, reason:, whole_effect_non_application:)
       unless whole_effect_non_application == true
         raise Hive::CommandUnresolved.new(

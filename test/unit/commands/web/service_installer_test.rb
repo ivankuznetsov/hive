@@ -20,7 +20,7 @@ class WebServiceInstallerTest < Minitest::Test
       unit = File.join(dir, ".config/systemd/user/hive-web.service")
       assert File.exist?(unit)
       rendered = File.read(unit)
-      assert_includes rendered, "ExecStart=#{hive} web"
+      assert_includes rendered, "ExecStart=#{hive} web --context local"
       assert_includes rendered, "Environment=HIVE_BIN=#{hive}"
       assert_includes rendered, "StartLimitBurst=3"
       assert_includes rendered, "StartLimitIntervalSec=300"

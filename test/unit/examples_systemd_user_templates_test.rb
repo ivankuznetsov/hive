@@ -37,6 +37,8 @@ class ExamplesSystemdUserTemplatesTest < Minitest::Test
       assert_equal 1, exec_starts.length, "#{relative(path)} must have one Service.ExecStart"
       assert_match(/\A%h\/\.local\/bin\/hive(?:\s|\z)/, exec_starts.fetch(0),
                    "#{relative(path)} must retain the installer-rendered Hive placeholder")
+      assert_equal [ "--context", "local" ], exec_starts.fetch(0).split.last(2),
+                   "#{relative(path)} must start in the local installation regardless of client selection"
     end
   end
 

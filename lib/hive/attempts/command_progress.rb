@@ -7,9 +7,20 @@ module Hive
     # asks this interface instead of knowing plan-review file layout or
     # special-casing current.json bytes itself.
     module CommandProgress
+      # Same-stage owner commands the daemon re-runs while their task row stays
+      # runnable. Their unchanged generation must pace and then stop repeated
+      # failures instead of admitting a fresh worker on every tick.
+      FAILURE_LADDER_COMMANDS = %w[plan-review-run].freeze
+
       module_function
 
-      def token_for(argv:, task:, fallback:)
+      def failure_ladder?(argv)
+        FAILURE_LADDER_COMMANDS.include?(Array(argv)[1].to_s)
+      end
+
+      # `runtime_digest` binds owner-command generations to the Hive build, so
+      # a deployment that fixes a deterministic failure starts a fresh series.
+      def token_for(argv:, task:, fallback:, runtime_digest: nil)
         return task_token_for(task: task, fallback: fallback) if task_progress?(task)
 
         case Array(argv)[1].to_s
@@ -20,7 +31,8 @@ module Hive
             "command" => "plan-review-run",
             "owner_progress" => Hive::PlanReview::Store.new(
               task_folder: task_folder(task)
-            ).progress_token
+            ).progress_token,
+            "runtime" => runtime_digest
           )
         else
           fallback

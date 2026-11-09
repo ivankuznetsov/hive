@@ -438,7 +438,7 @@ module Hive
     # resulting immutable OID, not the mutable branch name, is published.
     def publish_local_branch(repository_path:, branch:, remote: "origin",
                              expected_remote_oid: nil,
-                             expected_remote_absent: false,
+                             expected_remote_absent: false, expected_local_oid: nil,
                              allow_local_transport: false)
       name = branch_name(branch)
       expected = publication_expectation(
@@ -450,6 +450,9 @@ module Hive
         error_class: PublicationFailed,
         message: "local publication branch could not be resolved"
       ).strip.downcase
+      if expected_local_oid && oid != exact_oid(expected_local_oid, label: "expected local publication OID")
+        raise RemoteConflict, "local branch moved before exact publication"
+      end
       publish(
         repository_path: repository_path, oid: oid, branch: name,
         remote: remote, expected_remote_oid: expected,

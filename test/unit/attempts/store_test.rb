@@ -687,6 +687,20 @@ class AttemptsRepositoryTest < Minitest::Test
     with_tmp_dir { |root| yield Hive::Attempts::Repository.new(root: root, migrate: true) }
   end
 
+  def test_task_without_an_id_raises_the_per_task_invalid_attempt_record_error
+    # A task whose meta.yml id is null yields task_id nil. That record fails
+    # identity validation; the dedicated subclass lets the daemon block just
+    # that task while other repository errors keep propagating.
+    with_tmp_dir do |root|
+      repository = Hive::Attempts::Repository.new(root: root, migrate: true)
+      error = assert_raises(Hive::Attempts::InvalidAttemptRecord) do
+        repository.create_launching(**identity(task_id: nil), launch_timeout_sec: 30, now: NOW)
+      end
+      assert_kind_of Hive::Attempts::RepositoryError, error
+      assert_match(/attempt could not be created: .*incompatible identity/, error.message)
+    end
+  end
+
   def identity(attempt_id: "attempt-1", request_id: "request-1", task_id: "42",
                task_slug: "durable-task", task_generation: "generation-1")
     {

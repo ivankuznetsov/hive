@@ -7,6 +7,7 @@ require "pathname"
 require "set"
 require "json"
 require "hive/agent_profiles"
+require "hive/attempts/memory_limit"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
@@ -135,6 +136,7 @@ module Hive
           "codex" => "/llm-wiki:wiki-plan",
           "pi" => "/llm-wiki:wiki-plan",
           "opencode" => "/ce-plan",
+          "muse" => "/ce-plan",
           "default" => "/llm-wiki:wiki-plan"
         }
       },
@@ -154,6 +156,13 @@ module Hive
         # runaway agent, not to bound how long legitimate review may take.
         "attempts" => { "max_transient" => 2, "timeout_sec" => 1800 },
         "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        # The adversarial plan lens runs only at or above this effective
+        # level (standard|mandatory). At lower levels the review needs only
+        # whole-document coverage; adversarial plan findings mostly grew
+        # plans without changing code-review outcomes.
+        "adversarial_min_level" => "mandatory",
+        # Planner revision rounds after verification, per effective level.
+        "max_revision_rounds" => { "standard" => 1, "mandatory" => 3 },
         "adapter" => "ce_doc_review",
         "reviewers" => {
           "primary" => "plan_review",
@@ -234,6 +243,11 @@ module Hive
           "min_version" => "1.18.16",
           "credential_env" => [],
           "plugins" => []
+        },
+        "muse" => {
+          "bin" => "muse",
+          "env_override" => "HIVE_MUSE_BIN",
+          "min_version" => "1.4.14"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -418,7 +432,14 @@ module Hive
         "github_checks" => {
           "enabled" => true
         },
-        "max_passes" => 3,
+        # Two fix passes plus one verify-only pass. Later passes mostly
+        # surfaced new adjacent edge cases rather than real defects, and
+        # each fix commit became fresh review surface.
+        "max_passes" => 2,
+        # From this pass on, only High-severity findings with concrete
+        # evidence are fixed; Medium/Low/Nit findings are DEFERRED (see
+        # Hive::Stages::Review::Convergence). nil disables the gate.
+        "severity_gate_from_pass" => 2,
         # Outer wall-clock budget for the whole reviewers phase. Sized to
         # fit a couple of Claude reviewers each running up to their
         # per-reviewer `timeout_sec` (default 7200s / 2h) — a deep code
@@ -483,7 +504,20 @@ module Hive
           "daily_digest_delivery" => 300
         },
         "log_max_bytes" => 10_485_760,
-        "log_max_files" => 5
+        "log_max_files" => 5,
+        # Memory cap for each durable attempt's transient systemd user scope
+        # (`hive-attempt-*.scope`, Linux with a user manager only; a no-op on
+        # macOS or plain-spawn hosts). The scope holds the agent CLI and
+        # every tool, probe, test, and CI command it starts, so one cap bounds
+        # a runaway child before it pushes a small shared host into
+        # systemd-oomd. 6G clears observed agent peaks with headroom while
+        # stopping a runaway probe (seen at 4-4.6 GB within seconds) well
+        # short of a 16 GB host; swap 0 makes the cap bite immediately rather
+        # than after a long swap storm. Values use systemd size syntax
+        # ("6G", "512M", "50%", "infinity") or bytes; `false` disables.
+        # The swap cap applies only together with a memory cap.
+        "attempt_memory_max" => "6G",
+        "attempt_memory_swap_max" => "0"
       },
       # Update flow (plan 2026-05-27-002). The daemon checks the latest
       # release on a throttled cadence and, on the install.sh channel,
@@ -779,7 +813,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode muse].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
@@ -2300,13 +2334,15 @@ module Hive
 
     PLAN_REVIEW_KEYS = %w[
       enabled classifier_version minimum_level coding skip protected_paths attempts
-      coverage adapter reviewers routes approval_policies mcp
+      coverage adapter reviewers routes approval_policies mcp adversarial_min_level
+      max_revision_rounds
     ].freeze
     PLAN_REVIEW_NESTED_KEYS = {
       "coding" => %w[minimum_level],
       "skip" => %w[max_files max_bytes],
       "attempts" => %w[max_transient timeout_sec],
       "coverage" => %w[required optional],
+      "max_revision_rounds" => %w[standard mandatory],
       "reviewers" => %w[primary adversarial verification],
       "routes" => %w[
         primary adversarial verification fallbacks planner_revision_fallback
@@ -2343,6 +2379,17 @@ module Hive
       end
       validate_plan_review_level!(review.dig("coding", "minimum_level"),
                                   "plan_review.coding.minimum_level", source_path)
+      # YAML 1.1 parses a bare `off` as false; accept it as the "off" level.
+      review["adversarial_min_level"] = "off" if review["adversarial_min_level"] == false
+      unless %w[standard mandatory off].include?(review["adversarial_min_level"])
+        raise ConfigError,
+              "plan_review.adversarial_min_level in #{describe_source(source_path)} must be " \
+              "\"standard\", \"mandatory\" or \"off\"; got #{review['adversarial_min_level'].inspect}"
+      end
+      %w[standard mandatory].each do |level|
+        validate_bounded_integer!(review.dig("max_revision_rounds", level),
+                                  "plan_review.max_revision_rounds.#{level}", 1, 10, source_path)
+      end
       validate_bounded_integer!(review.dig("skip", "max_files"),
                                 "plan_review.skip.max_files", 1, 100, source_path)
       validate_bounded_integer!(review.dig("skip", "max_bytes"),
@@ -2976,6 +3023,7 @@ module Hive
       [ %w[review triage max_attempts], "review.triage.max_attempts" ],
       [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
       [ %w[review max_passes], "review.max_passes" ],
+      [ %w[review severity_gate_from_pass], "review.severity_gate_from_pass" ],
       [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]
     ].freeze
 
@@ -3855,6 +3903,21 @@ module Hive
 
       validate_daemon_verb_timeouts!(daemon, source_path)
       validate_daemon_stage_timeouts!(daemon, source_path)
+      validate_daemon_memory_limits!(daemon, source_path)
+    end
+
+    def validate_daemon_memory_limits!(daemon, source_path)
+      { "attempt_memory_max" => false, "attempt_memory_swap_max" => true }.each do |key, allow_zero|
+        next unless daemon.key?(key)
+
+        value = daemon[key]
+        reason = Hive::Attempts::MemoryLimit.invalid_reason(value, allow_zero: allow_zero)
+        next unless reason
+
+        raise ConfigError,
+              "daemon.#{key} in #{describe_source(source_path)} #{reason}; " \
+              "got #{value.inspect} (#{value.class})"
+      end
     end
 
     def validate_web_config!(cfg, source_path)
@@ -4433,6 +4496,19 @@ module Hive
               "between 0 and 23; got #{hour.inspect} (#{hour.class})"
       end
 
+      validate_daily_digest_route!(daily, "daily_digest", source_path)
+      fallbacks = daily["fallback_agents"]
+      unless fallbacks.nil?
+        unless fallbacks.is_a?(Array) && fallbacks.all? { |entry| entry.is_a?(Hash) && entry["agent"] }
+          raise ConfigError,
+                "daily_digest.fallback_agents in #{describe_source(source_path)} must be an Array " \
+                "of objects with an agent"
+        end
+        fallbacks.each_with_index do |entry, index|
+          validate_daily_digest_route!(entry, "daily_digest.fallback_agents[#{index}]", source_path)
+        end
+      end
+
       zone = daily["time_zone"]
       validate_daily_digest_zone!(zone, source_path) unless zone.nil?
       coverage = daily["coverage_started_at"]
@@ -4461,6 +4537,23 @@ module Hive
               "daily_digest coverage frontier, initial_membership, and first_interval are required " \
               "before enablement in #{describe_source(source_path)}; run `hive setup`"
       end
+    end
+
+    # Any registered agent and any model string it accepts may write the
+    # digest; the model itself is validated by the agent CLI at launch.
+    def validate_daily_digest_route!(route, label, source_path)
+      validate_agent_name!(route["agent"], "#{label}.agent", source_path)
+      model = route["model"]
+      unless model.nil? || (model.is_a?(String) && !model.strip.empty?)
+        raise ConfigError,
+              "#{label}.model in #{describe_source(source_path)} must be a non-empty String"
+      end
+      effort = route["effort"]
+      return if effort.nil? || Hive::ModelRouting::EFFORT_VALUES.include?(effort)
+
+      raise ConfigError,
+            "#{label}.effort in #{describe_source(source_path)} must be one of " \
+            "#{Hive::ModelRouting::EFFORT_VALUES.inspect}"
     end
 
     def validate_daily_digest_zone!(zone, source_path)

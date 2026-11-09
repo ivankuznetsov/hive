@@ -1,5 +1,6 @@
 require "hive/attempts/contracts"
 require "hive/runtime_control_plane/file_fence"
+require "hive/runtime_control_plane"
 
 module Hive
   module Attempts
@@ -44,7 +45,11 @@ module Hive
       def self.busy?(error)
         Hive::InternalError.sqlite_busy?(error) ||
           Hive::InternalError.exception_chain(error).any? do |entry|
-            entry.is_a?(RuntimeControlPlane::FileFence::Busy)
+            # The typed runtime busy and Sequel's lock timeout are SQLITE_BUSY
+            # surfaces too; Attempts::RuntimeDatabaseBusy carries one as cause.
+            entry.is_a?(RuntimeControlPlane::FileFence::Busy) ||
+              entry.is_a?(RuntimeControlPlane::Busy) ||
+              entry.is_a?(Sequel::DatabaseLockTimeout)
           end
       end
 

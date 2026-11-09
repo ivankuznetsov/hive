@@ -19,6 +19,7 @@ require "hive/attempts/command_dispatch"
 require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/terminal_outcome"
+require "hive/review_residual_commit"
 
 module Hive
   module Commands
@@ -483,7 +484,33 @@ module Hive
         end
       end
 
+      # Decorate the marker-specific action with review residual-commit and
+      # long provider-limit guidance (see Hive::ReviewResidualCommit).
       def json_next_action(task, marker)
+        action = marker_next_action(task, marker)
+        hints = review_recovery_hints(task, marker)
+        return action if hints.empty?
+
+        sha = marker.attrs["residual_commit"].to_s
+        action = action.merge("residual_commit" => sha, "residual_published" => false) unless sha.empty?
+        instructions = [ action["instructions"], *hints ].compact.join("; ")
+        action.merge("instructions" => instructions)
+      end
+
+      def review_recovery_hints(task, marker)
+        return [] unless %i[review_error review_stale review_ci_stale error].include?(marker.name)
+
+        [
+          Hive::ReviewResidualCommit.next_step(marker, worktree: task_worktree(task)),
+          (Hive::ReviewResidualCommit.agent_profile_hint(marker) if marker.name == :review_error)
+        ].compact
+      end
+
+      def task_worktree(task)
+        task.worktree_path if task.respond_to?(:worktree_path)
+      end
+
+      def marker_next_action(task, marker)
         kind = Hive::Schemas::NextActionKind
         if human_stage?(task)
           if marker.name == :complete
@@ -551,8 +578,7 @@ module Hive
             "markers_to_clear" => [ "review_stale" ] }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, then refresh " \
-                              "`hive status --operational --json` and invoke this task's workflow.retry action",
+            "instructions" => review_ci_stale_instructions(marker),
             "markers_to_clear" => [ "review_ci_stale" ] }
         when :manual_steering
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
@@ -671,6 +697,18 @@ module Hive
         end
       end
 
+      def review_ci_stale_instructions(marker)
+        if marker.attrs["reason"].to_s == "base_conflict"
+          return "the PR conflicts with its base: merge origin/<base> into the task branch with a merge " \
+                 "commit (no rebase, no force-push) as reviews/ci-blocked.md describes; if you pushed it " \
+                 "yourself, run `hive publication-reconcile TASK --project P --pr URL --head <full sha>`; " \
+                 "then refresh `hive status --operational --json` and invoke this task's workflow.retry action"
+        end
+
+        "fix CI failures, edit reviews/ci-blocked.md, then refresh " \
+          "`hive status --operational --json` and invoke this task's workflow.retry action"
+      end
+
       def execute_waiting_next_action(task, marker)
         Hive::ExecuteWaitingAction.build(task, marker, rerun_with: friendly_command(task, marker))
       end
@@ -732,9 +770,10 @@ module Hive
         when :review_stale
           puts "  next: inspect or edit the highest-pass review files, then refresh " \
                "`hive status --operational --json` and invoke this task's workflow.retry action"
+          review_recovery_hints(task, marker).each { |hint| puts "  next: #{hint}" }
         when :review_ci_stale
-          puts "  next: fix CI failures, edit reviews/ci-blocked.md, then refresh " \
-               "`hive status --operational --json` and invoke this task's workflow.retry action"
+          puts "  next: #{review_ci_stale_instructions(marker)}"
+          review_recovery_hints(task, marker).each { |hint| puts "  next: #{hint}" }
         when :manual_steering
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
@@ -765,6 +804,7 @@ module Hive
                    "and invoke this task's workflow.retry action with `hive act`"
             end
           end
+          review_recovery_hints(task, marker).each { |hint| warn "  next: #{hint}" }
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"
         end
       end

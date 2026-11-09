@@ -5,6 +5,50 @@ require "open3"
 class RuntimeControlPlaneActivationGateTest < Minitest::Test
   include HiveTestHelper
 
+  def test_default_status_policy_defers_invalid_encoding_to_cli_validation
+    gate = Hive::RuntimeControlPlane::ActivationGate
+    [ "bad\xFF".b, "bad\xFF".dup.force_encoding(Encoding::UTF_8) ].each do |invalid|
+      refute gate.default_status_route?([ "status", "--json", invalid ])
+      refute gate.default_status_route?([ "status", "--diagnose", "task", "--json", invalid ])
+    end
+  end
+
+  def test_default_status_policy_respects_modes_and_boolean_spellings
+    gate = Hive::RuntimeControlPlane::ActivationGate
+    [ %w[status], %w[status --json], %w[--json=true status],
+     %w[status --no-write], %w[status --skip-write], %w[status --write=false],
+     %w[status --operational=false], %w[status --no-internal_task_graph],
+     %w[status --project demo --stage 4-execute], %w[status --project=demo],
+     %w[status --write false] ].each do |argv|
+      assert gate.default_status_route?(argv), argv.inspect
+    end
+    [ %w[new project status], %w[status --diagnose task --write],
+     %w[status --diagnose=true --write=true], %w[status --diagnose task --no-write],
+     %w[status --skip-write --diagnose=task], %w[status --operational],
+     %w[status --internal_task_graph=true], %w[status --full], %w[status --archive],
+     %w[status --write], %w[status --help], %w[status --json=bogus],
+     %w[status -- extra], %w[status --project], %w[status --write=invalid],
+     %w[status --no-operational true --json], %w[status --skip-operational true],
+     %w[status --no-write true], %w[status --skip-write false], [] ].each do |argv|
+      refute gate.default_status_route?(argv), argv.inspect
+    end
+  end
+
+  def test_default_status_policy_consumes_separate_json_boolean_values
+    gate = Hive::RuntimeControlPlane::ActivationGate
+    %w[--json --no-json --skip-json].each do |option|
+      %w[true TRUE t T false FALSE f F].each do |value|
+        argv = [ "status", option, value, "--project", "demo" ]
+        assert gate.default_status_route?(argv), argv.inspect
+      end
+    end
+    [ %w[status --json bogus], %w[status --json True],
+      %w[status --json=true false], %w[status --json true extra],
+      %w[status --json true --operational], %w[status --json true --write] ].each do |argv|
+      refute gate.default_status_route?(argv), argv.inspect
+    end
+  end
+
   def test_fresh_commands_remain_available_without_creating_storage
     with_tmp_dir do |root|
       %w[setup help init].each do |route|

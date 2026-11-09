@@ -140,6 +140,20 @@ class CommandOperationTest < Minitest::Test
     end
   end
 
+  def test_typed_runtime_busy_after_effect_keeps_unresolved_finalization_contract
+    with_operation(key: "busy-finalization") do |_operation, store, project|
+      store.define_singleton_method(:succeed) { |*_, **_| raise Hive::RuntimeControlPlane::Busy.new }
+      operation = Hive::CommandOperation.new(
+        key: "busy-finalization", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true, store: store
+      )
+      error = assert_raises(Hive::CommandUnresolved) do
+        operation.call { { "schema" => "hive-approve", "ok" => true } }
+      end
+      assert_equal "command_unresolved_pending", error.reason
+    end
+  end
+
   def test_authoritative_finalization_reacquires_live_execution_capacity
     with_operation(key: "capacity-finalization") do |_operation, store, project|
       original_succeed = store.method(:succeed)
@@ -179,6 +193,31 @@ class CommandOperationTest < Minitest::Test
       store.abort_before_effect(blocker, reason: "test complete")
       result = operation.call { flunk "authoritative finalization must not repeat the effect" }
       assert_equal "succeeded", result.dig("command_receipt", "state")
+    end
+  end
+
+  def test_authoritative_failed_outcome_recovers_after_a_lost_final_receipt_write
+    with_operation(key: "failed-finalization") do |_operation, store, project|
+      store.define_singleton_method(:fail_applied) do |*, **|
+        raise Sequel::DatabaseError, "lost failure finalization"
+      end
+      operation = Hive::CommandOperation.new(
+        key: "failed-finalization", command: "approve", target: "task", request: {},
+        project_root: project, principal: "owner", json: true, structured: true,
+        display_json: false, result_status: ->(_) { Hive::ExitCodes::TASK_IN_ERROR }, store: store
+      )
+      assert_raises(Hive::CommandUnresolved) do
+        operation.call { { "ok" => true, "result" => { "terminal_outcome" => "failed" } } }
+      end
+      error = assert_raises(Hive::CommandReplayFailure) do
+        operation.call { flunk "recovering a failed outcome must never repeat the effect" }
+      end
+      assert_equal Hive::ExitCodes::TASK_IN_ERROR, error.exit_code
+      assert_equal "failed", error.payload.dig("command_receipt", "state")
+      durable = store.receipt(error.payload.dig("command_receipt", "id"))
+      assert_equal "failed", durable.fetch(:state)
+      assert_equal Hive::ExitCodes::TASK_IN_ERROR, durable.fetch(:result_status)
+      assert_equal 0, durable.fetch(:retry_eligible)
     end
   end
 

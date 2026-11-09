@@ -98,7 +98,11 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
-        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i
+        "plan_review:\n  approval_policies: [nope]\n" => /approval_policies\[0\].*must be a Hash/i,
+        "plan_review:\n  adversarial_min_level: skip\n" => /adversarial_min_level.*"standard", "mandatory" or "off"/i,
+        "plan_review:\n  max_revision_rounds:\n    standard: 0\n" => /max_revision_rounds\.standard.*at least 1/i,
+        "plan_review:\n  max_revision_rounds:\n    other: 1\n" => /max_revision_rounds/i,
+        "review:\n  severity_gate_from_pass: 0\n" => /severity_gate_from_pass.*positive integer/i
       }
       invalid_documents.each do |document, pattern|
         File.write(config_path, document)
@@ -1025,6 +1029,19 @@ class ConfigTest < Minitest::Test
 
       assert_includes error.message, config_path
       assert_includes error.message, "not readable"
+    end
+  end
+
+  def test_load_accepts_unquoted_off_for_adversarial_min_level
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan_review:
+          adversarial_min_level: off
+      YAML
+
+      assert_equal "off", Hive::Config.load(dir).dig("plan_review", "adversarial_min_level"),
+                   "YAML 1.1 parses bare off as false; it must still mean the off level"
     end
   end
 
@@ -2834,7 +2851,7 @@ class ConfigTest < Minitest::Test
       assert_equal "ci_fix_prompt.md.erb", cfg.dig("review", "ci", "prompt_template")
       # Other sibling blocks at review.* must also stay intact.
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
-      assert_equal 3,            cfg.dig("review", "max_passes")
+      assert_equal 2,            cfg.dig("review", "max_passes")
     end
   end
 
@@ -3756,7 +3773,10 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("review", "ci", "agent")
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
-      assert_equal 3,         cfg.dig("review", "max_passes")
+      assert_equal 2,         cfg.dig("review", "max_passes")
+      assert_equal 2,         cfg.dig("review", "severity_gate_from_pass")
+      assert_equal "mandatory", cfg.dig("plan_review", "adversarial_min_level")
+      assert_equal({ "standard" => 1, "mandatory" => 3 }, cfg.dig("plan_review", "max_revision_rounds"))
       assert_equal 28_800,    cfg.dig("review", "max_wall_clock_sec")
       assert_equal "claude",  cfg.dig("agents", "claude", "bin")
       assert_equal "codex",   cfg.dig("agents", "codex", "bin")
@@ -4704,6 +4724,48 @@ class ConfigTest < Minitest::Test
         assert_match(/daemon\.#{Regexp.escape(key)}.*integer >= 1/, err.message)
       end
     end
+  end
+
+  def test_load_global_daemon_defaults_and_overrides_attempt_memory_cap
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_daemon
+      assert_equal "6G", cfg["attempt_memory_max"]
+      assert_equal "0", cfg["attempt_memory_swap_max"]
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon:
+          attempt_memory_max: false
+          attempt_memory_swap_max: 0
+      YAML
+      cfg = Hive::Config.load_global_daemon
+      assert_equal false, cfg["attempt_memory_max"]
+      assert_equal 0, cfg["attempt_memory_swap_max"]
+    end
+  end
+
+  def test_load_global_daemon_rejects_invalid_attempt_memory_caps
+    {
+      "attempt_memory_max" => [ "6 GB", 0, nil, true ],
+      "attempt_memory_swap_max" => [ "lots", -1 ]
+    }.each do |key, values|
+      values.each do |value|
+        with_tmp_global_config do |home|
+          File.write(
+            File.join(home, "config.yml"),
+            { "registered_projects" => [], "daemon" => { key => value } }.to_yaml
+          )
+
+          err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+          assert_match(/daemon\.#{key} .*systemd size/, err.message)
+        end
+      end
+    end
+  end
+
+  def test_daemon_validation_skips_memory_keys_absent_from_a_partial_block
+    Hive::Config.send(:validate_daemon_memory_limits!, {}, "inline")
   end
 
   def test_load_global_daemon_rejects_non_hash_daemon_block
@@ -5730,7 +5792,13 @@ class ConfigTest < Minitest::Test
       base.merge("time_zone" => "Mars/Olympus"),
       base.merge("coverage_started_at" => "not-a-time"),
       base.merge("first_interval" => []),
-      base.merge("first_interval" => { "local_date" => "2026-08-30" })
+      base.merge("first_interval" => { "local_date" => "2026-08-30" }),
+      base.merge("agent" => "no-such-agent"),
+      base.merge("agent" => "codex", "model" => ""),
+      base.merge("agent" => "codex", "effort" => "extreme"),
+      base.merge("fallback_agents" => {}),
+      base.merge("fallback_agents" => [ { "model" => "gpt-6-astra" } ]),
+      base.merge("fallback_agents" => [ { "agent" => "nope" } ])
     ]
 
     invalid.each do |daily|
@@ -5740,6 +5808,10 @@ class ConfigTest < Minitest::Test
     end
 
     Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base }, path)
+    Hive::Config.send(:validate_daily_digest!, { "daily_digest" => base.merge(
+      "agent" => "codex", "model" => "gpt-6-astra", "effort" => "medium",
+      "fallback_agents" => [ { "agent" => "opencode", "model" => "opencode-go/deepseek-v4.1-flash" } ]
+    ) }, path)
 
     enabled = base.merge("enabled" => true)
     Hive::Config.send(:validate_daily_digest!, { "daily_digest" => enabled }, path)

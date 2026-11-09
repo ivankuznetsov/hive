@@ -20,6 +20,7 @@ require "hive/daemon/recovery_coordinator"
 require "hive/model_unsupported"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/runtime_control_plane/boot_identity"
+require "hive/runtime_control_plane/process_registry"
 require "hive/command_dispatch_lifecycle"
 
 require "hive/daemon/logger"
@@ -33,6 +34,7 @@ require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_fix_admission_scheduler"
 require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
+require "hive/pull_request_outcome"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/lock"
 require "hive/paths"
@@ -42,7 +44,9 @@ require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/api"
+require "hive/attempts/dispatcher"
 require "hive/attempts/generation"
+require "hive/attempts/repository"
 require "hive/dependency_snapshot"
 require "hive/task_projection"
 require "hive/terminal_outcome"
@@ -83,6 +87,9 @@ module Hive
       # How often a one-shot pass re-settles abandoned Architecture Patrol
       # discovery claims while it drains.
       ONE_SHOT_CLAIM_RECOVERY_INTERVAL_SEC = 5
+      # Startup waits between retries when the runtime database stays locked
+      # past its busy timeout. Bounded: persistent contention still fails.
+      STARTUP_BUSY_RETRY_DELAYS_SEC = [ 2, 5, 10 ].freeze
       STATE_FILE_PROBE_BATCH_SIZE = 64
       STALE_RECOVERY_BLOCK_REASONS = %w[
         generation_conflict task_identity_conflict
@@ -91,6 +98,7 @@ module Hive
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answer_state`).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
+      REVIEW_STAGE_DIR = Hive::Workflows::VERBS.fetch("review").fetch(:target)
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
@@ -138,6 +146,8 @@ module Hive
                      one_shot_drain_timeout_sec: nil)
         @config = config
         @controller = controller
+        # A project may lower its own task cap in its config (daemon.max_concurrent_per_project).
+        @controller.project_cap = ->(project) { project_concurrency_cap(project) } if @controller.respond_to?(:project_cap=)
         @supervisor = supervisor
         @status_consumer = status_consumer
         @logger = logger
@@ -264,6 +274,8 @@ module Hive
         # interval without the operator having to send SIGHUP.
         # PR-40 follow-up #2.
         @enabled_cache = {}
+        # Per-tick project concurrency cap cache, cleared with @enabled_cache.
+        @project_cap_cache = {}
         # Per-tick set of project names whose layout is half-migrated
         # (non-empty legacy_stage_dirs). Populated at the start of each
         # tick from StatusConsumer::Result#projects; row dispatch refuses
@@ -296,6 +308,10 @@ module Hive
         # they evaluated. The completed operational snapshot consumes these;
         # no selector is rerun for status rendering.
         @routing_observations = {}
+        # Per-tick repeated-failure evidence for rows whose owner command hit
+        # the attempt failure limit, so the operator-owned disposition names
+        # the failing attempt and exit status instead of a generic hold.
+        @failure_limit_observations = {}
         # A successful full scan replaces this snapshot. Changed-task ticks
         # inherit it so a freshly completed task cannot reuse its slot before
         # older capacity-deferred rows are reconsidered by the next full scan.
@@ -325,6 +341,7 @@ module Hive
         # cache populated on first sight stuck for the daemon's
         # lifetime and the only way to honour a disable was SIGHUP.
         @enabled_cache.clear
+        @project_cap_cache.clear
         unless refresh_project_ownership
           @one_shot_failure = "project ownership unavailable" if scoped_execution?
           publish_operational_snapshot(
@@ -333,6 +350,7 @@ module Hive
           return
         end
         @routing_observations.clear
+        @failure_limit_observations.clear
         @logger.event(:tick_begin, now: now.utc.iso8601)
         reset_active_agent_snapshot
 
@@ -485,8 +503,8 @@ module Hive
         # to advance the stage on the same tick that just learned the
         # agent died. The outer rescue protects the tick from a future
         # NoMethodError/TypeError in the healer: without it, a healer
-        # bug would crash the tick before per-row dispatch and hit
-        # StartLimitBurst=3 in the unit's restart-loop cap.
+        # bug would crash the tick before per-row dispatch and put the
+        # unit into a restart loop.
         begin
           @stale_agent_healer.heal(
             rows_eligible_for_error_recovery(result.rows),
@@ -653,6 +671,7 @@ module Hive
         return true if keys.empty?
 
         @enabled_cache.clear
+        @project_cap_cache.clear
         return false unless refresh_project_ownership
         @logger.event(:tick_begin, now: now.utc.iso8601, scope: "changed_tasks", tasks: keys.length)
         result = @status_consumer.fetch_tasks(keys)
@@ -715,7 +734,9 @@ module Hive
         # C3: clean up dispatch-request claims left by a prior process
         # before the first tick, so a crash-restart neither re-dispatches
         # an already-run request nor retains stale SQL claims for dead owners.
-        recover_dispatch_claims(now: Time.now)
+        retry_runtime_database_busy(phase: "recover_dispatch_claims") do
+          recover_dispatch_claims(now: Time.now)
+        end
         publish_runtime_readiness(now: Time.now)
         @runtime_ready_callback&.call
         @runtime_ready_callback = nil
@@ -745,16 +766,18 @@ module Hive
             reload_config!
             @reload = false
           end
-          if full_tick
-            tick(now: now)
-          else
-            @checkpoint_maintenance&.sweep if admission_open?
-            probe = cheap_probe(now: now)
-            unless @shutdown || @reload
-              if probe.full_tick
-                tick(now: Time.now)
-              elsif !probe.task_keys.empty?
-                tick_changed(task_keys: probe.task_keys, now: Time.now)
+          survive_runtime_database_busy(now: now) do
+            if full_tick
+              tick(now: now)
+            else
+              @checkpoint_maintenance&.sweep if admission_open?
+              probe = cheap_probe(now: now)
+              unless @shutdown || @reload
+                if probe.full_tick
+                  tick(now: Time.now)
+                elsif !probe.task_keys.empty?
+                  tick_changed(task_keys: probe.task_keys, now: Time.now)
+                end
               end
             end
           end
@@ -825,6 +848,48 @@ module Hive
       end
 
       private
+
+      # Bounded startup backoff for runtime database lock contention. The
+      # runtime database is shared with every concurrent `hive` process, so a
+      # write can lose the busy timeout to a long transaction elsewhere. Any
+      # other error, or contention that outlasts the backoff, still fails
+      # startup.
+      def retry_runtime_database_busy(phase:, delays: STARTUP_BUSY_RETRY_DELAYS_SEC)
+        attempt = 0
+        begin
+          yield
+        rescue StandardError => error
+          raise unless Hive::InternalError.sqlite_busy?(error) && attempt < delays.length && !@shutdown
+
+          @logger.event(
+            :startup_deferred, reason: "runtime_database_busy", phase: phase,
+            retry_in_sec: delays[attempt], message: error.message.to_s[0, 300]
+          )
+          interruptible_sleep(delays[attempt])
+          attempt += 1
+          retry
+        end
+      end
+
+      # A tick that loses the runtime database busy timeout ends early and the
+      # next tick retries. Lock contention is normal when many `hive`
+      # processes share the database; it must never terminate the daemon.
+      # Corruption, schema, and storage failures are not busy errors and still
+      # propagate.
+      def survive_runtime_database_busy(now:)
+        yield
+      rescue StandardError => error
+        raise unless Hive::InternalError.sqlite_busy?(error)
+
+        @logger.event(
+          :tick_deferred, reason: "runtime_database_busy",
+          error: "#{error.class}: #{error.message.to_s[0, 300]}"
+        )
+        publish_operational_snapshot(
+          :fail, phase: "failed", reason: "runtime_database_busy", now: now
+        )
+        nil
+      end
 
       def live_attempt?(project)
         Array(@attempt_snapshot&.attempts).any? do |status|
@@ -2525,6 +2590,8 @@ module Hive
                                   reason: "folder_missing")
           return :folder_missing
         end
+        publication_hold = settled_pull_request_hold(row)
+        return publication_hold if publication_hold
 
         # Per-slug in-flight gate — prevents the row scan from
         # double-dispatching a slug the dispatch-request queue just
@@ -2585,6 +2652,7 @@ module Hive
             row.marker.to_s == "none" && Policy.advance?(row.action)
         )
         remember_routing_observation(row, dispatch_result)
+        remember_failure_limit_observation(row, dispatch_result)
         outcome = dispatch_outcome(dispatch_result)
         if failed_automatic_advance_replay?(row, trigger, dispatch_result)
           return record_markerless_stall(row, attempt: dispatch_result.attempt)
@@ -2612,6 +2680,25 @@ module Hive
           reason: "task_source_changed", error: e.message
         )
         :task_source_changed
+      end
+
+      # Review (and its CI-fix / fix / triage phases) works on an open pull
+      # request. Once Hive has observed the task's PR merged or closed, a
+      # review dispatch can only spend agent time or commit onto a delivered
+      # branch. Merged PRs are left to the merge watcher's archival (or an
+      # operator `already_delivered` archive); closed PRs need an operator
+      # decision. No observation keeps the pre-existing dispatch behavior.
+      def settled_pull_request_hold(row)
+        return nil unless row.stage.to_s == REVIEW_STAGE_DIR && Hive::Workflows.coding_id?(row.workflow)
+
+        outcome = Hive::PullRequestOutcome.latest(row.folder)
+        return nil unless outcome&.settled?
+
+        hold = outcome.merged? ? :pull_request_merged : :pull_request_closed_unmerged
+        @logger.event(outcome.merged? ? :skipped : :blocked,
+                      project: row.project, slug: row.slug, stage: row.stage,
+                      action: row.action, reason: hold.to_s, pr_url: outcome.pr_url)
+        hold
       end
 
       def failed_automatic_advance_replay?(row, trigger, result)
@@ -2649,6 +2736,7 @@ module Hive
           when "capacity", "capacity_saturated" then :attempt_capacity
           when "patrol_retry_delay" then :attempt_patrol_retry
           when "transient_retry", "transition_retry" then :attempt_transient_retry
+          when Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON then :attempt_failure_limit
           when "attempt_lost" then :attempt_lost
           when "launch_handoff_failed" then :launch_handoff_failed
           else :attempt_deferred
@@ -2679,6 +2767,8 @@ module Hive
           [ "scheduler", "this Patrol task is waiting for its retry delay" ]
         when :attempt_transient_retry
           [ "scheduler", "transient contention is waiting for its retry backoff" ]
+        when :attempt_failure_limit
+          failure_limit_disposition(row)
         when :attempt_lost
           [ "hive", "a prior durable attempt is lost and requires recovery" ]
         when :launch_handoff_failed
@@ -2703,6 +2793,11 @@ module Hive
           [ "operator", "task folder disappeared before dispatch" ]
         when :plan_approval_invalid
           [ "hive", "plan approval could not be prepared safely" ]
+        when :pull_request_merged
+          [ "operator", "task pull request is merged; review agents are not dispatched " \
+                        "(archive with --reason already_delivered if Hive does not)" ]
+        when :pull_request_closed_unmerged
+          [ "operator", "task pull request was closed without merging; review agents are not dispatched" ]
         when :shutdown
           [ "scheduler", "daemon admission is closed for shutdown" ]
         else
@@ -2714,6 +2809,29 @@ module Hive
         observe_operational_disposition(
           row, decision: outcome, owner: owner, reason: reason, **details
         )
+      end
+
+      def failure_limit_disposition(row)
+        evidence = @failure_limit_observations.delete([ row.project.to_s, row.slug.to_s ]) || {}
+        [
+          "operator",
+          "#{row.suggested_command || 'the owner command'} failed " \
+          "#{Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT} times in a row with " \
+          "exit #{evidence['exit_status'] || 'unknown'} on unchanged task input " \
+          "(latest attempt #{evidence['attempt_id'] || 'unknown'}); automatic " \
+          "redispatch is stopped until the plan, the plan review, or the Hive " \
+          "build changes, or an operator reruns it"
+        ]
+      end
+
+      def remember_failure_limit_observation(row, result)
+        return unless result.is_a?(Hive::Attempts::DispatchResult) &&
+                      result.reason == Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+
+        @failure_limit_observations[[ row.project.to_s, row.slug.to_s ]] = {
+          "attempt_id" => result.attempt&.attempt_id,
+          "exit_status" => result.receipt&.fetch("exit_status", nil)
+        }
       end
 
       def remember_routing_observation(row, result)
@@ -2768,9 +2886,28 @@ module Hive
       def publish_operational_snapshot(method, phase:, **attributes)
         return unless @operational_snapshot
 
-        @operational_snapshot.public_send(method, **attributes)
+        result = @operational_snapshot.public_send(method, **attributes)
+        log_operational_snapshot_incomplete(phase: phase, result: result)
+        result
       rescue StandardError => e
         log_operational_snapshot_failure(phase: phase, error: e)
+        nil
+      end
+
+      # A tick that publishes no complete record must be visible in the log
+      # even when the previous completed record stays authoritative, or the
+      # snapshot later expires with no recorded cause.
+      def log_operational_snapshot_incomplete(phase:, result:)
+        return unless result.is_a?(OperationalSnapshot::IncompletePublication)
+
+        @logger.event(
+          :operational_snapshot_incomplete,
+          phase: phase,
+          reason: result.reason,
+          retained_complete_snapshot: result.retained,
+          duplicates: result.duplicates
+        )
+      rescue StandardError
         nil
       end
 
@@ -2844,7 +2981,10 @@ module Hive
           next unless request.recovery.is_a?(Hash)
 
           begin
-            receipt = @recovery_coordinator.receipt_for_request(request)
+            receipt = @recovery_coordinator.projected_receipt_for_request(
+              request,
+              dispatch_enabled: project_enabled?(request.project)
+            )
             {
               "project" => request.project,
               "slug" => request.slug,
@@ -2951,6 +3091,25 @@ module Hive
               reason: error.code, message: error.message
             )
             next
+          rescue Hive::Attempts::InvalidAttemptRecord => error
+            # One task's attempt record failed its own validation (for
+            # example a task without an id fails identity validation). That
+            # blocks this task only; it must never end the daemon tick and
+            # take every project's automation down with it. Every other
+            # attempt repository error, including storage failures, still
+            # propagates.
+            log_attempt_admission_failure(row, error)
+            next
+          rescue Hive::Attempts::RuntimeDatabaseBusy => error
+            # Another Hive process held the runtime database write lock past
+            # the busy timeout. Nothing was written. Every later row would
+            # wait out the same timeout, so defer the rest of this pass; the
+            # next tick re-evaluates all of them.
+            @logger.event(
+              :dispatch_deferred, project: row.project, slug: row.slug, stage: row.stage,
+              reason: "runtime_database_busy", message: error.message.to_s[0, 300]
+            )
+            break
           end
           if %i[dispatched in_flight attempt_terminal_replay task_source_changed].include?(outcome)
             @advance_rows_by_key.delete(task_key(row))
@@ -2964,6 +3123,24 @@ module Hive
         end
 
         { global: global_fence, projects: project_fences }
+      end
+
+      # Logged once per task and distinct message so a persistently invalid
+      # task does not flood the daemon log every tick.
+      def log_attempt_admission_failure(row, error)
+        @attempt_admission_failure_signatures ||= {}
+        key = task_key(row)
+        message = error.message.to_s[0, 300]
+        return if @attempt_admission_failure_signatures[key] == message
+
+        @attempt_admission_failure_signatures[key] = message
+        inspection_command = Shellwords.join([ "hive", "task", row.slug, "--project", row.project ])
+        @logger.event(
+          :blocked, project: row.project, slug: row.slug, stage: row.stage,
+          reason: "attempt_admission_failed", message: message,
+          remediation: "inspect the task with `#{inspection_command}`; " \
+                       "a task without an id cannot be admitted"
+        )
       end
 
       def log_priority_capacity_fence(row, outcome)
@@ -3883,6 +4060,7 @@ module Hive
 
         now = current_dispatch_time(now)
         begin
+          return :awaiting_admission unless remote_admission_ready?(req)
           validate_command_dispatch_context!(req)
         rescue Hive::CommandUnresolved, Hive::CommandConflict, Hive::ConfigError => error
           reject_request(
@@ -3907,6 +4085,13 @@ module Hive
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now,
             admission_view: @attempt_snapshot&.admission_view
           )
+          if req.recovery&.fetch("variant", nil) == "marker" &&
+              %i[accepted existing_live terminal_replay].include?(result.status) &&
+              !@recovery_coordinator.manual_attempt_matches?(req, result.attempt)
+            result = Hive::Attempts::DispatchResult.new(status: :deferred,
+              attempt: result.attempt, receipt: nil, attach_descriptor: nil,
+              reason: "attempt_identity_conflict")
+          end
           log_attempt_admission(result)
           if result.status == :deferred && result.reason == "capacity_saturated"
             recovery_receipt = if req.recovery.is_a?(Hash)
@@ -4055,6 +4240,25 @@ module Hive
         context
       end
 
+      def remote_admission_ready?(request)
+        authority = request.respond_to?(:remote_authority) && request.remote_authority
+        return true unless authority
+        context = dispatch_repository.command_context(request.request_id)
+        unless context && context.fetch("principal_source") == "api_token" &&
+               context.fetch("principal") == authority.fetch("principal")
+          raise Hive::CommandConflict, "remote dispatch admission identity changed"
+        end
+        receipt = dispatch_repository.database.read do |db|
+          db[:command_receipts][receipt_id: context.fetch("receipt_id")]
+        end
+        unless receipt && receipt.fetch(:principal) == context.fetch("principal") &&
+               receipt.fetch(:request_fingerprint) == context.fetch("request_fingerprint") &&
+               receipt.fetch(:mode) == "remote"
+          raise Hive::CommandConflict, "remote dispatch receipt identity changed"
+        end
+        receipt.fetch(:state) == "succeeded"
+      end
+
       def allocate_command_successor!(predecessor_request_id:, intent_id:, intent_version:,
                                       delivery_cycle_id:)
         command_dispatch_lifecycle.allocate_successor!(
@@ -4139,6 +4343,7 @@ module Hive
 
       def request_intended_stage(argv, task)
         verb = Array(argv)[1].to_s
+        return Hive::OperationalAction.intended_stage_for(task, action_id: Array(argv)[2]) if verb == "act"
         return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
 
         Hive::Workflows.for_verb(verb).fetch(:target)
@@ -4278,11 +4483,20 @@ module Hive
         return true unless @attempt_reconciler
 
         arguments = { now: now.utc }
-        arguments[:mutate_projects] = @project_ownership.owned_projects if @project_ownership
+        if @project_ownership
+          arguments[:mutate_projects] = @project_ownership.owned_projects
+          # A dispatch-disabled project is never owned, so its stranded
+          # attempts are settled under a transient reconciliation-only guard.
+          if @project_ownership.respond_to?(:with_maintenance_ownership)
+            arguments[:maintain_projects] = @project_ownership.method(:with_maintenance_ownership)
+          end
+        end
         @attempt_snapshot = @attempt_reconciler.reconcile(**arguments)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
+        release_abandoned_launch_reservations
+        reconcile_exited_owned_processes
         true
       rescue StandardError => e
         @logger.event(
@@ -4291,6 +4505,50 @@ module Hive
           keeping_previous: true
         )
         false
+      end
+
+      # Launch reservations whose attempt settled or whose owner died before
+      # registering would otherwise stay reserved forever and keep
+      # quiescence capability ineligible. Failures leave them reserved.
+      def release_abandoned_launch_reservations
+        registry = launch_reservation_registry
+        return unless registry
+
+        released = registry.release_abandoned_reservations!
+        return if released.empty?
+
+        @logger.event(:launch_reservations_released, count: released.size, reservations: released)
+      rescue StandardError => e
+        @logger.event(:launch_reservation_release_failed, error: "#{e.class}: #{e.message}")
+      end
+
+      # Owned-process rows whose process tree is provably gone but whose own
+      # cleanup never committed would otherwise keep quiescence capability
+      # ineligible forever. Failures leave the rows unresolved (fail-closed).
+      def reconcile_exited_owned_processes
+        registry = launch_reservation_registry
+        return unless registry
+
+        closed = registry.reconcile_exited_processes!
+        return if closed.empty?
+
+        @logger.event(
+          :owned_processes_reconciled, count: closed.size,
+          evidence: closed.map { |row| row.fetch("evidence") }.tally
+        )
+      rescue StandardError => e
+        @logger.event(:owned_process_reconcile_failed, error: "#{e.class}: #{e.message}")
+      end
+
+      def launch_reservation_registry
+        store = @attempt_reconciler.respond_to?(:store) ? @attempt_reconciler.store : nil
+        database = store.respond_to?(:database) ? store.database : nil
+        return unless database
+
+        @launch_reservation_registry ||= Hive::RuntimeControlPlane::ProcessRegistry.new(
+          database: database, state_home: File.dirname(database.path),
+          custody: Hive::Attempts::ProcessCustody.unsupported("launch reservation reconciliation")
+        )
       end
 
       def refresh_attempt_storage_snapshot
@@ -4484,7 +4742,8 @@ module Hive
       end
 
       def write_attempt_dispatch_result(request, attempt, receipt, now:)
-        return if request.chat_id.nil?
+        remote = request.respond_to?(:remote_authority) && request.remote_authority
+        return if request.chat_id.nil? && !remote
 
         dispatch_repository.write_result!(
           chat_id: request.chat_id,
@@ -4500,6 +4759,7 @@ module Hive
           state_home: dispatch_result_state_home,
           now: now
         )
+        dispatch_repository.acknowledge_result(request.request_id, now: now) if remote
         @logger.event(
           :dispatch_result_written,
           request_id: request.request_id,
@@ -4619,6 +4879,14 @@ module Hive
         @logger.event(:dispatch_request_rejected,
                       request_id: req.request_id, project: req.project,
                       slug: req.slug, reason: reason)
+        if req.respond_to?(:remote_authority) && req.remote_authority
+          dispatch_repository.write_result!(
+            chat_id: nil, project: req.project, slug: req.slug, request_id: req.request_id,
+            exit_code: Hive::ExitCodes::TEMPFAIL, command: Shellwords.join(req.argv),
+            receipt: { "outcome" => "failed", "reason" => "admission_rejected" }
+          )
+          dispatch_repository.acknowledge_result(req.request_id)
+        end
         dispatch_repository.remove(
           req.request_id, state_home: dispatch_request_state_home
         )
@@ -4789,6 +5057,7 @@ module Hive
           when :deferred
             case result.reason
             when "transient_retry", "transition_retry" then :attempt_transient_retry
+            when Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON then :attempt_failure_limit
             when "patrol_retry_delay" then :attempt_patrol_retry_deferred
             else :attempt_capacity_deferred
             end
@@ -4970,6 +5239,19 @@ module Hive
         @enabled_cache[project_name] = false
       end
 
+      # A project's own daemon.max_concurrent_per_project, read the same way
+      # as daemon.enabled. The controller only lets it lower the daemon-wide
+      # cap; an unreadable config or a non-integer value leaves the global cap.
+      def project_concurrency_cap(project_name)
+        return @project_cap_cache[project_name] if @project_cap_cache.key?(project_name)
+
+        entry = Hive::Config.find_project(project_name)
+        @project_cap_cache[project_name] =
+          entry && Hive::Config.load(entry["path"]).dig("daemon", "max_concurrent_per_project")
+      rescue Hive::ConfigError
+        @project_cap_cache[project_name] = nil
+      end
+
       def project_owned?(project_name)
         !@project_ownership || @project_ownership.owned?(project_name)
       rescue StandardError
@@ -5099,6 +5381,7 @@ module Hive
         # values.
         @stale_agent_healer = stale_agent_healer
         @enabled_cache.clear
+        @project_cap_cache.clear
         @logger.event(
           :config_reloaded,
           max_concurrent_runs: @controller.max_concurrent_runs,

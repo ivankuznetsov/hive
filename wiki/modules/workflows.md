@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/terminal_outcome.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/task_workspace/builder.rb
 created: 2026-04-26
-updated: 2026-09-09
+updated: 2026-11-03
 tags: [module, workflow, result, verbs, selection, human-stage, outcomes, terminal-outcomes, registry, archive, retention]
 ---
 
@@ -201,6 +201,51 @@ the environment and refuses repository URL rewriting before a push. Offline
 origin initialization ignores candidate templates and global configuration,
 accepts the deliberately shallow base history, and registers the ordinary
 unsealed origin on both initial and resumed setup.
+
+The packaged `hive_driver.rb` mounts its `STAGES_SH` as the actual stage caller.
+For non-sealed runs, that caller checks creation of `/work/.hb/bin` and
+`/work/.hb`, then requires the bin to be a directory whose full canonical path
+matches the managed path, rejecting symlinks in the bin or any ancestor. It
+prunes exactly `codex`, `pi`, and `grok` before prepending the bin to PATH,
+agent preflight, or fresh/resumed stage routing. It repeats the directory
+validation and cleanup before a plan-stage `hive run` continuation, immediately
+before `hive develop`, on entry to review before the existing `gh` write, and
+again immediately before `hive review` after the publication agent has run.
+These boundaries remove entries planted by earlier agents. Directory setup
+or validation failure emits `HB_ERROR controller_bin_setup_failed`; a failed
+absolute `/usr/bin/rm -f --` emits
+`HB_ERROR legacy_agent_shim_cleanup_failed path=<managed-path>`. Both diagnostics
+go to stdout, which the driver tees into `stages.out` and captures; both stop
+the cell with exit 4, including continuation failures. Each removal's status
+governs, including dangling symlinks and entries that disappear afterward.
+The caller's marker contract documents these stdout diagnostics explicitly;
+the plan-continuation helper returns 1 on cleanup failure and its top-level
+caller maps that failure to exit 4.
+Managed-name directories fail without
+recursive deletion. Unrelated entries and external symlink targets survive;
+partial cleanup can be retried after repairing permissions. Sealed controller
+setup retains its existing behavior: the shared cleanup function returns
+success immediately in sealed mode, before validation or removal.
+
+The allowlist comes from historical commit `b1fd4b1862`'s older wrappers:
+`pi`, `codex`, and `grok` re-executed `$PI_REAL`, `$HB_CODEX_REAL`, and
+`$GROK_REAL`. It describes those legacy names rather than all agent binaries.
+The inspected driver contract is:
+
+| Agent | Driver executable selection | Cleanup scope |
+| --- | --- | --- |
+| Pi | `HIVE_PI_BIN=/opt/hb/pi-bench-launcher` | Legacy `pi` entry |
+| OpenCode | `HIVE_OPENCODE_BIN=/opt/hb/opencode-bench-launcher` | Excluded; launcher pinned |
+| Codex / Grok | Bare PATH names; no driver `HIVE_CODEX_BIN` / `HIVE_GROK_BIN` pin | Legacy `codex` / `grok` entries |
+| Claude | Bare PATH name; no driver `HIVE_CLAUDE_BIN` pin | Excluded; accepted stale-wrapper exposure |
+
+The packaged Pi launcher selects `HB_PI_REAL_BIN` or `/usr/local/bin/pi` and
+forwards the transport `--extension` plus the caller argv. Canonical
+hive-bench's inspected `243ef7bb7e2cb3f6ecbe2d5fe3f3ab9c83cff326` still has a
+separate Pi self-resolution defect; its follow-up and the accepted Hive
+stale-`claude` and stale-`gh` windows are recorded in [[gaps]]. The tested Hive
+revision and the per-behavior ownership mapping are in [[testing]].
+
 When the control plane is invoked through the dogfood wrapper, the packaged
 driver resolves the exact immutable deployment named by
 `HIVE_RUNTIME_DEPLOYMENT_ID` and verifies its full commit against

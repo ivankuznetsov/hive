@@ -1,5 +1,6 @@
 require "json"
 require "hive/config"
+require "hive/gh"
 require "hive/commands/approve"
 require "hive/commands/run"
 require "hive/markers"
@@ -149,6 +150,7 @@ module Hive
         end
 
         validate_marker!(task, config)
+        confirm_archive_pr_merged!(task, current_stage, target_stage)
         new_folder = File.join(task.hive_state_path, "stages", target_stage, task.slug)
         promote(task, target_stage, current_stage, config)
         run_at(new_folder, observation_guard: nil)
@@ -207,6 +209,54 @@ module Hive
           current_stage: stage_dir(task),
           target_stage: config.fetch(:target)
         )
+      end
+
+      # A finalize COMPLETE marker only proves the PR was readied, not that it
+      # merged. `gh pr merge` can still be refused afterwards (required checks
+      # pending, BEHIND, CONFLICTING), so ordinary archive asks GitHub — via
+      # the same Hive::Gh adapter finalize uses — whether the recorded PR is
+      # MERGED before the terminal move. Anything else, including a gh
+      # failure, refuses with a typed error; the explicit `--reason` closure
+      # path is the operator escape hatch for work delivered elsewhere.
+      def confirm_archive_pr_merged!(task, current_stage, target_stage)
+        return unless @verb == "archive"
+
+        context = { current_stage: current_stage, target_stage: target_stage }
+        pr_url = Hive::Gh.parse_pull_request_url(
+          Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))["pr_url"]
+        )&.fetch("url")
+        unless pr_url
+          raise Hive::ArchivePrStateUnobservable.new(
+            "archive refused (reason=pr_url_unresolved): #{task.slug} has no canonical " \
+            "pr_url in pr.md, so Hive cannot confirm its PR merged. " \
+            "#{archive_ways_forward(task, current_stage)}",
+            reason: "pr_url_unresolved", **context
+          )
+        end
+
+        state = Hive::Gh.pr_state(pr_url, cfg: Hive::Config.load(task.project_root))
+        return if state == "MERGED"
+
+        ways_forward = archive_ways_forward(task, current_stage)
+        raise Hive::ArchivePrNotMerged.new(
+          "archive refused (reason=pr_not_merged): #{task.slug}'s PR #{pr_url} is " \
+          "#{state}, not MERGED; #{target_stage} records delivered work. #{ways_forward}",
+          reason: "pr_not_merged", pr_url: pr_url, pr_state: state, **context
+        )
+      rescue Hive::GhError => e
+        raise Hive::ArchivePrStateUnobservable.new(
+          "archive refused (reason=pr_state_unobservable): could not read the state of " \
+          "#{task.slug}'s PR #{pr_url} (#{e.message.to_s.lines.first.to_s.strip[0, 200]}); " \
+          "Hive fails closed instead of archiving an unconfirmed PR; check `gh auth status` and retry. " \
+          "#{archive_ways_forward(task, current_stage)}",
+          reason: "pr_state_unobservable", pr_url: pr_url, **context
+        )
+      end
+
+      def archive_ways_forward(task, current_stage)
+        "Either merge the PR and re-run `hive archive #{task.slug} --from #{current_stage}`, " \
+          "or close the task explicitly with `hive archive #{task.slug} " \
+          "--reason already_delivered|superseded|cancelled` (plus its --evidence/--attestation)."
       end
 
       # See `Hive::Markers::TERMINAL_MARKER_NAMES` for the canonical

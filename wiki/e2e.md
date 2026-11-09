@@ -26,6 +26,13 @@ bin/hive-e2e clean              # old run cleanup
 
 `rake e2e` delegates to `bin/hive-e2e run`. The default `rake test` suite does not run e2e scenarios.
 
+The full-pipeline scenario seeds a valid PR identity, then exercises the real
+review publication gate through a loopback Git daemon and a local bare remote.
+Ordered GitHub shim responses provide the matching open PR and exact head for
+publication and final confirmation. Disabling hosted checks still requires
+publication proof; a placeholder non-PR URL cannot complete review. The harness
+owns and stops the loopback server with its other background processes.
+
 ## Semantic coverage
 
 `test/e2e/coverage.yml` is the canonical stable-ID taxonomy for the 24 scenario

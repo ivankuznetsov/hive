@@ -114,6 +114,7 @@ module Hive
         end
         {
           "questions" => questions, "recovery" => recovery,
+          "review_publication" => operator["review_publication"],
           "diagnostic_summary" => operator["diagnostic_summary"]&.to_s
         }
       end

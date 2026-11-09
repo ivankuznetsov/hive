@@ -19,6 +19,18 @@ class AttemptsAPITest < Minitest::Test
     assert_kind_of Hive::Error, Hive::Attempts::UnsupportedDetachment.new
   end
 
+  def test_read_only_fetch_and_attachment_use_the_same_attempt_identity
+    store = Object.new
+    store.define_singleton_method(:fetch) { |id| [ :record, id ] }
+    client = Object.new
+    calls = []
+    client.define_singleton_method(:attach) { |id, **options| calls << [ id, options ]; :terminal }
+    api = Hive::Attempts::API.new(store: store, client: client)
+    assert_equal [ :record, "attempt-1" ], api.fetch("attempt-1")
+    assert_equal :terminal, api.attach("attempt-1", stdout: :output, stderr: :error)
+    assert_equal [ [ "attempt-1", { stdout: :output, stderr: :error } ] ], calls
+  end
+
   def test_dispatch_delegates_foreground_admission
     foreground = Object.new
     call = nil

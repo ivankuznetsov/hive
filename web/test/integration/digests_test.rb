@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/daily_digest/store"
+require "hive/daily_digest/generation_failures"
 
 class DigestsTest < ActionDispatch::IntegrationTest
   setup do
@@ -27,6 +28,85 @@ class DigestsTest < ActionDispatch::IntegrationTest
     assert_select ".digest-document script", 0
     assert_select ".digest-filter, .digest-attention, .digest-activity, .digest-amendments, .digest-badges", 0
     assert_select "nav[aria-label='Digest date']"
+  end
+
+  test "a failed generation is announced above the last saved digest" do
+    sign_in!
+    store = Hive::DailyDigest::Store.new
+    store.write_base(simple_record("2026-08-30").merge("document" => "Saved text", "content" => "non_empty"))
+    Hive::DailyDigest::GenerationFailures.new(root: store.root).record(
+      "2026-08-31", Hive::AgentError.new("digest agent failed (exit 1): This API key has expired.")
+    )
+
+    get digest_path("2026-08-30")
+    assert_response :success
+    assert_select ".digest-generation-failure", 0
+
+    get digest_path("today")
+    assert_response :success
+    assert_select ".digest-generation-failure[role='alert']", text: /Digest generation for 2026-08-31 failed/
+    assert_select ".digest-generation-failure", text: /This API key has expired/
+    assert_select ".digest-generation-failure code", text: "hive digest refresh --date 2026-08-31"
+    assert_select ".digest-document", text: /Saved text/
+  end
+
+  test "a repository split across sections shows its stats once and diagrams render as escaped source" do
+    sign_in!
+    document = <<~MD
+      # 6 November 2026
+
+      ## The day in brief
+
+      - Reviews stop early. [PR #1](https://github.com/ivankuznetsov/hive/pull/1)
+
+      ## Needs you
+
+      - Decide whether to keep the I/O bar. [PR #2](https://github.com/ivankuznetsov/hive/pull/2)
+
+      ## Hive: fewer wasted runs
+
+      ### Plan review pauses after three identical failures
+
+      Before, a failing reviewer retried until its budget ran out.
+
+      ```mermaid
+      flowchart LR
+        A[Review] -->|fails| B{"<script>alert(1)</script>"}
+      ```
+
+      [PR #1](https://github.com/ivankuznetsov/hive/pull/1)
+
+      ## Hive: clearer status
+
+      Status explains itself. [PR #2](https://github.com/ivankuznetsov/hive/pull/2)
+
+      ```ruby
+      puts "not a diagram"
+      ```
+    MD
+    record = simple_record("2026-08-30").merge(
+      "document" => document, "content" => "non_empty",
+      "repository_stats" => [ { "name" => "ivankuznetsov/hive", "pull_requests" => 2, "commits" => 3,
+                                "additions" => 10, "deletions" => 5 } ]
+    )
+    Hive::DailyDigest::Store.new.write_base(record)
+
+    get digest_path("2026-08-30")
+
+    assert_response :success
+    assert_select ".digest-document h2 .digest-project-link", 2
+    assert_select ".digest-document .digest-project-stats", 1
+    assert_select ".digest-document h2.digest-needs-you", text: "Needs you"
+    assert_select ".digest-document ul.digest-needs-you-list li", text: /keep the I\/O bar/
+    assert_select ".digest-document h2", text: "The day in brief"
+    assert_select ".digest-document h2 .digest-project-link", 2
+    assert_select ".digest-document figure.digest-diagram[data-controller='mermaid']", 1
+    assert_select "figure.digest-diagram[data-mermaid-src-value^='/assets/mermaid.min-']", 1
+    assert_select ".digest-diagram pre.digest-diagram-source[data-mermaid-target='source']",
+                  text: /flowchart LR\n  A\[Review\] -->\|fails\| B\{"<script>alert\(1\)<\/script>"\}/
+    assert_select ".digest-document script", 0
+    assert_select ".digest-document pre code", text: /not a diagram/
+    refute_includes response.body, "HIVEDIGESTDIAGRAM"
   end
 
   test "project headings link to repositories and show persisted numerical evidence" do

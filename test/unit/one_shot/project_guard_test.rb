@@ -515,6 +515,67 @@ class OneShotProjectGuardTest < Minitest::Test
     end
   end
 
+  def test_maintenance_ownership_transiently_guards_only_unheld_disabled_projects
+    with_tmp_dir do |root|
+      entries = %w[active paused held].map do |name|
+        state = File.join(root, name, ".hive-state")
+        FileUtils.mkdir_p(state)
+        { "name" => name, "path" => File.dirname(state), "hive_state_path" => state }
+      end
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, drained: ->(*) { true },
+        enabled: ->(entry) { entry.fetch("name") == "active" }
+      )
+      assert_equal [ "active" ], collection.refresh!
+      paused_state = entries.fetch(1).fetch("hive_state_path")
+      held_state = entries.fetch(2).fetch("hive_state_path")
+      runner = guard(held_state, kind: "one_shot").acquire!
+
+      yielded = collection.with_maintenance_ownership(%w[active paused held unknown paused]) do |held|
+        error = assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) do
+          guard(paused_state, kind: "one_shot").acquire!
+        end
+        assert_equal "daemon_owned", error.code
+        assert_equal [ "active" ], collection.owned_projects
+        held
+      end
+
+      assert_equal [ "paused" ], yielded
+      assert_predicate yielded, :frozen?
+      assert_equal "one_shot_busy", assert_raises(Hive::OneShot::ProjectGuard::OwnershipError) {
+        guard(held_state, kind: "babysitter").acquire!
+      }.code
+      guard(paused_state, kind: "one_shot").acquire!.release!
+      assert_equal [ "active" ], collection.owned_projects
+    ensure
+      runner&.release!
+      collection&.release_all!
+    end
+  end
+
+  def test_maintenance_ownership_releases_its_guards_when_reconciliation_raises
+    with_tmp_dir do |root|
+      state = File.join(root, ".hive-state")
+      FileUtils.mkdir_p(state)
+      entries = [ { "name" => "paused", "path" => root, "hive_state_path" => state } ]
+      collection = Hive::OneShot::ProjectGuard::Collection.new(
+        kind: "daemon", registry: -> { entries }, drained: ->(*) { true }, enabled: ->(*) { false }
+      )
+      collection.refresh!
+
+      assert_raises(RuntimeError) do
+        collection.with_maintenance_ownership([ "paused" ]) { raise "reconcile failed" }
+      end
+      guard(state, kind: "one_shot").acquire!.release!
+
+      entries.clear
+      collection.refresh!
+      assert_empty(collection.with_maintenance_ownership([ "paused" ]) { |held| held })
+    ensure
+      collection&.release_all!
+    end
+  end
+
   private
 
   def guard(root, kind:)

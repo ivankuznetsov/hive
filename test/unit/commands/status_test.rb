@@ -141,7 +141,7 @@ class CommandsStatusTest < Minitest::Test
       def json_payload(*) = raise("full graph must not be built")
       def operational_payload(*) = raise("operational graph must not be built")
       def running_payload(*)
-        {
+        [ {
           "daemon" => { "running" => true, "pid" => 42, "uptime_sec" => 12 },
           "complete" => true,
           "count" => 1,
@@ -151,7 +151,7 @@ class CommandsStatusTest < Minitest::Test
             "project" => "demo", "slug" => "live-task", "display_name" => "Live task",
             "stage" => "4-execute", "liveness" => { "source" => "task_lock" }
           } ]
-        }
+        }, false ]
       end
     end
 
@@ -408,7 +408,7 @@ class CommandsStatusTest < Minitest::Test
         depends_on: "prerequisite-task-260823-abcd"
       )
       write_status_task(
-        hive_state, "9-done", "prerequisite-task-260823-abcd",
+        hive_state, "8-finalize", "prerequisite-task-260823-abcd",
         state_file: "done.md", marker: "COMPLETE"
       )
       command = Hive::Commands::Status.new(
@@ -1328,7 +1328,7 @@ class CommandsStatusTest < Minitest::Test
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       base = write_status_task(
-        hive_state, "9-done", "base-task", state_file: "task.md", marker: "COMPLETE"
+        hive_state, "8-finalize", "base-task", state_file: "task.md", marker: "COMPLETE"
       )
       dependent = write_status_task(
         hive_state, "4-execute", "dependent-task", state_file: "task.md",

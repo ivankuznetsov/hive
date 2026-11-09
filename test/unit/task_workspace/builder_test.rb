@@ -32,6 +32,49 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     def active_attempts = raise("workspace attempted a global attempt query")
   end
 
+  def test_review_retry_command_preserves_canonical_attempt_and_generation_precedence
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes.merge!("marker" => "review_error", "action" => "recover_review", "folder" => native.folder,
+        "state_file" => File.join(native.folder, "task.md"), "stage" => "6-review",
+        "mtime" => "2026-11-01T12:00:00Z", "task_generation" => 17, "condition_task_generation" => 3,
+        "attempt_id" => "explicit-attempt", "current_attempt" => "fallback-attempt",
+        "attrs" => Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending"))
+      canonical = Hive::OperationalAction.descriptor(project: "demo", row: attributes)
+      snapshot = builder(native, task, questions: 0).call
+      assert_includes snapshot.dig("operator", "review_publication", "retry_command"), canonical.fetch("observation_token")
+    end
+  end
+
+  def test_review_recovery_uses_the_tasks_canonical_operational_action
+    with_fixture do |native, task|
+      action = { "action_id" => "workflow.retry", "target" => "demo:task", "observation_token" => "a" * 64 }
+      task.define_singleton_method(:operational_action) { action }
+      task.instance_variable_get(:@attributes)["attrs"] = Hive::ReviewPublicationRecovery.encode(
+        "publication" => "unpublished", "verification" => "pending")
+      snapshot = builder(native, task, questions: 0).call
+      assert_equal "hive act workflow.retry demo:task --observation #{'a' * 64} --json",
+        snapshot.dig("operator", "review_publication", "retry_command")
+    end
+  end
+
+  def test_review_recovery_preserves_trusted_paths_commands_and_draft_completion_guidance
+    with_fixture do |native, task|
+      evidence = { "publication" => "published", "verification" => "verified",
+        "worktree" => "/owned/work tree", "branch" => "task", "is_draft" => true, "pr_state" => "OPEN",
+        "ready_command" => "cd /owned/work\\ tree && gh pr ready 42", "local_head" => "a" * 40 }
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["marker"] = "review_complete"
+      attributes["attrs"] = Hive::ReviewPublicationRecovery.encode(evidence)
+      snapshot = builder(native, task, questions: 0).call
+      projected = snapshot.dig("operator", "review_publication")
+      assert_equal evidence["worktree"], projected["worktree"]
+      assert_equal evidence["ready_command"], projected["ready_command"]
+      assert_includes projected["readiness_guidance"], "successful current secret scan"
+      assert_includes projected["readiness_guidance"], "pr_observed"
+    end
+  end
+
   def test_builds_one_schema_valid_snapshot_and_projects_answer_posture
     with_fixture do |native, task|
       snapshot = builder(native, task, questions: 2).call

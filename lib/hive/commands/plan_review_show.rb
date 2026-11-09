@@ -1,6 +1,7 @@
 require "json"
 require "hive"
 require "hive/config"
+require "hive/plan_review/identity"
 require "hive/plan_review/projection"
 require "hive/plan_review/transition_guard"
 require "hive/task_resolver"
@@ -63,6 +64,7 @@ module Hive
 
       def payload_for(task, projection)
         summary = projection.summary
+        freshness = @freshness.call(task, projection).to_h { |key, value| [ key.to_s, value ] }
         open = projection.record["findings"].select { |finding| finding["lifecycle"] == "open" }
         {
           "schema" => envelope_schema,
@@ -72,7 +74,10 @@ module Hive
           "task_folder" => task.folder,
           **IDENTITY_KEYS.to_h { |key| [ key, summary[key] ] },
           "task_generation" => summary["task_generation"].to_s,
-          "freshness" => @freshness.call(task, projection).to_h { |key, value| [ key.to_s, value ] },
+          "current_task_generation" => Hive::PlanReview::Identity.task_generation(task),
+          "freshness" => freshness,
+          "next_action" => freshness["status"] == "stale" ? "restart" : nil,
+          "blockers" => Array(projection.record["blockers"]),
           "open_findings" => open.sort_by { |finding| finding["display_order"].to_i }
                                  .map { |finding| FINDING_KEYS.to_h { |key| [ key, finding[key] ] } }
         }
@@ -87,6 +92,16 @@ module Hive
         freshness = payload["freshness"]
         unless freshness["status"] == "current"
           puts "  freshness: #{freshness['status']} (#{freshness['reason']}); decisions need a linked review first"
+          puts "  current_task_generation: #{payload['current_task_generation']}"
+        end
+        if payload["next_action"]
+          puts "  next_action: hive plan-review #{payload['slug']} #{payload['next_action']} " \
+               "--review-id ... (copy the identities above)"
+        end
+        payload["blockers"].each do |blocker|
+          next unless blocker.is_a?(Hash) && blocker["diagnostic"]
+
+          puts "  blocker: #{blocker['reason']}: #{blocker['diagnostic']}"
         end
         payload["open_findings"].each do |finding|
           puts "  - #{finding['fingerprint']} [#{finding['classification']}, #{finding['risk']}] #{finding['title']}"

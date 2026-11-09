@@ -60,6 +60,7 @@ module Hive
           rescue StandardError
             nil
           end
+          SQLiteSupport.raise_if_busy!(error)
           if database&.respond_to?(:storage_error_for) &&
              (storage_error = database.storage_error_for(error))
             raise storage_error
@@ -166,7 +167,7 @@ module Hive
         @finished = true
         true
       ensure
-        disconnect if @finished
+        disconnect
       end
 
       def disconnect

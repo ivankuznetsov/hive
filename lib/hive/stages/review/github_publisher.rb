@@ -4,6 +4,7 @@ require "tempfile"
 require "hive/gh"
 require "hive/reviewers"
 require "hive/secret_scanner"
+require "hive/stages/review/pass_archive"
 require "hive/worktree"
 
 module Hive
@@ -34,7 +35,7 @@ module Hive
           pr_url = validated_pr_url(task, cfg) { [ pr_path, pr_frontmatter ] }
           return :invalid_pr unless pr_url
 
-          header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
+          header = comment_header(task, reviewer_name, pass)
           body = "#{header}\n\n#{file_body}"
           if (hits = Hive::SecretScanner.scan(body)).any?
             warn "hive: review GitHub publish skipped for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
@@ -68,6 +69,19 @@ module Hive
           warn "hive: failed to post reviewer comment for pass=#{format('%02d', pass)} reviewer=#{reviewer_name}; " \
                "local file at #{relative_body_path(task, body_path)} is authoritative (#{e.class}: #{e.message})"
           :failed
+        end
+
+        # The header line is the dedupe key (see already_posted?). A backward
+        # approve archives the prior generation's pass files and review
+        # restarts at pass 01, so a pass-only header would match the archived
+        # generation's comment and the new pass would never be posted. The
+        # first generation keeps the original header so comments posted before
+        # this key existed still dedupe; later generations are suffixed with
+        # their ordinal, which stays fixed while that generation re-runs.
+        def comment_header(task, reviewer_name, pass)
+          header = "### Reviewer: #{reviewer_name} - Pass #{format('%02d', pass)}"
+          generation = Hive::Stages::Review::PassArchive.generation(task.folder)
+          generation > 1 ? "#{header} (review generation #{generation})" : header
         end
 
         def enabled?(cfg)

@@ -126,6 +126,32 @@ class AttemptsProcessCustodyTest < Minitest::Test
     end
   end
 
+  def test_membership_waits_for_freeze_acknowledgement_within_the_remaining_deadline
+    with_tmp_dir do |root|
+      domain = File.join(root, "attempt.scope")
+      FileUtils.mkdir_p(domain)
+      events_path = File.join(domain, "cgroup.events")
+      File.write(events_path, "populated 1\nfrozen 0\n")
+      File.write(File.join(domain, "cgroup.freeze"), "0\n")
+      File.write(File.join(domain, "cgroup.procs"), "4242\n")
+      clock = [ 0.0, 0.995, 0.995 ]
+      custody = Hive::Attempts::ProcessCustody::LinuxCgroupV2.new(
+        cgroup_root: root, monotonic: -> { clock.shift },
+        exclusive_domain_path: "/attempt.scope"
+      )
+      sleeps = []
+      custody.define_singleton_method(:sleep) do |seconds|
+        sleeps << seconds
+        File.write(events_path, "populated 1\nfrozen 1\n")
+      end
+
+      assert_equal [ 4242 ], custody.members("/attempt.scope")
+      assert_equal 1, sleeps.size
+      assert_in_delta 0.005, sleeps.first, 0.000001
+      assert_equal "0\n", File.read(File.join(domain, "cgroup.freeze"))
+    end
+  end
+
   def test_membership_times_out_when_freeze_never_acknowledges
     with_tmp_dir do |root|
       domain = File.join(root, "attempt.scope")

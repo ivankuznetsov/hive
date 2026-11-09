@@ -1162,7 +1162,7 @@ review:                 # 6-review stage config (U2)
         allowed_paths: [...] # default source/test/docs/wiki/manifests allowlist
         denied_paths: [...]  # default bin/config/CI/env/lockfile denylist
   browser_test: { enabled: false, agent: claude, prompt_template: browser_test_prompt.md.erb, max_attempts: 2 }
-  max_passes: 3
+  max_passes: 2
   max_wall_clock_sec: 5400
   reviewers: [...]      # Array — REPLACED wholesale on override (no per-element merge)
 rebase:                 # auto-rebase pre-step for `hive run` (plan 2026-05-14-001)
@@ -1424,3 +1424,22 @@ prepares that day; neither sent nor ambiguous outcomes auto-resend.
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[commands/digest]] · [[commands/refactor-patrol]]
+
+When archive content checks find unique committed work, `unique_worktree_changes`
+now carries optional typed `details` in `hive-task-closure-input` previews. The
+summary remains bounded to 500 characters; complete owned path/branch, persisted
+PR reference, full local fix SHAs and delivery classification remain structured.
+The shared diagnostic formatter preserves them in preview text, web detail and
+all archive-revalidation errors. Legacy diagnostics without details remain valid;
+confirmed closure receipts do not re-emit these diagnostics and need no schema
+change. Optional additions follow the existing no-version-bump schema policy.
+
+Publication and content delivery stay separate. Commit classification uses only a
+validated persisted review-publication head bound to the owned path, branch,
+and equal recorded local/remote heads, or `pr.md`'s `head_oid`, with already
+verified delivered heads supplied separately. Missing or locally unresolvable PR
+references yield `unknown` and separately labeled local candidates. No fallback
+to default-branch history claims that a squash history is unpushed. Preview adds
+no open-PR lookup, publication, readiness change or destructive Git operation.
+Merged-PR blockers retain all work and require an operator to decide whether to
+deliver it through a new change or establish that its content is already delivered.

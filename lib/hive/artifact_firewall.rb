@@ -387,7 +387,7 @@ module Hive
     def validate(manifest, snapshot)
       validate_snapshot!(manifest, snapshot)
       current = Hive::ProtectedFiles.observe_paths(manifest.protected_anchors)
-      violations = protected_violations(manifest, snapshot.observed, current)
+      violations = protected_violations(manifest, snapshot, current)
       violations.concat(
         protected_parent_violations(
           manifest, snapshot.parent_identities, observe_parent_identities(manifest)
@@ -433,7 +433,9 @@ module Hive
 
       current_anchors = Hive::ProtectedFiles.observe_paths(manifest.protected_anchors)
       current_parents = observe_parent_identities(manifest)
-      changed_anchors = changed_identity_labels(snapshot.observed, current_anchors)
+      changed_anchors = changed_identity_labels(snapshot.observed, current_anchors).reject do |label|
+        controller_append?(manifest, snapshot, label)
+      end
       changed_parents = changed_identity_labels(
         snapshot.parent_identities, current_parents
       )
@@ -492,21 +494,38 @@ module Hive
       report.tampered? ? restore(manifest, snapshot, report) : report
     end
 
-    def protected_violations(manifest, before, after)
+    def protected_violations(manifest, snapshot, after)
       manifest.protected_anchors.filter_map do |label, path|
-        prior = before.fetch(label)
+        prior = snapshot.observed.fetch(label)
         current = after.fetch(label)
         next if prior == current
+        next if controller_append?(manifest, snapshot, label)
 
         kind = protected_violation_kind(prior, current)
-        violation(
-          manifest, kind, label, path,
-          "protected anchor #{label.inspect} changed from #{identity_name(prior)} " \
-          "to #{identity_name(current)}"
-        )
+        diagnostic =
+          if kind == :protected_changed && Hive::ProtectedFiles.append_only_log?(path)
+            "protected append-only anchor #{label.inspect} lost or rewrote existing " \
+              "records or gained non-journal content"
+          else
+            "protected anchor #{label.inspect} changed from #{identity_name(prior)} " \
+              "to #{identity_name(current)}"
+          end
+        violation(manifest, kind, label, path, diagnostic)
       end
     end
     private_class_method :protected_violations
+
+    # Controller-owned append-only logs (the task journal) legitimately grow
+    # while an agent runs: Hive's own writers append under the log's lock.
+    # Only a log whose captured bytes survive and whose growth is complete
+    # journal records counts as a controller append; truncation or rewrites
+    # remain tampering.
+    def controller_append?(manifest, snapshot, label)
+      path = manifest.protected_anchors.fetch(label)
+      Hive::ProtectedFiles.append_only_log?(path) &&
+        Hive::ProtectedFiles.appended_only?(path, snapshot.captured.fetch(label))
+    end
+    private_class_method :controller_append?
 
     def protected_parent_violations(manifest, before, after)
       manifest.protected_anchors.filter_map do |label, path|

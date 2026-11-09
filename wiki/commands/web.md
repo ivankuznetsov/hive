@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/runtime_identity.rb, lib/hive/web/, web/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-10-15
+updated: 2026-11-07
 tags: [command, web, rails, turbo, plan-review, archive, retention, dogfood, daily-digest]
 ---
 
@@ -36,6 +36,29 @@ ordinary artifacts verb. Rails revalidates its exact canonical
 `hive evidence rework ... --stage 7-artifacts --generation ...
 --recovery-digest ...` command before queueing; malformed or stale bindings are
 rejected before any request write.
+
+## Scoped remote API
+
+`/api/v1` exposes bearer-only JSON adapters over the shared readers and domain
+commands. It does not accept browser cookies or loopback authentication as a
+fallback, and does not change browser login or CSRF behavior. The API is
+unavailable while the owner is blank or `HIVE_WEB_LOCAL_LOOPBACK` evaluates true;
+literal `"0"` is false. Mutations also require installed command receipts.
+These interlocks return byte-identical safe 503 bodies and distinct audit codes.
+
+Supported exposure uses loopback web behind an operator-managed TLS proxy or
+tunnel forwarding only `/api/v1`, refusing all browser paths, and providing rate
+limiting. Set `web.local_loopback: false` and provision a non-blank
+`web.github.owner` before exposure, including hosted hivedev C15 workspace
+creation. The server daemon must be installed and running for accepted work to
+execute. Issuing tokens never authorizes a non-loopback bind;
+`enforce_bind_policy!` is unchanged. A separately authorized non-loopback bind
+avoids the bypass interlock but is outside the supported proxy recipe.
+
+See [[remote-access]] for setup, scopes, bounded content, durable operation
+recovery and incident response; [[commands/token]] owns the server-local token
+lifecycle. There is no remote setup, module grant, deletion, release, shell/argv
+executor, or browser token-management UI.
 
 ## CLI
 
@@ -754,8 +777,8 @@ Honeycomb projections.
   `codex login`, because the callback server would bind on the Hive host and
   surface a localhost URL that a remote browser cannot reach. Grok uses
   `grok login --device-auth`, exposed through the same first-class login action
-  and constrained session routes as the other relayed agents. Codex, Grok,
-  and `gh`
+  and constrained session routes as the other relayed agents. Muse uses
+  `muse login` through those same constrained routes. Codex, Grok, Muse, and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the
@@ -931,8 +954,11 @@ project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful
 composer text/chip/file reset before Turbo renders with project-context
-retention, failed-submit
-draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
+retention, and project-rail submission followed by a forced live refresh.
+That submission check verifies the task row, stored attachment, and cleared
+composer; a later GET can consume the one-request success flash. Coverage also
+includes failed-submit draft/file retention on a 422-shaped Turbo event and
+attachment-index rebuild
 after a real Stimulus disconnect/reconnect before adding and submitting another
 image, eight-image/10 MB browser enforcement with bounded batch transport,
 constant-memory non-decoding chips, staged-File cleanup after a true disconnect

@@ -63,12 +63,14 @@ module Hive
           @entries = {}
           @projects = {}
           @contentions = {}
+          @disabled_entries = {}
         end
 
         def refresh!
           entries = Array(@registry.call)
           seen = {}
           enabled_associations = {}
+          disabled_entries = {}
           entries.each do |entry|
             name = entry.fetch("name").to_s
             seen[name] = true
@@ -81,6 +83,7 @@ module Hive
               enabled = @enabled.call(entry)
               enabled_associations[[ identity, name ]] = enabled
               unless enabled
+                disabled_entries[name] = entry
                 @contentions.delete(name)
                 next
               end
@@ -106,8 +109,34 @@ module Hive
             @projects.delete(name)
             @contentions.delete(name)
           end
+          @disabled_entries = disabled_entries
           release_drained_associations(enabled_associations)
           owned_projects
+        end
+
+        # Transient reconciliation-only ownership of registered projects whose
+        # daemon dispatch is disabled. A paused project is never enrolled, so a
+        # durable attempt stranded there by a dead wrapper would otherwise stay
+        # unowned, and therefore unsettled, forever. Each guard is held only for
+        # the block and released before returning; a project held by any other
+        # process (one-shot runner, another daemon) is skipped silently. The
+        # yielded names are never added to owned_projects, so they never reach
+        # dispatch.
+        def with_maintenance_ownership(projects)
+          guards = []
+          held = []
+          Array(projects).map(&:to_s).uniq.each do |name|
+            entry = @disabled_entries[name]
+            next unless entry && !owned?(name)
+
+            guards << @guard_factory.call(entry).acquire!
+            held << name
+          rescue StandardError
+            next
+          end
+          yield held.freeze
+        ensure
+          guards.each(&:release!)
         end
 
         def owned?(project)

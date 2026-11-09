@@ -74,8 +74,9 @@ Keep these commonly confused cases separate:
 - `REVIEW_ERROR phase=fix reason=fix_failed` with a Claude stop-hook completion
   failure uses the same universal retry path as other review errors. The stage
   re-runs its ordinary completion and integrity checks.
-- `limits_reached` is scheduler-owned even when `retry_after` is missing or
-  malformed; the shared marker-age cooldown remains authoritative.
+- With daemon dispatch enabled, `limits_reached` is scheduler-owned even when
+  `retry_after` is missing or malformed; the shared marker-age cooldown remains
+  authoritative. Manual projects expose a fresh local operator retry.
 - Stale `agent_working` with a verified live PID/lock is still running. An
   orphan may be healer-managed; a dead worker rewritten to
   `ERROR reason=agent_died` enters the universal cooled retry path.
@@ -95,11 +96,36 @@ For an operational row with a fresh routine `workflow.retry` descriptor, use
 the exact action and observation token from that same snapshot:
 
 ```bash
-hive act workflow.retry PROJECT:SLUG --observation TOKEN --json
+hive act workflow.retry PROJECT:SLUG --observation TOKEN --project PROJECT --json
 ```
 
+The project's effective `daemon.enabled` selects caller behavior. When false
+(including the legacy default when the key is absent), local CLI retry stays
+attached to the durable attempt and reports its terminal outcome. When true,
+retry retains queued admission even during a daemon outage. Do not choose the
+mode from a PID probe. A live daemon can still consume action recovery for a
+disabled project; shared request admission prevents a duplicate attempt.
+
 The receipt is canonical queued, cooldown, running, blocked, terminal, or
-unavailable truth. Re-snapshot immediately. If the observed generation,
+unavailable truth. Manual unlaunched work reports blocked/unavailable with its
+owner, reason and next command. JSON emits one `hive-act` v2 envelope; `ok: true`
+means the action was evaluated, while a failed terminal stage exits nonzero.
+Keyed replay preserves that outcome without relaunching. Re-snapshot afterward.
+
+A fresh retry can consume an identity-matched stranded admitted/cleared request,
+including an unchanged markerless task. Its token binds request revision/phase
+and task identity, stage, generation and post-clear progress. After caller loss,
+a fresh local action reconciles canonical attempt outcomes and invokes guarded
+terminal/failure repair. There is no automatic manual-request reaper without a
+daemon; status only observes. Never repair this state by deleting markers.
+Remote retry on a daemon-disabled project returns HTTP 503
+`dispatcher_unavailable`, with the exact local attached action command, and
+persists no recovery request. Enabled-project remote retries remain queued.
+Web/TUI retry-button execution retains its existing limitations.
+
+For stale observations run `hive status --operational --json`; use its new token.
+For live work inspect `hive task SLUG --project PROJECT --json`.
+If the observed generation,
 marker, or ownership changed, stop and diagnose the new state rather than
 applying the old remedy.
 

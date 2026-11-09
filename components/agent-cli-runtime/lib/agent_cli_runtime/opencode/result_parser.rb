@@ -60,16 +60,21 @@ module AgentCliRuntime
             next
           end
 
-          event_session = required_string(event, "sessionID", "event sessionID")
-          session_id ||= event_session
-          malformed!("OpenCode run sessionID changed within one capture") unless
-            session_id == event_session
-
           if type == "error"
+            # OpenCode 2.x reports failures raised before a session exists
+            # (for example an empty prompt) with an empty sessionID.
+            error_session = validate_additive_session!(event, session_id) unless
+              event["sessionID"] == ""
+            session_id ||= error_session
             validate_error!(event)
             error_seen = true
             next
           end
+
+          event_session = required_string(event, "sessionID", "event sessionID")
+          session_id ||= event_session
+          malformed!("OpenCode run sessionID changed within one capture") unless
+            session_id == event_session
 
           part = required_hash(event, "part", "event part")
           validate_part!(part, type, session_id)
@@ -260,11 +265,18 @@ module AgentCliRuntime
       end
       private_class_method :validate_part!
 
+      # OpenCode 1.x: {"name": ..., "data": {"message": ...}}.
+      # OpenCode 2.x: {"type": ..., "message": ..., "status"?: ...}.
       def validate_error!(event)
         error = required_hash(event, "error", "error event payload")
-        required_string(error, "name", "error name")
-        data = required_hash(error, "data", "error data")
-        required_string(data, "message", "error message")
+        if error.key?("name") || error.key?("data")
+          required_string(error, "name", "error name")
+          data = required_hash(error, "data", "error data")
+          required_string(data, "message", "error message")
+        else
+          required_string(error, "type", "error type")
+          required_string(error, "message", "error message")
+        end
       end
       private_class_method :validate_error!
 
@@ -310,9 +322,8 @@ module AgentCliRuntime
           error = event["error"]
           next unless error.is_a?(Hash)
 
-          name = error["name"].to_s
-          data = error["data"]
-          message = data.is_a?(Hash) ? data["message"].to_s : ""
+          name = (error["name"] || error["type"]).to_s
+          message = ErrorExtractors.opencode_error_message(error).to_s
           [ name, message ].reject(&:empty?).join(": ")
         rescue JSON::ParserError
           nil

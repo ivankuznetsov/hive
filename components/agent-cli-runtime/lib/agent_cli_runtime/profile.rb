@@ -23,7 +23,8 @@ module AgentCliRuntime
                 :permission_skip_flag, :workspace_write_flags,
                 :read_only_flags, :add_dir_flag, :tool_scope_flags,
                 :budget_flag, :output_format_flags, :version_flag,
-                :min_version, :prompt_style, :model_argument_builder,
+                :min_version, :prompt_style, :prompt_argument,
+                :model_argument_builder,
                 :effort_argument_builder, :launcher_identity,
                 :cli_capabilities, :declared_capability_support,
                 :credential_environment_keys, :configuration_environment_key,
@@ -36,13 +37,15 @@ module AgentCliRuntime
                    workspace_write_flags: [], read_only_flags: [],
                    add_dir_flag: nil, tool_scope_flags: {}, budget_flag: nil,
                    output_format_flags: [], min_version: nil,
-                   prompt_style: :positional, model_argument_builder: nil,
+                   prompt_style: :positional, prompt_argument: nil,
+                   model_argument_builder: nil,
                    effort_argument_builder: nil, launcher_identity: nil,
                    usage_extractor: nil, error_extractor: nil,
                    auth_configuration_probe: nil,
                    cli_capabilities: {}, raw_cli_arguments_supported: false,
                    credential_environment_keys: [], configuration_environment_key: nil,
                    default_configuration_directory: nil,
+                   configuration_directory_probe: nil,
                    permission_policy_required: false, result_parser: nil,
                    version_check_timeout_sec: CAPTURE_TIMEOUT_SECONDS)
       normalized_prompt_style = prompt_style.to_sym
@@ -66,6 +69,8 @@ module AgentCliRuntime
       @version_flag = immutable_string(version_flag)
       @min_version = min_version.nil? ? nil : immutable_string(min_version)
       @prompt_style = normalized_prompt_style
+      @prompt_argument =
+        prompt_argument.nil? ? nil : immutable_string(prompt_argument)
       @model_argument_builder = model_argument_builder
       @effort_argument_builder = effort_argument_builder
       @launcher_identity =
@@ -84,6 +89,7 @@ module AgentCliRuntime
       @default_configuration_directory = optional_relative_directory(
         default_configuration_directory
       )
+      @configuration_directory_probe = configuration_directory_probe
       @permission_policy_required = permission_policy_required == true
       @result_parser = result_parser
       @version_check_timeout_sec = Float(version_check_timeout_sec)
@@ -188,12 +194,16 @@ module AgentCliRuntime
         raise VersionError,
               "could not parse #{@name} #{@version_flag} output"
       end
-      if versions.length > 1
+      # A CLI may print one version twice in different forms (Muse prints
+      # "1.4.14 (1.4.14-R7309.1)"). That is one version, not ambiguity: only
+      # distinct numeric cores disagree about what is installed.
+      cores = versions.map { |value| value[/\A\d+\.\d+\.\d+/] }.uniq
+      if cores.length > 1
         raise VersionError,
               "ambiguous #{@name} #{@version_flag} output: " \
               "#{versions.join(', ')}"
       end
-      version = versions.fetch(0)
+      version = versions.length == 1 ? versions.fetch(0) : cores.fetch(0)
       if @min_version &&
          Gem::Version.new(version) < Gem::Version.new(@min_version)
         raise VersionError,
@@ -256,6 +266,10 @@ module AgentCliRuntime
     end
 
     def configuration_directory(home: nil, env: ENV)
+      if @configuration_directory_probe
+        resolved = @configuration_directory_probe.call(home: home, env: env)
+        return File.expand_path(resolved) if resolved
+      end
       if @configuration_environment_key
         configured = env[@configuration_environment_key].to_s
         unless configured.empty?

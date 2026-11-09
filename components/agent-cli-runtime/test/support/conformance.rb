@@ -18,7 +18,7 @@ module AgentCliRuntime
   module Conformance
     # Complete ordered built-in provider inventory of the installed candidate
     # and the source CLI contract.
-    PROVIDER_NAMES = %i[claude codex pi grok opencode].freeze
+    PROVIDER_NAMES = %i[claude codex pi grok opencode muse].freeze
 
     # OpenCode "run --help" capabilities required by the pinned v1.18.16
     # contract. Order matches the fixture corpus rendering.

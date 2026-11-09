@@ -1731,24 +1731,26 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
-  def test_max_review_pass_admits_passes_opened_by_ci_repair_receipts
-    # max_passes=2: pass 03 is the verify pass. Each kind=ci_repaired
-    # receipt admitted exactly one more pass, so 04 and 05 are legitimate;
+  def test_max_review_pass_admits_passes_opened_by_repair_and_approval_receipts
+    # max_passes=2: pass 03 is the verify pass. Each repair or approval
+    # receipt admits exactly one more pass, so 04 and 05 are legitimate;
     # 06 has no admitting receipt and still fails loudly.
-    with_tmp_dir do |dir|
-      reviews = File.join(dir, "reviews")
-      FileUtils.mkdir_p(reviews)
-      File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=ci_repaired -->\n")
-      File.write(File.join(reviews, "fix-success-04.md"), "<!-- HIVE: head=#{'b' * 40} kind=ci_repaired -->\n")
-      File.write(File.join(reviews, "claude-05.md"), "## High\n")
-      cfg = { "review" => { "max_passes" => 2 } }
+    [ %w[ci_repaired ci_repaired], %w[approved approved], %w[ci_repaired approved] ].each do |kinds|
+      with_tmp_dir do |dir|
+        reviews = File.join(dir, "reviews")
+        FileUtils.mkdir_p(reviews)
+        File.write(File.join(reviews, "fix-success-03.md"), "<!-- HIVE: head=#{'a' * 40} kind=#{kinds[0]} -->\n")
+        File.write(File.join(reviews, "fix-success-04.md"), "<!-- HIVE: head=#{'b' * 40} kind=#{kinds[1]} -->\n")
+        File.write(File.join(reviews, "claude-05.md"), "## High\n")
+        cfg = { "review" => { "max_passes" => 2 } }
 
-      assert_equal 5, Hive::Stages::Review.admitted_pass_ceiling(dir, 2)
-      assert_equal 5, Hive::Stages::Review.max_review_pass(dir, cfg)
+        assert_equal 5, Hive::Stages::Review.admitted_pass_ceiling(dir, 2)
+        assert_equal 5, Hive::Stages::Review.max_review_pass(dir, cfg)
 
-      File.write(File.join(reviews, "claude-06.md"), "## High\n")
-      err = assert_raises(Hive::ConfigError) { Hive::Stages::Review.max_review_pass(dir, cfg) }
-      assert_match(/claude-06\.md/, err.message)
+        File.write(File.join(reviews, "claude-06.md"), "## High\n")
+        err = assert_raises(Hive::ConfigError) { Hive::Stages::Review.max_review_pass(dir, cfg) }
+        assert_match(/claude-06\.md/, err.message)
+      end
     end
   end
 

@@ -1,18 +1,63 @@
 require "test_helper"
+require_relative "../../support/babysitter_git_options"
 require "hive/babysitter/git_policy"
 require "hive/babysitter/gh_policy"
 require "hive/babysitter/passthrough_runner"
 
 class BabysitterPassthroughPolicyTest < Minitest::Test
+  GIT_OPTION_SPELLINGS = BabysitterGitOptions::SPELLINGS
+
+  def test_git_policy_matches_the_version_independent_option_contract
+    assert_equal 1, GIT_OPTION_SPELLINGS.fetch("schema_version")
+    GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+      [ [], %w[-C /tmp/repo --git-dir=/tmp/repo/.git --work-tree /tmp/repo] ].each do |globals|
+        decision = Hive::Babysitter::GitPolicy.classify(globals + entry.fetch("argv"), environment: {})
+        assert_equal entry.fetch("hive_policy") == "allow", decision.allowed?, entry.fetch("id")
+        assert_equal entry.fetch("argv"), decision.rest, "#{entry.fetch('id')} with #{globals.inspect}"
+      end
+    end
+  end
+
+  def test_git_policy_repeated_classification_preserves_mutable_and_frozen_inputs
+    GIT_OPTION_SPELLINGS.fetch("cases").each do |entry|
+      [ false, true ].each do |frozen|
+        argv = entry.fetch("argv").map(&:dup)
+        environment = { "GIT_CONFIG_COUNT" => "0", "GIT_EXTERNAL_DIFF" => "" }
+        original_argv = Marshal.load(Marshal.dump(argv))
+        original_environment = Marshal.load(Marshal.dump(environment))
+        if frozen
+          argv.each(&:freeze)
+          argv.freeze
+          environment.each do |key, value|
+            key.freeze
+            value.freeze
+          end
+          environment.freeze
+        end
+
+        first = Hive::Babysitter::GitPolicy.classify(argv, environment: environment)
+        second = Hive::Babysitter::GitPolicy.classify(argv, environment: environment)
+
+        assert_equal first, second, entry.fetch("id")
+        assert_equal original_argv, argv
+        assert_equal original_environment, environment
+        assert_equal [ :allowed?, :rest ], first.members
+      end
+    end
+  end
+
   def test_git_policy_classifies_reads_without_side_effects
     allowed = [
       %w[status --short],
       %w[log -p -1],
+      %w[log -- --filters],
+      %w[rev-list --filter blob:none --objects HEAD],
       %w[remote -v]
     ]
     denied = [
       %w[push origin main],
       %w[log --output=/tmp/leak],
+      %w[log --pretty -- --filters],
       %w[-c core.pager=cat status]
     ]
 
@@ -94,16 +139,27 @@ class BabysitterPassthroughPolicyTest < Minitest::Test
   end
 
   def test_git_policy_hardens_log_passthrough_after_global_options
-    hardened = Hive::Babysitter::GitPolicy.hardened_passthrough_argv(
-      %w[-C /tmp/repo log -1], %w[log -1]
-    )
+    globals = %w[-C /tmp/repo --git-dir=/tmp/repo/.git --work-tree /tmp/repo]
+    {
+      %w[log -1] => %w[log --no-ext-diff --no-textconv -1],
+      %w[show HEAD] => %w[show --no-ext-diff --no-textconv HEAD],
+      %w[cat-file --filter=blob:none --batch-all-objects --batch-check] =>
+        %w[cat-file --filter=blob:none --batch-all-objects --batch-check]
+    }.each do |command, expected_command|
+      argv = globals + command
+      decision = Hive::Babysitter::GitPolicy.classify(argv, environment: {})
+      assert decision.allowed?, argv.inspect
+      assert_equal command, decision.rest
+      hardened = Hive::Babysitter::GitPolicy.hardened_passthrough_argv(argv, decision.rest)
 
-    assert_equal %w[-C /tmp/repo log --no-ext-diff --no-textconv -1], hardened.last(6)
-    assert_includes hardened.each_cons(2).to_a, %w[-c core.fsmonitor=false]
-    assert_includes hardened.each_cons(2).to_a, %w[-c gpg.ssh.program=false]
-    assert_includes hardened.each_cons(2).to_a, %w[-c diff.submodule=short]
-    assert_includes hardened, "--no-lazy-fetch"
-    assert_includes hardened, "--no-pager"
+      expected_tail = globals + expected_command
+      assert_equal expected_tail, hardened.last(expected_tail.length)
+      assert_includes hardened.each_cons(2).to_a, %w[-c core.fsmonitor=false]
+      assert_includes hardened.each_cons(2).to_a, %w[-c gpg.ssh.program=false]
+      assert_includes hardened.each_cons(2).to_a, %w[-c diff.submodule=short]
+      assert_includes hardened, "--no-lazy-fetch"
+      assert_includes hardened, "--no-pager"
+    end
   end
 
   def test_gh_policy_classifies_reads_without_side_effects

@@ -107,8 +107,8 @@ session secret always comes from the persisted session-secret file.
 
 ## Agents
 
-Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`, and
-`opencode`. The
+Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`,
+`opencode`, and `muse`. The
 published `agent-cli-runtime` gem owns each CLI's compatibility facts; Hive's
 profile wrapper adds workflow policy such as skills, routing, and status
 detection. Stage runners use CLI-managed subscription/session state and scrub
@@ -116,6 +116,15 @@ ambient provider API credentials before spawning. Grok runs headlessly with
 `grok -p <prompt> --always-approve --output-format streaming-json`, honors an
 absolute `GROK_HOME`, and lets an absolute `GROK_AUTH_PATH` select the session
 file directly with higher precedence.
+
+Muse is likewise selected nowhere by default. It runs headlessly with
+`muse exec --json`, keeps its credentials and settings under
+`$XDG_CONFIG_HOME/muse` (default `~/.config/muse`), and scrubs
+`META_API_KEY` so launches use the CLI's subscription session. Compound
+Engineering installs as a native Muse plugin from a Hive-staged,
+symlink-free copy of the upstream repository, because Muse refuses plugin
+bundles containing symlinks. See the agent support notes in the wiki for its
+permission-mode mapping.
 
 OpenCode is selected nowhere by default. When opted in, Hive requires
 OpenCode 1.18.16 or newer, an exact nested `provider/model`, and a non-yolo
@@ -252,7 +261,7 @@ review:
   github_publish:
     enabled: true
     max_attempts: 2
-  max_passes: 3
+  max_passes: 2
   max_wall_clock_sec: 14400
   reviewers: []              # `hive init` writes the recommended set here
 

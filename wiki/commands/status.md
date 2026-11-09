@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-10-30
+updated: 2026-11-01
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -14,6 +14,11 @@ workflow history. `hive status --json` emits the bounded
 broader active queue and blocker ownership, `hive task TARGET --json` for one
 task's detail, `hive tui` for the fleet browser, and `hive archive` for
 terminal history. The former public full-fleet status surface is removed.
+
+For a named remote context, use `hive status --context NAME --json` and follow
+`data.continuation` with `--cursor HANDLE`, preserving the project filter.
+Remote status rejects `--operational` and reports unavailable project loads
+explicitly. See [[remote-access]] for its bounded page and authority contract.
 
 ## Mode contract
 
@@ -67,6 +72,66 @@ errors exit `78`.
 |---|---|---|---|---|---|---|
 | `hive status` | Options: `--json`, `--operational`, `--diagnose`, and the mode-specific filters documented below. | Reads bounded liveness, operational, diagnostic, or archive projections without mutating tasks. | The selected JSON schema is `hive-running-status.v2`, `hive-status-diagnose.v2`, or `hive-operational-status.v5`. | Invalid arguments and projection failures use the selected typed error surface. | Error-envelope `JSON::GeneratorError` is suppressed so the original typed status error controls the exit. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
 | `hive act` | Options: required `--observation` and optional `--json`. | Revalidates and executes one current routine action; stale or invented actions are refused. | JSON uses schema `hive-act.v2`. | Invalid arguments and stale/refused actions use typed errors. | `JSON::GeneratorError` propagates and no fallback JSON is emitted. | Exit codes `0`, `64`, `75`, `78`, plus the selected typed failure code. |
+
+## Runtime database contention
+
+Default human and JSON status share one second of SQLite busy waiting across
+activation checks, process registration, lease reads, and exit cleanup. Ruby
+startup, scheduler work, and ordinary SQL execution do not consume that
+allowance. Connections opened or reused during the invocation use the same
+budget; directly invoked default status scopes and clears its own budget.
+
+Separate JSON boolean values, such as `hive status --json true` and
+`hive status --json false`, receive the same bounded policy and preserve the
+selected JSON or human output. Recognition accepts Thor's exact `true`, `TRUE`,
+`t`, `T`, `false`, `FALSE`, `f`, and `F` literals, including explicit values
+after `--no-json` and `--skip-json`; invalid or extra arguments stay on ordinary
+CLI validation.
+
+SQLite retries the operation after the final bounded wait, so a lock released
+during that slice can still recover; an exhausted budget permits no further
+waiting on the next busy callback.
+
+If contention clears within the allowance, normal registration and observation
+continue. On exhaustion before dispatch, Hive goes directly to the same status
+producer with the runtime source unavailable, then exits `0`. It does not
+reconcile the scheduler, execute command work, migrate, or repair the database
+as a contention recovery measure. Daemon PID/runtime evidence remains visible.
+Human output says `RUNNING TASKS UNAVAILABLE` and emits one
+`STATUS PARTIAL` line containing `runtime database busy`; unavailable lease data
+never justifies `NO RUNNING TASKS`.
+
+JSON remains `hive-running-status.v2`, with `ok: true`, `complete: false`,
+`observed_count_exact: false`, and `omitted_count_exact: false`. Busy metadata is
+internal to the producer and renderer. It adds no JSON properties or fabricated
+project failures. With no observed rows, all row counts remain zero and
+`truncated` and `source.scan_truncated` remain false, including with zero
+configured projects. Actual project failures still have their own counters.
+
+The one-second policy applies only to default running status. Operational,
+internal task-graph, archive, and diagnostic modes keep their existing
+contracts; `--diagnose ... --write` cannot enter the observation fallback.
+Only SQLite busy errors take this path. Custody, schema, storage, admission,
+and launch-fence failures retain their existing handling.
+
+Runtime table-presence checks query SQLite's catalog directly so a busy probe
+reaches the same contention handler. A transient probe failure cannot become
+`missing_schema`, omit lifecycle/process evidence, or skip command-context
+and receipt-pin handling as though the relevant table were absent. Quiescence
+upgrade copying uses the same probe.
+
+Ordinary commands retain the existing 15-second SQLite busy timeout for each
+startup operation, rather than sharing a startup deadline. Exhaustion before
+command dispatch exits `75`, with exactly `runtime database busy, retry` on
+stderr. JSON requests additionally receive the existing
+`hive-runtime-maintenance.v1` runtime error envelope on stdout. Cleanup after a
+status result uses the same remaining allowance. A failed cleanup leaves durable
+ownership evidence for existing lifecycle reconciliation and does not mask the
+status exit code.
+
+The real-lock subprocess proof runs separately as
+`bundle exec rake test:runtime_database_contention`, a named CI merge gate
+excluded from the default suite and coverage shards.
 
 ## Bounded running-task contract
 
@@ -207,24 +272,44 @@ status` as a remedy when it is failing under this same inspection policy.
 A failure before command dispatch uses the existing
 `hive-runtime-maintenance.v1` envelope and exposes `runtime_code` plus
 `next_action`. A failure reached after operational dispatch uses the additive
-optional `code` and `next_action` fields in `hive-operational-status.v4`.
+optional `code` and `next_action` fields in `hive-operational-status.v5`.
 Those fields are not added to plain, running, full/archive, daemon-task, or
-diagnostic status errors. Successful operational v4 documents are unchanged.
+diagnostic status errors. Successful operational v5 documents do not include
+these error-only fields.
 
 The operational document projects every non-archived task into exactly one of
 seven states: `running`, `needs_repair`, `waiting_on_you`,
 `waiting_on_provider_or_scheduler`, `completion_ready`, `idle`, or `unknown`.
 Classification precedence is running, repair, human input, provider/scheduler,
-completion, unknown, then idle. The human renderer deliberately displays
-running, human input, repair, provider/scheduler, completion, unknown, then
-idle; it caps each band at five rows and directs overflow to `hive tui`. The
-human view prints active/archive counts, exact project/slug
-identity, stage/marker, blocker owner, reason, and source issues. The JSON
-document additionally carries project counts, daemon/scheduler identity and
-freshness, structured provider/retry evidence, and the exact durable routing
-decision when an explicit pool was evaluated. The human row adds either the
-selected route or the no-selection reason only when that routing data exists;
-legacy rows render unchanged.
+completion, unknown, then idle. Either true liveness flag (`live_task_lock` or
+`claude_pid_alive`) outranks simultaneous stale evidence in state,
+`blocker_owner`, liveness-source reasons, and liveness status. The human
+renderer deliberately displays running, human input, repair,
+provider/scheduler, completion, unknown, then idle; it caps each band at five
+rows and directs overflow to `hive tui`. The human view prints active/archive
+counts, exact project/slug identity, stage/marker, blocker owner, reason, and
+source issues. The JSON document additionally carries project counts,
+daemon/scheduler identity and freshness, structured provider/retry evidence,
+and the exact durable routing decision when an explicit pool was evaluated.
+The human row adds either the selected route or the no-selection reason only
+when that routing data exists; legacy rows render unchanged.
+
+The task-lock check requires a live PID and matches its process start time
+when the lock records one; without a recorded start time it checks PID
+existence only. The agent check tests PID existence only, so a reused PID can
+read as live. Without either true flag, a dead recorded PID requests
+stale-runner repair only when the action is `agent_running` or the marker is
+`agent_working` or `review_working`. An `agent_running` action without stale
+evidence can still classify as running; without either true liveness flag,
+its generic reason is "task is running". A true liveness flag without an
+available verified PID instead reports "task has a verified live runner".
+Material scheduler reasons remain ahead of the live explanation.
+
+`tasks[].liveness.pid` selects the available task-lock PID only when
+`live_task_lock == true`, otherwise the available agent PID only when
+`claude_pid_alive == true`, otherwise null. Both-live rows prefer the lock
+PID. Stale-only rows publish null. The same PID rule applies when a material
+scheduler reason precedes the live explanation.
 
 ## Bounded task history
 
@@ -269,9 +354,10 @@ task whose durable receipts already project `ready_to_run` or
 an earlier attempt left dead process metadata in the runtime task lease. For
 daemon-enrolled projects the next transition remains scheduler-owned, and ordinary
 task-lock acquisition reclaims the dead holder with a higher fence without an
-operator repair step. A genuinely current
-`agent_running`, `AGENT_WORKING`, or `REVIEW_WORKING` claim with a dead runner
-continues to report `needs_repair`.
+operator repair step. A genuinely current `agent_running`, `AGENT_WORKING`, or
+`REVIEW_WORKING` claim whose recorded runners are all dead — neither
+`live_task_lock` nor `claude_pid_alive` is true — continues to report
+`needs_repair`.
 
 A benign dependency-blocked row is always
 `waiting_on_provider_or_scheduler`, with `blocker_owner: scheduler` and
@@ -311,6 +397,17 @@ refines that projection. `retry_cooldown` carries the exact deadline and stays
 scheduler-owned; `retry_in_flight` is running/agent-owned; and
 `retry_safety_blocked` becomes `needs_repair` with the reported operator or
 Hive owner instead of falsely claiming the scheduler will clear it.
+`retry_in_flight` requires in-flight evidence: the recovery's dispatch request
+is claimed/admitted/awaiting delivery, or its referenced attempt is still
+launching or running. A durable `dispatched` recovery whose request went back
+to `queued` after its attempt ended is a queued retry, not running work:
+`retry_pending` (`waiting_on_provider_or_scheduler`, scheduler-owned, reason
+`retry_awaiting_dispatch`), or `retry_dispatch_disabled` (`needs_repair`,
+operator-owned, reason `project_dispatch_disabled`, remediation names the
+`daemon.enabled` flag and `hive daemon reload`) when the daemon will not
+dispatch the project. Both keep `recovery.status: queued` with the retry count,
+identical-failure count, and escalation tier, and neither counts toward
+`summary.states.running`.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 
@@ -328,6 +425,14 @@ renders its sanitized declared outcome. Status still publishes the guarded
 `workflow.retry` action, but its diagnostic explains that the action reruns
 only the current terminal stage and that propagated upstream blockers require
 a fresh task.
+
+When later daemon ticks cannot publish a complete scheduler record (for
+example `duplicate_task_identity`, the same slug in two stage folders of one
+project), the retained record carries `last_failure`. While it is still
+current, status adds a `scheduler_tick_failed` warning; after it expires, the
+`scheduler_stale` issue message names the failure (project, slug, and each
+`stage (folder)` for duplicates) instead of only `snapshot_expired`, and the
+remediation says to keep one stage folder per slug.
 
 Completeness is explicit: `complete`, `partial`, or `unknown`. Missing project
 roots, legacy stage directories, invalid task metadata, unavailable/stale
@@ -499,9 +604,10 @@ head/reason/time. Bot and TUI consume this producer field rather than reading
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`,
 `unmet_dependencies`, `dependency_base_mode`, `blocked`, and required nullable
 `admission_error`. `depends_on` is a string, an ordered string array, or null.
-`dependency_base_mode` is `stacked` only for a resolvable same-project scalar;
-lists, cross-project scalars, invalid fallbacks, and dependency-free tasks use
-`default`. One scan reuses each project's already loaded default-branch policy
+`dependency_base_mode` is `stacked` only for a resolvable same-project scalar
+whose prerequisite is undelivered; delivered prerequisites (`9-done`, or a PR
+observed merged), lists, cross-project scalars, invalid fallbacks, and
+dependency-free tasks use `default`. One scan reuses each project's already loaded default-branch policy
 and one batched local/origin branch-ref inventory; it does not parse project
 configuration or fork Git once per row. Incremental projections build the
 bounded base-selection context only when a changed row declares a scalar
@@ -843,3 +949,68 @@ because an earlier recovery succeeded. Active recovery dispositions still
 participate in scheduling classification.
 
 Active and ordinary status share one envelope builder. Active-row preparation avoids duplicate action classification independently of numeric prerequisite resolution, which retains the registered-slug folder lookup and unregistered-task fallback.
+
+A local `workflow.retry` action selects its execution policy from the task
+project's effective `daemon.enabled` setting. With dispatch disabled (including
+the legacy default when the key is absent), it admits guarded recovery and
+attaches to the durable attempt until its canonical outcome is available.
+Enabled projects retain queued recovery, regardless of daemon process presence.
+The attached command refreshes task state and returns request/attempt identity,
+terminal outcome and time. JSON remains one `hive-act` v2 document: `ok: true`
+means the action was evaluated; a failed terminal stage also exits nonzero.
+Keyed terminal failures persist a failed command receipt and the same nonzero
+exit status while retaining the evaluated `ok: true` action payload. Failed
+action evaluation replays its stored typed error envelope and extras. Both
+replays emit one envelope without another attempt, including after recovery
+from an interrupted receipt finalization. Stale actions
+require `hive status --operational --json`; inspect live work using
+`hive task SLUG --project PROJECT --json`.
+
+Manual marker workflows do not need scheduler snapshots to expose recovery.
+Controller workflows retain their own receipt-based status. Status
+reads recovery evidence once per project within a snapshot, grouped by slug
+with an independent 65-row overflow check per task. Full status and lean
+recovery projections reuse those observations. Tasks without recovery requests
+need no additional marker read. An identity-matched
+admitted/cleared request over unchanged markerless task input can advertise a
+fresh retry descriptor. The token binds request revision, phase, task identity,
+stage, dispatch generation and post-clear progress. Pending manual recovery is
+`blocked`, owned by the operator; a verified live attempt is agent-owned and
+suppresses routine actions for every descriptor consumer, including remote
+task action reads. Evidence read failures remain typed `unavailable` results
+and suppress routine actions. During execution, configuration and coordinator
+handles are reused while task markers and request bindings are reread at each
+guard. Missing requests and failed best-effort deferral also return typed
+unavailable receipts with local inspection guidance.
+Status only observes: it never clears a marker, resumes a request, dispatches,
+or terminalizes abandoned work.
+
+Caller loss between recovery terminalization and failure-marker repair also
+remains recoverable. When the failed terminal request still matches unchanged
+markerless input, fresh status exposes operator-owned guarded repair. The local
+action completes that repair and reports the existing canonical outcome without
+charging another retry or launching a duplicate. A subsequent fresh descriptor
+can authorize the next retry against the repaired failure marker. Ambiguous
+request bindings are refused before repair; status does not select one by age.
+
+Review terminal rows expose `review_publication`, a local projection of versioned
+marker evidence. It includes publication and verification state, owned worktree
+and branch, full commits absent from the validated PR head, observation time,
+failure reason and recovery commands. `unknown` is distinct from `unpublished`;
+no commit list is invented from the default branch after a squash merge.
+
+Operational text, authenticated task detail and TUI detail share this projection.
+Small TUI screens explicitly omit long commands and direct operators to
+`hive status --operational --json`. Projection performs no GitHub requests or
+Git-history scans. Current routine retry commands come only from the canonical
+action producer. The durable refresh recipe refuses absent/ineligible retry
+recommendations and cannot advance another stage. Findings-only final stales
+require locally committed fixes and explicit operator/coordinator recovery.
+After remediation, select a final-stale task in `hive tui` and press `r` to
+submit that explicit retry. Its routine `workflow.retry` action remains absent.
+
+Draft guidance remains visible after successful review even without a recovery
+request. Normal finalize owns secret scanning and the publication activity record.
+The displayed manual `gh pr ready N` alternative requires publication, exact-head
+verification and a successful current scan, and explains the Hive checks and
+activity record it bypasses. Non-draft and merged PRs have no ready instruction.

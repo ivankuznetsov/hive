@@ -565,6 +565,117 @@ class HiveDaemonQuiescenceTest < Minitest::Test
     end
   end
 
+  def test_reservation_of_a_dead_owner_is_released_before_the_entry_gate
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:launch_reservations].update(owner_pid: gone_pid) }
+
+      result = coordinator(
+        root, database,
+        capability: Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root, legacy_inventory: -> { [] }
+        )
+      ).call
+
+      assert result.paused, result.reason
+      database.open!
+      row = database.read { |db| db[:launch_reservations].first }
+      assert_equal %w[released owner_gone], row.values_at(:state, :reason)
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
+  def test_owned_process_of_an_exited_cli_is_reconciled_before_the_entry_gate
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "brainstorm")
+      registry.register!(reservation.id, pid: Process.pid)
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:owned_processes].update(pid: gone_pid) }
+
+      result = coordinator(
+        root, database,
+        capability: Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root, legacy_inventory: -> { [] }
+        )
+      ).call
+
+      assert result.paused, result.reason
+      database.open!
+      row = database.read { |db| db[:owned_processes].first }
+      assert_equal %w[stopped owner_gone_custody_unverified], row.values_at(:state, :unknown_reason)
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
+  def test_a_failed_owned_process_reconcile_leaves_the_entry_gate_refusing
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "brainstorm")
+      registry.register!(reservation.id, pid: Process.pid)
+      reservation.release_fence!
+      gone_pid = Process.spawn("true")
+      Process.wait(gone_pid)
+      database.transaction { |db| db[:owned_processes].update(pid: gone_pid) }
+      registry.define_singleton_method(:reconcile_exited_processes!) do |**|
+        raise Sequel::DatabaseError, "database is locked"
+      end
+
+      result = coordinator(
+        root, database, registry: registry,
+        capability: Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root, legacy_inventory: -> { [] }
+        )
+      ).call
+
+      refute result.paused
+      assert result.admission_open
+      assert_equal "running", database.read { |db| db[:owned_processes].get(:state) }
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
+  def test_a_failed_release_leaves_the_reservation_refusing_the_entry_gate
+    with_runtime do |root, database|
+      registry = Hive::RuntimeControlPlane::ProcessRegistry.new(
+        database: database, state_home: root
+      )
+      reservation = registry.reserve!(origin: "direct_cli", role: "status")
+      reservation.release_fence!
+      registry.define_singleton_method(:release_abandoned_reservations!) do |**|
+        raise Hive::RuntimeControlPlane::Unavailable.new("busy", code: :busy, action: "retry")
+      end
+
+      result = coordinator(
+        root, database, registry: registry,
+        capability: Hive::RuntimeControlPlane::QuiescenceCapability.new(
+          database: database, state_home: root, legacy_inventory: -> { [] }
+        )
+      ).call
+
+      refute result.paused
+      assert result.admission_open
+      assert_equal "reserved", database.read { |db| db[:launch_reservations].get(:state) }
+    ensure
+      reservation&.release_fence!
+    end
+  end
+
   def test_writer_fence_contention_is_not_reported_as_launch_fence_contention
     with_runtime do |root, database|
       database.define_singleton_method(:with_exclusive_writer) do |**|

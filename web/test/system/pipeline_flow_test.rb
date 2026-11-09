@@ -428,8 +428,29 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_equal filtered, composer_project,
                  "widening the view must not discard the composer's project choice"
 
+    execute_script <<~JS
+      document.addEventListener("turbo:load", () => {
+        document.documentElement.dataset.projectRailSubmitted = "true"
+      }, { once: true })
+    JS
     submit_idea
-    assert_selector ".flash-notice", text: "Idea added", wait: 5
+    assert_field "New idea", with: "", wait: 5
+    assert_selector "html[data-project-rail-submitted='true']", wait: 10
+    # A live refresh after the redirect consumes the one-request Rails flash.
+    # Exercise that ordering before checking the submitted idea.
+    execute_script <<~JS
+      document.addEventListener("turbo:morph", () => {
+        document.documentElement.dataset.projectRailRefreshed = "true"
+      }, { once: true })
+      const stream = document.createElement("turbo-stream")
+      stream.setAttribute("action", "refresh")
+      document.documentElement.appendChild(stream)
+    JS
+    assert_selector "html[data-project-rail-refreshed='true']", wait: 10
+    assert_selector ".task-row", text: "Filter navigation draft", count: 1
+    assert_field "New idea", with: ""
+    assert_no_selector ".chip"
+    assert_equal 0, page.evaluate_script("document.querySelector('[data-composer-target=files]').files.length")
     folder = stage_dir(filtered, "1-inbox").children
                                             .find { |child| child.basename.to_s.start_with?("filter-navigation-draft") }
     assert folder&.join("assets", "image1.png")&.file?,

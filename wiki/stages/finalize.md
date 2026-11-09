@@ -3,7 +3,7 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, lib/hive/task_closure.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-08-24
+updated: 2026-11-08
 tags: [stage, finalize, pr, github, clean-exit, closure]
 ---
 
@@ -62,6 +62,22 @@ not repeat accepted work.
 
 ## Steps performed (`Stages::Finalize.run!`)
 
+0. **Idempotency gate.** An existing `summary.md` short-circuits to
+   `already complete (<canonical pr_url>)` only when
+   `completed_finalize_state` confirms the finalize is still true: `pr.md`
+   has a canonical `pr_url` and a controller-recorded `head_oid`, the current
+   marker is `COMPLETE is_draft=false` bound to that URL, and GitHub
+   (`Hive::Gh.pr_metadata` by URL) reports the same PR as `MERGED`, or as
+   `OPEN`, non-draft, with `headRefOid` equal to the recorded head. Any drift
+   (`pr_url_unresolved`, `marker_not_complete`, `recorded_head_missing`,
+   `pr_identity_mismatch`, `pr_state=<STATE>`, `pr_not_ready`,
+   `pr_head_moved`, or `pr_state_unobservable` on a gh error) prints
+   `summary.md exists but finalize is not complete (<drift>); re-running
+   finalize` and falls through to the normal path below, which re-validates
+   identity, re-readies a draft, re-records the head, or fails closed with its
+   own typed marker. The gate never mutates the marker and no longer prints
+   `(no url)`. Consequence: a legacy `summary.md` without a recorded
+   `head_oid` re-runs finalize once.
 1. Read `pr_url` from `pr.md`, parse its canonical host/repository/number, and
    resolve that number through the task worktree's repository context. A
    mismatched URL or cross-repository observation fails before the URL reaches
@@ -96,6 +112,7 @@ not repeat accepted work.
 
 - Agent-written `:complete` → `pr_finalized`.
 - Already-merged short-circuit `:complete merged=true` → `finalize_already_merged`; no `summary.md` is expected because the PR is already terminal on GitHub.
+- Archive-ready is not delivered: ordinary `hive archive` additionally requires GitHub to report the PR `MERGED` (see [[commands/stage_action]] step 8) and otherwise refuses with `ArchivePrNotMerged` / `ArchivePrStateUnobservable`.
 - Status only treats an `8-finalize` `:complete` marker as archive-ready when it carries `is_draft=false` and a `pr_url` matching `pr.md` frontmatter. A carried-over `5-open-pr` marker with `is_draft=true` remains ready to run finalize, not ready to archive.
 - Missing `pr.md` / missing `pr_url`, dirty worktree, or genuinely unpushed state writes an `ERROR` marker and commits the corresponding error state. Patch-identical stale rebase duplicates are fast-forwarded to the upstream instead of becoming terminal `unpushed_commits`.
 

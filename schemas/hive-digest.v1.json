@@ -66,6 +66,18 @@
         "coverage_started_at": { "type": ["string", "null"], "format": "date-time" },
         "precoverage": { "type": "boolean" },
         "pruned_at": { "type": ["string", "null"], "format": "date-time" },
+        "generation_failure": {
+          "description": "Latest failed document generation affecting this view: the selected date, or for an implicit today read a newer day that failed while an older saved document is shown.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["local_date", "failed_at", "error_class", "message"],
+          "properties": {
+            "local_date": { "type": "string", "format": "date" },
+            "failed_at": { "type": "string", "format": "date-time" },
+            "error_class": { "type": "string" },
+            "message": { "type": "string" }
+          }
+        },
         "web_url": { "type": "string", "format": "uri", "pattern": "^https?://" }
       }
     },

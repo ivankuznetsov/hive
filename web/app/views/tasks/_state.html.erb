@@ -7,6 +7,7 @@
 <% recovery = operator["recovery"] %>
 <section id="task-state" data-controller="answers">
   <%= render "tasks/workspace_summary", workspace: @semantic_workspace %>
+  <%= render "tasks/review_publication", publication: operator["review_publication"] %>
 
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a

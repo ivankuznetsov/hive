@@ -342,6 +342,39 @@ class PlanReviewStoreTest < Minitest::Test
     end
   end
 
+  def test_rejected_reviewer_output_is_kept_bounded_and_redacted_beside_the_attempt
+    with_store do |store|
+      manifest = manifest_record
+      store.create_review!(manifest)
+      attempt_id = Hive::PlanReview::Identity.attempt(manifest.review_id)
+      secret = "sk-#{'x' * 30}"
+      oversized = "{\"coverage\": \"#{secret}\"}" + ("y" * Hive::PlanReview::Store::MAX_REJECTED_OUTPUT_BYTES)
+      refs = store.write_attempt!(
+        review_id: manifest.review_id, attempt_id:, plan_bytes: "# Plan\n",
+        result: { "diagnostic" => "invalid plan review coverage entry 0: unknown keys notes" },
+        coverage: {}, route_receipt: { "role" => "verification" },
+        rejected_output: "#{oversized}\xFF".b
+      )
+
+      reference = refs.fetch("rejected_output")
+      assert_equal "reviews/#{manifest.review_id}/attempts/#{attempt_id}/rejected-output.md",
+                   reference.fetch("path")
+      document = store.read_reference(reference).force_encoding(Encoding::UTF_8)
+      assert_includes document, "Rejected plan review output (verification, attempt #{attempt_id})"
+      assert_includes document, "Parser error: invalid plan review coverage entry 0: unknown keys notes"
+      assert_includes document, "first #{Hive::PlanReview::Store::MAX_REJECTED_OUTPUT_BYTES} of #{oversized.bytesize + 1} bytes"
+      refute_includes document, secret
+      assert document.bytesize < Hive::PlanReview::Store::MAX_REJECTED_OUTPUT_BYTES + 1024
+      assert_equal 0o600, File.stat(File.join(store.root, reference.fetch("path"))).mode & 0o777
+
+      short = store.write_attempt!(
+        review_id: manifest.review_id, attempt_id: Hive::PlanReview::Identity.attempt(manifest.review_id),
+        plan_bytes: "# Plan\n", result: {}, coverage: {}, route_receipt: {}, rejected_output: "{}"
+      )
+      assert_includes store.read_reference(short.fetch("rejected_output")), "redacted (2 bytes)"
+    end
+  end
+
   private
 
   def with_store

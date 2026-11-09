@@ -42,6 +42,7 @@ module Hive
         "codex" => %w[codex login --device-auth],
         "grok" => %w[grok login --device-auth],
         "opencode" => %w[opencode auth login],
+        "muse" => %w[muse login],
         # gh is not a pipeline agent, but its login IS first-run setup: git's
         # https credential helper reads it for every push the daemon makes.
         # The flags pin the prompts away (host, protocol, no ssh key upload)
@@ -55,7 +56,7 @@ module Hive
       # the child exits (`done`) rather than show a paste-the-code form. codex
       # `--device-auth` and gh's device flow are both poll-type; claude
       # `setup-token` is the only paste-back flow.
-      POLL_LOGIN_AGENTS = %w[codex grok gh].freeze
+      POLL_LOGIN_AGENTS = %w[codex grok muse gh].freeze
 
       # Hard ceiling on in-flight login attempts. Each holds a PTY (2 fds + a
       # child + a reader thread); a small cap stops a stuck-CLI pile-up from
@@ -82,7 +83,7 @@ module Hive
       end
 
       def statuses
-        agents = %w[claude codex pi grok opencode].to_h do |agent|
+        agents = %w[claude codex pi grok opencode muse].to_h do |agent|
           [ agent, { "logged_in" => Hive::AgentProfiles.logged_in?(agent) } ]
         end
         # Not an agent profile, but part of the same first-run checklist:

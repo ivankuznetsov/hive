@@ -1,6 +1,7 @@
 require "test_helper"
 require "json_schemer"
 require "hive/operational_status"
+require "hive/review_publication_recovery"
 
 class OperationalStatusTest < Minitest::Test
   STATES = %w[
@@ -10,6 +11,21 @@ class OperationalStatusTest < Minitest::Test
 
   def setup
     Hive::RuntimeControlPlane.database.migrate!
+  end
+
+  def test_review_publication_evidence_is_projected_without_remote_or_git_reads
+    evidence = { "publication" => "published", "verification" => "pending", "worktree" => "/owned/path with spaces",
+      "branch" => "task", "local_head" => "a" * 40, "remote_head" => "a" * 40,
+      "is_draft" => true, "pr_state" => "OPEN", "ready_command" => "gh pr ready 42" }
+    attrs = Hive::ReviewPublicationRecovery.encode(evidence).merge("reason" => "final_fix_unverified", "pass" => "3", "accepted" => "1")
+    result = project(status_payload(task(action: "recover_review", slug: "fix", marker: "review_stale", attrs: attrs))).fetch("tasks").first
+    assert_nil result["action"]
+    diagnostic = result.fetch("review_publication")
+    assert_equal "published", diagnostic["publication"]
+    assert_equal evidence["worktree"], diagnostic["worktree"]
+    assert_nil diagnostic["retry_command"]
+    assert_includes diagnostic["remediation"], "Commit fixes locally"
+    assert_includes diagnostic["readiness_guidance"], "normal finalize"
   end
 
   def test_projects_complete_graph_into_closed_operational_states_and_archive_counts
@@ -246,21 +262,161 @@ class OperationalStatusTest < Minitest::Test
 
     assert_equal "running", projected.fetch("state")
     assert_equal "agent", projected.fetch("blocker_owner")
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
     assert_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "provider_quota"
+  end
+
+  def test_live_task_lock_beats_stale_agent_pid
+    result = project(status_payload(live_lock_with_stale_agent))
+    projected = assert_live_liveness(
+      result, pid: 4242, message: "task runner holds the live lock (pid 4242)"
+    )
+
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
+    assert_equal "task runner holds the live lock (pid 4242)", projected.fetch("reason")
+  end
+
+  def test_live_agent_pid_beats_stale_task_lock
+    result = project(status_payload(live_agent_with_stale_lock))
+    projected = assert_live_liveness(result, pid: 777, message: "agent process 777 is alive")
+
+    assert_equal "live_runner", projected.dig("reasons", 0, "code")
+    assert_equal "agent process 777 is alive", projected.fetch("reason")
+  end
+
+  def test_material_scheduler_reasons_precede_both_mixed_live_explanations
+    [
+      [ live_lock_with_stale_agent, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ live_agent_with_stale_lock, 777, "agent process 777 is alive" ]
+    ].each do |row, pid, message|
+      %w[in_flight dispatched].each do |decision|
+        scheduler_message = "scheduler reports #{decision}"
+        snapshot = scheduler_snapshot_for(row, decision: decision, reason: scheduler_message)
+        result = project(
+          status_payload(row),
+          project_context: { "demo" => { "daemon_enabled" => true } },
+          scheduler_snapshot: snapshot
+        )
+        label = "#{row.fetch('slug')}/#{decision}"
+        projected = assert_live_liveness(result, pid: pid, message: message, label: label)
+
+        assert_equal [ "running", "agent" ], classify_row(row, daemon_enabled: true), label
+        assert_equal "current", projected.dig("freshness", "scheduler_status"), label
+        assert_equal decision, projected.dig("reasons", 0, "code"), label
+        assert_equal "scheduler", projected.dig("reasons", 0, "source"), label
+        assert_equal scheduler_message, projected.dig("reasons", 0, "message"), label
+        assert_equal scheduler_message, projected.fetch("reason"), label
+        assert_equal "live_runner", projected.dig("reasons", 1, "code"), label
+      end
+    end
+  end
+
+  def test_live_pid_and_explanation_prefer_the_first_available_verified_source
+    cases = [
+      [ "both-live", true, 4242, true, 777, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ "missing-lock-pid", true, nil, true, 777, 777, "agent process 777 is alive" ],
+      [ "missing-agent-pid", true, 4242, true, nil, 4242, "task runner holds the live lock (pid 4242)" ],
+      [ "missing-both-pids", true, nil, true, nil, nil, "task has a verified live runner" ],
+      [ "lock-flag-only", true, nil, false, 777, nil, "task has a verified live runner" ],
+      # Synthetic projector invariant: the producer retains only a live lock holder.
+      [ "agent-flag-only", false, 4242, true, nil, nil, "task has a verified live runner" ]
+    ]
+    cases.each do |slug, lock_live, lock_pid, agent_live, agent_pid, expected_pid, message|
+      row = task(
+        action: "agent_running", slug: slug, live_task_lock: lock_live, task_lock_pid: lock_pid
+      ).merge("claude_pid" => agent_pid, "claude_pid_alive" => agent_live)
+      projected = assert_live_liveness(
+        project(status_payload(row)), pid: expected_pid, message: message, label: slug
+      )
+
+      assert_equal message, projected.fetch("reason"), slug
+      assert_equal "live_runner", projected.dig("reasons", 0, "code"), slug
+    end
+  end
+
+  def test_unverified_pid_flags_do_not_publish_or_narrate_historical_pids
+    # Synthetic projector invariant: the producer retains only a live lock holder.
+    [ false, nil, :missing ].each do |flag|
+      row = task(action: "agent_running", slug: "unverified-#{flag}", task_lock_pid: 4242).merge(
+        "claude_pid" => 777, "live_task_lock" => flag, "claude_pid_alive" => flag,
+        "attempt_id" => "current-attempt", "task_generation" => "generation-1"
+      )
+      if flag == :missing
+        row.delete("live_task_lock")
+        row.delete("claude_pid_alive")
+      end
+
+      result = project(status_payload(row))
+      assert_operational_schema(result, label: flag.inspect)
+      projected = result.fetch("tasks").first
+      assert_nil projected.dig("liveness", "pid"), flag.inspect
+      assert_equal "current-attempt", projected.dig("liveness", "attempt_id"), flag.inspect
+      assert_equal "generation-1", projected.dig("liveness", "task_generation"), flag.inspect
+      if flag == false
+        assert_equal "needs_repair", projected.fetch("state"), flag.inspect
+        assert_equal "stale_runner", projected.dig("reasons", 0, "code"), flag.inspect
+      else
+        assert_equal "running", projected.fetch("state"), flag.inspect
+        assert_equal "task is running", projected.fetch("reason"), flag.inspect
+      end
+
+      live_lock = row.merge("live_task_lock" => true)
+      assert_live_liveness(
+        project(status_payload(live_lock)), pid: 4242,
+        message: "task runner holds the live lock (pid 4242)", label: flag.inspect
+      )
+      live_agent = row.merge("claude_pid_alive" => true)
+      assert_live_liveness(
+        project(status_payload(live_agent)), pid: 777,
+        message: "agent process 777 is alive", label: flag.inspect
+      )
+
+      historical = row.merge("action" => "ready_to_plan")
+      historical_result = project(status_payload(historical))
+      assert_operational_schema(historical_result, label: flag.inspect)
+      historical_liveness = historical_result.fetch("tasks").first.fetch("liveness")
+      assert_equal "not_running", historical_liveness.fetch("status"), flag.inspect
+      %w[pid attempt_id task_generation].each do |key|
+        assert_nil historical_liveness.fetch(key), "#{flag.inspect}/#{key}"
+      end
+    end
+  end
+
+  def test_action_derived_running_without_live_pid_keeps_ownership_metadata
+    row = task(action: "agent_running", slug: "action-only").merge(
+      "attempt_id" => "current-attempt", "task_generation" => "generation-1"
+    )
+    projected = assert_live_liveness(
+      project(status_payload(row)), pid: nil, message: "task is running"
+    )
+
+    assert_equal "task is running", projected.fetch("reason")
+    assert_equal "current-attempt", projected.dig("liveness", "attempt_id")
+    assert_equal "generation-1", projected.dig("liveness", "task_generation")
   end
 
   def test_dead_recorded_runner_is_repair_not_running
     row = task(action: "agent_running", slug: "stale").merge(
       "claude_pid" => 99_999,
-      "claude_pid_alive" => false
+      "claude_pid_alive" => false,
+      "attempt_id" => "stale-attempt", "task_generation" => "generation-1"
     )
 
-    projected = project(status_payload(row)).fetch("tasks").first
+    result = project(status_payload(row))
+    assert_operational_schema(result)
+    projected = result.fetch("tasks").first
 
     assert_equal "needs_repair", projected.fetch("state")
     assert_equal "hive", projected.fetch("blocker_owner")
     assert_equal "stale", projected.dig("liveness", "status")
+    assert_nil projected.dig("liveness", "pid")
+    assert_equal "stale-attempt", projected.dig("liveness", "attempt_id")
+    assert_equal "generation-1", projected.dig("liveness", "task_generation")
     assert_equal "stale_runner", projected.dig("reasons", 0, "code")
+    assert_equal "liveness", projected.dig("reasons", 0, "source")
+    assert_equal "recorded task runner is no longer alive", projected.dig("reasons", 0, "message")
+    assert_equal projected.dig("reasons", 0, "message"), projected.fetch("reason")
+    refute_includes projected.fetch("reasons").map { |reason| reason.fetch("code") }, "live_runner"
   end
 
   def test_dead_runner_marker_stays_repair_after_the_action_projects_error
@@ -734,6 +890,59 @@ class OperationalStatusTest < Minitest::Test
     assert_includes result.fetch("issues").map { |issue| issue.fetch("code") }, "scheduler_stale"
   end
 
+  def test_expired_scheduler_snapshot_names_the_tick_failure_that_blocked_publication
+    source_task = task(action: "ready_to_plan", slug: "expired-scheduler")
+    reason = "duplicate_task_identity: demo:x in 1-inbox (/p/stages/1-inbox/x), " \
+             "3-generate (/p/stages/3-generate/x); keep exactly one stage folder per task slug"
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "status" => "stale", "reason" => "snapshot_expired",
+      "last_failure" => {
+        "reason" => reason, "since" => "2026-07-20T09:58:00.000000Z", "tick_sequence" => 7
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    stale = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_stale" }
+    assert_includes stale.fetch("message"), "snapshot_expired; no complete scheduler snapshot " \
+                                            "published since 2026-07-20T09:58:00.000000Z (tick 7)"
+    assert_includes stale.fetch("message"), "demo:x in 1-inbox (/p/stages/1-inbox/x)"
+    assert_match(/exactly one <project>\/\.hive-state\/stages\/<stage>\/ folder/,
+                 stale.fetch("remediation"))
+    assert_equal "snapshot_expired", result.dig("scheduler", "reason")
+  end
+
+  def test_current_scheduler_snapshot_warns_while_later_ticks_fail
+    source_task = task(action: "ready_to_plan", slug: "retained-scheduler")
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "global_cap", reason: "global dispatch capacity is exhausted"
+    ).merge(
+      "last_failure" => {
+        "reason" => "status_failure", "since" => "2026-07-20T09:59:30.000000Z", "tick_sequence" => 2
+      }
+    )
+
+    result = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    )
+
+    assert_equal "current", result.dig("scheduler", "status")
+    warning = result.fetch("issues").find { |issue| issue.fetch("code") == "scheduler_tick_failed" }
+    refute_nil warning
+    assert_equal "warning", warning.fetch("severity")
+    assert_includes warning.fetch("message"), "stays authoritative only until #{snapshot.fetch('valid_until')}"
+    assert_includes warning.fetch("message"), "(tick 2): status_failure"
+    assert_includes warning.fetch("remediation"), "operational_snapshot_incomplete"
+  end
+
   def test_task_graph_sampled_before_snapshot_completion_rejects_scheduler_dispositions
     source_task = task(action: "ready_to_plan", slug: "older-task-graph")
     snapshot = scheduler_snapshot_for(
@@ -976,9 +1185,13 @@ class OperationalStatusTest < Minitest::Test
       "retry_cooldown" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
       "retry_in_flight" => [ "running", "agent" ],
       "retry_safety_blocked" => [ "needs_repair", "scheduler" ],
+      "retry_pending" => [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      "retry_dispatch_disabled" => [ "needs_repair", "operator" ],
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
       "model_unsupported" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
+      "pull_request_merged" => [ "waiting_on_you", "operator" ],
+      "pull_request_closed_unmerged" => [ "waiting_on_you", "operator" ],
       "quarantined" => [ "needs_repair", "scheduler" ],
       "skip" => [ "idle", "scheduler" ]
     }
@@ -999,6 +1212,57 @@ class OperationalStatusTest < Minitest::Test
       assert_equal state, projected.fetch("state"), decision
       assert_equal owner, projected.fetch("blocker_owner"), decision
     end
+  end
+
+  def test_queued_retry_behind_terminal_attempt_is_not_running
+    {
+      [ "retry_pending", "retry_awaiting_dispatch", "scheduler" ] =>
+        [ "waiting_on_provider_or_scheduler", "scheduler" ],
+      [ "retry_dispatch_disabled", "project_dispatch_disabled", "operator" ] =>
+        [ "needs_repair", "operator" ]
+    }.each do |(decision, reason, receipt_owner), (state, owner)|
+      source_task = task(action: "ready_to_run", slug: "queued-retry")
+      snapshot = scheduler_snapshot_for(source_task, decision: decision, reason: reason)
+      snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+        "status" => "queued", "request_id" => "69d2202b", "attempt_id" => "0595da53",
+        "phase" => "dispatched", "failure_origin" => "agent_exited_without_terminal_marker",
+        "owner" => receipt_owner, "reason" => reason, "retry_count" => 3,
+        "identical_failure_count" => 3, "escalation_tier" => "degraded"
+      }
+      result = project(
+        status_payload(source_task),
+        project_context: { "demo" => { "daemon_enabled" => true } },
+        scheduler_snapshot: snapshot
+      )
+      projected = result.fetch("tasks").first
+
+      assert_equal [ state, owner ], [ projected.fetch("state"), projected.fetch("blocker_owner") ]
+      assert_equal 0, result.dig("summary", "states", "running").to_i
+      assert_equal decision, projected.dig("reasons", 0, "code")
+      assert_equal reason, projected.fetch("reason")
+      recovery = projected.fetch("recovery")
+      assert_equal [ "queued", receipt_owner, "degraded", 3 ],
+                   recovery.values_at("status", "owner", "escalation_tier", "retry_count")
+    end
+  end
+
+  def test_plan_review_failure_limit_is_operator_owned_repair_not_scheduler_wait
+    source_task = task(action: "plan_reviewing", slug: "stuck-review")
+    snapshot = scheduler_snapshot_for(
+      source_task,
+      decision: "attempt_failure_limit",
+      reason: "hive plan-review-run failed 3 times in a row with exit 4"
+    )
+    projected = project(
+      status_payload(source_task),
+      project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_equal "needs_repair", projected.fetch("state")
+    assert_equal "operator", projected.fetch("blocker_owner")
+    assert_includes projected.fetch("reasons").map { |reason| reason.fetch("message") },
+                    "hive plan-review-run failed 3 times in a row with exit 4"
   end
 
   def test_recovery_specific_scheduler_states_have_closed_classifications
@@ -1228,6 +1492,90 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "blocked", projected.dig("recovery", "status")
     assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
     assert_includes projected.dig("recovery", "remediation"), "https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md"
+  end
+
+  def test_manual_recovery_does_not_require_a_scheduler_snapshot
+    row = task(action: "error", slug: "manual-failure", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "operator", actual.fetch("blocker_owner")
+    assert_equal "operator", actual.dig("recovery", "owner")
+    assert_equal "blocked", actual.dig("recovery", "status")
+    assert_equal "project_dispatch_disabled", actual.dig("recovery", "reason")
+    assert_equal "workflow.retry", actual.dig("action", "action_id")
+    assert_includes actual.dig("recovery", "remediation"), "hive status --operational --json"
+  end
+
+  def test_mixed_fleet_keeps_scheduler_and_operator_recovery_ownership_and_reuses_manual_evidence
+    automated = task(action: "error", slug: "scheduled", stage: "6-review", marker: "review_error")
+    manual = task(action: "ready_for_review", slug: "manual", stage: "6-review", marker: "none")
+    payload = status_payload(automated)
+    payload.fetch("projects") << payload.fetch("projects").first.merge("name" => "manual-project", "tasks" => [ manual ])
+    snapshot = scheduler_snapshot_for(automated, decision: "retry_pending", reason: "awaiting dispatch")
+    snapshot.dig("tasks", 0, "disposition")["recovery"] = {
+      "status" => "queued", "phase" => "cleared", "owner" => "scheduler", "request_id" => "scheduled-request"
+    }
+    calls = []
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      calls << [ project, rows.map { |row| row.fetch("slug") } ]
+      { "manual" => { "binding" => { "request_id" => "manual-request", "revision" => 3 },
+        "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+          "status" => "blocked", "phase" => "cleared", "owner" => "operator", "request_id" => "manual-request",
+          "reason" => "project_dispatch_disabled", "retry_count" => 1 }).to_h } }
+    end
+    projection = Hive::OperationalStatus.new(status_payload: payload, scheduler_snapshot: snapshot,
+      project_context: { "demo" => { "daemon_enabled" => true }, "manual-project" => { "daemon_enabled" => false } },
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2))
+    projected = projection.to_h.fetch("tasks")
+    assert_equal %w[scheduler operator], projected.map { |row| row.dig("recovery", "owner") }
+    assert_equal %w[queued blocked], projected.map { |row| row.dig("recovery", "status") }
+    assert_equal %w[scheduler operator], projected.map { |row| row.fetch("blocker_owner") }
+    assert_equal %w[scheduled-request manual-request], projected.map { |row| row.dig("recovery", "request_id") }
+    assert_equal [ "workflow.retry", "workflow.retry" ], projected.map { |row| row.dig("action", "action_id") }
+    assert_equal projected.map { |row| row.fetch("recovery") }, projection.recovery_rows.map { |row| row.fetch("recovery") }
+    assert_equal [ [ "manual-project", [ "manual" ] ] ], calls
+  end
+
+  def test_manual_recovery_projects_a_live_failed_task_as_in_flight
+    row = task(action: "error", slug: "manual-running", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" }, live_task_lock: true)
+    actual = project(status_payload(row)).fetch("tasks").first
+    assert_equal "running", actual.dig("recovery", "status")
+    assert_equal "agent", actual.dig("recovery", "owner")
+    assert_equal "existing_live", actual.dig("recovery", "reason")
+    assert_nil actual["action"]
+    assert_includes actual.dig("recovery", "remediation"), "hive task manual-running --project demo --json"
+  end
+
+  def test_manual_recovery_projects_unavailable_evidence_as_hive_owned
+    row = task(action: "error", slug: "manual-unavailable", stage: "6-review", marker: "review_error",
+      attrs: { "reason" => "review_orphaned", "marker_id" => "failure-1" })
+    coordinator = Object.new
+    coordinator.define_singleton_method(:manual_evidence_for) do |project:, rows:|
+      rows.to_h { |row| [ row.fetch("slug"), { "binding" => nil, "receipt" => Hive::Daemon::RecoveryCoordinator::Receipt.from_h({
+        "status" => "unavailable", "owner" => "hive", "reason" => "recovery_observation_unavailable",
+        "remediation" => "hive status --operational --json" }).to_h } ] }
+    end
+    actual = Hive::OperationalStatus.new(status_payload: status_payload(row),
+      recovery_coordinator: coordinator, now: Time.utc(2026, 7, 20, 10, 0, 2)).to_h.fetch("tasks").first
+    assert_equal "hive", actual.fetch("blocker_owner")
+    assert_equal "unavailable", actual.dig("recovery", "status")
+    assert_equal "recovery_observation_unavailable", actual.dig("recovery", "reason")
+  end
+
+  def test_idless_recovery_marker_projects_migration_without_a_daemon_snapshot
+    source_task = task(
+      action: "error", slug: "legacy", stage: "4-execute",
+      marker: "error", attrs: { "reason" => "implementer_failed", "marker_id" => nil }
+    )
+
+    projected = project(
+      status_payload(source_task), project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "blocked", projected.dig("recovery", "status")
+    assert_equal "recovery_migration_required", projected.dig("recovery", "reason")
   end
 
   def test_lean_recovery_projection_only_joins_recovery_candidates
@@ -1482,7 +1830,7 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected.fetch("human").fetch("action")
     assert_nil projected.fetch("parked").fetch("action")
     assert_equal "workflow.retry", projected.dig("error", "action", "action_id")
-    assert_equal "unavailable", projected.dig("error", "recovery", "status")
+    assert_equal "blocked", projected.dig("error", "recovery", "status")
   end
 
   def test_human_outcomes_are_preserved_in_operational_position
@@ -1626,6 +1974,32 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  # hivedev C11: a retry_scheduled review sat 3+ days past its retry_at as
+  # an ordinary scheduler wait.
+  def test_overdue_plan_review_retry_is_reported_as_repair_unless_a_dependency_holds_it
+    overdue = { "state" => "retry_scheduled", "retry_at" => "2026-07-20T08:59:00Z",
+                "blocker_owner" => "provider" }
+    row = task(action: "plan_review_retry", slug: "overdue", stage: "3-plan", plan_review: overdue)
+
+    assert_equal [ "needs_repair", "hive" ], classify_row(row, daemon_enabled: true)
+    reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal "plan_review_retry_overdue", reasons.first.fetch("code")
+    assert_includes reasons.first.fetch("message"), "due at 2026-07-20T08:59:00Z"
+    assert_includes reasons.first.fetch("message"), "hive plan-review-run overdue"
+
+    recent = row.merge("plan_review" => overdue.merge("retry_at" => "2026-07-20T09:30:00Z"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(recent, daemon_enabled: true)
+    held = row.merge("blocked" => true)
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(held, daemon_enabled: true)
+    reviewing = row.merge("plan_review" => overdue.merge("state" => "reviewing"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(reviewing, daemon_enabled: true)
+    malformed = row.merge("plan_review" => overdue.merge("retry_at" => "soon"))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(malformed, daemon_enabled: true)
+  end
+
   def test_execution_repair_stays_operator_owned_with_daemon_enabled
     row = task(action: "recover_execute", slug: "execute-repair", stage: "4-execute")
 
@@ -1663,6 +2037,45 @@ class OperationalStatusTest < Minitest::Test
   end
 
   private
+
+  def live_lock_with_stale_agent
+    task(
+      action: "agent_running", slug: "mixed-lock", live_task_lock: true, task_lock_pid: 4242
+    ).merge("claude_pid" => 99_999, "claude_pid_alive" => false)
+  end
+
+  # Synthetic projector invariant: the producer retains only a live lock holder.
+  def live_agent_with_stale_lock
+    task(action: "agent_running", slug: "mixed-agent", task_lock_pid: 4242).merge(
+      "claude_pid" => 777, "claude_pid_alive" => true
+    )
+  end
+
+  def assert_operational_schema(result, label: nil)
+    schema = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    )
+    assert_empty schema.validate(result).to_a, label
+  end
+
+  def assert_live_liveness(result, pid:, message:, label: nil)
+    assert_operational_schema(result, label: label)
+    projected = result.fetch("tasks").first
+    assert_equal "running", projected.fetch("state"), label
+    assert_equal "agent", projected.fetch("blocker_owner"), label
+    assert_equal "running", projected.dig("liveness", "status"), label
+    if pid.nil?
+      assert_nil projected.dig("liveness", "pid"), label
+    else
+      assert_equal pid, projected.dig("liveness", "pid"), label
+    end
+    live_reason = projected.fetch("reasons").find { |entry| entry.fetch("source") == "liveness" }
+    refute_nil live_reason, label
+    assert_equal "live_runner", live_reason.fetch("code"), label
+    assert_equal message, live_reason.fetch("message"), label
+    refute_includes projected.fetch("reasons").map { |entry| entry.fetch("code") }, "stale_runner", label
+    projected
+  end
 
   def classify_row(row, daemon_enabled: false)
     context = daemon_enabled ? { "demo" => { "daemon_enabled" => true } } : {}

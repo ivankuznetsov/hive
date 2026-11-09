@@ -4,6 +4,14 @@ require "hive/tui/snapshot"
 require "hive/tui/views/red_status_detail"
 
 class HiveTuiViewsRedStatusDetailTest < Minitest::Test
+  def test_small_screen_explains_that_exact_publication_commands_are_omitted
+    attrs = Hive::ReviewPublicationRecovery.encode("publication" => "unpublished", "verification" => "pending")
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(attrs: attrs), cols: 140, rows: 20))
+    assert_includes output, "Publication: unpublished; verification: pending"
+    assert_includes output, "Recovery details and exact commands omitted"
+    assert_includes output, "hive status --operational --json"
+  end
+
   def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
           marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
           folder: nil, slug: "red-task", id: 42, display_name: "Red Task",

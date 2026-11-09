@@ -65,7 +65,20 @@ admission tick, including projects enabled by an ordinary config edit, and
 contains an unreadable project's config failure without blocking other
 projects. It retains a disabled or removed project's guard while its durable
 attempts or identity-verified task workers remain live, then releases the
-drained project. Guard collections key ownership by canonical state-root
+drained project. A project that is already disabled when the daemon starts is
+never enrolled, so its attempts were classified `:unowned` and a dead wrapper's
+`running` row stayed unsettled forever (keeping quiescence at
+`agent_attempt_root`). `Collection#with_maintenance_ownership` now covers that
+case: during attempt reconciliation only, the daemon tries to take each
+registered, dispatch-disabled project that still has live (`launching` or
+`running`) attempts, reconciles it under that guard, and releases the guard
+before the tick continues. A project held by any other process (a one-shot
+runner, another daemon) is skipped, the names never join `owned_projects`, and
+`project_enabled?` still gates dispatch on `daemon.enabled`, so a paused
+project is settled but never dispatched into; its lost attempts also wait for
+re-enablement before the loss healer acts. A one-shot started against that
+project during the brief hold gets the usual retryable `daemon_owned`.
+Guard collections key ownership by canonical state-root
 identity: aliases share one lock, while re-registering a project name at a new
 root cannot authorize that root through the old lock. The previous root stays
 guarded until its own work drains. One-shot commands acquire the same guard
@@ -428,7 +441,13 @@ timestamps retain microseconds for independently collected same-second
 ordering, and missing or malformed source-window timestamps fail closed. The
 assembler still rejects a source frame containing multiple physical
 rows for one project/slug as `duplicate_task_identity`, so a provider hold or
-dispatch decision from one row cannot be attached to another. The record also
+dispatch decision from one row cannot be attached to another. The whole frame
+stays fail-closed rather than excluding only the duplicated rows: the
+dispatcher itself still acts on both physical rows, so a `complete` record that
+omitted them would overstate scheduler coherence to quiesce and idle
+consumers. The reason names the project, slug, and every `stage (folder)`
+location, and ends with the remediation (keep exactly one stage folder per
+task slug). The record also
 carries daemon generation/PID/start identity,
 sequence and validity window, capacity, queue counters, provider holds,
 coordinator recovery receipts, and per-task owner/reason.
@@ -461,8 +480,32 @@ Retry dispositions additionally carry the exact marker-age `retry_at`,
 whether the boundary is due, the current safety verdict, and its reason.
 `retry_cooldown` is scheduler-owned, `retry_in_flight` is agent-owned, and
 `retry_safety_blocked` is operator-owned (or Hive-owned when inspection itself
-failed). A failed first reconciliation publishes `failed`; a later failure is
+failed). The recovery receipts published into the snapshot come from
+`RecoveryCoordinator#projected_receipt_for_request`: a durable `dispatched`
+phase projects `running` (`retry_in_flight`) only while the request is
+`claimed`, `admitted`, or `awaiting_delivery`, or its referenced attempt is
+still `launching`/`running` (unreadable attempt storage stays `running`). A
+request released back to `queued` behind a terminal attempt projects `queued`
+with reason `retry_awaiting_dispatch` (`retry_pending`, scheduler-owned), or
+reason `project_dispatch_disabled` (`retry_dispatch_disabled`, operator-owned,
+with enable-and-reload remediation) when `project_enabled?` is false for the
+project. A `completed`/`cancelled` request behind a final attempt projects
+`unavailable` with reason `recovery_transition_pending`. Retry count,
+fingerprint, and escalation tier are carried through unchanged. A failed first reconciliation publishes `failed`; a later failure is
 logged while the last completed snapshot remains authoritative until expiry.
+Every `Assembler#fail` (including a `complete` that rejects duplicate
+identities) returns an `IncompletePublication(reason, retained, duplicates)`,
+and the dispatcher logs it as `operational_snapshot_incomplete` with the
+reason, whether a completed record was retained, and structured duplicate
+locations. When a completed record is retained, the assembler annotates it
+with `last_failure` (`reason`, `since`, first failing `tick_sequence`) without
+changing its phase, tick, or `valid_until`, republishing only when the reason
+changes and keeping the paired status projection. The next complete tick
+drops the annotation. The reader turns it into `detail` on a
+`snapshot_expired` result, and operational status appends it to the
+`scheduler_stale` issue (with duplicate-specific remediation) or, while the
+retained record is still current, emits a `scheduler_tick_failed` warning
+issue that does not change completeness.
 Snapshot age starts at the actual completion sample rather than the tick-start
 sample, and a SIGHUP poll-interval reload can shorten retained authority but
 never extend it.
@@ -499,8 +542,9 @@ pacing rather than partitioning task capacity.
 The reader treats incomplete phases, a stopped/replaced daemon, generation
 mismatch, expiry, malformed content, unsafe symlink/hard-link/permissions, and
 unreadable paths as typed non-authoritative evidence. Snapshot publication is
-advisory: write/assembly failure logs `operational_snapshot_publish_failed` but
-does not stop dispatch. Consumers therefore report partial/unknown status
+advisory: write/assembly failure logs `operational_snapshot_publish_failed`,
+and a tick that publishes no complete record logs
+`operational_snapshot_incomplete`, but neither stops dispatch. Consumers therefore report partial/unknown status
 rather than either crashing Hive or presenting old scheduler state as current.
 
 After attempt reconciliation, the daemon publishes one `attempt_storage` cell
@@ -530,6 +574,27 @@ systemd-oomd kill of the daemon cgroup can no longer erase every accepted
 attempt with it; only an independently selected attempt scope is affected and
 the normal lost-attempt recovery contract applies. Hosts without a usable
 systemd user bus retain the POSIX double-fork/session fallback.
+
+Runtime database lock contention is never fatal to the daemon. The runtime
+SQLite database is shared with every concurrent `hive` process; a write that
+loses its 15 s `busy_timeout` (`BEGIN IMMEDIATE` while another process holds
+the write lock) is translated by `Attempts::Repository#translate_store_error`
+to `Hive::Attempts::RuntimeDatabaseBusy` (exit 75). The row loop logs
+`dispatch_deferred` (`reason: runtime_database_busy`) and stops that dispatch
+pass, so later rows do not each wait out the same lock; `run_forever` logs
+`tick_deferred` and publishes a failed operational snapshot for any tick that
+raises a SQLite busy error, then keeps ticking. Startup dispatch-claim
+recovery retries busy with bounded backoff (2 s, 5 s, 10 s, logged as
+`startup_deferred`) before failing.
+Non-busy repository, corruption, schema, and storage errors still propagate.
+`OperationalRepository#publish` encodes the observation document (the
+scheduler snapshot plus the multi-MB `hive-status` projection) before
+`BEGIN IMMEDIATE`; only the row upsert runs under the write lock. Encoding a
+5.7 MB projection inside the transaction held the lock ~0.8 s per tick at
+rest and for seconds on a swapping host.
+The shipped systemd unit sets `StartLimitIntervalSec=0` with `RestartSec=30s`
+growing to `RestartMaxDelaySec=10min` over `RestartSteps=5`, so a crash loop
+backs off instead of landing in `start-limit-hit`.
 
 The answer and daily-digest schedulers dispatch before status fetch because
 they are global, not project-row driven. The dispatcher tracks each synthetic
@@ -702,6 +767,19 @@ ticks coalesce through the ordinary task/commit locks and immutable review
 identity. A transient provider limit retains its attempt and `retry_at`; stable
 unsupported capability does not consume retries. The daemon does not derive
 coverage or clearance from logs.
+
+`plan-review-run` is a same-stage owner command, so the advance path's
+failed-terminal replay never applied and, before 2026-11-06, every tick
+admitted a fresh durable attempt (hivedev C5: 393 identical exit-4 attempts in
+7.5 h). `Hive::Attempts::CommandProgress::FAILURE_LADDER_COMMANDS` now opts it
+into the same `RetryPolicy` ladder transitions use, and
+`Attempts::Dispatcher#repeated_failure_limit` stops automatic admission after
+three identical `failed` exit statuses on one generation, derived from attempt
+rows (`recent_terminal_attempt_ids`) rather than a separate counter. The
+plan-review-run progress token includes the Hive runtime digest, so a
+deployment starts a fresh series. The daemon maps the deferral to
+`attempt_failure_limit` (log event and operator-owned `needs_repair`
+disposition).
 
 ## Trust boundary
 

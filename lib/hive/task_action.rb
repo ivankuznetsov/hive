@@ -1039,8 +1039,13 @@ module Hive
       false
     end
 
+    # Repeatedly rejected reviewer output is also a repair, not a verdict:
+    # the reviewer contract must change before another attempt is useful.
     def unsupported_review?
       plan_review["required_action"].to_s.match?(/capability|configuration|reviewer/i) ||
+        Array(plan_review["blockers"]).any? do |blocker|
+          blocker.is_a?(Hash) && blocker["reason"] == "reviewer_output_rejected"
+        end ||
         Array(plan_review["routes"]).any? do |route|
           route["capability_result"] == "unsupported"
         end

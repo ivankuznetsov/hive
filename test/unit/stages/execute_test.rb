@@ -16,8 +16,13 @@ class HiveStagesExecuteTest < Minitest::Test
       FileUtils.mkdir_p(path)
     end
 
+    def resolved_base
+      base = create_calls.last&.fetch(:base_override)
+      base ? "origin/#{base}" : "origin/#{create_calls.last&.fetch(:default_branch)}"
+    end
+
     def write_pointer!(task_folder, branch_name, execute_base_head: nil,
-                       base_branch: nil, base_oid: nil, repository: nil)
+                       base_branch: nil, base_oid: nil, repository: nil, base_ref: nil)
       data = {
         "path" => path,
         "branch" => branch_name,
@@ -25,6 +30,7 @@ class HiveStagesExecuteTest < Minitest::Test
       }
       data["base_branch"] = base_branch if base_branch
       data["base_oid"] = base_oid if base_oid
+      data["base_ref"] = base_ref if base_ref
       data["repository"] = repository if repository
       File.write(File.join(task_folder, "worktree.yml"), data.to_yaml)
     end
@@ -1443,6 +1449,8 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "base-head", pointer.fetch("execute_base_head")
       assert_equal "master", pointer.fetch("base_branch")
       assert_equal "base-head", pointer.fetch("base_oid")
+      assert_equal "origin/base-task", pointer.fetch("base_ref"),
+                   "the pointer must name the stacked ref base_oid came from"
     end
   end
 

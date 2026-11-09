@@ -16,8 +16,8 @@
 #   systemctl --user daemon-reload
 #   systemctl --user enable --now hive-daemon
 #
-# Verify it actually started (catches a wrong ExecStart= path before the
-# StartLimitBurst kicks in):
+# Verify it actually started (catches a wrong ExecStart= path; the unit keeps
+# retrying with backoff instead of stopping):
 #   systemctl --user status hive-daemon
 #   journalctl --user -u hive-daemon -n 50
 #
@@ -33,22 +33,22 @@
 #   sudo loginctl enable-linger $USER
 #
 # This unit runs in the foreground (no --detach). systemd is the
-# supervisor; Restart=on-failure brings the daemon back if it crashes.
-# StartLimit* below caps the respawn loop so a wrong ExecStart= path
-# stops cleanly with `failed` instead of relaunching forever.
+# supervisor; Restart=on-failure brings the daemon back if it crashes,
+# with growing backoff and no start limit (see [Unit] below).
 
 [Unit]
 Description=Hive auto-advancing dispatcher (ADR-024)
 # Do not order this unit after default.target: enabling it adds the inverse
 # target dependency, and the two edges form an ordering cycle. WantedBy below
 # is sufficient to start the daemon with the user default target.
-# Hard cap on the auto-restart loop. If `hive daemon start` exits non-zero
-# 3 times within 5 minutes, systemd marks the unit `failed` instead of
-# respawning forever. This is the safety net for a misconfigured ExecStart=
-# (binary not on PATH, typo, missing rbenv shim) — `systemctl --user status`
-# will show `failed` rather than silently churning every 30 s.
-StartLimitBurst=3
-StartLimitIntervalSec=300
+# Never give up restarting. The daemon is the only thing advancing every
+# project, and a transient fault (for example SQLite lock contention with
+# other `hive` processes) must not leave it in `failed` until an operator
+# runs `systemctl --user reset-failed`. A 3-in-5-minutes cap did exactly
+# that on 2026-11-05 and stalled every project for hours. Restart backoff
+# below (30 s growing to 10 min) keeps a misconfigured ExecStart= from
+# churning; `systemctl --user status` still shows the exit status.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -72,9 +72,14 @@ Type=simple
 # system Ruby is assumed.
 Environment=HIVE_BIN=%h/.local/bin/hive
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/.local/bin/hive daemon start
+ExecStart=%h/.local/bin/hive daemon start --context local
 Restart=on-failure
 RestartSec=30s
+# systemd >= 254: grow the delay from RestartSec to RestartMaxDelaySec over
+# RestartSteps consecutive failures. Older systemd ignores these keys and
+# keeps the fixed 30 s delay.
+RestartSteps=5
+RestartMaxDelaySec=10min
 # Stop or restart only the supervised daemon process. Accepted stage attempts
 # have durable lease owners in detached wrapper/worker processes; they must
 # survive daemon replacement so the new daemon can adopt them without replay.

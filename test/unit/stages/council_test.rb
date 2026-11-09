@@ -615,6 +615,25 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_command_runner_does_not_leak_hive_private_ruby_load_path_to_project_command
+    with_tmp_dir do |project|
+      out = File.join(project, "env.txt")
+      with_env("RUBYLIB" => "/srv/hive/deployments/hive-dogfood-abc/lib", "RUBYOPT" => "-W0",
+               "GEM_PATH" => "/srv/hive/gems") do
+        _stderr, status = Hive::Stages::Council::CommandRunner.run(
+          { "HIVE_COUNCIL_ROUND" => "1" },
+          "printf '%s|%s|%s|%s' \"${RUBYLIB-unset}\" \"${RUBYOPT-unset}\" \"${GEM_PATH-unset}\" " \
+          "\"$HIVE_COUNCIL_ROUND\" > env.txt",
+          chdir: project, timeout_sec: 10, label: "council env probe"
+        )
+
+        assert_predicate status, :success?
+      end
+
+      assert_equal "unset|unset|unset|1", File.read(out)
+    end
+  end
+
   def test_command_timeout_force_kills_a_process_group_that_ignores_term
     with_tmp_dir do |project|
       error = assert_raises(Hive::StageError) do

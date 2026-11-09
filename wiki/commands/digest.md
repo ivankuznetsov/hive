@@ -9,7 +9,11 @@ tags: [command, digest, activity, history, json, telegram, retention]
 
 `hive digest` reads one saved changes document. PRDigest collects descriptions
 and relevant patches; Hive's configured agent writes the text, and Hive stores
-and delivers it. See [[modules/daily-digest]] for the integration contract.
+and delivers it. Any registered agent and model may write it:
+`daily_digest.agent`/`model`/`effort` select the route (default: the `execute`
+stage agent), and optional `daily_digest.fallback_agents` (a list of
+`{agent, model?, effort?}`) are tried in order when a route fails; an
+all-routes failure names every cause. See [[modules/daily-digest]] for the integration contract.
 
 ```bash
 hive digest                         # saved document as text
@@ -30,7 +34,15 @@ a separate report. Web displays one escaped text article.
 Generation uses unique registered GitHub repositories regardless of which tool
 created each PR. Local tracking start does not prevent querying older GitHub
 changes. Future dates fail. Empty days need no agent invocation. Collection or
-generation failures leave the last saved document intact. Reads have no network,
+generation failures leave the last saved document intact, but they are not
+silent: `DocumentWriter` records the latest failure per date in
+`<daily_digest_root>/generation-failures.json` (redacted, cleared by the next
+successful write). The reader attaches it as `generation_failure` (and sets
+`stale: true`) for that explicit date, or for an implicit `today` read that
+falls back to an older saved document. `hive digest` prints it first, `--json`
+carries it in `hive-digest.v1`, and Web shows an alert banner above the saved
+document. A failed agent run reports the provider's own error event (for
+example an expired OpenCode API key) rather than its stderr. Reads have no network,
 generation, or delivery side effects.
 
 Closed documents are immutable and reused on retry. Pruned documents are not

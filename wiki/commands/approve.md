@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-08
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -23,6 +23,14 @@ hive approve <slug> --json                 # machine-readable result (success AN
 
 `<stage>` accepts either the full directory name (`3-plan`) or the short suffix (`plan`). Both `--to` and `--from` are validated against the closed enum at parse time (Thor `enum:` constraint).
 
+Remote approval requires `answer` authority and full stage/generation guards.
+When omitted by a token with `read`, the CLI resolves them and prints the exact
+`--from`, `--generation` and retry key to stderr before submission. Reuse those
+values for a lost-response retry after advancement. Retained remote verification
+composes with caller observation guards and always refuses force/destination
+overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
+[[remote-access]].
+
 ## Steps performed (`Commands::Approve#call`)
 
 1. `resolve_target`: path-shaped `TARGET` (contains `/` or starts with `~`/`.`) is used directly; bare slugs are searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous. The resolved folder is then `File.realpath`'d so slug-named symlinks pointing outside the `.hive-state` hierarchy are rejected at the PATH_RE check.
@@ -41,6 +49,22 @@ hive approve <slug> --json                 # machine-readable result (success AN
    state commit fails. Composing commands apply their new transition state
    after this cleanup, so a decision-created `WAITING` marker is not mistaken
    for stale state and removed with the old markers.
+   When the rewind interval (destination through source) includes the
+   workflow's review stage (`kind: :review_council`, coding `6-review`), the
+   prior review generation is retired after `post_rearm_mutation`: every
+   top-level numbered `reviews/*-NN.md` file (reviewer passes, escalations,
+   fix-success receipts, errors, ci-error, browser-blocked; symlinks are moved
+   as links) is renamed into
+   `reviews/archive/<UTC yyyymmddThhmmssZ>-<from>-to-<to>[-N]/`
+   (`Hive::Stages::Review::PassArchive`). Unnumbered state (`ci-blocked.md`,
+   `deferred-findings.md`, `suppressed.md`) stays. Review globs `reviews/`
+   non-recursively, so the archive is never counted toward
+   `review.max_passes`; without this, `hive approve --to 6-review` from
+   8-finalize left pass 06 files and the next `hive review` failed pre-flight
+   with `REVIEW_ERROR reason=config_error`. A failed move or commit renames
+   the files back. Outcome-evidence rework archives under its own
+   `reviews/archive/rework-NN/` label in `post_rearm_mutation` first, so the
+   generic archive finds nothing left.
 9. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
@@ -201,6 +225,19 @@ and holds invalid dependency state. Agent callers use `approve` for:
 - an audit-trail commit on `hive/state` recording the approval
 
 `hive approve` adds all of that without removing the manual `mv` path — the two coexist.
+
+## Remote context
+
+Remote approval requires the independent `answer` scope and an expected stage
+and generation. `--from STAGE --generation GENERATION` lets an answer-only token
+submit the binding without obtaining general read access. With `read`, the
+native transport can obtain the task's current `approval_generation`. Admission
+is durable and the daemon performs the guarded transition later. Remote
+`--force`, destination overrides and effects that derive force are refused with
+guidance to advance locally, even when the token has every scope. A workflow
+action that performs approval needs both `act` and `answer`; the explicit
+approval endpoint needs `answer`. See [[remote-access]] for operation recovery
+and authority boundaries. Remote JSON uses the bounded `hive-remote.v1` contract.
 
 ## Backlinks
 

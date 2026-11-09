@@ -15,7 +15,7 @@ module Hive
       REQUESTORS = %w[bot healer web tui cli action daemon recorder operator].freeze
       ALLOWED_VERBS = %w[
         run develop brainstorm plan plan-review-run review open-pr artifacts finalize
-        archive markers daemon
+        archive markers daemon act approve
       ].freeze
       GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
       GLOBAL_MAINTENANCE_ARGVS = [ %w[hive daemon install --force] ].freeze
@@ -37,14 +37,14 @@ module Hive
         :chat_id, :update_id, :trigger, :task_generation,
         :inherited_outputs, :task_id,
         :expected_stage, :expected_marker_name, :expected_marker_id,
-        :recovery, :schema_version, :state, :revision
+        :recovery, :schema_version, :state, :revision, :remote_authority
       ) do
         def initialize(request_id:, created_at:, project:, slug:, argv:, requestor:,
                        chat_id: nil, update_id: nil, trigger: "", task_generation: nil,
                        inherited_outputs: [], task_id: nil,
                        expected_stage: nil, expected_marker_name: nil, expected_marker_id: nil,
                        recovery: nil, schema_version: DispatchRepository::SCHEMA_VERSION,
-                       state: "queued", revision: 0)
+                       state: "queued", revision: 0, remote_authority: nil)
           super(
             request_id: request_id, created_at: created_at, project: project, slug: slug,
             argv: argv, requestor: requestor, chat_id: chat_id, update_id: update_id,
@@ -52,7 +52,8 @@ module Hive
             inherited_outputs: inherited_outputs, task_id: task_id,
             expected_stage: expected_stage, expected_marker_name: expected_marker_name,
             expected_marker_id: expected_marker_id, recovery: recovery,
-            schema_version: schema_version, state: state, revision: revision
+            schema_version: schema_version, state: state, revision: revision,
+            remote_authority: remote_authority
           )
         end
       end
@@ -93,14 +94,14 @@ module Hive
                          inherited_outputs: [], task_id: nil,
                          expected_stage: nil, expected_marker_name: nil,
                          expected_marker_id: nil, recovery: nil, now: @clock.call,
-                         command_context: nil, **)
+                         command_context: nil, remote_authority: nil, **)
         payload = request_payload(
           project: project, slug: slug, argv: argv, requestor: requestor,
           request_id: request_id, chat_id: chat_id, update_id: update_id, trigger: trigger,
           task_generation: task_generation,
           inherited_outputs: inherited_outputs, task_id: task_id, expected_stage: expected_stage,
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
-          recovery: recovery, now: now
+          recovery: recovery, now: now, remote_authority: remote_authority
         )
         database.transaction do |db|
           insert_request!(db, payload)
@@ -170,12 +171,33 @@ module Hive
         end
       end
 
-      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, **)
+      def recovery_requests(limit: RECOVERY_PROJECTION_LIMIT, project: nil, slug: nil, **)
         database.read do |db|
-          db[:dispatch_requests]
-            .where(recovery_request: 1)
-            .reverse_order(:updated_at, :request_id).limit(Integer(limit))
+          scope = db[:dispatch_requests].where(recovery_request: 1)
+          scope = scope.where(project_id: db[:projects].where(name: project.to_s).select(:project_id)) if project
+          scope = scope.where(task_slug: slug.to_s) if slug
+          scope.reverse_order(:updated_at, :request_id).limit(Integer(limit))
             .all.reverse.map { |row| request_from(row) }
+        end
+      end
+
+      def recovery_attempt_id(request_id)
+        database.read do |db|
+          db[:attempts].where(request_id: request_id.to_s).get(:attempt_id)
+        end
+      end
+
+      def recovery_requests_by_slug(project:, slugs:, limit: RECOVERY_PROJECTION_LIMIT)
+        return {} if slugs.empty?
+        per_task_limit = Integer(limit)
+        database.read do |db|
+          ranked = db[:dispatch_requests].where(recovery_request: 1, task_slug: slugs,
+            project_id: db[:projects].where(name: project.to_s).select(:project_id))
+            .select_append(Sequel.function(:row_number).over(partition: :task_slug,
+              order: [ Sequel.desc(:updated_at), Sequel.desc(:request_id) ]).as(:recovery_rank))
+          ranked.from_self.where { recovery_rank <= per_task_limit }
+            .order(:task_slug, Sequel.desc(:recovery_rank)).all
+            .map { |row| request_from(row) }.group_by(&:slug)
         end
       end
 
@@ -186,7 +208,7 @@ module Hive
 
       def command_context(request_id)
         database.read do |db|
-          next nil unless db.table_exists?(:command_dispatch_contexts)
+          next nil unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
           row = db[:command_dispatch_contexts][request_id: request_id.to_s]
           row && row.transform_keys(&:to_s)
         end
@@ -424,7 +446,7 @@ module Hive
       end
 
       def expired?(request, now: @clock.call, expiry_sec: EXPIRY_SEC)
-        !request.recovery && now.utc - request.created_at.utc > expiry_sec
+        !request.recovery && !request.remote_authority && now.utc - request.created_at.utc > expiry_sec
       end
 
       def write_result!(chat_id:, project:, slug:, request_id:, exit_code:, command:,
@@ -538,8 +560,8 @@ module Hive
       private
 
       def close_acknowledged_command_pins!(db, request_ids, now:)
-        return unless db.table_exists?(:command_dispatch_contexts) &&
-          db.table_exists?(:command_receipt_pins)
+        return unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts) &&
+          SQLiteSupport.table_exists?(db, :command_receipt_pins)
 
         db[:command_dispatch_contexts].where(request_id: request_ids).all.each do |context|
           db[:command_receipt_pins].where(
@@ -563,7 +585,7 @@ module Hive
           ) if tagged
           return
         end
-        unless db.table_exists?(:command_dispatch_contexts)
+        unless SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
           raise Hive::ConfigError,
                 "command dispatch context requires the installed command receipt schema"
         end
@@ -643,7 +665,7 @@ module Hive
 
       def rebind_existing_command_context?(request_id, context)
         database.transaction do |db|
-          existing = if db.table_exists?(:command_dispatch_contexts)
+          existing = if SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
             db[:command_dispatch_contexts][request_id: request_id.to_s]
           end
           next existing.nil? if context.nil?
@@ -674,7 +696,7 @@ module Hive
                           update_id: nil, trigger: nil, task_generation: nil,
                           inherited_outputs: [], task_id: nil,
                           expected_stage: nil, expected_marker_name: nil,
-                          expected_marker_id: nil, recovery: nil, remaining_argvs: [])
+                          expected_marker_id: nil, recovery: nil, remaining_argvs: [], remote_authority: nil)
         validate_request!(project, slug, argv, requestor, request_id, inherited_outputs, recovery)
         {
           "schema" => SCHEMA, "schema_version" => SCHEMA_VERSION,
@@ -685,7 +707,7 @@ module Hive
           "inherited_outputs" => Array(inherited_outputs), "task_id" => task_id,
           "expected_stage" => expected_stage, "expected_marker_name" => expected_marker_name,
           "expected_marker_id" => expected_marker_id, "recovery" => recovery,
-          "remaining_argvs" => Array(remaining_argvs)
+          "remaining_argvs" => Array(remaining_argvs), "remote_authority" => remote_authority
         }
       end
 
@@ -718,7 +740,7 @@ module Hive
           request_id project slug argv requestor chat_id update_id trigger task_generation
           inherited_outputs task_id expected_stage
           expected_marker_name expected_marker_id recovery
-          remaining_argvs
+          remaining_argvs remote_authority
         ].all? { |key| existing[key] == payload[key] }
       end
 
@@ -744,7 +766,7 @@ module Hive
           expected_marker_name: payload["expected_marker_name"],
           expected_marker_id: payload["expected_marker_id"], recovery: payload["recovery"],
           schema_version: payload.fetch("schema_version"), state: row.fetch(:state),
-          revision: row.fetch(:revision)
+          revision: row.fetch(:revision), remote_authority: payload["remote_authority"]
         )
       rescue KeyError, ArgumentError, TypeError, CodecError => error
         raise IntegrityError.new(

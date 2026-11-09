@@ -16,6 +16,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     sign_in!
   end
 
+  test "review publication recovery retains usable commands and escapes hostile paths" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), stage_dir(@project, "6-review").join(@slug))
+    path = stage_dir(@project, "6-review").join(@slug, "task.md")
+    path.write("# Review\n")
+    Hive::Markers.set(path, :review_stale, reason: "final_fix_unverified", pass: 3, accepted: 1, escalations: 0,
+      **Hive::ReviewPublicationRecovery.encode("publication" => "published", "verification" => "pending",
+        "worktree" => "/owned/a b<script>alert(1)</script>", "branch" => "fix", "is_draft" => true,
+        "pr_state" => "OPEN", "ready_command" => "gh pr ready 42", "local_head" => "a" * 40))
+    refresh_status_feed!
+    get task_path(@project, @slug)
+    assert_response :success
+    assert_includes response.body, "Review publication and verification"
+    assert_includes response.body, "/owned/a b&lt;script&gt;"
+    assert_includes response.body, "Commit fixes locally"
+    assert_includes response.body, "gh pr ready 42"
+    assert_includes response.body, "successful current secret scan"
+    assert_includes response.body, "normal finalize"
+    assert_select "dd script", 0
+  end
+
   test "status grid lists the task" do
     get "/grid"
     assert_response :success
@@ -41,6 +61,24 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
 
     assert_equal 0, audit_reads, "ordinary task navigation must not read hidden audit panels"
+  end
+
+  test "closure blocker renders full retained commit details" do
+    sha = "a" * 40
+    entry = { "code" => "unique_worktree_changes", "message" => "PR already merged; unique commits retained", "owner" => "operator",
+      "details" => { "worktree" => "/owned/path with spaces", "branch" => "task", "reference_head" => "b" * 40,
+        "publication" => "unpublished", "local_fix_shas" => [ sha ], "candidate_shas" => [],
+        "classification" => "ahead", "delivery" => "content_absent_from_default", "guidance" => "Deliver through a new change." } }
+    preview = Hive::TaskClosure::Preview.new(input: { "reason" => "already_delivered", "evidence" => [] }, task: {},
+      task_repository: nil, evidence: [], successor: nil, authority: "remote_merge", evidence_digest: "c" * 64,
+      preview_digest: "d" * 64, errors: [], blockers: [ entry ])
+    with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: { reason: "already_delivered", evidence: [] }
+    end
+    assert_response :unprocessable_entity
+    assert_includes response.body, sha
+    assert_includes response.body, "/owned/path with spaces"
+    assert_includes response.body, "new change"
   end
 
   test "closure entry requires authentication" do

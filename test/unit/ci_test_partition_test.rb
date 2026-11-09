@@ -32,6 +32,7 @@ class CiTestPartitionTest < Minitest::Test
         "test:tui_reactivity_perf" => "test/integration/tui_reactivity_perf_test.rb",
         "test:setup_agents_integration" => "test/integration/setup_agents_test.rb",
         "test:status_read_only" => "test/integration/status_read_only_test.rb",
+        "test:runtime_database_contention" => "test/integration/runtime_database_contention_test.rb",
         "test:babysitter_dry_run_security_matrix" =>
           "test/unit/babysitter/dry_run_security_matrix_test.rb",
         "test:bench_isolation_proof" => "test/unit/bench_harness/isolation_proof_test.rb"
@@ -127,6 +128,10 @@ class CiTestPartitionTest < Minitest::Test
         {
           "name" => "operational status read-only mounts",
           "task" => "test:status_read_only"
+        },
+        {
+          "name" => "runtime database contention",
+          "task" => "test:runtime_database_contention"
         },
         {
           "name" => "babysitter dry-run security matrix",

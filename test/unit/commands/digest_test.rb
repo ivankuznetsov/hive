@@ -26,6 +26,32 @@ class DigestCommandTest < Minitest::Test
     end
   end
 
+  def test_generation_failure_is_reported_in_text_and_json
+    failure = { "local_date" => "2026-11-06", "failed_at" => "2026-11-06T23:58:17Z",
+                "error_class" => "Hive::AgentError", "message" => "This API key has expired." }
+    record = digest_record.merge("document" => "Old digest\n", "repository_stats" => [],
+                                 "generation_failure" => failure, "stale" => true)
+    reader = Object.new
+    reader.define_singleton_method(:read) { |**| record }
+    output = StringIO.new
+    payload = Hive::Commands::Digest.new(
+      json: true, reader: reader, stdout: output,
+      web_config_loader: -> { { "origin" => "https://hive.example" } }
+    ).call
+    assert_equal failure, payload.fetch("generation_failure")
+    assert payload.fetch("stale")
+    assert_empty digest_schema.validate(payload).to_a
+
+    output = StringIO.new
+    Hive::Commands::Digest.new(
+      reader: reader, stdout: output,
+      web_config_loader: -> { { "origin" => "https://hive.example" } }
+    ).call
+    assert_match(/\ADigest generation for 2026-11-06 failed at .*This API key has expired\./, output.string)
+    assert_includes output.string, "hive digest refresh --date 2026-11-06"
+    assert_includes output.string, "Old digest"
+  end
+
   def test_json_is_a_pure_schema_valid_view_with_canonical_web_url
     calls = []
     reader = Object.new

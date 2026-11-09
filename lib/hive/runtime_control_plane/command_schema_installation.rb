@@ -4,6 +4,7 @@ require "uri"
 require "hive/runtime_control_plane"
 require "hive/runtime_control_plane/command_schema"
 require "hive/runtime_control_plane/command_migrations/002_add_command_receipts"
+require "hive/runtime_control_plane/dogfood_rollback_deployment"
 
 module Hive
   module RuntimeControlPlane
@@ -17,6 +18,8 @@ module Hive
       module_function
 
       def validate_coordinates!(coordinates = PUBLISHED_ROLLBACK_PACKAGE)
+        return DogfoodRollbackDeployment.verify!(coordinates) if DogfoodRollbackDeployment.dogfood?(coordinates)
+
         version = coordinates && (coordinates[:version] || coordinates["version"])
         location = coordinates && (coordinates[:location] || coordinates["location"])
         sha256 = coordinates && (coordinates[:sha256] || coordinates["sha256"])
@@ -65,7 +68,9 @@ module Hive
             )
           end
         end
-        { "status" => "installed", "version" => CommandSchema::VERSION }
+        { "status" => "installed", "version" => CommandSchema::VERSION,
+          "schema_sha256" => CommandSchema::EXPECTED_SCHEMA_SHA256,
+          "rollback" => package_coordinates.transform_keys(&:to_s) }
       end
     end
   end

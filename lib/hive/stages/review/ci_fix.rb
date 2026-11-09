@@ -5,6 +5,7 @@ require "digest"
 require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/output_pulse"
+require "hive/project_command_environment"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/reviewers/synthetic_task"
@@ -33,6 +34,13 @@ module Hive
       # tooling.
       module CiFix
         Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text)
+        # Agent label on hosted-check limit errors; distinguishes a hosted CI
+        # account wall from the CI-fix agent's own provider limit.
+        HOSTED_CI_LIMIT_AGENT = "hosted-ci".freeze
+
+        def self.hosted_limit?(error_message)
+          error_message.to_s.start_with?(Hive::AgentLimit.error_message("", agent: HOSTED_CI_LIMIT_AGENT))
+        end
 
         # ANSI escape sequence regex — matches CSI sequences (ESC [ ... letter)
         # which cover colors, cursor movement, text styling. Some CI
@@ -47,7 +55,7 @@ module Hive
         module_function
 
         def run!(cfg:, ctx:, started_at: nil, max_wall_clock_sec: nil,
-                 command: nil, command_runner: nil)
+                 command: nil, command_runner: nil, no_repair: false)
           command ||= cfg.dig("review", "ci", "command")
           if command.nil? || command.to_s.strip.empty?
             return Result.new(
@@ -101,7 +109,16 @@ module Hive
                 idle_timeout_sec: idle_timeout_sec
               )
             end
-            return run_result.to_result(attempts: attempts) if run_result.is_a?(CommandError)
+            if run_result.is_a?(CommandError)
+              # A timed-out or idle-killed run keeps what it printed so the
+              # operator can see where it stalled.
+              if run_result.output && !run_result.output.empty?
+                run_result = CommandError.new(
+                  run_result.reason, clean_output(run_result.output, tail_lines)
+                )
+              end
+              return run_result.to_result(attempts: attempts)
+            end
 
             output = clean_output(run_result.combined, tail_lines)
             last_output = output
@@ -129,12 +146,12 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: Hive::AgentLimit.error_message(output, agent: "hosted-ci"),
+                error_message: Hive::AgentLimit.error_message(output, agent: HOSTED_CI_LIMIT_AGENT),
                 limit_text: output
               )
             end
 
-            if attempts >= max_attempts
+            if no_repair || attempts >= max_attempts
               return Result.new(
                 status: :stale,
                 attempts: attempts,
@@ -246,7 +263,12 @@ module Hive
 
           begin
             pipe_r, pipe_w = IO.pipe
-            pid = Process.spawn(*cmd, chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w)
+            # The project's CI must resolve its own Ruby toolchain, never the
+            # load path Hive's attempt worker inherited for itself.
+            pid = Process.spawn(
+              Hive::ProjectCommandEnvironment.overrides, *cmd,
+              chdir: cwd, pgroup: true, out: pipe_w, err: pipe_w
+            )
             pipe_w.close
           rescue Errno::ENOENT, Errno::EACCES => e
             pipe_r&.close unless pipe_r&.closed?
@@ -264,15 +286,21 @@ module Hive
           idle = idle_timeout_sec.to_f
           idle = nil unless idle.positive?
           pulse = idle ? Hive::OutputPulse.new : nil
-          combined = +""
           # Reader keeps draining the pipe so the producer doesn't block
           # or die with SIGPIPE, but appends only up to max_bytes into
           # the captured buffer. Once the cap is hit we read-and-drop
           # remaining bytes — bound memory, clean subprocess exit. The
           # downstream consumer tail-truncates by line count in
-          # clean_output.
+          # clean_output. The buffer is shared (under a mutex) so a
+          # timeout that kills the reader still has the output so far.
+          buf = +""
+          buf_lock = Mutex.new
+          captured = lambda do
+            text = buf_lock.synchronize { buf.dup }
+            text.force_encoding(Encoding::UTF_8)
+            text.scrub("?")
+          end
           reader = Thread.new do
-            buf = +""
             capped = false
             loop do
               chunk = pipe_r.read_nonblock(4096, exception: false)
@@ -288,15 +316,15 @@ module Hive
 
               next if capped
 
-              remaining = max_bytes - buf.bytesize
-              if remaining <= 0
-                capped = true
-                next
+              buf_lock.synchronize do
+                remaining = max_bytes - buf.bytesize
+                if remaining <= 0
+                  capped = true
+                else
+                  buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
+                end
               end
-
-              buf << (chunk.bytesize > remaining ? chunk.byteslice(0, remaining) : chunk)
             end
-            combined.replace(buf)
           rescue EOFError, IOError
             nil
           ensure
@@ -316,14 +344,15 @@ module Hive
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
-              return CommandError.new("CI command timed out after #{timeout_sec}s")
+              return CommandError.new("CI command timed out after #{timeout_sec}s", captured.call)
             end
             if pulse && pulse.idle_for >= idle
               kill_process_group(pgid, pid)
               reader.join(2)
               reader.kill if reader.alive?
               return CommandError.new(
-                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)"
+                "CI command produced no output for #{idle_timeout_sec}s (idle-output timeout)",
+                captured.call
               )
             end
             _, status = Process.wait2(pid, Process::WNOHANG)
@@ -334,10 +363,7 @@ module Hive
           reader.join(2)
           reader.kill if reader.alive?
 
-          combined.force_encoding(Encoding::UTF_8)
-          combined.scrub!("?") # replace invalid UTF-8 sequences
-
-          Run.new(combined, status.exitstatus)
+          Run.new(captured.call, status.exitstatus) # invalid UTF-8 scrubbed
         end
 
         # TERM the process group, give it 3s to drain, then KILL.
@@ -378,12 +404,14 @@ module Hive
         # Wrap a launch failure as a Result :error directly so the
         # caller doesn't have to distinguish "command exited non-zero"
         # from "command couldn't even start."
-        CommandError = Struct.new(:reason) do
+        # +output+ is what a killed run printed before its timeout (nil
+        # when the command never started).
+        CommandError = Struct.new(:reason, :output) do
           def to_result(attempts: 0)
             CiFix::Result.new(
               status: :error,
               attempts: attempts,
-              last_output: nil,
+              last_output: output,
               error_message: reason,
               limit_text: nil
             )

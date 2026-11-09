@@ -26,7 +26,8 @@ module Hive
       end
 
       def initialize(task:, clock: -> { Time.now.utc }, task_locker: nil,
-                     commit_locker: nil, committer: nil, freshness_checker: nil)
+                     commit_locker: nil, committer: nil, freshness_checker: nil,
+                     freshness_reader: nil)
         @task = task
         @clock = clock
         @store = Store.new(task_folder: task.folder)
@@ -37,6 +38,7 @@ module Hive
           Hive::Lock.with_commit_lock(task.hive_state_path, &block)
         end
         @committer = committer || method(:commit!)
+        @freshness_reader = freshness_reader || method(:current_freshness)
         @freshness_checker = freshness_checker || method(:validate_current_freshness!)
       end
 
@@ -47,7 +49,11 @@ module Hive
         @commit_locker.call do
           @task_locker.call do
             current = @store.current
-            @freshness_checker.call(current)
+            if action.to_s == "restart"
+              validate_restartable!(current)
+            else
+              @freshness_checker.call(current)
+            end
             target = normalize_target(action, target_fingerprint, value, review_id, current)
             decision = build_decision(
               action:, review_id:, task_generation:, policy_fingerprint:,
@@ -174,7 +180,7 @@ module Hive
 
       def normalize_value(action, value)
         case action.to_s
-        when "approve_finding", "retry", "request_review"
+        when "approve_finding", "retry", "request_review", "restart"
           {}
         when "answer_finding"
           answer = value.is_a?(Hash) ? value["answer"] || value[:answer] : value
@@ -208,6 +214,8 @@ module Hive
           raise InvalidAction, "retry requires a current transient attempt" unless attempt_id
 
           attempt_id
+        when "restart"
+          "restart-#{review_id}"
         when "request_review"
           if current["blockers"].any? { |entry| entry["reason"] == "verification_finding" }
             return "review-#{review_id}"
@@ -265,9 +273,11 @@ module Hive
         when "request_review"
           data["routes"] = reset_terminal_route(current)
         end
+        required_action = decision.action == "restart" ?
+          "start a linked plan review for the current task generation" : "resume plan review"
         data.merge(
           "state" => "reviewing", "outcome" => nil, "blockers" => [],
-          "required_action" => "resume plan review", "degradation_reason" => nil,
+          "required_action" => required_action, "degradation_reason" => nil,
           "retry_at" => nil, "execution_allowed" => false
         )
       end
@@ -394,14 +404,37 @@ module Hive
         end
       end
 
-      def validate_current_freshness!(current)
+      def current_freshness(current)
         task = Hive::Task.new(@task.folder)
-        freshness = TransitionGuard.freshness(
+        TransitionGuard.freshness(
           task:, projection: Projection.new(current), config: Hive::Config.load(task.project_root)
         )
+      end
+
+      # A stale review (its task generation, plan, or policy moved on) cannot
+      # take a decision, and before `restart` every action copied from `show`
+      # was rejected with no way out. Name the one action that supersedes it.
+      def validate_current_freshness!(current)
+        freshness = @freshness_reader.call(current)
         return if freshness.fetch("status") == "current"
 
+        if freshness.fetch("status") == "stale"
+          raise StaleDecision,
+                "plan review is stale (#{freshness['reason']}); run `hive plan-review #{@task.slug} restart` " \
+                "with the identities from `show` to start a linked review for the current generation"
+        end
         raise StaleDecision, "plan review changed; refresh the current observation"
+      end
+
+      # `restart` is the only action valid on a stale review. On a current
+      # review it would discard live reviewer state, so it is refused there.
+      def validate_restartable!(current)
+        freshness = @freshness_reader.call(current)
+        return if freshness.fetch("status") == "stale"
+
+        raise InvalidAction,
+              "restart applies only to a stale plan review; this review is #{freshness.fetch('status')}" \
+              "#{freshness['reason'] ? " (#{freshness['reason']})" : ''}; use retry or request-review"
       end
 
       def timestamp = @clock.call.utc.iso8601(6)

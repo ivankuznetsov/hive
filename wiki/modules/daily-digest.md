@@ -26,9 +26,17 @@ calls PRDigest's collector. It redacts recognized secrets before giving facts
 to an agent. Non-GitHub projects are outside this PR-only scope. Collection
 failure leaves the previous document intact instead of publishing an empty day.
 
-`DocumentGenerator` invokes the selected Hive agent with
-`Prdigest::Document.prompt`. `daily_digest.agent`, `model`, and `effort` can
-select a digest-specific route; otherwise the execute route is used. The writer
+`DocumentGenerator` invokes the selected Hive agent with Hive's own
+`DailyDigest::DocumentPrompt` (PRDigest's shared `Document.prompt` is no longer
+used by Hive; PRDigest still supplies the bounded `facts_json`). The prompt is a
+morning briefing for the owner who reads it instead of the PRs: `## The day in
+brief`, an optional `## Needs you` (open decisions, manual steps, gaps not to
+rely on), one `##` per repository with one `###` per outcome (bold takeaway,
+then before / now and how it works / what to do), an `#### Also merged` list,
+and fenced ```mermaid diagrams only where a flow, state machine, or component
+relationship changed. Depth follows impact with no word limit; explicit rules
+ban filler words and identifier-heavy prose. `daily_digest.agent`, `model`, and
+`effort` can select a digest-specific route; otherwise the execute route is used. The writer
 validates non-empty output and preserves the exact generated document. A day
 with no merged PRs produces a short no-changes document without an agent call.
 
@@ -55,6 +63,17 @@ that starts before midnight stays open even if it finishes after midnight; the
 next collection can observe the full day before closing it.
 
 ## Reading and delivery
+
+Web lifts ```mermaid fences out before Markdown sanitization (which drops the
+fence language) and restores each as an escaped `<pre>` inside a
+`figure[data-controller=mermaid]`. The Stimulus controller injects the vendored
+`web/vendor/javascript/mermaid.min.js` (11.4.1, a classic script defining
+`globalThis.mermaid`; importing it as a module leaves the global undefined)
+only on pages with a diagram, renders with `securityLevel: "strict"` and HTML
+labels off, and drops any `img`, `image`, `foreignObject`, or `a` node; the
+escaped source stays visible if rendering fails. Repository stats attach to the
+first heading per repository only, the brief and `Needs you` headings are never
+treated as repositories, and Telegram replaces each diagram with a web link.
 
 The shared reader returns the current preview if one exists, otherwise the most
 recent saved document. CLI text prints the document, JSON exposes `document`,

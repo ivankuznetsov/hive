@@ -367,6 +367,12 @@ does not depend on an unpublished companion `hive-skills` package. Setup does
 not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
 after correcting the scoped remediation printed by doctor.
 
+The canonical skill also routes named remote contexts through its
+`references/remote-access.md`: bounded status continuation, task/content reads,
+opaque answer handles, independent scopes, approval replay guards and durable
+operation lookup. Remote contexts reject local-only verbs and `--operational`;
+operators explicitly select `--context local` for the local operational loop.
+
 OpenClaw support is rendered from the same canonical `skills/hive/` source into
 `openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug
@@ -893,7 +899,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | Knob                            | Default | Notes                                                       |
 |---------------------------------|---------|-------------------------------------------------------------|
 | `max_concurrent_runs`           | 3       | Global cap. Raise carefully — multiplies cost ceiling.      |
-| `max_concurrent_per_project`    | 3       | Per-project burst cap. Lower it below the global cap to force cross-project sharing. |
+| `max_concurrent_per_project`    | 3       | Per-project burst cap. Lower it below the global cap to force cross-project sharing. A project's own `.hive-state/config.yml` `daemon.max_concurrent_per_project` lowers that project's cap further (never raises it). |
 | `max_runs_per_day_per_project`  | 50      | Circuit-breaker. Raise if a project legitimately needs it.  |
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |

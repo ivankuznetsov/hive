@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, skills/hive/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/web/, web/, public/, hive.gemspec, packaging/, .github/workflows/{live-agent-skills,release}.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-09-02
+updated: 2026-11-07
 tags: [commands, api, skills, agents, operational, provisioning]
 ---
 
@@ -77,6 +77,12 @@ surface. `--operational --json` selects the v5 agent workflow document with a
 required nullable exact routing decision; `hive task`, `hive tui`, and
 `hive archive` own task detail, fleet browsing, and terminal history.
 [[commands/watch]] emits bounded semantic JSON Lines without shell polling.
+[[commands/context]] selects a named local or remote installation before project
+discovery. Supported remote task operations use the scoped `/api/v1` JSON API;
+[[commands/token]] administers server-local grants and [[commands/operation]]
+queries durable accepted work. [[remote-access]] owns deployment prerequisites
+and incident response. Local filesystem commands require an effective local
+context.
 `hive act` accepts only a fresh observation token for the one closed routine
 workflow-advance action and recomputes the verb under the task lock.
 The wrapper also normalizes command-local help before Thor dispatch:

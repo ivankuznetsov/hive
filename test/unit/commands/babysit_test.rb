@@ -404,7 +404,7 @@ class HiveCommandsBabysitTest < Minitest::Test
     end
 
     assert_equal [ :stop ], calls
-    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--dry-run" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hive", "babysit", "start", "--detach", "--context", "local", "--dry-run" ], exec_args
   end
 
   def test_detached_restart_without_dry_run_omits_dry_run_flag
@@ -421,7 +421,7 @@ class HiveCommandsBabysitTest < Minitest::Test
       end
     end
 
-    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach" ], exec_args
+    assert_equal [ "/tmp/hive-wrapper/bin/hv", "babysit", "start", "--detach", "--context", "local" ], exec_args
   end
 
   def test_detached_restart_surfaces_reexec_failure

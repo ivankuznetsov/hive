@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-09-02
+updated: 2026-11-07
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -71,6 +71,55 @@ provider usability, quota, credential validity, actual invoice spend, or
 provider-observed billing from it. Use `hive status --operational --json` for
 current workflow and scheduler ownership. Provider routing is recomputed from
 current configuration and live attempt capacity; there is no health projection.
+
+## Remote API projection
+
+With a remote context, `hive task TASK --project PROJECT --context NAME`
+resolves only that server project and task. `PROJECT:TASK` is also explicit
+project-qualified addressing. It never derives a local project from cwd or
+accepts a checkout path. Remote JSON uses the API envelope below.
+
+The remote content selectors are mutually exclusive:
+
+```sh
+hive task TASK --project PROJECT --context NAME --log
+hive task TASK --project PROJECT --context NAME --diff
+hive task TASK --project PROJECT --context NAME --artifacts --json
+hive task TASK --project PROJECT --context NAME --artifact RESOURCE_ID --output ./answer.md
+```
+
+Without `--output`, requested content goes to stdout. `--output` names an
+explicit client destination; server paths never become client targets. The new
+`--diff`, `--artifacts` and `--artifact ID` selectors fail under default or
+explicit local context before effects, with guidance to use the existing local
+`hive task --json` artifact panel or a remote context. Local `--log` still cannot
+be combined with `--json`; remote `--log --json` returns one API document.
+
+The bearer-authenticated `/api/v1/projects/:project/tasks/:task` reader accepts
+an exact registered project plus a task ID or slug. It returns a deliberately
+smaller DTO in the `hive-remote.v1` envelope, with native schema/version named
+as `source_schema`/`source_schema_version` provenance. It does not claim the
+partial DTO conforms to the full native workspace schema. Filesystem paths,
+raw command suggestions and cross-project dependency details are excluded.
+Action descriptors require the matching token scopes; forced transitions stay
+local. `approval_generation` identifies the current ownership generation for
+an explicit approval, separately from the native semantic task generation.
+
+Related read routes expose questions, correlated logs, owned-worktree diffs,
+and workflow-declared artifacts. Questions carry opaque server-issued handles;
+the native folder-bearing answer binding remains in an owner-only server
+registry. Artifact IDs and status continuation cursors are also opaque and
+bound to their authorized targets and current observations. Unknown or
+cross-target IDs return 404; known stale observations return 409 and require
+refreshing the inventory. Read identities survive a server restart and confer
+no mutation admission authority.
+
+Status pages contain at most 100 tasks and 2 MiB, with counts computed over the
+authorized projects before pagination. Logs are limited to 256 KiB; selected
+artifact and diff responses to 512 KiB, including the escaped JSON envelope.
+Smaller `max_bytes` limits are accepted; a limit too small for control metadata
+returns 413. A truncated response says so explicitly. Artifact manifests retain
+the native 20-file/2-MiB aggregate limits and never use client-supplied paths.
 
 ## Serialization and exit codes
 

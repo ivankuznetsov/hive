@@ -283,7 +283,7 @@ list, and list fan-in is not collapsed into one `blocked_by` value.
 Same-repository scalar edges may display strict worktree base/head evidence as
 a stacked Git relationship. Cross-project edges and all list edges are labelled
 scheduling-only and use `dependency_base_mode: default`; only a resolvable
-same-project scalar uses `stacked`.
+same-project scalar whose prerequisite is undelivered uses `stacked`.
 Each selected connected task receives its own bounded local publication
 observation under the component's single two-second deadline, so ancestor and
 descendant branch, base, head, and PR absence are not inferred from the root.

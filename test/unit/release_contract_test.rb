@@ -55,6 +55,80 @@ class ReleaseContractTest < Minitest::Test
     assert_equal "${{ runner.temp }}/release-e2e", reports.fetch("with").fetch("path")
   end
 
+  def test_every_betterleaks_packaging_consumer_restores_verified_archive_cache
+    expected = {
+      "ci.yml" => %w[coverage-shards expensive-test-gates e2e web-tests launchd-macos],
+      "live-agent-skills.yml" => %w[build],
+      "release-candidate.yml" => %w[candidate release-e2e]
+    }
+    path = "${{ runner.temp }}/betterleaks-archives"
+    key = "betterleaks-archives-v1-${{ runner.os }}-${{ hashFiles('lib/hive/betterleaks.rb') }}"
+    expected.each do |filename, jobs|
+      workflow = YAML.safe_load_file(File.join(ROOT, ".github/workflows", filename), aliases: true)
+      consumers = workflow.fetch("jobs").filter_map do |name, job|
+        steps = job.fetch("steps", [])
+        indexes = steps.each_index.select do |index|
+          body = steps[index]["run"].to_s
+          body.include?("ruby packaging/betterleaks.rb") || body.match?(/HiveReleaseCandidate::Artifacts\.new\(.*?\)\.call\b/m)
+        end
+        next if indexes.empty?
+        assert_equal 1, indexes.size, "#{filename}:#{name}"
+        consumer_index = indexes.first
+        consumer = steps[consumer_index]
+        cache_index = steps.index { |step| step.dig("with", "path") == path }
+        refute_nil cache_index, "#{filename}:#{name}"
+        cache = steps[cache_index]
+        assert_equal "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", cache.fetch("uses")
+        assert_equal key, cache.fetch("with").fetch("key")
+        assert_equal "betterleaks-archives-v1-${{ runner.os }}-", cache.fetch("with").fetch("restore-keys").strip
+        assert_operator cache_index, :<, consumer_index
+        checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+        assert_operator checkout_index, :<, cache_index
+        assert_equal path, consumer.fetch("env").fetch("HIVE_BETTERLEAKS_CACHE_DIR")
+        refute consumer["if"].to_s.include?("cache-hit")
+        if filename == "release-candidate.yml"
+          refute consumer.fetch("env").key?("GITHUB_TOKEN")
+          refute consumer.fetch("env").key?("GH_TOKEN")
+        else
+          assert_equal "${{ github.token }}", consumer.fetch("env").fetch("GITHUB_TOKEN")
+        end
+        %w[GITHUB_TOKEN GH_TOKEN HIVE_BETTERLEAKS_CACHE_DIR].each do |variable|
+          refute workflow.fetch("env", {}).key?(variable)
+          refute job.fetch("env", {}).key?(variable)
+        end
+        gh_token_steps = steps.each_with_index.filter_map do |step, index|
+          (step["name"] || "step #{index}") if step.fetch("env", {}).key?("GH_TOKEN")
+        end
+        expected_gh_token_steps = if filename == "release-candidate.yml" && name == "release-e2e"
+          [ "Attest exact producer before release E2E" ]
+        else
+          []
+        end
+        assert_equal expected_gh_token_steps, gh_token_steps,
+                     "#{filename}:#{name}: GH_TOKEN is restricted to the existing producer attestation step"
+        assert_equal ".", consumer.fetch("working-directory") if name == "web-tests"
+        if filename == "ci.yml"
+          minutes = %w[expensive-test-gates launchd-macos].include?(name) ? 15 : 20
+          assert_equal minutes, job.fetch("timeout-minutes")
+        end
+        if filename == "release-candidate.yml" && name == "candidate"
+          assert_equal "inputs.source_run_id == ''", cache.fetch("if")
+          assert_equal cache.fetch("if"), consumer.fetch("if")
+          assert_equal false, steps[checkout_index].fetch("with").fetch("persist-credentials")
+        else
+          refute cache.key?("if")
+        end
+        name
+      end
+      assert_equal jobs.sort, consumers.sort
+      token_steps = workflow.fetch("jobs").flat_map do |name, job|
+        job.fetch("steps", []).filter_map { |step| name if step.fetch("env", {}).key?("GITHUB_TOKEN") }
+      end
+      assert_equal(filename == "release-candidate.yml" ? [] : jobs.sort, token_steps.sort,
+                   "#{filename}: GITHUB_TOKEN is restricted to the Betterleaks packaging consumer steps")
+    end
+  end
+
   def test_agent_conversion_guide_is_packaged_for_installed_users
     spec = Gem::Specification.load(File.join(ROOT, "hive.gemspec"))
     assert_includes spec.files, "docs/guides/current-format-migration.md"
@@ -111,9 +185,9 @@ class ReleaseContractTest < Minitest::Test
     release_docs = read("docs/RELEASING.md")
 
     assert_equal "0.1.5", canonical.version
-    assert_equal 19, canonical.reference_paths.size
-    assert_equal 19, projection.fetch("files").keys.grep(%r{\Areferences/}).size
-    assert_equal 19,
+    assert_equal 20, canonical.reference_paths.size
+    assert_equal 20, projection.fetch("files").keys.grep(%r{\Areferences/}).size
+    assert_equal 20,
                  Dir.glob(File.join(ROOT, "openclaw/skills/hive/references/*.md")).size
     assert_equal canonical.version, openclaw.fetch("version")
     assert_equal canonical.version, projection.fetch("skill_version")

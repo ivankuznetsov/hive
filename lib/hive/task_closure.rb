@@ -17,6 +17,7 @@ require "hive/task_resolver"
 require "hive/task_closure_contract"
 require "hive/workflow_package/canonical_json"
 require "hive/worktree"
+require "hive/review_publication_recovery"
 
 module Hive
   # Evidence-bound operator closure for work delivered outside a task's
@@ -57,6 +58,22 @@ module Hive
     class StalePreview < Error; end
     class Unauthorized < Error; end
     class InvalidReceipt < Error; end
+
+    def self.format_diagnostic(entry)
+      detail = entry["details"]
+      return entry.fetch("message") unless detail
+      labels = { "worktree" => "Worktree", "branch" => "Branch", "reference_head" => "Persisted PR head",
+        "publication" => "Publication", "reason" => "Evidence reason", "classification" => "Commit classification",
+        "local_fix_shas" => "Commits absent from PR", "candidate_shas" => "Local candidates (publication unknown)",
+        "delivery" => "Content delivery", "guidance" => "Operator decision" }
+      lines = labels.filter_map do |key, label|
+        value = detail[key]
+        next if value == []
+        value = "unavailable" if value.nil?
+        "#{label}: #{value.is_a?(Array) ? value.join(', ') : value}"
+      end
+      ([ entry.fetch("message") ] + lines).join("\n")
+    end
 
     Preview = Data.define(
       :input, :task, :task_repository, :evidence, :successor, :authority,
@@ -912,9 +929,50 @@ module Hive
       return [] unless unique
       return [] if worktree_content_delivered?(path, baseline)
 
-      [ blocker("unique_worktree_changes", "owned worktree has unique commits") ]
+      details = retained_fix_details(task, pointer, head, delivered_heads: verified_heads)
+      summary = verified_heads.empty? ? "owned worktree retains unique commits" : "PR already merged; owned worktree retains unique commits"
+      [ blocker("unique_worktree_changes", summary, details: details) ]
     rescue Hive::Error, KeyError, SystemCallError, IOError => e
       [ blocker("worktree_unverifiable", e.message) ]
+    end
+
+    # This is local evidence only. Do not use the open-PR resolver here: an
+    # archive preview must never publish to a PR that has already merged.
+    def retained_fix_details(task, pointer, head, delivered_heads:)
+      frontmatter = Hive::Gh.pr_frontmatter(File.join(task.folder, "pr.md"))
+      persisted = Hive::ReviewPublicationRecovery.decode(Hive::Markers.current(task.state_file).attrs)
+      parsed = Hive::Gh.parse_pull_request_url(frontmatter["pr_url"])
+      reference = if persisted && persisted["publication"] == "published" && parsed &&
+                     Hive::Gh.parse_pull_request_url(persisted["pr_url"]) == parsed &&
+                     persisted["worktree"] == pointer.fetch("path") &&
+                     persisted["branch"] == pointer.fetch("branch") &&
+                     persisted["local_head"] == persisted["remote_head"]
+        persisted["remote_head"]
+      else
+        frontmatter["head_oid"]
+      end
+      reference = reference.to_s.downcase
+      reference = nil unless reference.match?(FULL_OID_RE)
+      classification = Hive::ReviewPublicationRecovery.classify(worktree: pointer.fetch("path"),
+        reference_oid: reference, head: head, delivered_heads: delivered_heads)
+      unknown = classification["classification"] == "unknown"
+      publication = if unknown || classification["classification"] == "divergent"
+        "unknown"
+      elsif classification["unpushed_shas"].empty?
+        "published"
+      else
+        "unpublished"
+      end
+      {
+        "worktree" => pointer.fetch("path"), "branch" => pointer.fetch("branch"),
+        "reference_head" => reference, "publication" => publication,
+        "reason" => unknown ? classification["failure_reason"] : "retained_commits_require_operator_decision",
+        "local_fix_shas" => classification["unpushed_shas"],
+        "candidate_shas" => classification["candidate_shas"],
+        "classification" => classification["classification"],
+        "delivery" => "content_absent_from_default",
+        "guidance" => "Commits and worktree are retained. Decide whether to deliver them through a new change or establish that their content is already delivered. Do not push or ready the merged PR."
+      }
     end
 
     # A squash merge, or a review fix delivered through a follow-up pull
@@ -983,7 +1041,7 @@ module Hive
     def validate_preview!(preview)
       return if preview.valid?
 
-      details = (preview.errors + preview.blockers).map { |entry| entry.fetch("message") }.join("; ")
+      details = (preview.errors + preview.blockers).map { |entry| self.class.format_diagnostic(entry) }.join("; ")
       raise VerificationFailed, details
     end
 
@@ -1281,7 +1339,7 @@ module Hive
           task, project, delivered_heads: delivered_heads,
           preserve_worktree: receipt["reason"] == "cancelled"
         )
-        raise VerificationFailed, blockers.map { |entry| entry["message"] }.join("; ") unless blockers.empty?
+        raise VerificationFailed, blockers.map { |entry| self.class.format_diagnostic(entry) }.join("; ") unless blockers.empty?
       end
       transition!(task, project, receipt)
       archived = resolve_current_task(task, project)
@@ -1340,7 +1398,7 @@ module Hive
       )
       unless repository_errors.empty? &&
              live_repository == receipt.fetch("task_repository")
-        detail = repository_errors.map { |entry| entry.fetch("message") }.join("; ")
+        detail = repository_errors.map { |entry| self.class.format_diagnostic(entry) }.join("; ")
         raise StalePreview,
               detail.empty? ? "task repository identity changed before archive" : detail
       end
@@ -1357,7 +1415,7 @@ module Hive
              self.class.secure_compare(
                receipt.fetch("evidence_digest"), self.class.digest(refreshed)
              )
-        detail = evidence_errors.map { |entry| entry.fetch("message") }.join("; ")
+        detail = evidence_errors.map { |entry| self.class.format_diagnostic(entry) }.join("; ")
         raise StalePreview,
               detail.empty? ? "remote evidence changed before archive" : detail
       end
@@ -1376,7 +1434,7 @@ module Hive
       )
       unless blockers.empty?
         raise VerificationFailed,
-              blockers.map { |entry| entry.fetch("message") }.join("; ")
+              blockers.map { |entry| self.class.format_diagnostic(entry) }.join("; ")
       end
       true
     end
@@ -1529,8 +1587,10 @@ module Hive
       { "field" => field, "code" => code, "message" => message.to_s[0, 500] }
     end
 
-    def blocker(code, message)
-      { "code" => code, "message" => message.to_s[0, 500], "owner" => "operator" }
+    def blocker(code, message, details: nil)
+      result = { "code" => code, "message" => message.to_s[0, 500], "owner" => "operator" }
+      result["details"] = details if details
+      result
     end
 
     def default_attempt_store

@@ -4,6 +4,7 @@ require "hive/atomic_file"
 require "hive/attempts/capability"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
+require "hive/attempts/memory_limit"
 require "hive/attempts/command_progress"
 require "hive/attempts/repository"
 require "hive/attempts/stream_log"
@@ -35,7 +36,8 @@ module Hive
                      clock: -> { Time.now.utc },
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      install_signal_handlers: false, process_registry: nil,
-                     reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"])
+                     reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"],
+                     oom_kill_counter: -> { MemoryLimit.oom_kill_count })
         @store = store
         @attempt_id = attempt_id
         @claim_io = claim_io
@@ -51,6 +53,8 @@ module Hive
         @install_signal_handlers = install_signal_handlers
         @process_registry = process_registry
         @reservation_id = reservation_id
+        @oom_kill_counter = oom_kill_counter
+        @failure_reason = nil
         @wrapper_registered = false
         @ready_sent = false
         @cancel_reason = nil
@@ -73,13 +77,18 @@ module Hive
         register_wrapper! if @reservation_id
 
         log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
-        now = @clock.call
-        record = @store.claim(
-          record, owner: process_identity(Process.pid),
-          claim_capability: @claim_capability,
-          first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: now
-        )
-        record = @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        # The claim and first heartbeat each re-check their own deadline, so a
+        # busy retry stays bounded by the launch window and fails closed there.
+        owner = process_identity(Process.pid)
+        record = with_store_retry do
+          @store.claim(
+            record, owner: owner, claim_capability: @claim_capability,
+            first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: @clock.call
+          )
+        end
+        record = with_store_retry do
+          @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        end
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 
@@ -225,6 +234,7 @@ module Hive
             spawn_options[evidence_w.fileno] = evidence_w.fileno
           end
         end
+        oom_baseline = @oom_kill_counter.call
         @worker_pid = Process.spawn(
           env, *resolved_worker_argv(record), spawn_options
         )
@@ -351,6 +361,7 @@ module Hive
 
         exit_status = forced_exit || status_exit(status)
         @worker_signal = signal_name(status.termsig) if status && !status.exited?
+        record_memory_limit_kills(oom_baseline, log, forced: !forced_exit.nil?)
         outcome = if forced_exit
           @pause_generation ? "interrupted" : "cancelled"
         else
@@ -418,6 +429,7 @@ module Hive
           "timed_out" => @cancel_reason == :timeout,
           "cancelled" => outcome == "cancelled",
           "signal" => @worker_signal || @cancel_signal,
+          "error_reason" => @failure_reason,
           "report_status" => "unknown",
           "firewall_status" => "unknown",
           "custody_status" => "unknown"
@@ -606,6 +618,33 @@ module Hive
         true
       end
 
+      # The attempt runs inside its own `hive-attempt-*.scope`, so the scope's
+      # cgroup `memory.events` counts kernel OOM kills caused by the
+      # configured MemoryMax. A worker that died by SIGKILL while that counter
+      # moved was killed for memory; record the typed reason in the attempt
+      # log (and the synthesized diagnostic) instead of a bare "signal KILL".
+      # A kill of some other descendant (an agent's runaway tool probe) is
+      # logged as a notice only: the worker survived and owns its outcome.
+      def record_memory_limit_kills(baseline, log, forced: false)
+        current = @oom_kill_counter.call
+        return if baseline.nil? || current.nil? || current <= baseline
+
+        kills = current - baseline
+        if @worker_signal == "KILL" && !forced
+          @failure_reason = MemoryLimit::FAILURE_REASON
+          message = "hive-attempt: failure_reason=#{@failure_reason} oom_kills=#{kills} " \
+                    "(the attempt scope reached daemon.attempt_memory_max; the kernel " \
+                    "OOM killer terminated the worker)\n"
+        else
+          message = "hive-attempt: memory_limit_oom_kills=#{kills} (the attempt scope " \
+                    "reached daemon.attempt_memory_max; the kernel OOM killer terminated " \
+                    "a descendant process, the worker continued)\n"
+        end
+        log.append(:stderr, message)
+      rescue IOError, SystemCallError
+        nil
+      end
+
       def status_exit(status)
         return Hive::ExitCodes::SOFTWARE unless status
         return status.exitstatus if status.exited?
@@ -628,7 +667,9 @@ module Hive
         worker_argv = record["worker_argv"]
         return worker_argv unless worker_argv.first == "hive"
 
-        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), *worker_argv.drop(1) ]
+        # Execution belongs to this installation even if its operator uses the
+        # CLI to inspect another server. Keep the recorded logical argv intact.
+        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), "--context", "local", *worker_argv.drop(1) ]
       end
 
       def hive_worker?(record)

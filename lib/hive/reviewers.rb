@@ -28,6 +28,7 @@ module Hive
       "claude" => "reviewer_claude_ce_code_review.md.erb",
       "codex" => "reviewer_codex_ce_code_review.md.erb",
       "grok" => "reviewer_grok_ce_code_review.md.erb",
+      "muse" => "reviewer_muse_ce_code_review.md.erb",
       "pi" => "reviewer_codex_ce_code_review.md.erb"
     }.freeze
 

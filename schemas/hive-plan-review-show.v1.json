@@ -6,7 +6,8 @@
   "additionalProperties": false,
   "required": ["schema", "schema_version", "ok", "slug", "task_folder", "review_id", "task_generation",
                "policy_fingerprint", "observation_digest", "state", "outcome", "execution_allowed",
-               "required_action", "freshness", "open_findings"],
+               "required_action", "current_task_generation", "freshness", "next_action",
+               "blockers", "open_findings"],
   "properties": {
     "schema": {"const": "hive-plan-review-show"},
     "schema_version": {"const": 1},
@@ -30,6 +31,9 @@
         "reason": {"type": ["string", "null"]}
       }
     },
+    "current_task_generation": {"type": "string", "minLength": 1},
+    "next_action": {"type": ["string", "null"]},
+    "blockers": {"type": "array", "items": {"type": ["string", "object"]}},
     "open_findings": {
       "type": "array",
       "items": {

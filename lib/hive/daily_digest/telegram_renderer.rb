@@ -12,6 +12,10 @@ module Hive
     # Every dynamic field is control-stripped, length-bounded, and escaped at
     # this sink; attention rows use an explicit privacy allowlist.
     class TelegramRenderer
+      # Telegram cannot draw Mermaid, so each diagram becomes a pointer to the
+      # web digest instead of raw diagram source.
+      MERMAID_FENCE = /^```mermaid[ \t]*\r?\n.*?^```[ \t]*$/m
+
       MAX_CHARS = 3_800
       MAX_ATTENTION = 5
       MAX_ITEMS = 8
@@ -62,7 +66,9 @@ module Hive
       private
 
       def render_document(record)
-        source = record.fetch("document")
+        source = record.fetch("document").gsub(MERMAID_FENCE) do
+          "[Diagram: open the web digest](#{web_url(record.fetch('local_date'))})"
+        end
         html = source.lines.map do |line|
           heading = line.match(/\A\#{1,6} (.+?)\s*\z/)
           heading ? "<b>#{document_inline(heading[1])}</b>\n" : document_inline(line.sub(/\A[-*] /, "• "))

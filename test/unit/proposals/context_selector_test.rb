@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/proposals/context_selector"
 require "hive/context_provenance"
+require "hive/git_ops"
 require_relative "../../support/proposal_query_fixture"
 
 class ProposalContextSelectorTest < Minitest::Test
@@ -114,8 +115,10 @@ class ProposalContextSelectorTest < Minitest::Test
   end
 
   def test_prompt_composition_preserves_receipt_appendix_and_shared_byte_cap
-    with_tmp_dir do |project|
-      state_root = File.join(project, ".hive-state", "proposals", "v1")
+    with_tmp_git_repo do |project|
+      git_ops = Hive::GitOps.new(project)
+      git_ops.hive_state_init
+      state_root = File.join(git_ops.hive_state_path, "proposals", "v1")
       FileUtils.mkdir_p(File.join(project, ".hive-state", "stages", "4-execute", "task"))
       @root = state_root
       @store = Hive::Proposals::Store.new(root: state_root)
@@ -125,6 +128,10 @@ class ProposalContextSelectorTest < Minitest::Test
       create_record(@rejected, revision: "v2", retries: @draft)
       append_evaluation(@rejected, 1, "fail", "cost", 1.4)
       append_rejection(@rejected, 2)
+      git_ops.hive_commit(
+        stage_name: "proposals", slug: "fixture", action: "recorded context",
+        pathspecs: %w[proposals/v1/records proposals/v1/events]
+      )
       task = PromptTask.new(
         project_root: project,
         folder: File.join(project, ".hive-state", "stages", "4-execute", "task"),

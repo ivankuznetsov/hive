@@ -7,6 +7,7 @@ require "pathname"
 require "set"
 require "json"
 require "hive/agent_profiles"
+require "hive/attempts/memory_limit"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
@@ -503,7 +504,20 @@ module Hive
           "daily_digest_delivery" => 300
         },
         "log_max_bytes" => 10_485_760,
-        "log_max_files" => 5
+        "log_max_files" => 5,
+        # Memory cap for each durable attempt's transient systemd user scope
+        # (`hive-attempt-*.scope`, Linux with a user manager only; a no-op on
+        # macOS or plain-spawn hosts). The scope holds the agent CLI and
+        # every tool, probe, test, and CI command it starts, so one cap bounds
+        # a runaway child before it pushes a small shared host into
+        # systemd-oomd. 6G clears observed agent peaks with headroom while
+        # stopping a runaway probe (seen at 4-4.6 GB within seconds) well
+        # short of a 16 GB host; swap 0 makes the cap bite immediately rather
+        # than after a long swap storm. Values use systemd size syntax
+        # ("6G", "512M", "50%", "infinity") or bytes; `false` disables.
+        # The swap cap applies only together with a memory cap.
+        "attempt_memory_max" => "6G",
+        "attempt_memory_swap_max" => "0"
       },
       # Update flow (plan 2026-05-27-002). The daemon checks the latest
       # release on a throttled cadence and, on the install.sh channel,
@@ -3904,6 +3918,21 @@ module Hive
 
       validate_daemon_verb_timeouts!(daemon, source_path)
       validate_daemon_stage_timeouts!(daemon, source_path)
+      validate_daemon_memory_limits!(daemon, source_path)
+    end
+
+    def validate_daemon_memory_limits!(daemon, source_path)
+      { "attempt_memory_max" => false, "attempt_memory_swap_max" => true }.each do |key, allow_zero|
+        next unless daemon.key?(key)
+
+        value = daemon[key]
+        reason = Hive::Attempts::MemoryLimit.invalid_reason(value, allow_zero: allow_zero)
+        next unless reason
+
+        raise ConfigError,
+              "daemon.#{key} in #{describe_source(source_path)} #{reason}; " \
+              "got #{value.inspect} (#{value.class})"
+      end
     end
 
     def validate_web_config!(cfg, source_path)

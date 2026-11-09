@@ -16,6 +16,27 @@ attempt row fails closed with an invalid attempt record rather than a clean
 newer-schema refusal. Whether a dedicated fence (schema v3 plus a
 QuiescenceUpgrade source) is wanted is undecided.
 
+## Attempt memory cap (2026-11-08)
+
+- `memory_limit_exceeded` is recorded in the attempt log and in synthesized
+  patrol-fix diagnostics only. The terminal receipt (`receipt_version` 2,
+  exact key set) has no failure-reason field, so `hive attempt` views and
+  recovery still see a generic `failed` with exit 137. A typed receipt field
+  needs a receipt version bump.
+- There is no separate `review.ci.memory_max`. Review CI runs as a descendant
+  of the review attempt and is already bounded by the attempt scope cap. A
+  CI-specific `systemd-run --scope` would create a sibling scope under
+  `app.slice` that escapes the attempt cap, so a CI-specific limit should
+  instead use a nested cgroup inside the delegated attempt scope. Not
+  implemented.
+- No memory-based admission: Hive does not delay launches while
+  `MemAvailable` is below the cap.
+- The `OOMPolicy=continue` gate relies on `systemd-run --version` >= 253. On
+  older managers, scopes take no unit action on OOM, which matches the
+  intended behavior. This has been verified only on systemd 262.
+- `oom_kill` is a cumulative counter for the scope, so concurrent descendant
+  kills just before the worker's own `SIGKILL` are attributed to it.
+
 ## Review base-conflict gate and rewind archive (2026-11-08)
 
 - Finalize's merge-time handling of `BEHIND` (guarded update-branch) is still

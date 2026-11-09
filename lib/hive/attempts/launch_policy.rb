@@ -17,6 +17,15 @@ module Hive
         daemon.fetch("child_kill_grace_sec").to_i
       end
 
+      # Host-level memory cap for the attempt's systemd user scope. Older
+      # global configs may predate the keys, so fall back to "disabled".
+      def memory_limits(daemon:)
+        {
+          memory_max: daemon.fetch("attempt_memory_max", false),
+          memory_swap_max: daemon.fetch("attempt_memory_swap_max", false)
+        }
+      end
+
       def limits(daemon:)
         {
           max_global: daemon.fetch("max_concurrent_runs"),

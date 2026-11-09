@@ -4818,6 +4818,48 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_daemon_defaults_and_overrides_attempt_memory_cap
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_daemon
+      assert_equal "6G", cfg["attempt_memory_max"]
+      assert_equal "0", cfg["attempt_memory_swap_max"]
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        daemon:
+          attempt_memory_max: false
+          attempt_memory_swap_max: 0
+      YAML
+      cfg = Hive::Config.load_global_daemon
+      assert_equal false, cfg["attempt_memory_max"]
+      assert_equal 0, cfg["attempt_memory_swap_max"]
+    end
+  end
+
+  def test_load_global_daemon_rejects_invalid_attempt_memory_caps
+    {
+      "attempt_memory_max" => [ "6 GB", 0, nil, true ],
+      "attempt_memory_swap_max" => [ "lots", -1 ]
+    }.each do |key, values|
+      values.each do |value|
+        with_tmp_global_config do |home|
+          File.write(
+            File.join(home, "config.yml"),
+            { "registered_projects" => [], "daemon" => { key => value } }.to_yaml
+          )
+
+          err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+          assert_match(/daemon\.#{key} .*systemd size/, err.message)
+        end
+      end
+    end
+  end
+
+  def test_daemon_validation_skips_memory_keys_absent_from_a_partial_block
+    Hive::Config.send(:validate_daemon_memory_limits!, {}, "inline")
+  end
+
   def test_load_global_daemon_rejects_non_hash_daemon_block
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)

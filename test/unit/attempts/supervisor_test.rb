@@ -1026,6 +1026,101 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_worker_killed_by_scope_oom_records_typed_memory_limit_reason
+    worker_argv = [ "/bin/sh", "-c", "kill -KILL $$" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      counts = [ 2, 3 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "failed", terminal.outcome
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "failure_reason=memory_limit_exceeded oom_kills=1"
+    end
+  end
+
+  def test_descendant_oom_kill_is_a_notice_when_the_worker_survives
+    worker_argv = [ "/bin/sh", "-c", "exit 0" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      counts = [ 0, 2 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "memory_limit_oom_kills=2"
+      refute_includes log, "failure_reason="
+    end
+  end
+
+  def test_unavailable_oom_counter_leaves_the_log_untouched
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "kill -KILL $$" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { nil }
+      )
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      refute_includes attempt_log_text(store, store.fetch(attempt.attempt_id)), "memory_limit"
+    end
+  end
+
+  def test_memory_limit_log_failures_do_not_break_terminalization
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new,
+      oom_kill_counter: -> { 1 }
+    )
+    supervisor.instance_variable_set(:@worker_signal, "KILL")
+    log = Object.new
+    log.define_singleton_method(:append) { |*| raise IOError, "attempt log is closed" }
+
+    assert_nil supervisor.send(:record_memory_limit_kills, 0, log)
+    assert_equal "memory_limit_exceeded", supervisor.instance_variable_get(:@failure_reason)
+  end
+
+  def test_signalled_patrol_attempt_reports_memory_limit_agent_reason
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(
+      worker_argv: worker_argv, intended_stage: "2-fix",
+      workflow_controller: :patrol_fix
+    ) do |store, attempt|
+      counts = [ 0, 1 ]
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        oom_kill_counter: -> { counts.shift }
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        worker = <<~'RUBY'
+          gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+          abort "gate not released" unless gate.read(1) == "1"
+          Process.kill("KILL", Process.pid)
+        RUBY
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 137, Timeout.timeout(10) { supervisor.run }
+      diagnostic = diagnostic_from_terminal(store, store.fetch(attempt.attempt_id))
+      assert_equal "memory_limit_exceeded", diagnostic.fetch("agent_reason")
+      assert_equal "KILL", diagnostic.fetch("signal")
+    end
+  end
+
   def test_cancel_signal_synthesizes_cancelled_artifact_and_log_reference
     worker_argv = [ "hive", "run", "durable-task" ]
     with_attempt(
@@ -1381,6 +1476,12 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   private
+
+  def attempt_log_text(store, terminal)
+    Hive::Attempts::StreamLog.read(
+      File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+    ).map(&:bytes).join
+  end
 
   def inject_torn_log_separator_failure(archive, persistent:)
     original = archive.method(:open_writer)

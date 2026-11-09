@@ -605,7 +605,9 @@ reference.
      "daily_digest_close" => 3600,
      "daily_digest_delivery" => 300},
    "log_max_bytes" => 10485760,
-   "log_max_files" => 5},
+   "log_max_files" => 5,
+   "attempt_memory_max" => "6G",
+   "attempt_memory_swap_max" => "0"},
  "update" => {"check" => true, "auto" => true},
  "web" =>
   {"bind" => "127.0.0.1",
@@ -942,7 +944,7 @@ include:
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence, 0–100 alpha, per-feature/run counts, interval, `scheduled_discovery_launches_per_engine_per_day >= 2`, and command shape are validated before the scheduler or `hive patrol` command can run. The selected mode always projects the closed 2/4/8/16 table; the projected key is not an independent override. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
 10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, and semantic scope plus contract/dependency policy booleans. File count and diff size are publication evidence, not config or mutation gates; runtime mutation remains protected by root/path confinement, `.hive-state` and protected-path checks, secret scanning, dependency and public-contract guards, and applicable validation commands. Invalid side-effect policy fails at config load, not in a background action.
-11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
+11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present. `daemon.attempt_memory_max` (default `"6G"`) and `daemon.attempt_memory_swap_max` (default `"0"`) must be `false` (disabled), a byte Integer, or a systemd size (`"512M"`, `"6G"`, `"50%"`, `"infinity"`); the memory cap must be non-zero. They are host-level launch controls read from the global daemon block (like `child_kill_grace_sec`) and applied to each durable attempt's systemd user scope — see [[modules/attempts]] "Attempt memory cap".
 12. **`validate_dependency_gate_stage!`** — `dependency_gate_stage` must be exactly `8-finalize` or `9-done`. Runtime admission applies it to scalar dependencies, applies fixed `9-done` to lists, and checks reachability against each prerequisite task's selected workflow rather than assuming the coding descriptor.
 13. **`validate_model_routing_capabilities!`** — after structural role and
 patrol validation, resolves exact/coarse routes for enabled, reachable built-in

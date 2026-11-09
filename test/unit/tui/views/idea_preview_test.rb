@@ -138,7 +138,7 @@ class HiveTuiViewsIdeaPreviewTest < Minitest::Test
 
   def test_truncates_extra_block_before_common_block_when_height_overflows
     extra = (1..20).map { |i| "extra line #{i}" }.join("\n")
-    out = render(state: info_state(original_text: "common survives", stage_extra: extra), height: 14)
+    out = render(state: info_state(original_text: "common survives", stage_extra: extra), height: 13)
 
     assert_includes out, "created_at:"
     assert_includes out, "folder:"
@@ -146,7 +146,8 @@ class HiveTuiViewsIdeaPreviewTest < Minitest::Test
     assert_includes out, "Original idea"
     assert_includes out, "common survives"
     assert_includes out, "brainstorm.md"
-    assert_includes out, "…"
+    assert_includes out.lines(chomp: true), "…",
+      "overflow must reserve a standalone … marker row, not just an inline chrome ellipsis"
     refute_includes out, "extra line 20"
   end
 

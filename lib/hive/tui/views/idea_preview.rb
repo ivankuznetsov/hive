@@ -63,7 +63,11 @@ module Hive
           return [] if capacity <= 0
           return truncate_rows(base, capacity, width) if extra.empty?
 
-          # Reserve at least the title block so a long original_text cannot suppress extra entirely.
+          # Reserve up to the extra block's first three chrome rows so a long
+          # original_text cannot suppress extra entirely. This floors how many
+          # rows extra may claim; it does not guarantee its title survives. At a
+          # tight capacity (e.g. 3: base 1 / extra 2) extra's allotment collapses
+          # to a blank row plus the `…` marker, dropping the title row.
           extra_reserve = [ extra.length, 3 ].min
           base_capacity = [ capacity - extra_reserve, 1 ].max
           base_rows = truncate_rows(base, base_capacity, width)

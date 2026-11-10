@@ -56,6 +56,23 @@ class HiveBotRecoveryResultBuilderTest < Minitest::Test
     end
   end
 
+  def test_build_dispatches_coordinator_recovery_once_a_max_pass_escalation_is_answered
+    Dir.mktmpdir("hive-review-escalation") do |folder|
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      File.write(File.join(folder, "reviews", "escalations-02.md"), "### Q1. Keep it?\n### A1.\nYes.\n")
+      row = Struct.new(:folder).new(folder)
+
+      result = Hive::Bot::Handlers::RecoveryResultBuilder.build(
+        project: "hive", slug: "stale-260525-abcd", stage: "6-review",
+        marker: "review_stale", match_attr: "marker_id=m2",
+        attrs: { "pass" => "2", "marker_id" => "m2" }, row: row,
+        result_class: Result, clear_keyboard: true
+      )
+
+      assert_equal :dispatch_recovery, result.action
+    end
+  end
+
   def test_build_short_circuits_on_no_retry_verb_stage
     result = Hive::Bot::Handlers::RecoveryResultBuilder.build(
       project: "hive", slug: "done-260525-abcd", stage: "9-done",

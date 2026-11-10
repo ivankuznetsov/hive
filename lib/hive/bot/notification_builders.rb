@@ -385,13 +385,16 @@ module Hive
       end
 
       # Returns the operator-facing reply text for a manual-only state.
-      # EXECUTE_STALE is always manual; max-pass REVIEW_STALE is manual while
-      # its escalation artifact exists. Row-aware callers supply attrs/folder.
+      # EXECUTE_STALE is always manual; max-pass REVIEW_STALE is manual until
+      # the operator answers one of its escalations, after which Autofix (like
+      # `hive act workflow.retry`) submits the guarded retry. Row-aware
+      # callers supply attrs/folder.
       def manual_only_reply(marker:, attrs: nil, folder: nil)
         if Hive::Recovery.intervention_required?(
           marker: marker, attrs: attrs || {}, folder: folder
         )
-          return "Edit the current review escalation, then retry from the TUI with `r`."
+          return "Edit the current review escalation: answer an open question and Hive offers " \
+                 "a guarded retry here and in `hive status --operational --json`, or retry from the TUI with `r`."
         end
 
         "Hive has no automatic recovery for this state - open it on a laptop."

@@ -1,3 +1,5 @@
+require "hive/review_escalations"
+
 module Hive
   # Shared, policy-free vocabulary for durable recovery. Mutation and pacing
   # remain owned by RecoveryCoordinator; adapters use Recovery::API.
@@ -52,37 +54,116 @@ module Hive
       end
     end
 
+    RETRY_STEP = "refresh `hive status --operational --json` and invoke this " \
+                 "task's workflow.retry action with `hive act`".freeze
+
     # A max-pass REVIEW_STALE with unresolved reviewer input needs an operator
-    # edit. A newer fix-success receipt proves the escalations were already
-    # handled; that shape is restart recovery, not a human decision, and may
-    # use the ordinary automatic retry path.
+    # edit; no surface may offer a routine retry for it. Once the operator has
+    # answered an escalation (:operator_answered), operator surfaces may submit
+    # the guarded retry, but the daemon still never retries it on its own.
     def intervention_required?(marker:, attrs:, folder:)
       review_stale_recovery_state(marker:, attrs:, folder:) == :operator
     end
 
+    # True for every max-pass REVIEW_STALE that only an operator may resume,
+    # answered or not. Automatic recovery (healer/daemon) checks this.
+    def operator_owned_review_stale?(marker:, attrs:, folder:)
+      %i[operator operator_answered].include?(
+        review_stale_recovery_state(marker:, attrs:, folder:)
+      )
+    end
+
+    # A newer fix-success receipt proves the escalations were already handled;
+    # that shape is restart recovery, not a human decision, and may use the
+    # ordinary automatic retry path.
     def completed_review_stale?(marker:, attrs:, folder:)
       review_stale_recovery_state(marker:, attrs:, folder:) == :automatic
     end
 
+    # :not_applicable — not a pass-bound REVIEW_STALE with escalations.
+    # :automatic — fresh fix-success receipt; restart recovery.
+    # :operator — operator input is still missing.
+    # :operator_answered — the operator answered at least one escalation for
+    #   the marker's pass; explicit operator retry only.
     def review_stale_recovery_state(marker:, attrs:, folder:)
       return :not_applicable unless marker.to_s.downcase == "review_stale"
 
       normalized = attrs.to_h.transform_keys(&:to_s)
-      return :operator if normalized["reason"] == "final_fix_unverified"
-
+      final_fix = normalized["reason"] == "final_fix_unverified"
       pass = normalized["pass"].to_s
-      return :not_applicable unless pass.match?(/\A[1-9]\d*\z/)
+      unless pass.match?(/\A[1-9]\d*\z/)
+        return final_fix ? :operator : :not_applicable
+      end
 
-      suffix = format("%02d", pass.to_i)
-      escalations = File.join(folder.to_s, "reviews", "escalations-#{suffix}.md")
-      return :not_applicable unless File.exist?(escalations)
+      escalations = Hive::ReviewEscalations.path(folder, pass)
+      unless File.exist?(escalations)
+        return final_fix ? :operator : :not_applicable
+      end
 
-      fix_success = File.join(folder.to_s, "reviews", "fix-success-#{suffix}.md")
-      return :operator unless File.exist?(fix_success)
+      unless final_fix
+        fix_success = File.join(folder.to_s, "reviews", "fix-success-#{format('%02d', pass.to_i)}.md")
+        if File.exist?(fix_success) && File.mtime(fix_success) >= File.mtime(escalations)
+          return :automatic
+        end
+      end
 
-      File.mtime(fix_success) < File.mtime(escalations) ? :operator : :automatic
-    rescue SystemCallError, IOError
+      operator_answered?(escalations, normalized) ? :operator_answered : :operator
+    rescue SystemCallError, IOError, EncodingError, ArgumentError
       :operator
+    end
+
+    # The next fix pass consumes every non-empty `### A<n>.` answer and skips
+    # blank ones, and a verify pass hands the whole file to triage, so one
+    # answer is real input. When the marker recorded how many questions were
+    # open at stall time (`escalations=`), answers already present then do not
+    # count: only an answer added afterwards is new operator input.
+    def operator_answered?(escalations, attrs)
+      questions = Hive::ReviewEscalations.questions(escalations)
+      answered = questions.count { |question| Hive::ReviewEscalations.answered?(question) }
+      return false if answered.zero?
+
+      recorded = attrs["escalations"].to_s
+      return true unless recorded.match?(/\A\d+\z/)
+
+      questions.length - answered < recorded.to_i
+    end
+
+    # Operator-facing next step for a REVIEW_STALE marker, shared by the stage
+    # runner's pre-flight warning and `hive run`/`hive review` reports.
+    def review_stale_guidance(attrs:, folder:)
+      normalized = attrs.to_h.transform_keys(&:to_s)
+      state = review_stale_recovery_state(marker: "review_stale", attrs: normalized, folder: folder)
+      return "inspect or edit the highest-pass review files, then #{RETRY_STEP}" unless
+        %i[operator operator_answered].include?(state)
+
+      escalations = Hive::ReviewEscalations.path(folder, normalized["pass"])
+      file = "reviews/#{File.basename(escalations)}"
+      if state == :operator_answered
+        return "operator answers in #{file} are recorded; #{RETRY_STEP} " \
+               "(Hive never retries this automatically)"
+      end
+
+      final_fix = normalized["reason"] == "final_fix_unverified"
+      grant = "grant more fix passes with the review_grant action in `hive status --operational --json`"
+      if open_escalation?(escalations)
+        step = "answer the open `### A<n>.` questions in #{file}, then #{RETRY_STEP}"
+        return final_fix ? "#{step}; to let Hive apply fixes instead, #{grant} before answering" : step
+      end
+      if final_fix
+        return "no escalation question is open; #{grant}, or commit fixes locally " \
+               "and retry from `hive tui` with `r`"
+      end
+
+      "edit #{file}, then retry from `hive tui` with `r`"
+    end
+
+    # An escalations file whose bytes cannot be parsed has no question the
+    # operator could answer to unlock a routine retry.
+    def open_escalation?(escalations)
+      Hive::ReviewEscalations.questions(escalations)
+        .any? { |question| !Hive::ReviewEscalations.answered?(question) }
+    rescue EncodingError, ArgumentError
+      false
     end
   end
 end

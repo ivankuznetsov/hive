@@ -20,6 +20,7 @@ require "hive/task_meta"
 require "hive/commit_or_rollback"
 require "hive/terminal_outcome"
 require "hive/review_residual_commit"
+require "hive/recovery"
 
 module Hive
   module Commands
@@ -593,8 +594,7 @@ module Hive
           end
         when :review_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "inspect or edit the highest-pass review files, then refresh " \
-                              "`hive status --operational --json` and invoke this task's workflow.retry action",
+            "instructions" => review_stale_instructions(task, marker),
             "markers_to_clear" => [ "review_stale" ] }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
@@ -717,6 +717,12 @@ module Hive
         end
       end
 
+      # A max-pass REVIEW_STALE offers workflow.retry only once the operator
+      # answers an escalation, so the text depends on the escalation state.
+      def review_stale_instructions(task, marker)
+        Hive::Recovery.review_stale_guidance(attrs: marker.attrs, folder: task.folder)
+      end
+
       def review_ci_stale_instructions(marker)
         if marker.attrs["reason"].to_s == "base_conflict"
           return "the PR conflicts with its base: merge origin/<base> into the task branch with a merge " \
@@ -788,8 +794,7 @@ module Hive
           puts "  next: answer open questions in reviews/escalations-NN.md; legacy reviewer files still accept [x], " \
                "then `hive run #{task.folder}`"
         when :review_stale
-          puts "  next: inspect or edit the highest-pass review files, then refresh " \
-               "`hive status --operational --json` and invoke this task's workflow.retry action"
+          puts "  next: #{review_stale_instructions(task, marker)}"
           review_recovery_hints(task, marker).each { |hint| puts "  next: #{hint}" }
         when :review_ci_stale
           puts "  next: #{review_ci_stale_instructions(marker)}"

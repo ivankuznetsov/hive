@@ -1955,6 +1955,26 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  def test_final_stale_diagnostic_suggests_the_guarded_retry_only_after_an_answer
+    Dir.mktmpdir("task-action-review-stale-answered") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      reviews = File.join(task.folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      escalations = File.join(reviews, "escalations-03.md")
+      File.write(escalations, "### Q1. Keep the manual proof?\n### A1.\n\n")
+      stale = marker(:review_stale, "reason" => "final_fix_unverified", "pass" => "3",
+                                    "accepted" => "0", "escalations" => "1", "marker_id" => "m3")
+
+      assert_equal({ "kind" => "manual_fix", "command" => nil }, Hive::TaskAction.for(task, stale).diagnostic)
+
+      File.write(escalations, "### Q1. Keep the manual proof?\n### A1.\nYes.\n\n")
+      suggested = Hive::TaskAction.for(task, stale).diagnostic.fetch("suggested_next_action")
+
+      assert_equal "retry", suggested.fetch("kind")
+      assert_recovery_action_command(suggested.fetch("command"), task)
+    end
+  end
+
   def test_auto_commit_scope_failure_diagnostic_is_retryable
     with_tmp_dir do |dir|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: dir)

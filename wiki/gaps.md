@@ -3,9 +3,34 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-09
+updated: 2026-11-10
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Answered max-pass REVIEW_STALE retry: open edges (2026-11-10)
+
+Operational status now offers `workflow.retry` for a max-pass `REVIEW_STALE`
+once the operator fills at least one `### A<n>.` answer
+(`Hive::Recovery.review_stale_recovery_state == :operator_answered`). Open
+questions left by that change:
+
+- Answering a `reason=final_fix_unverified` park before a review grant makes
+  `ReviewBudget#validate_exhaustion!` count the answers as accepted findings,
+  so the grant reports `contradictory_evidence` (`review_grant_unavailable`).
+  The answered shape's only routine path is then `workflow.retry`, which
+  re-runs the verify pass with the answers as triage context and cannot apply
+  fixes. Whether grants should accept answers recorded before the grant is
+  undecided.
+- A retried verify pass deletes and rewrites `reviews/escalations-NN.md`; the
+  operator's answers reach triage as prompt context, but the working copy then
+  holds only the new triage output.
+- Legacy checkbox escalation files (`- [x]` lines without `### Q<n>.` blocks)
+  are not recognized as operator input; those rows still need TUI `r`.
+- The shared predicate applies to every pass-bearing `REVIEW_STALE` with an
+  escalations file, including `reason=wall_clock`, not only the max-pass shape.
+  Such wall-clock rows share the operator gating (pre-existing behavior).
+- TUI `r` still force-retries an unanswered max-pass row as an explicit
+  operator gesture, while CLI, agent and bot surfaces require an answer.
 
 ## Proposal subject binding has no runtime database version fence (2026-11-08)
 

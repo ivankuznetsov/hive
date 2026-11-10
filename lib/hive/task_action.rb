@@ -898,8 +898,13 @@ module Hive
     # near-identical implementations coordinated only by comments;
     # drift would silently desync producer + consumers. See PR #84
     # review finding #17.
+    #
+    # This is the max-pass *shape*, answered or not: the TUI keeps Enter as
+    # browse/edit and `r` as its forced retry for both. Whether operator input
+    # is still missing (no routine retry anywhere) is
+    # Hive::Recovery.intervention_required?.
     def self.max_passes_review_stale_with_escalations?(folder:, marker_name:, attrs:)
-      Hive::Recovery.intervention_required?(
+      Hive::Recovery.operator_owned_review_stale?(
         marker: marker_name, attrs: attrs || {}, folder: folder
       )
     end

@@ -510,6 +510,16 @@ jobs:
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb
+      - name: Upload golden-path E2E debug bundle
+        if: ${{ failure() && matrix.suite == 'golden' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: golden-e2e-debug
+          path: |
+            /tmp/golden-e2e-debug
+            web/tmp/screenshots
+          if-no-files-found: ignore
+          retention-days: 7
       - name: rubocop (web)
         if: ${{ matrix.suite == 'integration' }}
         run: bin/rubocop --format github

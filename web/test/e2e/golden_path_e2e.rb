@@ -72,6 +72,14 @@ class GoldenPathE2E < ApplicationSystemTestCase
         puts "===== daemon pid #{@daemon_pid} alive=#{alive} ====="
       end
       puts "===== HIVE_HOME/logs: #{Dir[File.join(ENV["HIVE_HOME"], "logs", "*")].inspect} ====="
+      # The daemon log only says a stage child exited; the child's own
+      # stdout/stderr (and the task's agent logs) say why. Print their tails.
+      child_logs = Dir[File.join(ENV["HIVE_HOME"], "logs", "daemon-children", "**", "*.log")]
+      agent_logs = Dir[File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", "*", ".hive-state", "logs", "*", "*.log")]
+      (child_logs + agent_logs).sort.each do |f|
+        puts "===== #{f.delete_prefix("#{ENV["HIVE_TEST_HOME_ROOT"]}/")} (tail) ====="
+        puts File.readlines(f).last(60).join
+      end
       debug_dir = "/tmp/golden-e2e-debug"
       FileUtils.rm_rf(debug_dir)
       FileUtils.mkdir_p(debug_dir)

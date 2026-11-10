@@ -14,9 +14,10 @@ set -euo pipefail
 project_override=""
 retry_selector=""
 drain_mode=0
+proposal_source=""
 
 usage() {
-  printf 'Usage: %s [--project <path>] [--drain | --retry-failed <sha|all>]\n' "$0"
+  printf 'Usage: %s [--project <path>] [--proposal-source <sha>] [--drain | --retry-failed <sha|all>]\n' "$0"
 }
 
 while [ "$#" -gt 0 ]; do
@@ -32,6 +33,14 @@ while [ "$#" -gt 0 ]; do
     --drain)
       drain_mode=1
       shift
+      ;;
+    --proposal-source)
+      [ "$#" -ge 2 ] || {
+        usage >&2
+        exit 2
+      }
+      proposal_source="$2"
+      shift 2
       ;;
     --retry-failed)
       [ "$#" -ge 2 ] || {
@@ -49,6 +58,14 @@ while [ "$#" -gt 0 ]; do
 done
 if [ "$drain_mode" -eq 1 ] && [ -n "$retry_selector" ]; then
   printf 'llm-wiki: --drain and --retry-failed are mutually exclusive\n' >&2
+  exit 2
+fi
+if [ -n "$proposal_source" ] && { [ "$drain_mode" -eq 1 ] || [ -n "$retry_selector" ]; }; then
+  printf 'llm-wiki: --proposal-source cannot be combined with drain or retry mode\n' >&2
+  exit 2
+fi
+if [ -n "$proposal_source" ] && [[ ! "$proposal_source" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+  printf 'llm-wiki: proposal source must be a full source SHA\n' >&2
   exit 2
 fi
 if [ "$retry_selector" != all ] && [ -n "$retry_selector" ] && \
@@ -134,6 +151,7 @@ state_dir="$common_dir/llm-wiki"
 pending_dir="$state_dir/pending"
 failed_dir="$state_dir/failed"
 failure_count_file="$state_dir/consecutive-failures"
+proposal_failure_count_file="$state_dir/proposal-consecutive-failures"
 breaker_file="$state_dir/refresh-disabled"
 publication_blocked_file="$state_dir/publication-blocked"
 canonical_config="$state_dir/config.json"
@@ -148,6 +166,8 @@ remote_base_ref="refs/llm-wiki/remotes/base"
 lock_owner_oid=""
 global_lock_fd=""
 global_lock_keeper_pid=""
+global_provider_lock_acquired=0
+BATCH_PROPOSAL_ONLY=0
 mkdir -p "$pending_dir" "$failed_dir"
 
 positive_integer_or_default() {
@@ -167,6 +187,17 @@ max_path_bytes="$(positive_integer_or_default "${LLM_WIKI_MAX_PATH_BYTES:-200}" 
 
 log_line() {
   printf '[llm-wiki][%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$log_file" 2>/dev/null || true
+}
+
+primary_checkout() {
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      printf '%s\n' "${line#worktree }"
+      return 0
+    fi
+  done < <(git worktree list --porcelain 2>/dev/null)
+  return 1
 }
 
 configure_qmd_environment() {
@@ -189,16 +220,28 @@ run_qmd() {
 sha="$(git rev-parse HEAD 2>/dev/null || true)"
 [ -n "$sha" ] || exit 0
 if [ "$drain_mode" -eq 0 ] && [ -z "$retry_selector" ]; then
-  changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
+  if [ -n "$proposal_source" ]; then
+    sha="$(git rev-parse --verify "${proposal_source}^{commit}" 2>/dev/null || true)"
+    [ -n "$sha" ] || {
+      printf 'llm-wiki: proposal source commit is unavailable\n' >&2
+      exit 2
+    }
+    changed_files="proposals/v1/records/.explicit-refresh"
+  else
+    changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
+  fi
   [ -n "$changed_files" ] || exit 0
 
-  # wiki/log.md is compiled from wiki/log.d fragments. A commit that only
-  # rewrites the compiled projection contains no new source for the wiki agent.
-  if ! printf '%s\n' "$changed_files" | grep -Fqvx 'wiki/log.md'; then
+  # Compiled projections contain no new source for either compiler. A commit
+  # that changes another path in the same batch still enters the queue.
+  if ! printf '%s\n' "$changed_files" | grep -Evqx \
+    '(wiki/log\.md|wiki/proposals\.json|wiki/proposals\.md)'; then
     exit 0
   fi
 
   if ! printf '%s\n' "$changed_files" | grep -Eq \
+    '^proposals/v1/(records/|events/)' && \
+     ! printf '%s\n' "$changed_files" | grep -Eq \
     '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma|routes|controllers|handlers|resolvers|app/|src/|lib/|test/|tests/|spec/|templates/|config/|bin/|README\.md|Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock|docs/|wiki/|raw/notes/|plans/|todos/|CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)'; then
     exit 0
   fi
@@ -300,6 +343,12 @@ acquire_global_provider_lock() {
   [ "$lock_status" = "locked" ]
 }
 
+ensure_global_provider_lock() {
+  [ "$global_provider_lock_acquired" -eq 1 ] && return 0
+  acquire_global_provider_lock || return 1
+  global_provider_lock_acquired=1
+}
+
 lock_owner_stale() {
   local owner_oid="$1" owner pid identity current_identity
   owner="$(git cat-file -p "$owner_oid" 2>/dev/null || true)"
@@ -358,6 +407,17 @@ pending_sources_present() {
   [ "$(pending_source_count)" -gt 0 ]
 }
 
+ordinary_pending_source_count() {
+  local path count=0
+  shopt -s nullglob
+  for path in "$pending_dir"/*; do
+    [ -f "$path" ] || continue
+    queue_file_proposal_only "$path" || count=$((count + 1))
+  done
+  shopt -u nullglob
+  printf '%s\n' "$count"
+}
+
 queue_temp_source_sha() {
   local name
   name="$(basename "$1")"
@@ -408,7 +468,7 @@ recover_queue_temps() {
 
 open_backlog_circuit_if_needed() {
   local count breaker_tmp
-  count="$(pending_source_count)"
+  count="$(ordinary_pending_source_count)"
   [ "$count" -gt "$max_auto_pending" ] || return 1
   breaker_tmp="$state_dir/.refresh-disabled.$$"
   printf 'backlog:%s\n' "$count" >"$breaker_tmp"
@@ -478,7 +538,7 @@ reconcile_circuit_after_success() {
   # hook that arrives after this removal will wait for this lock and perform its
   # own reconciliation.
   rm -f -- "$breaker_file"
-  pending_count="$(pending_source_count)"
+  pending_count="$(ordinary_pending_source_count)"
   failed_count="$(failed_source_count)"
   if [ "$failed_count" -gt 0 ]; then
     breaker_tmp="$state_dir/.refresh-disabled.$$"
@@ -541,7 +601,8 @@ failed_source_count() {
   local path count=0
   shopt -s nullglob
   for path in "$failed_dir"/*; do
-    [ -f "$path" ] && count=$((count + 1))
+    [ -f "$path" ] || continue
+    queue_file_proposal_only "$path" || count=$((count + 1))
   done
   shopt -u nullglob
   printf '%s\n' "$count"
@@ -841,6 +902,102 @@ snapshot_queue() {
   [ "${#QUEUE_FILES[@]}" -gt 0 ]
 }
 
+queue_file_proposal_only() {
+  local file="$1" path saw_canonical=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in
+      proposals/v1/records/*|proposals/v1/events/*) saw_canonical=1 ;;
+      proposals/v1/*) ;;
+      *) return 1 ;;
+    esac
+  done < <(sed -n '2,$p' "$file")
+  [ "$saw_canonical" -eq 1 ]
+}
+
+queue_batch_proposal_only() {
+  local file
+  [ "${#QUEUE_FILES[@]}" -gt 0 ] || return 1
+  for file in "${QUEUE_FILES[@]}"; do
+    queue_file_proposal_only "$file" || return 1
+  done
+}
+
+latest_proposal_source() {
+  local file queued_sha queued_branch path saw_canonical selected="" selected_row candidate_row
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    saw_canonical=0
+    while IFS= read -r path; do
+      case "$path" in
+        proposals/v1/records/*|proposals/v1/events/*) saw_canonical=1; break ;;
+      esac
+    done < <(sed -n '2,$p' "$file")
+    if [ "$saw_canonical" -eq 1 ]; then
+      if [ -z "$selected" ]; then
+        selected="$(generated_proposal_source)"
+      fi
+      if [ -z "$selected" ] || git merge-base --is-ancestor "$selected" "$queued_sha"; then
+        selected="$queued_sha"
+      elif git merge-base --is-ancestor "$queued_sha" "$selected"; then
+        :
+      else
+        selected_row="$(git show -s --format='%ct %H' "$selected")"
+        candidate_row="$(git show -s --format='%ct %H' "$queued_sha")"
+        if [ "$(printf '%s\n%s\n' "$selected_row" "$candidate_row" | LC_ALL=C sort | tail -n 1)" = "$candidate_row" ]; then
+          selected="$queued_sha"
+        fi
+      fi
+    fi
+  done
+  printf '%s\n' "$selected"
+}
+
+generated_proposal_source() {
+  local source="" index="$refresh_root/wiki/proposals.json"
+  [ -f "$index" ] || return 0
+  source="$(
+    sed -nE 's/.*"source_commit":"([0-9a-fA-F]{40,64})".*/\1/p' "$index" |
+      head -n 1
+  )"
+  if [[ "$source" =~ ^[0-9a-fA-F]{40,64}$ ]] && \
+     git cat-file -e "${source}^{commit}" 2>/dev/null; then
+    printf '%s\n' "$source"
+  fi
+}
+
+protect_generated_proposals() {
+  local path
+  for path in wiki/proposals.json wiki/proposals.md; do
+    if git -C "$refresh_root" ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+      git -C "$refresh_root" restore --source=HEAD --staged --worktree -- "$path" \
+        >>"$log_file" 2>&1 || return 1
+    else
+      rm -f -- "$refresh_root/$path"
+    fi
+  done
+}
+
+compile_proposals() {
+  local source_commit="$1" owner_root compiler
+  [ -n "$source_commit" ] || return 0
+  owner_root="$(primary_checkout || true)"
+  [ -n "$owner_root" ] || {
+    log_line "ERROR: proposal compiler could not resolve the primary checkout"
+    return 1
+  }
+  compiler="${HIVE_PROPOSAL_COMPILER_BIN:-hive}"
+  (
+    cd "$owner_root"
+    run_with_timeout "${LLM_WIKI_PROPOSAL_COMPILE_TIMEOUT:-120}" \
+      "$compiler" proposal refresh --compile-only \
+      --source-ref "$source_commit" --output-root "$refresh_root"
+  ) >>"$log_file" 2>&1 || {
+    log_line "ERROR: deterministic proposal compilation failed; queue retained"
+    return 1
+  }
+}
+
 local_source_commit() {
   local queued_sha="$1"
   git -C "$refresh_root" log -n 1 --format=%H --fixed-strings \
@@ -929,7 +1086,10 @@ prune_receipted_queue_files() {
 }
 
 record_batch_failure() {
-  local file queued_sha queued_branch count max_attempts count_tmp unreceipted=0
+  local failure_kind="$1"
+  local file queued_sha queued_branch count counter_file max_attempts count_tmp unreceipted=0
+  counter_file="$failure_count_file"
+  [ "$failure_kind" = "provider" ] || counter_file="$proposal_failure_count_file"
   max_attempts="${LLM_WIKI_MAX_REFRESH_ATTEMPTS:-2}"
   [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || max_attempts=2
 
@@ -947,17 +1107,17 @@ record_batch_failure() {
     unreceipted=1
   done
   if [ "$unreceipted" -eq 0 ]; then
-    rm -f -- "$failure_count_file"
+    rm -f -- "$counter_file"
     reconcile_circuit_after_success
     return 0
   fi
 
-  count="$(sed -n '1p' "$failure_count_file" 2>/dev/null || true)"
+  count="$(sed -n '1p' "$counter_file" 2>/dev/null || true)"
   [[ "$count" =~ ^[0-9]+$ ]] || count=0
   count="$((count + 1))"
   count_tmp="$state_dir/.consecutive-failures.$$"
   printf '%s\n' "$count" >"$count_tmp"
-  mv -f "$count_tmp" "$failure_count_file"
+  mv -f "$count_tmp" "$counter_file"
 
   if [ "$count" -ge "$max_attempts" ]; then
     for file in "${QUEUE_FILES[@]}"; do
@@ -965,22 +1125,41 @@ record_batch_failure() {
       IFS=$'\t' read -r queued_sha queued_branch <"$file"
       mv -f -- "$file" "$failed_dir/$queued_sha"
     done
-    printf 'failures:%s\n' "$count" >"$breaker_file"
-    log_line "ERROR: automatic refresh disabled after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    if [ "$failure_kind" = "provider" ]; then
+      printf 'failures:%s\n' "$count" >"$breaker_file"
+      log_line "ERROR: automatic refresh disabled after $count consecutive failed batch(es); run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    else
+      log_line "ERROR: proposal compilation quarantined after $count consecutive failed batch(es) without opening the ordinary refresh circuit; run .llm-wiki/post-commit-refresh.sh --retry-failed all"
+    fi
   else
     log_line "refresh batch failed ($count/$max_attempts consecutive failures); queue retained"
   fi
 }
 
+record_provider_batch_failure() {
+  record_batch_failure provider
+}
+
+record_proposal_batch_failure() {
+  record_batch_failure proposal
+}
+
 process_queue_batch() {
   local sources="" file queued_sha queued_branch prompt short_source compile_runner
-  local path display_path path_count omitted_paths
+  local path display_path path_count omitted_paths proposal_source proposal_only=0
   local LC_ALL=C
   local commit_args=()
+  BATCH_PROPOSAL_ONLY=0
   prune_receipted_queue_files
   if [ "${#QUEUE_FILES[@]}" -eq 0 ]; then
-    rm -f -- "$failure_count_file"
+    rm -f -- "$failure_count_file" "$proposal_failure_count_file"
     return 0
+  fi
+  proposal_source="$(latest_proposal_source)"
+  if queue_batch_proposal_only; then
+    proposal_only=1
+    BATCH_PROPOSAL_ONLY=1
+    log_line "proposal-only batch skips the headless wiki agent"
   fi
   retained_status=0
   publish_retained_sources || retained_status=$?
@@ -1036,11 +1215,16 @@ qmd; the wrapper handles bounded index maintenance. Do not invent facts.
 PROMPT
 )"
 
-  if ! run_refresh_agent "$prompt"; then
-    log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
-    return 1
+  if [ "$proposal_only" -eq 0 ]; then
+    if ! ensure_global_provider_lock; then
+      return 3
+    fi
+    if ! run_refresh_agent "$prompt"; then
+      log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
+      return 1
+    fi
+    wiki_only_changes || return 1
   fi
-  wiki_only_changes || return 1
 
   compile_runner="$refresh_root/.llm-wiki/compile-log.sh"
   if [ ! -x "$compile_runner" ] && [ -x "$state_dir/compile-log.sh" ]; then
@@ -1054,6 +1238,11 @@ PROMPT
   else
     log_line "WARN: compile-log.sh missing; leaving wiki/log.md unchanged"
   fi
+  protect_generated_proposals || {
+    log_line "ERROR: generated proposal files could not be restored; queue retained"
+    return 1
+  }
+  compile_proposals "$proposal_source" || return 1
   wiki_only_changes || return 1
 
   if [ -e "$refresh_root/wiki" ] || [ -n "$(git -C "$refresh_root" ls-files -- wiki)" ]; then
@@ -1092,7 +1281,11 @@ PROMPT
     return 1
   fi
   rm -f -- "${QUEUE_FILES[@]}"
-  rm -f -- "$failure_count_file"
+  if [ "$proposal_only" -eq 1 ]; then
+    rm -f -- "$proposal_failure_count_file"
+  else
+    rm -f -- "$failure_count_file"
+  fi
   ( cd "$refresh_root" && run_qmd update ) >>"$log_file" 2>&1 || true
   ( cd "$refresh_root" && run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 ) >>"$log_file" 2>&1 || true
   return 0
@@ -1138,13 +1331,20 @@ fi
 if ! pending_sources_present; then
   exit 0
 fi
-if ! acquire_global_provider_lock; then
-  log_line "refresh remains queued; machine-wide provider lock was busy"
-  if [ -n "$retry_selector" ]; then
-    printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
-    exit 1
+proposal_only_run=0
+if snapshot_queue && queue_batch_proposal_only; then
+  proposal_only_run=1
+fi
+if [ "$proposal_only_run" -eq 0 ]; then
+  if ! acquire_global_provider_lock; then
+    log_line "refresh remains queued; machine-wide provider lock was busy"
+    if [ -n "$retry_selector" ]; then
+      printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
+      exit 1
+    fi
+    exit 0
   fi
-  exit 0
+  global_provider_lock_acquired=1
 fi
 configure_qmd_environment
 if ! prepare_refresh_worktree; then
@@ -1168,7 +1368,14 @@ max_drain_batches="$(positive_integer_or_default "${LLM_WIKI_MAX_DRAIN_BATCHES:-
 while snapshot_queue; do
   batch_status=0
   process_queue_batch || batch_status=$?
-  if [ "$batch_status" -eq 2 ]; then
+  if [ "$batch_status" -eq 3 ]; then
+    log_line "refresh remains queued; machine-wide provider lock was busy"
+    if [ -n "$retry_selector" ]; then
+      printf 'llm-wiki: retry deferred; machine-wide refresh worker is busy\n' >&2
+      exit 1
+    fi
+    exit 0
+  elif [ "$batch_status" -eq 2 ]; then
     log_line "refresh publication deferred; it will retry without opening the provider circuit"
     if [ -n "$retry_selector" ]; then
       printf 'llm-wiki: retry generated the refresh but publication is still deferred; see %s\n' "$log_file" >&2
@@ -1176,7 +1383,12 @@ while snapshot_queue; do
     fi
     exit 0
   elif [ "$batch_status" -ne 0 ]; then
-    record_batch_failure
+    if [ "$BATCH_PROPOSAL_ONLY" -eq 1 ]; then
+      log_line "proposal-only compile failed without opening the provider failure circuit"
+      record_proposal_batch_failure
+    else
+      record_provider_batch_failure
+    fi
     if [ -n "$retry_selector" ]; then
       printf 'llm-wiki: retry failed; see %s\n' "$log_file" >&2
       exit 1
@@ -1206,7 +1418,7 @@ if [ -n "$retry_selector" ]; then
   fi
 fi
 
-main_checkout="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+main_checkout="$(primary_checkout || true)"
 project_name="$(basename "${main_checkout:-$committing_tree}")"
 for sync_dir in "$HOME/wikis/.sync-needed" "$(dirname "${main_checkout:-$committing_tree}")/wikis/.sync-needed"; do
   if [ -d "$(dirname "$sync_dir")" ]; then

@@ -169,6 +169,25 @@ class CliUsageContractsTest < Minitest::Test
     )
   end
 
+  def test_proposal_variant_maps_read_and_mutation_subcommands_to_schemas
+    assert_equal(
+      { schema: "hive-proposal-list", error_kind: "usage" },
+      Hive::CliUsageContracts.contract(%w[proposal --project demo filter])
+    )
+    assert_equal(
+      { schema: "hive-proposal-list", error_kind: "usage" },
+      Hive::CliUsageContracts.contract(%w[proposal list])
+    )
+    assert_equal(
+      { schema: "hive-proposal-show", error_kind: "usage" },
+      Hive::CliUsageContracts.contract(%w[proposal show])
+    )
+    assert_equal(
+      { schema: "hive-proposal-mutation", error_kind: "usage" },
+      Hive::CliUsageContracts.contract(%w[proposal decide prp-1])
+    )
+  end
+
   def test_workflow_variant_validates_arity_error_keeps_the_validate_envelope
     contract = Hive::CliUsageContracts.contract(%w[workflow validate editorial extra])
     assert_equal "hive-workflow-validate", contract.fetch(:schema)

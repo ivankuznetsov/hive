@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-show.v1.json",
+  "title": "Hive proposal show (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-proposal-show" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "proposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id", "subject", "revision", "proposed_change", "motivation",
+        "evidence", "author", "status", "evaluations", "decision", "lineage",
+        "rollback", "lifecycle_head", "retention", "provenance", "source_event_id",
+        "created_at", "event_count", "projection_digest", "history", "diagnostics",
+        "result_digest"
+      ],
+      "properties": {
+        "proposal_id": { "$ref": "#/$defs/ProposalId" },
+        "subject": { "type": "object" },
+        "revision": { "type": "string" },
+        "proposed_change": { "type": "string" },
+        "motivation": { "type": "string" },
+        "evidence": { "type": "array" },
+        "author": { "type": "object" },
+        "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
+        "evaluations": { "type": "array" },
+        "decision": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lineage": { "type": "object" },
+        "rollback": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lifecycle_head": { "$ref": "#/$defs/LifecycleHead" },
+        "retention": { "type": "object" },
+        "provenance": { "type": "object" },
+        "source_event_id": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "event_count": { "type": "integer", "minimum": 0 },
+        "projection_digest": { "$ref": "#/$defs/Digest" },
+        "history": { "type": "array", "items": { "$ref": "#/$defs/Event" } },
+        "diagnostics": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
+        "result_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "error_class": { "type": "string" },
+    "error_kind": {
+      "enum": [
+        "unauthorized", "stale", "conflict", "quota", "quarantine",
+        "source_unavailable", "config", "invalid", "usage"
+      ]
+    },
+    "exit_code": { "type": "integer" },
+    "message": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "ok": { "const": true } } },
+      "then": { "required": ["proposal"] },
+      "else": { "required": ["error_class", "error_kind", "exit_code", "message"] }
+    }
+  ],
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "LifecycleHead": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "digest"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Event": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "event_id", "proposal_id", "version", "type",
+        "data", "source_event_id", "provenance", "policy", "occurred_at"
+      ],
+      "properties": {
+        "schema": { "const": "hive-proposal-event" },
+        "schema_version": { "const": 1 },
+        "event_id": {
+          "type": "string",
+          "pattern": "^pev-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "proposal_id": { "$ref": "#/$defs/ProposalId" },
+        "version": { "type": "integer", "minimum": 1 },
+        "type": { "enum": ["evaluation", "decision", "supersession", "rollback"] },
+        "data": { "type": "object" },
+        "source_event_id": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+        "provenance": { "type": "object" },
+        "policy": { "type": "object" },
+        "occurred_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "Diagnostic": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "code", "path", "sha256", "bytes", "proposal_id"],
+      "properties": {
+        "kind": { "const": "quarantine" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "proposal_id": {
+          "anyOf": [{ "$ref": "#/$defs/ProposalId" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

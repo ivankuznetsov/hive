@@ -3,7 +3,7 @@ title: Templates
 type: reference
 source: templates/, lib/hive/llm_wiki_bootstrap/scripts.rb
 created: 2026-04-25
-updated: 2026-10-14
+updated: 2026-11-09
 tags: [template, erb, prompt, llm-wiki]
 ---
 
@@ -36,6 +36,13 @@ filename still identifies an available source commit are reconstructed from
 that commit and returned to the normal queue; unavailable or unrecognized temp
 files remain retained for inspection. A reconstruction that cannot read the
 source commit's changed paths also retains the original temp for a later retry.
+Proposal-only batches remain exempt from the provider-failure circuit and
+ordinary pending budget, but compile failures still increment their retry count,
+and move exhausted sources to `failed/` for explicit retry. Their quarantined
+entries do not open or keep open the ordinary refresh breaker, so an exhausted
+proposal compiler cannot disable unrelated wiki refresh.
+Primary-checkout discovery reads the complete porcelain worktree path, including
+ordinary spaces.
 
 Hive-installed runtimes record a `scheduler-service` in the shared state. A
 commit-triggered runner queues its source and dispatches that memory-bounded
@@ -74,6 +81,13 @@ mixed batch first publishes and receipts retained sources, then launches the
 agent only for new sources. Even a no-diff generation gets an empty commit with
 source trailers when remote publication is required, so publication retries do
 not repeat the provider call.
+
+Bounded proposal batches seed source selection from the already generated
+`wiki/proposals.json` source commit. An ancestor encountered in a later
+SHA-ordered batch therefore cannot replace a compiled descendant. Proposal-only
+batches still avoid the machine-wide provider lock, but the runner acquires that
+lock lazily before any later ordinary batch launches a provider.
+
 If merging the published refresh branch or current default branch conflicts,
 the runner aborts the merge and writes `publication-blocked`. Later automatic
 runs keep queuing sources but do not relaunch the agent. After resolving the

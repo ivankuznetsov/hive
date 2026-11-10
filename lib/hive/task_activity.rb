@@ -24,6 +24,7 @@ module Hive
       attempt_dispatcher context_provenance agent_runtime stage_service
       command_service recovery_service bot_answer web_mutation open_pr review
       finalize provider_external local_git github operator reconciliation
+      proposal_service
     ].freeze
     MAX_IDENTIFIER_BYTES = 256
     MAX_REASON_BYTES = 4 * 1024

@@ -80,7 +80,7 @@ concurrency, generation/configuration/grant identity, and attempt creation so a
 replay or simultaneous trigger creates at most one permitted attempt.
 
 Every evaluated occurrence writes a launch or skip receipt. Module hooks are a
-first-class `hive-attempt` v3 subject and reuse the existing detached owner,
+first-class `hive-attempt` v5 subject and reuse the existing detached owner,
 lease, heartbeat, bounded retry, receipt, and recovery machinery. A hook
 failure records an attempt and retry; it does not roll back a structurally valid
 installation. Capacity- or handoff-deferred retries wait one hour before

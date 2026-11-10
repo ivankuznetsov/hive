@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-09-26
+updated: 2026-11-09
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
@@ -115,8 +115,24 @@ The contract validates:
 - candidate versus boundary-ready migration-exception rules;
 - consistency between this inventory and the YAML catalog.
 
+## Proposal tracking application boundary
+
+`Hive::Proposals` is a project-owned application boundary, not an extraction
+candidate in the component catalog. It owns durable source admission, immutable
+candidate/event storage, lifecycle authority, projection/query, bounded context,
+and deterministic compilation. Its dependencies point down to shared atomic
+file, canonical JSON, Git/state locking, attempt, activity, configuration, and
+secret-redaction primitives.
+
+The inverse dependency is forbidden: proposal code cannot construct or call
+active skill provisioners, skill publishers, workflow-package mutation stores,
+workflow install/update/remove/publish commands, or revert executors. A
+decision, supersession, rollback, compile, query, or context selection therefore
+changes only proposal history and derived views. See [[modules/proposals]].
+
 ## Backlinks
 
 - [[architecture]]
 - [[modules/patrol]]
+- [[modules/proposals]]
 - [[testing]]

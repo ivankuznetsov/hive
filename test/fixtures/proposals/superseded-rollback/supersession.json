@@ -1,0 +1,4 @@
+{
+  "successor_id": "REPLACE_WITH_SUCCESSOR_ID",
+  "idempotency_key": "supersede-accepted-review-prompt"
+}

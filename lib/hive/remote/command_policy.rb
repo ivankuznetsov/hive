@@ -27,7 +27,7 @@ module Hive
         runtime wiki workflow module bench generate-name run rebase-status publication-reconcile
         worktree evidence brainstorm plan plan-review plan-review-run develop open-pr review review-grant artifacts
         finalize archive drop patrol refactor-patrol refactor-patrol-scheduled refactor-patrol-classify
-        __patrol_fix_semantic_decision answer-digest digest watch decide findings accept-finding
+        __patrol_fix_semantic_decision answer-digest digest watch decide proposal findings accept-finding
         reject-finding markers babysit daemon bot pairing web tui metrics token __attempt-supervise __module-hook
       ].freeze
       READ_ONLY = %w[help tree version doctor rebase-status findings task watch metrics operation].freeze

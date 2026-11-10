@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-proposal-index.v1.json",
+  "title": "Hive proposal compiled index (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "source_commit", "proposals", "diagnostics",
+    "projection_digest", "index_digest"
+  ],
+  "properties": {
+    "schema": { "const": "hive-proposal-index" },
+    "schema_version": { "const": 1 },
+    "source_commit": {
+      "anyOf": [
+        { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+        { "type": "null" }
+      ]
+    },
+    "proposals": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Projection" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Diagnostic" }
+    },
+    "projection_digest": { "$ref": "#/$defs/Digest" },
+    "index_digest": { "$ref": "#/$defs/Digest" }
+  },
+  "$defs": {
+    "Digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "ProposalId": {
+      "type": "string",
+      "pattern": "^prp-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "LifecycleHead": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "digest"],
+      "properties": {
+        "version": { "type": "integer", "minimum": 0 },
+        "digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "proposal_id", "subject", "revision", "proposed_change", "motivation",
+        "evidence", "author", "status", "evaluations", "decision", "lineage",
+        "rollback", "lifecycle_head", "retention", "provenance", "source_event_id",
+        "created_at", "event_count", "projection_digest"
+      ],
+      "properties": {
+        "proposal_id": { "$ref": "#/$defs/ProposalId" },
+        "subject": { "type": "object" },
+        "revision": { "type": "string" },
+        "proposed_change": { "type": "string" },
+        "motivation": { "type": "string" },
+        "evidence": { "type": "array" },
+        "author": { "type": "object" },
+        "status": { "enum": ["draft", "accepted", "rejected", "superseded", "rolled_back"] },
+        "evaluations": { "type": "array" },
+        "decision": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lineage": { "type": "object" },
+        "rollback": { "anyOf": [{ "type": "object" }, { "type": "null" }] },
+        "lifecycle_head": { "$ref": "#/$defs/LifecycleHead" },
+        "retention": { "type": "object" },
+        "provenance": { "type": "object" },
+        "source_event_id": { "type": "string", "pattern": "^pse-[0-9a-f]{64}$" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "event_count": { "type": "integer", "minimum": 0 },
+        "projection_digest": { "$ref": "#/$defs/Digest" }
+      }
+    },
+    "Diagnostic": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "code", "path", "sha256", "bytes", "proposal_id"],
+      "properties": {
+        "kind": { "const": "quarantine" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "sha256": { "$ref": "#/$defs/Digest" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "proposal_id": {
+          "anyOf": [{ "$ref": "#/$defs/ProposalId" }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

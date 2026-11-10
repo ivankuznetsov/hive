@@ -1,0 +1,14 @@
+{
+  "proposed_change": "Tighten the review prompt around held-out recall checks.",
+  "motivation": "Improve review recall without a protected regression.",
+  "evidence": [
+    {
+      "label": "held-out-review-set",
+      "content": "baseline=0.82 candidate=0.91",
+      "media_type": "text/plain",
+      "visibility": "project",
+      "retention": "project"
+    }
+  ],
+  "idempotency_key": "accepted-review-prompt-submission"
+}

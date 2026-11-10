@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-09
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -1419,11 +1419,43 @@ They never contain a bot token or message body and survive projection pruning.
 An orphaned `sending` intent becomes `unknown` when the next send attempt
 prepares that day; neither sent nor ambiguous outcomes auto-resend.
 
+## Proposal ledger
+
+Proposal history is project state beside, rather than inside, task stage
+folders. It initializes lazily on the first newly admitted typed proposal event:
+
+```text
+<project>/.hive-state/proposals/v1/
+├── inbox/                         # committed immutable admission receipts
+├── records/<proposal-id>.json     # immutable candidate revisions
+└── events/<proposal-id>/          # immutable evaluations/lifecycle facts
+```
+
+The committed `hive/state` blobs are authoritative. Inbox indexes track
+unconsumed, consumed, and terminally quarantined source IDs so reconciliation
+does bounded recovery work without reading historical task journals. Worktree-
+only remnants are never ingested as durable evidence. Candidate and event files
+are read independently with bounded no-follow reads, which lets malformed,
+oversize, symlinked, duplicate, or inconsistent inputs produce logical safe
+diagnostics without hiding valid neighbors.
+
+Status is always derived. A candidate record begins as a draft; evaluation
+events may append at any time; one decision retains accepted/rejected history;
+supersession and rollback are orthogonal facts. Thus an accepted candidate can
+display as superseded or rolled back without erasing its acceptance. Lifecycle
+mutations compare the observed lifecycle head and the explicitly considered
+evaluation set under the proposal lock.
+
+`wiki/proposals.json` and `wiki/proposals.md` are deterministic generated views,
+not authority. Retention metadata is declarative and always carries
+`enforcement=none`; v1 neither expires canonical bytes nor executes an external
+artifact deletion. See [[modules/proposals]].
+
 ## Backlinks
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[commands/digest]] · [[commands/refactor-patrol]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/daily-digest]] · [[modules/patrol]] · [[modules/proposals]] · [[commands/digest]] · [[commands/refactor-patrol]]
 
 When archive content checks find unique committed work, `unique_worktree_changes`
 now carries optional typed `details` in `hive-task-closure-input` previews. The

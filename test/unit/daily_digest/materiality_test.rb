@@ -31,7 +31,8 @@ class DailyDigestMaterialityTest < Minitest::Test
     assert_equal "stage_transition", changed.value.fetch("kind")
 
     %w[attempt_admitted context_launch_captured context_selection_reported
-       session_started usage_observed context_revision retry_requested].each do |kind|
+       proposal_context_supplied proposal_source_recorded session_started
+       usage_observed context_revision retry_requested].each do |kind|
       assert_equal :noise, classify(kind).disposition, kind
     end
 

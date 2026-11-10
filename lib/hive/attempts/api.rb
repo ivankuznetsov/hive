@@ -23,11 +23,12 @@ module Hive
       end
 
       def dispatch(task:, intended_stage:, argv:, request_id: SecureRandom.uuid,
-                   provider: nil, interactive: true, now: Time.now.utc)
+                   provider: nil, interactive: true, now: Time.now.utc,
+                   proposal_admission: nil)
         foreground.dispatch(
           task: task, intended_stage: intended_stage, argv: argv,
           request_id: request_id, provider: provider,
-          interactive: interactive, now: now
+          interactive: interactive, now: now, proposal_admission: proposal_admission
         )
       end
 
@@ -85,6 +86,14 @@ module Hive
           root: store.root,
           reference_resolver: ->(reference) { store.sealed_payload_reference(reference) }
         )
+      end
+
+      # Read-only durable binding for consumers that must correlate a task
+      # projection with the exact attempt admitted by this subsystem. Keeping
+      # this read on the facade prevents consumers from constructing the
+      # internal Repository while preserving TaskJournal's strict validation seam.
+      def fetch_projection_binding(attempt_id)
+        store.fetch_projection_binding(attempt_id)
       end
 
       private

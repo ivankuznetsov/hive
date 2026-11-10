@@ -7,6 +7,41 @@ updated: 2026-11-09
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## Proposal subject binding has no runtime database version fence (2026-11-08)
+
+Merging main dropped the branch's no-op SQLite version-fence migration for the
+v5 attempt subject `proposal` member, because main supports only the current
+runtime format (base schema v2). A main-era binary that reads a proposal-bound
+attempt row fails closed with an invalid attempt record rather than a clean
+newer-schema refusal. Whether a dedicated fence (schema v3 plus a
+QuiescenceUpgrade source) is wanted is undecided.
+
+## Proposal tracking deferred review findings (2026-11-09)
+
+The final review of the proposal ledger left these Medium findings open as
+follow-up work rather than widening the change:
+
+- `Proposals.with_state_lock` places its lock file in the shared
+  `Dir.tmpdir` under a name derived from the project root. Hive assumes a
+  same-user host, but on a multi-user host another user could pre-create that
+  path and make every proposal command fail with an untyped `EACCES`.
+- `Attempts::ConfiguredDispatcher` reconciles proposals (taking the
+  `hive/state` commit lock and running `git status` over `proposals/v1`) on
+  every dispatch once a project has any proposal history, before it knows
+  whether any receipt is pending. Projects without `proposals/v1` pay nothing.
+- Proposal-bound prompt decoration re-materializes the committed ledger from a
+  pinned commit on each call, and its broad rescue reports every failure as
+  `unavailable`, which is indistinguishable from an empty selection.
+- `GitOps#hive_commit` now commits its scoped paths with `git commit --only`,
+  which takes working-tree bytes for those paths rather than the staged
+  snapshot. Stale index entries outside the scope are no longer swept into a
+  task commit, and callers' tests pass, but a concurrent writer to a scoped path
+  that does not hold the commit lock (task-journal appends use their own lock)
+  can now land bytes between `git add` and the commit.
+- The sibling skill-evolution workflow plan still describes its own
+  `wiki/skill-evolution/skill-impact/` record instead of consuming this ledger;
+  it needs re-planning against `hive proposal` before execution.
+
 ## Original final-fix incident artifacts (2026-11-02)
 
 The original stalled review's artifacts were not supplied for the per-task

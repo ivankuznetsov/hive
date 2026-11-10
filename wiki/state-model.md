@@ -326,9 +326,15 @@ remains only as an explicit operator repair primitive. Its clear allowlist is
 terminal-success markers (`REVIEW_COMPLETE`, `EXECUTE_COMPLETE`, `COMPLETE`)
 are refused. A max-pass `REVIEW_STALE` requires operator input only when its
 escalation artifact is newer than the matching `fix-success-NN.md` receipt (or
-no receipt exists). A fresh completion receipt exposes normal guarded retry and
-lets the daemon recover a restart boundary; ordinary action, web, and bot
-surfaces still cannot bypass a newer operator edit.
+no receipt exists); `reason=final_fix_unverified` always does. A fresh
+completion receipt exposes normal guarded retry and lets the daemon recover a
+restart boundary. Until the operator fills at least one `### A<n>.` answer in
+the marker pass's `reviews/escalations-NN.md` (`:operator`), ordinary action,
+web, and bot surfaces cannot submit a retry. After an answer
+(`:operator_answered`; when the marker records `escalations=M`, an answer must
+leave fewer than M questions open), operational status offers the guarded
+`workflow.retry`, bot Autofix and `hive act` submit it through
+`RecoveryCoordinator`, and the healer still never retries it automatically.
 
 `Markers.set` writes via tempfile + `File.rename` for atomicity, holding `LOCK_EX` on a `.markers-lock` sidecar (not the data file) so readers never see partial writes. UTF-8 is pinned. See [[modules/markers]].
 

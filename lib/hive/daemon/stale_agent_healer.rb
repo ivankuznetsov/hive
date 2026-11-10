@@ -218,9 +218,11 @@ module Hive
           next if Hive::TerminalOutcome.outcome_evidence_rework?(row.marker_attrs)
 
           if Hive::Recovery.recoverable_marker?(row.marker)
+            # Answered max-pass escalations unlock explicit operator retry
+            # only; the healer never resumes an operator-owned REVIEW_STALE.
             heal_recoverable_error_if_auto_recoverable(row, now: now) if
               daemon_enabled_for_row?(row, daemon_enabled_projects) &&
-              !Hive::Recovery.intervention_required?(
+              !Hive::Recovery.operator_owned_review_stale?(
                 marker: row.marker, attrs: row.marker_attrs, folder: row.folder
               )
             next

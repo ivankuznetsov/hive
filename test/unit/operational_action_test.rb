@@ -335,6 +335,113 @@ class OperationalActionTest < Minitest::Test
     end
   end
 
+  OPEN_ESCALATIONS = "# Escalations for pass 03\n\n## Round 1\n\n" \
+                     "### Q1. Keep the hosting proof manual?\nSource: codex-03.md\n### A1.\n\n" \
+                     "### Q2. Ship the retry budget now?\nSource: codex-03.md\n### A2.\n\n".freeze
+
+  def test_unanswered_max_pass_escalations_need_intervention_and_offer_no_action
+    with_tmp_dir do |folder|
+      write_escalations(folder, OPEN_ESCALATIONS)
+      # A whitespace-only answer is not operator input.
+      write_escalations(folder, OPEN_ESCALATIONS.sub("### A1.\n", "### A1.\n   \n"))
+
+      [ final_stale_row(folder), final_stale_row(folder, reason: nil) ].each do |row|
+        assert_equal :operator, review_stale_state(row)
+        assert Hive::Recovery.intervention_required?(marker: row["marker"], attrs: row["attrs"], folder: folder)
+        assert Hive::Recovery.operator_owned_review_stale?(marker: row["marker"], attrs: row["attrs"], folder: folder)
+        assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+      end
+    end
+  end
+
+  def test_answered_max_pass_escalations_offer_guarded_retry_with_observation_token
+    with_tmp_dir do |folder|
+      write_escalations(folder, OPEN_ESCALATIONS.sub("### A1.\n", "### A1.\nKeep it manual; no code change.\n"))
+
+      [ final_stale_row(folder), final_stale_row(folder, reason: nil) ].each do |row|
+        assert_equal :operator_answered, review_stale_state(row)
+        refute Hive::Recovery.intervention_required?(marker: row["marker"], attrs: row["attrs"], folder: folder)
+        assert Hive::Recovery.operator_owned_review_stale?(marker: row["marker"], attrs: row["attrs"], folder: folder)
+        refute Hive::Recovery.completed_review_stale?(marker: row["marker"], attrs: row["attrs"], folder: folder)
+        assert Hive::TaskAction.max_passes_review_stale_with_escalations?(
+          folder: folder, marker_name: row["marker"], attrs: row["attrs"]
+        ), "the TUI keeps its browse-then-`r` gesture for the answered shape"
+
+        action = Hive::OperationalAction.descriptor(project: "demo", row: row)
+        expected_token = Hive::Daemon::RecoveryCoordinator.observation_token(
+          row.merge("state_file_mtime" => row.fetch("mtime"), "marker_attrs" => row.fetch("attrs"))
+        )
+        assert_equal "workflow.retry", action.fetch("action_id")
+        assert_equal "demo:review-task", action.fetch("target")
+        assert_equal expected_token, action.fetch("observation_token")
+        assert_match(/\A[0-9a-f]{64}\z/, action.fetch("observation_token"))
+        refute action.fetch("confirmation_required")
+      end
+    end
+  end
+
+  def test_answers_already_present_when_the_stale_was_written_are_not_new_operator_input
+    with_tmp_dir do |folder|
+      # Triage left A1 filled; the marker recorded one open question (Q2).
+      prefilled = OPEN_ESCALATIONS.sub("### A1.\n", "### A1.\nAnswered before the stall.\n")
+      write_escalations(folder, prefilled)
+      row = final_stale_row(folder, escalations: 1)
+      assert_equal :operator, review_stale_state(row)
+      assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+
+      write_escalations(folder, prefilled.sub("### A2.\n", "### A2.\nYes, ship it.\n"))
+      assert_equal :operator_answered, review_stale_state(row)
+      assert_equal "workflow.retry", Hive::OperationalAction.descriptor(project: "demo", row: row).fetch("action_id")
+    end
+  end
+
+  def test_unparseable_escalations_fail_closed_to_operator_intervention
+    with_tmp_dir do |folder|
+      write_escalations(folder, "### Q1. Broken \xFF bytes\n### A1.\nAnswer\n".b)
+      row = final_stale_row(folder)
+      assert_equal :operator, review_stale_state(row)
+      assert_nil Hive::OperationalAction.descriptor(project: "demo", row: row)
+    end
+  end
+
+  def test_act_workflow_retry_on_answered_final_stale_reaches_the_recovery_coordinator
+    with_review_grant_task do |task, cfg|
+      cfg["daemon"] = (cfg["daemon"] || {}).merge("enabled" => true)
+      File.write(File.join(task.project_root, ".hive-state", "config.yml"), cfg.to_yaml)
+      escalations = File.join(task.folder, "reviews", "escalations-04.md")
+      File.write(escalations, "# Escalations for pass 04\n\n### Q1. Keep the manual proof?\n### A1.\n\n")
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 4, accepted: 1, escalations: 1)
+      project = Hive::Config.registered_projects.find { |entry| entry.fetch("name") == task.project_name }
+
+      unanswered = operational_row(project)
+      assert_nil unanswered.fetch("action"), "unanswered escalations keep the routine retry absent"
+
+      File.write(escalations, File.read(escalations).sub("### A1.\n", "### A1.\nYes; no code change is needed.\n"))
+      answered = operational_row(project)
+      action = answered.fetch("action")
+      assert_equal "workflow.retry", action.fetch("action_id")
+      assert_equal "#{task.project_name}:#{task.slug}", action.fetch("target")
+      assert_equal "operator", answered.dig("recovery", "owner")
+      assert_equal "operator_retry_required", answered.dig("recovery", "reason")
+      assert_includes answered.dig("recovery", "remediation"), "workflow.retry"
+
+      result = Hive::OperationalAction::Executor.new.execute(
+        action_id: action.fetch("action_id"), target: action.fetch("target"),
+        observation_token: action.fetch("observation_token")
+      )
+      receipt = result.fetch("recovery")
+      assert_equal "queued", receipt.fetch("status"), receipt.inspect
+      assert_equal "admitted", receipt.fetch("phase")
+      request = Hive::RuntimeControlPlane::DispatchRepository.open_default.fetch(receipt.fetch("request_id"))
+      assert_equal "action", request.requestor
+      assert_equal "review_stale", request.expected_marker_name
+      assert_equal "final_fix_unverified", request.recovery.dig("expected_marker_attrs", "reason")
+      # Admission records intent only; the coordinator's resume owns the clear.
+      assert_equal :review_stale, Hive::Markers.current(task.state_file).name
+    end
+  end
+
   def test_task_recheck_reproduces_status_token_and_rejects_marker_rotation
     with_tmp_global_config do
       with_tmp_dir do |project_root|
@@ -781,5 +888,36 @@ class OperationalActionTest < Minitest::Test
     refute_nil row
     refute_nil row.fetch("action")
     row.fetch("action")
+  end
+
+  def operational_row(project)
+    rows = Hive::Commands::Status.new(json: true, operational: true)
+      .operational_payload([ project ], scheduler_snapshot: nil).fetch("tasks")
+    assert_equal 1, rows.size
+    rows.first
+  end
+
+  def write_escalations(folder, body)
+    reviews = File.join(folder, "reviews")
+    FileUtils.mkdir_p(reviews)
+    File.binwrite(File.join(reviews, "escalations-03.md"), body)
+  end
+
+  def final_stale_row(folder, reason: "final_fix_unverified", escalations: 2)
+    attrs = { "pass" => "3", "marker_id" => "marker-3" }
+    attrs.merge!("reason" => reason, "accepted" => "0", "escalations" => escalations.to_s) if reason
+    {
+      "project" => "demo", "slug" => "review-task", "folder" => folder,
+      "state_file" => File.join(folder, "task.md"), "workflow" => "coding",
+      "stage" => "6-review", "marker" => "review_stale", "attrs" => attrs,
+      "mtime" => "2026-07-20T09:00:00.000000Z", "action" => "recover_review",
+      "task_generation" => "generation-1", "condition_task_generation" => "generation-1",
+      "attempt_id" => nil, "current_attempt" => nil, "live_task_lock" => false,
+      "blocked" => false, "held" => nil
+    }
+  end
+
+  def review_stale_state(row)
+    Hive::Recovery.review_stale_recovery_state(marker: row["marker"], attrs: row["attrs"], folder: row["folder"])
   end
 end

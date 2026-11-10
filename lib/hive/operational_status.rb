@@ -920,6 +920,25 @@ module Hive
         )
       end
 
+      # Answered max-pass escalations: the daemon never admits this retry, so
+      # name the operator's guarded action instead of a missing observation.
+      if Hive::Recovery.review_stale_recovery_state(
+        marker: row["marker"], attrs: row["attrs"] || {}, folder: row["folder"]
+      ) == :operator_answered
+        return normalized_recovery(
+          {
+            "status" => "blocked", "request_id" => nil, "attempt_id" => row["attempt_id"],
+            "phase" => nil, "failure_origin" => row.dig("attrs", "reason"),
+            "next_eligible_at" => nil, "owner" => "operator",
+            "reason" => "operator_retry_required",
+            "remediation" => Hive::Recovery.review_stale_guidance(attrs: row["attrs"] || {}, folder: row["folder"]),
+            "retry_count" => nil, "provider_hint" => provider_hint(row),
+            "terminal_outcome" => nil, "terminal_at" => nil
+          },
+          row
+        )
+      end
+
       decision = disposition&.fetch("decision", nil)
       # An eligibility assessment is not queue admission. Until the
       # coordinator supplies a canonical receipt/request ID, keep the action

@@ -55,7 +55,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: |
           docker run --rm -v "$PWD:/src" -w /src archlinux:latest \
-            bash -lc 'pacman -Sy --noconfirm bash curl grep sed gawk coreutils jq && bash install.sh --dry-run --version=v0.1.0'
+            bash -lc 'pacman -Syu --noconfirm --needed bash curl grep sed gawk coreutils jq && bash install.sh --dry-run --version=v0.1.0'
 
   die-paths:
     name: install.sh die paths (malformed inputs)

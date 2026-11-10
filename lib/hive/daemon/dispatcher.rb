@@ -2638,6 +2638,16 @@ module Hive
                                     stage: row.stage, action: row.action,
                                     reason: "plan_approval_invalid: #{e.message}")
             return :plan_approval_invalid
+          rescue Hive::ConcurrentRunError => e
+            # Approval takes the task lock. A stale `plan_waiting` row (the
+            # task already advanced and its next stage's run holds the task
+            # lease) or a concurrent operator action collides here. That is
+            # contention, not an invalid plan: skip this tick and let the
+            # next snapshot decide. Letting it escape killed the daemon.
+            @logger.event(:skipped, project: row.project, slug: row.slug,
+                                    stage: row.stage, action: row.action,
+                                    reason: "plan_approval_busy: #{e.message}")
+            return :plan_approval_busy
           end
         end
 
@@ -2793,6 +2803,8 @@ module Hive
           [ "operator", "task folder disappeared before dispatch" ]
         when :plan_approval_invalid
           [ "hive", "plan approval could not be prepared safely" ]
+        when :plan_approval_busy
+          [ "scheduler", "plan approval is waiting for the task's active run to release its lock" ]
         when :pull_request_merged
           [ "operator", "task pull request is merged; review agents are not dispatched " \
                         "(archive with --reason already_delivered if Hive does not)" ]

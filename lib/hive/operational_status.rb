@@ -746,7 +746,7 @@ module Hive
       when "global_cap", "project_cap", "daily_cap", "cooldown", "in_flight",
            "dispatched", "wait_for_debounce", "record_baseline", "poll_for_merge",
            "merge_watch", "blocked_on_dependency", "retry_cooldown", "retry_pending",
-           "attempt_capacity", "attempt_transient_retry"
+           "attempt_capacity", "attempt_transient_retry", "plan_approval_busy"
         [ "waiting_on_provider_or_scheduler", "scheduler" ]
       when "retry_in_flight"
         [ "running", "agent" ]

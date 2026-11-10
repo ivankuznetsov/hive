@@ -6096,6 +6096,34 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  def test_plan_approval_lock_contention_skips_the_tick_without_killing_the_daemon
+    # Approval takes the task lock. When a stale plan_waiting row is approved
+    # while the task's next-stage run already holds the task lease (seen in
+    # the golden-path E2E: "another hive run is active for .../3-plan/..."),
+    # the ConcurrentRunError used to escape the tick and end the daemon.
+    Dir.mktmpdir("dispatcher-plan-approval-busy") do |dir|
+      state_file = File.join(dir, "plan.md")
+      File.write(state_file, "# plan\n\n<!-- WAITING -->\n")
+      rows = [ row(stage: "3-plan", action: "ready_to_develop", marker: "waiting",
+                   command: "hive develop s1 --from 3-plan",
+                   mtime: T0 - 600, state_file: state_file) ]
+      plan_approval = Object.new
+      plan_approval.define_singleton_method(:prepare) do |_command, path|
+        raise Hive::ConcurrentRunError.new("another hive run is active for #{File.dirname(path)}")
+      end
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows, plan_approval: plan_approval)
+
+      dispatcher.tick(now: T0)
+
+      assert_equal 0, sup.spawned.size, "contention must not dispatch"
+      skip_event = logger.events.find do |(n, a)|
+        n == :skipped && a[:reason].to_s.start_with?("plan_approval_busy")
+      end
+      refute_nil skip_event, "must log :skipped reason: plan_approval_busy (got #{logger.events.map(&:first).inspect})"
+      assert_equal :waiting, Hive::Markers.current(state_file).name, "contention must not flip the marker"
+    end
+  end
+
   def test_plan_needs_input_with_malformed_command_skips
     # If the suggested_command is not a well-formed `hive plan ...`
     # invocation (e.g., a stale TaskAction emission or a malformed

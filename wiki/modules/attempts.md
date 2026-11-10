@@ -14,6 +14,32 @@ successor increments that charge. No extra timer table or watcher is involved.
 Explicit operator retries retain their existing bypass of automatic pacing.
 The project daily dispatch cap remains the emergency brake.
 
+Claimed launch reservations retain matching owners past the first-heartbeat
+deadline, and the exact live wrapper can commit a delayed first heartbeat under
+the original lease CAS. Unverifiable claimed owners are retained only until
+`first_heartbeat_deadline + 2 * (first_heartbeat_deadline - claimed_at)`, derived
+from persisted claim diagnostics. Restart and timer changes cannot move this
+ceiling. Reconciliation rechecks the row, wrapper and worker custody: a proven
+live worker still reserves capacity; otherwise valid pending completion wins
+before the distinct `first_heartbeat_owner_unverifiable_ceiling` loss. Running
+unverifiable owners retain their existing conservative policy. Once the wrapper
+is gone or mismatched, mismatched worker identities permit pending completion
+replay or loss and do not keep lost recovery pending. Matching live workers,
+unverifiable groups and permission-denied termination still fence successors;
+termination reports unresolved custody as `still_alive` instead of a mismatch.
+
+Worker registration continues through cancellation, timeout and short worker
+exit, without releasing a cancelled worker's execution gate. During quiescence
+the first identity-only checkpoint has one bounded `worker:<attempt_id>` cleanup
+slot, separate from terminal/interruption cleanup; it cannot change outputs or
+the work checkpoint. Pending receipt references resolve against the canonical
+store root while continuing to reject redirected descendants and linked files.
+
+Typed bookkeeping reasons survive client errors, Execute and Review markers,
+lost-recovery projections, healer logs and recovery terminal-marker repair.
+`runtime_bookkeeping_busy` and the claimed-owner ceiling remain attributable to
+runtime bookkeeping instead of becoming generic agent/provider failures.
+
 **TLDR**: Hive admits task-stage work as independent durable attempts. One
 `attempts` row owns the attempt record plus fixed accounting,
 lost-recovery, and terminal-publication facts. Live rows provide capacity.
@@ -368,6 +394,40 @@ may repeat safe work; it does not restore a claim or cursor from SQLite.
 
 See [[state-model]], [[modules/provider_routing]], [[modules/daemon]], and
 [[token-usage]].
+
+Runtime writer transactions report monotonic acquisition wait separately from
+lock hold, including commit/rollback, with stable operation labels. Debug
+measurements are enabled by `HIVE_SQL_DEBUG=1`; holds over one second warn even
+without debug logging. Measurements never log SQL or projection payloads and
+are emitted after SQL and writer-fence release. See
+`docs/implementation/runtime-database-contention.md` for observed evidence.
+
+Attempt bookkeeping uses `BookkeepingRetry` with a single monotonic deadline
+per operation. Admission through wrapper registration, claim, first heartbeat
+and worker registration shares `attempt_bookkeeping_timeout_sec` (30 seconds
+by default), capped at 30 seconds and clamped strictly inside persisted
+launch/first-heartbeat expiry.
+The detached handoff exports the remaining absolute deadline through its private
+supervisor transport; it never retries the launcher, process spawn or agent body.
+A delayed claim still requires the capability, unchanged lease and a matching
+live identity for the current wrapper.
+
+Later heartbeat and terminal writes retain separate 600-second deferral
+envelopes. Scheduled heartbeat and worker-registration retries leave output
+capture, cancellation and stage timeout polling active between tries. Every
+SQL try is capped at one second or its remaining budget, with connection/fence
+work sharing that cap and reserving a positive SQL wait. Backoff starts at
+50 ms with bounded jitter and caps at one second. There is no independent
+try-count termination rule. Writer measurements also separate connection,
+fence and SQLite acquisition time, including failures.
+
+Only actual SQLite BUSY errors (including extended primary result codes),
+wrapped driver causes and the runtime file-fence busy type are retryable.
+Messages containing `database is locked` alone are ordinary errors. Exhaustion
+raises `BookkeepingBusy`, a TEMPFAIL carrying the attempt, operation, count,
+elapsed time and `runtime_bookkeeping_busy` reason; it does not enter generic
+launch-handoff failure handling. The repository resolves an identical ambiguous
+terminal commit from its authoritative receipt rather than overwriting it.
 
 Guarded attached recovery uses `Recovery::API` with an explicit manual execution
 policy. The coordinator alone validates a persisted recovery observation and

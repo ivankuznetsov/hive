@@ -3,6 +3,8 @@ require "hive/daemon/quiescence"
 require "hive/runtime_control_plane/database"
 require "hive/runtime_control_plane/lifecycle_repository"
 require "hive/runtime_control_plane/process_registry"
+require "hive/commands/daemon"
+require "json_schemer"
 
 class HiveDaemonQuiescenceTest < Minitest::Test
   include HiveTestHelper
@@ -238,6 +240,7 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       refute result.admission_open
       assert_equal 1, result.generation
       assert result.checkpoint.fetch(:complete)
+      assert result.checkpoint.fetch(:passive_drain).fetch(:complete)
       assert database.disconnected?
 
       database.open!
@@ -249,6 +252,71 @@ class HiveDaemonQuiescenceTest < Minitest::Test
       assert verdict.valid?, verdict.reason
       assert_equal state.revision, verdict.payload.fetch("lifecycle_revision")
       assert_equal state.mutation_sequence, verdict.payload.fetch("mutation_sequence")
+    end
+  end
+
+  def test_pre_pause_drain_uses_controller_authority_before_paused_and_full_checkpoint
+    with_runtime do |root, database|
+      clock = ManualClock.new
+      events = []
+      passive = database.method(:passive_checkpoint!)
+      full = database.method(:checkpoint!)
+      test_case = self
+      database.define_singleton_method(:passive_checkpoint!) do |authority:, timeout_sec:|
+        events << [ :passive, timeout_sec, lifecycle_phase = read { |sql| sql[:runtime_lifecycle].get(:phase) } ]
+        test_case.assert_equal "quiescing", lifecycle_phase
+        test_case.assert send(:valid_authority?, authority)
+        result = passive.call(authority: authority, timeout_sec: timeout_sec)
+        clock.sleep(0.2)
+        result
+      end
+      database.define_singleton_method(:checkpoint!) do |timeout_sec:|
+        events << [ :full, timeout_sec, read { |sql| sql[:runtime_lifecycle].get(:phase) } ]
+        full.call(timeout_sec: timeout_sec)
+      end
+      result = coordinator(
+        root, database, timeout_sec: 1,
+        capability: SequenceCapability.new(eligible, eligible), monotonic: clock.method(:call)
+      ).call
+
+      assert result.paused
+      assert_equal %i[passive full], events.map(&:first)
+      assert_equal "paused", events.last.last
+      assert_in_delta 0.2, events.first[1] - events.last[1], 0.0001
+      assert result.checkpoint.fetch(:complete)
+    end
+  end
+
+  def test_pre_pause_drain_error_and_deadline_remain_admission_closed_without_a_paused_candidate
+    with_runtime do |root, database|
+      database.define_singleton_method(:passive_checkpoint!) do |**|
+        raise IOError, "passive unavailable"
+      end
+      result = coordinator(root, database, capability: SequenceCapability.new(eligible, eligible)).call
+      refute result.paused
+      assert_equal "checkpoint_error", result.reason
+      assert_equal "quiescing", lifecycle(database).phase
+    end
+    with_runtime do |root, database|
+      clock = ManualClock.new
+      passive_checkpoint = database.method(:passive_checkpoint!)
+      database.define_singleton_method(:passive_checkpoint!) do |**options|
+        result = passive_checkpoint.call(**options)
+        clock.sleep(1)
+        result
+      end
+      database.define_singleton_method(:checkpoint!) { |**| flunk "FULL must not start after the lifecycle deadline" }
+      result = coordinator(
+        root, database, timeout_sec: 1,
+        capability: SequenceCapability.new(eligible, eligible), monotonic: clock.method(:call)
+      ).call
+      refute result.paused
+      assert_equal "deadline_exhausted", result.reason
+      assert_equal "quiescing", lifecycle(database).phase
+      payload = Hive::Commands::Daemon.new(nil).send(:lifecycle_result_envelope, "quiesce", result)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-daemon-quiesce"))))
+      assert_empty schema.validate(JSON.parse(JSON.generate(payload))).map { |error| error.fetch("error") }
+      assert_equal 8, result.checkpoint.fetch(:passive_drain).size
     end
   end
 

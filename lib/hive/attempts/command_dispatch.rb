@@ -71,6 +71,18 @@ module Hive
       end
 
       def handle_durable_failure!(result)
+        if (reason = BookkeepingReason.from(result))
+          if @json && result.stdout_emitted? && !@command_dispatch_context
+            warn "hive: #{reason}: durable attempt #{result.attempt_id} requires bookkeeping recovery"
+            exit(result.exit_status)
+          end
+          raise Hive::AttemptExecutionError.new(
+            "#{reason}: durable attempt #{result.attempt_id} requires bookkeeping recovery",
+            exit_code: result.exit_status, attempt_id: result.attempt_id,
+            outcome: result.outcome, reason: reason
+          )
+        end
+
         if result.status == :lost
           if @json && result.stdout_emitted? && !@command_dispatch_context
             exit(result.exit_status)

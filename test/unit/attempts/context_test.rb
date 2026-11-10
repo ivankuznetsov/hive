@@ -165,8 +165,8 @@ class AttemptsContextTest < Minitest::Test
       catalog = Sequel.mock(fetch: { name: "command_dispatch_contexts" })[:sqlite_master]
       real_database = store.database
       database = Object.new
-      database.define_singleton_method(:read) do |&block|
-        real_database.read do |real_connection|
+      database.define_singleton_method(:read) do |**options, &block|
+        real_database.read(**options) do |real_connection|
           connection = Object.new
           connection.define_singleton_method(:[]) do |name|
             case name

@@ -136,6 +136,29 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_loss_recovery_preserves_reason_and_existing_retry_charge
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      with_task do |task|
+        with_tmp_dir do |root|
+          store = Hive::Attempts::Repository.new(root: root, migrate: true)
+          lost = lost_attempt(store, retry_charge: 1, task_folder: task.folder, reason: reason)
+          outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+          dispatcher = FakeDispatcher.new(store)
+          logger = FakeLogger.new
+          processor = FakeProcessor.new(outcomes, task.folder)
+          healer(store, outcomes, processor, dispatcher, logger).heal_attempt_losses(
+            [ lost ], admission_view: admission_view(store), now: RETRY_AT
+          )
+          assert_equal 1, dispatcher.calls.size
+          assert_equal 2, dispatcher.calls.first.fetch(:retry_charge)
+          event = logger.events.find { |name, _attrs| name == :marker_healed }
+          assert_equal reason, event.last.fetch(:reason)
+          assert_equal reason, outcomes.fetch(lost.attempt_id).fetch("failure_origin")
+        end
+      end
+    end
+  end
+
   def test_shutdown_after_first_replacement_stops_later_attempt_loss_admission
     with_task do |task|
       with_tmp_dir do |root|
@@ -537,7 +560,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     )
   end
 
-  def lost_attempt(store, retry_charge:, task_folder:, intended_stage: "4-execute", worker_argv: nil)
+  def lost_attempt(store, retry_charge:, task_folder:, intended_stage: "4-execute", worker_argv: nil, reason: "launch_timeout")
     worker_argv ||= [ "hive", "run", task_folder ]
     attempt = store.create_launching(
       attempt_id: "lost-#{retry_charge}", request_id: "request-#{retry_charge}",
@@ -549,7 +572,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
       starting_revision: "abc", retry_charge: retry_charge,
       inherited_outputs: [], launch_timeout_sec: 1, now: NOW
     )
-    store.mark_lost(attempt, reason: "launch_timeout", now: NOW + 1)
+    store.mark_lost(attempt, reason: reason, now: NOW + 1)
   end
 
   def with_task(stage: "4-execute")

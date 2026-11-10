@@ -179,25 +179,36 @@ class ConditionsAttemptObserverTest < Minitest::Test
     end
   end
 
-  def test_lost_attempt_replaces_live_health_with_fail_closed_observation
-    with_tmp_dir do |dir|
-      task = build_task(dir)
-      store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
-      launching = create_attempt(store)
-      lost = store.mark_lost(launching, reason: "launch_timeout", now: NOW + 1)
-      status = Hive::Attempts::ReconciledAttempt.new(
-        attempt: lost, classification: :lost,
-        owner_status: :not_claimed, evidence: {}
-      )
-      observer = Hive::Conditions::AttemptObserver.new(
-        store: store, task_locator: ->(_attempt) { task }
-      )
+  %w[launch_timeout runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+    define_method("test_lost_attempt_replaces_live_health_with_fail_closed_observation_#{reason}") do
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        store = Hive::Attempts::Repository.new(root: File.join(dir, "attempts"), migrate: true)
+        launching = create_attempt(store)
+        lost = store.mark_lost(launching, reason: reason, now: NOW + 1)
+        status = Hive::Attempts::ReconciledAttempt.new(
+          attempt: lost, classification: :lost,
+          owner_status: :not_claimed, evidence: {}
+        )
+        observer = Hive::Conditions::AttemptObserver.new(
+          store: store, task_locator: ->(_attempt) { task }
+        )
 
-      assert observer.call(status, now: NOW + 1)
-      projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
-      health = projection.current_condition("AgentHealthy")
-      assert_equal "unsatisfied", health.fetch("state")
-      assert_equal "attempt_lost", health.fetch("reason")
+        assert observer.call(status, now: NOW + 1)
+        projection = Hive::TaskProjection::Reader.new(task_folder: task.folder).read
+        health = projection.current_condition("AgentHealthy")
+        assert_equal "unsatisfied", health.fetch("state")
+        # A typed bookkeeping loss must keep the routed `attempt_lost`
+        # reason (recover_execute) and carry the typed reason as evidence.
+        assert_equal "attempt_lost", health.fetch("reason")
+        lease = health.fetch("evidence").find { |entry| entry["type"] == "attempt_lease" }
+        if reason == "launch_timeout"
+          refute lease.key?("bookkeeping_reason")
+        else
+          assert_equal reason, lease.fetch("bookkeeping_reason")
+        end
+        assert_equal :acknowledged, observer.observe(status, now: NOW + 2)
+      end
     end
   end
 

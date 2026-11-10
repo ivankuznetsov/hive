@@ -56,11 +56,20 @@ module Hive
 
       def call
         ready_io = ready_io_from_env
+        budget = Float(ENV.fetch("HIVE_ATTEMPT_BOOKKEEPING_TIMEOUT_SEC", 30))
+        launch_deadline = ENV["HIVE_ATTEMPT_BOOKKEEPING_DEADLINE"] && Float(ENV.fetch("HIVE_ATTEMPT_BOOKKEEPING_DEADLINE"))
+        opening = Hive::Attempts::BookkeepingRetry.new(
+          operation: "open_wrapper", attempt_id: @attempt_id,
+          budget_sec: budget, deadline: launch_deadline
+        )
+        launch_deadline = opening.deadline
+        database = Hive::RuntimeControlPlane::Database.new(path: @database_path)
+        store = opening.run do |timeout|
+          database.open!(revalidate: false, timeout_sec: timeout)
+          Hive::Attempts::Repository.new(root: @store_root, database: database)
+        end
         Hive::Attempts::Supervisor.new(
-          store: Hive::Attempts::Repository.new(
-            root: @store_root,
-            database: Hive::RuntimeControlPlane::Database.new(path: @database_path)
-          ),
+          store: store,
           attempt_id: @attempt_id,
           claim_io: claim_io_from_env,
           ready_io: ready_io,
@@ -69,6 +78,7 @@ module Hive
           first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec,
           timeout_sec: @timeout_sec,
           kill_grace_sec: @kill_grace_sec,
+          launch_deadline: launch_deadline, bookkeeping_timeout_sec: budget,
           install_signal_handlers: true
         ).run
       end

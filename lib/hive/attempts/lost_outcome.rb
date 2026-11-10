@@ -14,8 +14,8 @@ module Hive
     class LostOutcomeTransition
       PHASES = %w[pending ready complete].freeze
       FINAL_PHASES = %w[complete].freeze
-      SAFE_CLEANUPS = %w[absent terminated no_worker].freeze
-      CLEANUPS = (SAFE_CLEANUPS + %w[identity_mismatch identity_changed still_alive]).freeze
+      SAFE_CLEANUPS = %w[absent terminated no_worker identity_mismatch identity_changed].freeze
+      CLEANUPS = (SAFE_CLEANUPS + %w[still_alive]).freeze
 
       def initialize(store:)
         @store = store
@@ -107,6 +107,7 @@ module Hive
           "task_generation" => row.fetch(:task_generation),
           "project" => row.fetch(:project_name), "task_slug" => row.fetch(:task_slug),
           "phase" => row.fetch(:lost_recovery_phase),
+          "failure_origin" => Record.from_row(row).bookkeeping_reason || "attempt_lost",
           "cleanup" => row[:lost_recovery_cleanup],
           "request_id" => row[:lost_recovery_request_id],
           "revision" => row.fetch(:lost_recovery_revision),
@@ -174,9 +175,9 @@ module Hive
     end
 
     # Performs cleanup and observational worktree capture before successor
-    # policy. Unsafe process identity remains pending: a later observation may
-    # prove the old process gone, so this error must not become a permanent
-    # durable retry state.
+    # policy. Live or unverifiable workers remain pending until a later
+    # observation establishes absence or a different identity. A mismatched
+    # identity cannot keep the lost attempt's recovery pending forever.
     class LostOutcomeProcessor
       def initialize(store:, outcome_store:, process_identity:, dirty_capture: nil,
                      task_resolver: nil, orphan_grace_sec: 2)

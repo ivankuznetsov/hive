@@ -60,7 +60,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
         store = Hive::Attempts::Repository.new(root: root, migrate: true)
         lost = lost_attempt(store)
         outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
-        identity = FakeIdentity.new(:identity_mismatch, [])
+        identity = FakeIdentity.new(:still_alive, [])
         processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: store, outcome_store: outcomes, process_identity: identity,
           task_resolver: ->(_attempt) { task }
@@ -91,6 +91,28 @@ class AttemptsLostOutcomeTest < Minitest::Test
     end
   end
 
+  def test_mismatched_worker_identity_allows_loss_recovery
+    %i[identity_mismatch identity_changed].each do |cleanup|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
+        lost = lost_attempt(store)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        identity = FakeIdentity.new(cleanup, [])
+        processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: store, outcome_store: outcomes, process_identity: identity,
+          task_resolver: ->(_attempt) { nil }
+        )
+
+        ready = processor.process(lost, now: NOW + 3)
+        assert_equal "ready", ready.fetch("phase")
+        assert_equal cleanup.to_s, ready.fetch("cleanup")
+        assert_equal outcomes.recovery_request_id(lost), ready.fetch("request_id")
+        assert_equal ready, processor.process(lost, now: NOW + 4)
+        assert_equal 1, identity.calls.size
+      end
+    end
+  end
+
   def test_transition_rejects_a_stale_attempt_identity
     with_tmp_dir do |root|
       store = Hive::Attempts::Repository.new(root: root, migrate: true)
@@ -102,6 +124,19 @@ class AttemptsLostOutcomeTest < Minitest::Test
       end
       assert_equal "new-generation", outcomes.fetch(lost.attempt_id).fetch("task_generation")
       assert_raises(Hive::Attempts::RepositoryError) { outcomes.update(lost, now: NOW, phase: "ready") }
+    end
+  end
+
+  def test_bookkeeping_loss_reason_survives_recovery_projection_and_restart
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Repository.new(root: root, migrate: true)
+        lost = lost_without_worker(store, reason: reason)
+        outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        assert_equal reason, outcomes.ensure_for(lost, now: NOW + 32).fetch("failure_origin")
+        restarted = Hive::Attempts::LostOutcomeTransition.new(store: store)
+        assert_equal reason, restarted.fetch(lost.attempt_id).fetch("failure_origin")
+      end
     end
   end
 
@@ -387,7 +422,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
     store.mark_lost(with_worker, reason: "owner_gone", now: NOW + 3)
   end
 
-  def lost_without_worker(store)
+  def lost_without_worker(store, reason: "launch_timeout")
     launching = store.create_launching(
       attempt_id: "lost-no-worker", request_id: "request-no-worker",
       task_id: "42", project: "demo", task_slug: "durable-task",
@@ -397,6 +432,6 @@ class AttemptsLostOutcomeTest < Minitest::Test
       claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
-    store.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
+    store.mark_lost(launching, reason: reason, now: NOW + 31)
   end
 end

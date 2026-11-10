@@ -98,6 +98,27 @@ run in separate processes with their own loaders; Rails uses its own bundle.
 This is focused feedback, not proof of complete transitive dependency coverage.
 The full CI gate remains mandatory.
 
+Attempt bookkeeping regression tests live in `test/unit/attempts/` and
+`test/unit/runtime_control_plane/`. They cover invalid pending evidence,
+completion replay before loss or interruption, safe evidence retirement,
+concurrent admission and ambiguous worker registration, and error preservation
+when bounded SQL timeout cleanup fails. Supervisor race tests control worker
+exit and registration observation explicitly so those paths do not depend on
+scheduler timing.
+
+`bundle exec rake test:runtime_database_contention` is a separate CI merge gate.
+It runs one daemon publisher/reconciler with four real supervisors through
+held-lock release and exhaustion for claim, first heartbeat, worker registration,
+heartbeat and terminal publication. It checks invocation counts, typed reasons,
+restart receipt replay and per-role checkpoint pragmas, then invokes the fixed
+writer-comparison and pinned-reader checkpoint fixtures. CI retains
+`tmp/runtime-database-contention-evidence.json`. Short real lock holds use
+reduced retry budgets; the default `runtime_database_contention_invariants_test`
+independently checks the full 30/600-second envelopes with an injected clock.
+The attempt reconciler tests cover persisted ceiling boundaries, identity
+rechecks, EPERM/empty fingerprints, worker custody, busy retry and receipt/CAS
+precedence. Timing observations remain evidence, without CI performance ratios.
+
 ```bash
 bin/test --changed --list                    # inspect files, commands, fallback reasons
 bin/test --changed --base origin/main        # run selected tests
@@ -1006,10 +1027,13 @@ pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
 failure, and feeds the functional job result into the protected
 `rake test (Ruby 3.4)` aggregate. That job treats missing enabled results,
 duplicate metadata/results, and invalid durations as functional failures. A
-separate `continue-on-error` job downloads the retained report and runs only
+separate advisory job downloads the retained report and runs only
 the timing mode of `test/e2e/check_incident_budget.rb`, flagging enabled
 incidents at or above sixteen seconds (including sandbox bootstrap) or a group
-total at or above thirty-six seconds without blocking the merge. The #9771
+total at or above thirty-six seconds without blocking the merge. Only the timing
+step uses `continue-on-error`; the job records the result in its summary and
+finishes successfully after an overrun so exact-head CI polling does not treat
+the advisory as a functional failure. The #9771
 dependency-gate and repository-routing incidents are enabled; four
 sibling-gated fixtures remain pending. The incident index and activation rules
 live in `test/e2e/scenarios/README.md`.

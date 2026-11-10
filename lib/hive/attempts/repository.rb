@@ -3,9 +3,13 @@ require "digest"
 require "fileutils"
 require "json"
 require "hive/attempts/capability"
+require "hive/attempts/contracts"
+require "hive/attempts/bookkeeping_retry"
+require "hive/attempts/process_identity"
 require "hive/attempts/record"
 require "hive/attempts/coordination"
 require "hive/attempts/publication"
+require "hive/attempts/pending_bookkeeping"
 require "hive/output_reference"
 require "hive/paths"
 require "hive/runtime_control_plane"
@@ -16,22 +20,6 @@ require "hive/stringify_keys"
 
 module Hive
   module Attempts
-    class RepositoryError < Hive::Error; end
-    class CompareAndSwapFailed < RepositoryError; end
-    # The attempt record built for one task failed its own validation (for
-    # example a task without an id). That is a per-task data problem, not a
-    # storage failure, so callers may block just that task.
-    class InvalidAttemptRecord < RepositoryError; end
-    # SQLite lock contention outlasted the runtime database busy timeout:
-    # another Hive process held the write lock. Nothing was written, and the
-    # same operation can be retried later, so callers may defer instead of
-    # failing. Corruption, schema, and storage errors never take this class.
-    class RuntimeDatabaseBusy < RepositoryError
-      def exit_code = Hive::ExitCodes::TEMPFAIL
-    end
-    class CapacityExceeded < RepositoryError; end
-    class StaleTaskSource < RepositoryError; end
-
     # The attempt facade persists lifecycle state in the runtime control plane.
     # The filesystem root contains only retained bytes referenced by those rows.
     class Repository
@@ -69,7 +57,7 @@ module Hive
         end
       end
 
-      attr_reader :database
+      attr_reader :database, :installation_id
 
       def self.open_default(create_directories: true, state_home: Hive::Paths.state_home)
         requested_home = File.expand_path(state_home)
@@ -87,6 +75,7 @@ module Hive
         database_exists = File.file?(database.path)
         database.open!(revalidate: !database_exists) if database_exists || create_directories
         prepare_payload_root! if create_directories
+        @installation_id = database.read { |db| db[:installations].get(:installation_id) } if database_exists || create_directories
       rescue RuntimeControlPlane::Unavailable => error
         raise if storage_unavailable?(error)
         raise RepositoryError, "attempt runtime control plane is unavailable: #{error.message}"
@@ -104,6 +93,10 @@ module Hive
 
       def payload_store
         @payload_store ||= RuntimeControlPlane::PayloadStore.new(root: @root)
+      end
+
+      def pending_bookkeeping
+        @pending_bookkeeping ||= PendingBookkeeping.new(store: self)
       end
 
       def log_archive
@@ -164,16 +157,18 @@ module Hive
       end
 
       def create_launching(source_fingerprint: nil, admission: nil, limits: nil,
-                           route_decision: nil, **attributes)
+                           route_decision: nil, timeout_sec: nil, **attributes)
         recovery_source_attempt_id = attributes.delete(:recovery_source_attempt_id)
         source_fingerprint ||= attributes[:progress_token]
-        RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
+        record = RuntimeControlPlane::AdmissionTransition.new(repository: self).call(
           attributes: attributes, source_fingerprint: source_fingerprint,
           admission: admission, limits: limits,
           route_decision: route_decision,
-          recovery_source_attempt_id: recovery_source_attempt_id
+          recovery_source_attempt_id: recovery_source_attempt_id, timeout_sec: timeout_sec
         )
-      rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error => error
+        output_directory(record.attempt_id, create: true)
+        record
+      rescue InvalidRecord, Sequel::Error, RuntimeControlPlane::Error, Hive::ConcurrentRunError => error
         translate_store_error(error, "attempt could not be created")
       end
 
@@ -182,7 +177,7 @@ module Hive
       # separate, short transaction: task/file inspection stays outside the
       # admission lock, while a concurrent newer observation still fences this
       # caller at admission_validate_subject_in.
-      def observe_task_source(task:, generation:, observed_at:)
+      def observe_task_source(task:, generation:, observed_at:, timeout_sec: nil)
         task_id = generation.task_id.to_s
         fingerprint = generation.progress_token.to_s
         input_epoch = Integer(generation.task_input_epoch)
@@ -195,7 +190,7 @@ module Hive
         workflow_id = (workflow.respond_to?(:id) ? workflow.id : workflow).to_s
         workflow_id = "coding" if workflow_id.empty?
         timestamp = Record.iso8601(observed_at)
-        database.transaction do |db|
+        database.transaction(operation: "attempt.observe_task_source", timeout_sec: timeout_sec) do |db|
           project = db[:projects].where(state_root_path: File.dirname(stages)).first
           unless project && project.fetch(:name) == generation.project.to_s
             raise StaleTaskSource, "attempt project identity is not registered for the task path"
@@ -246,8 +241,8 @@ module Hive
         translate_store_error(error, "attempt task source could not be observed")
       end
 
-      def arm_launch_handoff(observed, launch_timeout_sec:, now:)
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+      def arm_launch_handoff(observed, launch_timeout_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.arm_launch_handoff", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "claim_deadline" => Record.iso8601(now + launch_timeout_sec),
@@ -258,13 +253,13 @@ module Hive
         end
       end
 
-      def fetch(attempt_id)
-        row = read_row(attempt_id)
+      def fetch(attempt_id, timeout_sec: nil)
+        row = read_row(attempt_id, timeout_sec: timeout_sec)
         row && record_from(row)
       end
 
-      def fetch_hot(attempt_id)
-        row = read_row(attempt_id)
+      def fetch_hot(attempt_id, timeout_sec: nil)
+        row = read_row(attempt_id, timeout_sec: timeout_sec)
         return nil unless row
         return record_from(row) if %w[launching running].include?(row.fetch(:state))
         return nil unless publication_pending_row?(row)
@@ -321,8 +316,8 @@ module Hive
         true
       end
 
-      def active_attempts
-        rows = database.read do |db|
+      def active_attempts(timeout_sec: nil)
+        rows = database.read(timeout_sec: timeout_sec) do |db|
           publication_pending = Sequel.lit(
             "terminal_receipt_json IS NOT NULL AND publication_promoted = 0"
           )
@@ -348,14 +343,20 @@ module Hive
         translate_store_error(error, "live attempt query failed")
       end
 
-      def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)
-        raise CompareAndSwapFailed, "launch claim deadline expired" if
-          observed.active_deadline && now > observed.active_deadline
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+      def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.claim", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           unless Capability.matches?(data["claim_capability_digest"], claim_capability)
             raise CompareAndSwapFailed, "attempt claim capability is invalid"
           end
           raise CompareAndSwapFailed, "attempt is already claimed" if data["wrapper"]
+          # A try that began within the launch deadline may acquire SQL after
+          # it. Only the exact live wrapper holding the capability may repair
+          # that transition; the caller's finite retry deadline is unchanged.
+          deadline = data["claim_deadline"] && Time.iso8601(data["claim_deadline"])
+          if deadline && now > deadline &&
+             (owner.fetch("pid", owner[:pid]) != Process.pid || ProcessIdentity.new.status(Hive::StringifyKeys.call(owner)) != :matching)
+            raise CompareAndSwapFailed, "launch claim deadline expired"
+          end
 
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
@@ -367,11 +368,14 @@ module Hive
         end
       end
 
-      def first_heartbeat(observed, stale_sec:, now:)
-        raise CompareAndSwapFailed, "first heartbeat deadline expired" if
-          observed.active_deadline && now > observed.active_deadline
-        mutate(observed, allowed_states: [ "launching" ]) do |data|
+      def first_heartbeat(observed, stale_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.first_heartbeat", allowed_states: [ "launching" ], timeout_sec: timeout_sec) do |data|
           raise CompareAndSwapFailed, "attempt has not been claimed" unless data["wrapper"]
+          deadline = data["first_heartbeat_deadline"] && Time.iso8601(data["first_heartbeat_deadline"])
+          if deadline && now > deadline &&
+             (data["wrapper"]["pid"] != Process.pid || ProcessIdentity.new.status(data["wrapper"]) != :matching)
+            raise CompareAndSwapFailed, "first heartbeat deadline expired"
+          end
 
           timestamp = Record.iso8601(now)
           data.merge(
@@ -382,8 +386,8 @@ module Hive
         end
       end
 
-      def heartbeat(observed, stale_sec:, now:)
-        mutate(observed, allowed_states: [ "running" ]) do |data|
+      def heartbeat(observed, stale_sec:, now:, timeout_sec: nil)
+        mutate(observed, operation: "attempt.heartbeat", allowed_states: [ "running" ], timeout_sec: timeout_sec) do |data|
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "heartbeat_at" => Record.iso8601(now),
@@ -392,8 +396,16 @@ module Hive
         end
       end
 
-      def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil)
-        mutate(observed, allowed_states: [ "running" ]) do |data|
+      def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil, timeout_sec: nil)
+        # First worker custody is cleanup bookkeeping even if quiescence won
+        # the race with spawn. Its one bounded write must not consume the
+        # separate terminal/interruption cleanup allowance.
+        registering_worker = worker && !observed.worker &&
+          Hive::StringifyKeys.call(checkpoint) == observed.checkpoint &&
+          output_references.nil? && log_reference.nil?
+        mutate(observed, operation: registering_worker ? "attempt.register_worker" : "attempt.checkpoint",
+               allowed_states: [ "running" ], timeout_sec: timeout_sec,
+               cleanup_attempt_id: registering_worker ? "worker:#{observed.attempt_id}" : nil) do |data|
           outputs = output_references.nil? ? data.fetch("current_outputs") :
             Hive::StringifyKeys.call(output_references)
           outputs.each { |reference| OutputReference.validate_shape!(reference) }
@@ -409,7 +421,7 @@ module Hive
         end
       end
 
-      def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
+      def prepare_terminal_receipt(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
                       log_reference:, now:, provider_evidence: nil, pause_generation: nil,
                       authority: nil, timeout_sec: nil)
         version = observed.lease_version + 1
@@ -434,14 +446,45 @@ module Hive
           task_input_epoch: observed.task_input_epoch,
           terminal_lease_version: version, routing: observed["routing"]
         )
+        receipt
+      end
+
+      def terminalize(observed, outcome:, exit_status:, final_checkpoint:, output_references:,
+                      log_reference:, now:, provider_evidence: nil, pause_generation: nil,
+                      authority: nil, timeout_sec: nil)
+        receipt = prepare_terminal_receipt(
+          observed, outcome: outcome, exit_status: exit_status,
+          final_checkpoint: final_checkpoint, output_references: output_references,
+          log_reference: log_reference, now: now, provider_evidence: provider_evidence,
+          pause_generation: pause_generation
+        )
+        commit_prepared_terminal(observed, receipt, authority: authority, timeout_sec: timeout_sec)
+      end
+
+      def commit_prepared_terminal(observed, receipt, authority: nil, timeout_sec: nil, reason: nil,
+                                   allow_claimed_launch: false)
+        version = observed.lease_version + 1
+        Record.validate_receipt!(
+          receipt, attempt_id: observed.attempt_id, task_generation: observed.task_generation,
+          ownership_generation: observed.ownership_generation, task_input_epoch: observed.task_input_epoch,
+          terminal_lease_version: version, routing: observed["routing"]
+        )
+        final_checkpoint = receipt.fetch("final_checkpoint")
+        output_references = receipt.fetch("output_references")
+        log_reference = receipt.fetch("log_reference")
+        outcome = receipt.fetch("outcome")
         mutate(
-          observed, allowed_states: [ "running" ], pending_receipt: receipt,
+          observed, operation: "attempt.terminalize",
+          allowed_states: allow_claimed_launch && observed.claimed? ? %w[launching running] : [ "running" ],
+          pending_receipt: receipt,
           authority: authority, cleanup_attempt_id: observed.attempt_id,
           timeout_sec: timeout_sec
         ) do |data|
           data.merge(
             "state" => "terminal", "outcome" => outcome, "lease_version" => version,
-            "heartbeat_deadline" => nil, "ended_at" => Record.iso8601(now),
+            "claim_deadline" => nil, "first_heartbeat_deadline" => nil, "heartbeat_deadline" => nil,
+            "started_at" => data["started_at"] || receipt.fetch("started_at"), "ended_at" => receipt.fetch("ended_at"),
+            "diagnostics" => reason ? data.fetch("diagnostics").merge("bookkeeping_reason" => reason) : data.fetch("diagnostics"),
             "latest_revision" => final_checkpoint["revision"] || final_checkpoint[:revision] || data["latest_revision"],
             "checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
             "current_outputs" => Hive::StringifyKeys.call(output_references),
@@ -468,7 +511,7 @@ module Hive
       def mark_lost(observed, reason:, now:, diagnostics: {}, authority: nil,
                     timeout_sec: nil)
         mutate(
-          observed, allowed_states: %w[launching running], pending_receipt: {},
+          observed, operation: "attempt.mark_lost", allowed_states: %w[launching running], pending_receipt: {},
           authority: authority, cleanup_attempt_id: observed.attempt_id,
           timeout_sec: timeout_sec
         ) do |data|
@@ -506,15 +549,24 @@ module Hive
         ).count
       end
 
-      def mutate(observed, allowed_states:, pending_receipt: nil, authority: nil,
+      def mutate(observed, operation:, allowed_states:, pending_receipt: nil, authority: nil,
                  cleanup_attempt_id: nil, timeout_sec: nil)
         replacement = nil
-        database.transaction(
+        database.transaction(operation: operation, identifiers: { attempt_id: observed.attempt_id },
           authority: authority, cleanup_attempt_id: cleanup_attempt_id,
           timeout_sec: timeout_sec
         ) do |db|
           row = db[:attempts].where(attempt_id: observed.attempt_id).first
           current = row && record_from(row)
+          if pending_receipt && !pending_receipt.empty? && current&.state == "terminal" &&
+             current.lease_version == observed.lease_version + 1 &&
+             current.wrapper == observed.wrapper && current.worker == observed.worker &&
+             current.receipt.reject { |key, _| key == "ended_at" } == pending_receipt.reject { |key, _| key == "ended_at" }
+            # An ambiguous commit is resolved from the authoritative winner;
+            # the retry may have rebuilt its wall timestamp, never its inputs.
+            replacement = current
+            next
+          end
           verify_cas!(current, observed, allowed_states)
           replacement = Record.new(yield(current.to_h))
           verify_immutable!(current, replacement)
@@ -547,7 +599,7 @@ module Hive
         end
         replacement
       rescue InvalidRecord, InvalidOutputReference, Sequel::Error,
-             RuntimeControlPlane::Error => error
+             RuntimeControlPlane::Error, Hive::ConcurrentRunError => error
         translate_store_error(error, "attempt transition failed")
       end
 
@@ -587,9 +639,9 @@ module Hive
         raise RepositoryError, "attempt #{row.fetch(:attempt_id)} is unreadable: #{error.message}"
       end
 
-      def read_row(attempt_id)
+      def read_row(attempt_id, timeout_sec: nil)
         id = safe_id(attempt_id)
-        database.read { |db| db[:attempts].where(attempt_id: id).first }
+        database.read(timeout_sec: timeout_sec) { |db| db[:attempts].where(attempt_id: id).first }
       rescue Sequel::Error, RuntimeControlPlane::Error => error
         translate_store_error(error, "attempt lookup failed")
       end

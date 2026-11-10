@@ -17,6 +17,7 @@ require "hive/review_residual_commit"
 require "hive/usage_db"
 require "hive/worktree"
 require "hive/attempts/context"
+require "hive/attempts/bookkeeping_retry"
 require "hive/claude_launcher"
 require "hive/agent_observation"
 require "hive/billing_evidence"
@@ -1323,9 +1324,16 @@ module Hive
       # stage's own marker would still be the previous run's. Mark it too.
       def spawn_claude_with_failure_marker!(task, cfg, **kwargs)
         result = spawn_claude!(task, cfg, **kwargs)
+        if (reason = Hive::Attempts::BookkeepingReason.from(result))
+          Hive::Markers.set(task.state_file, :error, reason: reason, message: result[:error_message])
+          return result
+        end
         return result unless result.is_a?(Hash) && result[:preflight_failed]
 
         mark_claude_launch_failed(task, result[:error_message])
+      rescue Hive::Attempts::BookkeepingBusy => e
+        Hive::Markers.set(task.state_file, :error, reason: e.reason, message: e.message)
+        raise
       rescue Hive::AgentError => e
         raise if e.is_a?(Hive::ProviderRouteFailed)
 

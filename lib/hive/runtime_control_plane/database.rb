@@ -5,6 +5,7 @@ require "securerandom"
 require "sequel"
 require "sequel/extensions/migration"
 require "sqlite3"
+require "json"
 require "hive/atomic_file"
 require "hive/runtime_control_plane/file_fence"
 require "hive/runtime_control_plane/command_schema"
@@ -19,7 +20,8 @@ module Hive
       STORAGE_ACTION = "Use a writable, accessible state root (HIVE_HOME).".freeze
       UNPAIRED_STORAGE_ACTION = "Use a writable state root (HIVE_HOME), or safely restore a matching WAL/SHM pair or remove the stray sidecar after verifying no committed data will be lost.".freeze
       MIGRATIONS = %w[001_create_runtime_control_plane.rb].freeze
-      attr_reader :path, :owner_pid
+      CHECKPOINT_PAGES = { manual: 4096, daemon_backed: 0 }.freeze
+      attr_reader :path, :owner_pid, :checkpoint_role
 
       WriterAuthority = Data.define(:database_id, :owner_pid, :role) do
         def valid_for?(database, permitted_roles)
@@ -32,7 +34,8 @@ module Hive
                      busy_timeout_ms: BUSY_TIMEOUT_MS, sqlite_version: SQLite3::SQLITE_VERSION,
                      feature_probe: nil, clock: -> { Time.now.utc },
                      uuid_generator: -> { SecureRandom.uuid }, proc_root: "/proc",
-                     platform: RUBY_PLATFORM)
+                     platform: RUBY_PLATFORM, transaction_observer: nil,
+                     checkpoint_role: :manual)
         @path = File.expand_path(path)
         @migrations_dir = File.expand_path(migrations_dir)
         @busy_timeout_ms = Integer(busy_timeout_ms)
@@ -46,6 +49,21 @@ module Hive
         @connection = nil
         @validated = false
         @active_writer_authorities = {}
+        @transaction_observer = transaction_observer
+        # No connection exists yet, so construction needs no process guard.
+        @checkpoint_role = checked_checkpoint_role(checkpoint_role)
+      end
+
+      # A daemon may adopt the process's already-open command registration
+      # connection. Policy selection grants no writer/lifecycle authority.
+      def configure_checkpoint_role!(role)
+        role = checked_checkpoint_role(role)
+        ProcessGuard.checkout do
+          ensure_process_owner!
+          @checkpoint_role = role
+          @connection&.run("PRAGMA wal_autocheckpoint = #{CHECKPOINT_PAGES.fetch(role)}")
+        end
+        self
       end
 
       def open!(revalidate: true, timeout_sec: nil)
@@ -95,15 +113,30 @@ module Hive
                                  details: { error_class: error.class.name })
       end
 
-      def read
-        return operational_read { |database| yield database } if operational_inspection_active?
+      def read(timeout_sec: nil)
+        return operational_read(timeout_sec: timeout_sec) { |database| yield database } if operational_inspection_active?
 
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        deadline = timeout_sec && started + Float(timeout_sec)
         ProcessGuard.checkout do
-          ensure_open!
+          ensure_open!(timeout_sec: timeout_sec)
+          prior = integer_pragma(@connection, "busy_timeout") if deadline
+          if deadline
+            remaining_ms = (remaining_timeout(deadline) * 1000).floor
+            raise FileFence::Busy, "runtime read budget expired before SQL" unless remaining_ms.positive?
+
+            @connection.run("PRAGMA busy_timeout = #{remaining_ms}")
+          end
           @connection.run("PRAGMA query_only = ON")
           yield @connection
         ensure
-          @connection&.run("PRAGMA query_only = OFF")
+          active_error = $!
+          begin
+            @connection&.run("PRAGMA query_only = OFF")
+            @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+          rescue StandardError
+            raise unless active_error
+          end
         end
       rescue Sequel::Error, SQLite3::Exception => error
         SQLiteSupport.raise_if_busy!(error)
@@ -194,7 +227,13 @@ module Hive
       end
 
       def transaction(mode: :immediate, authority: nil, cleanup_attempt_id: nil,
-                      timeout_sec: nil, track_mutation: true)
+                      timeout_sec: nil, track_mutation: true,
+                      operation: "runtime.write", identifiers: {})
+        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        acquired_at = released_at = opened_at = fenced_at = nil
+        open_elapsed = fence_elapsed = sqlite_wait = 0.0
+        phase = :open
+        result = "acquisition_failed"
         if operational_inspection_active?
           raise Unavailable.new(
             "Hive state is mounted read-only at #{File.dirname(path)}",
@@ -205,21 +244,29 @@ module Hive
 
         fence_timeout = timeout_sec.nil? ? @busy_timeout_ms / 1000.0 :
           [ Float(timeout_sec), 0.0 ].max
-        wait_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-        ProcessGuard.checkout { ensure_open!(timeout_sec: fence_timeout) }
-        writer_timeout = if timeout_sec.nil?
-          fence_timeout
-        else
-          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
-          [ fence_timeout - elapsed, 0.0 ].max
+        deadline = timeout_sec.nil? ? nil : wait_started + fence_timeout
+        prepare_timeout = lambda do
+          next fence_timeout unless deadline
+
+          available = remaining_timeout(deadline)
+          # Keep a positive SQL wait after connection validation and fences.
+          reserve_sql = available > 0.1 ? 0.1 : available / 2.0
+          [ available - reserve_sql, 0.0 ].max
         end
-        with_writer_fence(authority: authority, timeout_sec: writer_timeout) do
+        ProcessGuard.checkout { ensure_open!(timeout_sec: prepare_timeout.call) }
+        opened_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        open_elapsed = opened_at - wait_started
+        phase = :fence
+        with_writer_fence(authority: authority, timeout_sec: prepare_timeout.call) do
+          fenced_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          fence_elapsed = fenced_at - opened_at
+          phase = :sql
           ProcessGuard.checkout(transaction: true) do
-            sqlite_timeout = if timeout_sec.nil?
-              fence_timeout
-            else
-              elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - wait_started
-              [ fence_timeout - elapsed, 0.0 ].max
+            sqlite_timeout = deadline ? remaining_timeout(deadline) : fence_timeout
+            # Explicit zero permits a nonblocking lifecycle rollback after its
+            # deadline; an exhausted positive budget must never start SQL.
+            if deadline && fence_timeout.positive? && sqlite_timeout < 0.001
+              raise FileFence::Busy, "runtime write budget expired before SQL acquisition"
             end
             ensure_open!(timeout_sec: sqlite_timeout) if @connection.nil?
             prior = integer_pragma(@connection, "busy_timeout") unless timeout_sec.nil?
@@ -227,20 +274,58 @@ module Hive
             apply_contention_budget(@connection)
             begin
               @connection.transaction(mode: mode, rollback: :reraise) do
+                acquired_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+                sqlite_wait = acquired_at - fenced_at
+                result = "rolled_back"
                 authorize_mutation!(@connection, authority: authority,
                                     cleanup_attempt_id: cleanup_attempt_id)
                 increment_mutation_sequence!(@connection) if track_mutation
                 yield @connection
               end
+              .tap { result = "committed" }
             ensure
-              @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
-              apply_contention_budget(@connection)
+              released_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+              sqlite_wait = released_at - fenced_at unless acquired_at
+              active_error = $!
+              begin
+                @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+                apply_contention_budget(@connection)
+              rescue StandardError
+                raise unless active_error
+              end
             end
           end
         end
       rescue Sequel::Error, SQLite3::Exception => error
         SQLiteSupport.raise_if_busy!(error)
         raise
+      ensure
+        finished_at = released_at || Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        open_elapsed = finished_at - wait_started if phase == :open
+        fence_elapsed = finished_at - opened_at if phase == :fence
+        sqlite_wait = finished_at - fenced_at if phase == :sql && !acquired_at
+        emit_transaction_measurement(
+          operation: operation, identifiers: identifiers, result: result,
+          wait_sec: (acquired_at || finished_at) - wait_started,
+          hold_sec: acquired_at && finished_at - acquired_at,
+          elapsed_sec: finished_at - wait_started,
+          open_sec: open_elapsed, fence_sec: fence_elapsed, sqlite_wait_sec: sqlite_wait
+        )
+      end
+
+      # Called after SQL and the writer fence have released. Diagnostics must
+      # never change a mutation's return value or replace its original error.
+      def emit_transaction_measurement(operation:, identifiers:, **measurement)
+        bounded = identifiers.slice(:task_id, :attempt_id).transform_values { |value| value.to_s.byteslice(0, 128) }
+        measurement = measurement.merge(operation: operation.to_s.byteslice(0, 96), **bounded)
+        measurement[:level] = measurement[:hold_sec].to_f > 1 ? "warning" : "debug"
+        if @transaction_observer
+          @transaction_observer.call(measurement.freeze)
+        elsif measurement[:level] == "warning" || ENV["HIVE_SQL_DEBUG"] == "1"
+          warn JSON.generate(event: "runtime_writer", **measurement)
+        end
+      rescue StandardError
+        nil
       end
 
       def with_exclusive_writer(role:, timeout_sec: BUSY_TIMEOUT_MS / 1000.0)
@@ -277,6 +362,44 @@ module Hive
           @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
           apply_contention_budget(@connection)
         end
+      end
+
+      # PASSIVE never waits for readers or forces WAL reclamation. The shared
+      # writer fence excludes pause/upgrade finalization; the controller can
+      # perform its pre-pause drain under its existing exclusive authority.
+      def passive_checkpoint!(timeout_sec: 0.25, authority: nil)
+        reject_operational_mutation!
+        deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + [ Float(timeout_sec), 0.0 ].max
+        ProcessGuard.checkout { ensure_open!(timeout_sec: remaining_timeout(deadline)) }
+        with_writer_fence(authority: authority, timeout_sec: remaining_timeout(deadline)) do
+          ProcessGuard.checkout do
+            raise ArgumentError, "checkpoint cannot run inside a transaction" if @connection.in_transaction?
+            phase = @connection[:runtime_lifecycle].get(:phase)
+            raise AdmissionClosed unless phase == "running" || valid_authority?(authority)
+
+            prior = integer_pragma(@connection, "busy_timeout")
+            @connection.run("PRAGMA busy_timeout = 0")
+            started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            values = @connection.fetch("PRAGMA wal_checkpoint(PASSIVE)").first.values.map { |value| Integer(value) }
+            busy, log_frames, checkpointed_frames = values
+            {
+              complete: busy.zero? && checkpointed_frames >= log_frames,
+              busy: busy, log_frames: log_frames, checkpointed_frames: checkpointed_frames,
+              remaining_frames: [ log_frames - checkpointed_frames, 0 ].max,
+              page_size: integer_pragma(@connection, "page_size"),
+              wal_bytes: wal_bytes,
+              duration_sec: Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+            }
+          ensure
+            @connection&.run("PRAGMA busy_timeout = #{prior}") if prior
+          end
+        end
+      end
+
+      def wal_bytes
+        File.size("#{path}-wal")
+      rescue Errno::ENOENT
+        0
       end
 
       def quiescence_upgrade_source
@@ -456,13 +579,22 @@ module Hive
 
       private
 
+      def checked_checkpoint_role(role)
+        role = role.to_sym
+        raise ArgumentError, "unknown checkpoint role: #{role}" unless CHECKPOINT_PAGES.key?(role)
+
+        role
+      end
+
       def runtime_connection(**options)
         budget = ContentionBudget.current
         if budget
           restore_timeout = options.fetch(:timeout)
+          connection_setup = options[:after_connect]
           # Sequel's adapter sets its integer timeout before after_connect.
           # Its initial connection pragmas do not access the database file.
           options = options.merge(timeout: 0, after_connect: ->(raw) {
+            connection_setup&.call(raw)
             budget.install(raw, restore_timeout_ms: restore_timeout)
           })
         end
@@ -625,8 +757,11 @@ module Hive
         validate_database_custody!
         timeout_ms = timeout_sec.nil? ? @busy_timeout_ms :
           [ (Float(timeout_sec) * 1000).floor, 0 ].max
-        @connection = runtime_connection(adapter: "sqlite", database: path, max_connections: 1,
-                                     timeout: timeout_ms, disable_dqs: true)
+        @connection = runtime_connection(
+          adapter: "sqlite", database: path, max_connections: 1,
+          timeout: timeout_ms, disable_dqs: true,
+          after_connect: ->(raw) { raw.execute("PRAGMA wal_autocheckpoint = #{CHECKPOINT_PAGES.fetch(checkpoint_role)}") }
+        )
         ProcessGuard.register(self)
         journal_mode = pragma_rows(@connection, "journal_mode = WAL").first.to_s.downcase
         unless journal_mode == "wal"
@@ -638,6 +773,7 @@ module Hive
         %w[foreign_keys\ =\ ON synchronous\ =\ FULL trusted_schema\ =\ OFF]
           .each { |setting| @connection.run("PRAGMA #{setting}") }
         validate_database_custody!
+        @connection.run("PRAGMA busy_timeout = #{@busy_timeout_ms}") unless timeout_sec.nil?
         @connection
       rescue Error
         disconnect_preserving_error

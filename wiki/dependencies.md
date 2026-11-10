@@ -292,6 +292,11 @@ resolutions and every locked native `sqlite3` platform.
 
 ## Web app bundle
 
+The web lock resolves Loofah 2.25.3, Nokogiri 1.19.7 across its eight native
+platforms, and rails-html-sanitizer 1.7.2. These compatible patches clear the
+November 2026 sanitizer/parser advisories reported by the separate web-lock
+audit. Audit both lockfiles; a clean root bundle does not cover web dependencies.
+
 `web/Gemfile` is deliberately separate from the gem payload: `hive web`
 execs the Rails app from the managed bundle or a source checkout, and
 `test/unit/gemspec_test.rb` pins that the gem does not package `web/`.

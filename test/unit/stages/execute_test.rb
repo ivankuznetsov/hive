@@ -712,6 +712,54 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_preserves_bookkeeping_result_attribution
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        write_plan(task)
+        worktree = File.join(dir, "worktree")
+        write_pointer(task, "path" => worktree, "branch" => task.slug, "execute_base_head" => "base")
+        git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+        result = { status: :error, error_reason: reason, error_message: "runtime database unavailable" }
+
+        run_result = with_fake_git_and_spawn(git, result: result) do
+          Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), worktree)
+        end
+
+        assert_equal({ commit: reason, status: :error }, run_result)
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal reason, marker.attrs.fetch("reason")
+        refute marker.attrs.key?("provider")
+      end
+    end
+  end
+
+  def test_run_pass_preserves_bookkeeping_exception_and_propagates_it
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      worktree = File.join(dir, "worktree")
+      write_pointer(task, "path" => worktree, "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      error = Hive::Attempts::BookkeepingBusy.new(
+        operation: "checkpoint", attempt_id: "attempt-1", retry_count: 3, elapsed_sec: 30, budget_sec: 30
+      )
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          ->(_task, _cfg, _path, agent_custody:, **_kwargs) { agent_custody.call { raise error } }
+        ) do
+          assert_same error, assert_raises(Hive::Attempts::BookkeepingBusy) {
+            Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), worktree)
+          }
+        end
+      end
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "runtime_bookkeeping_busy", marker.attrs.fetch("reason")
+      refute marker.attrs.key?("provider")
+    end
+  end
+
   def test_run_pass_preserves_non_limit_implementation_failure_marker
     with_tmp_dir do |dir|
       task = build_task(dir)

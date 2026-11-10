@@ -110,15 +110,7 @@ module Hive
           ownership_generation: attempt.ownership_generation,
           commit_generation: commit_generation(records, attempt.task_input_epoch),
           reason: reason,
-          evidence: [
-            {
-              "type" => "attempt_lease",
-              "attempt_id" => attempt.attempt_id,
-              "lease_version" => attempt.lease_version,
-              "state" => attempt.state,
-              "outcome" => attempt.outcome
-            }
-          ],
+          evidence: [ lease_evidence(attempt) ],
           provenance: {
             "source" => "attempt_reconciler",
             "classification" => status.classification.to_s,
@@ -131,6 +123,22 @@ module Hive
             "informational_after_terminal" => attempt.state == "terminal" && state == "satisfied"
           }
         }
+      end
+
+      # The condition reason stays in the routed vocabulary (`attempt_lost`)
+      # so recovery classification is unchanged; a typed bookkeeping loss
+      # rides along as lease evidence for diagnostics only.
+      def lease_evidence(attempt)
+        evidence = {
+          "type" => "attempt_lease",
+          "attempt_id" => attempt.attempt_id,
+          "lease_version" => attempt.lease_version,
+          "state" => attempt.state,
+          "outcome" => attempt.outcome
+        }
+        bookkeeping_reason = attempt.bookkeeping_reason
+        evidence["bookkeeping_reason"] = bookkeeping_reason if bookkeeping_reason
+        evidence
       end
 
       def health(attempt)

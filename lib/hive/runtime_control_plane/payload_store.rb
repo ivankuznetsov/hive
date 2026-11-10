@@ -37,19 +37,71 @@ module Hive
         with_custody_shards(shards) { yield }
       end
 
-      def write_open(attempt_id:, name:, bytes:)
+      # Pending operations and reclamation share this custody interval. A
+      # pending writer requires an admitted directory and cannot recreate one
+      # that a completed reclamation already removed.
+      def with_attempt_custody(attempt_id)
+        attempt = component!(attempt_id, "attempt id")
+        with_custody_shards([ "attempt-#{Digest::SHA256.hexdigest(attempt)}" ]) { yield }
+      end
+
+      def write_open(attempt_id:, name:, bytes:, require_existing: false)
         attempt = component!(attempt_id, "attempt id")
         basename = component!(name, "payload name")
-        directory = File.join(open_root, attempt)
-        prepare_directory!(directory)
-        path = File.join(directory, basename)
-        reject_existing_unsafe!(path)
-        Hive::AtomicFile.write(path, String(bytes), mode: 0o600)
-        secure_file!(path)
-        Hive::AtomicFile.fsync_directory(directory)
+        path = File.join(open_root, attempt, basename)
+        with_attempt_custody(attempt) do
+          directory = File.dirname(path)
+          if require_existing && !optional_lstat(directory)
+            raise_path_error!("admitted attempt payload directory is missing", :attempt_payload_missing, directory)
+          end
+          prepare_directory!(directory)
+          reject_existing_unsafe!(path)
+          Hive::AtomicFile.write(path, String(bytes), mode: 0o600)
+          secure_file!(path)
+          Hive::AtomicFile.fsync_directory(directory)
+        end
         path
       rescue SystemCallError, IOError => error
         raise_path_error!("cannot write open payload: #{error.message}", :payload_write_failed, path)
+      end
+
+      def read_open(attempt_id:, name:, max_bytes:)
+        attempt = component!(attempt_id, "attempt id")
+        basename = component!(name, "payload name")
+        with_attempt_custody(attempt) do
+          directory = File.join(open_root, attempt)
+          return nil unless optional_lstat(directory)
+          prepare_directory!(directory)
+          path = File.join(directory, basename)
+          return nil unless optional_lstat(path)
+          status = secure_file!(path)
+          integrity!("open payload exceeds read bound", :payload_too_large) if status.size > max_bytes
+          flags = File::RDONLY | File::NONBLOCK
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          File.open(path, flags) do |file|
+            before = file.stat
+            same_inode!(before, status, path)
+            bytes = file.read(max_bytes + 1).to_s
+            integrity!("open payload exceeds read bound", :payload_too_large) if bytes.bytesize > max_bytes
+            unless same_snapshot?(before, file.stat) && same_snapshot?(before, File.lstat(path))
+              integrity!("open payload changed while reading", :payload_changed)
+            end
+            bytes
+          end
+        end
+      end
+
+      def remove_open(attempt_id:, name:)
+        attempt = component!(attempt_id, "attempt id")
+        basename = component!(name, "payload name")
+        with_attempt_custody(attempt) do
+          path = File.join(open_root, attempt, basename)
+          return false unless optional_lstat(path)
+          secure_file!(path)
+          File.unlink(path)
+          Hive::AtomicFile.fsync_directory(File.dirname(path))
+          true
+        end
       end
 
       def seal(source_path, expected_sha256: nil, expected_size: nil)
@@ -137,21 +189,26 @@ module Hive
       # lost. Merely absent from a current scan is not enough authority.
       def reclaim_open!(lost_attempt_ids:)
         Array(lost_attempt_ids).map { |id| component!(id, "attempt id") }.uniq.sort.flat_map do |attempt|
-          directory = File.join(open_root, attempt)
-          status = optional_lstat(directory)
-          next [] unless status
-          path_error!(directory, :unsafe_open_root) if status.symlink? || !status.directory?
+          with_attempt_custody(attempt) do
+            directory = File.join(open_root, attempt)
+            status = optional_lstat(directory)
+            next [] unless status
+            path_error!(directory, :unsafe_open_root) if status.symlink? || !status.directory?
+            # Even malformed evidence remains pinned until its SQL disposition
+            # is durable. File presence never grants terminal authority.
+            next [] if optional_lstat(File.join(directory, "pending-bookkeeping.json"))
 
-          files = Dir.children(directory).sort.map do |name|
-            component!(name, "payload name")
-            path = File.join(directory, name)
-            secure_file!(path)
-            File.unlink(path)
-            path
+            files = Dir.children(directory).sort.map do |name|
+              component!(name, "payload name")
+              path = File.join(directory, name)
+              secure_file!(path)
+              File.unlink(path)
+              path
+            end
+            Dir.rmdir(directory)
+            Hive::AtomicFile.fsync_directory(open_root)
+            files
           end
-          Dir.rmdir(directory)
-          Hive::AtomicFile.fsync_directory(open_root)
-          files
         end
       end
 

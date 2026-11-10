@@ -21,20 +21,22 @@ module Hive
     # heartbeat/checkpoint state, captures ordered output, and atomically
     # commits the only valid terminal receipt.
     class Supervisor
+      attr_reader :last_durable_record
+
       READ_CHUNK = 16 * 1024
-      # Pause between retries of a lease write that lost a SQLite lock race.
-      STORE_RETRY_SEC = 1
       # How long lock contention may defer lease writes. A stale owner whose
       # process still matches is only ever a reconciler "suspect", never lost,
       # so this may exceed the lease window; a swapping host can hold the
       # runtime database's write lock far longer than `stale_sec`.
-      BUSY_TOLERANCE_SEC = 600
+      BUSY_TOLERANCE_SEC = BookkeepingRetry::WORKER_ALIVE_BUDGET_SEC
 
       def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
                      kill_grace_sec: 1, busy_tolerance_sec: BUSY_TOLERANCE_SEC,
-                     clock: -> { Time.now.utc },
+                     bookkeeping_timeout_sec: BookkeepingRetry::PRESTART_BUDGET_SEC,
+                     launch_deadline: nil, sleeper: ->(seconds) { sleep(seconds) },
+                     random: -> { Random.rand }, clock: -> { Time.now.utc },
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      install_signal_handlers: false, process_registry: nil,
                      reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"],
@@ -49,7 +51,10 @@ module Hive
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
         @timeout_sec = timeout_sec&.positive? ? timeout_sec : nil
         @kill_grace_sec = kill_grace_sec
-        @busy_tolerance_sec = [ busy_tolerance_sec, stale_sec ].max
+        @busy_tolerance_sec = busy_tolerance_sec
+        @bookkeeping_timeout_sec = BookkeepingRetry.prestart_budget(bookkeeping_timeout_sec)
+        @launch_deadline = launch_deadline
+        @sleeper, @random = sleeper, random
         @clock = clock
         @monotonic = monotonic
         @install_signal_handlers = install_signal_handlers
@@ -75,24 +80,54 @@ module Hive
         @claim_capability = read_claim_capability
         return fail_before_start("invalid_claim_capability") unless @claim_capability
 
-        record = @store.fetch(@attempt_id)
+        @launch_deadline ||= @monotonic.call + @bookkeeping_timeout_sec
+        record = bookkeeping_retry("read_launch", deadline: @launch_deadline).run do |timeout|
+          @store.fetch(@attempt_id, timeout_sec: timeout)
+        end
         return fail_before_start("attempt_not_launching") unless record&.state == "launching"
+        @last_durable_record = record
 
-        register_wrapper! if @reservation_id
+        prestart = bookkeeping_retry("claim", deadline: @launch_deadline)
+        prestart.cap_lifecycle!(expires_at: record.active_deadline, now: @clock.call)
+        @launch_deadline = prestart.deadline
+        @cleanup_deadline = @launch_deadline
+        if @reservation_id
+          bookkeeping_retry("register_wrapper", deadline: @launch_deadline).run do |timeout|
+            register_wrapper!(timeout_sec: timeout)
+          end
+        end
 
         log = @store.log_archive.open_writer(record.attempt_id, clock: @clock)
-        # The claim and first heartbeat each re-check their own deadline, so a
-        # busy retry stays bounded by the launch window and fails closed there.
         owner = process_identity(Process.pid)
-        record = with_store_retry do
+        record = prestart.run do |timeout|
+          if prestart.retry_count.positive?
+            winner = @store.fetch(@attempt_id, timeout_sec: timeout)
+            if winner&.state == "launching" && winner.lease_version == record.lease_version + 1 && winner.wrapper == owner
+              next winner
+            end
+          end
           @store.claim(
-            record, owner: owner, claim_capability: @claim_capability,
-            first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: @clock.call
+            record, owner: owner,
+            claim_capability: @claim_capability,
+            first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec,
+            now: @clock.call, timeout_sec: prestart.timeout_sec
           )
         end
-        record = with_store_retry do
-          @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
+        @last_durable_record = record
+        first = bookkeeping_retry("first_heartbeat", deadline: @launch_deadline)
+        first.cap_lifecycle!(expires_at: record.active_deadline, now: @clock.call)
+        @launch_deadline = first.deadline
+        @cleanup_deadline = @launch_deadline
+        record = first.run do |timeout|
+          if first.retry_count.positive?
+            winner = @store.fetch(@attempt_id, timeout_sec: timeout)
+            if winner&.state == "running" && winner.lease_version == record.lease_version + 1 && winner.wrapper == record.wrapper
+              next winner
+            end
+          end
+          @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call, timeout_sec: first.timeout_sec)
         end
+        @last_durable_record = record
         signal_ready("claimed" => true, "attempt_id" => record.attempt_id, "pid" => Process.pid)
         install_signal_handlers! if @install_signal_handlers
 
@@ -116,13 +151,21 @@ module Hive
           provider_signal: provider_signal
         )
         output_references << diagnostic_reference if diagnostic_reference
-        terminal = with_store_retry do
+        @prepared_completion = @store.prepare_terminal_receipt(
+          record, outcome: outcome, exit_status: exit_status,
+          final_checkpoint: record.checkpoint, output_references: output_references,
+          log_reference: log_reference, provider_evidence: provider_evidence,
+          pause_generation: @pause_generation, now: @clock.call
+        )
+        @store.pending_bookkeeping.prepare_completion(record, receipt: @prepared_completion)
+        completed_at = Time.iso8601(@prepared_completion.fetch("ended_at"))
+        terminal = with_store_retry(operation: "terminalize") do |timeout|
           if outcome == "interrupted"
             @store.interrupt(
               record, pause_generation: @pause_generation, exit_status: exit_status,
               final_checkpoint: record.checkpoint,
               output_references: output_references,
-              log_reference: log_reference, now: @clock.call
+              log_reference: log_reference, now: completed_at, timeout_sec: timeout
             )
           else
             @store.terminalize(
@@ -130,10 +173,11 @@ module Hive
               final_checkpoint: record.checkpoint,
               output_references: output_references,
               log_reference: log_reference, provider_evidence: provider_evidence,
-              now: @clock.call
+              now: completed_at, timeout_sec: timeout
             )
           end
         end
+        @last_durable_record = terminal
         terminal.receipt.fetch("exit_status")
       rescue RuntimeControlPlane::AdmissionClosed => e
         signal_ready(
@@ -141,6 +185,13 @@ module Hive
           "state" => "quiescing", "error" => e.message
         )
         Hive::ExitCodes::TEMPFAIL
+      rescue BookkeepingBusy => busy
+        handle_bookkeeping_busy(busy, log)
+      rescue PendingBookkeeping::StorageError => error
+        terminate_worker_group
+        warn "hive attempt supervisor: #{@attempt_id} #{error.message}; completion remains uncommitted"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => error.message)
+        Hive::ExitCodes::SOFTWARE
       rescue CompareAndSwapFailed, RepositoryError => e
         warn "hive attempt supervisor: #{@attempt_id} lost its lease: #{e.class}: #{e.message}"
         terminate_worker_group
@@ -161,12 +212,23 @@ module Hive
               exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed"
             )
             output_references << diagnostic_reference if diagnostic_reference
-            @store.terminalize(
+            @last_durable_record = current
+            failure_receipt = @store.prepare_terminal_receipt(
               current, outcome: "failed", exit_status: Hive::ExitCodes::SOFTWARE,
               final_checkpoint: current.checkpoint, output_references: output_references,
               log_reference: reference, now: @clock.call
             )
+            @store.pending_bookkeeping.prepare_completion(current, receipt: failure_receipt)
+            with_store_retry(operation: "terminalize_failure") do |timeout|
+              @store.terminalize(
+                current, outcome: "failed", exit_status: Hive::ExitCodes::SOFTWARE,
+                final_checkpoint: current.checkpoint, output_references: output_references,
+                log_reference: reference, now: @clock.call, timeout_sec: timeout
+              )
+            end
           end
+        rescue BookkeepingBusy => busy
+          return handle_bookkeeping_busy(busy, log)
         rescue StandardError
           nil
         end
@@ -182,6 +244,27 @@ module Hive
       end
 
       private
+
+      def handle_bookkeeping_busy(busy, log)
+        terminate_worker_group
+        reap_scope_leftovers(log)
+        log&.append(:supervisor, "hive attempt supervisor: #{busy.reason} (#{busy.operation})\n") unless log&.closed?
+        log&.close unless log&.closed?
+        if @last_durable_record && !@last_durable_record.final?
+          @store.pending_bookkeeping.record_busy(
+            @last_durable_record, operation: busy.operation, reason: busy.reason
+          )
+        end
+        warn "hive attempt supervisor: #{@attempt_id} #{busy.message}"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id,
+                     "error" => busy.message, "reason" => busy.reason)
+        Hive::ExitCodes::TEMPFAIL
+      rescue PendingBookkeeping::StorageError, SystemCallError, IOError => storage_error
+        warn "hive attempt supervisor: #{@attempt_id} pending bookkeeping storage failed: #{storage_error.message}"
+        signal_ready("claimed" => false, "attempt_id" => @attempt_id,
+                     "error" => storage_error.message, "reason" => busy.reason)
+        Hive::ExitCodes::TEMPFAIL
+      end
 
       # Once the worker is gone nothing else may keep the attempt's scope
       # alive: a leftover (podman's conmon, a daemon an agent started with
@@ -201,10 +284,10 @@ module Hive
         nil
       end
 
-      def register_wrapper!
+      def register_wrapper!(timeout_sec: nil)
         registry.register!(
           @reservation_id, pid: Process.pid,
-          service_identity: "attempt:#{@attempt_id}", proven_child_safe: false
+          service_identity: "attempt:#{@attempt_id}", proven_child_safe: false, timeout_sec: timeout_sec
         )
         @wrapper_registered = true
       end
@@ -212,10 +295,14 @@ module Hive
       def release_wrapper_registration
         return unless @reservation_id && @process_registry && @wrapper_registered
 
+        remaining = @cleanup_deadline && @cleanup_deadline - @monotonic.call
+        return if remaining && remaining <= 0
+
         @process_registry.mark_stopped_by_reservation!(
-          @reservation_id, require_descendant_absence: true
+          @reservation_id, require_descendant_absence: true,
+          timeout_sec: [ 1.0, remaining || 1.0 ].min
         )
-      rescue RuntimeControlPlane::Error, Sequel::Error
+      rescue RuntimeControlPlane::Error, Sequel::Error, Hive::ConcurrentRunError
         nil
       end
 
@@ -271,20 +358,11 @@ module Hive
         stderr_w.close
         worker_identity = process_identity(@worker_pid)
         @worker_pgid = worker_identity.fetch("process_group_id")
-        record = with_store_retry do
-          @store.checkpoint(
-            record, checkpoint: record.checkpoint,
-            worker: worker_identity, now: @clock.call
-          )
-        end
-        if gate_w
-          gate_w.write("1")
-          gate_w.close
-        end
-
+        registration = bookkeeping_retry("worker_registration", deadline: @launch_deadline)
+        registered = false
+        next_registration = @monotonic.call
         readers = { stdout_r => :stdout, stderr_r => :stderr }
-        next_heartbeat = @monotonic.call + @heartbeat_sec
-        busy_deadline = @monotonic.call + @busy_tolerance_sec
+        next_heartbeat = next_registration
         timeout_at = @timeout_sec && (@monotonic.call + @timeout_sec)
         status = nil
         forced_exit = nil
@@ -325,16 +403,46 @@ module Hive
             termination_kill_sent = true
           end
 
-          if now_mono >= next_heartbeat
+          if !registered && now_mono >= next_registration
+            registered_record = registration.try do |timeout|
+              if registration.retry_count.positive?
+                winner = @store.fetch(@attempt_id, timeout_sec: timeout)
+                if winner&.state == "running" && winner.lease_version == record.lease_version + 1 &&
+                   winner.wrapper == record.wrapper && winner.worker == worker_identity && winner.checkpoint == record.checkpoint
+                  next winner
+                end
+              end
+              @store.checkpoint(
+                record, checkpoint: record.checkpoint,
+                worker: worker_identity, now: @clock.call, timeout_sec: registration.timeout_sec
+              )
+            end
+            now_mono = @monotonic.call
+            if registered_record
+              record = registered_record
+              @last_durable_record = record
+              registered = true
+              if gate_w && !@cancel_reason && status.nil?
+                gate_w.write("1")
+                gate_w.close
+              end
+              next_heartbeat = now_mono + @heartbeat_sec
+            else
+              next_registration = now_mono + registration.delay
+            end
+          end
+          next_heartbeat = now_mono + @heartbeat_sec unless registered
+
+          if registered && now_mono >= next_heartbeat
             unless admission_closed?
-              renewed = renew_lease(record, log, busy_deadline)
+              renewed = renew_lease(record, log)
               now_mono = @monotonic.call
               if renewed
                 record = renewed
-                busy_deadline = now_mono + @busy_tolerance_sec
+                @last_durable_record = record
                 next_heartbeat = now_mono + @heartbeat_sec
               else
-                next_heartbeat = now_mono + [ STORE_RETRY_SEC, @heartbeat_sec ].min
+                next_heartbeat = now_mono + @renewal_retry.delay
               end
             else
               next_heartbeat = now_mono + @heartbeat_sec
@@ -350,6 +458,9 @@ module Hive
           end
 
           wait_for = [ next_heartbeat - now_mono, 0.05 ].min
+          if !registered
+            wait_for = [ wait_for, next_registration - now_mono ].min
+          end
           wait_for = [ wait_for, timeout_at - now_mono ].min if timeout_at && @cancel_reason.nil?
           if termination_deadline && status.nil?
             wait_for = [ wait_for, termination_deadline - now_mono ].min
@@ -383,6 +494,34 @@ module Hive
           end
           readers.keys.each { |io| drain_reader(io, readers, log) } if status
         end
+
+        @terminal_deadline ||= @monotonic.call + @busy_tolerance_sec
+        unless registered
+          # Cancellation or a short-lived worker may end the loop before
+          # registration succeeds. Persist custody even after exit, or adopt
+          # its exact ambiguous winner, before publishing a terminal receipt.
+          # This retry shares the terminal write's fixed deadline.
+          record = bookkeeping_retry(
+            "worker_registration_result", budget_sec: @busy_tolerance_sec,
+            deadline: @terminal_deadline
+          ).run do |timeout|
+            winner = @store.fetch(@attempt_id, timeout_sec: timeout)
+            if winner&.lease_version == record.lease_version && winner.to_h == record.to_h
+              next @store.checkpoint(
+                record, checkpoint: record.checkpoint, worker: worker_identity,
+                now: @clock.call, timeout_sec: timeout
+              )
+            end
+            unless winner&.state == "running" && winner.lease_version == record.lease_version + 1 &&
+                   winner.wrapper == record.wrapper && winner.worker == worker_identity && winner.checkpoint == record.checkpoint
+              raise CompareAndSwapFailed, "worker registration result changed ownership"
+            end
+
+            winner
+          end
+        end
+        @last_durable_record = record
+        @cleanup_deadline = @terminal_deadline
 
         exit_status = forced_exit || status_exit(status)
         @worker_signal = signal_name(status.termsig) if status && !status.exited?
@@ -558,35 +697,45 @@ module Hive
         readers.clear
       end
 
-      # A heartbeat that loses a SQLite lock race rolled back, so the observed
-      # record is still the compare-and-swap base. Defer it for up to the busy
-      # tolerance instead of killing a healthy worker; a lost CAS (another
-      # owner took the lease) or any other store failure still ends the attempt.
-      def renew_lease(record, log, busy_deadline)
-        @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
-      rescue CompareAndSwapFailed
-        raise
-      rescue RepositoryError => e
-        raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < busy_deadline
+      # A scheduled try leaves the output/cancellation loop in control. The
+      # same deferral episode retains its absolute deadline across every tick.
+      def renew_lease(record, log)
+        @renewal_retry ||= bookkeeping_retry("heartbeat", budget_sec: @busy_tolerance_sec)
+        @cleanup_deadline = @renewal_retry.deadline
+        renewed = @renewal_retry.try do |timeout|
+          if @renewal_retry.retry_count.positive?
+            winner = @store.fetch(@attempt_id, timeout_sec: timeout)
+            if winner&.state == "running" && winner.lease_version == record.lease_version + 1 &&
+               winner.wrapper == record.wrapper && winner.worker == record.worker &&
+               winner.checkpoint == record.checkpoint && winner["heartbeat_at"] != record["heartbeat_at"]
+              next winner
+            end
+          end
+          @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call, timeout_sec: @renewal_retry.timeout_sec)
+        end
+        if renewed
+          @renewal_retry = nil
+          return renewed
+        end
 
-        log.append(:supervisor, "hive attempt supervisor: heartbeat deferred: #{e.message}\n")
+        log.append(:supervisor, "hive attempt supervisor: heartbeat deferred: runtime database busy\n")
         nil
       end
 
-      # Retry a one-shot lease write through SQLite lock contention for at most
-      # the busy tolerance; the transaction rolled back, so retrying is safe.
-      def with_store_retry
-        deadline = @monotonic.call + @busy_tolerance_sec
-        begin
-          yield
-        rescue CompareAndSwapFailed
-          raise
-        rescue RepositoryError => e
-          raise unless Hive::InternalError.sqlite_busy?(e) && @monotonic.call < deadline
+      def with_store_retry(operation: "terminalize", &block)
+        @terminal_deadline ||= @monotonic.call + @busy_tolerance_sec
+        retry_operation = bookkeeping_retry(
+          operation, budget_sec: @busy_tolerance_sec, deadline: @terminal_deadline
+        )
+        @cleanup_deadline = retry_operation.deadline
+        retry_operation.run(&block)
+      end
 
-          sleep STORE_RETRY_SEC
-          retry
-        end
+      def bookkeeping_retry(operation, budget_sec: @bookkeeping_timeout_sec, deadline: nil)
+        BookkeepingRetry.new(
+          operation: operation, attempt_id: @attempt_id, budget_sec: budget_sec,
+          deadline: deadline, monotonic: @monotonic, sleeper: @sleeper, random: @random
+        )
       end
 
       def terminate_worker_group

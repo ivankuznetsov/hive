@@ -9,6 +9,91 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     super
   end
 
+  def test_writer_measurements_separate_acquisition_from_hold_and_follow_release
+    with_database do |database, path|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, lambda do |measurement|
+        probe = SQLite3::Database.new(path)
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+        probe.close
+        measurements << measurement
+      end)
+      database.transaction(operation: "test.commit", identifiers: { attempt_id: "a" * 200 }) { 42 }
+      error = assert_raises(RuntimeError) do
+        database.transaction(operation: "test.rollback") { raise "original" }
+      end
+      assert_equal "original", error.message
+      assert_equal %w[committed rolled_back], measurements.map { |item| item.fetch(:result) }
+      assert_equal "test.commit", measurements.first.fetch(:operation)
+      assert_equal 128, measurements.first.fetch(:attempt_id).length
+      measurements.each do |item|
+        assert_operator item.fetch(:wait_sec), :>=, 0
+        assert_operator item.fetch(:hold_sec), :>=, 0
+      end
+      database.instance_variable_set(:@transaction_observer, ->(*) { raise "logging unavailable" })
+      assert_equal 42, database.transaction { 42 }
+      assert_raises(RuntimeError) { database.transaction { raise "rollback" } }
+    end
+  end
+
+  def test_busy_acquisition_is_not_reported_as_a_long_writer_hold
+    with_database do |database, path|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, ->(item) { measurements << item })
+      blocker = SQLite3::Database.new(path)
+      blocker.execute("BEGIN IMMEDIATE")
+      assert_raises(Hive::RuntimeControlPlane::Busy) do
+        database.transaction(operation: "test.busy", timeout_sec: 0.05) { flunk }
+      end
+      assert_equal "acquisition_failed", measurements.last.fetch(:result)
+      assert_nil measurements.last.fetch(:hold_sec)
+      assert_operator measurements.last.fetch(:wait_sec), :>=, 0.03
+    ensure
+      blocker&.execute("ROLLBACK")
+      blocker&.close
+    end
+  end
+
+  def test_cleanup_failures_preserve_original_read_and_transaction_errors
+    [ :read, :transaction ].each do |operation|
+      [ false, true ].each do |body_fails|
+        with_database do |database|
+          connection = database.instance_variable_get(:@connection)
+          original_run = connection.method(:run)
+          cleanup = RuntimeError.new("timeout cleanup failed")
+          original = RuntimeError.new("body failed")
+          restore = "PRAGMA busy_timeout = #{Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS}"
+          connection.define_singleton_method(:run) do |sql, *args|
+            raise cleanup if sql == restore
+            original_run.call(sql, *args)
+          end
+          error = assert_raises(RuntimeError) do
+            database.public_send(operation, timeout_sec: 0.2) do
+              raise original if body_fails
+              :saved
+            end
+          end
+          assert_same body_fails ? original : cleanup, error
+        end
+      end
+    end
+  end
+
+  def test_writer_debug_measurement_is_emitted_after_commit
+    with_database do |database|
+      with_env("HIVE_SQL_DEBUG" => "1") do
+        _out, err = capture_io do
+          assert_equal :saved, database.transaction(operation: "test.debug") { :saved }
+        end
+        measurement = JSON.parse(err)
+        assert_equal "runtime_writer", measurement.fetch("event")
+        assert_equal "test.debug", measurement.fetch("operation")
+        assert_equal "committed", measurement.fetch("result")
+      end
+    end
+  end
+
   def test_budget_reinstalls_real_adapter_handler_after_transaction_and_checkpoint
     with_database do |database|
       database.open!
@@ -56,6 +141,14 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       [ :diagnostics, :installation_identity, :quiescence_status_snapshot ].each do |operation|
         assert_raises(Hive::RuntimeControlPlane::Busy) { database.public_send(operation) }
       end
+    end
+  end
+
+  def test_wal_bytes_is_zero_before_database_creation
+    with_tmp_dir do |root|
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(root, "missing.sqlite3"))
+      assert_equal 0, database.wal_bytes
+      refute_path_exists database.path
     end
   end
 
@@ -141,6 +234,7 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
           journal_mode: pragma.call("journal_mode").to_s.downcase,
           foreign_keys: pragma.call("foreign_keys"),
           synchronous: pragma.call("synchronous"),
+          wal_autocheckpoint: pragma.call("wal_autocheckpoint"),
           trusted_schema: pragma.call("trusted_schema"),
           busy_timeout_ms: pragma.call("busy_timeout")
         }
@@ -149,11 +243,117 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
       assert_equal "wal", settings.fetch(:journal_mode)
       assert_equal 1, settings.fetch(:foreign_keys)
       assert_equal 2, settings.fetch(:synchronous)
+      assert_equal 4096, settings.fetch(:wal_autocheckpoint)
       assert_equal 0, settings.fetch(:trusted_schema)
       assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
                    settings.fetch(:busy_timeout_ms)
       assert_raises(Sequel::DatabaseError) do
         database.read { |connection| connection.get(Sequel.lit('"not_a_column"')) }
+      end
+    end
+  end
+
+  def test_checkpoint_role_applies_to_cached_reopened_and_forked_connections
+    with_database do |database, path|
+      %i[daemon_backed manual].each do |role|
+        expected = role == :daemon_backed ? 0 : 4096
+        database.configure_checkpoint_role!(role)
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+        database.disconnect
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+        database.read(&:disconnect)
+        assert_equal expected, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) },
+                     "a replacement physical connection in the pool must inherit its role"
+        reader, writer = IO.pipe
+        pid = Hive::RuntimeControlPlane::ProcessGuard.fork do
+          reader.close
+          writer.write(database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) })
+          writer.close
+          database.disconnect
+          exit! 0
+        end
+        writer.close
+        assert_equal expected.to_s, reader.read
+        reader.close
+        Process.wait(pid)
+        assert_predicate $?, :success?
+      end
+      assert_raises(ArgumentError) { database.configure_checkpoint_role!(:controller) }
+      Hive::RuntimeControlPlane.disconnect
+      cached = Hive::RuntimeControlPlane.database(path: path)
+      assert_same cached, Hive::RuntimeControlPlane.database(path: path, checkpoint_role: :daemon_backed)
+      assert_equal :daemon_backed, cached.checkpoint_role
+      assert_equal 0, cached.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+    end
+  end
+
+  def test_daemon_writes_cross_the_old_checkpoint_threshold_without_checkpointing
+    with_database do |database, path|
+      database.configure_checkpoint_role!(:daemon_backed)
+      database.checkpoint!
+      original_bytes = File.size(path)
+      publish_large_snapshot(database, 5 * 1024 * 1024)
+
+      assert_operator database.wal_bytes, :>, 1000 * 4096
+      assert_equal original_bytes, File.size(path), "daemon commits must leave checkpoint work to maintenance"
+      result = database.passive_checkpoint!
+      assert result.fetch(:complete)
+      assert_operator result.fetch(:checkpointed_frames), :>, 1000
+      assert_operator File.size(path), :>, original_bytes
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |sql| sql.fetch("PRAGMA busy_timeout").get(:timeout) }
+    end
+  end
+
+  def test_manual_only_writes_automatically_checkpoint_at_the_raised_threshold
+    with_database do |database, path|
+      database.checkpoint!
+      original_bytes = File.size(path)
+      3.times { |index| publish_large_snapshot(database, 5 * 1024 * 1024, index) }
+      assert_equal original_bytes, File.size(path), "the raised threshold must exceed the old 1000-page policy"
+      publish_large_snapshot(database, 5 * 1024 * 1024, 3)
+
+      assert_operator File.size(path), :>, original_bytes,
+                      "manual-only writes must make automatic progress without a daemon or command hook"
+      assert_equal 4096, database.read { |sql| sql.fetch("PRAGMA wal_autocheckpoint").get(:wal_autocheckpoint) }
+    end
+  end
+
+  def test_passive_checkpoint_defers_a_pinned_reader_then_drains_without_blocking_writes
+    with_database do |database, path|
+      database.configure_checkpoint_role!(:daemon_backed)
+      publish_large_snapshot(database, 100)
+      database.checkpoint!
+      reader = SQLite3::Database.new(path)
+      reader.execute("BEGIN")
+      reader.execute("SELECT observation_json FROM daemon_runtime")
+      publish_large_snapshot(database, 2 * 1024 * 1024)
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      deferred = database.passive_checkpoint!
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1
+      refute deferred.fetch(:complete)
+      assert_operator deferred.fetch(:remaining_frames), :>, 0
+      assert_equal 0, deferred.fetch(:busy), "PASSIVE can report incomplete progress without SQLITE_BUSY"
+      publish_large_snapshot(database, 2 * 1024 * 1024, 1)
+      reader.execute("ROLLBACK")
+      assert database.passive_checkpoint!.fetch(:complete)
+    ensure
+      reader&.close
+    end
+  end
+
+  def test_passive_checkpoint_cannot_overlap_transactions_or_closed_lifecycle_without_authority
+    with_database do |database|
+      database.transaction do
+        assert_raises(ArgumentError) { database.passive_checkpoint! }
+      end
+      database.transaction { |sql| sql[:runtime_lifecycle].update(phase: "quiescing") }
+      assert_raises(Hive::RuntimeControlPlane::AdmissionClosed) { database.passive_checkpoint! }
+      database.with_exclusive_writer(role: :controller) do |authority|
+        assert database.passive_checkpoint!(authority: authority).fetch(:complete)
+      end
+      database.with_exclusive_writer(role: :migrator) do
+        assert_raises(Hive::ConcurrentRunError) { database.passive_checkpoint!(timeout_sec: 0.01) }
       end
     end
   end
@@ -213,6 +413,142 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
     assert_operator observed, :>=, 0.0
   ensure
     database&.disconnect
+  end
+
+  def test_capped_transactions_restore_the_default_timeout_after_fresh_open_and_busy
+    with_database do |database, path|
+      database.disconnect
+      timeout = database.transaction(timeout_sec: 0.2) do |connection|
+        connection.fetch("PRAGMA busy_timeout").get
+      end
+      assert_operator timeout, :>, 0
+      assert_operator timeout, :<=, 200
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |connection| connection.fetch("PRAGMA busy_timeout").get }
+      database.disconnect
+      blocker = SQLite3::Database.new(path)
+      blocker.execute("BEGIN IMMEDIATE")
+      assert_raises(Hive::RuntimeControlPlane::Busy) do
+        database.transaction(timeout_sec: 0.1) { flunk "contended SQL must not enter the body" }
+      end
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |connection| connection.fetch("PRAGMA busy_timeout").get }
+    ensure
+      blocker&.execute("ROLLBACK")
+      blocker&.close
+    end
+  end
+
+  def test_submillisecond_remaining_budget_cannot_issue_zero_timeout_sql
+    with_database do |database|
+      fake_now = 0.0
+      calls = []
+      original_clock = Process.method(:clock_gettime)
+      clock = ->(kind, *options) { kind == Process::CLOCK_MONOTONIC ? fake_now : original_clock.call(kind, *options) }
+      original_fence = database.method(:with_writer_fence)
+      database.define_singleton_method(:with_writer_fence) do |**options, &block|
+        original_fence.call(**options) do
+          fake_now = 0.0099
+          block.call
+        end
+      end
+      connection = database.instance_variable_get(:@connection)
+      original_transaction = connection.method(:transaction)
+      connection.define_singleton_method(:transaction) do |**options, &block|
+        calls << options
+        original_transaction.call(**options, &block)
+      end
+      with_replaced_singleton_method(Process, :clock_gettime, clock) do
+        assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+          database.transaction(timeout_sec: 0.01) { flunk "budget must expire before SQL" }
+        end
+      end
+      assert_empty calls
+      assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                   database.read { |db| db.fetch("PRAGMA busy_timeout").get }
+    end
+  end
+
+  def test_zero_timeout_controller_cleanup_attempts_sql_without_waiting
+    with_database do |database, path|
+      database.with_exclusive_writer(role: :controller) do |authority|
+        observed = database.transaction(authority: authority, timeout_sec: 0) do |db|
+          db[:installations].update(activation_epoch: 1)
+          db.fetch("PRAGMA busy_timeout").get
+        end
+        assert_equal 0, observed
+
+        blocker = SQLite3::Database.new(path)
+        blocker.execute("BEGIN IMMEDIATE")
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        assert_raises(Hive::RuntimeControlPlane::Busy) do
+          database.transaction(authority: authority, timeout_sec: 0) { flunk "blocked cleanup must not run" }
+        end
+        assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.5
+        assert_equal Hive::RuntimeControlPlane::BUSY_TIMEOUT_MS,
+                     database.read { |db| db.fetch("PRAGMA busy_timeout").get }
+      ensure
+        blocker&.execute("ROLLBACK")
+        blocker&.close
+      end
+    end
+  end
+
+  def test_failed_open_and_fence_acquisition_keep_their_phase_timings
+    with_database do |database|
+      measurements = []
+      database.instance_variable_set(:@transaction_observer, ->(item) { measurements << item })
+      database.with_exclusive_writer(role: :controller, timeout_sec: 1) do |_authority|
+        assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+          database.transaction(timeout_sec: 0.05) { flunk "held fence must exclude SQL" }
+        end
+      end
+      fenced = measurements.last
+      assert_equal "acquisition_failed", fenced.fetch(:result)
+      assert_operator fenced.fetch(:fence_sec), :>=, 0.01
+      assert_equal 0, fenced.fetch(:sqlite_wait_sec)
+      assert_nil fenced.fetch(:hold_sec)
+
+      database.define_singleton_method(:ensure_open!) do |**|
+        sleep 0.02
+        raise Hive::RuntimeControlPlane::FileFence::Busy, "injected opening contention"
+      end
+      assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+        database.transaction(timeout_sec: 0.05) { flunk "failed open must exclude SQL" }
+      end
+      opening = measurements.last
+      assert_operator opening.fetch(:open_sec), :>=, 0.01
+      assert_equal 0, opening.fetch(:fence_sec)
+      assert_equal 0, opening.fetch(:sqlite_wait_sec)
+      assert_nil opening.fetch(:hold_sec)
+    end
+  end
+
+  def test_bounded_reads_restore_timeout_and_query_only_after_success_error_and_tiny_budget
+    with_database do |database|
+      connection = database.instance_variable_get(:@connection)
+      connection.run("PRAGMA busy_timeout = 3456")
+      observed = database.read(timeout_sec: 0.2) do |db|
+        db.fetch("PRAGMA busy_timeout").get
+      end
+      assert_operator observed, :>, 0
+      assert_operator observed, :<=, 200
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+
+      error = assert_raises(RuntimeError) do
+        database.read(timeout_sec: 0.1) { raise "original read failure" }
+      end
+      assert_equal "original read failure", error.message
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+
+      assert_raises(Hive::RuntimeControlPlane::FileFence::Busy) do
+        database.read(timeout_sec: 0.0001) { flunk "submillisecond read must not yield SQL" }
+      end
+      assert_equal 3456, connection.fetch("PRAGMA busy_timeout").get
+      assert_equal 0, connection.fetch("PRAGMA query_only").get
+    end
   end
 
   def test_database_is_the_only_runtime_control_plane_connection_owner
@@ -1315,6 +1651,12 @@ class RuntimeControlPlaneDatabaseTest < Minitest::Test
   end
 
   private
+
+  def publish_large_snapshot(database, bytes, sequence = 0)
+    Hive::RuntimeControlPlane::OperationalRepository.new(database: database).publish(
+      { "padding" => ("a".ord + sequence).chr * bytes, "sequence" => sequence }
+    )
+  end
 
   def inject_busy_table_probe(database, table)
     inspect = database.method(:inspect_database)

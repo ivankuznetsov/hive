@@ -1,6 +1,7 @@
 require "securerandom"
 require "time"
 require "hive/attempts/contracts"
+require "hive/attempts/bookkeeping_retry"
 require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
@@ -27,7 +28,10 @@ module Hive
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
                      capability_generator: Capability.method(:generate),
-                     launch_timeout_sec: 30, routing_policy_resolver: nil,
+                     launch_timeout_sec: 30, bookkeeping_timeout_sec: BookkeepingRetry::PRESTART_BUDGET_SEC,
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
+                     sleeper: ->(seconds) { sleep(seconds) }, random: -> { Random.rand },
+                     routing_policy_resolver: nil,
                      router: Hive::ProviderRouting::Router.new,
                      decision_id_generator: -> { SecureRandom.uuid },
                      context_provenance: Hive::ContextProvenance,
@@ -40,6 +44,8 @@ module Hive
         @capability_generator = capability_generator
         @task_resolver = task_resolver || method(:resolve_request_task)
         @launch_timeout_sec = launch_timeout_sec
+        @bookkeeping_timeout_sec = BookkeepingRetry.prestart_budget(bookkeeping_timeout_sec)
+        @monotonic, @sleeper, @random = monotonic, sleeper, random
         @routing_policy_resolver = routing_policy_resolver || method(:legacy_policy_for)
         @router = router
         @decision_id_generator = decision_id_generator
@@ -208,12 +214,22 @@ module Hive
                 inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil)
+        bookkeeping_deadline = @monotonic.call + @bookkeeping_timeout_sec
         created = nil
         claim_capability = nil
         route_decision = nil
         view = admission_view
-        @store.observe_task_source(task: task, generation: generation, observed_at: now) if task
-        view ||= AdmissionView.new(store: @store, records: @store.active_attempts)
+        if task
+          bookkeeping_retry("observe_source", deadline: bookkeeping_deadline).run do |timeout|
+            @store.observe_task_source(
+              task: task, generation: generation, observed_at: [ now, @clock.call ].max,
+              timeout_sec: timeout
+            )
+          end
+        end
+        view ||= bookkeeping_retry("read_admission", deadline: bookkeeping_deadline).run do |timeout|
+          AdmissionView.new(store: @store, records: @store.active_attempts(timeout_sec: timeout))
+        end
         records = view.records
         semantic_owner = find_semantic_owner(records, generation)
         if semantic_owner&.live?
@@ -318,7 +334,8 @@ module Hive
           inherited_outputs: inherited_outputs,
           subject: subject,
           now: now,
-          admission: patrol_admission_metadata(task: task)
+          admission: patrol_admission_metadata(task: task),
+          bookkeeping_deadline: bookkeeping_deadline
         }
 
         if routing_policy.explicit?
@@ -363,13 +380,23 @@ module Hive
           )
         end
 
+        if created.attempt_id != attempt_id || created.wrapper || created.state != "launching"
+          adopted = result_for_adopted_handoff(created, interactive: interactive)
+          return adopted || deferred_result("request_already_admitted", attempt: created)
+        end
+
         record_attempt_admission(task, created, now)
         capture_launch_context(task, created, generation, now)
         handoff_now = [ now.utc, @clock.call.utc ].max
-        created = @store.arm_launch_handoff(
-          created, launch_timeout_sec: @launch_timeout_sec, now: handoff_now
-        )
-        handoff = @launcher.launch(created, claim_capability: claim_capability)
+        created = bookkeeping_retry("arm_handoff", attempt_id: created.attempt_id, deadline: bookkeeping_deadline).run do |timeout|
+          @store.arm_launch_handoff(
+            created, launch_timeout_sec: @launch_timeout_sec, now: [ handoff_now, @clock.call.utc ].max,
+            timeout_sec: timeout
+          )
+        end
+        handoff = BookkeepingRetry.with_launch_deadline(bookkeeping_deadline) do
+          @launcher.launch(created, claim_capability: claim_capability)
+        end
         if handoff.is_a?(Hash) && (handoff["claimed"] == true || handoff["state"] == "launching")
           return accepted_result(created, interactive: interactive, decision: route_decision)
         end
@@ -378,6 +405,14 @@ module Hive
           created, interactive: interactive,
           error: handoff.is_a?(Hash) ? handoff["error"] : nil
         )
+      rescue BookkeepingBusy => busy
+        # No file is created before admission. A known admitted attempt owns
+        # bounded evidence even while SQL remains locked; the deterministic
+        # request still resolves an ambiguous admission on the next call.
+        if created && !created.final?
+          @store.pending_bookkeeping.record_busy(created, operation: busy.operation, reason: busy.reason)
+        end
+        raise
       rescue CapacityExceeded
         deferred_result("capacity")
       rescue StandardError => e
@@ -750,33 +785,47 @@ module Hive
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
                                     subject:, now:, admission:,
-                                    route_decision: nil)
-        @store.create_launching(
-          attempt_id: attempt_id,
-          request_id: request_id,
-          recovery_source_attempt_id: recovery_source_attempt_id,
-          task_id: generation.task_id&.to_s,
-          project: generation.project,
-          task_slug: generation.task_slug,
-          intended_stage: generation.intended_stage,
-          task_generation: generation.task_generation,
-          ownership_generation: generation.ownership_generation,
-          task_input_epoch: generation.task_input_epoch,
-          progress_token: generation.progress_token,
-          provider: provider,
-          routing: routing,
-          route_decision: route_decision,
-          worker_argv: argv,
-          claim_capability_digest: Capability.digest(claim_capability),
-          starting_revision: starting_revision(task),
-          retry_charge: retry_charge,
-          inherited_outputs: inherited_outputs || [],
-          subject: subject,
-          source_fingerprint: generation.progress_token,
-          admission: admission,
-          limits: @limits,
-          launch_timeout_sec: @launch_timeout_sec,
-          now: now
+                                    route_decision: nil, bookkeeping_deadline:)
+        admission_retry = bookkeeping_retry("admission", attempt_id: attempt_id, deadline: bookkeeping_deadline)
+        admission_retry.run do |_timeout|
+          winner = @store.attempt_id_for_request(request_id: request_id, timeout_sec: admission_retry.timeout_sec)
+          next @store.fetch(winner, timeout_sec: admission_retry.timeout_sec) if winner
+
+          @store.create_launching(
+            attempt_id: attempt_id,
+            request_id: request_id,
+            recovery_source_attempt_id: recovery_source_attempt_id,
+            task_id: generation.task_id&.to_s,
+            project: generation.project,
+            task_slug: generation.task_slug,
+            intended_stage: generation.intended_stage,
+            task_generation: generation.task_generation,
+            ownership_generation: generation.ownership_generation,
+            task_input_epoch: generation.task_input_epoch,
+            progress_token: generation.progress_token,
+            provider: provider,
+            routing: routing,
+            route_decision: route_decision,
+            worker_argv: argv,
+            claim_capability_digest: Capability.digest(claim_capability),
+            starting_revision: starting_revision(task),
+            retry_charge: retry_charge,
+            inherited_outputs: inherited_outputs || [],
+            subject: subject,
+            source_fingerprint: generation.progress_token,
+            admission: admission,
+            limits: @limits,
+            launch_timeout_sec: @launch_timeout_sec,
+            now: [ now, @clock.call ].max, timeout_sec: admission_retry.timeout_sec
+          )
+        end
+      end
+
+      def bookkeeping_retry(operation, attempt_id: nil, deadline:)
+        BookkeepingRetry.new(
+          operation: operation, attempt_id: attempt_id,
+          budget_sec: @bookkeeping_timeout_sec, deadline: deadline,
+          monotonic: @monotonic, sleeper: @sleeper, random: @random
         )
       end
 

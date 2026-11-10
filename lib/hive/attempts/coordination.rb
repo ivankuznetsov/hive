@@ -16,8 +16,8 @@ module Hive
         row && row.fetch(:attempt_id)
       end
 
-      def attempt_id_for_request(request_id:)
-        row = database.read do |db|
+      def attempt_id_for_request(request_id:, timeout_sec: nil)
+        row = database.read(timeout_sec: timeout_sec) do |db|
           db[:attempts].where(request_id: identifier(request_id))
             .reverse_order(:accepted_at, :lease_version, :attempt_id).first
         end

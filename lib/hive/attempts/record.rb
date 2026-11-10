@@ -283,6 +283,11 @@ module Hive
       def task_input_epoch = @data.fetch("task_input_epoch")
       def lease_version = @data.fetch("lease_version")
       def receipt = Hive::StringifyKeys.call(@data["receipt"])
+
+      def bookkeeping_reason
+        reason = @data.dig("loss", "reason") || @data.dig("diagnostics", "bookkeeping_reason")
+        reason if %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].include?(reason)
+      end
       def explicit_routing? = @data.dig("routing", "mode") == "explicit"
       def wrapper = Hive::StringifyKeys.call(@data["wrapper"])
       def worker = Hive::StringifyKeys.call(@data["worker"])

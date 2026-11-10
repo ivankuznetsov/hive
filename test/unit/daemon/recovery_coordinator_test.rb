@@ -1723,6 +1723,55 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_marker_recovery_preserves_typed_origin_and_existing_cooldown
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      with_fixture(marker_attrs: { "reason" => reason, "marker_id" => "busy-marker" }) do |coordinator, row, state_home|
+        first = coordinator.request(row: row, requestor: "healer", request_id: "busy-recovery", now: NOW)
+        assert_equal "queued", first.status
+        assert_equal reason, first.failure_origin
+        request = Q.fetch("busy-recovery", state_home: state_home)
+        assert_equal reason, request.recovery.fetch("failure_origin")
+        assert_equal 1, request.recovery.fetch("retry_count")
+        replay = coordinator.request(row: row, requestor: "healer", request_id: "busy-recovery", now: NOW + 1)
+        assert_equal reason, replay.failure_origin
+        assert_equal 1, Q.fetch("busy-recovery", state_home: state_home).recovery.fetch("retry_count")
+      end
+    end
+  end
+
+  def test_terminal_bookkeeping_loss_is_preserved_in_receipt_and_repaired_marker
+    %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+      record = nil
+      store = Object.new
+      store.define_singleton_method(:fetch) { |_id| record }
+      with_fixture(attempt_store: store) do |coordinator, row, state_home|
+        coordinator.request(row: row, requestor: "healer", request_id: "busy-terminal", now: NOW)
+        admitted = Q.fetch("busy-terminal", state_home: state_home)
+        coordinator.resume(request: admitted, row: row, now: NOW)
+        cleared = Q.fetch("busy-terminal", state_home: state_home)
+        coordinator.mark_dispatched(cleared, attempt_id: "busy-attempt", now: NOW)
+        dispatched = Q.fetch("busy-terminal", state_home: state_home)
+        values = {
+          "project" => "hive", "task_id" => "817", "task_slug" => row.slug,
+          "intended_stage" => row.stage
+        }
+        record = Object.new
+        record.define_singleton_method(:final?) { true }
+        record.define_singleton_method(:attempt_id) { "busy-attempt" }
+        record.define_singleton_method(:bookkeeping_reason) { reason }
+        record.define_singleton_method(:task_generation) { dispatched.task_generation }
+        record.define_singleton_method(:[]) { |key| values[key] }
+        receipt = coordinator.mark_dispatched(
+          dispatched, attempt_id: "busy-attempt", terminal: true, outcome: "lost", now: NOW + 1
+        )
+        assert_equal reason, receipt.failure_origin
+        terminal = Q.fetch("busy-terminal", state_home: state_home)
+        assert coordinator.repair_failed_terminal_marker(terminal)
+        assert_equal reason, Hive::Markers.current(row.state_file).attrs.fetch("reason")
+      end
+    end
+  end
+
   def test_failed_terminal_recovery_repairs_unchanged_markerless_task_for_retry
     with_fixture do |coordinator, row, state_home|
       coordinator.request(
@@ -2186,51 +2235,68 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
   end
 
   def test_terminal_markerless_controller_failure_rearms_with_fresh_delivery
-    with_markerless_fixture do |coordinator, row, dir, original|
-      admitted = coordinator.request_markerless_failure(
-        row: row, requestor: "healer",
-        reason: "agent_exited_without_terminal_marker", now: NOW
-      )
-      request = Q.fetch(admitted.request_id, state_home: dir)
-      coordinator.resume(
-        request: request, row: row, now: Time.iso8601(admitted.next_eligible_at)
-      )
-      request = Q.fetch(admitted.request_id, state_home: dir)
-      Q.claim(
-        admitted.request_id, pid: Process.pid, attempt_id: "attempt-2",
-        task_generation: request.task_generation, state_home: dir, now: NOW + 6
-      )
-      coordinator.mark_dispatched(request, attempt_id: "attempt-2", now: NOW + 6)
-      request = Q.fetch(admitted.request_id, state_home: dir)
-      coordinator.mark_dispatched(
-        request, attempt_id: "attempt-2", terminal: true,
-        outcome: "failed", now: NOW + 7
-      )
-      request = Q.fetch(admitted.request_id, state_home: dir)
-      refute coordinator.repair_failed_terminal_marker(request)
-      assert_equal original, File.binread(row.state_file)
+    [ nil, "runtime_bookkeeping_busy", "first_heartbeat_owner_unverifiable_ceiling" ].each do |reason|
+      record = nil
+      store = Object.new
+      store.define_singleton_method(:fetch) { |_id| record }
+      with_markerless_fixture(attempt_store: store) do |coordinator, row, dir, original|
+        admitted = coordinator.request_markerless_failure(
+          row: row, requestor: "healer",
+          reason: "agent_exited_without_terminal_marker", now: NOW
+        )
+        request = Q.fetch(admitted.request_id, state_home: dir)
+        coordinator.resume(
+          request: request, row: row, now: Time.iso8601(admitted.next_eligible_at)
+        )
+        request = Q.fetch(admitted.request_id, state_home: dir)
+        Q.claim(
+          admitted.request_id, pid: Process.pid, attempt_id: "attempt-2",
+          task_generation: request.task_generation, state_home: dir, now: NOW + 6
+        )
+        coordinator.mark_dispatched(request, attempt_id: "attempt-2", now: NOW + 6)
+        request = Q.fetch(admitted.request_id, state_home: dir)
+        values = {
+          "project" => row.project, "task_id" => "817", "task_slug" => row.slug,
+          "intended_stage" => row.stage
+        }
+        record = Object.new
+        record.define_singleton_method(:final?) { true }
+        record.define_singleton_method(:live?) { false }
+        record.define_singleton_method(:attempt_id) { "attempt-2" }
+        record.define_singleton_method(:task_generation) { request.task_generation }
+        record.define_singleton_method(:bookkeeping_reason) { reason }
+        record.define_singleton_method(:[]) { |key| values[key] }
+        coordinator.mark_dispatched(
+          request, attempt_id: "attempt-2", terminal: true,
+          outcome: "failed", now: NOW + 7
+        )
+        request = Q.fetch(admitted.request_id, state_home: dir)
+        assert_equal "agent_exited_without_terminal_marker", request.recovery.fetch("failure_origin")
+        refute coordinator.repair_failed_terminal_marker(request)
+        assert_equal original, File.binread(row.state_file)
 
-      rearmed = coordinator.request_markerless_failure(
-        row: row.with(attempt_id: "attempt-2"), requestor: "healer",
-        reason: "agent_exited_without_terminal_marker", now: NOW + 8
-      )
-      replay = coordinator.request_markerless_failure(
-        row: row.with(attempt_id: "attempt-2"), requestor: "healer",
-        reason: "agent_exited_without_terminal_marker", now: NOW + 9
-      )
+        rearmed = coordinator.request_markerless_failure(
+          row: row.with(attempt_id: "attempt-2"), requestor: "healer",
+          reason: "agent_exited_without_terminal_marker", now: NOW + 8
+        )
+        replay = coordinator.request_markerless_failure(
+          row: row.with(attempt_id: "attempt-2"), requestor: "healer",
+          reason: "agent_exited_without_terminal_marker", now: NOW + 9
+        )
 
-      refute_equal admitted.request_id, rearmed.request_id
-      assert_equal rearmed.request_id, replay.request_id
-      assert_equal "cooldown", rearmed.status
-      assert_equal "admitted", rearmed.phase
-      assert_equal 2, rearmed.retry_count
-      assert_empty Q.claimed(state_home: dir)
-      assert_equal [ rearmed.request_id ], Q.pending(state_home: dir).map(&:request_id)
-      assert_nil Q.fetch(admitted.request_id, state_home: dir)
-      persisted = Q.fetch(rearmed.request_id, state_home: dir)
-      assert_nil persisted.recovery.fetch("attempt_id")
-      assert_nil persisted.recovery.fetch("terminal_outcome")
-      assert_equal original, File.binread(row.state_file)
+        refute_equal admitted.request_id, rearmed.request_id
+        assert_equal rearmed.request_id, replay.request_id
+        assert_equal "cooldown", rearmed.status
+        assert_equal "admitted", rearmed.phase
+        assert_equal 2, rearmed.retry_count
+        assert_empty Q.claimed(state_home: dir)
+        assert_equal [ rearmed.request_id ], Q.pending(state_home: dir).map(&:request_id)
+        assert_nil Q.fetch(admitted.request_id, state_home: dir)
+        persisted = Q.fetch(rearmed.request_id, state_home: dir)
+        assert_nil persisted.recovery.fetch("attempt_id")
+        assert_nil persisted.recovery.fetch("terminal_outcome")
+        assert_equal original, File.binread(row.state_file)
+      end
     end
   end
 
@@ -2911,7 +2977,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     )
   end
 
-  def with_markerless_fixture(task_id: 817, safety: nil,
+  def with_markerless_fixture(task_id: 817, safety: nil, attempt_store: nil,
                               suggested_command: "hive run demo-task --project hive --stage 2-fix --json",
                               task_resolver_builder: nil)
     Dir.mktmpdir("hive-markerless-recovery") do |dir|
@@ -2940,7 +3006,7 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
       )
       task_resolver = task_resolver_builder&.call(task)
       coordinator = fixture_coordinator(
-        dir: dir, task: task, safety: safety, task_resolver: task_resolver
+        dir: dir, task: task, safety: safety, task_resolver: task_resolver, attempt_store: attempt_store
       )
       yield coordinator, row, dir, original
     end

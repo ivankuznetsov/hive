@@ -36,11 +36,12 @@ module Hive
       },
       "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       # Durable task-attempt timers are top-level because a detached wrapper
-      # enforces them even when no daemon exists. Tests may shorten all four.
+      # enforces them even when no daemon exists.
       "attempt_heartbeat_sec" => 5,
       "attempt_stale_sec" => 30,
       "attempt_launch_timeout_sec" => 30,
       "attempt_first_heartbeat_timeout_sec" => 30,
+      "attempt_bookkeeping_timeout_sec" => 30,
       "project_name" => nil,
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
@@ -3898,11 +3899,19 @@ module Hive
       attempt_stale_sec
       attempt_launch_timeout_sec
       attempt_first_heartbeat_timeout_sec
+      attempt_bookkeeping_timeout_sec
     ].freeze
 
     def validate_attempt_timers!(cfg, source_path)
       ATTEMPT_TIMER_KEYS.each do |key|
         value = cfg[key]
+        if key == "attempt_bookkeeping_timeout_sec"
+          next if value.is_a?(Numeric) && value.real? && value.finite? && value.positive?
+
+          raise ConfigError,
+                "#{key} in #{describe_source(source_path)} must be a positive finite number; " \
+                "got #{value.inspect} (#{value.class})"
+        end
         next if value.is_a?(Integer) && value.positive?
 
         raise ConfigError,

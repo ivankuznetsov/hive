@@ -31,6 +31,37 @@ class CommandDispatchLifecycleTest < Minitest::Test
     end
   end
 
+  def test_bookkeeping_result_preserves_reason_and_tempfail_for_lost_and_terminal_attempts
+    %i[lost terminal].each do |status|
+      %w[runtime_bookkeeping_busy first_heartbeat_owner_unverifiable_ceiling].each do |reason|
+        result = Hive::Attempts::ClientResult.new(
+          status: status, exit_status: Hive::ExitCodes::TEMPFAIL,
+          outcome: status == :lost ? "lost" : "failed", receipt: nil,
+          attempt_id: "busy-attempt", reason: reason
+        )
+        error = assert_raises(Hive::AttemptExecutionError) { AttemptsCaller.new(nil).fail!(result) }
+        assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+        assert_equal reason, error.reason
+        assert_includes error.message, reason
+      end
+    end
+  end
+
+  def test_bookkeeping_json_failure_after_worker_output_preserves_single_document
+    caller = AttemptsCaller.new(nil)
+    caller.instance_variable_set(:@json, true)
+    result = Hive::Attempts::ClientResult.new(
+      status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL, outcome: "lost", receipt: nil,
+      attempt_id: "busy-attempt", stdout_bytes: 12, reason: "runtime_bookkeeping_busy"
+    )
+    out, err = capture_io do
+      exit_error = assert_raises(SystemExit) { caller.fail!(result) }
+      assert_equal Hive::ExitCodes::TEMPFAIL, exit_error.status
+    end
+    assert_empty out
+    assert_includes err, "runtime_bookkeeping_busy"
+  end
+
   def test_attempts_successor_allocation_delegates_the_frozen_identity
     calls = []
     lifecycle = Object.new

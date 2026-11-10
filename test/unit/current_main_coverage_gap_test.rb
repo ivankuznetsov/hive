@@ -279,6 +279,39 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  def test_review_run_preserves_bookkeeping_exhaustion_reason
+    with_tmp_dir do |root|
+      folder = task_folder(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      task = Hive::Task.new(folder)
+      File.write(task.state_file, "")
+      File.write(task.worktree_yml_path, { "path" => worktree, "branch" => task.slug }.to_yaml)
+
+      with_replaced_singleton_method(Hive::Stages::Review, :canonical_worktree_root, ->(_task, _cfg) { root }) do
+        owned_pointer = lambda do |_folder, slug:, **_kwargs|
+          { "path" => worktree, "branch" => slug }
+        end
+        with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, owned_pointer) do
+          with_replaced_singleton_method(Hive::Worktree, :validate_pointer_path, ->(_path, _root) { true }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
+              with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { raise Hive::Attempts::BookkeepingBusy.new(operation: "checkpoint", attempt_id: "attempt-1", retry_count: 3, elapsed_sec: 30, budget_sec: 30) }) do
+                assert_raises(Hive::Attempts::BookkeepingBusy) do
+                  Hive::Stages::Review.run!(task, { "review" => {} })
+                end
+
+                marker = Hive::Markers.current(task.state_file)
+                assert_equal :review_error, marker.name
+                assert_equal "runtime_bookkeeping_busy", marker.attrs["reason"]
+                assert_equal "Hive::Attempts::BookkeepingBusy", marker.attrs["exception_class"]
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
   def test_review_helper_error_paths_return_structured_results
     with_tmp_dir do |root|
       folder = task_folder(root)

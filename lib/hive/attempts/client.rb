@@ -33,7 +33,7 @@ module Hive
             return ClientResult.new(
               status: :terminal, exit_status: receipt.fetch("exit_status"),
               outcome: receipt.fetch("outcome"), receipt: receipt, attempt_id: attempt_id,
-              stdout_bytes: stdout_bytes, output_status: output_status
+              stdout_bytes: stdout_bytes, output_status: output_status, reason: record.bookkeeping_reason
             )
           end
           if record.state == "lost"
@@ -43,7 +43,7 @@ module Hive
             return ClientResult.new(
               status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
               outcome: "lost", receipt: nil, attempt_id: attempt_id,
-              stdout_bytes: stdout_bytes, output_status: output_status
+              stdout_bytes: stdout_bytes, output_status: output_status, reason: record.bookkeeping_reason
             )
           end
           sleep @poll_interval

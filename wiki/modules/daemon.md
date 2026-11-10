@@ -3,9 +3,36 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-02
+updated: 2026-11-09
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
+
+Runtime writer connections have an explicit checkpoint role: daemon-owned
+setup selects `daemon_backed` (`wal_autocheckpoint=0`), including an already
+cached command-registration connection. Standalone/manual writers default to
+4096 pages and retain automatic checkpoint progress. Each replacement physical
+connection reapplies its selected policy; FULL synchronous durability remains.
+`CheckpointMaintenance` owns a separate daemon connection and runs one PASSIVE
+pass per 30 seconds on available full/fast poll ticks. At 16 MiB of WAL it may
+run once per second; this threshold cannot cap growth behind pinned readers.
+Its process/mutex guard, nonblocking lifecycle operation lock, shared writer
+fence and running-phase check prevent overlap with pause/upgrade work. The
+`runtime_checkpoint_maintenance` log event reports bytes, page/frame progress,
+duration and deferred errors. Quiescence performs a bounded PASSIVE drain
+while still quiescing under controller authority, then preserves the checked
+FULL checkpoint and proof boundary. Upgrade source TRUNCATE checks remain.
+The quiesce v1 schema accepts the nested `checkpoint.passive_drain` metrics.
+If the deadline expires after PASSIVE but before pause, the envelope retains
+the same four checkpoint summary fields with `complete: false` and nests all
+eight passive metrics in `passive_drain`; it never claims a completed FULL
+checkpoint. Regression coverage validates the actual producer's JSON against
+the published schema.
+Explicit zero-timeout writer transactions retain nonblocking SQL semantics so
+an expired proof-publication deadline can roll its paused candidate back to
+quiescing under the held controller fence. Exhausted positive write budgets
+still refuse SQL acquisition; cleanup never receives an extra busy wait.
+Measured storage-policy evidence is in
+`docs/implementation/runtime-database-contention.md`.
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
@@ -1292,6 +1319,9 @@ continuously.
 Retrying a terminal markerless recovery creates a deterministic fresh delivery
 request from the prior request id and next retry count, copies the bounded
 recovery ledger into it, and removes the superseded terminal queue receipt.
+The stored `failure_origin` remains the original markerless lookup key when a
+replacement ends with a bookkeeping loss; its attempt retains the typed loss
+reason. Terminalization cannot rewrite that key and bypass paced rearming.
 The attempt proof remains immutable. This preserves ordinary request
 idempotency—replaying one request still returns its first receipt—while an
 authorized cooled retry can launch a new worker for the unchanged controller

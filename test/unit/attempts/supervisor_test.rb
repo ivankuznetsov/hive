@@ -79,6 +79,250 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_nil supervisor.send(:release_wrapper_registration)
   end
 
+  def test_completion_storage_failure_leaves_running_attempt_without_a_receipt
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      store.pending_bookkeeping.define_singleton_method(:prepare_completion) do |*, **|
+        raise Hive::Attempts::PendingBookkeeping::StorageError, "disk full"
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      _out, err = capture_io { assert_equal Hive::ExitCodes::SOFTWARE, supervisor.run }
+      assert_includes err, "completion remains uncommitted"
+      assert_equal "running", store.fetch(attempt.attempt_id).state
+      assert_nil store.fetch(attempt.attempt_id).receipt
+    end
+  end
+
+  def test_pending_storage_failure_after_busy_exhaustion_still_returns_tempfail
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      mono = 0.0
+      store.define_singleton_method(:claim) do |*, timeout_sec:, **|
+        mono += timeout_sec
+        raise SQLite3::BusyException, "busy"
+      end
+      store.pending_bookkeeping.define_singleton_method(:record_busy) do |*, **|
+        raise Hive::Attempts::PendingBookkeeping::StorageError, "disk full"
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        bookkeeping_timeout_sec: 0.1, monotonic: -> { mono }, sleeper: ->(seconds) { mono += seconds }
+      )
+      _out, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run }
+      assert_includes err, "pending bookkeeping storage failed: disk full"
+      assert_equal "launching", store.fetch(attempt.attempt_id).state
+    end
+  end
+
+  def test_failed_worker_completion_is_preserved_when_error_terminalization_is_busy
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      mono = 0.0
+      store.define_singleton_method(:terminalize) do |*, timeout_sec:, **|
+        mono += timeout_sec
+        raise SQLite3::BusyException, "busy"
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        busy_tolerance_sec: 0.1, monotonic: -> { mono }, sleeper: ->(seconds) { mono += seconds }
+      )
+      supervisor.define_singleton_method(:run_worker) { |*| raise IOError, "worker setup failed" }
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run }
+      current = store.fetch(attempt.attempt_id)
+      assert_equal "running", current.state
+      pending = store.pending_bookkeeping.read(current)
+      assert_equal :valid, pending.status
+      assert_equal "failed", pending.document.fetch("terminal_receipt").fetch("outcome")
+    end
+  end
+
+  def test_cancellation_observed_after_worker_exit_preserves_success
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      supervisor.instance_variable_set(:@cancel_reason, :timeout)
+      wait = Process.method(:wait2)
+      # Resolve the worker exit at the cancellation check to exercise that race
+      # without depending on scheduler timing.
+      with_replaced_singleton_method(Process, :wait2, ->(pid, _flags) { wait.call(pid) }) do
+        assert_equal 0, supervisor.run
+      end
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      refute_nil terminal.worker
+      assert_nil supervisor.instance_variable_get(:@cancel_reason)
+    end
+  end
+
+  def test_cancellation_before_registration_persists_worker_identity
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.05
+      )
+      supervisor.instance_variable_set(:@cancel_reason, :signal)
+      supervisor.instance_variable_set(:@cancel_signal, "TERM")
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+    end
+  end
+
+  def test_timeout_before_registration_persists_worker_identity
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        timeout_sec: Float::MIN, kill_grace_sec: 0.05
+      )
+
+      assert_equal 124, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+    end
+  end
+
+  def test_quiescence_before_registration_persists_worker_custody_before_interruption
+    with_attempt(worker_argv: [ "/bin/sleep", "30" ]) do |store, attempt|
+      lifecycle = Hive::RuntimeControlPlane::LifecycleRepository.new(database: store.database)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.05
+      )
+      identity = supervisor.method(:process_identity)
+      supervisor.define_singleton_method(:process_identity) do |pid|
+        captured = identity.call(pid)
+        unless pid == Process.pid
+          lifecycle.begin_quiesce!(
+            deadline_monotonic: Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5,
+            boot_id: "test-boot", shutdown_grace_sec: 0.05
+          )
+          @cancel_reason = :signal
+          @cancel_signal = "TERM"
+        end
+        captured
+      end
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "interrupted", terminal.outcome
+      refute_nil terminal.worker
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(terminal.worker)
+      assert_equal lifecycle.current.generation, terminal.receipt.fetch("pause_generation")
+      cleanup_writes = store.database.read do |db|
+        db[:quiescence_cleanup_writes].select_map(:attempt_id)
+      end
+      assert_equal [ attempt.attempt_id, "worker:#{attempt.attempt_id}" ].sort, cleanup_writes.sort
+    end
+  end
+
+  def test_cancelled_hive_worker_registration_does_not_release_execution_gate
+    with_attempt(worker_argv: [ "hive", "run", "durable-task" ]) do |store, attempt|
+      invoked = File.join(store.root, "unexpected-execution")
+      worker = <<~'RUBY'
+        gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+        File.write(ARGV.fetch(0), "executed") if gate.read(1) == "1"
+        sleep 30
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY),
+        kill_grace_sec: 0.3
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker, invoked ]
+      end
+      signal = supervisor.method(:signal_worker_group)
+      supervisor.define_singleton_method(:signal_worker_group) do |name|
+        name == "TERM" ? true : signal.call(name)
+      end
+      supervisor.instance_variable_set(:@cancel_reason, :signal)
+      supervisor.instance_variable_set(:@cancel_signal, "TERM")
+
+      assert_equal 143, Timeout.timeout(3) { supervisor.run }
+      refute_nil store.fetch(attempt.attempt_id).worker
+      refute File.exist?(invoked)
+    end
+  end
+
+  def test_short_worker_registration_retries_before_publishing_terminal_receipt
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      calls = fail_store_calls(store, :checkpoint, times: 1)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+
+      assert_equal 0, Timeout.timeout(3) { supervisor.run }
+      assert_equal 2, calls.call
+      refute_nil store.fetch(attempt.attempt_id).worker
+    end
+  end
+
+  def test_ambiguous_worker_registration_adopts_the_exact_committed_winner
+    with_tmp_dir do |root|
+      release = File.join(root, "registration-observed")
+      worker = [ RbConfig.ruby, "-e", "sleep 0.01 until File.exist?(ARGV.fetch(0))", release ]
+      with_attempt(worker_argv: worker) do |store, attempt|
+        checkpoint = store.method(:checkpoint)
+        fetch = store.method(:fetch)
+        calls = 0
+        store.define_singleton_method(:checkpoint) do |*args, **options|
+          calls += 1
+          result = checkpoint.call(*args, **options)
+          raise SQLite3::BusyException, "ambiguous commit" if calls == 1
+          result
+        end
+        store.define_singleton_method(:fetch) do |*args, **options|
+          record = fetch.call(*args, **options)
+          File.write(release, "1") if record&.worker
+          record
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+        )
+        assert_equal 0, Timeout.timeout(10) { supervisor.run }
+        assert_equal 1, calls
+        assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+        refute_nil supervisor.last_durable_record.worker
+      end
+    end
+  end
+
+  def test_short_worker_registration_result_cannot_adopt_a_different_lease
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
+      checkpoint = store.method(:checkpoint)
+      wait = Process.method(:wait2)
+      exited = nil
+      store.define_singleton_method(:checkpoint) do |*args, **options|
+        registered = checkpoint.call(*args, **options)
+        heartbeat(registered, stale_sec: 30, now: Time.now.utc)
+        exited = wait.call(registered.worker.fetch("pid"))
+        raise SQLite3::BusyException, "ambiguous commit"
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id, claim_io: StringIO.new(CLAIM_CAPABILITY)
+      )
+      replacement = lambda do |pid, flags|
+        if exited && exited.first == pid
+          result, exited = exited, nil
+          result
+        else
+          wait.call(pid, flags)
+        end
+      end
+      _out, err = capture_io do
+        with_replaced_singleton_method(Process, :wait2, replacement) do
+          assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
+        end
+      end
+      assert_includes err, "worker registration result changed ownership"
+      assert_equal "running", store.fetch(attempt.attempt_id).state
+    end
+  end
+
   def test_quiescence_lifecycle_probe_errors_fail_closed_without_crashing_worker
     lifecycle = Object.new
     lifecycle.define_singleton_method(:current) do
@@ -206,15 +450,124 @@ class AttemptsSupervisorTest < Minitest::Test
     original = store.method(name)
     store.define_singleton_method(name) do |*args, **kwargs|
       calls += 1
-      raise Hive::Attempts::RepositoryError, message if calls <= times
+      if calls <= times
+        cause = message == BUSY ? SQLite3::BusyException.new("database is locked") : nil
+        raise Hive::Attempts::RepositoryError, message, cause: cause
+      end
 
       original.call(*args, **kwargs)
     end
     -> { calls }
   end
 
+  def test_real_sql_lock_delays_claim_with_bounded_positive_tries_and_one_worker
+    with_tmp_dir do |directory|
+      invocations = File.join(directory, "invocations")
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "printf run >> #{invocations}" ]) do |store, attempt|
+        measurements = []
+        store.database.instance_variable_set(:@transaction_observer, ->(entry) { measurements << entry })
+        with_sql_holder(store, seconds: 2.2) do
+          supervisor = Hive::Attempts::Supervisor.new(
+            store: store, attempt_id: attempt.attempt_id,
+            claim_io: StringIO.new(CLAIM_CAPABILITY),
+            heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5
+          )
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          assert_equal 0, supervisor.run
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+          assert_operator elapsed, :>=, 2.0
+          assert_operator elapsed, :<, 5.0
+        end
+        assert_equal "run", File.read(invocations)
+        claims = measurements.select { |entry| entry[:operation] == "attempt.claim" }
+        assert_operator claims.length, :>=, 3
+        blocked = claims.reject { |entry| entry[:result] == "committed" }
+        assert blocked.all? { |entry| entry[:sqlite_wait_sec] > 0.0 && entry[:sqlite_wait_sec] < 1.1 }, blocked.inspect
+        assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+      end
+    end
+  end
+
+  def test_contended_claim_exhausts_strictly_before_lifecycle_expiry_without_work
+    with_tmp_dir do |directory|
+      invocations = File.join(directory, "invocations")
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "touch #{invocations}" ]) do |store, attempt|
+        store.arm_launch_handoff(attempt, launch_timeout_sec: 0.2, now: Time.now.utc)
+        with_sql_holder(store, seconds: 0.5) do
+          supervisor = Hive::Attempts::Supervisor.new(
+            store: store, attempt_id: attempt.attempt_id,
+            claim_io: StringIO.new(CLAIM_CAPABILITY)
+          )
+          started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          _, error = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run }
+          assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 0.35
+          assert_includes error, "runtime_bookkeeping_busy"
+          refute_includes error, "launch claim deadline expired"
+        end
+        refute File.exist?(invocations)
+        assert_equal "launching", store.fetch(attempt.attempt_id).state
+      end
+    end
+  end
+
+  def test_ambiguous_claim_first_heartbeat_and_terminal_commit_fetch_the_winner
+    %i[claim first_heartbeat checkpoint terminalize heartbeat].each do |operation|
+      script = operation == :heartbeat ? [ "/bin/sleep", "0.2" ] : [ "/bin/true" ]
+      with_attempt(worker_argv: script) do |store, attempt|
+        original = store.method(operation)
+        calls = 0
+        store.define_singleton_method(operation) do |*arguments, **keywords|
+          calls += 1
+          result = original.call(*arguments, **keywords)
+          raise SQLite3::BusyException, "ambiguous commit" if calls == 1
+
+          result
+        end
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY),
+          heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5
+        )
+        assert_equal 0, supervisor.run, operation.to_s
+        terminal = store.fetch(attempt.attempt_id)
+        assert_equal "succeeded", terminal.outcome
+        if operation == :heartbeat
+          assert_operator terminal.lease_version, :>, 4
+          assert_operator calls, :>=, 1
+        else
+          assert_equal 4, terminal.lease_version
+          assert_equal operation == :terminalize ? 2 : 1, calls
+        end
+      end
+    end
+  end
+
+  def test_worker_registration_contention_keeps_timeout_and_output_drain_responsive
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "printf started; sleep 30" ]) do |store, attempt|
+      fail_store_calls(store, :checkpoint, times: Float::INFINITY)
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), timeout_sec: 0.1,
+        heartbeat_sec: 0.02, stale_sec: 5, first_heartbeat_timeout_sec: 5,
+        kill_grace_sec: 0.05, busy_tolerance_sec: 0.1
+      )
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(2) { supervisor.run } }
+      assert_operator Process.clock_gettime(Process::CLOCK_MONOTONIC) - started, :<, 1.0
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "running", terminal.state
+      assert_nil terminal.receipt
+      assert_equal :missing, Hive::Attempts::ProcessIdentity.new.status(
+        "pid" => supervisor.instance_variable_get(:@worker_pid)
+      )
+      assert_equal :valid, store.pending_bookkeeping.read(terminal).status
+      frames = Hive::Attempts::StreamLog.read(store.log_archive.hot_path(attempt.attempt_id))
+      assert frames.any? { |frame| frame.bytes.include?("started") }
+    end
+  end
+
   def test_busy_heartbeats_are_deferred_while_the_lease_is_unexpired
-    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.3; exit 0" ]) do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "sleep 0.7; exit 0" ]) do |store, attempt|
       heartbeats = fail_store_calls(store, :heartbeat, times: 3)
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
@@ -242,8 +595,9 @@ class AttemptsSupervisorTest < Minitest::Test
       )
 
       _, err = capture_io { assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run } }
-      assert_includes err, "lost its lease"
-      assert_includes err, "database is locked"
+      assert_includes err, "runtime_bookkeeping_busy: heartbeat exhausted"
+      assert_equal store.fetch(attempt.attempt_id).to_h, supervisor.last_durable_record.to_h
+      assert_equal "running", supervisor.last_durable_record.state
     end
   end
 
@@ -309,14 +663,15 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
-  # Busy retries never outlive the first-heartbeat deadline: the repository
-  # re-checks it on every retry and the attempt fails closed.
+  # Busy retries never outlive the first-heartbeat deadline: the retry budget
+  # is capped inside it and the repository re-checks it, so the attempt fails closed.
   def test_busy_first_heartbeat_fails_closed_at_its_deadline
     with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
       store.define_singleton_method(:first_heartbeat) do |observed, **kwargs|
         raise Hive::Attempts::CompareAndSwapFailed, "first heartbeat deadline expired" if
           observed.active_deadline && kwargs.fetch(:now) > observed.active_deadline
-        raise Hive::Attempts::RepositoryError, AttemptsSupervisorTest::BUSY
+        raise Hive::Attempts::RepositoryError, AttemptsSupervisorTest::BUSY,
+              cause: SQLite3::BusyException.new("database is locked")
       end
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
@@ -328,7 +683,9 @@ class AttemptsSupervisorTest < Minitest::Test
       _, err = capture_io do
         assert_equal Hive::ExitCodes::TEMPFAIL, Timeout.timeout(10) { supervisor.run }
       end
-      assert_includes err, "first heartbeat deadline expired"
+      # The bounded retry is capped inside the persisted first-heartbeat
+      # deadline, so it exhausts as typed bookkeeping busy before expiry.
+      assert_includes err, "runtime_bookkeeping_busy: first_heartbeat exhausted"
       assert_equal "launching", store.fetch(attempt.attempt_id).state
     end
   end
@@ -1453,11 +1810,11 @@ class AttemptsSupervisorTest < Minitest::Test
     with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       original_fetch = store.method(:fetch)
       fetches = 0
-      store.define_singleton_method(:fetch) do |attempt_id|
+      store.define_singleton_method(:fetch) do |attempt_id, **options|
         fetches += 1
         raise "store unavailable" if fetches > 1
 
-        original_fetch.call(attempt_id)
+        original_fetch.call(attempt_id, **options)
       end
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
@@ -1620,6 +1977,32 @@ class AttemptsSupervisorTest < Minitest::Test
       File.basename(candidate.fetch("path")) == Hive::PatrolFix::AttemptDiagnostic::FILENAME
     end
     JSON.parse(File.binread(File.join(store.root, reference.fetch("path"))))
+  end
+
+  def with_sql_holder(store, seconds:)
+    reader, writer = IO.pipe
+    script = <<~'RUBY'
+      connection = SQLite3::Database.new(ARGV.fetch(0))
+      connection.execute("BEGIN IMMEDIATE")
+      writer = IO.for_fd(Integer(ARGV.fetch(2)))
+      writer.write("1")
+      writer.close
+      sleep Float(ARGV.fetch(1))
+      connection.execute("ROLLBACK")
+      connection.close
+    RUBY
+    holder = Process.spawn(
+      RbConfig.ruby, "-I", $LOAD_PATH.join(File::PATH_SEPARATOR), "-rsqlite3", "-e", script,
+      store.database.path, seconds.to_s, writer.fileno.to_s,
+      writer.fileno => writer.fileno, close_others: true
+    )
+    writer.close
+    assert_equal "1", reader.read(1)
+    yield
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+    Process.wait(holder) if holder
   end
 
   def with_attempt(worker_argv:, routing: { "mode" => "legacy" }, intended_stage: "4-execute",

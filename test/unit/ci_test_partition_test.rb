@@ -513,6 +513,7 @@ class CiTestPartitionTest < Minitest::Test
     end
     assert_equal 1, enforce_steps.length
     enforce = enforce_steps.fetch(0)
+    assert_equal "budget", enforce.fetch("id")
     assert_equal(
       'ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR" --timing-only',
       enforce.fetch("run")
@@ -523,6 +524,8 @@ class CiTestPartitionTest < Minitest::Test
     assert_equal "${{ always() }}", report.fetch("if")
     assert_equal "${{ steps.#{enforce.fetch('id')}.outcome }}",
                  report.fetch("env").fetch("HIVE_INCIDENT_BUDGET_OUTCOME")
+    assert_includes report.fetch("run"), "GITHUB_STEP_SUMMARY"
+    assert_operator advisory.fetch("steps").index(report), :>, advisory.fetch("steps").index(enforce)
     assert_equal(
       "${{ runner.temp }}/hive-e2e-runs",
       enforce.fetch("env").fetch("HIVE_E2E_RUNS_DIR")
@@ -543,6 +546,26 @@ class CiTestPartitionTest < Minitest::Test
     required_needs = jobs.fetch("required-test-gate").fetch("needs")
     assert_includes required_needs, "e2e"
     refute_includes required_needs, "incident-duration-budget"
+  end
+
+  def test_incident_duration_summary_reports_timing_outcomes_and_skipped_measurements
+    workflow = YAML.safe_load_file(File.join(ROOT, ".github", "workflows", "ci.yml"), aliases: true)
+    steps = workflow.fetch("jobs").fetch("incident-duration-budget").fetch("steps")
+    report = steps.find { |step| step["name"] == "Report incident duration budget" }
+    assert report, "timing overruns must remain visible in the job summary"
+
+    Dir.mktmpdir("incident-summary") do |dir|
+      { "failure" => "exceeded", "success" => "stayed within", "skipped" => "was not measured" }.each do |outcome, expected|
+        summary = File.join(dir, "#{outcome}.md")
+        output, status = Open3.capture2e(
+          { "HIVE_INCIDENT_BUDGET_OUTCOME" => outcome, "GITHUB_STEP_SUMMARY" => summary },
+          "bash", "-e", "-c", report.fetch("run")
+        )
+
+        assert status.success?, output
+        assert_includes File.read(summary), "Incident duration #{expected}"
+      end
+    end
   end
 
   def test_ci_gate_tasks_fail_when_no_non_skipped_asserting_test_runs

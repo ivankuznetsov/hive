@@ -5,6 +5,56 @@ require "hive/runtime_control_plane/payload_store"
 class RuntimeControlPlanePayloadStoreTest < Minitest::Test
   include HiveTestHelper
 
+  def test_required_open_directory_cannot_be_recreated_after_reclamation
+    with_tmp_dir do |root|
+      subject = store(root)
+      error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::PathError) do
+        subject.write_open(attempt_id: "reclaimed", name: "pending.json", bytes: "{}", require_existing: true)
+      end
+      assert_equal :attempt_payload_missing, error.code
+      refute_path_exists File.join(root, "payloads", "open", "reclaimed")
+    end
+  end
+
+  def test_open_payload_removal_is_idempotent
+    with_tmp_dir do |root|
+      subject = store(root)
+      path = subject.write_open(attempt_id: "attempt-1", name: "pending.json", bytes: "{}")
+      assert subject.remove_open(attempt_id: "attempt-1", name: "pending.json")
+      refute_path_exists path
+      refute subject.remove_open(attempt_id: "attempt-1", name: "pending.json")
+    end
+  end
+
+  def test_open_payload_replacement_during_read_is_rejected
+    with_tmp_dir do |root|
+      subject = store(root)
+      path = subject.write_open(attempt_id: "attempt-1", name: "pending.json", bytes: "{}")
+      original_open = File.method(:open)
+      replacement = lambda do |candidate, *args, **kwargs, &block|
+        next original_open.call(candidate, *args, **kwargs) unless block
+        original_open.call(candidate, *args, **kwargs) do |file|
+          if candidate == path
+            read = file.method(:read)
+            file.define_singleton_method(:read) do |length|
+              bytes = read.call(length)
+              File.rename(path, "#{path}.old")
+              File.write(path, "{}")
+              bytes
+            end
+          end
+          block.call(file)
+        end
+      end
+      with_replaced_singleton_method(File, :open, replacement) do
+        error = assert_raises(Hive::RuntimeControlPlane::PayloadStore::IntegrityError) do
+          subject.read_open(attempt_id: "attempt-1", name: "pending.json", max_bytes: 100)
+        end
+        assert_equal :payload_changed, error.code
+      end
+    end
+  end
+
   def test_open_payload_seals_to_immutable_content_address_and_round_trips
     with_tmp_dir do |root|
       store = store(root)

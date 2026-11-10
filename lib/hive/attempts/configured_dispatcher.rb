@@ -99,6 +99,7 @@ module Hive
           heartbeat_sec: cfg.fetch("attempt_heartbeat_sec"),
           stale_sec: cfg.fetch("attempt_stale_sec"),
           first_heartbeat_timeout_sec: cfg.fetch("attempt_first_heartbeat_timeout_sec"),
+          bookkeeping_timeout_sec: cfg.fetch("attempt_bookkeeping_timeout_sec"),
           timeout_sec: LaunchPolicy.timeout_sec(daemon: daemon, argv: argv),
           kill_grace_sec: LaunchPolicy.kill_grace_sec(daemon: daemon),
           **LaunchPolicy.memory_limits(daemon: daemon)
@@ -109,6 +110,7 @@ module Hive
           limits: LaunchPolicy.limits(daemon: daemon),
           transient_retry_backoff_sec: daemon.fetch("transient_retry_backoff_sec"),
           launch_timeout_sec: cfg.fetch("attempt_launch_timeout_sec"),
+          bookkeeping_timeout_sec: cfg.fetch("attempt_bookkeeping_timeout_sec"),
           task_resolver: task_resolver,
           routing_policy_resolver: lambda do |_task, intended_stage|
             if controller_only_command?(argv)

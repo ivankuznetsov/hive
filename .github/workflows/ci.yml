@@ -184,6 +184,14 @@ jobs:
         env:
           HIVE_CI_GATE_TASK: ${{ matrix.task }}
         run: bundle exec rake "$HIVE_CI_GATE_TASK"
+      - name: Retain runtime contention evidence
+        if: ${{ always() && matrix.task == 'test:runtime_database_contention' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runtime-database-contention-evidence
+          path: tmp/runtime-database-contention-evidence.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Retain read-only mount evidence
         if: ${{ always() && matrix.task == 'test:status_read_only' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -417,9 +425,12 @@ jobs:
         run: |
           if [[ "$HIVE_INCIDENT_BUDGET_OUTCOME" == "failure" ]]; then
             echo "::warning title=Incident duration budget::advisory budget exceeded on this runner"
-            echo "### ⚠️ Incident scenarios exceeded their advisory duration budget" >> "$GITHUB_STEP_SUMMARY"
+            echo "### ⚠️ Incident duration exceeded its advisory budget" >> "$GITHUB_STEP_SUMMARY"
+            echo "The required functional E2E and report-integrity checks remain authoritative; see the timing step and retained hive-e2e-report artifact for this runner's measurements." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$HIVE_INCIDENT_BUDGET_OUTCOME" == "success" ]]; then
+            echo "### ✅ Incident duration stayed within its advisory budget" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "### ✅ Incident scenarios stayed within their advisory duration budget" >> "$GITHUB_STEP_SUMMARY"
+            echo "### Incident duration was not measured; see earlier steps for details" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   web-tests:
@@ -499,6 +510,16 @@ jobs:
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb
+      - name: Upload golden-path E2E debug bundle
+        if: ${{ failure() && matrix.suite == 'golden' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: golden-e2e-debug
+          path: |
+            /tmp/golden-e2e-debug
+            web/tmp/screenshots
+          if-no-files-found: ignore
+          retention-days: 7
       - name: rubocop (web)
         if: ${{ matrix.suite == 'integration' }}
         run: bin/rubocop --format github

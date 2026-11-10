@@ -85,7 +85,12 @@ module Hive
             @database.disconnect
             @database = nil
           end
-          @database ||= Database.new(path: expanded, **options)
+          if @database
+            @database.configure_checkpoint_role!(options[:checkpoint_role]) if options.key?(:checkpoint_role)
+            @database
+          else
+            @database = Database.new(path: expanded, **options)
+          end
         end
       end
 

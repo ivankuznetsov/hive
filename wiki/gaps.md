@@ -494,6 +494,13 @@ separate budgets for each runner class. Revisit the cap after representative
 hosted timing history exists; timing remains advisory and does not replace
 functional E2E coverage.
 
+A 2026-11-03 hosted run totaled 39.886 seconds (15.904, 14.690, and
+9.292 seconds), exceeding the aggregate advisory while all functional checks
+passed. This sample does not distinguish runner variance from a performance
+regression. The limits remain unchanged; step-level advisory handling now keeps
+the overrun visible without a failed job conclusion triggering exact-head CI
+repair loops.
+
 ## Operator cancellation awaits live validation (2026-09-09)
 
 `archive --reason cancelled` is covered locally for cancellation without GitHub
@@ -2248,6 +2255,43 @@ legacy review. Tasks already parked on `plan_dependency_missing` or
 the plan stage's cleared-plan short-circuit does not run adoption. Equal sets
 that differ only in spelling or order (`slug` vs `app:slug`, `[a, b]` vs
 `[b, a]`) are deliberately not adopted and still need a human.
+
+- The November 8 contention fixture did not create detached supervisor sessions,
+  so its terminal-replay claim depended on the caller's session layout. The
+  November 9 review fix mirrors production `setsid` and asserts wrapper/worker
+  session custody and group absence before restart replay. Local qualification
+  does not replace the hosted merge gate or the historical incident proof below.
+
+- Runtime contention qualification has not reproduced the historical long
+  publisher hold. Initial measurements retain one residual manual hold over
+  one second as negative evidence. The November 8 named gate runs the fixed
+  comparison three times plus real daemon/four-supervisor held-lock scenarios;
+  it establishes deterministic recovery and invocation counts, not historical
+  long-hold reduction or a long-running steady-state WAL maximum.
+
+- The bounded bookkeeping interface now has default full-envelope invariants,
+  restart pending-receipt replay, typed stage/recovery attribution and a named
+  daemon/four-supervisor gate. Its real contention cases shorten retry budgets;
+  injected-clock tests independently check 30/600-second bounds. Legacy claimed
+  rows without a valid persisted `diagnostics.claimed_at` cannot derive the
+  fixed unverifiable-owner ceiling and retain the conservative old policy.
+
+- The November 3 runtime CI repair is locally reproduced and checked against
+  the failed test files and both dependency audits. Hosted checks for the new
+  commit remain pending; this does not close the workload qualification gaps.
+
+- November 8 local changed-source coverage encounters `Errno::ESRCH` when
+  unchanged `InvocationProcessCustody` reads `/proc/2067241/environ` for a
+  defunct 1Password process on this host. Both OpenCode integration tests
+  reproduce the error in isolation; this blocks a clean wider validation
+  receipt independently of the runtime bookkeeping regressions.
+
+- The November 8 broad checkpoint completed with three failures and 23 errors.
+  Besides independently reproduced OpenCode procfs errors, its public-help
+  snapshot assertion observed concurrent checkout/test/Git writes. The focused
+  bookkeeping tests and named contention gate pass. The unmodified public-help
+  snapshot file passes with a quiet checkout (2 tests / 52 assertions); this
+  is not broad-suite success evidence.
 
 ## Muse support boundaries (2026-11-04)
 

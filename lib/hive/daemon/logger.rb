@@ -34,6 +34,7 @@ module Hive
         admission_check_failed
         operational_snapshot_publish_failed
         operational_snapshot_incomplete
+        runtime_checkpoint_maintenance
         dispatched
         completed
         skipped

@@ -232,13 +232,16 @@ module Hive
         end
 
         def attempt_evidence
-          {
+          evidence = {
             "type" => "attempt_lease",
             "attempt_id" => @attempt.attempt_id,
             "lease_version" => @attempt.lease_version,
             "state" => @attempt.state,
             "outcome" => @attempt.outcome
           }
+          bookkeeping_reason = @attempt.bookkeeping_reason
+          evidence["bookkeeping_reason"] = bookkeeping_reason if bookkeeping_reason
+          evidence
         end
 
         def commit_evidence(sha, branch)

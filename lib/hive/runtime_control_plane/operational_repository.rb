@@ -15,7 +15,7 @@ module Hive
         # every attempt heartbeat and CLI write waits on for seconds per tick
         # on a swapping host.
         observation_json = Codec.dump_json(document)
-        @database.transaction do |db|
+        @database.transaction(operation: "operational.publish") do |db|
           installation_id = db[:installations].get(:installation_id) ||
             raise(IntegrityError.new("runtime installation identity is missing", code: :identity_missing))
           values = { installation_id: installation_id, observation_json: observation_json }

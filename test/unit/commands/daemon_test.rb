@@ -255,6 +255,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     )
     attempts_api = captured.fetch(:attempt_dispatcher)
     assert_instance_of Hive::Attempts::API, attempts_api
+    assert_equal :daemon_backed, attempts_api.instance_variable_get(:@store).database.checkpoint_role
+    assert_instance_of Hive::Daemon::CheckpointMaintenance, captured.fetch(:checkpoint_maintenance)
+    assert_equal :daemon_backed, captured.fetch(:checkpoint_maintenance).database.checkpoint_role
     assert_equal(
       Hive::Paths.runtime_payload_root(@home),
       attempts_api.instance_variable_get(:@store).root

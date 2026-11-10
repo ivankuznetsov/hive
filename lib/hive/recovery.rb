@@ -145,9 +145,7 @@ module Hive
 
       final_fix = normalized["reason"] == "final_fix_unverified"
       grant = "grant more fix passes with the review_grant action in `hive status --operational --json`"
-      open = Hive::ReviewEscalations.questions(escalations)
-        .any? { |question| !Hive::ReviewEscalations.answered?(question) }
-      if open
+      if open_escalation?(escalations)
         step = "answer the open `### A<n>.` questions in #{file}, then #{RETRY_STEP}"
         return final_fix ? "#{step}; to let Hive apply fixes instead, #{grant} before answering" : step
       end
@@ -157,8 +155,15 @@ module Hive
       end
 
       "edit #{file}, then retry from `hive tui` with `r`"
-    rescue SystemCallError, IOError, EncodingError, ArgumentError
-      "inspect or edit the highest-pass review files, then #{RETRY_STEP}"
+    end
+
+    # An escalations file whose bytes cannot be parsed has no question the
+    # operator could answer to unlock a routine retry.
+    def open_escalation?(escalations)
+      Hive::ReviewEscalations.questions(escalations)
+        .any? { |question| !Hive::ReviewEscalations.answered?(question) }
+    rescue EncodingError, ArgumentError
+      false
     end
   end
 end

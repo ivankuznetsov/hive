@@ -1126,6 +1126,15 @@ class CommandsRunTest < Minitest::Test
       assert_match(/\Ano escalation question is open; grant more fix passes with the review_grant action/,
                    run.send(:json_next_action, t, findings_only).fetch("instructions"))
 
+      File.binwrite(escalations, "### Q1. Broken \xFF bytes\n### A1.\n".b)
+      assert_match(/\Ano escalation question is open; /,
+                   run.send(:json_next_action, t, final).fetch("instructions"))
+
+      File.write(escalations, "# Edit me\n")
+      legacy = marker(:review_stale, "pass" => "3")
+      assert_equal "edit reviews/escalations-03.md, then retry from `hive tui` with `r`",
+                   run.send(:json_next_action, t, legacy).fetch("instructions")
+
       wall_clock = marker(:review_stale, "reason" => "wall_clock", "pass" => "4")
       assert_match(/\Ainspect or edit the highest-pass review files, then refresh/,
                    run.send(:json_next_action, t, wall_clock).fetch("instructions"))

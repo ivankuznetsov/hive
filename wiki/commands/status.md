@@ -1025,7 +1025,13 @@ action producer. The durable refresh recipe refuses absent/ineligible retry
 recommendations and cannot advance another stage. Findings-only final stales
 require locally committed fixes and explicit operator/coordinator recovery.
 After remediation, select a final-stale task in `hive tui` and press `r` to
-submit that explicit retry. Its routine `workflow.retry` action remains absent.
+submit that explicit retry. Its routine `workflow.retry` action stays absent
+until the operator answers at least one open `### A<n>.` question in the
+marker pass's `reviews/escalations-NN.md`; the row then carries the guarded
+`workflow.retry` action and a `recovery` block with `status: blocked`,
+`owner: operator`, `reason: operator_retry_required`. The daemon never submits
+that retry itself. Answering before a review grant makes the grant evidence
+contradict the marker counters, so grant first if Hive should apply fixes.
 
 Draft guidance remains visible after successful review even without a recovery
 request. Normal finalize owns secret scanning and the publication activity record.

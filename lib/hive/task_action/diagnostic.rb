@@ -71,7 +71,7 @@ module Hive
         synthesized = synthetic_stale_agent_diagnostic
         return synthesized if synthesized
         return nil unless diagnostic_action?
-        return manual_fix if marker.name == :review_stale && marker.attrs["reason"] == "final_fix_unverified"
+        return manual_fix if marker.attrs["reason"] == "final_fix_unverified" && review_stale_input_missing?
 
         artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
         primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs)
@@ -473,9 +473,10 @@ module Hive
       #   - "retry" — Enter-in-detail-view runs the existing recover_review /
       #     recover_error path, or a markerless synthetic-error direct rerun
       #     such as PLAN_MISSING_OUTPUT; `command` is the copy-paste shell form.
-      #   - "manual_fix" — max_passes-hit REVIEW_STALE; the operator must edit
-      #     `reviews/escalations-NN.md` before retry. command stays null
-      #     because there's nothing safe to dispatch.
+      #   - "manual_fix" — max_passes-hit REVIEW_STALE without operator input;
+      #     the operator must answer `reviews/escalations-NN.md` before retry.
+      #     command stays null because there's nothing safe to dispatch. An
+      #     answered one gets the guarded "retry" command instead.
       #   - "clear_marker" — reserved for future expansion; not yet emitted
       #     because the in-tree heuristics route everything else through retry
       #     or manual_fix.
@@ -500,7 +501,7 @@ module Hive
 
         return manual_fix if finalize_missing_pr_md? || finalize_missing_metadata_error?
         return manual_fix if finalize_missing_pr_url? || finalize_pr_url_mismatch?
-        return manual_fix if max_passes_review_stale_with_escalations?
+        return manual_fix if review_stale_input_missing?
 
         # EXECUTE_STALE rows have no auto-retry recipe: the operator must
         # review findings and either edit the worktree or lower the pass
@@ -518,9 +519,12 @@ module Hive
         { "kind" => "manual_fix", "command" => nil }
       end
 
-      def max_passes_review_stale_with_escalations?
-        Hive::TaskAction.max_passes_review_stale_with_escalations?(
-          folder: task.folder, marker_name: marker.name, attrs: marker.attrs
+      # Operator input is still missing for this REVIEW_STALE. Once the
+      # operator answers an escalation the guarded workflow.retry command is
+      # the suggestion, matching the operational action.
+      def review_stale_input_missing?
+        Hive::Recovery.intervention_required?(
+          marker: marker.name, attrs: marker.attrs, folder: task.folder
         )
       end
 

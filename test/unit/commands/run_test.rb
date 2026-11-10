@@ -1098,6 +1098,49 @@ class CommandsRunTest < Minitest::Test
     assert_equal [ "review_stale" ], stale.fetch("markers_to_clear")
   end
 
+  def test_review_stale_next_action_follows_the_escalation_answer_state
+    with_tmp_dir do |folder|
+      run = command
+      t = task(folder: folder, stage_name: "review", stage_index: 6)
+      FileUtils.mkdir_p(File.join(folder, "reviews"))
+      escalations = File.join(folder, "reviews", "escalations-03.md")
+      final = marker(:review_stale, "reason" => "final_fix_unverified", "pass" => "3",
+                                    "accepted" => "1", "escalations" => "1")
+
+      File.write(escalations, "### Q1. Keep the manual proof?\n### A1.\n\n")
+      open = run.send(:json_next_action, t, final).fetch("instructions")
+      assert_includes open, "answer the open `### A<n>.` questions in reviews/escalations-03.md"
+      assert_includes open, "workflow.retry"
+      assert_includes open, "review_grant action"
+
+      File.write(escalations, "### Q1. Keep the manual proof?\n### A1.\nYes.\n\n")
+      answered = run.send(:json_next_action, t, final)
+      assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, answered.fetch("kind")
+      assert_match(/\Aoperator answers in reviews\/escalations-03\.md are recorded; refresh `hive status --operational --json` and invoke this task's workflow\.retry action/,
+                   answered.fetch("instructions"))
+      out, = capture_io { run.send(:report_text, t, {}, final) }
+      assert_includes out, "next: operator answers in reviews/escalations-03.md are recorded"
+
+      File.write(escalations, "# Escalations for pass 03\n\n_No user questions._\n")
+      findings_only = marker(:review_stale, final.attrs.merge("escalations" => "0"))
+      assert_match(/\Ano escalation question is open; grant more fix passes with the review_grant action/,
+                   run.send(:json_next_action, t, findings_only).fetch("instructions"))
+
+      File.binwrite(escalations, "### Q1. Broken \xFF bytes\n### A1.\n".b)
+      assert_match(/\Ano escalation question is open; /,
+                   run.send(:json_next_action, t, final).fetch("instructions"))
+
+      File.write(escalations, "# Edit me\n")
+      legacy = marker(:review_stale, "pass" => "3")
+      assert_equal "edit reviews/escalations-03.md, then retry from `hive tui` with `r`",
+                   run.send(:json_next_action, t, legacy).fetch("instructions")
+
+      wall_clock = marker(:review_stale, "reason" => "wall_clock", "pass" => "4")
+      assert_match(/\Ainspect or edit the highest-pass review files, then refresh/,
+                   run.send(:json_next_action, t, wall_clock).fetch("instructions"))
+    end
+  end
+
   def test_review_error_without_residual_commit_keeps_existing_guidance
     run = command
     t = task

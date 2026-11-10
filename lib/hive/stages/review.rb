@@ -18,6 +18,8 @@ require "hive/agent_limit"
 require "hive/model_unsupported"
 require "hive/review_error_reason"
 require "hive/review_budget"
+require "hive/review_escalations"
+require "hive/recovery"
 require "hive/reviewers"
 require "hive/agent_profiles"
 require "hive/stages/review/context"
@@ -80,8 +82,8 @@ module Hive
       # reviewer_sources_for all need to skip these — otherwise a
       # `fix-guardrail-NN.md` user tick `[x]` would re-flow into the
       # next pass's fix prompt and over-amplify guardrail findings.
-      ESCALATION_Q_RE = /^\s*###\s+Q(\d+)\.\s*(.*?)\s*$/.freeze
-      ESCALATION_A_RE = /^\s*###\s+A(\d+)\.\s*$/.freeze
+      ESCALATION_Q_RE = Hive::ReviewEscalations::QUESTION
+      ESCALATION_A_RE = Hive::ReviewEscalations::ANSWER
 
       # Per-pass sentinel: `reviews/fix-success-NN.md` is written after
       # a pass's Phase 4 fix succeeds (or Phase 2 produced zero findings
@@ -194,8 +196,7 @@ module Hive
                "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
           return { commit: nil, status: :review_ci_stale }
         when :review_stale
-          warn "hive: REVIEW_STALE — inspect or edit the highest-pass review files, then run " \
-               "`hive status --operational --json` and invoke this task's `workflow.retry` action with `hive act`"
+          warn "hive: REVIEW_STALE — #{Hive::Recovery.review_stale_guidance(attrs: marker.attrs, folder: task.folder)}"
           return { commit: nil, status: :review_stale }
         when :review_error
           warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, then run " \
@@ -2479,33 +2480,7 @@ module Hive
       end
 
       def parse_escalation_questions(path)
-        return [] unless File.exist?(path)
-
-        questions = []
-        current = nil
-        mode = nil
-
-        File.readlines(path).each do |line|
-          if (match = ESCALATION_Q_RE.match(line))
-            questions << current if current
-            current = {
-              number: match[1].to_i,
-              question: match[2].strip,
-              body: +"",
-              answer: +""
-            }
-            mode = :body
-          elsif current && (match = ESCALATION_A_RE.match(line)) && match[1].to_i == current[:number]
-            mode = :answer
-          elsif current && mode
-            current[mode] << line
-          end
-        end
-
-        questions << current if current
-        questions
-      rescue SystemCallError, IOError
-        []
+        Hive::ReviewEscalations.questions(path)
       end
 
       def write_manual_escalations(ctx)

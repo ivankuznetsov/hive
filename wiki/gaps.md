@@ -7,6 +7,46 @@ updated: 2026-11-10
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
 
+## OpenCode 2.x: private server landed, CLI contract still 1.x (2026-11-10)
+
+Hive and agent-cli-runtime now pass `--standalone` to every OpenCode command
+that could attach to or start the shared per-user background service (see
+[[modules/agent_cli_runtime]], [[modules/agent_profile]], [[modules/mcp]]).
+Verified live against 2.2.7 on 2026-11-10: with another XDG identity's
+`opencode serve --service` holding 127.0.0.1:49374, plain `auth list` failed
+with "port ... already in use by another process", while `auth list`,
+`debug config`, `models` and `session export` with `--standalone` exited 0
+and left no server behind. A `run --standalone` with an unavailable model
+still created its session, which a separate `session export --sanitize
+--standalone` exported from the same data home. `--help` and `--version` start no server. Open items:
+
+- The rest of Hive's OpenCode contract is still 1.x. OpenCode 2.2.7 `run` no
+  longer advertises `--dir`, `--variant` (the variant is `provider/model#variant`)
+  or `--pure`; `export` moved to `session export` (`opencode export --help`
+  prints root help); `models` takes no provider argument or `--verbose`; and
+  `debug config` lists configuration sources as a JSON array, with MCP servers
+  under `opencode mcp list`. So the component route probe fails on 2.x at
+  `REQUIRED_RUN_FLAGS`, Hive's post-run `export` cannot succeed, and the MCP
+  adapter's enumeration reports malformed JSON (`isolation=partial`). The
+  private-server change is necessary for 2.x but not sufficient.
+- Hive gates the flag on `run --help` (and `debug config --help` for MCP),
+  assuming the other subcommands share the global flag. True for 2.2.5 and
+  2.2.7; a version where they diverge would fail the export or inventory.
+- Every native OpenCode launch now spawns one extra `run --help` (about 0.1 s
+  on 2.2.7); the MCP probe adds one `debug config --help`. Neither is cached.
+- A help that exits nonzero omits the flag (fail-open, today's behaviour);
+  only a help timeout fails the launch. A runtime policy `command_prefix` is
+  not applied to the help probe; no OpenCode policy sets one today.
+- Interactive `opencode auth login` from the web auth flow intentionally keeps
+  the operator's normal service and is unchanged.
+- `hive-daemon.service` uses `KillMode=process`, so any server a daemon-side
+  OpenCode command already started (for example the 2.2.5 `serve --service`
+  from 2026-11-06) survives daemon restarts until stopped by hand.
+- The component change ships in agent-cli-runtime's next release; its
+  CHANGELOG entry lands with that version bump (the gemspec test pins
+  `## Unreleased` empty above 0.2.4). Installed Hive does not depend on it:
+  Hive keeps its own help check so it still runs against published 0.2.4.
+
 ## Answered max-pass REVIEW_STALE retry: open edges (2026-11-10)
 
 Operational status now offers `workflow.retry` for a max-pass `REVIEW_STALE`

@@ -5,7 +5,8 @@ module Hive
     module OpenCode
       module Execution
         NativeLaunch = Data.define(
-          :invocation, :requested_route, :environment, :executable
+          :invocation, :requested_route, :environment, :executable,
+          :server_arguments
         )
         RUN_CAPTURE_BYTES = AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
         EXPORT_CAPTURE_BYTES = AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
@@ -79,6 +80,12 @@ module Hive
           route = requested_route(configuration)
           executable = @runtime_policy&.executable || @profile.bin
           executable = isolated_executable(executable) if @isolate_environment
+          environment = native_environment(configuration)
+          # A private server (OpenCode 2.x) makes the run and its export load
+          # the environment built here rather than a shared service's.
+          server_arguments = Hive::AgentSupport::OpenCode.private_server_launch_arguments(
+            executable, environment: effective_native_environment(environment)
+          )
           invocation = Hive::AgentRuntime.compile(Hive::AgentRuntime::Request.new(
             profile: @profile,
             prompt: @prompt,
@@ -91,7 +98,7 @@ module Hive
             identity_arguments: @identity_arguments,
             routing_arguments: @routing_arguments,
             raw_cli_arguments: @cli_flags,
-            trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd ],
+            trusted_cli_arguments: [ *@runtime_cli_flags, "--dir", @cwd, *server_arguments ],
             executable:,
             command_prefix: @runtime_policy&.command_prefix || [],
             denied_commands: review_budget_task? ? [ "review-grant" ] : []
@@ -99,8 +106,9 @@ module Hive
           NativeLaunch.new(
             invocation:,
             requested_route: route,
-            environment: native_environment(configuration),
-            executable:
+            environment:,
+            executable:,
+            server_arguments:
           )
         end
 
@@ -219,7 +227,10 @@ module Hive
 
           parsed = Hive::AgentRuntime.parse_run(@profile, stdout: run.stdout)
           inspection = Hive::AgentRuntime::InspectionCommand.new(
-            argv: [ launch.executable, "export", parsed.session_id, "--sanitize" ],
+            argv: [
+              launch.executable, "export", parsed.session_id, "--sanitize",
+              *launch.server_arguments
+            ],
             environment: launch.environment,
             credential_environment_keys: [],
             session_id: parsed.session_id,

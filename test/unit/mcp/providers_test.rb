@@ -121,6 +121,60 @@ class McpProvidersTest < Minitest::Test
     end
   end
 
+  def test_opencode_debug_config_uses_a_private_server_only_when_its_help_advertises_one
+    with_tmp_dir do |dir|
+      {
+        "  --standalone   Run with a private server instead of the background service" => "debug config --standalone",
+        "  --print-logs   Print logs (server logs require --standalone)" => "debug config"
+      }.each do |help, expected|
+        log = File.join(dir, "calls.log")
+        FileUtils.rm_f(log)
+        profile = fake_opencode(dir, <<~SH)
+          echo "$*" >> "#{log}"
+          case "$*" in
+            "debug config --help") printf '%s\n' '#{help}' ;;
+            "#{expected}") printf '{"mcp":{"personal":{"type":"remote","url":"https://p"}}}' ;;
+            *) exit 9 ;;
+          esac
+        SH
+        launch = opencode_prepare(profile)
+
+        assert_equal :isolated, launch.isolation, help
+        assert_equal({ "mcp" => { "personal" => { "enabled" => false } } }, launch.config_overlay, help)
+        assert_equal [ "debug config --help", expected ], File.readlines(log, chomp: true), help
+      end
+    end
+  end
+
+  # The digest, display-name and diagnosis launchers spawn `opencode run`
+  # themselves after compiling through Hive::Mcp.compile.
+  def test_self_spawning_opencode_run_uses_a_private_server_only_when_advertised
+    with_tmp_dir do |dir|
+      {
+        "  --standalone   Run with a private server instead of the background service" => true,
+        "  --auto   Auto-approve permissions that are not explicitly denied" => false
+      }.each do |help, private_server|
+        log = File.join(dir, "calls.log")
+        FileUtils.rm_f(log)
+        bin = fake_opencode(dir, <<~SH).bin
+          echo "$*" >> "#{log}"
+          [ "$*" = "run --help" ] && printf '%s\n' '#{help}'
+        SH
+        profile = Hive::AgentProfiles.lookup(:opencode).with_overrides("bin" => bin)
+        request = Hive::AgentRuntime::Request.new(
+          profile:, prompt: "summarize",
+          permission_mode: Hive::Config.claude_permission_mode(Hive::Config::DEFAULTS)
+        )
+
+        argv = Hive::Mcp.compile(request, Hive::Mcp.launch(isolation: :isolated)).argv
+
+        assert_equal [ bin, "run" ], argv.first(2), help
+        assert_equal private_server, argv.include?("--standalone"), help
+        assert_equal [ "run --help" ], File.readlines(log, chomp: true), help
+      end
+    end
+  end
+
   def test_opencode_execution_merges_the_overlay_into_its_config_content
     with_tmp_dir do |dir|
       task = make_task(dir)

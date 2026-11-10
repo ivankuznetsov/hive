@@ -3,7 +3,7 @@ title: Hive-owned MCP (Hive::Mcp)
 type: module
 source: lib/hive/mcp.rb, lib/hive/mcp/*.rb, lib/hive/agent_support/*/mcp.rb
 created: 2026-10-15
-updated: 2026-10-15
+updated: 2026-11-10
 tags: [module, mcp, agent, config, decision]
 ---
 
@@ -41,7 +41,7 @@ execute: { mcp: { use: [context7, linear] } }   # a stage block replaces it
 |---|---|---|
 | claude | `--strict-mcp-config --mcp-config <0700 dir>/mcp.json` (0600) | entries in that file; secrets as `${VAR}`; name/type/url/headers kept identical so a saved login is found |
 | codex | `--ignore-user-config` (kept once when a sandbox preset already passes it) | `-c mcp_servers.<name>.*`; `bearer_token_env_var`, `env_http_headers`, `env_vars`, `oauth_resource` |
-| opencode | `opencode debug config` in the launch cwd, each server disabled in `OPENCODE_CONFIG_CONTENT` | same overlay, `{env:VAR}`; a failed probe launches with a notice (`isolation=partial`) |
+| opencode | `opencode debug config` in the launch cwd (plus `--standalone` when `debug config --help` advertises it, so OpenCode 2.x neither attaches to nor leaves behind its shared background server), each server disabled in `OPENCODE_CONFIG_CONTENT` | same overlay, `{env:VAR}`; a failed probe launches with a notice (`isolation=partial`) |
 | pi (>= 1.0.4) | `--no-mcp` | not possible; dropped with a notice |
 | grok, custom profiles | none | none; `isolation=none` notice |
 

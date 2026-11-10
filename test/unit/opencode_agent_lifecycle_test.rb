@@ -120,6 +120,48 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  def test_run_and_export_use_a_private_server_only_when_run_help_advertises_it
+    { success: false, private_server: true }.each do |mode, private_server|
+      with_fixture(mode:) do |fixture|
+        task = make_task(fixture.fetch(:dir), slug: "server-#{mode.to_s.tr('_', '-')}-260812-aaaa")
+
+        result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+          build_agent(task, fixture).run!
+        end
+
+        assert_equal :ok, result.fetch(:status), mode
+        calls = File.readlines(fixture.fetch(:calls), chomp: true)
+        assert_includes calls, "run --help", mode
+        run = calls.find { |line| line.start_with?("run --auto ") }
+        export = calls.find { |line| line.start_with?("export ses_") }
+        assert_equal private_server, run.split.include?("--standalone"), mode
+        assert_equal private_server, export.end_with?(" --sanitize --standalone"), mode
+        refute_includes export, "--standalone", mode unless private_server
+      end
+    end
+  end
+
+  def test_private_server_probe_omits_the_flag_for_unusable_help_and_fails_closed_on_a_hang
+    support = Hive::AgentSupport::OpenCode
+    with_tmp_dir do |dir|
+      assert_empty support.private_server_launch_arguments(File.join(dir, "absent"))
+      { 3 => [], 0 => [ "--standalone" ] }.each do |exit_code, expected|
+        bin = File.join(dir, "opencode-#{exit_code}")
+        File.write(bin, "#!/bin/sh\necho '  --standalone  Run with a private server'\nexit #{exit_code}\n")
+        File.chmod(0o755, bin)
+        assert_equal expected, support.private_server_launch_arguments(bin), exit_code
+      end
+    end
+
+    hanging = Object.new
+    hanging.define_singleton_method(:capture_local) { |*_arguments, **_options| raise Timeout::Error }
+    error = with_replaced_singleton_method(AgentCliRuntime::Profiles, :fetch, ->(_name) { hanging }) do
+      assert_raises(Hive::AgentError) { support.private_server_launch_arguments("/opt/bin/opencode") }
+    end
+    assert_equal "`opencode run --help` timed out after 30s; cannot tell whether it needs --standalone",
+                 error.message
+  end
+
   def test_completed_native_child_clears_its_identity_from_the_live_task_lock
     with_fixture do |fixture|
       task = make_task(fixture.fetch(:dir), slug: "lock-clear-260829-aaaa")
@@ -842,6 +884,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
       source_root_for_fixtures,
       "run-help.txt"
     ))
+    run_help += "  --standalone  Run with a private server instead of the background service\n" if
+      mode == :private_server
     export_help = File.read(File.join(source_root_for_fixtures, "export-help.txt"))
     run_output = File.read(File.join(
       source_root_for_fixtures,

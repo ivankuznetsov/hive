@@ -122,8 +122,12 @@ module Hive
 
     # Compile `request` for a launcher that spawns the agent itself, adding
     # `launch`'s argv. Carried defaults yield to keys the request's own
-    # argv already sets.
+    # argv already sets. Every such launcher must come through here (see
+    # test/unit/mcp/launch_site_contract_test.rb), so this is also where an
+    # agent's own spawn-time arguments join: OpenCode's private server.
     def compile(request, launch)
+      support = Hive::AgentSupport.for(request.profile)
+      request = support.spawn_request(request) if support.respond_to?(:spawn_request)
       base = Hive::AgentRuntime.compile(request)
       extra = launch.arguments_for(base.argv)
       return base if extra.empty?

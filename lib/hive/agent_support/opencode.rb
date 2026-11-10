@@ -10,8 +10,56 @@ module Hive::AgentSupport::OpenCode
   autoload :Skills, "hive/agent_support/opencode/skills"
   autoload :SetupAdapter, "hive/agent_support/opencode/setup_adapter"
   PORTABLE_MANAGED_RUNTIME = true
+  # OpenCode 2.x serves CLI commands from one shared per-user background
+  # server on a fixed loopback port, starting it when absent. That server was
+  # started with some other command's environment, so an attached command's
+  # OPENCODE_PERMISSION and OPENCODE_CONFIG_CONTENT are not guaranteed to
+  # apply, a command with a different XDG identity fails because the port is
+  # taken, and a server one command started outlives it. `--standalone` gives
+  # the command a private server that ends with it. OpenCode 1.x has no such
+  # flag, so Hive passes it only when the binary's own help advertises it. The
+  # check is local rather than the agent-cli-runtime helper because installed
+  # Hive must keep working against the published 0.2.4 component.
+  PRIVATE_SERVER_FLAG = "--standalone"
+  PRIVATE_SERVER_ADVERTISEMENT = /(?:\A|[\s,])#{Regexp.escape(PRIVATE_SERVER_FLAG)}(?:[\s,=\[]|$)/
+  # Matches the OpenCode profile's version-check bound: Bun-backed startup can
+  # exceed ten seconds under sustained host I/O.
+  PRIVATE_SERVER_PROBE_TIMEOUT_SECONDS = 30
 
   module_function
+
+  # The private-server arguments a CLI whose help text is +help+ accepts.
+  def private_server_arguments(help)
+    help.to_s.match?(PRIVATE_SERVER_ADVERTISEMENT) ? [ PRIVATE_SERVER_FLAG ].freeze : [].freeze
+  end
+
+  # The private-server arguments for an `opencode run` of +executable+, read
+  # from its own `run --help` (which starts no server). A binary that cannot
+  # spawn or exits nonzero is left for the run itself to report; a help that
+  # hangs fails the launch rather than risk attaching to a shared server.
+  def private_server_launch_arguments(executable, environment: ENV.to_h)
+    out, err, status = AgentCliRuntime::Profiles.fetch(:opencode).capture_local(
+      "run", "--help", env: environment, executable: executable.to_s,
+      timeout_sec: PRIVATE_SERVER_PROBE_TIMEOUT_SECONDS
+    )
+    status.success? ? private_server_arguments("#{out}\n#{err}") : [].freeze
+  rescue Timeout::Error
+    raise Hive::AgentError,
+          "`#{File.basename(executable.to_s)} run --help` timed out after " \
+          "#{PRIVATE_SERVER_PROBE_TIMEOUT_SECONDS}s; cannot tell whether it needs #{PRIVATE_SERVER_FLAG}"
+  rescue SystemCallError
+    [].freeze
+  end
+
+  # A self-spawning launcher's run request (Hive::Mcp.compile), with the
+  # private server its executable advertises.
+  def spawn_request(request)
+    arguments = private_server_launch_arguments(request.executable || request.profile.bin) -
+      request.trusted_cli_arguments
+    return request if arguments.empty?
+
+    request.with(trusted_cli_arguments: request.trusted_cli_arguments + arguments)
+  end
 
   def credential_path(home: nil)
     AgentCliRuntime::Profiles.opencode_auth_path(home:, env: ENV)

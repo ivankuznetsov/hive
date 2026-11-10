@@ -443,6 +443,12 @@ module AgentCliRuntime
         trusted = source.trusted_cli_arguments.dup
         trusted.concat([ "--dir", roots.fetch(:working) ])
         trusted << "--pure" if pure
+        # Run on a private server when the probe saw `--standalone`, so this
+        # invocation's overlay environment is the one the server loads.
+        trusted.concat(
+          OpenCode::Probe.supported_arguments(probe_result, :private_server) -
+            trusted
+        )
         request = Request.new(
           profile: profile,
           prompt: source.prompt,

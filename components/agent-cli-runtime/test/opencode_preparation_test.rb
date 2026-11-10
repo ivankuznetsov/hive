@@ -915,7 +915,137 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
     end
   end
 
+  def test_route_probe_runs_auth_and_models_on_a_private_server_only_when_run_advertises_it
+    plain_help = AgentCliRuntime::Conformance.opencode_run_help
+    {
+      plain_help => [],
+      "#{plain_help} --standalone" => [ "--standalone" ]
+    }.each do |run_help, server|
+      calls = []
+      result = with_stubbed_probe_profile(calls, run_help:) do
+        AgentCliRuntime::OpenCode::Probe.call!(
+          AgentCliRuntime::ProbeRequest.new(
+            profile: :opencode,
+            route: "openrouter/stealth/ox-alpha",
+            environment: {},
+            credential_environment_keys: [ "OPENROUTER_API_KEY" ]
+          ),
+          env: { "OPENROUTER_API_KEY" => "selected" }
+        )
+      end
+
+      assert result.ready, run_help
+      assert_equal [
+        [ "run", "--help" ],
+        [ "export", "--help" ],
+        [ "auth", "list", *server ],
+        [ "models", "openrouter", "--verbose", *server ]
+      ], calls, run_help
+      evidence = result.capability_evidence.find do |item|
+        item.capability == :private_server
+      end
+      if server.empty?
+        assert_nil evidence, run_help
+      else
+        assert evidence.supported
+        assert_equal server, evidence.arguments
+      end
+    end
+  end
+
+  def test_prepared_run_and_export_use_a_private_server_only_when_supported
+    run_output = File.read(File.expand_path(
+      "fixtures/opencode/v1.18.16/run-one-step.jsonl", __dir__
+    ))
+    parsed = AgentCliRuntime.parse_run(:opencode, stdout: run_output)
+    { ready: [], private_server: [ "--standalone" ] }.each do |mode, server|
+      with_fixture_cli(mode:) do |fixture|
+        Dir.mktmpdir do |dir|
+          work = File.join(dir, "work")
+          FileUtils.mkdir_p(work)
+
+          prepared = AgentCliRuntime.prepare!(
+            preparation_request(
+              work:, root: File.join(dir, "invocation"),
+              source: selected_config(dir)
+            ),
+            env: fixture.fetch(:env)
+          )
+
+          assert_equal [
+            fixture.fetch(:bin), "run", "--auto",
+            "--model", "anthropic/claude-sonnet-4-5",
+            "--variant", "high", "--dir", work, "--pure", *server,
+            "--format", "json"
+          ], prepared.invocation.argv, mode
+          assert_equal [
+            fixture.fetch(:bin), "export", parsed.session_id, "--sanitize",
+            *server
+          ], AgentCliRuntime.prepare_inspection(prepared, parsed).argv, mode
+          calls = File.readlines(fixture.fetch(:log), chomp: true)
+          assert_includes calls, [ "auth", "list", *server ].join(" "), mode
+          assert_includes calls,
+                          [ "models", "anthropic", "--verbose", *server ].join(" "),
+                          mode
+        ensure
+          prepared&.cleanup!
+        end
+      end
+    end
+  end
+
+  def test_profile_declares_the_private_server_capability_on_run
+    assert_equal [ "run", "--standalone" ],
+                 AgentCliRuntime::Profiles.fetch(:opencode)
+                   .cli_capabilities.fetch(:private_server)
+    assert_equal [ "--standalone" ],
+                 AgentCliRuntime::OpenCode::Probe.private_server_arguments(
+                   "  --standalone   Run with a private server\n"
+                 )
+    assert_empty AgentCliRuntime::OpenCode::Probe.private_server_arguments(
+      "  --print-logs   Print logs (server logs require --standalone)\n"
+    )
+  end
+
   private
+
+  # Resolves :opencode to a stub whose inspections answer from +run_help+
+  # and append each argument list to +calls+.
+  def with_stubbed_probe_profile(calls, run_help:)
+    success = Object.new
+    success.define_singleton_method(:success?) { true }
+    profile = Object.new
+    profile.define_singleton_method(:name) { :opencode }
+    profile.define_singleton_method(:binary_installed?) { |env:, executable: nil| true }
+    profile.define_singleton_method(:bin) { |env:| "opencode" }
+    profile.define_singleton_method(:check_version!) { |env:, executable: nil| "2.2.7" }
+    profile.define_singleton_method(:min_version) { "1.18.16" }
+    profile.define_singleton_method(:launcher_identity) { "opencode-cli/v1" }
+    profile.define_singleton_method(:env_bin_override_keys) { [] }
+    profile.define_singleton_method(:capture_local) do |*arguments, env:,
+                                                             timeout_sec: 10,
+                                                             executable: nil|
+      calls << arguments
+      output = case arguments
+      when [ "run", "--help" ] then run_help
+      when [ "export", "--help" ] then AgentCliRuntime::Conformance.opencode_export_help
+      when [ "auth", "list" ], [ "auth", "list", "--standalone" ] then "openrouter\n"
+      else
+        if arguments.first(3) == [ "models", "openrouter", "--verbose" ]
+          "openrouter/stealth/ox-alpha\n{\"variants\":{\"high\":{}}}\n"
+        else
+          raise "unexpected inspection call: #{arguments.inspect}"
+        end
+      end
+      [ output, "", success ]
+    end
+    singleton = AgentCliRuntime::Profiles.singleton_class
+    original_resolve = AgentCliRuntime::Profiles.method(:resolve)
+    singleton.define_method(:resolve) { |_value| profile }
+    yield
+  ensure
+    singleton.define_method(:resolve, original_resolve) if original_resolve
+  end
 
   def preparation_request(work:, root:, source:, configuration: nil,
                           credential_environment_keys: [ "ANTHROPIC_API_KEY" ],
@@ -963,6 +1093,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
         "fixtures/opencode/v1.18.16/run-help.txt", __dir__
       ))
       run_help = run_help.sub(/.*--variant.*\n/, "") if mode == :missing_capability
+      server = mode == :private_server ? [ "--standalone" ] : []
+      run_help += "      --standalone   Run with a private server instead of the background service\n" if
+        mode == :private_server
       export_help = File.read(File.expand_path(
         "fixtures/opencode/v1.18.16/export-help.txt", __dir__
       ))
@@ -984,9 +1117,9 @@ class AgentCliRuntimeOpenCodePreparationTest < Minitest::Test
           print #{run_help.dump}
         when ["export", "--help"]
           print #{export_help.dump}
-        when ["auth", "list"]
+        when ["auth", "list", *#{server.inspect}]
           print #{auth.dump}
-        when ["models", "anthropic", "--verbose"]
+        when ["models", "anthropic", "--verbose", *#{server.inspect}]
           print #{models_output.dump}
         else
           warn "unexpected fake OpenCode call: \#{ARGV.inspect}"

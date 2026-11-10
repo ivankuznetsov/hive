@@ -104,6 +104,20 @@ class McpDiscoveryTest < Minitest::Test
     end
   end
 
+  def test_opencode_discovery_reads_its_config_on_a_private_server_when_supported
+    with_tmp_dir do |dir|
+      config = JSON.generate("mcp" => { "remote-one" => { "type" => "remote", "url" => "https://r.example/mcp" } })
+      result = discover(
+        dir,
+        "debug config --help" => [ "  --standalone   Run with a private server instead of the background service\n", Status.new(0) ],
+        "debug config --standalone" => [ config, Status.new(0) ]
+      )
+
+      assert_equal({ "url" => "https://r.example/mcp" }, by_name(result, "opencode").fetch("remote-one").spec)
+      assert_empty result.notices.grep(/opencode/)
+    end
+  end
+
   def test_unreadable_sources_are_skipped_with_notices
     with_tmp_dir do |dir|
       {
@@ -119,6 +133,10 @@ class McpDiscoveryTest < Minitest::Test
 
       result = discover(dir, "debug config" => [ JSON.generate("mcp" => []), Status.new(0) ])
       assert_includes result.notices, "opencode skipped: `opencode debug config` returned no mcp table"
+      result = discover(dir, "debug config --help" => Hive::AgentError.new("`opencode debug config --help` timed out after 15s"))
+      assert_includes result.notices, "opencode skipped: `opencode debug config --help` timed out after 15s"
+      result = discover(dir, "debug config --help" => Errno::ENOENT.new("opencode"))
+      assert_includes result.notices, "opencode skipped: opencode could not run (ENOENT)"
 
       write(File.join(dir, "home", ".claude.json"), "{broken")
       assert_match(/\Aclaude skipped: .*\.claude\.json could not be read \(ParserError\)/,

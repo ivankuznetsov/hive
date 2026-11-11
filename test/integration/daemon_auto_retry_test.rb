@@ -274,6 +274,33 @@ class DaemonAutoRetryTest < Minitest::Test
     end
   end
 
+  # hivedev f4 (2026-11-10): the plan-review guard refused execute entry after
+  # an operator plan edit, and the daemon replayed `hive develop` on every
+  # cooldown. The typed marker must park on the operator across ticks.
+  def test_plan_review_blocked_execute_entry_is_left_for_the_operator_and_never_auto_retried
+    message = "plan review blocks execution (canonical plan changed after plan review); " \
+              "Hive will not retry this automatically. Move the task back to 3-plan"
+    with_error_row(
+      attrs: { "reason" => "plan_review_blocked", "required_action" => "complete or resolve the plan review",
+               "blocker" => "canonical plan changed after plan review", "message" => message }
+    ) do |row, state_file|
+      set_status_rows([ row ])
+      instance = dispatcher
+      stub_safe do
+        [ T0, T0 + 3600, T0 + (11 * 24 * 3600) ].each { |now| instance.tick(now: now) }
+      end
+
+      marker = Hive::Markers.current(state_file)
+      assert_equal [ :error, "plan_review_blocked" ], [ marker.name, marker.attrs["reason"] ]
+      assert_empty @supervisor.spawned
+      assert_empty(@logger.events.select { |name, _attrs| %i[recovery_requested marker_healed].include?(name) })
+      skipped = @logger.events.select { |name, attrs| name == :skipped && attrs[:reason] == "plan_review_blocked" }
+      refute_empty skipped, "the dispatcher must report the operator-owned disposition"
+      refute(@logger.events.any? { |name, attrs| name == :skipped && attrs[:reason].to_s.start_with?("retry_") },
+             "an operator-owned stop must never read as a pending or cooling-down retry")
+    end
+  end
+
   def test_current_work_area_safety_defers_without_making_error_terminal
     with_error_row(attrs: { "reason" => "implementer_failed" }) do |row, state_file|
       set_status_rows([ row ])

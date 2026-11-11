@@ -3,7 +3,7 @@ title: 4-execute stage
 type: stage
 source: lib/hive/stages/execute.rb, templates/execute_prompt.md.erb
 created: 2026-04-25
-updated: 2026-08-30
+updated: 2026-11-11
 tags: [stage, execute, worktree, plan-review]
 ---
 
@@ -50,7 +50,7 @@ Crash/provider retries, daemon adoption, restart, and project config edits stay 
 
 - **State file**: `task.md` with frontmatter `slug`, `started_at`. Initial body has `## Implementation` heading plus `<!-- AGENT_WORKING -->`.
 - **Worktree pointer**: `worktree.yml` (created on init pass; gates re-entry).
-- **Plan precondition**: `plan.md` must exist; otherwise stderr `"plan.md missing; this task did not pass through 3-plan"` and exit 1. For built-in coding tasks, `PlanReview::TransitionGuard.validate_execute_entry!` also requires current `skipped`, `cleared`, or `degraded_cleared` evidence whenever a review root exists. A no-root task already at execute receives `plan-review/legacy-execute-adoption.json` and is not retroactively blocked.
+- **Plan precondition**: `plan.md` must exist; otherwise stderr `"plan.md missing; this task did not pass through 3-plan"` and exit 1. For built-in coding tasks, `PlanReview::TransitionGuard.validate_execute_entry!` also requires current `skipped`, `cleared`, or `degraded_cleared` evidence whenever a review root exists. A no-root task already at execute receives `plan-review/legacy-execute-adoption.json` and is not retroactively blocked. A refusal (outside a validated outcome-evidence rework) writes `ERROR reason=plan_review_blocked` to `task.md` before re-raising `TransitionBlocked` (exit 4, error kind `plan_review_blocked`): attrs `blocker` (the guard's reason, e.g. `canonical plan changed after plan review`), the guard's `required_action`, `review_id`, `review_state`, and a `message` naming the remedy (move back to `3-plan` with `hive approve TASK --to 3-plan --from 4-execute`, then `hive plan-review TASK restart` or `hive plan-review-run TASK`; for a changed plan, alternatively restore the reviewed `plan.md`). The raised message ends with the same `next:` remedy. Nothing past the guard runs, so no identity capture, worktree, or stage-exit clean-exit commit happens. The reason is operator-owned (`Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS`): the daemon never retries it, and status names the remedy (see [[modules/daemon]], [[commands/status]]). Before this (hivedev, 2026-11-10) the refusal exited markerless, the healer converted it to a generic retryable error, and every retry repeated the refusal.
 
 ## Pre-flight state machine (`task_state`)
 

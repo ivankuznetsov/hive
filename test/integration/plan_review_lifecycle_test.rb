@@ -1,11 +1,13 @@
 require "test_helper"
 require "json"
+require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/plan_review"
 require "hive/commands/stage_action"
 require "hive/plan_review/orchestrator"
 require "hive/plan_review/transition_guard"
+require "hive/task_action"
 
 class PlanReviewLifecycleIntegrationTest < Minitest::Test
   include HiveTestHelper
@@ -103,6 +105,75 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
         Hive::ExitCodes::SUCCESS, Hive::ExitCodes::SOFTWARE, Hive::ExitCodes::TASK_IN_ERROR
       ], develop_status
       refute File.directory?(task.folder)
+    end
+  end
+
+  # hivedev f4 (2026-11-10): the operator edited plan.md in 6-review, moved the
+  # task back to 4-execute, and every daemon `hive develop` refused execute
+  # entry as a markerless exit that was healed into an endless generic retry.
+  def test_plan_edited_after_review_is_refused_at_reentry_with_a_typed_operator_owned_stop
+    with_plan_task(skip_plan) do |dir, task|
+      assert_equal "skipped", orchestrator(task, FakeAdapter.new("success")).advance!.record.state
+      stages = File.join(dir, ".hive-state", "stages")
+      review = File.join(stages, "6-review", task.slug)
+      FileUtils.mkdir_p(File.dirname(review))
+      FileUtils.mv(task.folder, review)
+      File.write(File.join(review, "plan.md"), skip_plan.sub("# Plan\n", "# Plan\nOperator decision: keep v1.\n"))
+
+      # The backward approve now refuses up front and names the remedy.
+      _out, approve_error, approve_status = with_captured_exit do
+        Hive::Commands::Approve.new(task.slug, to: "4-execute", from: "6-review").call
+      end
+      assert_equal Hive::ExitCodes::WRONG_STAGE, approve_status
+      assert_includes approve_error, "canonical plan changed after plan review"
+      assert_includes approve_error, "hive approve #{task.slug} --to 3-plan --from 6-review"
+      assert File.directory?(review), "a refused re-entry must leave the task in review"
+
+      # A raw move (or a move made before this preflight existed) still reaches
+      # execute entry, which now records the refusal instead of exiting markerless.
+      execute = File.join(stages, "4-execute", task.slug)
+      FileUtils.mkdir_p(File.dirname(execute))
+      FileUtils.mv(review, execute)
+      _out, develop_error, develop_status = with_captured_exit do
+        Hive::Commands::StageAction.new("develop", task.slug, from: "4-execute").call
+      end
+      assert_equal Hive::ExitCodes::WRONG_STAGE, develop_status
+      assert_includes develop_error, "hive approve #{task.slug} --to 3-plan --from 4-execute"
+      refute File.exist?(File.join(execute, "worktree.yml")), "the refusal precedes worktree setup"
+
+      executing = Hive::Task.new(execute)
+      marker = Hive::Markers.current(executing.state_file)
+      assert_equal [ :error, "plan_review_blocked" ], [ marker.name, marker.attrs["reason"] ]
+      assert_equal "complete or resolve the plan review", marker.attrs["required_action"]
+      assert_equal "canonical plan changed after plan review", marker.attrs["blocker"]
+      action = Hive::TaskAction.for(
+        executing, marker, config: Hive::Config.load(executing.project_root),
+        project_name: File.basename(dir)
+      )
+      assert_equal [ "error", "Plan review blocks execution" ], [ action.key, action.label ]
+      assert_includes action.diagnostic.fetch("detail"), "hive plan-review-run #{task.slug}"
+
+      # The named remedy works: back to plan clears the stop, and the stale
+      # review restarts into a fresh resolution for the edited plan.
+      capture_io { Hive::Commands::Approve.new(task.slug, to: "3-plan", from: "4-execute").call }
+      plan = Hive::Task.new(File.join(stages, "3-plan", task.slug))
+      assert_equal :none, Hive::Markers.current(File.join(plan.folder, "task.md")).name
+      stale = Hive::PlanReview::Store.new(task_folder: plan.folder).current_validated
+      restart = Hive::Commands::PlanReview.new(
+        plan.folder, "restart", review_id: stale.review_id,
+        task_generation: stale.task_generation, policy_fingerprint: stale.policy_fingerprint,
+        expected_artifact_digest: Hive::PlanReview::Projection.new(stale).observation_digest,
+        project: File.basename(dir), json: true,
+        resumer: ->(resolved) { orchestrator(resolved, FakeAdapter.new("success")).advance! }
+      )
+      output, = capture_io { restart.call }
+      assert JSON.parse(output).fetch("applied")
+      current = Hive::PlanReview::Store.new(task_folder: plan.folder).current_validated
+      refute_equal stale.review_id, current.review_id
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task: plan, projection: Hive::PlanReview::Projection.new(current),
+        config: Hive::Config.load(plan.project_root)
+      ).fetch("status")
     end
   end
 

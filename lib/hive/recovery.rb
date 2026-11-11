@@ -1,4 +1,6 @@
 require "hive/review_escalations"
+require "hive/model_unsupported"
+require "hive/plan_review/execute_blocked"
 
 module Hive
   # Shared, policy-free vocabulary for durable recovery. Mutation and pacing
@@ -8,11 +10,36 @@ module Hive
       error review_error review_stale review_ci_stale
     ].freeze
     OWNERS = %w[agent operator provider scheduler hive none unknown].freeze
+    # Error reasons that replaying the same stage cannot fix: an operator must
+    # change configuration (a provider-refused model) or plan-review evidence
+    # (execute entry refused by the plan-review guard) first. The daemon's
+    # automatic sweep never retries them; a human retry is still admitted.
+    OPERATOR_OWNED_ERROR_REASONS = [
+      Hive::ModelUnsupported::REASON, Hive::PlanReview::ExecuteBlocked::REASON
+    ].freeze
 
     module_function
 
     def recoverable_marker?(marker)
       RECOVERABLE_MARKERS.include?(marker.to_s.downcase)
+    end
+
+    def operator_owned_error_reason(attrs)
+      return nil unless attrs.respond_to?(:[])
+
+      reason = (attrs["reason"] || attrs[:reason]).to_s
+      OPERATOR_OWNED_ERROR_REASONS.include?(reason) ? reason : nil
+    end
+
+    def operator_owned_error?(attrs)
+      !operator_owned_error_reason(attrs).nil?
+    end
+
+    def operator_owned_error_remediation(attrs)
+      case operator_owned_error_reason(attrs)
+      when Hive::ModelUnsupported::REASON then Hive::ModelUnsupported.remediation(attrs)
+      when Hive::PlanReview::ExecuteBlocked::REASON then Hive::PlanReview::ExecuteBlocked.remediation(attrs)
+      end
     end
 
     # Marker reads intentionally use a binary view so invalid agent-authored

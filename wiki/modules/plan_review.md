@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-10-30
+updated: 2026-11-11
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -426,6 +426,22 @@ receipt under the task lock immediately before movement. `StageAction`,
 `Approve`, daemon plan approval, and execute entry all use this guard. A stale,
 missing, corrupt, blocked, or changed observation raises a typed
 `PlanReview::TransitionBlocked`; `--force` does not bypass it.
+`TransitionBlocked#blocked_reason` carries the guard's reason without the
+`; required action:` suffix.
+
+Execute entry records its refusal as the operator-owned
+`ERROR reason=plan_review_blocked` (`Hive::PlanReview::ExecuteBlocked`, see
+[[stages/execute]]) instead of exiting markerless, so the daemon never replays
+it. A backward `hive approve` into `4-execute` from a later coding stage
+(for example `--to 4-execute --from 6-review` after an operator edited
+`plan.md`) runs the read-only preflight
+`TransitionGuard.validate_execute_reentry!`: the same evidence execute entry
+checks, without writing a legacy adoption receipt and tolerating policy drift
+alone (a validated outcome-evidence rework may keep its clearance across
+reviewer-routing changes). A refusal names the remedy as its required action
+(back to `3-plan`, then restart or rerun the review, or restore the reviewed
+plan); `--force` does not bypass it. The preflight runs before the locks, so
+execute entry remains the authority.
 
 The task generation digests task id, slug, workflow, and `meta.yml` with its
 `depends_on` key removed (unparseable or non-mapping metadata falls back to raw

@@ -3,7 +3,6 @@ require "json"
 require "shellwords"
 require "time"
 require "hive/agent_limit"
-require "hive/model_unsupported"
 require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
 require "hive/attempts/command_progress"
@@ -186,10 +185,12 @@ module Hive
       # to these — those are about worktree state, not pacing.
       OPERATOR_REQUESTORS = %w[action cli bot web].freeze
 
-      # The daemon's own sweep. A marker that names an operator-owned
-      # configuration problem (Hive::ModelUnsupported) is never admitted for
-      # these: replaying it would fail identically until the config changes.
-      # Every human surface may still retry once the operator has fixed it.
+      # The daemon's own sweep. A marker that names an operator-owned error
+      # (Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS: a provider-refused model
+      # or an execute entry refused by the plan-review guard) is never admitted
+      # for these: replaying it would fail identically until the operator
+      # changes configuration or plan-review evidence. Every human surface may
+      # still retry once the operator has fixed it.
       AUTOMATIC_REQUESTORS = %w[healer].freeze
 
       def retry_delay_sec(retry_count)
@@ -273,9 +274,10 @@ module Hive
           safe: safe == true,
           safety_reason: safety_reason.to_s
         }
-        return result unless Hive::ModelUnsupported.marker?(marker_attrs(row))
+        operator_reason = Hive::Recovery.operator_owned_error_reason(marker_attrs(row))
+        return result unless operator_reason
 
-        result.merge(due: false, operator_required: true)
+        result.merge(due: false, operator_required: true, operator_reason: operator_reason)
       rescue StandardError => e
         {
           due: false, retry_at: nil, safe: false,
@@ -310,13 +312,13 @@ module Hive
           if AUTOMATIC_REQUESTORS.include?(requestor.to_s)
             return receipt(
               "blocked", failure_origin: failure_origin, owner: "operator",
-              reason: Hive::ModelUnsupported::REASON,
-              remediation: Hive::ModelUnsupported.remediation(marker_attrs(row)),
+              reason: assessment.fetch(:operator_reason),
+              remediation: Hive::Recovery.operator_owned_error_remediation(marker_attrs(row)),
               retry_count: retry_count, provider_hint: provider_hint(row)
             )
           end
           # Never due on its own, so any human surface (including the TUI)
-          # is the operator acting on the fixed config: skip the pacing gate.
+          # is the operator acting on the fixed cause: skip the pacing gate.
           operator_request = true
         end
         unless assessment[:due] || operator_request

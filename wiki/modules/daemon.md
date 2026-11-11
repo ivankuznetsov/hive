@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-09
+updated: 2026-11-11
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -990,6 +990,20 @@ advances a workflow stage directly:
    `bot`, `web`, `tui`) are still admitted after the config is fixed. This
    replaced PR #1473's `limits_reached` handling, under which four review
    tasks retried hourly for about 11 days.
+
+   **A plan-review-refused execute entry is operator-owned too (ADR-058):**
+   `Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS` lists `model_unsupported`
+   and `plan_review_blocked` (written by execute entry when
+   `TransitionGuard` refuses it; see [[stages/execute]]). The assessment
+   carries `operator_reason`, so the healer's blocked receipt, the
+   dispatcher's disposition (`plan_review_blocked`, owner `operator`,
+   `waiting_operator` pending item), and the daily digest's `authority` hold
+   all name the actual reason, and the remediation is the marker message
+   (back to `3-plan`, restart or rerun the plan review, or restore the
+   reviewed plan). Before this (hivedev, 2026-11-10) the refusal exited 4
+   without a marker; the healer wrote
+   `agent_exited_without_terminal_marker`, status reported "automatic retry
+   is eligible", and every retry repeated the refusal.
 
    Recovering an error reruns the owning stage through its normal checks;
    it does not bypass tamper detection, clean-exit scope, branch identity,

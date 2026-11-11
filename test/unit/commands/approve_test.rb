@@ -154,6 +154,37 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  # A backward move that re-enters execute (6-review -> 4-execute) checks the
+  # plan review execute entry will check; other backward moves never do, and
+  # --force does not bypass the refusal.
+  def test_backward_reentry_into_execute_runs_the_plan_review_preflight
+    calls = []
+    refusal = Hive::PlanReview::TransitionBlocked.new(
+      "canonical plan changed after plan review; required action: Move the task back to 3-plan"
+    )
+    preflight = lambda do |task:, destination:|
+      calls << [ task.stage_name, destination ]
+      raise refusal if destination == "4-execute"
+
+      true
+    end
+    marker = Hive::Markers::State.new(name: :error, attrs: {}, raw: nil)
+
+    with_replaced_singleton_method(
+      Hive::PlanReview::TransitionGuard, :validate_execute_reentry!, preflight
+    ) do
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        command(force: true).send(:validate_move!, task(stage_index: 6, stage_name: "review"), "4-execute", marker)
+      end
+      assert_same refusal, error
+      assert_equal "plan_review_blocked", command.send(:error_kind_for, error)
+
+      assert_nil command.send(:validate_move!, task(stage_index: 6, stage_name: "review"), "3-plan", marker)
+    end
+
+    assert_equal [ %w[review 4-execute], %w[review 3-plan] ], calls
+  end
+
   def test_force_does_not_bypass_plan_review_preflight
     current = task(stage_index: 3, stage_name: "plan")
     cmd = command(force: true)

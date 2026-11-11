@@ -3,9 +3,32 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-10
+updated: 2026-11-11
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
 ---
+
+## Plan-review-blocked execute entry: remedy not replayed live (2026-11-11)
+
+ADR-058 makes a plan-review refusal at execute entry a typed, operator-owned
+`ERROR reason=plan_review_blocked` and preflights backward `hive approve` into
+`4-execute`. Covered by unit tests and one integration test (real skipped
+review, edited plan, refused approve, raw move, `hive develop`, back to
+`3-plan`, `plan-review restart`). Open items:
+
+- Not replayed against a live daemon. The hivedev task that exposed it
+  (f4-run-the-hosting-proof, 2026-11-10) was repaired by hand first.
+- The named remedy moves the task back to `3-plan`. That rewind strips
+  `plan.md`'s `COMPLETE` marker, so with the daemon enabled the plan row is
+  `ready_to_run` and the daemon may dispatch the planner (which revises
+  `plan.md` and opens its own linked review) before the operator's
+  `hive plan-review TASK restart` / `plan-review-run`. Whether that re-plan
+  keeps operator edits made in later stages is unverified.
+- The refused dispatch still exits 4 (`plan_review_blocked`) instead of the
+  exit 3 a marker-writing stage normally returns, and writes no Hive state
+  commit. Returning normally would let the stage-exit clean-exit invariant
+  commit worktree residue on a run whose agent never started.
+- The approve preflight runs before the commit/task locks and tolerates policy
+  drift alone, so it is advisory; execute entry stays the authority.
 
 ## OpenCode 2.x: private server landed, CLI contract still 1.x (2026-11-10)
 

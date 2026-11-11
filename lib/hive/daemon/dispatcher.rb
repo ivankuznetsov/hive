@@ -17,7 +17,7 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/operational_snapshot"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recovery_coordinator"
-require "hive/model_unsupported"
+require "hive/recovery"
 require "hive/runtime_control_plane/dispatch_repository"
 require "hive/runtime_control_plane/boot_identity"
 require "hive/runtime_control_plane/process_registry"
@@ -1184,7 +1184,7 @@ module Hive
           )
         end
         if assessment[:operator_required]
-          return pending_item("waiting_operator", id, Hive::ModelUnsupported::REASON,
+          return pending_item("waiting_operator", id, assessment.fetch(:operator_reason),
                               condition: operator_condition(row))
         end
         unless assessment[:safe]
@@ -5197,9 +5197,9 @@ module Hive
         end
         if assessment[:operator_required]
           return [
-            :model_unsupported,
+            assessment.fetch(:operator_reason).to_sym,
             "operator",
-            Hive::ModelUnsupported.remediation(row.marker_attrs)
+            Hive::Recovery.operator_owned_error_remediation(row.marker_attrs)
           ]
         end
         unless assessment[:safe]

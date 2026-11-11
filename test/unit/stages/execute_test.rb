@@ -96,6 +96,88 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  # hivedev f4 (2026-11-10): plan.md edited in 6-review, task moved back to
+  # 4-execute, and every `hive develop` refused execute entry with exit 4 and
+  # no marker, which the daemon healed into an endlessly retried generic error.
+  def test_plan_review_refusal_records_an_operator_owned_marker_before_any_side_effect
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      identity_calls = 0
+      refusal = Hive::PlanReview::TransitionBlocked.new(
+        "canonical plan changed after plan review; required action: complete or resolve the plan review",
+        review_id: "pr-#{'a' * 64}", review_state: "cleared",
+        required_action: "complete or resolve the plan review",
+        blocked_reason: "canonical plan changed after plan review",
+        current_stage: "4-execute", target_stage: "4-execute"
+      )
+
+      error = with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, ->(**) { raise refusal }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :capture_implementation_identity, ->(*) { identity_calls += 1 }
+        ) do
+          assert_raises(Hive::PlanReview::TransitionBlocked) do
+            Hive::Stages::Execute.run!(task, "worktree_root" => File.join(dir, "worktrees"))
+          end
+        end
+      end
+
+      # The refusal still propagates (exit 4, error kind plan_review_blocked),
+      # now naming the remedy, and nothing past the guard ran.
+      assert_same refusal, error.cause
+      assert_equal "complete or resolve the plan review", error.required_action
+      assert_equal [ "4-execute", "4-execute" ], [ error.current_stage, error.target_stage ]
+      assert_includes error.message, "required action: complete or resolve the plan review; next: Move the task " \
+                                     "back to 3-plan (`hive approve #{task.slug} --to 3-plan --from 4-execute`)"
+      assert_includes error.message, "restore the reviewed plan.md and retry"
+      assert_equal 0, identity_calls
+      refute File.exist?(task.worktree_yml_path)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "plan_review_blocked", marker.attrs["reason"]
+      assert_equal "complete or resolve the plan review", marker.attrs["required_action"]
+      assert_equal "canonical plan changed after plan review", marker.attrs["blocker"]
+      assert_equal [ "pr-#{'a' * 64}", "cleared" ], marker.attrs.values_at("review_id", "review_state")
+      assert_includes marker.attrs["message"], "`hive plan-review-run #{task.slug}`"
+      refute_empty marker.attrs["marker_id"].to_s, "the marker must carry a recovery generation"
+      assert Hive::Recovery.operator_owned_error?(marker.attrs)
+    end
+  end
+
+  def test_reviewed_rework_that_is_still_blocked_records_the_operator_owned_marker
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      calls = []
+      guard = lambda do |**kwargs|
+        calls << kwargs
+        raise Hive::PlanReview::TransitionBlocked.new(
+          "canonical plan changed after plan review; required action: complete or resolve the plan review",
+          blocked_reason: "canonical plan changed after plan review",
+          required_action: "complete or resolve the plan review"
+        )
+      end
+      rework = { "feedback" => { "implementation_head" => "b" * 40 }, "protected_paths" => [] }
+
+      with_replaced_singleton_method(
+        Hive::PlanReview::TransitionGuard, :validate_execute_entry!, guard
+      ) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :outcome_evidence_rework_context, ->(*, **) { rework }
+        ) do
+          assert_raises(Hive::PlanReview::TransitionBlocked) { Hive::Stages::Execute.run!(task, {}) }
+        end
+      end
+
+      assert_equal [ nil, true ], calls.map { |kwargs| kwargs[:reviewed_rework] }
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal [ :error, "plan_review_blocked" ], [ marker.name, marker.attrs["reason"] ]
+    end
+  end
+
   def test_run_reuses_clearance_only_after_validated_reviewed_rework
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -153,6 +235,8 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal({ commit: nil, status: :execute_complete }, result)
       assert_nil calls.fetch(0)[:reviewed_rework]
       assert_equal true, calls.fetch(1).fetch(:reviewed_rework)
+      assert_equal :none, Hive::Markers.current(task.state_file).name,
+                   "an accepted reviewed rework is not a plan-review refusal"
     end
   end
 

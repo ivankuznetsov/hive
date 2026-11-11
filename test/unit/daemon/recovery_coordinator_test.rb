@@ -622,6 +622,34 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  # hivedev f4 (2026-11-10): execute entry refused by the plan-review guard
+  # was healed into a generic retryable error and replayed on every cooldown.
+  # The healer must never admit it; an operator retry after restoring the
+  # reviewed plan still goes through.
+  def test_plan_review_blocked_execute_entry_is_never_auto_admitted_but_operator_retry_is
+    message = "plan review blocks execution (canonical plan changed after plan review); " \
+              "Hive will not retry this automatically. Move the task back to 3-plan"
+    attrs = {
+      "reason" => "plan_review_blocked", "marker_id" => "marker-1",
+      "required_action" => "complete or resolve the plan review", "message" => message
+    }
+    with_fixture(marker_attrs: attrs, mtime: NOW - (30 * 24 * 3600)) do |coordinator, row, state_home|
+      assessment = coordinator.assessment(row, now: NOW)
+      refute assessment[:due], "a plan-review-blocked entry is never due for the automatic sweep"
+      assert assessment[:operator_required]
+      assert_equal "plan_review_blocked", assessment[:operator_reason]
+
+      receipt = coordinator.request(row:, requestor: "healer", now: NOW)
+      assert_equal [ "blocked", "operator", "plan_review_blocked", "plan_review_blocked", message ],
+                   [ receipt.status, receipt.owner, receipt.reason, receipt.failure_origin, receipt.remediation ]
+      assert_empty Q.pending(state_home:)
+
+      operator = coordinator.request(row:, requestor: "cli", request_id: "manual-fix", now: NOW)
+      refute_equal "blocked", operator.status, "an operator retry after restoring the plan must be admitted"
+      refute_empty Q.pending(state_home:)
+    end
+  end
+
   def test_previously_parked_provider_limit_rearms_without_skipping_hourly_cooldown
     with_fixture(marker_attrs: { "reason" => "limits_reached", "marker_id" => "marker-1" },
                  mtime: NOW - 3600) do |coordinator, row, state_home|

@@ -17,6 +17,7 @@ require "hive/agent_git_gate"
 require "hive/markers"
 require "hive/plan_frontmatter"
 require "hive/conditions/execute_boundary"
+require "hive/plan_review/execute_blocked"
 require "hive/plan_review/transition_guard"
 
 module Hive
@@ -51,17 +52,7 @@ module Hive
       UNRESOLVED_IDENTITY = Object.new.freeze
 
       def run!(task, cfg)
-        rework_context = nil
-        begin
-          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
-        rescue Hive::PlanReview::TransitionBlocked
-          rework_context = outcome_evidence_rework_context(task, require_receipt: true)
-          raise unless rework_context&.fetch("feedback")
-
-          Hive::PlanReview::TransitionGuard.validate_execute_entry!(
-            task:, config: cfg, reviewed_rework: true
-          )
-        end
+        rework_context = validate_plan_review_entry!(task, cfg)
         plan_path = File.join(task.folder, "plan.md")
         unless File.exist?(plan_path)
           warn "hive: plan.md missing; this task did not pass through 3-plan"
@@ -86,6 +77,47 @@ module Hive
         else
           run_init_pass(task, cfg, identity, rework_context: rework_context)
         end
+      end
+
+      # Execute entry is the plan-review backstop for raw and backward moves.
+      # An outcome-evidence rework may keep its reviewed clearance across
+      # policy drift; every other refusal is operator-owned. Record it as a
+      # typed ERROR (reason plan_review_blocked, carrying the guard's
+      # required_action) so the daemon never replays it as a markerless
+      # failure and status can name the remedy, then keep refusing by raising
+      # before identity capture, worktree creation, or the stage-exit worktree
+      # invariant can touch anything.
+      def validate_plan_review_entry!(task, cfg)
+        begin
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+          nil
+        rescue Hive::PlanReview::TransitionBlocked
+          rework_context = outcome_evidence_rework_context(task, require_receipt: true)
+          raise unless rework_context&.fetch("feedback")
+
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(
+            task:, config: cfg, reviewed_rework: true
+          )
+          rework_context
+        end
+      rescue Hive::PlanReview::TransitionBlocked => error
+        raise mark_plan_review_blocked(task, error)
+      end
+
+      def mark_plan_review_blocked(task, error)
+        stage = "#{task.stage_index}-#{task.stage_name}"
+        attrs = Hive::PlanReview::ExecuteBlocked.marker_attrs(error, slug: task.slug, from_stage: stage)
+        Hive::Markers.set(task.state_file, :error, attrs)
+        remedy = Hive::PlanReview::ExecuteBlocked.remedy(
+          slug: task.slug, from_stage: stage, blocked_reason: attrs.fetch(:blocker)
+        )
+        Hive::PlanReview::TransitionBlocked.new(
+          "#{error.message}; next: #{remedy}",
+          review_id: error.review_id, review_state: error.review_state,
+          required_action: error.required_action, blockers: error.blockers,
+          blocked_reason: error.blocked_reason,
+          current_stage: error.current_stage, target_stage: error.target_stage
+        )
       end
 
       # Pre-flight state. EXECUTE_STALE is no longer a state 4-execute

@@ -5,6 +5,7 @@ require "hive/operational_action"
 require "time"
 require "hive/attempts/repository"
 require "hive/markers"
+require "hive/recovery"
 require "hive/secret_patterns"
 require "hive/task_projection/reader"
 require "hive/task_workspace"
@@ -323,7 +324,16 @@ module Hive
         return "Refresh canonical task status before acting." unless
           status["freshness"] == "fresh" && status["state"] == "current"
 
-        "The canonical task state has no operator action."
+        operator_owned_remediation || "The canonical task state has no operator action."
+      end
+
+      # A refused model or a plan-review-blocked execute entry is never
+      # retried automatically; name what the operator must change instead.
+      def operator_owned_remediation
+        return nil unless %w[error review_error].include?(task_value("marker").to_s)
+
+        attrs = task_value("attrs")
+        Hive::Recovery.operator_owned_error_remediation(attrs.is_a?(Hash) ? attrs : {})
       end
 
       def semantic_headline(status)

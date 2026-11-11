@@ -1188,6 +1188,33 @@ class TaskActionTest < Minitest::Test
     end
   end
 
+  # An execute entry refused by the plan-review guard stays an `error` row
+  # (diagnostic, guarded retry), labelled by its blocker, and its diagnostic
+  # explains the remedy rather than tailing an unrelated older agent log.
+  def test_plan_review_blocked_execute_error_is_labelled_and_explains_the_remedy
+    Dir.mktmpdir("hive-task-action-plan-review-blocked") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      logs = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(logs, "execute-20260101T000000Z.log"), "previous implementation run\n")
+      remedy = "plan review blocks execution; Move the task back to 3-plan and restart its plan review."
+
+      action = Hive::TaskAction.for(
+        task, marker(:error, "reason" => "plan_review_blocked", "marker_id" => "m1", "message" => remedy)
+      )
+
+      assert_equal [ Hive::Schemas::TaskActionKind::ERROR, "Plan review blocks execution" ],
+                   [ action.key, action.label ]
+      diagnostic = action.diagnostic
+      assert_equal "marker", diagnostic["source"]
+      assert diagnostic["summary"].start_with?("ERROR message=plan review blocks execution")
+      assert_includes diagnostic["detail"], "reason=plan_review_blocked"
+      assert_includes diagnostic["detail"], "refused by the plan-review transition guard"
+      assert_includes diagnostic["detail"], "Next: #{remedy}"
+      refute_includes diagnostic["detail"], "previous implementation run"
+    end
+  end
+
   def test_diagnostic_rejects_artifact_symlink_escape
     Dir.mktmpdir("hive-task-action-symlink") do |root|
       task = fake_task(stage_name: "review", stage_index: 6, project_root: root)

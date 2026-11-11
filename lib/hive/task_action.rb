@@ -19,6 +19,7 @@ require "hive/plan_review/planner_identity"
 require "hive/plan_review/result_parser"
 require "hive/plan_review/route_resolver"
 require "hive/plan_review/transition_guard"
+require "hive/plan_review/execute_blocked"
 require "hive/patrol_fix/projection"
 require "hive/plan_review/approval_policy"
 
@@ -269,6 +270,14 @@ module Hive
         label: "Error",
         command: nil
       },
+      # ERROR reason=plan_review_blocked: execute entry refused by the plan
+      # review guard. Still an `error` row (diagnostic, guarded retry, repair
+      # classification); the label names the operator-owned blocker.
+      execute_plan_review_blocked: {
+        key: Hive::Schemas::TaskActionKind::ERROR,
+        label: "Plan review blocks execution",
+        command: nil
+      },
       blocked: {
         key: Hive::Schemas::TaskActionKind::ERROR,
         label: "Blocked",
@@ -478,6 +487,9 @@ module Hive
       end
       if marker.name == :error && Hive::TerminalOutcome.blocked_error?(marker.attrs)
         return ACTIONS.fetch(:blocked)
+      end
+      if marker.name == :error && Hive::PlanReview::ExecuteBlocked.marker?(marker.attrs)
+        return ACTIONS.fetch(:execute_plan_review_blocked)
       end
       return ACTIONS.fetch(:error) if marker.name == :error
       return ACTIONS.fetch(:manual_steering) if marker.name == :manual_steering

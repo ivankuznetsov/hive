@@ -43,7 +43,9 @@ module Hive
     # Forward auto-advance requires a terminal marker (`:complete` /
     # `:execute_complete` / `:review_complete`). Backward `--to <stage>` is a
     # recovery action and bypasses the marker check; `--force` bypasses it on
-    # forward moves too.
+    # forward moves too. A backward move into a coding task's 4-execute still
+    # preflights the plan review execute entry will check (TransitionBlocked,
+    # `plan_review_blocked`), and `--force` does not bypass that.
     #
     # `--from STAGE` is the agent-side idempotency lever: pass the stage the
     # caller *believes* the task is at; if the task has already been advanced
@@ -380,7 +382,15 @@ module Hive
 
       def validate_move!(task, dest_stage, marker)
         dest = stage_for_dest!(task, dest_stage)
-        return if dest.index <= task.stage_index
+        if dest.index <= task.stage_index
+          # Backward moves skip the marker gate, but one that re-enters
+          # execute must not land on a plan review execute entry will refuse
+          # (e.g. plan.md edited after review); `--force` does not bypass it.
+          Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+            task:, destination: dest_stage
+          )
+          return
+        end
         Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
         @plan_review_config = Hive::Config.load(task.project_root)
         @plan_review_observation = Hive::PlanReview::TransitionGuard.prepare!(

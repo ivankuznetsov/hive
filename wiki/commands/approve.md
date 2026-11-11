@@ -3,7 +3,7 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-11-08
+updated: 2026-11-11
 tags: [command, approval, json, dependencies, admission]
 ---
 
@@ -39,7 +39,7 @@ overrides. Shared effect checks live in `Hive::WorkflowAdmission`; see
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
 5. `resolve_destination`: `--to` (long or short stage name), or auto = the descriptor's next stage (`task.workflow.next_stage_after(task.stage_name)`). At the terminal stage (`9-done` for coding) this raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
-7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. At `4-execute`, effective condition authority is checked first. `--to` (backward direction) bypasses; `--force` bypasses the marker/condition result only after an idempotent `operator_action` audit is durable. Audit failure prevents the move.
+7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. At `4-execute`, effective condition authority is checked first. `--to` (backward direction) bypasses; `--force` bypasses the marker/condition result only after an idempotent `operator_action` audit is durable. Audit failure prevents the move. A backward move into a coding task's `4-execute` from a later stage (for example `--to 4-execute --from 6-review`) still runs the read-only `PlanReview::TransitionGuard.validate_execute_reentry!` preflight: a review execute entry would refuse (such as `plan.md` edited after review) raises `TransitionBlocked` (exit 4, error kind `plan_review_blocked`) whose required action names the remedy (`hive approve TASK --to 3-plan --from <stage>`, then restart or rerun the plan review, or restore the reviewed plan). Policy drift alone passes so outcome-evidence rework is unaffected; `--force` does not bypass it. See [[modules/plan_review]].
 8. For a backward move, rearm the destination and every traversed stage before
    the folder move. Hive de-duplicates their descriptor-owned state-file names,
    removes all recognized markers while preserving surrounding prose, and does
@@ -174,7 +174,7 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schem
 |-----------|-----------------|----------|
 | Forward auto (no `--to`) | terminal marker **and clear dependency admission** | `--force` affects marker only |
 | Forward via `--to`       | terminal marker **and clear dependency admission** | `--force` affects marker only |
-| Backward via `--to`      | none                            | n/a      |
+| Backward via `--to`      | none (coding re-entry into `4-execute` preflights plan review) | n/a      |
 | Same stage (no-op)       | none                            | n/a      |
 
 `:error`, `:waiting`, `:execute_waiting`, `:execute_stale`, `:review_waiting`, `:review_ci_stale`, `:review_stale`, `:review_error` are all non-terminal: they leave the task in place. The error message includes `marker is :<name>` so an agent can branch deterministically. Backward `--to` is the recovery lever for an intentional stage rewind: it clears recognized markers from state files belonging to the destination-through-source interval, so the destination and its next forward visits actually run again instead of consuming terminal output from the previous visit. State files belonging only to earlier or later stages stay exact. Recoverable error markers that do not require a stage rewind use the fresh `workflow.retry` action from `hive status --operational --json`; `EXECUTE_STALE` remains manual because findings must be inspected first. `hive markers clear` remains a low-level maintenance command, not the standard agent recovery recipe.

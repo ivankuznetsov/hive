@@ -5,6 +5,7 @@ require "time"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/model_routing"
+require "hive/plan_review/execute_blocked"
 require "hive/plan_review/identity"
 require "hive/plan_review/orchestrator"
 require "hive/plan_review/planner_identity"
@@ -133,6 +134,42 @@ module Hive
           task, nil, "execute entry has invalid plan review evidence: #{error.message}",
           required_action: "move the task back to plan and repair its review"
         )
+      end
+
+      # A backward move into execute (for example 6-review -> 4-execute)
+      # re-enters the execute boundary without crossing plan -> execute, so
+      # nothing checked the review before the move. Preflight the evidence
+      # execute entry will check and refuse a blocked review at the move, with
+      # the remedy, instead of letting execute entry refuse every dispatch.
+      # Read-only: unlike validate_execute_entry! it never records a legacy
+      # adoption receipt. Policy drift alone is tolerated because an
+      # outcome-evidence rework may keep its reviewed clearance; execute entry
+      # remains the authority for that and for anything that changes later.
+      def validate_execute_reentry!(task:, destination:, config: nil)
+        return true unless reentry_applicable?(task, destination)
+
+        cfg = config || Hive::Config.load(task.project_root)
+        return true unless review_enabled?(cfg)
+
+        root = File.join(task.folder, Store::ROOT_BASENAME)
+        unless File.exist?(root) || File.symlink?(root)
+          return true unless Hive::TaskMeta.plan_review_required?(task.folder)
+
+          raise blocked_error(task, nil, "required plan review evidence is missing")
+        end
+        return true if legacy_adoption_valid?(task, root)
+
+        authorize!(
+          task, Projection.load(task_folder: task.folder), cfg:, allow_policy_drift: true
+        )
+        true
+      rescue InvalidRecord, StaleObservation, Hive::ConfigError,
+             Hive::TaskMeta::InvalidMetadata => error
+        raise reentry_blocked(
+          task, blocked_error(task, nil, "execute re-entry has invalid plan review evidence: #{error.message}")
+        )
+      rescue TransitionBlocked => error
+        raise reentry_blocked(task, error)
       end
 
       def transition_applicable?(task, destination)
@@ -284,6 +321,7 @@ module Hive
           "#{reason}; required action: #{action}",
           review_id: record&.review_id, review_state: record&.state,
           required_action: action, blockers: record ? record["blockers"] : [],
+          blocked_reason: reason,
           current_stage: stage_dir(task), target_stage: EXECUTE_STAGE
         )
       end
@@ -292,12 +330,36 @@ module Hive
         task.respond_to?(:workflow) && Hive::Workflows.coding_id?(task.workflow.id)
       end
 
+      # Only a move from a stage after execute re-enters it; plan -> execute
+      # is prepare!/verify!'s boundary.
+      def reentry_applicable?(task, destination)
+        coding?(task) && destination.to_s == EXECUTE_STAGE &&
+          task.stage_index.to_i > EXECUTE_STAGE.to_i
+      end
+
+      # Re-entry refusals name the concrete remedy as the required action: the
+      # review can only be restarted once the task is back at plan.
+      def reentry_blocked(task, error)
+        from_stage = stage_dir(task)
+        remedy = ExecuteBlocked.remedy(
+          slug: task.slug, from_stage:, blocked_reason: error.blocked_reason
+        )
+        TransitionBlocked.new(
+          "#{error.blocked_reason}; required action: #{remedy}",
+          review_id: error.review_id, review_state: error.review_state,
+          required_action: remedy, blockers: error.blockers,
+          blocked_reason: error.blocked_reason,
+          current_stage: from_stage, target_stage: EXECUTE_STAGE
+        )
+      end
+
       def stage_dir(task) = "#{task.stage_index}-#{task.stage_name}"
 
       private_class_method :authorize!, :observation, :policy_configuration_matches?,
                            :current_plan_digest, :write_legacy_adoption!,
                            :persisted_run_level, :blocked_error,
-                           :stale, :coding?, :stage_dir
+                           :stale, :coding?, :stage_dir,
+                           :reentry_applicable?, :reentry_blocked
     end
   end
 end

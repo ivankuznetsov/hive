@@ -2,7 +2,6 @@ require "time"
 require "hive/review_publication_recovery"
 require "hive/attempts/storage_status"
 require "hive/operational_action"
-require "hive/model_unsupported"
 require "hive/recovery"
 require "hive/workflows"
 require "hive/task_closure"
@@ -754,7 +753,7 @@ module Hive
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "retry_dispatch_disabled"
         [ "needs_repair", disposition.dig("recovery", "owner") || "operator" ]
-      when "semantic_terminal_error", "attempt_failure_limit", Hive::ModelUnsupported::REASON
+      when "semantic_terminal_error", "attempt_failure_limit", *Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         owner = disposition["owner"] || "hive"
@@ -939,6 +938,23 @@ module Hive
         )
       end
 
+      # Operator-owned errors are never admitted by the daemon's sweep; name
+      # the remedy instead of an unavailable or pending automatic retry.
+      if operator_owned_error?(row)
+        return normalized_recovery(
+          {
+            "status" => "blocked", "request_id" => nil, "attempt_id" => row["attempt_id"],
+            "phase" => nil, "failure_origin" => row.dig("attrs", "reason"),
+            "next_eligible_at" => nil, "owner" => "operator",
+            "reason" => row.dig("attrs", "reason"),
+            "remediation" => Hive::Recovery.operator_owned_error_remediation(row["attrs"] || {}),
+            "retry_count" => nil, "provider_hint" => provider_hint(row),
+            "terminal_outcome" => nil, "terminal_at" => nil
+          },
+          row
+        )
+      end
+
       decision = disposition&.fetch("decision", nil)
       # An eligibility assessment is not queue admission. Until the
       # coordinator supplies a canonical receipt/request ID, keep the action
@@ -1100,7 +1116,14 @@ module Hive
         %w[error review_error].include?(row["marker"].to_s) &&
         !Hive::TaskProjection.history_invalid_row?(row) &&
         !task_history_unavailable?(row) &&
-        !Hive::ModelUnsupported.marker?(row["attrs"] || {})
+        !operator_owned_error?(row)
+    end
+
+    # A refused model or a plan-review-blocked execute entry: the daemon never
+    # retries it, so the operator's remedy is the reason, not a retry promise.
+    def operator_owned_error?(row)
+      %w[error review_error].include?(row["marker"].to_s) &&
+        Hive::Recovery.operator_owned_error?(row["attrs"] || {})
     end
 
     def task_history_unavailable?(row)
@@ -1158,6 +1181,11 @@ module Hive
           "task_history_unavailable",
           row.dig("attrs", "message") || "task journal is temporarily locked by a writer",
           "scheduler"
+        )
+      elsif operator_owned_error?(row)
+        attrs = row["attrs"] || {}
+        reasons << reason(
+          attrs["reason"], Hive::Recovery.operator_owned_error_remediation(attrs), "task"
         )
       elsif automatic_error_retry?(project, row)
         marker = row["marker"].to_s.upcase

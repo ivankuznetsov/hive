@@ -1740,13 +1740,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  dispatcher.send(:retry_pending_item, unsafe, now: T0).fetch("bucket")
 
     # A refused model waits on the operator, never on the retry scheduler.
-    assessment = { safe: true, due: false, retry_at: T0, safety_reason: "safe", operator_required: true }
+    assessment = { safe: true, due: false, retry_at: T0, safety_reason: "safe", operator_required: true,
+                   operator_reason: "model_unsupported" }
     assert_equal [ "waiting_operator", "model_unsupported" ],
                  dispatcher.send(:retry_pending_item, unsafe, now: T0).values_at("bucket", "reason")
     refused = row(slug: "refused",
                   marker_attrs: { "reason" => "model_unsupported", "message" => "set a supported model" })
     assert_equal [ :model_unsupported, "operator", "set a supported model" ],
                  dispatcher.send(:retry_disposition, refused, assessment)
+
+    # So does an execute entry the plan-review guard refused: the published
+    # disposition names the operator's remedy, not an eligible retry.
+    assessment = assessment.merge(operator_reason: "plan_review_blocked")
+    assert_equal [ "waiting_operator", "plan_review_blocked" ],
+                 dispatcher.send(:retry_pending_item, unsafe, now: T0).values_at("bucket", "reason")
+    blocked = row(slug: "blocked", marker_attrs: {
+      "reason" => "plan_review_blocked", "message" => "move the task back to 3-plan"
+    })
+    assert_equal [ :plan_review_blocked, "operator", "move the task back to 3-plan" ],
+                 dispatcher.send(:retry_disposition, blocked, assessment)
   end
 
   def test_project_owned_fails_closed_when_ownership_probe_raises

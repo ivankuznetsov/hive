@@ -59,6 +59,23 @@ class DailyDigestHoldObserverTest < Minitest::Test
     end
   end
 
+  def test_plan_review_blocked_disposition_is_an_operator_authority_hold
+    with_tmp_dir do |root|
+      records = []
+      activity = Object.new
+      activity.define_singleton_method(:record) { |**values| records << values }
+      observer = Hive::DailyDigest::HoldObserver.new(activity_factory: ->(_task) { activity })
+      folder = File.join(root, ".hive-state", "stages", "4-execute", "task")
+      FileUtils.mkdir_p(folder)
+      row = Row.new(folder: folder, stage: "4-execute", marker_attrs: { "reason" => "plan_review_blocked" })
+
+      observer.record(row, decision: :plan_review_blocked, owner: "operator",
+                           reason: "move the task back to 3-plan")
+
+      assert_equal [ "authority" ], records.map { |record| record.dig(:payload, "hold_kind") }
+    end
+  end
+
   # The daemon appended "hold cleared" activity to a task's journal while its
   # review CI-fix and plan-revision agents ran; custody blamed the agent and
   # rolled the entry back. Holds are deferred while the task lock is live.

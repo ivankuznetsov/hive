@@ -3,7 +3,7 @@ title: hive task
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/task.rb, lib/hive/task_workspace/builder.rb, schemas/hive-task-workspace.v2.json
 created: 2026-08-16
-updated: 2026-11-07
+updated: 2026-11-11
 tags: [command, task, semantic, workspace, json, diagnosis]
 ---
 
@@ -48,7 +48,10 @@ CLI-only result model:
 
 - `headline` and `action` come from fresh canonical task status. Optional
   usage, price, publication, or diagnostic evidence cannot manufacture an
-  action or disable an otherwise fresh canonical one.
+  action or disable an otherwise fresh canonical one. For an operator-owned
+  error (`model_unsupported`, or execute entry refused as
+  `plan_review_blocked`), the disabled `action.reason` is the marker's
+  remediation instead of "The canonical task state has no operator action."
 - `result` and `applicability` come from the normalized workflow result
   contract. A declared final document is primary when present; the current
   stage artifact is the in-progress fallback.

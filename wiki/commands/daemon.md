@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-09-26
+updated: 2026-11-11
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -24,7 +24,10 @@ retry-safety blocks, and 8-finalize while the PR is still open on GitHub.
 Every persisted `ERROR` / `REVIEW_ERROR` except the exact operator-owned
 `terminal_outcome_blocked` and `terminal_outcome_invalid` reasons is eligible
 for the universal marker-age retry; `RecoveryCoordinator` durably admits only
-the exact safe generation before normal policy dispatch. Separately, it ingests merged PRs and
+the exact safe generation before normal policy dispatch. The operator-owned
+stops `model_unsupported` and `plan_review_blocked`
+(`Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS`) are never due for that
+sweep; their disposition names the remedy and only a human retry admits them. Separately, it ingests merged PRs and
 fairly schedules ordinary patrol alongside language-neutral architecture
 discovery/action resumes.
 

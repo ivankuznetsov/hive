@@ -32,15 +32,16 @@ module Hive
       def exit_code = Hive::ExitCodes::USAGE
     end
     class TransitionBlocked < Hive::WrongStage
-      attr_reader :review_id, :review_state, :required_action, :blockers
+      attr_reader :review_id, :review_state, :required_action, :blockers, :blocked_reason
 
       def initialize(message, review_id: nil, review_state: nil, required_action: nil,
-                     blockers: [], **stage_context)
+                     blockers: [], blocked_reason: nil, **stage_context)
         super(message, **stage_context)
         @review_id = review_id
         @review_state = review_state
         @required_action = required_action
         @blockers = Array(blockers).freeze
+        @blocked_reason = blocked_reason
       end
     end
 

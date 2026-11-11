@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
 created: 2026-04-25
-updated: 2026-11-02
+updated: 2026-11-11
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -443,6 +443,20 @@ renders its sanitized declared outcome. Status still publishes the guarded
 `workflow.retry` action, but its diagnostic explains that the action reruns
 only the current terminal stage and that propagated upstream blockers require
 a fresh task.
+
+Operator-owned errors (`Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS`:
+`model_unsupported` and `plan_review_blocked`) are never scheduled retries.
+With or without a current scheduler snapshot, the row is `needs_repair` /
+`operator`, its first reason has the marker reason as `code` and the marker's
+remediation as `message`, and `recovery` is `blocked` / `operator` with the
+same reason and remediation (a canonical coordinator receipt, such as one
+queued by an operator retry, still wins). The scheduler's own disposition
+uses the same reason. `ERROR reason=plan_review_blocked` (execute entry refused
+by the plan-review guard; see [[stages/execute]]) keeps action key `error`
+with label `Plan review blocks execution`; its diagnostic is marker-sourced
+and its detail names the remedy (back to `3-plan`, restart or rerun the plan
+review, or restore the reviewed plan). The guarded `workflow.retry` action
+stays available for an operator who restored the reviewed plan.
 
 When later daemon ticks cannot publish a complete scheduler record (for
 example `duplicate_task_identity`, the same slug in two stage folders of one

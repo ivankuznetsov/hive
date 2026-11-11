@@ -306,6 +306,37 @@ class TaskWorkspaceBuilderTest < Minitest::Test
     end
   end
 
+  # hivedev f4 (2026-11-10): `hive task --json` answered "The canonical task
+  # state has no operator action." for an execute entry the plan-review guard
+  # refused. An operator-owned error names its remedy instead.
+  def test_semantic_v2_names_the_remedy_for_an_operator_owned_error
+    with_fixture do |native, task|
+      attributes = task.instance_variable_get(:@attributes)
+      attributes["action"] = Hive::Schemas::TaskActionKind::ERROR
+      attributes["action_label"] = "Plan review blocks execution"
+      attributes["marker"] = "error"
+      attributes["attrs"] = {
+        "reason" => "plan_review_blocked",
+        "message" => "plan review blocks execution; move the task back to 3-plan and restart its plan review"
+      }
+
+      blocked = builder(native, task, questions: 0).semantic
+      refute blocked.dig("action", "enabled")
+      assert_equal "plan review blocks execution; move the task back to 3-plan and restart its plan review",
+                   blocked.dig("action", "reason")
+      assert_equal "Plan review blocks execution", blocked.dig("headline", "label")
+
+      attributes["attrs"] = { "reason" => "implementer_failed" }
+      assert_equal "The canonical task state has no operator action.",
+                   builder(native, task, questions: 0).semantic.dig("action", "reason")
+
+      attributes["marker"] = "none"
+      attributes["attrs"] = { "reason" => "plan_review_blocked" }
+      assert_equal "The canonical task state has no operator action.",
+                   builder(native, task, questions: 0).semantic.dig("action", "reason")
+    end
+  end
+
   def test_semantic_v2_does_not_complete_an_active_terminal_agent_stage
     with_fixture do |native, task|
       native.workflow.stages = [

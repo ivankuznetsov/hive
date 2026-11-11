@@ -927,6 +927,42 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "model_unsupported", projected.dig("evidence", "marker_attrs", "reason")
   end
 
+  # hivedev f4 (2026-11-10): an execute entry refused by the plan-review guard
+  # was reported as "automatic retry is eligible". It is operator-owned: the
+  # row must name the remedy (back to plan, restart the review) in its reason
+  # and recovery block, with or without a current scheduler snapshot.
+  def test_plan_review_blocked_execute_entry_names_the_operator_remedy
+    message = "plan review blocks execution (canonical plan changed after plan review); " \
+              "Hive will not retry this automatically. Move the task back to 3-plan " \
+              "(`hive approve blocked --to 3-plan --from 4-execute`), then restart its plan review"
+    blocked = task(
+      action: "error", slug: "blocked", stage: "4-execute", marker: "error",
+      attrs: { "reason" => "plan_review_blocked", "required_action" => "complete or resolve the plan review",
+               "blocker" => "canonical plan changed after plan review", "message" => message }
+    )
+
+    projected = project(
+      status_payload(blocked), project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal [ "needs_repair", "operator", message ],
+                 projected.values_at("state", "blocker_owner", "reason")
+    assert_equal "plan_review_blocked", projected.fetch("reasons").first.fetch("code")
+    refute_includes projected.fetch("reasons").map { |entry| entry["code"] }, "error_retry_scheduled"
+    assert_equal [ "blocked", "operator", "plan_review_blocked", message ],
+                 projected.fetch("recovery").values_at("status", "owner", "reason", "remediation")
+
+    snapshot = scheduler_snapshot_for(blocked, decision: "plan_review_blocked", reason: message)
+    scheduled = project(
+      status_payload(blocked), project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: snapshot
+    ).fetch("tasks").first
+
+    assert_equal [ "needs_repair", "operator", message ],
+                 scheduled.values_at("state", "blocker_owner", "reason")
+    assert_nil scheduled["retry"], "an operator-owned stop is not a scheduled retry"
+  end
+
   def test_terminal_outcome_errors_are_retried_like_any_other_error
     %w[
       terminal_outcome_blocked terminal_outcome_invalid
@@ -1426,6 +1462,7 @@ class OperationalStatusTest < Minitest::Test
       "retry_dispatch_disabled" => [ "needs_repair", "operator" ],
       "semantic_terminal_error" => [ "needs_repair", "operator" ],
       "model_unsupported" => [ "needs_repair", "operator" ],
+      "plan_review_blocked" => [ "needs_repair", "operator" ],
       "wait_for_answers" => [ "waiting_on_you", "operator" ],
       "pull_request_merged" => [ "waiting_on_you", "operator" ],
       "pull_request_closed_unmerged" => [ "waiting_on_you", "operator" ],

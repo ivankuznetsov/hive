@@ -254,6 +254,112 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  # hivedev f4 (2026-11-10): a backward move 6-review -> 4-execute after an
+  # operator plan edit landed on a review execute entry would refuse.
+  def test_execute_reentry_refuses_a_changed_plan_with_the_concrete_remedy
+    with_task(stage_index: 6, stage_name: "review") do |task, cfg|
+      publish_projection(task, cfg, state: "cleared")
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: cfg
+      )
+
+      File.write(File.join(task.folder, "plan.md"), "# reviewed plan\n\nOperator decision: keep the API.\n")
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+          task:, destination: "4-execute", config: cfg
+        )
+      end
+
+      assert_equal "canonical plan changed after plan review", error.blocked_reason
+      assert_equal [ "6-review", "4-execute" ], [ error.current_stage, error.target_stage ]
+      assert_equal "cleared", error.review_state
+      assert error.required_action.start_with?(
+        "Move the task back to 3-plan (`hive approve #{task.slug} --to 3-plan --from 6-review`)"
+      )
+      assert_includes error.required_action, "restore the reviewed plan.md and retry"
+      assert_equal "canonical plan changed after plan review; required action: #{error.required_action}",
+                   error.message
+      refute File.exist?(File.join(task.folder, "plan-review", "legacy-execute-adoption.json"))
+    end
+  end
+
+  # Outcome-evidence rework re-enters execute after reviewer routing may have
+  # changed; execute entry tolerates that drift for a validated rework, so the
+  # preflight must not refuse it first.
+  def test_execute_reentry_tolerates_policy_drift_and_ignores_other_moves
+    with_task(stage_index: 7, stage_name: "artifacts") do |task, cfg|
+      publish_projection(task, cfg, state: "cleared")
+      drifted = Marshal.load(Marshal.dump(cfg))
+      drifted["plan_review"]["adapter"] = "replacement-review-adapter"
+
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: drifted
+      )
+
+      File.write(File.join(task.folder, "plan.md"), "# changed\n")
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "3-plan", config: cfg
+      )
+      disabled = Marshal.load(Marshal.dump(cfg))
+      disabled["plan_review"]["enabled"] = false
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: disabled
+      )
+    end
+
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: cfg
+      )
+    end
+
+    with_task(workflow_id: "research", stage_index: 6, stage_name: "review") do |task, cfg|
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: cfg
+      )
+    end
+  end
+
+  def test_execute_reentry_without_review_root_is_read_only
+    with_task(stage_index: 6, stage_name: "review") do |task, cfg|
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: cfg
+      )
+      refute File.exist?(File.join(task.folder, "plan-review")),
+             "the preflight must not record legacy adoption; execute entry owns that"
+
+      File.write(task.meta_yml_path, "id: 42\nworkflow: coding\nplan_review_required: true\n")
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+          task:, destination: "4-execute", config: cfg
+        )
+      end
+      assert_includes error.message, "required plan review evidence is missing; required action: Move the task back"
+    end
+
+    with_task(stage_index: 6, stage_name: "review") do |task, cfg|
+      at_execute = task.dup
+      at_execute.stage_index = 4
+      at_execute.stage_name = "execute"
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task: at_execute, config: cfg)
+
+      assert Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+        task:, destination: "4-execute", config: cfg
+      )
+    end
+
+    with_task(stage_index: 6, stage_name: "review") do |task, cfg|
+      FileUtils.mkdir_p(File.join(task.folder, "plan-review"))
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_reentry!(
+          task:, destination: "4-execute", config: cfg
+        )
+      end
+      assert_includes error.message, "execute re-entry has invalid plan review evidence"
+      assert_includes error.required_action, "hive approve #{task.slug} --to 3-plan --from 6-review"
+    end
+  end
+
   def test_invalid_review_inputs_are_normalized_to_blocked_or_invalid_results
     with_task do |task, cfg|
       error = assert_raises(Hive::PlanReview::TransitionBlocked) do

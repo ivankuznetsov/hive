@@ -9,6 +9,7 @@ require "hive/operational_action"
 require "hive/secret_patterns"
 require "hive/diagnostic_helpers"
 require "hive/terminal_outcome"
+require "hive/plan_review/execute_blocked"
 
 module Hive
   class TaskAction
@@ -74,7 +75,8 @@ module Hive
         return manual_fix if marker.attrs["reason"] == "final_fix_unverified" && review_stale_input_missing?
 
         artifacts = diagnostic_artifacts.select { |path| safe_diagnostic_artifact?(path) }
-        primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs)
+        primary = if incomplete_plan_artifact? || Hive::TerminalOutcome.semantic_error?(marker.attrs) ||
+                     Hive::PlanReview::ExecuteBlocked.marker?(marker.attrs)
           nil
         else
           artifacts.first
@@ -351,6 +353,15 @@ module Hive
             description,
             "workflow.retry reruns only the current terminal stage. If this result was propagated " \
               "from an already completed upstream stage, start a fresh task after correcting the blocker."
+          ].join("\n")
+        end
+
+        if Hive::PlanReview::ExecuteBlocked.marker?(marker.attrs)
+          return [
+            marker_summary,
+            "Execute entry was refused by the plan-review transition guard; " \
+              "Hive does not retry it automatically.",
+            "Next: #{Hive::PlanReview::ExecuteBlocked.remediation(marker.attrs)}"
           ].join("\n")
         end
 

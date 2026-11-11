@@ -1,4 +1,5 @@
 require "json"
+require "hive/recovery"
 require "hive/task"
 require "hive/task_activity"
 require "hive/task_journal"
@@ -9,6 +10,10 @@ module Hive
     # idempotent task-journal transitions for historical boundary replay.
     class HoldObserver
       MAX_SEED_BYTES = 256 * 1024
+      AUTHORITY_DECISIONS = %w[
+        task_history_invalid project_disabled legacy_layout quarantined
+        project_dropped folder_missing folder_missing_nil
+      ].freeze
 
       def initialize(activity_factory: nil)
         @activity_factory = activity_factory || ->(task) { Hive::TaskActivity.for_task(task) }
@@ -62,9 +67,8 @@ module Hive
                              decision.to_s == "provider_hold"
         return "capacity" if %w[attempt_capacity global_cap project_cap daily_cap].include?(decision.to_s)
         "authority" if owner.to_s == "operator" &&
-                       %w[task_history_invalid project_disabled legacy_layout quarantined
-                          project_dropped folder_missing folder_missing_nil
-                          model_unsupported].include?(decision.to_s)
+                       (AUTHORITY_DECISIONS.include?(decision.to_s) ||
+                        Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS.include?(decision.to_s))
       end
 
       def provider(row, details)

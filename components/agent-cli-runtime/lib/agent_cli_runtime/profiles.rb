@@ -365,7 +365,10 @@ module AgentCliRuntime
         working_directory: [ "run", "--dir" ],
         model_variant: [ "run", "--variant" ],
         pure: [ "run", "--pure" ],
-        sanitized_export: [ "export", "--sanitize" ]
+        sanitized_export: [ "export", "--sanitize" ],
+        # OpenCode 2.x only: a private server instead of the shared
+        # background service. The route probe records it when advertised.
+        private_server: [ "run", "--standalone" ]
       },
       auth_configuration_probe: lambda do |home:, env:|
         if env_configured?(env, *PI_CREDENTIAL_ENVIRONMENT_KEYS)

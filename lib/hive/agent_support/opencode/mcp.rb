@@ -8,6 +8,13 @@ require "hive/mcp/discovery"
 # and disables each one in the OPENCODE_CONFIG_CONTENT overlay, next to the
 # granted servers. Secrets stay `{env:VAR}` references. A failed probe still
 # launches, with a notice (plan 2026-10-15-001, D6).
+#
+# On OpenCode 2.x `debug config` would otherwise attach to, or start and leave
+# behind, the shared per-user background server; one started here from the
+# daemon outlives the launch. The probe runs before (and for `hive mcp
+# import`, entirely apart from) any OpenCode run, so it asks the same binary's
+# `debug config --help` whether `--standalone` exists instead of borrowing
+# another probe's answer or guessing from the version.
 module Hive::AgentSupport::OpenCode::Mcp
   PROBE_TIMEOUT_SECONDS = 15
   Discovery = Hive::Mcp::Discovery
@@ -36,7 +43,8 @@ module Hive::AgentSupport::OpenCode::Mcp
   end
 
   def enumerate(bin, cwd)
-    stdout, status = Hive::Mcp.capture([ bin, "debug", "config" ], chdir: cwd, timeout: probe_timeout)
+    capture = Hive::Mcp.method(:capture)
+    stdout, status = capture.call(debug_config_argv(bin, cwd, capture), chdir: cwd, timeout: probe_timeout)
     raise Hive::AgentError, "`opencode debug config` exited #{status.exitstatus}" unless status.success?
 
     servers = JSON.parse(stdout).fetch("mcp", {})
@@ -50,7 +58,14 @@ module Hive::AgentSupport::OpenCode::Mcp
   end
 
   def discover(cwd:, capture:, **)
-    document = Discovery.probe(capture, [ Hive::AgentProfiles.lookup(:opencode).bin, "debug", "config" ], cwd, "opencode")
+    argv = begin
+      debug_config_argv(Hive::AgentProfiles.lookup(:opencode).bin, cwd, capture)
+    rescue Hive::AgentError => e
+      raise Discovery::Skipped, e.message
+    rescue SystemCallError => e
+      raise Discovery::Skipped, "opencode could not run (#{e.class.name.split('::').last})"
+    end
+    document = Discovery.probe(capture, argv, cwd, "opencode")
     servers = document.is_a?(Hash) ? document["mcp"] || {} : nil
     raise Discovery::Skipped, "`opencode debug config` returned no mcp table" unless servers.is_a?(Hash)
 
@@ -70,6 +85,16 @@ module Hive::AgentSupport::OpenCode::Mcp
 
   def probe_timeout = PROBE_TIMEOUT_SECONDS
 
+  # `[bin, "debug", "config"]`, plus `--standalone` when this binary's help
+  # advertises it. A help that exits nonzero leaves the plain command to report
+  # its own failure; a spawn failure (SystemCallError) or timeout
+  # (Hive::AgentError) propagates to the caller's handling.
+  def debug_config_argv(bin, cwd, capture)
+    help, status = capture.call([ bin, "debug", "config", "--help" ], chdir: cwd, timeout: probe_timeout)
+    flags = status.success? ? Hive::AgentSupport::OpenCode.private_server_arguments(help) : []
+    [ bin, "debug", "config", *flags ]
+  end
+
   def entry(server, notices)
     if server.transport == :http
       headers = server.headers.merge(server.headers_env.transform_values { |name| "{env:#{name}}" })
@@ -85,5 +110,5 @@ module Hive::AgentSupport::OpenCode::Mcp
     { "type" => "local", "command" => [ server.command, *server.args ], "enabled" => true }
       .tap { |out| out["environment"] = environment unless environment.empty? }
   end
-  private_class_method :enumerate, :entry
+  private_class_method :enumerate, :entry, :debug_config_argv
 end

@@ -3,7 +3,7 @@ title: Agent CLI Runtime component
 type: module
 source: components/agent-cli-runtime, components/agent-cli-runtime/mirror, .github/workflows/agent-cli-runtime-release.yml
 created: 2026-07-26
-updated: 2026-11-04
+updated: 2026-11-10
 tags: [agent, runtime, component, gem, cli]
 ---
 
@@ -112,6 +112,21 @@ must still exist in that bounded local inventory. Generic `probe(profile)` and
 `nil`, `read-only`, and `workspace-write` compilation paths fail closed unless
 the prepared overlay supplies its explicit typed policy and trusted `--auto`
 argument.
+
+OpenCode 2.x serves CLI commands from one shared per-user background server on
+a fixed loopback port (127.0.0.1:49374), starting it when absent, unless a
+command passes `--standalone` for a private server that ends with it. A shared
+server was started with another command's environment, so the overlay is not
+guaranteed to apply, and a command with a different XDG identity fails with
+`Managed service port 49374 ... is already in use by another process`. When
+`run --help` advertises `--standalone`, the route probe records
+`:private_server` evidence and passes the flag to `auth list` and
+`models <provider> --verbose`; the prepared run argv carries it after `--pure`,
+and `Inspection.compile` appends it to `export SESSION --sanitize` exactly when
+the run's evidence has it. OpenCode 1.x has no such flag and is unchanged.
+`OpenCode::Probe.private_server_arguments(help)` and
+`OpenCode::Probe.supported_arguments(subject, capability)` are the public
+helpers, and the profile declares `private_server: ["run", "--standalone"]`.
 
 Prepared overlays reserve every XDG/config/disable key, remove selected
 per-agent permission blocks, forward credentials only when they match the

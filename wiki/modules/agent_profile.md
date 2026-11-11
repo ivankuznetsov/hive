@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,muse,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-11-04
+updated: 2026-11-10
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -107,6 +107,20 @@ create an OpenCode-specific cleanup tree. Explicit `credential_env` entries
 may restore selected provider variables; other ambient provider variables are
 scrubbed. The legacy provider spawn paths and mutable result shape are
 unchanged.
+
+Before compiling, Execution reads the same executable's `run --help` (under the
+run's environment, bounded at 30 seconds). When it advertises `--standalone`
+(OpenCode 2.x), the run and the export both pass it, so they use a private
+server that loads Hive's `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT`
+instead of attaching to (or starting and leaving behind) the shared per-user
+background service on 127.0.0.1:49374. A help that cannot spawn or exits
+nonzero omits the flag and leaves the run to report the problem; a help that
+times out fails the launch. Self-spawning launchers (daily digest, display
+name, diagnosis) get the same flag through `Hive::Mcp.compile`, which calls
+the OpenCode support module's `spawn_request`. The check lives in Hive
+(`Hive::AgentSupport::OpenCode.private_server_arguments`) rather than calling
+the unreleased agent-cli-runtime helper, so installed Hive still runs against
+the published 0.2.4 component.
 
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps

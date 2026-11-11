@@ -7,6 +7,16 @@ module AgentCliRuntime
         --model --variant --format --dir --pure --auto
       ].freeze
       MODEL_INVENTORY_TIMEOUT_SECONDS = 30
+      # OpenCode 2.x serves CLI commands from one shared per-user background
+      # server on a fixed loopback port, starting it when absent. That server
+      # was started with some other command's environment, so a
+      # per-invocation overlay (XDG homes, OPENCODE_CONFIG, pure mode, staged
+      # credentials) is not guaranteed to reach an attached command, and a
+      # command whose overlay differs from the server's identity fails
+      # because the port is taken.
+      # `--standalone` gives each command a private server that ends with it.
+      # OpenCode 1.x has no such flag, so it is used only when advertised.
+      PRIVATE_SERVER_FLAG = "--standalone"
       SAFE_ENVIRONMENT_KEYS = %w[
         HOME LANG LC_ALL LOGNAME PATH SHELL SSL_CERT_DIR SSL_CERT_FILE
         TMPDIR USER
@@ -82,6 +92,9 @@ module AgentCliRuntime
         evidence.concat(REQUIRED_RUN_FLAGS.map do |flag|
           evidence(profile, capability_for(flag), [ flag ])
         end)
+        server_arguments = private_server_arguments(run_help)
+        evidence << evidence(profile, :private_server, server_arguments) unless
+          server_arguments.empty?
 
         export_help = capture!(
           profile, child_env, "export", "--help", executable: request.executable
@@ -93,7 +106,8 @@ module AgentCliRuntime
         evidence << evidence(profile, :sanitized_export, [ "--sanitize" ])
 
         auth_output = capture!(
-          profile, child_env, "auth", "list", executable: request.executable
+          profile, child_env, "auth", "list", *server_arguments,
+          executable: request.executable
         )
         configured_key = request.credential_environment_keys.find do |key|
           !env[key].to_s.empty?
@@ -120,6 +134,7 @@ module AgentCliRuntime
         inventory_variants = if configured_variants.nil?
           models_output = capture!(
             profile, child_env, "models", request.route.provider, "--verbose",
+            *server_arguments,
             executable: request.executable,
             timeout_sec: MODEL_INVENTORY_TIMEOUT_SECONDS
           )
@@ -163,6 +178,23 @@ module AgentCliRuntime
         raise
       rescue StandardError => e
         raise ProbeError, Redactor.diagnostic(e)
+      end
+
+      # The private-server arguments a CLI whose help text is +help+ accepts:
+      # `["--standalone"]` when advertised, otherwise empty.
+      def private_server_arguments(help)
+        advertised?(help.to_s, PRIVATE_SERVER_FLAG) ?
+          [ PRIVATE_SERVER_FLAG ].freeze : [].freeze
+      end
+
+      # The arguments recorded by supported +capability+ evidence on +subject+
+      # (a RouteProbeResult or CompiledInvocation), or empty when +subject+
+      # carries no such evidence.
+      def supported_arguments(subject, capability)
+        evidence = Array(subject&.capability_evidence).find do |item|
+          item.capability == capability && item.supported
+        end
+        evidence ? evidence.arguments : [].freeze
       end
 
       def child_environment(profile, request, env:)

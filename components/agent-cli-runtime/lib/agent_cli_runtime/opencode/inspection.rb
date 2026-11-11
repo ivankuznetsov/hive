@@ -16,9 +16,15 @@ module AgentCliRuntime
                 "sanitized export inspection requires an OpenCode invocation"
         end
 
+        # Export through a private server exactly when the run used one: both
+        # read the same overlay data home, and neither may attach to (or
+        # start) the shared background service.
+        server_arguments =
+          OpenCode::Probe.supported_arguments(prepared.invocation, :private_server)
         InspectionCommand.new(
           argv: [
-            prepared.executable, "export", parsed_run.session_id, "--sanitize"
+            prepared.executable, "export", parsed_run.session_id, "--sanitize",
+            *server_arguments
           ],
           stdin_data: nil,
           environment: prepared.environment,

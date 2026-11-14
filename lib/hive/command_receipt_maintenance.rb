@@ -122,7 +122,7 @@ module Hive
       return payload unless confirm
 
       now = timestamp
-      changed = @database.transaction do |connection|
+      changed = @database.transaction(operation: "receipt.orphaned_owner") do |connection|
         current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
         authorize!(current)
         next 0 unless same_generation_state?(current, row, "executing") && same_owner?(current, row)
@@ -172,7 +172,7 @@ module Hive
       raise Hive::UsageError, "confirmed pin release requires --force" unless force
 
       now = timestamp
-      changed = @database.transaction do |connection|
+      changed = @database.transaction(operation: "receipt.release_pin") do |connection|
         current_pin = connection[:command_receipt_pins][pin_id: pin.fetch(:pin_id)]
         current_receipt = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
         authorize!(current_receipt)
@@ -217,7 +217,7 @@ module Hive
       return payload unless confirm
 
       now = timestamp
-      changed = @database.transaction do |connection|
+      changed = @database.transaction(operation: "receipt.abandon_batch") do |connection|
         current = connection[:command_maintenance_batches][batch_id: batch_id]
         authority.authorize!(current.fetch(:principal)) if current
         next 0 unless current && current.fetch(:generation) == batch.fetch(:generation) &&
@@ -435,7 +435,7 @@ module Hive
       result_json = Hive::RuntimeControlPlane::Codec.dump_json(result)
       now = timestamp
       policy = retirement_capacity_policy(row)
-      changed = @database.transaction do |connection|
+      changed = @database.transaction(operation: "receipt.terminalize") do |connection|
         current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
         authorize!(current)
         next 0 unless current && current.fetch(:generation) == row.fetch(:generation) &&

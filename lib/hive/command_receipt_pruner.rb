@@ -95,7 +95,7 @@ module Hive
       owner_process_start = Hive::Lock.process_start_time(Process.pid) ||
         raise(Hive::ConfigError, "cannot record prune owner process start time")
 
-      @database.transaction do |connection|
+      @database.transaction(operation: "receipt.prune_batch") do |connection|
         prune_completed_batches!(connection, limit: bounded)
         owned_batch = if context
           connection[:command_maintenance_batches][administrative_receipt_id: context.receipt_id]
@@ -251,7 +251,7 @@ module Hive
       end
       candidates = candidates.reject { |candidate| completed_ids.include?(candidate.fetch(:receipt_id)) }
       candidates.each_slice(DEFAULT_LIMIT) do |slice|
-        @database.transaction do |connection|
+        @database.transaction(operation: "receipt.prune_delete_slice") do |connection|
           prepare_authority!(connection)
           current_batch = connection[:command_maintenance_batches][batch_id: batch_id]
           unless current_batch && current_batch.fetch(:state) == "executing" &&
@@ -306,7 +306,7 @@ module Hive
         end
         expected_generation += 1
       end
-      @database.transaction do |connection|
+      @database.transaction(operation: "receipt.prune_finish_batch") do |connection|
         now = timestamp
         changed = connection[:command_maintenance_batches].where(
           batch_id: batch_id, state: "executing", generation: expected_generation

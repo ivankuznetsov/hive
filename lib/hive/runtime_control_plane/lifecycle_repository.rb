@@ -162,12 +162,13 @@ module Hive
           build(db[:runtime_lifecycle].first)
         end
 
+        label = "lifecycle.transition_from_#{from}"
         if privileged
           raise ArgumentError, "lifecycle mutation requires fenced controller authority" unless authority
 
-          database.transaction(authority: authority, timeout_sec: timeout_sec, &operation)
+          database.transaction(operation: label, authority: authority, timeout_sec: timeout_sec, &operation)
         else
-          database.transaction(timeout_sec: timeout_sec, &operation)
+          database.transaction(operation: label, timeout_sec: timeout_sec, &operation)
         end
       end
 

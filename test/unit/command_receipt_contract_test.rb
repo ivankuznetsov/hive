@@ -1580,7 +1580,7 @@ class CommandReceiptContractTest < Minitest::Test
     assert_equal "command_prune_preview_unavailable", error.reason
 
     database = Object.new
-    database.define_singleton_method(:transaction) { raise Errno::ENOSPC, "full" }
+    database.define_singleton_method(:transaction) { |**| raise Errno::ENOSPC, "full" }
     pruner = Hive::CommandReceiptPruner.new(database: database, authority: authority)
     with_replaced_singleton_method(pruner, :resolve_namespace, ->(**) { "namespace" }) do
       error = assert_raises(Hive::CommandCapacityError) { pruner.prune(namespace_id: "namespace") }
@@ -1753,7 +1753,7 @@ class CommandReceiptContractTest < Minitest::Test
 
   def fake_identity_activation_database(namespace_id:, state:)
     database = Object.new
-    database.define_singleton_method(:transaction) do |&block|
+    database.define_singleton_method(:transaction) do |**, &block|
       connection = Object.new
       connection.define_singleton_method(:[]) do |_name|
         Object.new.tap do |table|

@@ -261,7 +261,7 @@ module Hive
                                  expected_generation:, authority:, audit_context: {})
       namespace_id = SecureRandom.uuid
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-      database.transaction do |connection|
+      database.transaction(operation: "project_identity.replace_active") do |connection|
         authorize_enrollment!(authority)
         current = connection[:command_namespaces][namespace_id: row.fetch(:namespace_id)]
         unless current && current.fetch(:enrollment_state) == "active" &&
@@ -301,7 +301,7 @@ module Hive
     def reserve_pending!(database:, installation_id:, digest:, project_root:, authority: nil)
       namespace_id = SecureRandom.uuid
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-      database.transaction do |connection|
+      database.transaction(operation: "project_identity.reserve_pending") do |connection|
         authorize_enrollment!(authority) if authority
         existing = connection[:command_namespaces][
           installation_id: installation_id, git_common_dir_digest: digest
@@ -358,7 +358,7 @@ module Hive
 
     def activate!(database:, identity:, audit: nil, authority: nil)
       now = Hive::RuntimeControlPlane::Codec.dump_time(Time.now.utc)
-      changed = database.transaction do |connection|
+      changed = database.transaction(operation: "project_identity.activate") do |connection|
         authorize_enrollment!(authority) if authority
         enrollment = if connection.respond_to?(:[])
           enrollments = connection[:command_project_enrollments]
@@ -427,7 +427,7 @@ module Hive
 
     def persist_pending_audit_context!(database:, row:, authority:, audit_context:)
       encoded = Hive::RuntimeControlPlane::Codec.dump_json(audit_context)
-      database.transaction do |connection|
+      database.transaction(operation: "project_identity.persist_audit_context") do |connection|
         authorize_enrollment!(authority)
         enrollment = connection[:command_project_enrollments][namespace_id: row.fetch(:namespace_id)]
         unless enrollment && enrollment.fetch(:state) == "pending" &&

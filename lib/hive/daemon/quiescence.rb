@@ -632,7 +632,7 @@ module Hive
       end
 
       def mark_service_restored(service_identity)
-        @database.transaction(timeout_sec: remaining) do |db|
+        @database.transaction(operation: "quiescence.mark_service_restored", timeout_sec: remaining) do |db|
           db[:owned_processes].where(
             state: "stopped", unknown_reason: "quiesced",
             service_identity: service_identity

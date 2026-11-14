@@ -1871,7 +1871,7 @@ module Hive
           []
         end
         timestamp = Time.now.utc.iso8601(6)
-        Hive::RuntimeControlPlane.database.transaction do |db|
+        Hive::RuntimeControlPlane.database.transaction(operation: "config.sync_runtime_projects") do |db|
           installation_id = db[:installations].get(:installation_id)
           active_ids = entries.map do |entry|
             project_id = registry_project_id(entry)

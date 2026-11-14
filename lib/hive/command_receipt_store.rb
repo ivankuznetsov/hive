@@ -187,7 +187,7 @@ module Hive
       begin
         inserted = false
         attempts += 1
-        row = database.transaction do |connection|
+        row = database.transaction(operation: "receipt.reserve") do |connection|
         existing = connection[:command_receipts][
           namespace_id: identity.namespace_id, key_digest: key_digest
         ]
@@ -352,7 +352,7 @@ module Hive
 
     def abort_before_effect(claim, reason:)
       now = timestamp
-      changed = database.transaction do |connection|
+      changed = database.transaction(operation: "receipt.abort_before_effect") do |connection|
         row = connection[:command_receipts][receipt_id: claim.receipt_id]
         next 0 unless row && row.fetch(:generation) == claim.generation &&
                       %w[prepared executing].include?(row.fetch(:state)) &&
@@ -378,7 +378,7 @@ module Hive
 
     def abort_pre_submission(claim, effect_id:, reason:)
       now = timestamp
-      changed = database.transaction do |connection|
+      changed = database.transaction(operation: "receipt.abort_pre_submission") do |connection|
         row = connection[:command_receipts][receipt_id: claim.receipt_id]
         effect = connection[:command_effects][
           receipt_id: claim.receipt_id, effect_id: effect_id.to_s
@@ -461,7 +461,7 @@ module Hive
       end
       policy = existing ? nil : admission_policy!(project_root, namespace_id: namespace_id)
       persist_namespace_policy!(namespace_id, policy) if policy && !policy.keyed_intake_enabled
-      database.transaction do |connection|
+      database.transaction(operation: "receipt.allocate_successor") do |connection|
         existing = connection[:command_successor_allocations][
           namespace_id: namespace_id, principal: principal.to_s,
           intent_id: intent_id.to_s, intent_version: intent_version,
@@ -557,7 +557,7 @@ module Hive
     def persist_namespace_policy!(namespace_id, policy)
       raise Hive::CommandConflict, "keyed admission namespace changed" unless namespace_id
 
-      database.transaction do |connection|
+      database.transaction(operation: "receipt.persist_namespace_policy") do |connection|
         changed = sync_namespace_policy!(connection, namespace_id, policy, timestamp)
         raise Hive::CommandConflict, "keyed admission namespace changed" unless changed == 1
       end
@@ -594,7 +594,7 @@ module Hive
     def transition!(claim, from:, to:, updates: {}, executing_delta: 0, execution_policy: nil,
                     reset_aborted_effects: false)
       now = timestamp
-      changed = database.transaction do |connection|
+      changed = database.transaction(operation: "receipt.transition") do |connection|
         row = connection[:command_receipts][receipt_id: claim.receipt_id]
         expected = Array(from)
         next 0 unless row && row.fetch(:generation) == claim.generation &&
@@ -640,7 +640,7 @@ module Hive
         raise Hive::CommandUnresolved.new(message: "original command result exceeded the durable receipt limit")
       end
       now = timestamp
-      changed = database.transaction do |connection|
+      changed = database.transaction(operation: "receipt.finalize") do |connection|
         row = connection[:command_receipts][receipt_id: claim.receipt_id]
         next 0 unless row && row.fetch(:generation) == claim.generation &&
                       %w[prepared executing unresolved].include?(row.fetch(:state))

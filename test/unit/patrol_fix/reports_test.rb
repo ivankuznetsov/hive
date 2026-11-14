@@ -35,6 +35,30 @@ class PatrolFixReportsTest < Minitest::Test
     end
   end
 
+  def test_fix_report_names_the_field_and_rule_for_a_multi_line_command
+    document = {
+      "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,
+      "status" => "fixed", "summary" => "Fixed it.",
+      "validation_commands" => [
+        { "identity" => "focused-test", "command" => "bundle exec ruby test/focused_test.rb" },
+        { "identity" => "suite", "command" => "bundle install\nbin/rails test" }
+      ]
+    }
+
+    error = assert_raises(Hive::PatrolFix::FixReport::InvalidReport) do
+      Hive::PatrolFix::FixReport.parse(JSON.generate(document))
+    end
+    assert_equal "fix report validation_commands[1].command is invalid: it must be a single-line string of " \
+                 "1-4096 bytes with no newline, tab, or other control character", error.message
+
+    summary_error = assert_raises(Hive::PatrolFix::FixReport::InvalidReport) do
+      Hive::PatrolFix::FixReport.parse(JSON.generate(document.merge(
+        "summary" => "Line one.\nLine two.", "validation_commands" => [ document["validation_commands"].first ]
+      )))
+    end
+    assert_match(/\Afix report summary is invalid: it must be a single-line string of 1-16384 bytes/, summary_error.message)
+  end
+
   def test_fix_report_rejects_each_untrusted_file_and_document_boundary
     valid = {
       "schema" => "hive-patrol-fix-fix-report", "schema_version" => 1,

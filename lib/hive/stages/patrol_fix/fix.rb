@@ -105,6 +105,11 @@ module Hive
             that you deliberately selected. Hive will independently execute those commands later in a
             pristine detached checkout of this commit. Each command must include any dependency or
             bootstrap setup it needs; do not depend on ignored state from the owned fix worktree.
+            Every string in the report (summary, each identity, each command) must be one line with
+            no newline, tab, or other control character; Hive rejects the whole report otherwise.
+            Chain setup and test steps inside one command with && (for example
+            "bundle install && bin/rails test test/models/x_test.rb"). Each validation_commands
+            entry has exactly the keys identity (at most 128 bytes) and command (at most 4096 bytes).
           PROMPT
         end
 

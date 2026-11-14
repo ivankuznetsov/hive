@@ -240,7 +240,11 @@ and retry hint without provider response text, report/parser state, firewall
 restoration, and bounded publication-policy-redacted detail. A clean report
 after Pi's recovered internal provider retry remains successful and emits no
 failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
-from the other managed stages emit `agent_report_invalid`. Silent failures
+from the other managed stages emit `agent_report_invalid`. Every Patrol Fix
+report string (summary, each `validation_commands[i].identity` and `.command`)
+must be a single line with no control character; the Fix prompt states that
+contract and tells the agent to chain steps with `&&`, and the rejection names
+the exact field and rule (for example `validation_commands[1].command`). Silent failures
 receive a supervisor-authored terminal diagnostic. The first-party controller
 also publishes semantic failure facts before reraising known worktree head
 drift, dirty worktrees, validation mutation, and Hive-state Git index-lock

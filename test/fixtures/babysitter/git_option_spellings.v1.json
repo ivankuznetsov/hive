@@ -1170,6 +1170,269 @@
           "diagnostic": ""
         }
       }
+    },
+    "git version 2.56.1": {
+      "provenance": {
+        "kind": "reproduced",
+        "source": "git 2.56.1 built from the kernel.org release tarball (sha256 f0b0bf89264b9bd2e1c640363e7529643989da76281600473c50745cd34a607f, matching sha256sums.asc)",
+        "observed_on": "2026-11-14",
+        "ci_version_evidence": "https://github.com/ivankuznetsov/hive/actions/runs/43587128455/job/132423933551",
+        "ci_note": "The CI runner upgraded /usr/bin/git to 2.56.1 (the job above fails with characterize git version 2.56.1); every option case reproduced locally on the same exact version with the dry_run_env_test repo setup and classification, which reproduced the recorded 2.56.0 cases byte-for-byte."
+      },
+      "cases": {
+        "cat-filters": {
+          "exit_status": 0,
+          "category": "helper_execution",
+          "helper": "smudge",
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "cat-filters-path-before": {
+          "exit_status": 0,
+          "category": "helper_execution",
+          "helper": "smudge",
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "cat-filters-path-after": {
+          "exit_status": 0,
+          "category": "helper_execution",
+          "helper": "smudge",
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "cat-fi": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fi (could be --filters or --filter)"
+        },
+        "cat-fi-path-before": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fi (could be --filters or --filter)"
+        },
+        "cat-fi-path-after": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fi (could be --filters or --filter)"
+        },
+        "cat-fil": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fil (could be --filters or --filter)"
+        },
+        "cat-fil-path-before": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fil (could be --filters or --filter)"
+        },
+        "cat-fil-path-after": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: fil (could be --filters or --filter)"
+        },
+        "cat-filt": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filt (could be --filters or --filter)"
+        },
+        "cat-filt-path-before": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filt (could be --filters or --filter)"
+        },
+        "cat-filt-path-after": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filt (could be --filters or --filter)"
+        },
+        "cat-filte": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filte (could be --filters or --filter)"
+        },
+        "cat-filte-path-before": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filte (could be --filters or --filter)"
+        },
+        "cat-filte-path-after": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: filte (could be --filters or --filter)"
+        },
+        "cat-filter": {
+          "exit_status": 128,
+          "category": "invalid_filter_spec",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: invalid filter-spec 'HEAD:README.md'"
+        },
+        "cat-filter-path-before": {
+          "exit_status": 128,
+          "category": "invalid_filter_spec",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: invalid filter-spec 'HEAD:README.md'"
+        },
+        "cat-filter-path-after": {
+          "exit_status": 128,
+          "category": "invalid_filter_spec",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: invalid filter-spec '--path=README.md'"
+        },
+        "cat-object-filter-glued": {
+          "exit_status": 0,
+          "category": "ordinary_read",
+          "helper": null,
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "cat-object-filter-separate": {
+          "exit_status": 0,
+          "category": "ordinary_read",
+          "helper": null,
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "cat-shorter-f": {
+          "exit_status": 129,
+          "category": "ambiguous",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "error: ambiguous option: f (could be --filters or --filter)"
+        },
+        "log-ext-diff": {
+          "exit_status": 0,
+          "category": "helper_execution",
+          "helper": "external_diff",
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "log-ext": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext"
+        },
+        "log-ext-": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-"
+        },
+        "log-ext-d": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-d"
+        },
+        "log-ext-di": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-di"
+        },
+        "log-ext-dif": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-dif"
+        },
+        "show-ext-diff": {
+          "exit_status": 0,
+          "category": "helper_execution",
+          "helper": "external_diff",
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "show-ext": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext"
+        },
+        "show-ext-": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-"
+        },
+        "show-ext-d": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-d"
+        },
+        "show-ext-di": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-di"
+        },
+        "show-ext-dif": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --ext-dif"
+        },
+        "log-filters": {
+          "exit_status": 128,
+          "category": "invalid_option",
+          "helper": null,
+          "stdout": "empty",
+          "diagnostic": "fatal: unrecognized argument: --filters"
+        },
+        "rev-list-object-filter": {
+          "exit_status": 0,
+          "category": "ordinary_read",
+          "helper": null,
+          "stdout": "nonempty",
+          "diagnostic": ""
+        },
+        "grep-read": {
+          "exit_status": 0,
+          "category": "ordinary_read",
+          "helper": null,
+          "stdout": "nonempty",
+          "diagnostic": ""
+        }
+      }
     }
   }
 }

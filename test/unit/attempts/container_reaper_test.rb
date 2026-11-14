@@ -187,6 +187,67 @@ class AttemptsContainerReaperTest < Minitest::Test
     end
   end
 
+  def test_a_failed_relisting_reports_every_listed_container_as_a_survivor
+    podman = FakePodman.new([
+      [ container("e" * 64, "pg") ],
+      Command.new(status: :failed, output: "Error: storage locked\n")
+    ])
+    result = reaper(podman).reap
+
+    assert_equal "incomplete", result.status
+    assert_equal [ "pg" ], result.survivors.map { |entry| entry.fetch("name") }
+    assert_includes result.error, "storage locked"
+  end
+
+  def test_the_real_runner_lists_and_removes_through_a_podman_executable
+    with_tmp_dir do |dir|
+      removed = File.join(dir, "removed")
+      log = File.join(dir, "argv.log")
+      listing = JSON.generate([ container("f" * 64, "todero-test-db") ])
+      podman = File.join(dir, "podman")
+      File.write(podman, <<~SH)
+        #!/bin/sh
+        echo "$*" >> '#{log}'
+        case "$1" in
+          ps) if [ -f '#{removed}' ]; then echo '[]'; else echo '#{listing}'; fi ;;
+          rm) touch '#{removed}' ;;
+        esac
+      SH
+      File.chmod(0o755, podman)
+      subject = Hive::Attempts::ContainerReaper.new(attempt_id: ATTEMPT_ID, podman: podman, environment: {})
+
+      result = Timeout.timeout(10) { subject.reap(timeout_sec: 5, stop_timeout_sec: 1) }
+
+      assert_equal "reaped", result.status
+      assert_equal [ "todero-test-db" ], result.reaped.map { |entry| entry.fetch("name") }
+      calls = File.readlines(log, chomp: true)
+      assert_equal "ps --all --filter annotation=hive.attempt=attempt-1 --format json", calls.first
+      assert_equal "rm --force --volumes --time 1 #{"f" * 64}", calls[1]
+    end
+  end
+
+  def test_the_real_runner_kills_a_podman_that_ignores_term
+    with_tmp_dir do |dir|
+      podman = File.join(dir, "podman")
+      File.write(podman, "#!/bin/sh\ntrap '' TERM\nexec sleep 30\n")
+      File.chmod(0o755, podman)
+      subject = Hive::Attempts::ContainerReaper.new(attempt_id: ATTEMPT_ID, podman: podman, environment: {})
+
+      result = Timeout.timeout(10) { subject.reap(timeout_sec: 0.2) }
+
+      assert_equal "failed", result.status
+      assert_includes result.error, "timeout"
+    end
+  end
+
+  def test_terminating_an_already_reaped_podman_is_harmless
+    pid = Process.spawn("true", pgroup: true)
+    Process.wait(pid)
+    subject = Hive::Attempts::ContainerReaper.new(attempt_id: ATTEMPT_ID, environment: {})
+
+    assert_nil subject.send(:terminate, pid)
+  end
+
   def test_the_real_runner_reports_a_missing_binary
     subject = Hive::Attempts::ContainerReaper.new(
       attempt_id: ATTEMPT_ID, podman: "/nonexistent/hive-podman", environment: {}

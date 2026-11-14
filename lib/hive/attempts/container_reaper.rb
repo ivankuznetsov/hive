@@ -219,8 +219,6 @@ module Hive
           room = OUTPUT_BYTES - output.bytesize
           output << chunk.byteslice(0, room) if room.positive?
         end
-      rescue IOError
-        nil
       end
 
       def terminate(pid)

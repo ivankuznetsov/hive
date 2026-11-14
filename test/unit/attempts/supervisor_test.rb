@@ -1657,6 +1657,30 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_an_unavailable_attempt_directory_leaves_the_worker_untagged_and_logged
+    store = Object.new
+    store.define_singleton_method(:output_directory) do |*|
+      raise Hive::Attempts::RepositoryError, "attempt output directory is unavailable"
+    end
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: store, attempt_id: "attempt-1", claim_io: StringIO.new,
+      container_reaper: container_reaper(container_podman([], []))
+    )
+    record = { "project" => "demo" }
+    record.define_singleton_method(:attempt_id) { "attempt-1" }
+
+    assert_equal({}, supervisor.send(:container_environment, record))
+    lines = []
+    log = Object.new
+    log.define_singleton_method(:closed?) { false }
+    log.define_singleton_method(:append) { |channel, line| lines << [ channel, line ] }
+    supervisor.send(:reap_attempt_containers, log)
+
+    assert_equal :supervisor, lines.fetch(0).first
+    assert_includes lines.fetch(0).last, '"status":"untagged"'
+    assert_includes lines.fetch(0).last, "attempt output directory is unavailable"
+  end
+
   def test_supervisor_skips_the_container_reap_when_no_worker_was_tagged
     reaper = Object.new
     reaper.define_singleton_method(:reap) { |**| flunk "an untagged attempt must not run podman" }

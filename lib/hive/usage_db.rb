@@ -88,7 +88,7 @@ module Hive
         output_includes_reasoning: nullable_boolean(output_includes_reasoning)
       }
 
-      database.transaction do |db|
+      database.transaction(operation: "usage.record") do |db|
         usage = db[:token_usage]
         existing = attributes[:session_id] && usage.where(session_id: attributes[:session_id]).first
         if existing
@@ -123,7 +123,7 @@ module Hive
 
       store = database || self.database
       started_at = normalized_time(started_at)
-      store.transaction do |db|
+      store.transaction(operation: "usage.reserve_patrol_discovery") do |db|
         usage = db[:token_usage]
         lane = patrol_discovery_dataset(
           usage, project_slug: project_slug, stage: stage, at: started_at

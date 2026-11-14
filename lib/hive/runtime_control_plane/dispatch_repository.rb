@@ -103,7 +103,7 @@ module Hive
           expected_marker_name: expected_marker_name, expected_marker_id: expected_marker_id,
           recovery: recovery, now: now, remote_authority: remote_authority
         )
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.write_request") do |db|
           insert_request!(db, payload)
           bind_command_context!(db, request_id, command_context)
         end
@@ -217,7 +217,7 @@ module Hive
       def claim(request_id, pid:, process_start_time: nil, now: @clock.call,
                 attempt_id: nil, task_generation: nil, **)
         timestamp = now.utc.iso8601(6)
-        changed = database.transaction do |db|
+        changed = database.transaction(operation: "dispatch.claim") do |db|
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s, state: "queued")
           dataset.update(
             state: "claimed", claim_owner: "process", claim_pid: positive_pid(pid),
@@ -232,7 +232,7 @@ module Hive
 
       def update_claim(request_id, pid:, process_start_time: nil, now: @clock.call,
                        attempt_id: nil, task_generation: nil, **)
-        changed = database.transaction do |db|
+        changed = database.transaction(operation: "dispatch.update_claim") do |db|
           values = {
             claim_pid: positive_pid(pid), claim_process_identity: process_start_time&.to_s,
             claimed_at: now.utc.iso8601(6), updated_at: now.utc.iso8601(6),
@@ -248,7 +248,7 @@ module Hive
       end
 
       def release_claim(request_id, **)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.release_claim") do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: "claimed").update(
             cleared_claim_columns(state: "queued").merge(
               updated_at: @clock.call.utc.iso8601(6), revision: Sequel[:revision] + 1
@@ -258,7 +258,7 @@ module Hive
       end
 
       def remove(request_id, **)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.remove") do |db|
           row = db[:dispatch_requests].where(request_id: request_id.to_s).first
           next false unless row
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
@@ -275,7 +275,7 @@ module Hive
       end
 
       def remove_if_unclaimed(request_id, **)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.remove_if_unclaimed") do |db|
           row = db[:dispatch_requests].where(
             request_id: request_id.to_s, state: "queued", result_state: nil
           ).first
@@ -304,7 +304,7 @@ module Hive
 
       def promote_sequence(request_id, project:, slug:, requestor: "bot", chat_id: nil,
                            update_id: nil, trigger: "sequence_continuation", now: @clock.call, **)
-        next_id = database.transaction do |db|
+        next_id = database.transaction(operation: "dispatch.promote_sequence") do |db|
           row = db[:dispatch_requests].where(request_id: request_id.to_s).first
           next unless row
           parent = Codec.load_json(row.fetch(:payload_json))
@@ -371,7 +371,7 @@ module Hive
       end
 
       def complete_delivery(request_id, now: @clock.call, **)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.complete_delivery") do |db|
           db[:dispatch_requests].where(request_id: request_id.to_s, state: DELIVERY_STATES).update(
             cleared_claim_columns(state: "completed").merge(
               updated_at: now.utc.iso8601(6), revision: Sequel[:revision] + 1
@@ -398,7 +398,7 @@ module Hive
 
       def prune_terminal_recoveries(now: @clock.call, retention_sec: TERMINAL_RECOVERY_RETENTION_SEC, **)
         cutoff = now.utc - retention_sec
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.prune_terminal_recoveries") do |db|
           db[:dispatch_requests].where(state: "completed", result_state: nil)
             .where { updated_at < cutoff.iso8601(6) }.delete
         end
@@ -453,7 +453,7 @@ module Hive
                         update_id: nil, attempt_id: nil, attempt_state: nil,
                         receipt: nil, now: @clock.call, **)
         timestamp = now.utc.iso8601(6)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.write_result") do |db|
           dataset = db[:dispatch_requests].where(request_id: request_id.to_s)
           row = dataset.first
           unless row
@@ -523,7 +523,7 @@ module Hive
           ids.length > PENDING_RESULT_LIMIT
         return 0 if ids.empty?
 
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.acknowledge_results") do |db|
           pending = db[:dispatch_requests].where(
             request_id: ids, result_state: "pending"
           )
@@ -538,7 +538,7 @@ module Hive
       end
 
       def prune_results(now: @clock.call, **)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.prune_results") do |db|
           expired = db[:dispatch_requests].where(
             state: "completed", result_state: "delivered"
           ).where { retain_until < now.utc.iso8601(6) }
@@ -664,7 +664,7 @@ module Hive
       end
 
       def rebind_existing_command_context?(request_id, context)
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.rebind_command_context") do |db|
           existing = if SQLiteSupport.table_exists?(db, :command_dispatch_contexts)
             db[:command_dispatch_contexts][request_id: request_id.to_s]
           end
@@ -843,7 +843,7 @@ module Hive
 
       def mutate_payload(request_id)
         result = nil
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.mutate_payload") do |db|
           row = db[:dispatch_requests].where(request_id: request_id.to_s).first
           next false unless row
           payload = Codec.load_json(row.fetch(:payload_json))
@@ -897,7 +897,7 @@ module Hive
       def remove_matching(project, slug)
         ids = matching_recoveries(project, slug).select { |request| yield(request) }.map(&:request_id)
         return 0 if ids.empty?
-        database.transaction do |db|
+        database.transaction(operation: "dispatch.remove_matching") do |db|
           dataset = db[:dispatch_requests].where(request_id: ids)
           deleted = dataset.where(result_state: nil).delete
           completed = dataset.exclude(result_state: nil).update(

@@ -1,9 +1,9 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb
+source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/operational_repository.rb, lib/hive/runtime_control_plane/operational_payload_store.rb
 created: 2026-04-25
-updated: 2026-11-11
+updated: 2026-11-14
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -219,7 +219,13 @@ runtime control plane. Only `--operational` opts into the larger projection.
 It accepts it only when its daemon generation, tick, deadline, schema,
 source fingerprint, and registered project identities match the paired live
 scheduler observation and registry. An absent, invalid, expired, or mismatched
-projection falls back to the ordinary fresh graph scan. Default status never
+projection falls back to the ordinary fresh graph scan. The runtime row holds
+the scheduler record plus the projection envelope; the multi-MB payload body is
+a content-addressed file under `operational-status-payloads/` beside the
+runtime database, and the reader accepts it only when its size and SHA-256
+match the envelope's reference. A missing, torn, or substituted file is the
+same fail-closed fallback. Per-tick `generated_at` and task `age_seconds`
+travel in the envelope and are restored exactly. Default status never
 reads this projection. Archive, diagnosis, and the hidden internal task-graph
 surfaces keep their existing fresh-read contracts; the daemon's own graph
 producer cannot consume its projection recursively.

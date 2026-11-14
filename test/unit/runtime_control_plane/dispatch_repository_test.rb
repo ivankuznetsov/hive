@@ -106,6 +106,31 @@ class RuntimeControlPlaneDispatchRepositoryTest < Minitest::Test
     end
   end
 
+  # The daemon runs these every tick. A long hold logged as the generic
+  # `runtime.write` cannot be attributed, so each write names its operation.
+  def test_daemon_dispatch_writes_report_specific_operation_labels
+    with_repository do |repository|
+      operations = []
+      repository.database.instance_variable_set(
+        :@transaction_observer, ->(measurement) { operations << measurement.fetch(:operation) }
+      )
+      id = repository.write_request!(
+        project: "hive", slug: "sqlite-cutover", argv: %w[hive run sqlite-cutover],
+        request_id: "request-1", task_generation: "generation-1", now: NOW
+      )
+      repository.claim(id, pid: 123, process_start_time: "start", now: NOW)
+      repository.release_claim(id)
+      repository.prune_results(now: NOW)
+      repository.prune_terminal_recoveries(now: NOW)
+      repository.remove(id)
+
+      assert_equal %w[
+        dispatch.write_request dispatch.claim dispatch.release_claim
+        dispatch.prune_results dispatch.prune_terminal_recoveries dispatch.remove
+      ], operations
+    end
+  end
+
   def test_tagged_command_dispatch_persists_authenticated_context_atomically
     with_repository do |repository|
       Hive::RuntimeControlPlane::CommandSchemaInstallation.install!(

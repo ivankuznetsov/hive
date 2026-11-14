@@ -34,6 +34,7 @@ components:
       - lib/hive/runtime_control_plane/command_schema_writer_guard.rb
       - lib/hive/runtime_control_plane/database.rb
       - lib/hive/runtime_control_plane/migrations/001_create_runtime_control_plane.rb
+      - lib/hive/runtime_control_plane/operational_payload_store.rb
       - lib/hive/runtime_control_plane/operational_repository.rb
       - lib/hive/runtime_control_plane/process_guard.rb
       - lib/hive/runtime_control_plane/task_lease_repository.rb

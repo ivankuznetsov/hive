@@ -62,7 +62,7 @@ module Hive
       def expire(attempt_id, now: Time.now.utc)
         id = safe_id(attempt_id)
         with_custody(id, File::LOCK_EX, nonblock: true) do
-          references = @store.database.transaction do |db|
+          references = @store.database.transaction(operation: "attempt.log_archive_mark_releasable") do |db|
             rows = db[:payload_references].where(attempt_id: id)
               .where(state: %w[sealed pinned releasable]).all
             next [] if rows.empty?
@@ -79,7 +79,7 @@ module Hive
           @store.payload_store.with_reference_custody(references) do
             references.each { |reference| remove_unreferenced(reference) }
           end
-          @store.database.transaction do |db|
+          @store.database.transaction(operation: "attempt.log_archive_clear_retention") do |db|
             db[:payload_references].where(attempt_id: id, state: "releasable")
               .update(retain_until: nil)
           end

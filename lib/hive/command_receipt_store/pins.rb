@@ -35,7 +35,7 @@ module Hive
         policy = existing ? nil : admission_policy!(project_root, receipt_id: receipt_id)
         persist_namespace_policy!(receipt_snapshot.fetch(:namespace_id), policy) if
           policy && !policy.keyed_intake_enabled
-        row = database.transaction do |connection|
+        row = database.transaction(operation: "receipt.acquire_pin") do |connection|
           receipt = connection[:command_receipts][receipt_id: receipt_id]
           unless receipt
             raise Hive::CommandUnresolved.new(
@@ -90,7 +90,7 @@ module Hive
       def close_pin(receipt_id:, principal:, intent_id:, intent_generation:)
         intent_generation = Integer(intent_generation)
         now = timestamp
-        database.transaction do |connection|
+        database.transaction(operation: "receipt.close_pin") do |connection|
           pin = connection[:command_receipt_pins][
             receipt_id: receipt_id, principal: principal.to_s,
             intent_id: intent_id.to_s, intent_generation: intent_generation

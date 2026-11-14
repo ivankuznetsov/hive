@@ -180,7 +180,7 @@ class PatrolLaunchBudgetTest < Minitest::Test
   def test_allowance_fails_closed_when_token_history_is_unavailable
     broken = Object.new
     broken.define_singleton_method(:read) { raise IOError, "read failed" }
-    broken.define_singleton_method(:transaction) { raise IOError, "write failed" }
+    broken.define_singleton_method(:transaction) { |**| raise IOError, "write failed" }
     subject = Hive::Patrol::LaunchBudget.new(
       @root, cfg: { "patrol" => {} }, project_id: "project-1",
       project_name: "demo", engine: :ordinary, usage_db: @usage,

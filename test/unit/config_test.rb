@@ -429,7 +429,7 @@ class ConfigTest < Minitest::Test
   def test_runtime_registry_sync_wraps_database_errors
     with_tmp_global_config do
       database = Object.new
-      database.define_singleton_method(:transaction) { raise Sequel::DatabaseError, "offline" }
+      database.define_singleton_method(:transaction) { |**| raise Sequel::DatabaseError, "offline" }
 
       error = with_replaced_singleton_method(
         Hive::RuntimeControlPlane, :database, -> { database }

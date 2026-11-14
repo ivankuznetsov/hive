@@ -270,7 +270,7 @@ module Hive
         return [] if candidates.empty?
 
         released = []
-        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+        @database.transaction(operation: "process.release_abandoned_reservations", authority: authority, timeout_sec: timeout_sec) do |db|
           timestamp = now
           candidates.each do |reservation_id, reason|
             changed = db[:launch_reservations].where(reservation_id: reservation_id, state: "reserved")
@@ -335,7 +335,7 @@ module Hive
         return [] if candidates.empty?
 
         closed = []
-        @database.transaction(authority: authority, timeout_sec: timeout_sec) do |db|
+        @database.transaction(operation: "process.reconcile_exited", authority: authority, timeout_sec: timeout_sec) do |db|
           timestamp = now
           candidates.each do |row, evidence|
             changed = db[:owned_processes].where(

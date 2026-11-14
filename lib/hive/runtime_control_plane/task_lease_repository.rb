@@ -80,7 +80,7 @@ module Hive
 
         data = payload_from(observed).merge(additions.transform_keys(&:to_s))
         payload_json = dump_payload(data)
-        @database.transaction do |db|
+        @database.transaction(operation: "task_lease.update") do |db|
           updated = db[:task_leases].where(
             task_id: subject.fetch(:task_id), holder_id: lock_id.to_s,
             lease_version: observed.fetch(:lease_version)
@@ -101,7 +101,7 @@ module Hive
         data.delete("claude_pid")
         data.delete("claude_pid_start_time")
         payload_json = dump_payload(data)
-        @database.transaction do |db|
+        @database.transaction(operation: "task_lease.clear_child") do |db|
           db[:task_leases].where(
             task_id: subject.fetch(:task_id), holder_id: lock_id.to_s,
             lease_version: observed.fetch(:lease_version)
@@ -217,7 +217,7 @@ module Hive
         Hive::TaskMeta.validate_observation!(folder, observation) if observation
         if observe && row.fetch(:observed_path) != folder
           timestamp = Codec.dump_time(@clock.call)
-          @database.transaction do |db|
+          @database.transaction(operation: "task_lease.observe_subject_path") do |db|
             db[:task_subjects].where(task_id: task_id).update(
               observed_path: folder, last_observed_at: timestamp
             )
@@ -232,7 +232,7 @@ module Hive
         workflow_id = (metadata[:workflow] || "coding").to_s
         task_slug = (metadata[:slug] || File.basename(folder)).to_s
         timestamp = Codec.dump_time(@clock.call)
-        @database.transaction do |db|
+        @database.transaction(operation: "task_lease.register_subject") do |db|
           historical = db[:task_subjects].where(
             project_id: project.fetch(:project_id), workflow_id: workflow_id,
             task_slug: task_slug
@@ -289,7 +289,7 @@ module Hive
       end
 
       def release_dataset(lock_id, task_id: nil)
-        @database.transaction do |db|
+        @database.transaction(operation: "task_lease.release") do |db|
           dataset = db[:task_leases].where(holder_id: lock_id.to_s)
           dataset = dataset.where(task_id: task_id) if task_id
           updated = dataset.update(
@@ -310,7 +310,7 @@ module Hive
           holder_process_identity: data["process_start_time"], payload_json: payload_json
         }
         claimed = false
-        @database.transaction do |db|
+        @database.transaction(operation: "task_lease.claim") do |db|
           dataset = db[:task_leases].where(task_id: subject.fetch(:task_id))
           if observed
             claimed = dataset.where(

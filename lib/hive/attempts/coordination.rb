@@ -74,7 +74,7 @@ module Hive
 
       def mark_refunded(record)
         acceptance_for!(record)
-        database.transaction do |db|
+        database.transaction(operation: "attempt.mark_refunded") do |db|
           db[:attempts].where(
             attempt_id: record.attempt_id, accepted_at: record["accepted_at"],
             project_name: record["project"], refunded: 0

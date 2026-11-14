@@ -39,7 +39,7 @@ module Hive
           [ rows, cursor ]
         end
         last = candidates.last
-        database.transaction do |connection|
+        database.transaction(operation: "receipt.reclaim_dead_owners") do |connection|
           cursor_dataset = if scope == "namespace"
             connection[:command_namespaces].where(namespace_id: trigger_claim.namespace_id)
           else
@@ -67,7 +67,7 @@ module Hive
 
       def commit_automatic_reclamation(row, proof, authority, trigger_claim)
         now = timestamp
-        database.transaction do |connection|
+        database.transaction(operation: "receipt.commit_reclamation") do |connection|
           current = connection[:command_receipts][receipt_id: row.fetch(:receipt_id)]
           next false unless current && current.fetch(:state) == "executing" &&
                             current.fetch(:generation) == row.fetch(:generation) &&

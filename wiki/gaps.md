@@ -3,9 +3,38 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-11
-tags: [gap, todo, release-proof, agent-skills, plan-review, opencode]
+updated: 2026-11-14
+tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
 ---
+
+## Operational payload file: residual write volume and labels (2026-11-14)
+
+The daemon's `hive-status` payload body moved out of the `daemon_runtime` row
+into a content-addressed file, so the write lock now covers ~220 KB per tick
+instead of ~5.3 MB. Only the lock-hold and idle-tick behaviour are tested
+(unit tests plus a tmpfs measurement: hold p50 ~59 ms → ~1.3 ms with fsync
+cost excluded). The live improvement on the swapping dogfood host has not been
+measured after deployment.
+
+- A material change anywhere in the fleet still rewrites the whole ~5 MB file
+  (outside the lock, without fsync). On the 2026-11-14 dogfood host consecutive
+  ticks usually differed (event counts, markers, attempt ids), so idle-tick
+  dedup alone saves little there; per-task content addressing would bound the
+  rewrite to changed tasks but adds many files and partial-read states.
+- `plan_review` is ~78 % of the payload (~4 MB). It was not dropped because
+  `hive status --operational` exposes `plan_review` per row; shrinking needs a
+  consumer audit.
+- The file is not fsynced. After a crash it may be torn; readers then fail
+  closed to a fresh scan, and a restarted daemon has a new identity anyway.
+- The 220 KB scheduler snapshot is still rewritten every tick.
+- Operation labels are guarded only for the files listed in
+  `RuntimeTransactionLabelsTest`; a new runtime writer elsewhere still
+  defaults to `runtime.write`. Which daemon path produced the 2026-11-14
+  unlabelled holds (43 over 1 s in 6 h, one of 15 s) is still unknown until
+  the labelled build runs.
+- The read-only status Docker gate (`test:status_read_only`) was not run
+  locally; it is expected to read the payload file from the read-only state
+  mount like the database.
 
 ## Plan-review-blocked execute entry: remedy not replayed live (2026-11-11)
 

@@ -23,7 +23,7 @@ module Hive
 
       def ensure_for(attempt, now: Time.now.utc)
         validate_attempt!(attempt)
-        @store.database.transaction do |db|
+        @store.database.transaction(operation: "attempt.lost_outcome_ensure") do |db|
           dataset = db[:attempts].where(attempt_id: attempt.attempt_id, state: "lost")
           row = dataset.first
           raise RepositoryError, "lost recovery attempt is missing" unless row
@@ -58,7 +58,7 @@ module Hive
         unless (requested.keys - %w[phase cleanup request_id capture_references]).empty?
           raise RepositoryError, "lost recovery update is invalid"
         end
-        @store.database.transaction do |db|
+        @store.database.transaction(operation: "attempt.lost_outcome_update") do |db|
           row = db[:attempts].where(attempt_id: attempt.attempt_id, state: "lost").first
           current = row && row[:lost_recovery_phase] && parse(db, row)
           raise RepositoryError, "lost recovery is missing" unless current

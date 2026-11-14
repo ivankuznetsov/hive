@@ -6,7 +6,7 @@ module Hive
       def prepare_effect(claim, ordinal:, kind:, identity: {})
         effect_id = SecureRandom.uuid
         now = timestamp
-        database.transaction do |connection|
+        database.transaction(operation: "receipt.prepare_effect") do |connection|
           row = connection[:command_receipts][receipt_id: claim.receipt_id]
           unless row && row.fetch(:generation) == claim.generation && row.fetch(:state) == "executing"
             raise Hive::CommandConflict, "command receipt ownership changed before effect intent"
@@ -29,7 +29,7 @@ module Hive
 
       def update_effect(claim, effect_id:, from:, to:, evidence: nil)
         now = timestamp
-        changed = database.transaction do |connection|
+        changed = database.transaction(operation: "receipt.update_effect") do |connection|
           receipt = connection[:command_receipts][receipt_id: claim.receipt_id]
           next 0 unless receipt && receipt.fetch(:generation) == claim.generation &&
                         receipt.fetch(:state) == "executing"
@@ -96,7 +96,7 @@ module Hive
           "identity" => Hive::RuntimeControlPlane::Codec.normalize(identity)
         }
         now = timestamp
-        changed = database.transaction do |connection|
+        changed = database.transaction(operation: "receipt.record_effect_submission") do |connection|
           receipt = connection[:command_receipts][receipt_id: receipt_id.to_s]
           next 0 unless receipt && receipt.fetch(:state) == "executing" &&
                         receipt.fetch(:generation) == Integer(generation) &&
@@ -139,7 +139,7 @@ module Hive
           raise Hive::UsageError, "command effect observation requires source and correlation identity"
         end
         now = timestamp
-        changed = database.transaction do |connection|
+        changed = database.transaction(operation: "receipt.record_effect_observation") do |connection|
           receipt = connection[:command_receipts][receipt_id: receipt_id.to_s]
           next 0 unless receipt && receipt.fetch(:state) == "executing" &&
                         receipt.fetch(:generation) == Integer(generation) &&

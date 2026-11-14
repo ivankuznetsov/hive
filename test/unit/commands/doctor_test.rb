@@ -458,6 +458,20 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  # Config.load rejects an unregistered plan agent, but an in-process caller
+  # can hand doctor a raw hash; the independence advisory then stays silent
+  # instead of turning one unresolvable profile into a doctor failure.
+  def test_plan_review_independence_is_silent_when_the_plan_agent_cannot_resolve
+    cfg = {
+      "plan" => { "agent" => "not-a-registered-agent" },
+      "plan_review" => { "routes" => { "adversarial" => { "agent" => "codex", "family" => "openai" } } }
+    }
+    doctor = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: StringIO.new, environment: {})
+
+    assert_raises(Hive::ConfigError) { Hive::Stages::Base.stage_profile(cfg, "plan") }
+    assert_equal [], doctor.send(:check_plan_review_independence)
+  end
+
   def test_claude_config_is_silent_without_claude_mode_key
     with_fake_home do |home|
       exit_code, env = doctor_json_for_project_config(home, PARKED_STAGE_YAML)

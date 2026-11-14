@@ -48,8 +48,8 @@ module Hive
           unless command.is_a?(Hash) && command.keys.sort == %w[command identity]
             raise InvalidReport, "validation_commands[#{index}] has an invalid field set"
           end
-          { "identity" => string!(command["identity"], "identity", 128),
-            "command" => string!(command["command"], "command", 4_096) }.freeze
+          { "identity" => string!(command["identity"], "validation_commands[#{index}].identity", 128),
+            "command" => string!(command["command"], "validation_commands[#{index}].command", 4_096) }.freeze
         end
         new(status: status, summary: summary, validation_commands: normalized)
       rescue JSON::ParserError => e
@@ -57,9 +57,13 @@ module Hive
       end
 
       def self.string!(value, label, max)
+        # The reason names the exact rule so a retried agent (and the
+        # operator reading the stage error) can correct it: a multi-line
+        # validation script was the common failure.
         unless value.is_a?(String) && value.bytesize.between?(1, max) &&
                !value.match?(/[\u0000-\u001f\u007f]/)
-          raise InvalidReport, "fix report #{label} is invalid"
+          raise InvalidReport, "fix report #{label} is invalid: it must be a single-line string of 1-#{max} " \
+                               "bytes with no newline, tab, or other control character"
         end
         value.dup.freeze
       end

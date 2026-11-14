@@ -131,7 +131,10 @@ launching Claude, so Claude bills the subscription, not the API key); a
 `claude/config` warning when `.hive-state/config.yml` still sets the retired
 `claude.mode` key (`Hive::Config.obsolete_claude_mode_key?`; the value is
 ignored and the row tells the operator to delete the line); managed QMD
-availability/native ABI failures; an unparseable `config.yml` warning; and
+availability/native ABI failures; an unparseable `config.yml` warning; a
+`plan_review/independence` warning when `plan_review.routes.adversarial` is in
+the same model family as the plan stage agent (`PlannerIdentity.family`), which
+would fail every plan review with `same_model_family`; and
 `web/environment` alias warnings; and the MCP rows below. Warning rows never
 change the exit code.
 

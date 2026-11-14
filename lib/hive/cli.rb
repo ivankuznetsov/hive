@@ -1820,8 +1820,10 @@ module Hive
 
       The one operator-attested exception is `workflow.secret_rework`, which
       operational status advertises on a Patrol Fix task whose publication the
-      secret policy blocked. It returns the patch to Fix as a new generation
-      with redacted findings, runs only locally, and requires --confirm.
+      secret policy blocked. It re-runs the publication commit scan: findings
+      return the patch to Fix as a new generation with redacted findings, and a
+      clean range reopens Publish in a new generation. It runs only locally and
+      requires --confirm.
     DESC
     # Commands::Act owns the typed usage error. Keeping this optional at the
     # Thor layer prevents the required-option banner from widening every help

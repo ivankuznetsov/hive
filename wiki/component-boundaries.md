@@ -102,7 +102,8 @@ remote transport. It depends downward on Safe Agent Git Gate and normal task
 capture. The workflow-owned Publish stage composes the separate
 `Hive::GithubPublication` mechanism. `PatrolFix::SecretRework` reuses that
 mechanism's `commit_secret_findings` seam for the Validate pre-publication gate
-and the operator `workflow.secret_rework` release, and `PatrolFix::ReworkBudget`
+and the operator `workflow.secret_rework` release (rework, or republish for a
+stale block), and `PatrolFix::ReworkBudget`
 is the one rework bound shared by review and that gate.
 
 ## Boundary enforcement

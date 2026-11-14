@@ -200,13 +200,24 @@ module Hive
         if (recovery = result["recovery"])
           recovery_summary(recovery)
         elsif (rework = result["secret_rework"])
-          verb = rework.fetch("status") == "already_reworked" ? "already returned" : "returned"
-          "#{verb} #{@target} to Fix as generation #{rework.fetch('generation')} with " \
-            "#{rework.fetch('findings')} redacted secret finding(s) — #{result.fetch('task_state')} at " \
+          "#{secret_rework_summary(rework)} — #{result.fetch('task_state')} at " \
             "#{result.fetch('stage')} (#{result.fetch('marker')})\n"
         else
           "advanced #{@target} — #{result.fetch('task_state')} at " \
             "#{result.fetch('stage')} (#{result.fetch('marker')})\n"
+        end
+      end
+
+      def secret_rework_summary(rework)
+        status = rework.fetch("status")
+        prefix = status.start_with?("already_") ? "already " : ""
+        generation = rework.fetch("generation")
+        if status.end_with?("republished")
+          "#{prefix}reopened publication for #{@target} as generation #{generation}; " \
+            "the blocked commits no longer reproduce, so Publish rescans title, body, and commits"
+        else
+          "#{prefix}returned #{@target} to Fix as generation #{generation} with " \
+            "#{rework.fetch('findings')} redacted secret finding(s)"
         end
       end
 

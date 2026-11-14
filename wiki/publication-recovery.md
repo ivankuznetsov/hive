@@ -69,8 +69,11 @@ Validate runs publication's commit secret scan
 (`GithubPublication.commit_secret_findings`) before its commands. Findings route
 the patch back to Fix with redacted path/line/rule feedback while the shared
 rework budget lasts, then park for the operator. A Publish `secret_detected`
-block whose fields include `diff` can be released with
+block can be released with
 `hive act workflow.secret_rework PROJECT:SLUG --observation TOKEN --confirm`.
+If the blocked commits still reproduce, the patch returns to Fix; if they no
+longer do (a stale block, for example after an exact-fingerprint exception),
+Publish reopens in a new generation and rescans title, body, and commits.
 See [[modules/patrol]] for the gate, bound, and action contract.
 
 ## Exact secret-scan exceptions
@@ -82,7 +85,9 @@ Task-authored ignore files and inline suppression comments remain ineffective.
 An exception does not exempt other occurrences, future commits, titles or bodies.
 Never use a blanket rule or directory exception for a fixture finding. The
 Patrol Fix secret rework never writes this file; for an agent-authored test
-credential, rework the fix instead of adding an exception.
+credential, rework the fix instead of adding an exception. After an operator
+adds a reviewed exact fingerprint, `workflow.secret_rework` on the parked task
+finds the range clean and reopens Publish instead of reworking.
 
 ### Upstream content merged into the task branch
 

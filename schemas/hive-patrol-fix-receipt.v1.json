@@ -246,7 +246,16 @@
         },
         {
           "if": {"properties": {"stage": {"const": "publish"}}, "required": ["stage"]},
-          "then": {"properties": {"payload": {"properties": {"operator": {"const": "operator:secret-rework"}, "carried_receipts": {"maxItems": 0}}}}}
+          "then": {
+            "properties": {
+              "payload": {
+                "oneOf": [
+                  {"properties": {"operator": {"const": "operator:secret-rework"}, "carried_receipts": {"maxItems": 0}}},
+                  {"properties": {"operator": {"const": "operator:secret-republish"}, "carried_receipts": {"minItems": 1, "maxItems": 1}}}
+                ]
+              }
+            }
+          }
         }
       ]
     }

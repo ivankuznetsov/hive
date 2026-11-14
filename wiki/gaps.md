@@ -11,14 +11,21 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-da
 
 The pre-publication gate scans only the fix's commit range. The PR title and
 body are built later from finding and review evidence, so a secret there still
-parks at Publish, and `workflow.secret_rework` reports such title/body-only
-blocks `unavailable`; closure remains the only exit. The gate also cannot see
-upstream drift between Validate and Publish (a changed `default_branch` or
-operator `betterleaks.ignore`), so Publish can still block a range the gate
-passed. The operator action refuses a Publish block when the re-scan of the
-blocked range is now clean (for example after an exact fingerprint exception);
-there is no "re-publish this generation" action, and that block stays parked.
-It also refuses when the worktree HEAD moved after the block.
+parks at Publish. `workflow.secret_rework` releases such a block by
+republishing (the commit range is clean), but if the secret is deterministic
+finding or review text, Publish blocks again; closure is the real exit. Each
+republish is one operator-confirmed generation with no count cap. The gate
+also cannot see upstream drift between Validate and Publish (a changed
+`default_branch` or operator `betterleaks.ignore`), so Publish can still block
+a range the gate passed. The action refuses when the worktree HEAD moved after
+the block. A stale validate-stage gate (its range now clean) is still released
+as a rework that carries the gate-time findings, not as a fresh validation; the
+fix agent must still produce a new HEAD. Status cannot show in advance whether
+the release will rework or republish, because it never runs the scan.
+Republish and rework both rotate custody without renaming the `g1` worktree, so
+Publish's post-receipt cleanup check (it expects a
+`<slug>-patrol-fix-g<generation>` path) records `cleanup_failed` and leaves the
+worktree in place. This predates the republish route.
 
 Automatic secret reworks share `patrol.max_rework_cycles` with review, so a
 task that spends its budget on secret reworks reaches review without a
@@ -26,9 +33,10 @@ task that spends its budget on secret reworks reaches review without a
 count, and record only the fixed `operator:secret-rework` identity in the
 reopen receipt, not the human operator's name. The gate's feedback asks the
 agent to rewrite every commit since Base; an agent that only adds a follow-up
-commit fails the gate again and spends budget. The live todero tasks blocked on
-2026-11-14 have not yet been released with the new action; their
-`blocked_fields` (`["diff"]`) make them eligible. The operating skill's
+commit fails the gate again and spends budget. On 2026-11-14, one dogfood todero
+block reworked. Three stale ones (Betterleaks 1.8.1 blocks that no longer
+reproduce on the same HEAD) were refused before the republish route existed.
+They have not yet been re-released with it. The operating skill's
 workflow-actions reference still documents only routine `hive act` actions.
 
 ## Operational payload file: residual write volume and labels (2026-11-14)

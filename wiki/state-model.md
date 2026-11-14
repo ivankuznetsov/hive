@@ -754,11 +754,16 @@ route-transition intent with a `reopen` at stage `validate` (operator
 `controller:secret-scan`); `blocked` parks in `3-validate` with the same
 `publication_blocked` projection once the shared `patrol.max_rework_cycles`
 budget is spent. The operator-attested `workflow.secret_rework` action releases
-a current secret block: for a Publish block it appends a publish-stage
-`decision` carrying `blocked_receipt_id`, and either way the `reopen` carries
-operator `operator:secret-rework` and no carried receipts. Receipt validation
-admits validate/publish reopens only for those two operators. A replayed token
-returns `already_reworked` without another generation.
+a current secret block. When the commit scan still flags it, a Publish block
+gets a publish-stage `decision` carrying `blocked_receipt_id`, and the rework
+`reopen` carries operator `operator:secret-rework` and no carried receipts. When
+the blocked range is now clean, the `republish` route intent instead advances
+the generation in place in `5-publish`. It appends a publish-stage `reopen`
+with operator `operator:secret-republish`, the block as its outcome, and
+exactly one carried receipt: the block's review approval. Publish accepts that
+review as its approval for the new generation. Receipt validation admits
+validate/publish reopens only in those shapes. A replayed token returns
+`already_reworked` or `already_republished` without another generation.
 
 Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,

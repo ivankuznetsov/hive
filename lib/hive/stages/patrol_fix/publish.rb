@@ -181,10 +181,12 @@ module Hive
           manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           receipts = store.read_all
+          # A generation reopened by the operator's secret republish carries
+          # the review approval its released block was bound to.
           review = receipts.find do |row|
             current?(row, manifest) && row["kind"] == "decision" &&
               row["stage"] == "review" && row.dig("payload", "route") == "publish"
-          end
+          end || Hive::PatrolFix::SecretRework.republished_review(receipts, manifest)
           raise Hive::StageError, "publish requires an exact current review approval" unless review
           fix = receipts.find { |row| row["receipt_id"] == review.dig("payload", "fix_receipt_id") }
           validation = receipts.find do |row|

@@ -105,7 +105,7 @@ class PatrolFixSecretReworkTest < Minitest::Test
       refute_secret_persisted(second, OTHER_SECRET)
 
       block = SecretRework.current_block(task_folder: second.folder)
-      assert_equal [ "3-validate", gate, true ], block.values_at("stage", "receipt", "eligible")
+      assert_equal({ "stage" => "3-validate", "receipt" => gate }, block)
       token = SecretRework.observation_token(project: "demo", slug: second.slug, block: block)
       outcome = SecretRework.operator_rework!(
         second, cfg: cfg, project: "demo", observation_token: token, worktree_root: worktree_root,
@@ -192,7 +192,7 @@ class PatrolFixSecretReworkTest < Minitest::Test
     with_blocked_publication(contents: LEAK) do |task, worktree_root, block|
       assert_equal [ "diff" ], block.dig("payload", "blocked_fields")
       current = SecretRework.current_block(task_folder: task.folder)
-      assert_equal [ "5-publish", block, true, nil ], current.values_at("stage", "receipt", "eligible", "refusal")
+      assert_equal({ "stage" => "5-publish", "receipt" => block }, current)
       token = SecretRework.observation_token(project: "demo", slug: task.slug, block: current)
 
       outcome = SecretRework.operator_rework!(
@@ -263,15 +263,127 @@ class PatrolFixSecretReworkTest < Minitest::Test
     end
   end
 
-  def test_operator_release_refuses_anything_but_a_current_diff_secret_block
+  # A September block whose literal an operator has since excepted by exact
+  # fingerprint no longer reproduces on the same HEAD. Publish reopens in a
+  # new generation under the block's own review and publishes the clean range.
+  def test_stale_publication_block_reopens_publish_which_publishes_a_clean_range
+    with_blocked_publication(contents: LEAK) do |task, worktree_root, block|
+      with_operator_exception_for(task, worktree_root) do
+        current = SecretRework.current_block(task_folder: task.folder)
+        token = SecretRework.observation_token(project: "demo", slug: task.slug, block: current)
+
+        outcome = release(task, worktree_root, current)
+
+        assert_equal({ "status" => "republished", "generation" => 2, "findings" => 0 }, outcome)
+        assert File.directory?(task.folder), "a republish stays in 5-publish"
+        assert_equal 2, Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read.dig("task", "generation")
+        receipts = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all
+        refute receipts.any? { |row| row["kind"] == "decision" && row["stage"] == "publish" },
+               "a clean range records no rework decision"
+        reopen = receipts.last
+        assert_equal [ "reopen", "publish", SecretRework::REPUBLISH_OPERATOR, block.fetch("receipt_id"), [ "review-one" ] ],
+                     [ reopen.fetch("kind"), reopen.fetch("stage"), reopen.dig("payload", "operator"),
+                       reopen.dig("payload", "outcome_receipt_id"), reopen.dig("payload", "carried_receipts") ]
+        assert valid_receipt?(reopen)
+        projection = Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "5-publish").to_h
+        assert_nil projection["outcome"]
+        assert_equal({ "kind" => "ready", "runnable" => true }, projection.fetch("action"))
+        assert_nil projection.dig("timing", "parked_since")
+        assert_nil SecretRework.current_block(task_folder: task.folder)
+        bytes = File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+
+        replay = release(task, worktree_root, current, token: token)
+
+        assert_equal({ "status" => "already_republished", "generation" => 2, "findings" => 0 }, replay)
+        assert_equal bytes, File.binread(File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME))
+
+        published = Hive::Stages::PatrolFix::Publish.run!(
+          task, publish_config, git_gateway: identity_git, github_gateway: OkGithub.new,
+          worktree_root: worktree_root, cleanup: ->(*) { true }
+        )
+
+        assert_equal :complete, published.fetch(:status)
+        assert_equal [ "publication", 2, 2 ],
+                     [ published.dig(:receipt, "kind"), published.dig(:receipt, "task", "generation"),
+                       published.dig(:receipt, "evidence_revision", "generation") ]
+        assert_equal "https://github.com/acme/demo/pull/7", published.fetch(:pr_url)
+        assert_equal "advance", Hive::PatrolFix::Projection.new(task_folder: task.folder, stage: "5-publish").to_h.dig("action", "kind")
+        refute_secret_persisted(task)
+      end
+    end
+  end
+
+  def test_republished_publish_rescans_title_and_body_and_can_block_again
     with_blocked_publication(contents: SAFE, review_rationale: "token #{TOKEN}") do |task, worktree_root, block|
       assert_equal [ "body" ], block.dig("payload", "blocked_fields")
       current = SecretRework.current_block(task_folder: task.folder)
-      refute current.fetch("eligible")
-      error = assert_raises(SecretRework::Refused) { release(task, worktree_root, current) }
-      assert_equal SecretRework::UNELIGIBLE_BLOCK, error.message
-    end
+      token = SecretRework.observation_token(project: "demo", slug: task.slug, block: current)
 
+      assert_equal "republished", release(task, worktree_root, current).fetch("status")
+      reblocked = Hive::Stages::PatrolFix::Publish.run!(
+        task, publish_config, git_gateway: identity_git, github_gateway: Object.new,
+        worktree_root: worktree_root, cleanup: ->(*) { flunk "a blocked publication must not clean up" }
+      )
+
+      assert_equal :parked, reblocked.fetch(:status)
+      fresh = reblocked.fetch(:receipt)
+      assert_equal [ 2, [ "body" ] ], [ fresh.dig("task", "generation"), fresh.dig("payload", "blocked_fields") ]
+      refute_equal block.fetch("receipt_id"), fresh.fetch("receipt_id")
+      next_block = SecretRework.current_block(task_folder: task.folder)
+      assert_equal fresh, next_block.fetch("receipt")
+      refute_equal token, SecretRework.observation_token(project: "demo", slug: task.slug, block: next_block)
+      assert_equal "already_republished", release(task, worktree_root, current, token: token).fetch("status")
+      # The fixture's review rationale carries the token (agent input); the
+      # reopen and the fresh block this flow wrote must not.
+      written = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all.select do |row|
+        row.dig("task", "generation") == 2 || row["kind"] == "reopen"
+      end
+      assert_equal %w[publication_block reopen], written.map { |row| row.fetch("kind") }.sort
+      refute_includes JSON.generate(written), TOKEN
+    end
+  end
+
+  def test_republish_authority_must_bind_the_blocked_review
+    with_blocked_publication(contents: SAFE, review_rationale: "token #{TOKEN}") do |task, worktree_root, block|
+      receipts_path = File.join(task.folder, Hive::PatrolFix::ReceiptStore::FILENAME)
+      original = File.binread(receipts_path)
+      File.write(receipts_path, original.gsub('"receipt_id":"review-one"', '"receipt_id":"review-renamed"'))
+      current = SecretRework.current_block(task_folder: task.folder)
+      error = assert_raises(SecretRework::Refused) { release(task, worktree_root, current) }
+      assert_equal "the blocked review approval is unavailable", error.message
+      File.binwrite(receipts_path, original)
+
+      transition = committed_transition(task, worktree_root)
+      review = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder).read_all.find { |row| row["receipt_id"] == "review-one" }
+      [
+        [ block, review.merge("receipt_id" => "review-other") ],
+        [ block.merge("evidence_revision" => { "generation" => 1, "digest" => "f" * 64 }), review ],
+        [ review, review ]
+      ].each do |candidate, approval|
+        error = assert_raises(Hive::PatrolFix::Transition::InvalidTransition) do
+          transition.apply_secret_republish!(candidate, review: approval)
+        end
+        assert_includes error.message, "exact current publication block and its review"
+      end
+
+      commits = []
+      Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root, commit: ->(**values) { commits << values })
+                                 .apply_secret_republish!(block, review: review)
+      assert_equal "operator secret republish", commits.first.fetch(:action)
+      tampered = File.binread(receipts_path).sub(
+        '"review_receipt_id":"review-one"', '"review_receipt_id":"review-elsewhere"'
+      )
+      File.binwrite(receipts_path, tampered)
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::PatrolFix::Publish.publication_request(
+          task, publish_config, git_gateway: identity_git, worktree_root: worktree_root
+        )
+      end
+      assert_equal "republish authorization does not bind the blocked review approval", error.message
+    end
+  end
+
+  def test_operator_release_refuses_anything_but_a_current_secret_block
     with_blocked_publication(contents: LEAK) do |task, worktree_root, _block|
       current = SecretRework.current_block(task_folder: task.folder)
       assert_raises(Hive::StaleOperationalObservation) { release(task, worktree_root, current, token: "0" * 64) }
@@ -282,11 +394,6 @@ class PatrolFixSecretReworkTest < Minitest::Test
         release(task, worktree_root, current, transition: moved_elsewhere)
       end
       assert_includes error.message, "pending Patrol Fix transition"
-
-      with_replaced_singleton_method(SecretRework, :scan, ->(**) { [] }) do
-        error = assert_raises(SecretRework::Refused) { release(task, worktree_root, current) }
-        assert_includes error.message, "reports no commit findings"
-      end
 
       git_read = Hive::AgentGitGate.method(:read)
       failing_status = lambda do |path, operation, **options|
@@ -401,16 +508,18 @@ class PatrolFixSecretReworkTest < Minitest::Test
       "recorded_at" => "2026-11-14T12:00:00Z"
     }
     valid = [
-      [ "validate", SecretRework::SCAN_OPERATOR ], [ "validate", SecretRework::ACTION_OPERATOR ],
-      [ "publish", SecretRework::ACTION_OPERATOR ]
+      [ "validate", SecretRework::SCAN_OPERATOR, [] ], [ "validate", SecretRework::ACTION_OPERATOR, [] ],
+      [ "publish", SecretRework::ACTION_OPERATOR, [] ], [ "publish", SecretRework::REPUBLISH_OPERATOR, [ "review-1" ] ]
     ]
     invalid = [
       [ "publish", SecretRework::SCAN_OPERATOR, [] ], [ "validate", "controller:review", [] ],
-      [ "publish", SecretRework::ACTION_OPERATOR, [ "fix-1" ] ]
+      [ "publish", SecretRework::ACTION_OPERATOR, [ "fix-1" ] ], [ "publish", SecretRework::REPUBLISH_OPERATOR, [] ],
+      [ "publish", SecretRework::REPUBLISH_OPERATOR, %w[review-1 fix-1] ],
+      [ "validate", SecretRework::REPUBLISH_OPERATOR, [ "review-1" ] ]
     ]
-    valid.each do |stage, operator|
+    valid.each do |stage, operator, carried|
       receipt = base.merge("stage" => stage, "payload" => {
-        "outcome_receipt_id" => "secret-1", "operator" => operator, "carried_receipts" => []
+        "outcome_receipt_id" => "secret-1", "operator" => operator, "carried_receipts" => carried
       })
       Dir.mktmpdir { |dir| Hive::PatrolFix::ReceiptStore.new(task_folder: dir).append!(receipt) }
       assert valid_receipt?(receipt), "#{stage} #{operator}"
@@ -526,7 +635,7 @@ class PatrolFixSecretReworkTest < Minitest::Test
 
     patrol = Struct.new(:workflow, :project_root).new(Struct.new(:id).new(:"patrol-fix"), "/repo")
     executor.define_singleton_method(:resolve_task) { |*| patrol }
-    refuse = ->(*, **) { raise SecretRework::Refused, SecretRework::UNELIGIBLE_BLOCK }
+    refuse = ->(*, **) { raise SecretRework::Refused, "the blocked review approval is unavailable" }
     error = with_replaced_singleton_method(Hive::Config, :load, ->(*) { {} }) do
       with_replaced_singleton_method(SecretRework, :operator_rework!, refuse) do
         assert_raises(Hive::OperationalActionUsageError) do
@@ -534,7 +643,7 @@ class PatrolFixSecretReworkTest < Minitest::Test
         end
       end
     end
-    assert_equal "workflow.secret_rework refused: #{SecretRework::UNELIGIBLE_BLOCK}", error.message
+    assert_equal "workflow.secret_rework refused: the blocked review approval is unavailable", error.message
   end
 
   def test_current_block_ignores_other_stages
@@ -584,6 +693,28 @@ class PatrolFixSecretReworkTest < Minitest::Test
       task, cfg: publish_config, project: "demo", observation_token: token, worktree_root: worktree_root,
       transition: transition || committed_transition(task, worktree_root)
     )
+  end
+
+  # Models the operator's own exact-fingerprint exception, written outside
+  # task worktrees under Hive's config home. Production code never writes it.
+  def with_operator_exception_for(task, worktree_root)
+    owner = Hive::PatrolFix::WorktreeReceipt.new(
+      task_folder: task.folder, project_root: task.project_root, slug: task.slug, worktree_root: worktree_root
+    ).read
+    head = git(owner.fetch("worktree"), "rev-parse", "HEAD").strip
+    fingerprints = Hive::SecretScanner.git_findings(
+      owner.fetch("worktree"), base_oid: owner.fetch("base_revision"), head_oid: head, upstream_branch: "main"
+    ).map { |hit| hit.fetch(:fingerprint) }
+    refute_empty fingerprints
+    Dir.mktmpdir("hive-operator-config") do |home|
+      with_env("HIVE_HOME" => home) do
+        File.write(File.join(Hive::Paths.config_home, "betterleaks.ignore"), fingerprints.join("\n") + "\n")
+        assert_empty Hive::SecretScanner.git_findings(
+          owner.fetch("worktree"), base_oid: owner.fetch("base_revision"), head_oid: head, upstream_branch: "main"
+        ), "the exact-fingerprint exception must make the blocked range clean"
+        yield
+      end
+    end
   end
 
   def committed_transition(task, worktree_root)

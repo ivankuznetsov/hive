@@ -1039,8 +1039,10 @@ module Hive
     end
 
     # Patrol Fix secret blocks offer one operator-attested alternative to
-    # closure: return the patch to Fix with redacted findings. Only receipts
-    # are read here; the Betterleaks scan runs when the operator acts.
+    # closure. Only receipts are read here: the action itself re-runs the
+    # publication commit scan under the task lock and picks rework (findings)
+    # or republish (clean range), so the advertised action is never refused
+    # for its scan result and status never runs Betterleaks.
     def secret_rework_payload(project, row)
       return nil unless row["workflow"] == PATROL_FIX_WORKFLOW &&
         row["action"] == Hive::Schemas::TaskActionKind::PATROL_FIX_PUBLICATION_BLOCKED
@@ -1048,32 +1050,22 @@ module Hive
       block = Hive::PatrolFix::SecretRework.current_block(task_folder: row.fetch("folder"))
       return nil unless block
 
-      payload = {
-        "status" => block.fetch("eligible") ? "available" : "unavailable",
-        "code" => Hive::PatrolFix::SecretRework::CODE,
-        "stage" => block.fetch("stage"),
-        "blocked_receipt_id" => block.dig("receipt", "receipt_id"),
-        "remediation" => block.fetch("refusal"),
-        "command" => nil,
-        "action" => nil
-      }
-      unless block.fetch("eligible")
-        return payload.merge("remediation" => "A fix rework cannot clear this block: #{block.fetch('refusal')}.")
-      end
-
       token = Hive::PatrolFix::SecretRework.observation_token(
         project: project.fetch("name"), slug: row.fetch("slug"), block: block
       )
       target = "#{project.fetch('name')}:#{row.fetch('slug')}"
-      payload.merge(
-        "remediation" => "An operator can return the patch to Fix as a new generation with redacted " \
-                         "file/line/rule findings, or close it with evidence.",
+      {
+        "status" => "available",
+        "code" => Hive::PatrolFix::SecretRework::CODE,
+        "stage" => block.fetch("stage"),
+        "blocked_receipt_id" => block.dig("receipt", "receipt_id"),
+        "remediation" => secret_rework_remediation(block),
         "command" => "hive act #{Hive::PatrolFix::SecretRework::ACTION_ID} #{Shellwords.escape(target)} " \
                      "--observation #{token} --confirm",
         "action" => Hive::OperationalAction.secret_rework_descriptor(
           project: project.fetch("name"), row: row, observation_token: token
         )
-      )
+      }
     rescue Hive::Error, SystemCallError, IOError => error
       {
         "status" => "unavailable", "code" => Hive::PatrolFix::SecretRework::CODE,
@@ -1082,6 +1074,18 @@ module Hive
                          "(#{error.class.name.split('::').last}).",
         "command" => nil, "action" => nil
       }
+    end
+
+    def secret_rework_remediation(block)
+      if block.dig("receipt", "kind") == "publication_block"
+        "An operator can release this block: the publication commit scan runs again; findings return " \
+          "the patch to Fix as a new generation with redacted file/line/rule feedback, and a clean " \
+          "range reopens Publish in a new generation, whose full scan decides. Closing with evidence " \
+          "remains available."
+      else
+        "An operator can return the patch to Fix as a new generation with the gate's redacted " \
+          "file/line/rule findings, or close it with evidence."
+      end
     end
 
     def closure_payload(project, row)

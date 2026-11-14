@@ -281,8 +281,8 @@ module Hive
         if SECRET_DECISION_STAGES.include?(stage)
           require "hive/patrol_fix/secret_rework"
           # Secret-policy reopens come only from the secret-scan gate or the
-          # operator action, and they never carry earlier evidence forward.
-          unless Hive::PatrolFix::SecretRework.reopen_operator?(stage, payload["operator"]) && carried.empty?
+          # operator action; only a republish carries its blocked review.
+          unless Hive::PatrolFix::SecretRework.reopen_authorized?(stage, payload["operator"], carried)
             invalid!("#{label}.payload is not a secret-policy rework authorization")
           end
         end

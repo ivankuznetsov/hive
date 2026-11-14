@@ -88,7 +88,9 @@
                 "status": {
                   "enum": [
                     "reworked",
-                    "already_reworked"
+                    "already_reworked",
+                    "republished",
+                    "already_republished"
                   ]
                 },
                 "generation": {
@@ -97,7 +99,7 @@
                 },
                 "findings": {
                   "type": "integer",
-                  "minimum": 1
+                  "minimum": 0
                 }
               }
             }

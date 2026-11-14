@@ -19,7 +19,7 @@ module Hive
       SCHEMA_VERSION = 1
       INTENT_FILENAME = "route-intent.json".freeze
       MAX_INTENT_BYTES = 32 * 1024
-      ROUTES = %w[rework revalidate].freeze
+      ROUTES = %w[rework revalidate republish].freeze
       INTENT_STAGES = %w[inbox review validate publish].freeze
       REWORK_COMMIT_ACTIONS = {
         "validate" => "secret scan rework", "publish" => "operator secret rework"
@@ -70,6 +70,24 @@ module Hive
           action_id: decision.fetch("receipt_id"), route: "rework",
           stage: decision.fetch("stage"), destination: "2-fix", operator: operator,
           carried_receipts: []
+        )
+        apply_intent(intent)
+      end
+
+      # Operator release of a stale Publish secret block: the blocked range no
+      # longer reproduces, so Publish runs again in a new generation under the
+      # block's own review approval (carried), and its full scan decides.
+      def apply_secret_republish!(block, review:)
+        manifest = TaskManifest.new(task_folder: current_task_folder).read
+        unless SecretRework.republish_authority?(block, review, block_generation: manifest.dig("task", "generation")) &&
+               block.fetch("task") == manifest.fetch("task") &&
+               block.fetch("evidence_revision") == manifest.fetch("evidence_revision")
+          raise InvalidTransition, "secret republish requires the exact current publication block and its review"
+        end
+        intent = begin_intent(
+          action_id: block.fetch("receipt_id"), route: "republish", stage: "publish",
+          destination: "5-publish", operator: SecretRework::REPUBLISH_OPERATOR,
+          carried_receipts: [ review.fetch("receipt_id") ]
         )
         apply_intent(intent)
       end
@@ -176,10 +194,10 @@ module Hive
       def commit_intent!(intent)
         @commit.call(
           stage_name: intent.fetch("to"), slug: @task.slug,
-          action: if intent.fetch("route") == "rework"
-                    REWORK_COMMIT_ACTIONS.fetch(intent.fetch("stage"), "review rework")
-                  else
-                    "outcome reopened"
+          action: case intent.fetch("route")
+                  when "rework" then REWORK_COMMIT_ACTIONS.fetch(intent.fetch("stage"), "review rework")
+                  when "republish" then "operator secret republish"
+                  else "outcome reopened"
                   end,
           pathspecs: [
             File.join("stages", intent.fetch("from"), @task.slug),

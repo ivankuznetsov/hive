@@ -104,10 +104,42 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal "operator", operational.fetch("blocker_owner")
       assert_equal "secret_detected", operational.dig("reasons", 0, "code")
       assert_nil operational["action"]
+      # A title/body-only block is still released: the action rescans and,
+      # with a clean commit range, reopens Publish for a fresh full scan.
       rework = operational.fetch("secret_rework")
-      assert_equal [ "unavailable", nil, nil ], rework.values_at("status", "action", "command")
-      assert_includes rework.fetch("remediation"), "cannot clear this block"
-      assert_includes operational.fetch("reasons").map { |entry| entry.fetch("code") }, "secret_rework_unavailable"
+      assert_equal [ "available", "workflow.secret_rework" ], [ rework.fetch("status"), rework.dig("action", "action_id") ]
+      assert_includes rework.fetch("remediation"), "a clean range reopens Publish"
+      assert_includes rework.fetch("remediation"), "findings return the patch to Fix"
+      assert_includes operational.fetch("reasons").map { |entry| entry.fetch("code") }, "secret_rework_available"
+    end
+  end
+
+  def test_exhausted_pre_publication_gate_offers_the_rework_release
+    with_task("validate") do |task, receipts, root|
+      manifest = Hive::PatrolFix::TaskManifest.new(task_folder: task.folder).read
+      fix = { "receipt_id" => "fix-1", "payload" => { "head_revision" => "2" * 40, "diff_digest" => "3" * 64 } }
+      gate = receipts.append!(Hive::PatrolFix::SecretRework.decision(
+        manifest: manifest, stage: "validate", route: "blocked", fix: fix,
+        findings: [ { "path" => "test/login_test.rb", "line" => 1, "rule_id" => "generic-password" } ],
+        recorded_at: Time.utc(2026, 8, 20, 12, 2)
+      ))
+      project = {
+        "name" => "demo", "path" => root,
+        "hive_state_path" => File.join(root, ".hive-state")
+      }
+      status = Hive::Commands::Status.new(json: true)
+      payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
+      operational = status.operational_payload(
+        [ project ], status_payload: payload, scheduler_snapshot: nil,
+        now: Time.utc(2026, 8, 20, 12, 5)
+      ).fetch("tasks").first
+
+      assert_equal "patrol_fix_publication_blocked", payload.dig("projects", 0, "tasks", 0, "action")
+      rework = operational.fetch("secret_rework")
+      assert_equal [ "available", "3-validate", gate.fetch("receipt_id") ],
+                   rework.values_at("status", "stage", "blocked_receipt_id")
+      assert_includes rework.fetch("remediation"), "with the gate's redacted file/line/rule findings"
+      assert_equal "workflow.secret_rework", rework.dig("action", "action_id")
     end
   end
 

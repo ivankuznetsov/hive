@@ -252,7 +252,7 @@ components:
       - "Independent review binds the current evidence, fix diff, validation receipt, and worktree head before a closed semantic route becomes durable"
       - "Rework advances generation under a stable replayable intent and invalidates prior validation"
       - "Validate runs the exact publication commit-range secret scan first; findings route to rework with redacted path/line/rule feedback while the shared rework budget remains, then park for the operator"
-      - "The operator-attested secret rework releases only a current secret_detected block whose commit diff a fix can change, and replays an applied token without a second generation"
+      - "The operator-attested secret rework releases only a current secret_detected block: a still-flagged commit range routes to rework, a clean (stale) range republishes in place under the block's own review so Publish's full scan decides, and an applied token replays without another generation"
       - "Escalation creates exactly one linked coding task through TaskCapture and reciprocal controller-owned relation bytes without a GitHub issue effect"
       - "The Patrol Fix workflow directly owns remediation for newly accepted findings; historical local findings are imported only by the one-time script"
     schema_contracts:
@@ -311,7 +311,7 @@ components:
       - lib/hive/operational_action.rb
       - lib/hive/operational_status.rb
     mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
-    recovery_surface: "Replays incomplete rework route actions (review, secret-scan, and operator secret rework) and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
+    recovery_surface: "Replays incomplete rework and republish route actions (review, secret-scan, and operator secret release) and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/patrol_fix/task_manifest_test.rb

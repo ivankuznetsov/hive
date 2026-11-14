@@ -21,9 +21,13 @@ module Hive
     #   `rework` while the shared ReworkBudget remains, otherwise `blocked`,
     #   which parks the task for the operator.
     # - The operator-attested `workflow.secret_rework` action releases a
-    #   current secret block: that validate-stage `blocked` decision, or a
-    #   Publish `publication_block` whose blocked fields include the commit
-    #   diff. Both move the task through Transition's rework route.
+    #   current secret block: that validate-stage `blocked` decision (rework),
+    #   or a Publish `publication_block`. For a Publish block it re-runs the
+    #   publication commit scan under the task lock: findings move the task
+    #   through Transition's rework route; a clean range (a stale block, for
+    #   example after the operator added an exact-fingerprint exception)
+    #   reopens Publish itself through the republish route, and Publish's own
+    #   full title/body/commit scan decides again.
     #
     # Findings carry only path, line, and Betterleaks rule ID. Matched
     # values, snippets, fingerprints, and value hashes are never persisted or
@@ -33,12 +37,9 @@ module Hive
       CODE = "secret_detected".freeze
       SCAN_OPERATOR = "controller:secret-scan".freeze
       ACTION_OPERATOR = "operator:secret-rework".freeze
+      REPUBLISH_OPERATOR = "operator:secret-republish".freeze
       ROUTES = { "validate" => %w[rework blocked].freeze, "publish" => %w[rework].freeze }.freeze
       STAGE_DIRS = { "validate" => "3-validate", "publish" => "5-publish" }.freeze # not-a-stage-ref: Patrol Fix workflow stages
-      REOPEN_OPERATORS = {
-        "validate" => [ SCAN_OPERATOR, ACTION_OPERATOR ].freeze,
-        "publish" => [ ACTION_OPERATOR ].freeze
-      }.freeze
       FIELDS = %w[
         route rationale evidence blocker_owner head_revision diff_digest
         fix_receipt_id code findings omitted_findings secret_policy_version
@@ -61,8 +62,6 @@ module Hive
       ].join(" ").freeze
       ESCALATION_SUMMARY = ("The pre-publication secret scan still finds credential-like literals after " \
                             "the Patrol Fix rework limit; an operator must release another rework or close the task.").freeze
-      UNELIGIBLE_BLOCK = "the publication block covers only the pull-request title or body; " \
-                         "a fix rework cannot change those bytes".freeze
 
       class InvalidDecision < Hive::Error; end
       class Refused < Hive::Error; end
@@ -162,8 +161,46 @@ module Hive
           reopen.dig("payload", "operator") == rework_operator(decision)
       end
 
-      def reopen_operator?(stage, operator)
-        REOPEN_OPERATORS.fetch(stage, []).include?(operator)
+      # Validate/publish reopens: the gate or the operator rework carry
+      # nothing forward; a republish carries exactly the blocked review.
+      def reopen_authorized?(stage, operator, carried)
+        if stage == "validate"
+          return [ SCAN_OPERATOR, ACTION_OPERATOR ].include?(operator) && carried.empty?
+        end
+
+        (operator == ACTION_OPERATOR && carried.empty?) ||
+          (operator == REPUBLISH_OPERATOR && carried.length == 1)
+      end
+
+      # A republish may reuse only the review approval the released block was
+      # bound to: same review receipt, HEAD, and diff, one generation back
+      # from the generation that republishes.
+      def republish_authority?(block, review, block_generation:)
+        block.is_a?(Hash) && block["kind"] == "publication_block" && block["stage"] == "publish" &&
+          block.dig("payload", "code") == CODE && block.dig("task", "generation") == block_generation &&
+          review.is_a?(Hash) && review["kind"] == "decision" && review["stage"] == "review" &&
+          review.dig("payload", "route") == "publish" &&
+          block.dig("payload", "review_receipt_id") == review["receipt_id"] &&
+          block.dig("payload", "head_revision") == review.dig("payload", "head_revision") &&
+          block.dig("payload", "diff_digest") == review.dig("payload", "diff_digest")
+      end
+
+      # Publish's approval in a republished generation, or nil when the
+      # current generation was not reopened by the republish action.
+      def republished_review(receipts, manifest)
+        reopen = receipts.find do |row|
+          row["kind"] == "reopen" && row["stage"] == "publish" && current?(row, manifest) &&
+            row.dig("payload", "operator") == REPUBLISH_OPERATOR
+        end
+        return nil unless reopen
+
+        by_id = receipts.to_h { |row| [ row.fetch("receipt_id"), row ] }
+        block = by_id[reopen.dig("payload", "outcome_receipt_id")]
+        review = by_id[reopen.dig("payload", "carried_receipts").first]
+        unless republish_authority?(block, review, block_generation: manifest.dig("task", "generation") - 1)
+          raise Hive::StageError, "republish authorization does not bind the blocked review approval"
+        end
+        review
       end
 
       def finding_count(decision)
@@ -182,14 +219,12 @@ module Hive
           gate = current.find do |row|
             decision?(row) && row["stage"] == "validate" && row.dig("payload", "route") == "blocked"
           end
-          return gate && { "stage" => stage_dir, "receipt" => gate, "eligible" => true, "refusal" => nil }
+          return gate && { "stage" => stage_dir, "receipt" => gate }
         end
         receipt = current.find { |row| row["kind"] == "publication_block" && row["stage"] == "publish" }
         return nil unless receipt&.dig("payload", "code") == CODE
 
-        eligible = receipt.dig("payload", "blocked_fields").include?("diff")
-        { "stage" => stage_dir, "receipt" => receipt, "eligible" => eligible,
-          "refusal" => eligible ? nil : UNELIGIBLE_BLOCK }
+        { "stage" => stage_dir, "receipt" => receipt }
       end
 
       def observation_token(project:, slug:, block:)
@@ -227,17 +262,31 @@ module Hive
           raise Hive::StaleOperationalObservation,
                 "the secret block changed; run hive status --operational --json for a fresh token"
         end
-        raise Refused, block.fetch("refusal") unless block.fetch("eligible")
 
         manifest = TaskManifest.new(task_folder: task.folder).read
         receipt = block.fetch("receipt")
         owner = verify_custody!(task, manifest, receipt.dig("payload", "head_revision"), worktree_root)
         decision = receipt["kind"] == "decision" ? receipt : publish_decision(task, cfg, manifest, receipt, owner)
+        return republish!(task, receipt, transition) unless decision
+
         moved = transition.apply_secret_rework!(decision, operator: ACTION_OPERATOR)
         { "status" => "reworked", "generation" => moved.fetch(:generation),
           "findings" => finding_count(decision) }
       end
       private_class_method :release!
+
+      # The blocked range no longer reproduces. Nothing for Fix to correct, so
+      # reopen Publish under the block's own review; its full scan decides.
+      def republish!(task, block, transition)
+        review = ReceiptStore.new(task_folder: task.folder).read_all.find do |row|
+          row["receipt_id"] == block.dig("payload", "review_receipt_id")
+        end
+        raise Refused, "the blocked review approval is unavailable" unless review
+
+        moved = transition.apply_secret_republish!(block, review: review)
+        { "status" => "republished", "generation" => moved.fetch(:generation), "findings" => 0 }
+      end
+      private_class_method :republish!
 
       def publish_decision(task, cfg, manifest, block, owner)
         store = ReceiptStore.new(task_folder: task.folder)
@@ -256,10 +305,8 @@ module Hive
           worktree: owner.fetch("worktree"), base_revision: owner.fetch("base_revision"),
           head_revision: block.dig("payload", "head_revision"), base_branch: base_branch(task, cfg)
         )
-        if findings.empty?
-          raise Refused, "the current secret scan reports no commit findings for this block; " \
-                         "a fix rework has nothing to correct"
-        end
+        return nil if findings.empty?
+
         store.append!(decision(
           manifest: manifest, stage: "publish", route: "rework", findings: findings, fix: fix,
           blocked_receipt_id: block.fetch("receipt_id")
@@ -290,20 +337,32 @@ module Hive
         receipts = ReceiptStore.new(task_folder: task_folder).read_all
         by_id = receipts.to_h { |row| [ row.fetch("receipt_id"), row ] }
         receipts.each do |reopen|
-          next unless reopen["kind"] == "reopen" && reopen.dig("payload", "operator") == ACTION_OPERATOR
+          next unless reopen["kind"] == "reopen"
 
-          decision = by_id[reopen.dig("payload", "outcome_receipt_id")]
-          next unless decision?(decision)
+          source, stage, outcome = released_block(reopen, by_id)
+          next unless source && secure_compare(token_for(project, slug, STAGE_DIRS.fetch(stage), source), token)
 
-          source = decision["stage"] == "publish" ? by_id[decision.dig("payload", "blocked_receipt_id")] : decision
-          next unless source && secure_compare(token_for(project, slug, STAGE_DIRS.fetch(decision["stage"]), source), token)
-
-          return { "status" => "already_reworked", "generation" => reopen.dig("task", "generation"),
-                   "findings" => finding_count(decision) }
+          return outcome.merge("generation" => reopen.dig("task", "generation"))
         end
         nil
       end
       private_class_method :released
+
+      # The block an operator reopen released, its stage, and the replayed
+      # outcome; nil for controller reopens.
+      def released_block(reopen, by_id)
+        outcome = by_id[reopen.dig("payload", "outcome_receipt_id")]
+        case reopen.dig("payload", "operator")
+        when REPUBLISH_OPERATOR
+          [ outcome, "publish", { "status" => "already_republished", "findings" => 0 } ]
+        when ACTION_OPERATOR
+          return nil unless decision?(outcome)
+
+          source = outcome["stage"] == "publish" ? by_id[outcome.dig("payload", "blocked_receipt_id")] : outcome
+          [ source, outcome["stage"], { "status" => "already_reworked", "findings" => finding_count(outcome) } ]
+        end
+      end
+      private_class_method :released_block
 
       def token_for(project, slug, stage_dir, receipt)
         Digest::SHA256.hexdigest(PatrolFix.canonical_json(

@@ -311,37 +311,54 @@ before any receipt; it never lets the range through.
 
 ### Operator secret rework
 
-`workflow.secret_rework` releases a current secret block back to Fix as a new
-generation. It is operator-attested (`confirmation_required: true`), local
-only, and never a routine `workflow.*` recommendation:
+`workflow.secret_rework` releases a current secret block as a new generation:
+back to Fix when the publication commit scan still flags the range, or back
+into Publish when the block has gone stale. It is operator-attested
+(`confirmation_required: true`), local only, and never a routine `workflow.*`
+recommendation:
 
 ```bash
 hive act workflow.secret_rework PROJECT:SLUG --observation TOKEN --confirm
 ```
 
 Operational status advertises it in the task's `secret_rework` field, next to
-`closure` (`workflow.close_with_evidence`). Eligible blocks are a current
-validate-stage `blocked` gate, or a current Publish `publication_block` whose
-`blocked_fields` include `diff`. Title/body-only blocks report `unavailable`:
-those bytes come from the finding and review, not from the fix. The token binds
-the block receipt, generation, evidence digest, HEAD, and diff digest.
+`closure` (`workflow.close_with_evidence`), for every current validate-stage
+`blocked` gate and every current Publish `secret_detected` block (title/body
+blocks included). Status reads only receipts and never runs Betterleaks: the
+single action picks its route from the scan it runs under the lock, so the
+advertised action is never refused because of the current scan result. The
+token binds the block receipt, generation, evidence digest, HEAD, and diff
+digest.
 
 Under the stable slug lock and the task lock, the action reconciles any pending
 route intent, verifies worktree custody (generation, HEAD equal to the block,
 clean), and then:
 
-- for a Publish block, re-runs the same commit scan to obtain redacted findings
-  and appends a publish-stage `decision` (`route: rework`,
-  `blocked_receipt_id`), refusing when the scan now finds nothing;
-- for a validate gate, reuses the `blocked` decision as the feedback.
+- for a validate gate, reuses the `blocked` decision as the feedback and applies
+  `Transition#apply_secret_rework!` (`reworked`);
+- for a Publish block, re-runs the same commit scan
+  (`GithubPublication.commit_secret_findings`). Findings append a publish-stage
+  `decision` (`route: rework`, `blocked_receipt_id`) and apply the rework route
+  (`reworked`).
+- for a Publish block whose blocked range is now clean (a stale block: the
+  policy or the operator's exact-fingerprint exceptions changed since it was
+  recorded), it applies `Transition#apply_secret_republish!` (`republished`).
+  The `republish` route advances the generation in place in `5-publish`,
+  rotates custody, and appends a publish-stage `reopen` (operator
+  `operator:secret-republish`, outcome = the block, carrying exactly the
+  block's review receipt). Publish accepts that carried review as its approval
+  only when it is the review the block was bound to (same receipt, HEAD, and
+  diff, one generation back). It then runs normally, and its own full
+  title/body/commit scan decides: a clean scan publishes, and any finding writes
+  a fresh block in the new generation.
 
-It then applies `Transition#apply_secret_rework!` with operator
-`operator:secret-rework`. It refuses (usage error) anything that is not a current
-eligible block; a different token is a stale observation. Replaying an
-already-applied token returns `already_reworked` without a second generation.
-Operator releases do not consult the budget, so a recurring finding parks again.
-Ignore rules are never added; exceptions stay exact fingerprints written by the
-operator (see [[publication-recovery]]).
+Anything that is not a current secret block is refused (usage error), and a
+different token is a stale observation. Replaying an applied token returns
+`already_reworked` or `already_republished` without another generation. Operator
+releases do not consult the rework budget. Each one needs a fresh observation
+and `--confirm` and creates exactly one generation, so a recurring finding just
+parks again. Ignore rules are never added; exceptions stay exact fingerprints
+written by the operator (see [[publication-recovery]]).
 
 ## One-time historical import
 

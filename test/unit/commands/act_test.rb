@@ -91,6 +91,46 @@ class CommandsActTest < Minitest::Test
     assert schema.valid?(payload), schema.validate(payload).to_a.inspect
   end
 
+  def test_operator_secret_rework_forwards_confirmation_and_reports_the_new_generation
+    token = "a" * 64
+    result = {
+      "task_state" => "ready_to_run", "stage" => "2-fix", "marker" => "none",
+      "secret_rework" => { "status" => "reworked", "generation" => 2, "findings" => 3 }
+    }
+    executor = FakeExecutor.new(result: result)
+    stdout, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.secret_rework", "demo:task", observation: token, json: true,
+        confirm: true, executor: executor
+      ).call
+    end
+    payload = JSON.parse(stdout)
+
+    assert_equal [ {
+      action_id: "workflow.secret_rework", target: "demo:task", observation_token: token, confirm: true
+    } ], executor.calls
+    assert_equal result, payload.fetch("result")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-act"))))
+    assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
+
+    human, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.secret_rework", "demo:task", observation: token, confirm: true, executor: executor
+      ).call
+    end
+    assert_equal "returned demo:task to Fix as generation 2 with 3 redacted secret finding(s) — " \
+                 "ready_to_run at 2-fix (none)\n", human
+
+    replayed = result.merge("secret_rework" => result.fetch("secret_rework").merge("status" => "already_reworked"))
+    human, = capture_io do
+      Hive::Commands::Act.new(
+        "workflow.secret_rework", "demo:task", observation: token, confirm: true,
+        executor: FakeExecutor.new(result: replayed)
+      ).call
+    end
+    assert_match(/\Aalready returned demo:task to Fix as generation 2/, human)
+  end
+
   def test_human_success_is_concise
     stdout, = capture_io do
       Hive::Commands::Act.new(

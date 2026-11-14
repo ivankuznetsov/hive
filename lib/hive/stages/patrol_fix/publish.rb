@@ -7,6 +7,7 @@ require "hive/git_ops"
 require "hive/patrol_fix/publication_receipt"
 require "hive/patrol_fix/publication_block_receipt"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/secret_rework"
 require "hive/patrol_fix/transition"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_snapshot"
@@ -215,8 +216,8 @@ module Hive
                  repository_identity.keys.sort == %w[host repository]
             raise Hive::StageError, "publication repository identity is unavailable"
           end
-          base_branch = cfg["default_branch"].to_s
-          base_branch = Hive::GitOps.new(task.project_root).detect_default_branch if base_branch.empty?
+          # The pre-publication gate scopes its scan with this same helper.
+          base_branch = Hive::PatrolFix::SecretRework.base_branch(task, cfg)
           {
             "manifest" => manifest, "review" => review, "fix" => fix,
             "validation" => validation, "owner" => owner,

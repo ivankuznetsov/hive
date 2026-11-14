@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-08-27
+updated: 2026-11-14
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -155,8 +155,10 @@ Patrol Fix owns the repair workflow:
 1. Inbox re-investigates the current source and makes the semantic admission
    decision.
 2. Fix creates or recovers one exact local worktree generation.
-3. Validate runs only configured or structured validation commands in a
-   disposable detached checkout pinned to the fix receipt's exact HEAD.
+3. Validate first runs the publication secret scan on the fix's commit range
+   (see "Pre-publication secret gate" below), then runs only configured or
+   structured validation commands in a disposable detached checkout pinned to
+   the fix receipt's exact HEAD.
 4. Review records an independent route decision.
 5. Publish uses `Hive::GithubPublication`.
 
@@ -267,10 +269,79 @@ commit range, including secrets removed from the final diff. Repeated runs
 return the existing park without remote calls or cleanup. Status names the
 operator as owner; daemon dispatch and ordinary retry cannot release it.
 
-There is no publication-specific reopen action or routing back to earlier
-stages. The operator must correct the source problem before starting a new
-task through the normal workflow. Historical secrets require cleaning history,
-not merely editing the latest file. The old blocked generation stays parked.
+### Pre-publication secret gate
+
+Fix agents tend to add plaintext test credentials (for example
+`password: "password123"` in a request test), which publication then refuses.
+`Hive::PatrolFix::SecretRework` catches that before Publish. Validate, after
+its HEAD/cleanliness checks and before any validation command, calls
+`Hive::GithubPublication.commit_secret_findings` — the same seam
+`Controller#ensure_secret_free!` uses — with the same scan base (the owned
+worktree's creation base), HEAD, and `SecretRework.base_branch` (also used by
+Publish). Binary, trusted Betterleaks config, operator `betterleaks.ignore`,
+and the upstream-merge scoping are therefore identical to publication.
+
+Findings are reduced to `path`, `line`, and Betterleaks `rule_id` (at most 32,
+plus an omitted count). Matched values, snippets, fingerprints, and value
+hashes never reach a receipt or prompt. A finding appends a validate-stage
+`decision` receipt (`code: secret_detected`, `findings`, a fixed feedback
+`rationale`, and redacted `evidence` lines):
+
+- `route: rework` while the task's rework budget remains. Validate applies it
+  at once through `Transition#apply_secret_rework!` with operator
+  `controller:secret-scan`: new generation, rotated custody, same owned
+  worktree, back in `2-fix`. No validation receipt is written.
+- `route: blocked` (owner `operator`) once the budget is spent. The task parks
+  in `3-validate`; the projection reports the same `publication_blocked`
+  outcome and `secret_detected` diagnostic as a Publish block.
+
+The fixed feedback tells the agent not to add credential-like literals (even in
+tests), to reuse the project's existing test constants or a scanner-safe
+construction, that every commit since Base is scanned so the fix commits must be
+rewritten (amend or squash), and that ignore files or allow comments are not
+honored. Fix receives the decision as `secret_scan_feedback`, and a secret
+rework counts as progress only when HEAD changes (a literal can live in an
+intermediate commit while the final diff is clean).
+
+`Hive::PatrolFix::ReworkBudget` is the shared bound: rework decisions from
+review, the secret gate, and the operator action all count against
+`patrol.max_rework_cycles` (default 2). Review drops its `rework` route once
+the shared count reaches the cap. A scanner failure raises a `StageError`
+before any receipt; it never lets the range through.
+
+### Operator secret rework
+
+`workflow.secret_rework` releases a current secret block back to Fix as a new
+generation. It is operator-attested (`confirmation_required: true`), local
+only, and never a routine `workflow.*` recommendation:
+
+```bash
+hive act workflow.secret_rework PROJECT:SLUG --observation TOKEN --confirm
+```
+
+Operational status advertises it in the task's `secret_rework` field, next to
+`closure` (`workflow.close_with_evidence`). Eligible blocks are a current
+validate-stage `blocked` gate, or a current Publish `publication_block` whose
+`blocked_fields` include `diff`. Title/body-only blocks report `unavailable`:
+those bytes come from the finding and review, not from the fix. The token binds
+the block receipt, generation, evidence digest, HEAD, and diff digest.
+
+Under the stable slug lock and the task lock, the action reconciles any pending
+route intent, verifies worktree custody (generation, HEAD equal to the block,
+clean), and then:
+
+- for a Publish block, re-runs the same commit scan to obtain redacted findings
+  and appends a publish-stage `decision` (`route: rework`,
+  `blocked_receipt_id`), refusing when the scan now finds nothing;
+- for a validate gate, reuses the `blocked` decision as the feedback.
+
+It then applies `Transition#apply_secret_rework!` with operator
+`operator:secret-rework`. It refuses (usage error) anything that is not a current
+eligible block; a different token is a stale observation. Replaying an
+already-applied token returns `already_reworked` without a second generation.
+Operator releases do not consult the budget, so a recurring finding parks again.
+Ignore rules are never added; exceptions stay exact fingerprints written by the
+operator (see [[publication-recovery]]).
 
 ## One-time historical import
 
@@ -311,7 +382,12 @@ the standard task projections.
   or publication engine is runnable.
 - Remote PR publication goes through `Hive::GithubPublication`.
 - Secret-policy publication blocks are append-only, operator-owned, and cannot be
-  released by ordinary retry or automatic stage routing.
+  released by ordinary retry or automatic stage routing. Only the
+  operator-attested `workflow.secret_rework` action releases one, as a new
+  generation through the rework route.
+- The pre-publication secret gate uses publication's own commit-scan seam and
+  redacts findings to path/line/rule; automatic secret reworks share the
+  `patrol.max_rework_cycles` budget with review.
 - Generic `hive run` auto-rebase never runs for a controller workflow; exact
   checkout movement belongs to the controller's receipts and transitions.
 - Historical import is explicit, local, one-time, and never daemon-triggered.

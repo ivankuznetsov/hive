@@ -10,12 +10,13 @@ module Hive
       include Hive::Schemas::EnvelopeEmitter
 
       def initialize(action_id, target, observation:, json: false,
-                     executor: nil,
+                     executor: nil, confirm: false,
                      project: nil, idempotency_key: nil, command_receipt_store: nil,
                      structured: false, principal: nil, principal_source: "local_cli")
         @action_id = action_id
         @target = target
         @observation = observation
+        @confirm = confirm == true
         @json = json
         authority = if defined?(Hive::Attempts::Context)
           Hive::Attempts::Context.current&.remote_authority
@@ -33,13 +34,11 @@ module Hive
         call_with_envelope do
           invoke = lambda do
             validate!
-            result = with_stage_stdout do
-              @executor.execute(
-                action_id: @action_id,
-                target: @target,
-                observation_token: @observation
-              )
-            end
+            # Only operator-attested actions read --confirm; routine calls
+            # keep their exact executor contract.
+            arguments = { action_id: @action_id, target: @target, observation_token: @observation }
+            arguments[:confirm] = true if @confirm
+            result = with_stage_stdout { @executor.execute(**arguments) }
             emit_success(result)
           end
           payload = begin
@@ -120,7 +119,7 @@ module Hive
             "action_id" => @action_id,
             "observation" => @observation,
             "project" => @project_filter
-          },
+          }.merge(@confirm ? { "confirm" => true } : {}),
           project_roots: lambda {
             project_name, = qualified_target
             Hive::CommandOperation.registered_project_roots(
@@ -200,6 +199,11 @@ module Hive
       def text_success(result)
         if (recovery = result["recovery"])
           recovery_summary(recovery)
+        elsif (rework = result["secret_rework"])
+          verb = rework.fetch("status") == "already_reworked" ? "already returned" : "returned"
+          "#{verb} #{@target} to Fix as generation #{rework.fetch('generation')} with " \
+            "#{rework.fetch('findings')} redacted secret finding(s) — #{result.fetch('task_state')} at " \
+            "#{result.fetch('stage')} (#{result.fetch('marker')})\n"
         else
           "advanced #{@target} — #{result.fetch('task_state')} at " \
             "#{result.fetch('stage')} (#{result.fetch('marker')})\n"

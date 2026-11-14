@@ -26,6 +26,8 @@ module Hive
     autoload :SuccessorMaterializer, "hive/patrol_fix/successor_materializer"
     autoload :PublicationReceipt, "hive/patrol_fix/publication_receipt"
     autoload :AttemptDiagnostic, "hive/patrol_fix/attempt_diagnostic"
+    autoload :ReworkBudget, "hive/patrol_fix/rework_budget"
+    autoload :SecretRework, "hive/patrol_fix/secret_rework"
 
     module_function
 

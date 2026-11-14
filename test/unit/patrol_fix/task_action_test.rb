@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "fileutils"
 require "tmpdir"
 require "hive/daemon/policy"
@@ -103,6 +104,51 @@ class PatrolFixTaskActionTest < Minitest::Test
       assert_equal "operator", operational.fetch("blocker_owner")
       assert_equal "secret_detected", operational.dig("reasons", 0, "code")
       assert_nil operational["action"]
+      rework = operational.fetch("secret_rework")
+      assert_equal [ "unavailable", nil, nil ], rework.values_at("status", "action", "command")
+      assert_includes rework.fetch("remediation"), "cannot clear this block"
+      assert_includes operational.fetch("reasons").map { |entry| entry.fetch("code") }, "secret_rework_unavailable"
+    end
+  end
+
+  def test_diff_secret_block_offers_the_operator_rework_next_to_closure
+    with_task("publish") do |task, receipts, root|
+      block = receipts.append!(publication_block_receipt(blocked_fields: [ "diff" ]))
+      project = {
+        "name" => "demo", "path" => root,
+        "hive_state_path" => File.join(root, ".hive-state")
+      }
+      status = Hive::Commands::Status.new(json: true)
+      payload = status.json_payload([ project ], now: Time.utc(2026, 8, 20, 12, 5))
+      result = status.operational_payload(
+        [ project ], status_payload: payload, scheduler_snapshot: nil,
+        now: Time.utc(2026, 8, 20, 12, 5)
+      )
+      operational = result.fetch("tasks").first
+
+      token = Hive::PatrolFix::SecretRework.observation_token(
+        project: "demo", slug: SLUG,
+        block: Hive::PatrolFix::SecretRework.current_block(task_folder: task.folder)
+      )
+      rework = operational.fetch("secret_rework")
+      assert_equal [ "available", "secret_detected", "5-publish", block.fetch("receipt_id") ],
+                   rework.values_at("status", "code", "stage", "blocked_receipt_id")
+      assert_equal "hive act workflow.secret_rework demo:#{SLUG} --observation #{token} --confirm",
+                   rework.fetch("command")
+      assert_equal({
+        "action_id" => "workflow.secret_rework", "target" => "demo:#{SLUG}",
+        "observation_token" => token, "risk_class" => "operator_attested",
+        "confirmation_required" => true,
+        "provenance" => {
+          "source" => "hive-operational-status", "task_action" => "patrol_fix_publication_blocked"
+        }
+      }, rework.fetch("action"))
+      assert_equal "workflow.close_with_evidence", operational.dig("closure", "action", "action_id")
+      assert_nil operational["action"], "the operator rework is never a routine action"
+      assert_equal "secret_detected", operational.dig("reasons", 0, "code")
+      assert_includes operational.fetch("reasons").map { |entry| entry.fetch("code") }, "secret_rework_available"
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+      assert schema.valid?(result), schema.validate(result).map { |error| error.fetch("error") }.inspect
     end
   end
 
@@ -209,11 +255,11 @@ class PatrolFixTaskActionTest < Minitest::Test
     }
   end
 
-  def publication_block_receipt
+  def publication_block_receipt(blocked_fields: [ "body" ])
     Hive::PatrolFix::PublicationBlockReceipt.build(
       task: { "slug" => SLUG, "generation" => 1 },
       evidence_revision: { "generation" => 1, "digest" => "a" * 64 },
-      blocked_fields: [ "body" ],
+      blocked_fields: blocked_fields,
       review_receipt_id: "review-1", fix_receipt_id: "fix-1",
       validation_receipt_id: "validation-1", head_revision: "2" * 40,
       diff_digest: "3" * 64, recorded_at: Time.utc(2026, 8, 20, 12, 2)

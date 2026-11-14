@@ -61,6 +61,37 @@
         "validation_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128}
       }
     },
+    "secretFinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "line", "rule_id"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 512},
+        "line": {"type": "integer", "minimum": 0},
+        "rule_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"}
+      }
+    },
+    "secretDecisionPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["route", "rationale", "evidence", "blocker_owner", "head_revision", "diff_digest", "fix_receipt_id", "code", "findings", "omitted_findings", "secret_policy_version"],
+      "properties": {
+        "route": {"enum": ["rework", "blocked"]},
+        "rationale": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "evidence": {"type": "array", "minItems": 1, "maxItems": 33, "items": {"type": "string", "minLength": 1, "maxLength": 16384}},
+        "blocker_owner": {"enum": ["fix_agent", "operator"]},
+        "head_revision": {"$ref": "#/$defs/revision"},
+        "diff_digest": {"$ref": "#/$defs/digest"},
+        "fix_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "code": {"const": "secret_detected"},
+        "findings": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"$ref": "#/$defs/secretFinding"}},
+        "omitted_findings": {"type": "integer", "minimum": 0},
+        "secret_policy_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "blocked_receipt_id": {"type": "string", "minLength": 1, "maxLength": 128}
+      },
+      "allOf": [
+        {"if": {"properties": {"route": {"const": "rework"}}}, "then": {"properties": {"blocker_owner": {"const": "fix_agent"}}}},
+        {"if": {"properties": {"route": {"const": "blocked"}}}, "then": {"properties": {"blocker_owner": {"const": "operator"}}}}
+      ]
+    },
     "fixPayload": {
       "type": "object", "additionalProperties": false,
       "required": ["worktree_generation", "worktree", "branch", "base_revision", "head_revision", "diff_digest", "validation_commands"],
@@ -177,6 +208,28 @@
               ]
             }
           }
+        },
+        {
+          "properties": {
+            "stage": {"const": "validate"},
+            "payload": {
+              "allOf": [
+                {"$ref": "#/$defs/secretDecisionPayload"},
+                {"not": {"required": ["blocked_receipt_id"]}}
+              ]
+            }
+          }
+        },
+        {
+          "properties": {
+            "stage": {"const": "publish"},
+            "payload": {
+              "allOf": [
+                {"$ref": "#/$defs/secretDecisionPayload"},
+                {"required": ["blocked_receipt_id"], "properties": {"route": {"const": "rework"}}}
+              ]
+            }
+          }
         }
       ]
     },
@@ -184,6 +237,18 @@
     "validationReceipt": {"properties": {"kind": {"const": "validation"}, "stage": {"const": "validate"}, "payload": {"$ref": "#/$defs/validationPayload"}}},
     "publicationReceipt": {"properties": {"kind": {"const": "publication"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationPayload"}}},
     "publicationBlockReceipt": {"properties": {"kind": {"const": "publication_block"}, "stage": {"const": "publish"}, "payload": {"$ref": "#/$defs/publicationBlockPayload"}}},
-    "reopenReceipt": {"properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review"]}, "payload": {"$ref": "#/$defs/reopenPayload"}}}
+    "reopenReceipt": {
+      "properties": {"kind": {"const": "reopen"}, "stage": {"enum": ["inbox", "review", "validate", "publish"]}, "payload": {"$ref": "#/$defs/reopenPayload"}},
+      "allOf": [
+        {
+          "if": {"properties": {"stage": {"const": "validate"}}, "required": ["stage"]},
+          "then": {"properties": {"payload": {"properties": {"operator": {"enum": ["controller:secret-scan", "operator:secret-rework"]}, "carried_receipts": {"maxItems": 0}}}}}
+        },
+        {
+          "if": {"properties": {"stage": {"const": "publish"}}, "required": ["stage"]},
+          "then": {"properties": {"payload": {"properties": {"operator": {"const": "operator:secret-rework"}, "carried_receipts": {"maxItems": 0}}}}}
+        }
+      ]
+    }
   }
 }

@@ -1,6 +1,7 @@
 require "hive/patrol_fix"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/secret_rework"
 require "json"
 require "time"
 
@@ -37,6 +38,9 @@ module Hive
         current = receipts.select { |receipt| current_receipt?(receipt, manifest) }
         decision = current_decision(current)
         last_decision = receipts.reverse.find { |receipt| receipt["kind"] == "decision" }
+        last_review = receipts.reverse.find do |receipt|
+          receipt["kind"] == "decision" && receipt["stage"] == "review"
+        end
         validation = current.reverse.find { |receipt| receipt["kind"] == "validation" }
         if validation.nil?
           carried = current.reverse.find do |receipt|
@@ -59,6 +63,8 @@ module Hive
         state = missing_terminal_authority ? "invalid" : "current"
         diagnostic = if missing_terminal_authority
           { "summary" => "Patrol-fix done requires an exact current pull-request receipt, rejection, linked escalation, or valid evidence-closure receipt." }
+        elsif SecretRework.decision?(decision) && outcome
+          { "code" => SecretRework::CODE, "summary" => SecretRework::ESCALATION_SUMMARY }
         elsif publication_block
           {
             "code" => publication_block.dig("payload", "code"),
@@ -83,7 +89,7 @@ module Hive
           "outcome" => outcome,
           "blocker_owner" => outcome&.fetch("blocker_owner", nil),
           "validation" => validation&.fetch("payload", nil),
-          "review" => last_decision && last_decision["stage"] == "review" ? last_decision.fetch("payload") : nil,
+          "review" => last_review&.fetch("payload"),
           "publication" => publication&.fetch("payload", nil),
           "timing" => timing_projection(receipts, current, outcome),
           "archived" => done && state == "current",
@@ -124,6 +130,14 @@ module Hive
         return nil unless decision
         route = decision.dig("payload", "route")
         return nil unless PARKED_ROUTES.include?(route)
+        if SecretRework.decision?(decision)
+          # The pre-publication gate exhausted its rework budget: the same
+          # operator-owned secret park that Publish records, one stage earlier.
+          return {
+            "kind" => "publication_blocked", "receipt_id" => decision.fetch("receipt_id"),
+            "rationale" => SecretRework::ESCALATION_SUMMARY, "blocker_owner" => "operator"
+          }
+        end
 
         {
           "kind" => { "reject" => "rejected", "escalate" => "escalated" }.fetch(route, route),
@@ -159,13 +173,19 @@ module Hive
         parked_seconds = 0
         parked_since = nil
         parked = {}
+        # An operator secret rework of a Publish block reopens through its own
+        # decision; that decision names the block whose park it releases.
+        releases = {}
         receipts.each do |receipt|
           if (receipt["kind"] == "decision" &&
               PARKED_ROUTES.include?(receipt.dig("payload", "route"))) ||
              receipt["kind"] == "publication_block"
             parked[receipt.fetch("receipt_id")] = receipt.fetch("recorded_at")
+          elsif receipt["kind"] == "decision" && receipt.dig("payload", "blocked_receipt_id")
+            releases[receipt.fetch("receipt_id")] = receipt.dig("payload", "blocked_receipt_id")
           elsif receipt["kind"] == "reopen"
-            opened = parked.delete(receipt.dig("payload", "outcome_receipt_id"))
+            outcome_id = receipt.dig("payload", "outcome_receipt_id")
+            opened = parked.delete(releases.fetch(outcome_id, outcome_id))
             parked_seconds += elapsed_seconds(opened, receipt.fetch("recorded_at")) if opened
           end
         end

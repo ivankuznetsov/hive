@@ -7,6 +7,30 @@ updated: 2026-11-14
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
 ---
 
+## Patrol Fix secret rework limits (2026-11-14)
+
+The pre-publication gate scans only the fix's commit range. The PR title and
+body are built later from finding and review evidence, so a secret there still
+parks at Publish, and `workflow.secret_rework` reports such title/body-only
+blocks `unavailable`; closure remains the only exit. The gate also cannot see
+upstream drift between Validate and Publish (a changed `default_branch` or
+operator `betterleaks.ignore`), so Publish can still block a range the gate
+passed. The operator action refuses a Publish block when the re-scan of the
+blocked range is now clean (for example after an exact fingerprint exception);
+there is no "re-publish this generation" action, and that block stays parked.
+It also refuses when the worktree HEAD moved after the block.
+
+Automatic secret reworks share `patrol.max_rework_cycles` with review, so a
+task that spends its budget on secret reworks reaches review without a
+`rework` route. Operator releases do not consult the budget, are not limited in
+count, and record only the fixed `operator:secret-rework` identity in the
+reopen receipt, not the human operator's name. The gate's feedback asks the
+agent to rewrite every commit since Base; an agent that only adds a follow-up
+commit fails the gate again and spends budget. The live todero tasks blocked on
+2026-11-14 have not yet been released with the new action; their
+`blocked_fields` (`["diff"]`) make them eligible. The operating skill's
+workflow-actions reference still documents only routine `hive act` actions.
+
 ## Operational payload file: residual write volume and labels (2026-11-14)
 
 The daemon's `hive-status` payload body moved out of the `daemon_runtime` row

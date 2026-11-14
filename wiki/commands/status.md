@@ -513,9 +513,23 @@ in-repository producer, consumer, fixture, and operating skill to v2; v1 is no
 longer published or supported.
 
 A Patrol Fix publication secret park reports `waiting_on_you`, owned by the
-operator, with a sanitized `secret_detected` reason. It offers no executable
-recovery action, including when the daemon is enabled. Ordinary retry cannot
-release the same blocked generation.
+operator, with a sanitized `secret_detected` reason. Its routine `action` stays
+null, including when the daemon is enabled; ordinary retry cannot release the
+blocked generation. The task's `secret_rework` field (next to `closure`)
+reports `available` or `unavailable`, the block stage and receipt ID, a
+remediation reason (`secret_rework_available` / `secret_rework_unavailable`),
+and, when available, an operator-attested `workflow.secret_rework` descriptor
+with `confirmation_required: true` plus its exact command:
+
+```bash
+hive act workflow.secret_rework PROJECT:SLUG --observation TOKEN --confirm
+```
+
+It returns the patch to Fix as a new generation with redacted file/line/rule
+findings. `hive act` refuses it without `--confirm`, refuses it under remote
+authority, and treats a replay of an applied token as `already_reworked`.
+Title/body-only blocks are `unavailable` because a fix cannot change those
+bytes. Status reads only receipts; the scan runs when the operator acts.
 
 Recovery recommendations bind to the exact current `marker_id`. A task carrying
 an old id-less recoverable marker reports `recovery_migration_required` and

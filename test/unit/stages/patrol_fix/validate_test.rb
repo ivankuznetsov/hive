@@ -100,7 +100,12 @@ class PatrolFixValidateStageTest < Minitest::Test
       checkout = nil
       leaked_root = nil
       result = nil
+      original_rmdir = Dir.method(:rmdir)
       replacement = lambda do |path|
+        # Only the disposable validation root fails; the pre-publication
+        # secret scan's own temporary directory still cleans up normally.
+        return original_rmdir.call(path) unless File.basename(path).start_with?("hive-patrol-fix-validation-")
+
         leaked_root = path
         raise Errno::ENOTEMPTY, path
       end

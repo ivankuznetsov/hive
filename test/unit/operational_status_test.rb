@@ -367,6 +367,31 @@ class OperationalStatusTest < Minitest::Test
     assert_nil projected["action"]
   end
 
+  def test_unreadable_secret_block_reports_rework_unavailable_without_an_action
+    row = task(
+      action: "patrol_fix_publication_blocked", slug: "publication-block",
+      stage: "5-publish", marker: "none"
+    ).merge("workflow" => "patrol-fix", "suggested_command" => nil)
+    unreadable = ->(**) { raise Hive::PatrolFix::ReceiptStore::InvalidReceipt, "receipt journal is unreadable" }
+    result = with_replaced_singleton_method(Hive::PatrolFix::SecretRework, :current_block, unreadable) do
+      project(status_payload(row))
+    end
+    projected = result.fetch("tasks").first
+
+    rework = projected.fetch("secret_rework")
+    assert_equal [ "unavailable", "5-publish", nil, nil, nil ],
+                 rework.values_at("status", "stage", "blocked_receipt_id", "command", "action")
+    assert_includes rework.fetch("remediation"), "(InvalidReceipt)"
+    assert_nil projected["action"]
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert schema.valid?(result), schema.validate(result).map { |error| error.fetch("error") }.inspect
+
+    absent = with_replaced_singleton_method(Hive::PatrolFix::SecretRework, :current_block, ->(**) { nil }) do
+      project(status_payload(row)).fetch("tasks").first
+    end
+    assert_nil absent.fetch("secret_rework")
+  end
+
   def test_operational_snapshot_identifies_the_active_dogfood_build
     sha = "0864de726d9a75f7bc46610a89db851c90b402ee"
     result = Hive::OperationalStatus.new(

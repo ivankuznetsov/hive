@@ -422,7 +422,7 @@ intentionally not used.
 
 ## Community
 
-The public Hive Discord group is `https://discord.gg/Qg5E7rMt`. Keep the
+The public Hive Discord group is `https://discord.gg/rBTM7gqCNX`. Keep the
 GitHub README link pointed at that invite unless a newer canonical community
 URL is announced.
 

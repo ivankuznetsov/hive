@@ -24,7 +24,7 @@ module Hive
                      systemd_scope: -> { self.class.systemd_scope_available? },
                      systemd_run: "systemd-run",
                      memory_max: false, memory_swap_max: false,
-                     systemd_version: nil,
+                     systemd_version: nil, reap_containers: true,
                      process_registry: nil, bookkeeping_timeout_sec: BookkeepingRetry::PRESTART_BUDGET_SEC,
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      clock: -> { Time.now.utc },
@@ -44,6 +44,7 @@ module Hive
         @systemd_run = systemd_run
         @memory_max = memory_max
         @memory_swap_max = memory_swap_max
+        @reap_containers = reap_containers != false
         @systemd_version = systemd_version || -> { MemoryLimit.systemd_version(@systemd_run) }
         @process_registry = process_registry
         @hive_executable = hive_executable
@@ -160,6 +161,8 @@ module Hive
             "--kill-grace-sec", @kill_grace_sec.to_s
           ]
           command.concat([ "--timeout-sec", @timeout_sec.to_s ]) if @timeout_sec
+          # Only the opt-out is spelled out, so the default argv is unchanged.
+          command.concat([ "--reap-containers", "false" ]) unless @reap_containers
           command = systemd_scope_command(record, command, scope_properties) if use_systemd_scope
           env = ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }.merge(
             "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,

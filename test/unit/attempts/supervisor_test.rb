@@ -1538,6 +1538,139 @@ class AttemptsSupervisorTest < Minitest::Test
     assert_instance_of Hive::Attempts::ScopeReaper, supervisor.instance_variable_get(:@scope_reaper)
   end
 
+  def test_attempt_worker_is_tagged_and_its_containers_reaped_before_the_scope
+    print_override = [ "/bin/sh", "-c", 'printf "override=%s\n" "$CONTAINERS_CONF_OVERRIDE"' ]
+    with_attempt(worker_argv: print_override) do |store, attempt|
+      order = []
+      podman = container_podman([ [ podman_container("todero-test-pg") ], [] ], order)
+      scope = recording_scope_reaper("clean")
+      scope.define_singleton_method(:reap) { |**| order << :scope; Hive::Attempts::ScopeReaper::Result.new(
+        status: "clean", unit: "u", reaped: [], survivors: [], error: nil
+      ) }
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1, kill_grace_sec: 0.3,
+        scope_reaper: scope, container_reaper: container_reaper(podman)
+      )
+
+      assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      conf = File.join(store.output_directory(attempt.attempt_id, "containers"), "containers.conf")
+      assert_includes File.read(conf), '"hive.attempt=attempt-1"'
+      assert_includes File.read(conf), '"hive.project=demo"'
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "override=#{conf}\n"
+      assert_includes log, "hive-attempt: attempt_containers {"
+      assert_includes log, '"name":"todero-test-pg"'
+      assert_equal "annotation=hive.attempt=attempt-1", podman.calls.first.first[4]
+      assert_equal %i[ps rm ps scope], order
+    end
+  end
+
+  def test_container_reap_failures_never_change_the_attempt_outcome
+    [
+      ->(_argv, _timeout) { Hive::Attempts::ContainerReaper::Command.new(status: :timeout, output: "") },
+      ->(_argv, _timeout) { raise IOError, "podman pipe" }
+    ].each do |runner|
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 0" ]) do |store, attempt|
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+          stale_sec: 1, first_heartbeat_timeout_sec: 1,
+          scope_reaper: recording_scope_reaper("clean"),
+          container_reaper: Hive::Attempts::ContainerReaper.new(
+            attempt_id: attempt.attempt_id, runner: runner, environment: {}
+          )
+        )
+
+        assert_equal 0, Timeout.timeout(10) { supervisor.run }
+        terminal = store.fetch(attempt.attempt_id)
+        assert_equal "succeeded", terminal.outcome
+        assert_equal 0, terminal.receipt.fetch("exit_status")
+        assert_includes attempt_log_text(store, terminal), '"status":"failed"'
+      end
+    end
+
+    with_attempt(worker_argv: [ "/bin/sh", "-c", "exit 4" ]) do |store, attempt|
+      exploding = Object.new
+      exploding.define_singleton_method(:tag) do |**|
+        Hive::Attempts::ContainerReaper::Tagging.new(status: "tagged", environment: {}, error: nil)
+      end
+      exploding.define_singleton_method(:reap) { |**| raise "reaper bug" }
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        scope_reaper: recording_scope_reaper("clean"), container_reaper: exploding
+      )
+
+      assert_equal 4, Timeout.timeout(10) { supervisor.run }
+      assert_equal "failed", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  def test_project_opt_out_neither_tags_nor_reaps_containers
+    print_override = [ "/bin/sh", "-c", 'printf "override=[%s]\n" "$CONTAINERS_CONF_OVERRIDE"' ]
+    with_attempt(worker_argv: print_override) do |store, attempt|
+      podman = container_podman([], [])
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+        stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        scope_reaper: recording_scope_reaper("clean"),
+        container_reaper: container_reaper(podman), reap_containers: false
+      )
+
+      with_env("CONTAINERS_CONF_OVERRIDE" => nil) do
+        assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      end
+      terminal = store.fetch(attempt.attempt_id)
+      log = attempt_log_text(store, terminal)
+      assert_includes log, "override=[]\n"
+      refute_includes log, "attempt_containers"
+      assert_empty podman.calls
+      refute File.exist?(File.join(store.output_directory(attempt.attempt_id, "containers"), "containers.conf"))
+    end
+  end
+
+  def test_an_operator_containers_conf_override_is_kept_and_logged_untagged
+    print_override = [ "/bin/sh", "-c", 'printf "override=%s\n" "$CONTAINERS_CONF_OVERRIDE"' ]
+    with_attempt(worker_argv: print_override) do |store, attempt|
+      podman = container_podman([], [])
+      with_env("CONTAINERS_CONF_OVERRIDE" => "/etc/operator-containers.conf") do
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new(CLAIM_CAPABILITY), heartbeat_sec: 0.01,
+          stale_sec: 1, first_heartbeat_timeout_sec: 1,
+          scope_reaper: recording_scope_reaper("clean"),
+          container_reaper: Hive::Attempts::ContainerReaper.new(attempt_id: attempt.attempt_id, runner: podman)
+        )
+
+        assert_equal 0, Timeout.timeout(10) { supervisor.run }
+      end
+      log = attempt_log_text(store, store.fetch(attempt.attempt_id))
+      assert_includes log, "override=/etc/operator-containers.conf\n"
+      assert_includes log, '"status":"untagged"'
+      assert_empty podman.calls
+    end
+  end
+
+  def test_supervisor_skips_the_container_reap_when_no_worker_was_tagged
+    reaper = Object.new
+    reaper.define_singleton_method(:reap) { |**| flunk "an untagged attempt must not run podman" }
+    supervisor = Hive::Attempts::Supervisor.new(
+      store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new, container_reaper: reaper
+    )
+
+    assert_nil supervisor.send(:reap_attempt_containers, nil)
+    assert_instance_of Hive::Attempts::ContainerReaper,
+                       Hive::Attempts::Supervisor.new(
+                         store: Object.new, attempt_id: "attempt-1", claim_io: StringIO.new
+                       ).instance_variable_get(:@container_reaper)
+  end
+
   def test_signalled_patrol_attempt_reports_memory_limit_agent_reason
     worker_argv = [ "hive", "run", "durable-task" ]
     with_attempt(
@@ -1935,6 +2068,28 @@ class AttemptsSupervisorTest < Minitest::Test
       result
     end
     reaper
+  end
+
+  def podman_container(name)
+    { "Id" => Digest::SHA256.hexdigest(name), "Names" => [ name ], "Image" => "docker.io/library/postgres:16",
+      "State" => "running" }
+  end
+
+  def container_podman(listings, order)
+    calls = []
+    runner = lambda do |argv, timeout|
+      calls << [ argv, timeout ]
+      order << argv[1].to_sym
+      next Hive::Attempts::ContainerReaper::Command.new(status: :ok, output: "") if argv[1] == "rm"
+
+      Hive::Attempts::ContainerReaper::Command.new(status: :ok, output: JSON.generate(listings.shift || []))
+    end
+    runner.define_singleton_method(:calls) { calls }
+    runner
+  end
+
+  def container_reaper(runner)
+    Hive::Attempts::ContainerReaper.new(attempt_id: "attempt-1", runner: runner, environment: {})
   end
 
   def attempt_log_text(store, terminal)

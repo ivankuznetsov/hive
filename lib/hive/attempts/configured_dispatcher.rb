@@ -102,6 +102,7 @@ module Hive
           bookkeeping_timeout_sec: cfg.fetch("attempt_bookkeeping_timeout_sec"),
           timeout_sec: LaunchPolicy.timeout_sec(daemon: daemon, argv: argv),
           kill_grace_sec: LaunchPolicy.kill_grace_sec(daemon: daemon),
+          reap_containers: cfg.fetch("attempt_reap_containers", true) != false,
           **LaunchPolicy.memory_limits(daemon: daemon)
         )
         @dispatcher_class.new(

@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-11-09
+updated: 2026-11-14
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -194,9 +194,76 @@ and the terminal receipt is committed.
   secrets. A clean scope logs nothing. The terminal receipt schema is
   unchanged.
 - Reaping never raises into the supervisor. Containers whose processes live
-  in a separate cgroup (podman with the systemd cgroup manager puts them in
-  their own `libpod-*.scope`) are outside this attempt's scope and are not
-  touched. Only the leftovers inside the attempt scope are killed.
+  in a separate cgroup (podman with the systemd cgroup manager puts the
+  container in `libpod-<id>.scope` and conmon in `libpod-conmon-<id>.scope`)
+  are outside this attempt's scope and are not touched here. Only the
+  leftovers inside the attempt scope are killed; containers are handled by
+  `ContainerReaper` (next section), which runs first.
+
+## Attempt containers
+
+Rootless Podman containers escape the attempt scope, so ScopeReaper never
+saw them. Agents left Postgres containers published on `0.0.0.0` running for
+days (`todero-babysit64-pg`, `todero-test-pg2`, `todero-patrol-navigator-pg`),
+and an earlier one held a terminal attempt's scope open for 7 hours.
+`Attempts::ContainerReaper` (`lib/hive/attempts/container_reaper.rb`) tags
+and removes them by annotation instead of by cgroup.
+
+- **Tagging.** Before spawning the worker, the supervisor writes
+  `open/<attempt_id>/containers/containers.conf` (mode 0600) in the attempt
+  payload root:
+  `[containers] annotations = ["hive.attempt=<id>", "hive.project=<name>", {append=true}]`,
+  and sets `CONTAINERS_CONF_OVERRIDE` to it in the worker environment. The
+  worker's agent CLI, its tool shells, review CI and council commands inherit
+  it. Isolated agent launches keep it too (`Hive::Agent::ISOLATED_CHILD_ENV_KEYS`).
+  `annotations` is the containers.conf option (`label` there is SELinux
+  separation, not a container label). Verified live on Podman 6.1.4: a
+  rootless `podman run` from a child shell carries both annotations, a CLI
+  `--annotation` is merged in, and a file named by `CONTAINERS_CONF` is still
+  honoured because the override loads last and `{append=true}` appends.
+  The file is kept after the attempt: Podman refuses to run when the override
+  path is missing.
+- **Operator overrides.** Podman reads one override file and TOML has no
+  include, so an inherited `CONTAINERS_CONF_OVERRIDE` is left as it is.
+  That attempt is not tagged and logs
+  `hive-attempt: attempt_containers {"status":"untagged","error":"operator_containers_conf_override",…}`.
+  An agent's own `CONTAINERS_CONF` keeps working (merge, not skip).
+- **Reaping.** On every supervisor exit path, after the worker is gone and
+  before ScopeReaper, `podman ps --all --filter annotation=hive.attempt=<id> --format json`
+  then `podman rm --force --volumes --time <min(kill grace, 10)> <ids>` and a
+  re-list. The annotation filter is an exact value match (`attempt-1` does not
+  select `attempt-10`). Containers go first so `podman rm` stops them through
+  a live conmon and Podman records a clean exit. All calls share one
+  deadline: 30 s, or the quiescence grace (at least 1 s) while quiescing.
+  Each Podman call runs in its own process group and is TERM-then-KILLed at
+  the deadline. It runs only when the worker was actually tagged, at most once.
+- **Volumes.** `--volumes` removes only the reaped containers' anonymous
+  volumes (an image `VOLUME`, such as Postgres's data directory), which would
+  otherwise leak one per container. `podman rm` never removes named volumes,
+  and those are how a project keeps data across containers on purpose, so
+  they stay. Verified live: the anonymous volume went, the named one stayed.
+- **Evidence.** A notable result (`reaped`, `incomplete`, `failed`,
+  `untagged`) appends one supervisor-channel line to the attempt log:
+  `hive-attempt: attempt_containers {"annotation":…,"status":…,"reaped":[{"id":<short id>,"name":…,"image":…,"state":…}],"survivors":[…]}`.
+  `clean`, `no_podman` (binary missing) and opted-out attempts log nothing.
+  The terminal receipt schema is unchanged.
+- **Outcome safety.** Reaping is best-effort: a Podman error, timeout or
+  exception becomes a logged result and never changes the outcome, exit
+  status or receipt.
+- **Crash recovery.** A lost attempt's supervisor never reaped.
+  `LostOutcomeProcessor#process` reaps the lost attempt's tagged containers
+  once the worker cleanup is safe (worker absent or terminated) and before
+  the dirty-state capture, with a 15 s bound and 5 s stop time because it
+  runs in a daemon tick. A notable result is recorded as the daemon log event
+  `attempt_containers_reaped` (the lost record is immutable). The tag is the
+  consent: opted-out attempts were never tagged, so this path needs no
+  config read.
+- **Opt-out.** Project config `attempt_reap_containers: false` (default
+  `true`) reaches the supervisor as `--reap-containers false`; the argv is
+  unchanged otherwise. Opted-out attempts get neither the tag nor the reap.
+  See [[modules/config]].
+- **Binary.** `HIVE_PODMAN_BIN` overrides `podman` on `PATH`. The test helper
+  points it at a missing path so the suite never touches host containers.
 
 Hive's own drain and wait paths do not count scopes. Operational task
 liveness uses task-lock and agent pid identity. Daemon status liveness and

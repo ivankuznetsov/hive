@@ -2,6 +2,7 @@ require "json"
 require "rbconfig"
 require "hive/atomic_file"
 require "hive/attempts/capability"
+require "hive/attempts/container_reaper"
 require "hive/attempts/diagnostic_channel"
 require "hive/attempts/evidence_channel"
 require "hive/attempts/memory_limit"
@@ -41,7 +42,7 @@ module Hive
                      install_signal_handlers: false, process_registry: nil,
                      reservation_id: ENV["HIVE_ATTEMPT_RESERVATION_ID"],
                      oom_kill_counter: -> { MemoryLimit.oom_kill_count },
-                     scope_reaper: nil)
+                     scope_reaper: nil, reap_containers: true, container_reaper: nil)
         @store = store
         @attempt_id = attempt_id
         @claim_io = claim_io
@@ -63,6 +64,10 @@ module Hive
         @oom_kill_counter = oom_kill_counter
         @scope_reaper = scope_reaper || ScopeReaper.new(attempt_id: attempt_id)
         @scope_reaped = false
+        @reap_containers = reap_containers != false
+        @container_reaper = container_reaper || ContainerReaper.new(attempt_id: attempt_id)
+        @container_tagging = nil
+        @containers_reaped = false
         @failure_reason = nil
         @wrapper_registered = false
         @ready_sent = false
@@ -132,7 +137,7 @@ module Hive
         install_signal_handlers! if @install_signal_handlers
 
         exit_status, outcome, record, provider_signal, diagnostic_frame = run_worker(record, log)
-        reap_scope_leftovers(log)
+        reap_attempt_leftovers(log)
         log.close
         log_reference = OutputReference.build(log.path, root: @store.root)
         if provider_signal
@@ -199,7 +204,7 @@ module Hive
         Hive::ExitCodes::TEMPFAIL
       rescue StandardError => e
         terminate_worker_group
-        reap_scope_leftovers(log)
+        reap_attempt_leftovers(log)
         begin
           log&.append(:supervisor, "hive attempt supervisor failed: #{e.class}: #{e.message}\n")
           log&.close
@@ -235,7 +240,7 @@ module Hive
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => e.message)
         Hive::ExitCodes::SOFTWARE
       ensure
-        reap_scope_leftovers(log)
+        reap_attempt_leftovers(log)
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => "wrapper_exited")
         @ready_io&.close unless @ready_io&.closed?
         @claim_io&.close unless @claim_io&.closed?
@@ -247,7 +252,7 @@ module Hive
 
       def handle_bookkeeping_busy(busy, log)
         terminate_worker_group
-        reap_scope_leftovers(log)
+        reap_attempt_leftovers(log)
         log&.append(:supervisor, "hive attempt supervisor: #{busy.reason} (#{busy.operation})\n") unless log&.closed?
         log&.close unless log&.closed?
         if @last_durable_record && !@last_durable_record.final?
@@ -264,6 +269,66 @@ module Hive
         signal_ready("claimed" => false, "attempt_id" => @attempt_id,
                      "error" => storage_error.message, "reason" => busy.reason)
         Hive::ExitCodes::TEMPFAIL
+      end
+
+      # Containers first: `podman rm` stops them through a still-running
+      # conmon, so Podman records a clean exit, before ScopeReaper kills
+      # whatever else is left in the scope (including anything those Podman
+      # calls left behind).
+      def reap_attempt_leftovers(log)
+        reap_attempt_containers(log)
+        reap_scope_leftovers(log)
+      end
+
+      # Removes the Podman containers this attempt's worker tagged (see
+      # ContainerReaper). Runs at most once, only after the worker was spawned
+      # with the tagging override, and never raises: a Podman failure or
+      # timeout is logged and cannot change the attempt outcome.
+      def reap_attempt_containers(log)
+        return if @containers_reaped || @container_tagging.nil?
+
+        @containers_reaped = true
+        result = if @container_tagging.tagged?
+          @container_reaper.reap(
+            timeout_sec: container_reap_timeout_sec,
+            stop_timeout_sec: effective_kill_grace
+          )
+        elsif @container_tagging.status == "untagged"
+          @container_reaper.untagged_result(@container_tagging)
+        end
+        return unless result&.notable?
+
+        log.append(:supervisor, result.journal_line) if log && !log.closed?
+      rescue StandardError
+        nil
+      end
+
+      # During quiescence the reap shares the shortened kill grace so the
+      # terminal receipt still lands inside the controller's window.
+      def container_reap_timeout_sec
+        return ContainerReaper::DEFAULT_TIMEOUT_SEC unless @quiescence_grace_sec
+
+        [ @quiescence_grace_sec.to_f, 1.0 ].max
+      end
+
+      # The worker environment that tags every container it creates with
+      # this attempt. Opted-out projects (`attempt_reap_containers: false`)
+      # get neither the tag nor the reap. Never raises.
+      def container_environment(record)
+        @container_tagging = if @reap_containers
+          directory = @store.output_directory(
+            record.attempt_id, ContainerReaper::CONF_DIRECTORY, create: true
+          )
+          @container_reaper.tag(directory: directory, project: record["project"])
+        else
+          ContainerReaper::Tagging.new(status: "disabled", environment: {}, error: nil)
+        end
+        @container_tagging.environment
+      rescue StandardError => e
+        @container_tagging = ContainerReaper::Tagging.new(
+          status: "untagged", environment: {}, error: "#{e.class}: #{e.message}"
+        )
+        {}
       end
 
       # Once the worker is gone nothing else may keep the attempt's scope
@@ -315,7 +380,7 @@ module Hive
       def run_worker(record, log)
         stdout_r, stdout_w = IO.pipe
         stderr_r, stderr_w = IO.pipe
-        env = scrubbed_attempt_environment
+        env = scrubbed_attempt_environment.merge(container_environment(record))
         spawn_options = {
           in: File::NULL, out: stdout_w, err: stderr_w, pgroup: true,
           close_others: true

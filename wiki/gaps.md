@@ -272,11 +272,11 @@ merge remain pending.
   `scope_leftovers` field would need a receipt version bump.
 - Killing podman's `conmon` skips podman's own exit cleanup, so the
   container can stay in podman's state as `Exited` or `Stopping` until the
-  next `podman` command repairs it. The container's processes are killed
-  only when they share the attempt scope's cgroup. Under the systemd
-  cgroup manager they run in a separate `libpod-*.scope`, which this reaper
-  never touches, so a container can outlive the attempt there. Not verified
-  against a live podman run.
+  next `podman` command repairs it. Under the systemd cgroup manager the
+  container runs in `libpod-<id>.scope` and conmon in
+  `libpod-conmon-<id>.scope` (seen live on Podman 6.1.4), so this reaper
+  never touches them. Tagged containers are now removed by
+  `ContainerReaper` before this reaper runs; see the next section.
 - Pid reuse between the membership read and the signal is narrowed by a
   `/proc/<pid>/cgroup` re-check, not closed. Closing it needs pidfds or
   cgroup v2 `cgroup.kill` on a sub-cgroup that excludes the supervisor.
@@ -288,6 +288,40 @@ merge remain pending.
   status `running=3`/`live=3`, and the user journal shows other attempt
   scopes really active at the time. So that drain timeout may have been
   counting live attempts, not only the leftover scope.
+
+## Attempt container reaping (2026-11-14)
+
+- Only containers created through the Podman CLI in the attempt's
+  environment are tagged. Real Docker (`dockerd`), `docker compose` or other
+  clients talking to `podman system service` over its API socket, and
+  `podman --remote` / `podman machine` (macOS) create containers in a process
+  that never sees `CONTAINERS_CONF_OVERRIDE`, so they stay untagged. The
+  `podman-docker` shim should work because it execs `podman`; not verified.
+- An agent that exports its own `CONTAINERS_CONF_OVERRIDE` in a tool shell,
+  or that runs Podman against another storage root (`--root`,
+  `CONTAINERS_STORAGE_CONF`, `--connection`), escapes tagging or the
+  supervisor's `podman ps`. An operator-level override disables tagging for
+  every attempt (logged `untagged`).
+- Bounded managed-workflow actors (`WorkflowPackage::RuntimePolicy` non-yolo
+  scopes) have a closed environment that does not carry the override. They
+  are not expected to run Podman, but nothing enforces that.
+- Pods are not handled. `podman rm --force` of a pod's infra container
+  fails, which leaves the result `incomplete`; the pod itself is never
+  removed.
+- Containers go before ScopeReaper so conmon is alive during `podman rm`.
+  A setsid'ed leftover still in the scope could create a new tagged
+  container after the listing; nothing re-lists after ScopeReaper.
+- The crash-recovery reap is recorded only in the daemon log
+  (`attempt_containers_reaped`), not on the lost attempt record or in its
+  attempt log. A supervisor killed while no daemon or one-shot run processes
+  lost outcomes leaves its containers until one does.
+- Containers leaked before this change carry no annotation and must be
+  removed by hand.
+- During quiescence the reap gets at least 1 s even when the quiescence
+  grace is shorter; a slow Podman then logs `failed` and leaves the
+  containers.
+- The per-attempt `containers.conf` stays under `open/<attempt_id>/containers/`
+  and is not sealed or pruned with the attempt's payloads.
 
 ## Review base-conflict gate and rewind archive (2026-11-08)
 

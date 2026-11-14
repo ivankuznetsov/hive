@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/lost_outcome"
 require "hive/attempts/repository"
+require "hive/daemon/logger"
 
 class AttemptsLostOutcomeTest < Minitest::Test
   include HiveTestHelper
@@ -51,6 +52,60 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert Hive::Markers.current(task.state_file).none?,
                "the attempt ledger owns loss recovery; it must not create a second marker lifecycle"
       end
+    end
+  end
+
+  def test_crash_recovery_reaps_the_lost_attempts_tagged_containers
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeTransition.new(store: store)
+      calls = []
+      listings = [
+        [ { "Id" => "d" * 64, "Names" => [ "todero-babysit64-pg" ], "Image" => "postgres:16", "State" => "running" } ],
+        []
+      ]
+      runner = lambda do |argv, timeout|
+        calls << [ argv, timeout ]
+        output = argv[1] == "ps" ? JSON.generate(listings.shift) : ""
+        Hive::Attempts::ContainerReaper::Command.new(status: :ok, output: output)
+      end
+      events = []
+      logger = Object.new
+      logger.define_singleton_method(:event) { |name, **attrs| events << [ name, attrs ] }
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes,
+        process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil },
+        logger: logger,
+        container_reaper: lambda { |attempt|
+          Hive::Attempts::ContainerReaper.new(attempt_id: attempt.attempt_id, runner: runner, environment: {})
+        }
+      )
+
+      assert_equal "ready", processor.process(lost, now: NOW + 1).fetch("phase")
+      assert_equal "annotation=hive.attempt=lost-no-worker", calls.first.first[4]
+      assert_equal %w[ps rm ps], calls.map { |argv, _| argv[1] }
+      assert_operator calls.first.last, :<=, Hive::Attempts::LostOutcomeProcessor::LOST_CONTAINER_REAP_TIMEOUT_SEC
+      name, attrs = events.fetch(0)
+      assert_equal :attempt_containers_reaped, name
+      assert_equal "lost-no-worker", attrs.fetch(:attempt_id)
+      assert_equal "reaped", attrs.fetch(:status)
+      assert_equal "todero-babysit64-pg", attrs.fetch(:reaped).first.fetch("name")
+      assert_includes Hive::Daemon::Logger::EVENTS, :attempt_containers_reaped
+    end
+  end
+
+  def test_a_failing_container_reap_never_blocks_lost_recovery
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Repository.new(root: root, migrate: true)
+      lost = lost_without_worker(store)
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: Hive::Attempts::LostOutcomeTransition.new(store: store),
+        process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil },
+        container_reaper: ->(_attempt) { raise "podman exploded" }
+      )
+
+      assert_equal "ready", processor.process(lost, now: NOW + 1).fetch("phase")
     end
   end
 

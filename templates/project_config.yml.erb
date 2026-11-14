@@ -91,6 +91,13 @@ claude:
 # Arbitrary custom-workflow stage names are intentionally not valid here;
 # put `model:` / `effort:` on their workflow descriptor instead.
 
+# Durable attempts tag every rootless Podman container they create with
+# `hive.attempt=<attempt id>` and `hive.project=<name>` (through a
+# CONTAINERS_CONF_OVERRIDE fragment) and remove those containers, plus their
+# anonymous volumes, when the attempt ends. Named volumes are kept. Set false
+# if this project keeps containers alive across attempts on purpose.
+# attempt_reap_containers: true
+
 # Optional per-stage agent tool scopes. Default is yolo, which preserves
 # today's stage behavior. Non-yolo scopes are supported by Claude and OpenCode
 # through their native enforcement contracts, not an OS sandbox; see

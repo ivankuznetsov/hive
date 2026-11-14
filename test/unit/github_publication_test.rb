@@ -1059,7 +1059,8 @@ class GithubPublicationTest < Minitest::Test
         calls << [ args, kwargs ]
         raise Hive::SecretScanner::Unavailable, "stop after scan"
       end
-      with_replaced_singleton_method(Hive::SecretScanner, :git_match?, clean) do
+      # Publication and Patrol Fix's pre-publication gate share this seam.
+      with_replaced_singleton_method(Hive::SecretScanner, :git_findings, clean) do
         assert_raises(Hive::GithubPublication::Blocked) do
           Hive::GithubPublication::Controller.new(
             state_path: state_path(repo), git_gateway: CountingGit.new(remote), github_gateway: FakeGithub.new
@@ -1076,7 +1077,7 @@ class GithubPublicationTest < Minitest::Test
       git = CountingGit.new(remote)
       path = state_path(repo)
       unavailable = ->(*) { raise Hive::SecretScanner::Unavailable, "scanner unavailable" }
-      with_replaced_singleton_method(Hive::SecretScanner, :git_match?, unavailable) do
+      with_replaced_singleton_method(Hive::SecretScanner, :git_findings, unavailable) do
         error = assert_raises(Hive::GithubPublication::Blocked) do
           Hive::GithubPublication::Controller.new(
             state_path: path, git_gateway: git, github_gateway: FakeGithub.new

@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-11-09
+updated: 2026-11-14
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -744,8 +744,21 @@ If the pre-effect secret scan returns `secret_detected`, Publish appends one
 names, review/fix/validation receipt IDs, HEAD/diff hashes, policy version, and
 fixed owner/summary fields. A publication receipt and block receipt cannot both
 be terminal authority for the same generation. The projection reports
-`publication_blocked` and remains parked on replay. No publication-specific
-reopen receipt, recovery action, or stage-routing intent is created.
+`publication_blocked` and remains parked on replay; Publish itself never
+reopens it.
+
+Validate runs the same commit-range scan before validation commands. A finding
+becomes a validate-stage `decision` receipt (`code: secret_detected`, redacted
+`findings` of path/line/rule): `rework` routes back to `2-fix` through the
+route-transition intent with a `reopen` at stage `validate` (operator
+`controller:secret-scan`); `blocked` parks in `3-validate` with the same
+`publication_blocked` projection once the shared `patrol.max_rework_cycles`
+budget is spent. The operator-attested `workflow.secret_rework` action releases
+a current secret block: for a Publish block it appends a publish-stage
+`decision` carrying `blocked_receipt_id`, and either way the `reopen` carries
+operator `operator:secret-rework` and no carried receipts. Receipt validation
+admits validate/publish reopens only for those two operators. A replayed token
+returns `already_reworked` without another generation.
 
 Admission may bypass remote reconciliation only by supplying this
 same full canonical publication payload, including host/repository/base,

@@ -1817,6 +1817,11 @@ module Hive
       Destructive, administrative, destination-changing, release, and
       publication actions must use their direct commands after operator
       confirmation.
+
+      The one operator-attested exception is `workflow.secret_rework`, which
+      operational status advertises on a Patrol Fix task whose publication the
+      secret policy blocked. It returns the patch to Fix as a new generation
+      with redacted findings, runs only locally, and requires --confirm.
     DESC
     # Commands::Act owns the typed usage error. Keeping this optional at the
     # Thor layer prevents the required-option banner from widening every help
@@ -1825,9 +1830,12 @@ module Hive
                          desc: "opaque observation token from operational status"
     option :project, type: :string, desc: "scope target lookup to one registered project"
     option :idempotency_key, type: :string, desc: "durably replay an identical operational action"
+    option :confirm, type: :boolean, default: false,
+                     desc: "attest an operator action whose descriptor requires confirmation"
     def act(action_id, target)
       require "hive/commands/act"
       kwargs = { observation: options[:observation], json: options[:json] }
+      kwargs[:confirm] = true if options[:confirm]
       kwargs[:project] = options[:project] if options[:project]
       kwargs[:idempotency_key] = options[:idempotency_key] if options[:idempotency_key]
       Hive::Commands::Act.new(action_id, target, **kwargs).call

@@ -3,7 +3,7 @@ title: Component boundaries
 type: reference
 source: config/component-boundaries.yml, test/support/component_boundary_contract.rb
 created: 2026-07-25
-updated: 2026-11-09
+updated: 2026-11-14
 tags: [architecture, components, boundaries, monorepo, sqlite, sequel]
 ---
 
@@ -100,7 +100,10 @@ The component has no discovery scheduler, occurrence journal, effect delivery,
 migration ownership, shadow comparison, cutover, rollback, status schema, or
 remote transport. It depends downward on Safe Agent Git Gate and normal task
 capture. The workflow-owned Publish stage composes the separate
-`Hive::GithubPublication` mechanism.
+`Hive::GithubPublication` mechanism. `PatrolFix::SecretRework` reuses that
+mechanism's `commit_secret_findings` seam for the Validate pre-publication gate
+and the operator `workflow.secret_rework` release, and `PatrolFix::ReworkBudget`
+is the one rework bound shared by review and that gate.
 
 ## Boundary enforcement
 

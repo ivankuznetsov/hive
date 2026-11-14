@@ -232,6 +232,8 @@ components:
       - lib/hive/patrol_fix/transition.rb
       - lib/hive/patrol_fix/successor_materializer.rb
       - lib/hive/patrol_fix/attempt_diagnostic.rb
+      - lib/hive/patrol_fix/rework_budget.rb
+      - lib/hive/patrol_fix/secret_rework.rb
       - schemas/hive-patrol-fix-decision.v1.json
       - schemas/hive-patrol-fix-task-manifest.v1.json
       - schemas/hive-patrol-fix-receipt.v1.json
@@ -249,6 +251,8 @@ components:
       - "Validation records only deliberate controller or structured agent-selected commands; reproduction prose is never an executable input"
       - "Independent review binds the current evidence, fix diff, validation receipt, and worktree head before a closed semantic route becomes durable"
       - "Rework advances generation under a stable replayable intent and invalidates prior validation"
+      - "Validate runs the exact publication commit-range secret scan first; findings route to rework with redacted path/line/rule feedback while the shared rework budget remains, then park for the operator"
+      - "The operator-attested secret rework releases only a current secret_detected block whose commit diff a fix can change, and replays an applied token without a second generation"
       - "Escalation creates exactly one linked coding task through TaskCapture and reciprocal controller-owned relation bytes without a GitHub issue effect"
       - "The Patrol Fix workflow directly owns remediation for newly accepted findings; historical local findings are imported only by the one-time script"
     schema_contracts:
@@ -275,6 +279,7 @@ components:
       - hive/managed_directory
       - hive/output_reference
       - hive/secret_patterns
+      - hive/secret_scanner
       - hive/task
       - hive/task_capture
       - hive/task_meta
@@ -303,8 +308,10 @@ components:
       - lib/hive/stages/patrol_fix/validate.rb
       - lib/hive/stages/patrol_fix/review.rb
       - lib/hive/stages/patrol_fix/publish.rb
+      - lib/hive/operational_action.rb
+      - lib/hive/operational_status.rb
     mutation_authority: "Strict task-local manifest replacement, append-only decision/fix/validation/publication/reopen receipts, stable receipt-gated stage/route-transition journals, and reciprocal coding-successor relations only."
-    recovery_surface: "Replays incomplete rework route actions and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
+    recovery_surface: "Replays incomplete rework route actions (review, secret-scan, and operator secret rework) and reconciles exactly one linked coding successor; no scheduler, adapter, issue, or remote-publication authority."
     wiki_page: wiki/modules/patrol.md
     focused_tests:
       - test/unit/patrol_fix/task_manifest_test.rb
@@ -318,6 +325,7 @@ components:
       - test/unit/patrol_fix/review_receipt_test.rb
       - test/unit/patrol_fix/transition_test.rb
       - test/unit/patrol_fix/successor_materializer_test.rb
+      - test/unit/patrol_fix/secret_rework_test.rb
       - test/unit/attempts/patrol_dispatch_replay_test.rb
       - test/unit/stages/patrol_fix/publish_test.rb
     migration_exceptions: []

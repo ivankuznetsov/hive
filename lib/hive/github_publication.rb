@@ -294,6 +294,19 @@ module Hive
       end
     end
 
+    # The exact commit-range secret scan every publication runs before any
+    # remote effect. Scoping to the PR base branch keeps upstream content
+    # brought in by merging that branch from being attributed to the task.
+    # Workflows that want to catch a finding before publication must call
+    # this instead of assembling their own Betterleaks invocation, so the
+    # binary, trusted configuration, operator ignore file, and range match.
+    # Findings are redacted: rule ID, path, line, and hashes, never values.
+    def self.commit_secret_findings(worktree_path:, base_oid:, head_oid:, base_branch:)
+      Hive::SecretScanner.git_findings(
+        worktree_path, base_oid: base_oid, head_oid: head_oid, upstream_branch: base_branch
+      )
+    end
+
     class Controller
       STATE_FIELDS = %w[
         schema schema_version phase publication_id host repository base_branch
@@ -987,14 +1000,11 @@ module Hive
       def ensure_secret_free!(request)
         fields = { "title" => request.title, "body" => request.published_body }
         detected = fields.keys.select { |key| Hive::SecretScanner.match?(fields.fetch(key)) }
-        # Scope to the PR base branch so upstream content brought in by
-        # merging it into the task branch is not re-attributed to the task.
-        if Hive::SecretScanner.git_match?(
-          request.worktree_path,
-          base_oid: request.scan_base_oid, head_oid: request.head_oid, upstream_branch: request.base_branch
+        commit_findings = GithubPublication.commit_secret_findings(
+          worktree_path: request.worktree_path, base_oid: request.scan_base_oid,
+          head_oid: request.head_oid, base_branch: request.base_branch
         )
-          detected << "commits"
-        end
+        detected << "commits" unless commit_findings.empty?
         return if detected.empty?
 
         raise Blocked.new(

@@ -1,5 +1,6 @@
 require "digest"
 require "time"
+require "hive/patrol_fix/secret_rework"
 require "hive/recovery/api"
 require "hive/task_projection"
 require "hive/workflow_package/canonical_json"
@@ -17,6 +18,11 @@ module Hive
     CLOSURE_ACTION_ID = "workflow.close_with_evidence".freeze
     REVIEW_GRANT_ACTION_ID = "workflow.grant_fix_passes".freeze
     EXECUTABLE_ACTION_IDS = [ ACTION_ID, RETRY_ACTION_ID ].freeze
+    # Operator-attested actions that `hive act` executes only locally and
+    # only with explicit --confirm. They are never routine recommendations,
+    # never daemon- or remote-admitted, and never in EXECUTABLE_ACTION_IDS.
+    SECRET_REWORK_ACTION_ID = Hive::PatrolFix::SecretRework::ACTION_ID
+    OPERATOR_ACTION_IDS = [ SECRET_REWORK_ACTION_ID ].freeze
     RISK_CLASS = "routine_idempotent".freeze
 
     SAFE_TASK_ACTIONS = %w[
@@ -94,6 +100,22 @@ module Hive
           "risk_class" => "operator_attested",
           "confirmation_required" => true,
           "supported_reasons" => Hive::TaskClosure::REASONS,
+          "provenance" => {
+            "source" => "hive-operational-status",
+            "task_action" => row.fetch("action")
+          }
+        }
+      end
+
+      # Patrol Fix secret block release. The token binds the exact block
+      # receipt, generation, evidence digest, HEAD, and diff digest.
+      def secret_rework_descriptor(project:, row:, observation_token:)
+        {
+          "action_id" => SECRET_REWORK_ACTION_ID,
+          "target" => "#{project}:#{row.fetch('slug')}",
+          "observation_token" => observation_token,
+          "risk_class" => "operator_attested",
+          "confirmation_required" => true,
           "provenance" => {
             "source" => "hive-operational-status",
             "task_action" => row.fetch("action")
@@ -289,8 +311,11 @@ module Hive
         @remote_authority = remote_authority
       end
 
-      def execute(action_id:, target:, observation_token:)
+      def execute(action_id:, target:, observation_token:, confirm: false)
         @observation_context = ObservationContext.new
+        if OperationalAction::OPERATOR_ACTION_IDS.include?(action_id)
+          return execute_secret_rework(target, observation_token, confirm)
+        end
         validate_action_id!(action_id)
         project_name, slug = parse_target(target)
         registered_project(project_name)
@@ -332,6 +357,31 @@ module Hive
       end
 
       private
+
+      def execute_secret_rework(target, observation_token, confirm)
+        if @remote_authority
+          raise Hive::OperationalActionUsageError,
+                "#{OperationalAction::SECRET_REWORK_ACTION_ID} is operator-attested; run it locally"
+        end
+        unless confirm == true
+          raise Hive::OperationalActionUsageError,
+                "#{OperationalAction::SECRET_REWORK_ACTION_ID} returns the patch to Fix as a new generation; " \
+                "pass --confirm to attest the operator decision"
+        end
+        project_name, slug = parse_target(target)
+        registered_project(project_name)
+        task = resolve_task(slug, project_name)
+        unless task.workflow.id.to_s == Hive::PatrolFix::WORKFLOW_ID.to_s
+          raise Hive::OperationalActionUsageError, "#{target} is not a Patrol Fix task"
+        end
+        outcome = Hive::PatrolFix::SecretRework.operator_rework!(
+          task, cfg: @observation_context.config_for(task), project: project_name,
+          observation_token: observation_token
+        )
+        result_for(project_name, slug).merge("secret_rework" => outcome)
+      rescue Hive::PatrolFix::SecretRework::Refused => e
+        raise Hive::OperationalActionUsageError, "#{OperationalAction::SECRET_REWORK_ACTION_ID} refused: #{e.message}"
+      end
 
       def verify_remote_effect!(task, project_name, action_id, observation_token)
         return unless @remote_authority

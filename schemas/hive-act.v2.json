@@ -37,7 +37,8 @@
           "type": "string",
           "enum": [
             "workflow.advance",
-            "workflow.retry"
+            "workflow.retry",
+            "workflow.secret_rework"
           ]
         },
         "target": {
@@ -74,6 +75,31 @@
             },
             "recovery": {
               "$ref": "#/$defs/Recovery"
+            },
+            "secret_rework": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "generation",
+                "findings"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "reworked",
+                    "already_reworked"
+                  ]
+                },
+                "generation": {
+                  "type": "integer",
+                  "minimum": 2
+                },
+                "findings": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
             }
           }
         },

@@ -44,10 +44,11 @@
       "required": ["receipt_id", "stage", "payload"],
       "properties": {
         "receipt_id": {"type": "string", "minLength": 1, "maxLength": 128},
-        "stage": {"enum": ["inbox", "review"]},
+        "stage": {"enum": ["inbox", "review", "validate", "publish"]},
         "payload": {"anyOf": [
           {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/decisionPayload"},
-          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"}
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/reviewDecisionPayload"},
+          {"$ref": "hive-patrol-fix-receipt.v1.json#/$defs/secretDecisionPayload"}
         ]}
       }
     },

@@ -5,6 +5,7 @@ require "fileutils"
 require "hive/git_ops"
 require "hive/managed_directory"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/secret_rework"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/worktree_receipt"
 
@@ -19,6 +20,10 @@ module Hive
       INTENT_FILENAME = "route-intent.json".freeze
       MAX_INTENT_BYTES = 32 * 1024
       ROUTES = %w[rework revalidate].freeze
+      INTENT_STAGES = %w[inbox review validate publish].freeze
+      REWORK_COMMIT_ACTIONS = {
+        "validate" => "secret scan rework", "publish" => "operator secret rework"
+      }.freeze
       class InvalidTransition < Hive::Error; end
 
       def initialize(task, worktree_root: nil, commit: nil, clock: -> { Time.now.utc })
@@ -43,6 +48,27 @@ module Hive
         intent = begin_intent(
           action_id: decision.fetch("receipt_id"), route: "rework",
           stage: "review", destination: "2-fix", operator: "controller:review",
+          carried_receipts: []
+        )
+        apply_intent(intent)
+      end
+
+      # Secret-policy rework: Validate's automatic gate (SCAN_OPERATOR) or the
+      # operator release of a current secret block (ACTION_OPERATOR). Both
+      # reuse the review rework mechanics: new generation, rotated custody,
+      # and the same owned worktree back in 2-fix.
+      def apply_secret_rework!(decision, operator:)
+        unless SecretRework.decision?(decision) && SecretRework.rework_operator(decision) == operator
+          raise InvalidTransition, "secret rework requires the exact secret-policy decision receipt"
+        end
+        manifest = TaskManifest.new(task_folder: current_task_folder).read
+        unless decision.fetch("task") == manifest.fetch("task") &&
+               decision.fetch("evidence_revision") == manifest.fetch("evidence_revision")
+          raise InvalidTransition, "secret rework decision is stale"
+        end
+        intent = begin_intent(
+          action_id: decision.fetch("receipt_id"), route: "rework",
+          stage: decision.fetch("stage"), destination: "2-fix", operator: operator,
           carried_receipts: []
         )
         apply_intent(intent)
@@ -150,7 +176,11 @@ module Hive
       def commit_intent!(intent)
         @commit.call(
           stage_name: intent.fetch("to"), slug: @task.slug,
-          action: intent.fetch("route") == "rework" ? "review rework" : "outcome reopened",
+          action: if intent.fetch("route") == "rework"
+                    REWORK_COMMIT_ACTIONS.fetch(intent.fetch("stage"), "review rework")
+                  else
+                    "outcome reopened"
+                  end,
           pathspecs: [
             File.join("stages", intent.fetch("from"), @task.slug),
             File.join("stages", intent.fetch("to"), @task.slug),
@@ -284,7 +314,7 @@ module Hive
         unless intent.is_a?(Hash) && intent.keys.sort == fields.sort &&
                intent["schema"] == SCHEMA && intent["schema_version"] == SCHEMA_VERSION &&
                %w[pending completed].include?(intent["status"]) && intent["task"] == @task.slug &&
-               ROUTES.include?(intent["route"]) && %w[inbox review].include?(intent["stage"]) &&
+               ROUTES.include?(intent["route"]) && INTENT_STAGES.include?(intent["stage"]) &&
                Projection::STAGE_DIRS.include?(intent["from"]) && Projection::STAGE_DIRS.include?(intent["to"]) &&
                intent["from_generation"].is_a?(Integer) &&
                intent["to_generation"] == intent["from_generation"] + 1 &&

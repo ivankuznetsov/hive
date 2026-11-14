@@ -3,6 +3,7 @@ require "securerandom"
 require "time"
 require "hive/patrol_fix/receipt_store"
 require "hive/patrol_fix/review_receipt"
+require "hive/patrol_fix/rework_budget"
 require "hive/patrol_fix/successor_materializer"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/transition"
@@ -18,7 +19,7 @@ module Hive
         module_function
 
         REPORT_FILENAME = "patrol-fix-review-report.json".freeze
-        DEFAULT_MAX_REWORKS = 2
+        DEFAULT_MAX_REWORKS = Hive::PatrolFix::ReworkBudget::DEFAULT_MAX_REWORKS
         PROTECTED_FILES = Hive::Stages::PatrolFix::Inbox::PROTECTED_FILES.freeze
 
         def run!(task, cfg = {}, agent_runner: nil, worktree_root: nil,
@@ -123,11 +124,8 @@ module Hive
             raise Hive::ConfigError, "Patrol Fix max rework cycles must be a non-negative integer"
           end
           routes = Hive::PatrolFix::ReviewReceipt::ROUTES.dup
-          reworks = store.read_all.count do |row|
-            row["kind"] == "decision" && row["stage"] == "review" &&
-              row.dig("payload", "route") == "rework"
-          end
-          routes.delete("rework") if reworks >= max_reworks
+          # Review and the pre-publication secret gate share one budget.
+          routes.delete("rework") unless Hive::PatrolFix::ReworkBudget.remaining?(store.read_all, max_reworks)
           routes.freeze
         end
 

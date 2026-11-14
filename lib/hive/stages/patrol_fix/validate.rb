@@ -4,6 +4,7 @@ require "time"
 require "hive/agent_git_gate"
 require "hive/patrol/validator"
 require "hive/patrol_fix/receipt_store"
+require "hive/patrol_fix/secret_rework"
 require "hive/patrol_fix/task_manifest"
 require "hive/patrol_fix/transition"
 require "hive/patrol_fix/validation_receipt"
@@ -15,8 +16,9 @@ module Hive
       module Validate
         module_function
 
-        def run!(task, cfg = {}, command_runner: nil, worktree_root: nil)
-          recovered = Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root).reconcile!
+        def run!(task, cfg = {}, command_runner: nil, worktree_root: nil, transition: nil)
+          transition ||= Hive::PatrolFix::Transition.new(task, worktree_root: worktree_root)
+          recovered = transition.reconcile!
           if recovered && recovered[:task_folder] != task.folder
             return { status: :complete, commit: nil, moved_task_folder: recovered.fetch(:task_folder) }
           end
@@ -24,6 +26,8 @@ module Hive
           store = Hive::PatrolFix::ReceiptStore.new(task_folder: task.folder)
           existing = current(store, manifest, "validation", "validate")
           return complete(existing) if existing
+          gate = current(store, manifest, "decision", "validate")
+          return finish_secret_gate(gate, transition) if gate
           fix = current(store, manifest, "fix", "fix") || raise(Hive::StageError, "validate requires a current fix receipt")
           custody = Hive::PatrolFix::WorktreeReceipt.new(
             task_folder: task.folder, project_root: task.project_root, slug: task.slug,
@@ -35,6 +39,13 @@ module Hive
           actual_head = git_head(owner.fetch("worktree"))
           raise Hive::StageError, "fix worktree HEAD changed before validation" unless actual_head == expected_head
           raise Hive::StageError, "fix worktree is dirty before validation" unless git_status(owner.fetch("worktree")).empty?
+          # Publication refuses any commit range its secret scan flags. Run
+          # that exact scan first, so the fix agent can still correct it
+          # instead of the task parking forever at Publish.
+          gate = Hive::PatrolFix::SecretRework.pre_publication_gate!(
+            task, cfg || {}, manifest: manifest, store: store, fix: fix, owner: owner
+          )
+          return finish_secret_gate(gate, transition) if gate
           commands = selected_commands(manifest, fix, cfg || {})
           runner = command_runner || lambda { |path, rows| default_validator(cfg || {}).validate_selected(path, rows) }
           result = with_validation_checkout(task.project_root, expected_head) do |path|
@@ -148,6 +159,18 @@ module Hive
         private_class_method :current
         def complete(receipt) = { status: :complete, commit: "patrol-fix validation collected", receipt: receipt }
         private_class_method :complete
+
+        def finish_secret_gate(gate, transition)
+          if gate.dig("payload", "route") == "rework"
+            moved = transition.apply_secret_rework!(
+              gate, operator: Hive::PatrolFix::SecretRework::SCAN_OPERATOR
+            )
+            return { status: :complete, commit: nil, receipt: gate,
+                     moved_task_folder: moved.fetch(:task_folder) }
+          end
+          { status: :parked, commit: "park Patrol-fix pre-publication secret block", receipt: gate }
+        end
+        private_class_method :finish_secret_gate
       end
     end
   end

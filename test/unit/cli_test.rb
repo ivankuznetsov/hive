@@ -1225,6 +1225,12 @@ class HiveCliTest < Minitest::Test
       assert_equal({ observation: "a" * 64, json: true }, calls.first.fetch(:kwargs))
     end
 
+    with_command_new_stub(Hive::Commands::Act) do |calls|
+      Hive::CLI.start([ "act", "workflow.secret_rework", "demo:slug", "--observation", "#{'a' * 64}", "--confirm" ])
+      assert_equal [ "workflow.secret_rework", "demo:slug" ], calls.first.fetch(:args)
+      assert_equal({ observation: "a" * 64, json: false, confirm: true }, calls.first.fetch(:kwargs))
+    end
+
     with_command_new_stub(Hive::Commands::Approve) do |calls|
       Hive::CLI.start([ "approve", "slug", "--to", "3-report", "--from", "2-gather", "--project", "proj", "--force", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)

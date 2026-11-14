@@ -20,10 +20,15 @@ module Hive
       SLUG = TaskManifest::SLUG
       KINDS = %w[decision fix validation publication publication_block reopen].freeze
       STAGES = %w[inbox fix validate review publish].freeze
+      # Validate and Publish decisions are controller/operator secret-policy
+      # routes owned by SecretRework; agents only report inbox/review routes.
       DECISION_ROUTES = {
         "inbox" => %w[fix escalate reject blocked],
-        "review" => %w[publish rework escalate reject blocked]
+        "review" => %w[publish rework escalate reject blocked],
+        "validate" => %w[rework blocked],
+        "publish" => %w[rework]
       }.freeze
+      SECRET_DECISION_STAGES = %w[validate publish].freeze
 
       class InvalidReceipt < Hive::Error; end
 
@@ -164,7 +169,9 @@ module Hive
       end
 
       def validate_decision!(stage, payload, label)
-        invalid!("decision receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
+        invalid!("decision receipts are only valid for inbox, review, validate, or publish") unless DECISION_ROUTES.key?(stage)
+        return validate_secret_decision!(stage, payload, label) if SECRET_DECISION_STAGES.include?(stage)
+
         fields = %w[route rationale evidence blocker_owner head_revision]
         fields += %w[diff_digest fix_receipt_id validation_receipt_id] if stage == "review"
         exact_keys!(payload, fields, "#{label}.payload")
@@ -258,12 +265,27 @@ module Hive
         invalid!("#{label}.payload #{e.message}")
       end
 
+      def validate_secret_decision!(stage, payload, label)
+        require "hive/patrol_fix/secret_rework"
+        Hive::PatrolFix::SecretRework.validate_payload!(stage, payload)
+      rescue Hive::PatrolFix::SecretRework::InvalidDecision => e
+        invalid!("#{label}.payload #{e.message}")
+      end
+
       def validate_reopen!(stage, payload, label)
-        invalid!("reopen receipts are only valid for inbox or review") unless DECISION_ROUTES.key?(stage)
+        invalid!("reopen receipts are only valid for inbox, review, validate, or publish") unless DECISION_ROUTES.key?(stage)
         exact_keys!(payload, %w[outcome_receipt_id operator carried_receipts], "#{label}.payload")
         string!(payload.fetch("outcome_receipt_id"), "#{label}.payload.outcome_receipt_id", max: 128)
         string!(payload.fetch("operator"), "#{label}.payload.operator", max: 256)
         carried = array!(payload.fetch("carried_receipts"), "#{label}.payload.carried_receipts", min: 0, max: 2)
+        if SECRET_DECISION_STAGES.include?(stage)
+          require "hive/patrol_fix/secret_rework"
+          # Secret-policy reopens come only from the secret-scan gate or the
+          # operator action, and they never carry earlier evidence forward.
+          unless Hive::PatrolFix::SecretRework.reopen_operator?(stage, payload["operator"]) && carried.empty?
+            invalid!("#{label}.payload is not a secret-policy rework authorization")
+          end
+        end
         carried.each_with_index do |receipt_id, index|
           string!(receipt_id, "#{label}.payload.carried_receipts[#{index}]", max: 128)
         end

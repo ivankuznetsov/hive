@@ -65,6 +65,14 @@ and all old receipts, captures the current fix, and reruns actual validation
 and independent review. Dirty work remains preserved for repair. Changes during
 review/publication never inherit the old validation or approval.
 
+Validate runs publication's commit secret scan
+(`GithubPublication.commit_secret_findings`) before its commands. Findings route
+the patch back to Fix with redacted path/line/rule feedback while the shared
+rework budget lasts, then park for the operator. A Publish `secret_detected`
+block whose fields include `diff` can be released with
+`hive act workflow.secret_rework PROJECT:SLUG --observation TOKEN --confirm`.
+See [[modules/patrol]] for the gate, bound, and action contract.
+
 ## Exact secret-scan exceptions
 
 Betterleaks still owns detection. Operator-reviewed false positives can be
@@ -72,7 +80,9 @@ listed as native exact fingerprints in `betterleaks.ignore` under Hive's config
 home (normally `~/.config/hive`). Each line binds a commit, path, rule and line.
 Task-authored ignore files and inline suppression comments remain ineffective.
 An exception does not exempt other occurrences, future commits, titles or bodies.
-Never use a blanket rule or directory exception for a fixture finding.
+Never use a blanket rule or directory exception for a fixture finding. The
+Patrol Fix secret rework never writes this file; for an agent-authored test
+credential, rework the fix instead of adding an exception.
 
 ### Upstream content merged into the task branch
 

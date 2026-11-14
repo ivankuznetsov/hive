@@ -988,6 +988,7 @@
         },
         "review_grant": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/ReviewGrant" }] },
         "closure": { "$ref": "#/$defs/Closure" },
+        "secret_rework": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SecretRework" }] },
         "plan_review": {
           "oneOf": [
             { "type": "null" },
@@ -1427,6 +1428,51 @@
       "properties": {
         "status": { "enum": ["current", "stale", "not_initialized", "invalid", "unknown"] },
         "reason": { "type": ["string", "null"] }
+      }
+    },
+    "SecretRework": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "code", "stage", "blocked_receipt_id", "remediation", "command", "action"
+      ],
+      "properties": {
+        "status": { "enum": ["available", "unavailable"] },
+        "code": { "const": "secret_detected" },
+        "stage": { "type": ["string", "null"] },
+        "blocked_receipt_id": { "type": ["string", "null"], "maxLength": 128 },
+        "remediation": { "type": "string", "minLength": 1 },
+        "command": { "type": ["string", "null"] },
+        "action": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/SecretReworkAction" }
+          ]
+        }
+      }
+    },
+    "SecretReworkAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "action_id", "target", "observation_token", "risk_class",
+        "confirmation_required", "provenance"
+      ],
+      "properties": {
+        "action_id": { "const": "workflow.secret_rework" },
+        "target": { "type": "string", "pattern": "^.+:.+$" },
+        "observation_token": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "risk_class": { "const": "operator_attested" },
+        "confirmation_required": { "const": true },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["source", "task_action"],
+          "properties": {
+            "source": { "const": "hive-operational-status" },
+            "task_action": { "type": "string" }
+          }
+        }
       }
     },
     "ClosureAction": {

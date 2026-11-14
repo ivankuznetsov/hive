@@ -7,6 +7,10 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_SYSTEMCTL"] = "1"
 ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
+# Durable-attempt supervisors list and remove Podman containers tagged with
+# their attempt id. Point them at a missing binary so no test reads or changes
+# the host's containers; ContainerReaper tests inject their own runner.
+ENV["HIVE_PODMAN_BIN"] = "/nonexistent/hive-test-no-podman/podman"
 
 if ENV["HIVE_COVERAGE"]
   require_relative "support/coverage"

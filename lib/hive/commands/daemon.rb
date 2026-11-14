@@ -471,7 +471,8 @@ module Hive
         lost_outcome_processor = Hive::Attempts::LostOutcomeProcessor.new(
           store: attempt_store,
           outcome_store: lost_outcome_store,
-          process_identity: attempt_process_identity
+          process_identity: attempt_process_identity,
+          logger: logger
         )
         operational_snapshot = Hive::Daemon::OperationalSnapshot::Assembler.new(
           repository: Hive::RuntimeControlPlane::OperationalRepository.new(

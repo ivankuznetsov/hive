@@ -1031,6 +1031,23 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_attempt_container_reaping_defaults_on_and_accepts_only_a_boolean_opt_out
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      path = File.join(dir, ".hive-state", "config.yml")
+      File.write(path, "{}\n")
+      assert_equal true, Hive::Config.load(dir).fetch("attempt_reap_containers")
+
+      File.write(path, "attempt_reap_containers: false\n")
+      assert_equal false, Hive::Config.load(dir).fetch("attempt_reap_containers")
+
+      File.write(path, "attempt_reap_containers: \"no\"\n")
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes error.message, "attempt_reap_containers"
+      assert_includes error.message, "true or false"
+    end
+  end
+
   def test_load_rejects_non_positive_attempt_timers
     %w[
       attempt_heartbeat_sec

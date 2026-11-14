@@ -8,7 +8,7 @@ module Hive
     class AttemptSupervise
       VALUE_OPTIONS = %w[
         --store-root --database-path --heartbeat-sec --stale-sec --first-heartbeat-timeout-sec
-        --timeout-sec --kill-grace-sec
+        --timeout-sec --kill-grace-sec --reap-containers
       ].freeze
 
       def self.from_argv(argv)
@@ -35,7 +35,8 @@ module Hive
           stale_sec: Float(options.fetch("--stale-sec", 30)),
           first_heartbeat_timeout_sec: Float(options.fetch("--first-heartbeat-timeout-sec", 30)),
           timeout_sec: options["--timeout-sec"] && Float(options["--timeout-sec"]),
-          kill_grace_sec: Float(options.fetch("--kill-grace-sec", 1))
+          kill_grace_sec: Float(options.fetch("--kill-grace-sec", 1)),
+          reap_containers: boolean_option(options.fetch("--reap-containers", "true"))
         )
       rescue KeyError, ArgumentError => e
         raise Hive::InvalidTaskPath, "invalid attempt supervisor invocation: #{e.message}"
@@ -43,7 +44,7 @@ module Hive
 
       def initialize(attempt_id:, store_root:, database_path:, heartbeat_sec:,
                      stale_sec:, first_heartbeat_timeout_sec:, timeout_sec:,
-                     kill_grace_sec:)
+                     kill_grace_sec:, reap_containers: true)
         @attempt_id = attempt_id
         @store_root = store_root
         @database_path = database_path
@@ -52,7 +53,17 @@ module Hive
         @first_heartbeat_timeout_sec = first_heartbeat_timeout_sec
         @timeout_sec = timeout_sec
         @kill_grace_sec = kill_grace_sec
+        @reap_containers = reap_containers
       end
+
+      def self.boolean_option(value)
+        case value
+        when "true" then true
+        when "false" then false
+        else raise ArgumentError, "--reap-containers must be true or false"
+        end
+      end
+      private_class_method :boolean_option
 
       def call
         ready_io = ready_io_from_env
@@ -78,6 +89,7 @@ module Hive
           first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec,
           timeout_sec: @timeout_sec,
           kill_grace_sec: @kill_grace_sec,
+          reap_containers: @reap_containers,
           launch_deadline: launch_deadline, bookkeeping_timeout_sec: budget,
           install_signal_handlers: true
         ).run

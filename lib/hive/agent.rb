@@ -47,10 +47,14 @@ module Hive
       "HIVE_SCREENOTE_BASE_URL" => nil,
       **SCRUBBED_TOOLCHAIN_ENV_KEYS.to_h { |key| [ key, nil ] }
     }.freeze
+    # CONTAINERS_CONF_OVERRIDE carries the durable attempt's Podman tagging
+    # fragment (Attempts::ContainerReaper), so containers an isolated agent
+    # starts are still reaped with its attempt.
     ISOLATED_CHILD_ENV_KEYS = %w[
       HOME PATH LANG LC_ALL LC_CTYPE TMPDIR TZ SSL_CERT_FILE SSL_CERT_DIR
       XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR
       DISPLAY WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS TERM COLORTERM
+      CONTAINERS_CONF_OVERRIDE
     ].freeze
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,

@@ -116,7 +116,8 @@ module Hive
           dry_run: dry_run, attempt_dispatcher: attempts_api,
           attempt_reconciler: reconciler, lost_outcome_store: lost_store,
           lost_outcome_processor: Hive::Attempts::LostOutcomeProcessor.new(
-            store: attempt_store, outcome_store: lost_store, process_identity: identity
+            store: attempt_store, outcome_store: lost_store, process_identity: identity,
+            logger: logger
           ),
           module_runtime: Hive::Modules::DaemonRuntime.new(
             attempt_store: attempt_store, attempt_dispatcher: attempts_api,

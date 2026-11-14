@@ -286,6 +286,22 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     refute probed
   end
 
+  def test_only_a_project_container_reap_opt_out_changes_the_supervisor_argv
+    default_args = launched_wrapper_argv(
+      Hive::Attempts::DetachedLauncher.new(store: launcher_store, systemd_scope: -> { false })
+    )
+    disabled_args = launched_wrapper_argv(
+      Hive::Attempts::DetachedLauncher.new(
+        store: launcher_store, systemd_scope: -> { false }, reap_containers: false
+      )
+    )
+
+    refute_includes default_args, "--reap-containers"
+    flag = disabled_args.index("--reap-containers")
+    refute_nil flag
+    assert_equal "false", disabled_args[flag + 1]
+  end
+
   def test_memory_cap_is_a_no_op_without_a_systemd_user_scope
     probed = false
     launcher = Hive::Attempts::DetachedLauncher.new(

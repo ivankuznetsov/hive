@@ -93,7 +93,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
       "attempt_stale_sec" => 41,
       "attempt_launch_timeout_sec" => 13,
       "attempt_first_heartbeat_timeout_sec" => 17,
-      "attempt_bookkeeping_timeout_sec" => 19.5
+      "attempt_bookkeeping_timeout_sec" => 19.5,
+      "attempt_reap_containers" => false
     )
     daemon = Hive::Config::DEFAULTS.fetch("daemon").merge(
       "child_timeout_sec" => 90,
@@ -129,6 +130,7 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     assert_equal 8, launcher_options.fetch(:kill_grace_sec)
     assert_equal "5G", launcher_options.fetch(:memory_max)
     assert_equal "512M", launcher_options.fetch(:memory_swap_max)
+    assert_equal false, launcher_options.fetch(:reap_containers)
     assert_equal 13, dispatcher_options.fetch(:launch_timeout_sec)
     assert_equal 19.5, launcher_options.fetch(:bookkeeping_timeout_sec)
     assert_equal 19.5, dispatcher_options.fetch(:bookkeeping_timeout_sec)

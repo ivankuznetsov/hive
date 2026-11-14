@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "tmpdir"
+require "hive/agent_limit"
 require "hive/atomic_file"
 require "hive/canonical_json"
 require "hive/lock"
@@ -29,6 +30,7 @@ module Hive
       TRANSIENT_OUTCOMES = Adapters::Base::TRANSIENT_OUTCOMES
       SUCCESS_OUTCOMES = Adapters::Base::SUCCESS_OUTCOMES
       TERMINAL_OUTCOMES = (Adapters::Base::OUTCOMES - TRANSIENT_OUTCOMES).freeze
+      PROVIDER_LIMIT_OUTCOME = "provider_limit"
       MAX_VERIFICATION_REVISION_ROUNDS = 3
       # One extra planner round reserved for integrating operator decisions.
       # Safe fixes can spend the whole budget before an operator approves a
@@ -783,7 +785,11 @@ module Hive
           requested:, observed: adapter_result.coverage, outcome: adapter_result.outcome
         )
         retry_at = adapter_result.retry_at
-        if TRANSIENT_OUTCOMES.include?(adapter_result.outcome) && retry_at.nil?
+        if adapter_result.outcome == PROVIDER_LIMIT_OUTCOME
+          # Provider quota walls retry on Hive's fixed cadence, never the
+          # provider-announced reset (a weekly limit can be days away).
+          retry_at = (@clock.call + Hive::AgentLimit.retry_cooldown_sec).utc.iso8601(6)
+        elsif TRANSIENT_OUTCOMES.include?(adapter_result.outcome) && retry_at.nil?
           retry_at = default_retry_at(record, role, attempt_id)
         end
         route = merge_route_receipts(
@@ -1251,7 +1257,10 @@ module Hive
         routes = record["routes"].select { |entry| entry["role"] == role }
         reset = routes.rindex { |entry| entry["recovery_reset"] == true }
         routes = routes.drop(reset + 1) if reset
-        routes.count { |entry| entry["attempt_id"] }
+        # A provider quota wall is not a failed attempt of the review: it
+        # never exhausts the transient budget, so the leg keeps retrying on
+        # the hourly provider cadence instead of parking.
+        routes.count { |entry| entry["attempt_id"] && entry["outcome"] != PROVIDER_LIMIT_OUTCOME }
       end
 
       # Mandatory initial coverage is a liveness requirement, not an operator

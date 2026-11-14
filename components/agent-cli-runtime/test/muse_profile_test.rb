@@ -200,6 +200,23 @@ class AgentCliRuntimeMuseProfileTest < Minitest::Test
     assert_equal :rate_limited, failure[:kind]
     assert_equal 429, failure[:status_code]
 
+    # The exact Muse subscription wall observed in the field must classify as
+    # a provider limit, so Hive retries it hourly instead of parking it.
+    quota = AgentCliRuntime.extract_provider_error(
+      :muse,
+      {
+        "payload_type" => "run.terminal.failed",
+        "payload" => {
+          "terminal" => "failed",
+          "reason" => "API error 429 [request_id=e02acc48-e483-46c6-8b33-23ab76b8c497]: " \
+                      "Subscription quota exhausted. Your usage window resets at " \
+                      "2026-11-16T00:00:00Z. (rate_limit_error)"
+        }
+      }
+    )
+    assert_equal :provider_limit, quota[:kind]
+    assert_match(/Subscription quota exhausted/, quota[:message])
+
     assert_nil AgentCliRuntime.extract_provider_error(
       :muse,
       {

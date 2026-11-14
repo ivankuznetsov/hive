@@ -677,8 +677,9 @@ class TasksTest < ActionDispatch::IntegrationTest
       original.bind_call(self).tap do |value|
         value["usage"] = {
           "coverage" => "partial", "observed_subtotal" => true,
-          "sessions_count" => 1, "metered_sessions_count" => 1,
-          "unmetered_sessions_count" => 0, "live_sessions_count" => 0,
+          # Two technical retries (no metered usage) are counted but not listed.
+          "sessions_count" => 3, "metered_sessions_count" => 1,
+          "unmetered_sessions_count" => 2, "live_sessions_count" => 0,
           "excluded_attributed_sessions_count" => 0, "unattributed_legacy_count" => nil,
           "tokens" => {
             "input" => 1200, "output" => 300, "input_output" => 1500,
@@ -731,6 +732,8 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#workspace-usage", text: /opencode.*openai.*gpt-5\.6-sol.*API/m
     assert_select "details[data-workspace-disclosure-key='usage-details']", 1
     assert_select ".usage-group", text: /Execute.*Succeeded.*Cache read \/ write.*200 \/ 0/m
+    assert_select ".usage-session-list > li", 1
+    assert_select ".usage-hidden-sessions", text: "2 technical retries with no metered usage hidden"
     assert_select "a[href='https://developers.openai.com/api/docs/models/gpt-5.6-sol']", 1
     refute_includes response.body, "private-session-id"
     refute_includes response.body, "private-attempt-id"

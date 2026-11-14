@@ -602,6 +602,15 @@ review is `retry_scheduled` more than an hour past its `retry_at`
 scheduler wait. A row a dependency holds back keeps its scheduler wait and
 `dependency_wait` reason.
 
+In a project whose daemon is disabled, a `plan_reviewing`/`plan_review_retry`
+row whose review owner is `hive` or `scheduler` (typically a stale review whose
+required action is "start a linked plan review from the current plan") is
+classified `idle` with owner `none`, like any other ready row in a paused
+project, with reason `plan_review_dispatch_disabled` naming the exact
+`hive plan-review-run SLUG --project NAME` command. Nothing dispatches
+`plan-review-run` there, so a provider/scheduler wait would be false. Review
+waits owned by a provider, agent, or operator keep their owner.
+
 ## Tests and proof
 
 - `test/unit/plan_review/` covers policy, identity, immutable storage, parser,

@@ -2248,6 +2248,47 @@ class OperationalStatusTest < Minitest::Test
                  classify_row(row, daemon_enabled: true)
   end
 
+  # 2026-11-14 dogfood: 42 stale plan reviews in paused projects (daemon
+  # disabled) claimed "Hive will start a linked plan review" as a
+  # provider/scheduler wait, although nothing dispatches plan-review-run there.
+  def test_hive_owned_plan_review_wait_in_a_paused_project_is_idle_with_the_manual_command
+    stale = { "state" => "blocked", "blocker_owner" => "hive",
+              "required_action" => "start a linked plan review from the current plan" }
+    row = task(action: "plan_reviewing", slug: "stale-review", stage: "3-plan", plan_review: stale)
+
+    assert_equal [ "idle", "none" ], classify_row(row)
+    assert_equal [ "idle", "none" ],
+                 classify_row(row.merge("plan_review" => stale.merge("blocker_owner" => "scheduler")))
+    assert_equal [ "waiting_on_provider_or_scheduler", "scheduler" ], classify_row(row, daemon_enabled: true)
+
+    reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal [ "plan_review_dispatch_disabled", "scheduler" ], reasons.first.values_at("code", "source")
+    assert_includes reasons.first.fetch("message"), "start a linked plan review from the current plan"
+    assert_includes reasons.first.fetch("message"), "`hive plan-review-run stale-review --project demo`"
+
+    enabled_reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: { "demo" => { "daemon_enabled" => true } },
+      scheduler_snapshot: nil, now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal "plan_review_blocked", enabled_reasons.first.fetch("code")
+  end
+
+  def test_paused_project_plan_review_projection_counts_as_idle_not_scheduler_wait
+    stale = { "state" => "blocked", "blocker_owner" => "hive",
+              "required_action" => "start a linked plan review from the current plan" }
+    projected = project(
+      status_payload(task(action: "plan_reviewing", slug: "stale-review", stage: "3-plan", plan_review: stale))
+    )
+    row = projected.fetch("tasks").first
+
+    assert_equal [ "idle", "none" ], row.values_at("state", "blocker_owner")
+    assert_equal 1, projected.dig("summary", "states", "idle").to_i
+    assert_equal 0, projected.dig("summary", "states", "waiting_on_provider_or_scheduler").to_i
+  end
+
   # hivedev C11: a retry_scheduled review sat 3+ days past its retry_at as
   # an ordinary scheduler wait.
   def test_overdue_plan_review_retry_is_reported_as_repair_unless_a_dependency_holds_it

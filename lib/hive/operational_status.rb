@@ -778,6 +778,7 @@ module Hive
       return [ "waiting_on_you", "operator" ] if row["action"] == "plan_review_decision"
       if PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
         return [ "needs_repair", "hive" ] if plan_review_retry_overdue?(row)
+        return [ "idle", "none" ] if paused_plan_review_automation?(project, row)
 
         owner = daemon_enabled?(project["name"]) ? "scheduler" : operational_review_owner(row)
         return [ "waiting_on_provider_or_scheduler", owner ]
@@ -1163,6 +1164,16 @@ module Hive
           "run `hive plan-review-run #{row['slug']}` or inspect `hive plan-review #{row['slug']} show`",
           "plan_review"
         )
+      elsif paused_plan_review_automation?(project, row)
+        review = row.fetch("plan_review")
+        pending = review["required_action"] || review["blocker_reason"] || row["action_label"]
+        command = Shellwords.join([ "hive", "plan-review-run", row["slug"].to_s, "--project", project["name"].to_s ])
+        reasons << reason(
+          "plan_review_dispatch_disabled",
+          "#{pending}; daemon dispatch is disabled for this project, so nothing starts it — " \
+          "run `#{command}` or enable the project's daemon",
+          "scheduler"
+        )
       elsif row["plan_review"].is_a?(Hash) && row["action"].to_s.start_with?("plan_review")
         review = row.fetch("plan_review")
         message = review["required_action"] || review["blocker_reason"] || row["action_label"]
@@ -1246,6 +1257,19 @@ module Hive
       @now - Time.iso8601(review["retry_at"].to_s) > PLAN_REVIEW_RETRY_OVERDUE_SEC
     rescue ArgumentError
       false
+    end
+
+    # A plan-review wait whose owner is Hive automation (`plan-review-run`
+    # dispatched by the daemon) in a project whose daemon is disabled. Nothing
+    # will ever start that run, so the row is ready-but-undispatched like any
+    # other ready row in a paused project, not a provider/scheduler wait.
+    # Provider-, agent- or operator-owned review waits keep their owner.
+    def paused_plan_review_automation?(project, row)
+      return false unless PLAN_REVIEW_WAIT_ACTIONS.include?(row["action"])
+      return false if daemon_enabled?(project["name"])
+      return false unless row["plan_review"].is_a?(Hash)
+
+      %w[hive scheduler].include?(operational_review_owner(row))
     end
 
     def dependency_wait?(row)

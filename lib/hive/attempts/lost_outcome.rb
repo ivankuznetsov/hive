@@ -1,6 +1,7 @@
 require "digest"
 require "time"
 require "hive/agent_limit"
+require "hive/attempts/container_reaper"
 require "hive/attempts/dirty_state_capture"
 require "hive/runtime_control_plane"
 require "hive/stringify_keys"
@@ -179,9 +180,17 @@ module Hive
     # observation establishes absence or a different identity. A mismatched
     # identity cannot keep the lost attempt's recovery pending forever.
     class LostOutcomeProcessor
+      # This runs inside a daemon tick, so it gets a shorter bound than the
+      # supervisor's own reap.
+      LOST_CONTAINER_REAP_TIMEOUT_SEC = 15
+      LOST_CONTAINER_STOP_SEC = 5
+
       def initialize(store:, outcome_store:, process_identity:, dirty_capture: nil,
-                     task_resolver: nil, orphan_grace_sec: 2)
+                     task_resolver: nil, orphan_grace_sec: 2, container_reaper: nil, logger: nil)
         @store = store
+        @container_reaper = container_reaper ||
+          ->(attempt) { ContainerReaper.new(attempt_id: attempt.attempt_id) }
+        @logger = logger
         @outcome_store = outcome_store
         @process_identity = process_identity
         @dirty_capture = dirty_capture || DirtyStateCapture.new(store: store)
@@ -202,6 +211,7 @@ module Hive
           )
         end
 
+        reap_containers(attempt)
         references = outcome.fetch("capture_references")
         if references.empty?
           task = @task_resolver.call(attempt)
@@ -230,6 +240,24 @@ module Hive
         Hive::AgentLimit.retry_due?(limited_at: last_cleanup_at, now: now)
       rescue ArgumentError, TypeError
         true
+      end
+
+      # A lost attempt's supervisor never ran its own container reap. The
+      # worker is proven gone here, so remove the Podman containers it tagged.
+      # The tag is the consent: an opted-out project's attempts were never
+      # tagged. Best-effort and idempotent; it never blocks recovery.
+      def reap_containers(attempt)
+        result = @container_reaper.call(attempt).reap(
+          timeout_sec: LOST_CONTAINER_REAP_TIMEOUT_SEC, stop_timeout_sec: LOST_CONTAINER_STOP_SEC
+        )
+        return unless result.notable?
+
+        @logger&.event(
+          :attempt_containers_reaped,
+          attempt_id: attempt.attempt_id, project: attempt["project"], **result.to_h.transform_keys(&:to_sym)
+        )
+      rescue StandardError
+        nil
       end
 
       def cleanup_orphan(attempt)

@@ -42,6 +42,11 @@ module Hive
       "attempt_launch_timeout_sec" => 30,
       "attempt_first_heartbeat_timeout_sec" => 30,
       "attempt_bookkeeping_timeout_sec" => 30,
+      # Tag every Podman container an attempt creates with
+      # `hive.attempt=<id>` and remove it when the attempt ends. Set false for
+      # projects that keep containers across attempts on purpose; they get
+      # neither the tag nor the reap. See Hive::Attempts::ContainerReaper.
+      "attempt_reap_containers" => true,
       "project_name" => nil,
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
@@ -3917,6 +3922,12 @@ module Hive
         raise ConfigError,
               "#{key} in #{describe_source(source_path)} must be a positive integer; " \
               "got #{value.inspect} (#{value.class})"
+      end
+
+      unless [ true, false ].include?(cfg["attempt_reap_containers"])
+        raise ConfigError,
+              "attempt_reap_containers in #{describe_source(source_path)} must be true or false; " \
+              "got #{cfg["attempt_reap_containers"].inspect} (#{cfg["attempt_reap_containers"].class})"
       end
 
       return if cfg["attempt_stale_sec"] >= cfg["attempt_heartbeat_sec"]

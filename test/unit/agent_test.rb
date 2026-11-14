@@ -206,6 +206,24 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_isolated_child_environment_keeps_the_attempt_container_tagging_override
+    with_tmp_dir do |dir|
+      with_env(
+        "CONTAINERS_CONF_OVERRIDE" => "/state/open/attempt-1/containers/containers.conf",
+        "DATABASE_URL" => "postgres://secret@db/app"
+      ) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "inspect", max_budget_usd: nil,
+          timeout_sec: 5, isolate_environment: true
+        )
+
+        assert_equal "/state/open/attempt-1/containers/containers.conf",
+                     agent.child_environment.fetch("CONTAINERS_CONF_OVERRIDE")
+        refute agent.child_environment.key?("DATABASE_URL")
+      end
+    end
+  end
+
   def test_isolated_child_environment_resolves_tool_manager_launcher_without_session_blobs
     with_tmp_dir do |dir|
       launcher_dir = File.join(dir, "launchers")

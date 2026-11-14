@@ -42,6 +42,7 @@ class AttemptsCommandSuperviseTest < Minitest::Test
         :timeout_sec, :kill_grace_sec
       )
       assert captured.fetch(:install_signal_handlers)
+      assert_equal true, captured.fetch(:reap_containers)
       assert_equal dir, captured.fetch(:store).root
     ensure
       # IO.for_fd wraps the inherited descriptors; the original pipe objects
@@ -51,6 +52,19 @@ class AttemptsCommandSuperviseTest < Minitest::Test
         io.close if io && !io.closed?
       end
     end
+  end
+
+  def test_project_container_reap_opt_out_reaches_the_supervisor
+    base = [ "attempt", "--store-root", "/tmp", "--database-path", "/tmp/runtime.db" ]
+    disabled = Hive::Commands::AttemptSupervise.from_argv(base + [ "--reap-containers", "false" ])
+    enabled = Hive::Commands::AttemptSupervise.from_argv(base + [ "--reap-containers", "true" ])
+
+    assert_equal false, disabled.instance_variable_get(:@reap_containers)
+    assert_equal true, enabled.instance_variable_get(:@reap_containers)
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::AttemptSupervise.from_argv(base + [ "--reap-containers", "no" ])
+    end
+    assert_includes error.message, "--reap-containers must be true or false"
   end
 
   def test_invalid_invocations_and_ready_descriptor_fail_as_usage_or_nil

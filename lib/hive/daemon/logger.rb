@@ -83,6 +83,7 @@ module Hive
         attempt_suspect
         attempt_terminal
         attempt_lost
+        attempt_containers_reaped
         attempt_duplicate
         launch_reservations_released
         launch_reservation_release_failed

@@ -41,6 +41,8 @@ class PathsTest < Minitest::Test
                      Hive::Paths.runtime_writer_fence_path
         assert_equal File.join(dir, "state", "hive", "runtime-payloads"),
                      Hive::Paths.runtime_payload_root
+        assert_equal File.join(dir, "state", "hive", "operational-status-payloads"),
+                     Hive::Paths.operational_status_payload_root
         assert_equal File.join(dir, "data", "hive", "web"), Hive::Paths.web_app_home
         refute Hive::Paths.hive_home_collapsed?
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home

@@ -698,7 +698,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_pending_choice_does_not_hide_exhausted_verification
+  # A provider quota wall never exhausts the transient budget: even with
+  # max_transient=0 the leg stays retry_scheduled on the hourly cadence.
+  def test_provider_limit_never_exhausts_the_transient_budget
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0
       adapter = FakeAdapter.new do |request|
@@ -709,14 +711,36 @@ class PlanReviewOrchestratorTest < Minitest::Test
             [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
         end
       end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      now = Time.utc(2026, 8, 12, 12)
+      3.times do |hour|
+        clock = now + (hour * 3600)
+        projection = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock }).advance!
+        assert_equal "retry_scheduled", projection.record.state
+        assert_equal (clock + 3600).utc.iso8601(6), projection.record["retry_at"]
+        refute projection.record.execution_allowed?
+      end
+      assert_equal 3, adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
+  def test_pending_choice_does_not_hide_exhausted_verification
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "timeout")
+        else
+          successful_result(request, findings: request.kind == "primary" ?
+            [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
+        end
+      end
       runner = orchestrator(task, cfg, adapter:,
                             planner_revision: FakeRevision.new(standard_plan.sub("# Plan", "# Revised")))
       blocked = runner.advance!
       assert_equal "blocked", blocked.record.state
       assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
-      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_provider_limit" }
-      assert_match(/plan-review retry/, blocked.record["required_action"],
-                   "a quota-only block points at retry, not a new linked plan")
+      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_timeout" }
       refute blocked.record.execution_allowed?
       calls = adapter.calls.size
       assert_equal "blocked", runner.advance!.record.state
@@ -1469,13 +1493,15 @@ class PlanReviewOrchestratorTest < Minitest::Test
     with_task(standard_plan) do |task, cfg|
       finding = finding("safe_auto", "Clarify tests")
       verification_calls = 0
-      retry_at = "2026-08-12T13:00:00Z"
+      # The provider announces a reset days away; Hive retries hourly anyway.
+      provider_reset = "2026-08-19T00:00:00Z"
+      retry_at = "2026-08-12T13:00:00.000000Z"
       adapter = FakeAdapter.new do |request|
         if request.kind == "primary"
           successful_result(request, findings: [ finding ])
         elsif request.kind == "verification" && (verification_calls += 1) == 1
           Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "provider_limit", retry_at:
+            outcome: "provider_limit", retry_at: provider_reset
           )
         else
           successful_result(request)

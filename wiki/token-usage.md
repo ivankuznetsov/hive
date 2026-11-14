@@ -129,6 +129,15 @@ actual providers/models, combined billing route, and API-equivalent coverage.
 Details group sessions by stage/outcome and retain cache/reasoning categories,
 billing evidence, rate basis, and missing dimensions. Raw attempt/session IDs
 are not headings, and the v2 projection removes provider-reported cost.
+`usage.groups` lists only sessions that did metered work: a finished session
+with no usage row, or with every token category absent or zero, is left out
+(`Usage#idle_session?`; live sessions always stay). These are technical
+retries such as a provider 429 that exits in seconds — one field task had 69
+of 234 sessions in that state. They still count in `sessions_count`,
+`unmetered_sessions_count`, and the coverage label, so totals do not change.
+The Web card derives the hidden count as `sessions_count` minus listed
+sessions (unless `details_truncated`) and shows one muted line, "N technical
+retries with no metered usage hidden"; the v2 schema is unchanged.
 
 ## API-equivalent price catalog
 

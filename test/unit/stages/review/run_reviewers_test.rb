@@ -809,6 +809,44 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  # A partial failure records which failed reviewers were NOT provider
+  # limits, so the pass can be marked limits_reached only when every failure
+  # was a quota wall.
+  def test_partial_failure_separates_limit_failures_from_other_failures
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "ok", "output_basename" => "ok" },
+            { "name" => "quota", "output_basename" => "quota" },
+            { "name" => "quoted", "output_basename" => "quoted" }
+          ]
+        }
+      }
+      specs = cfg["review"]["reviewers"]
+      adapters = [
+        OkReviewer.new(specs[0], make_ctx(dir)),
+        LimitErroringReviewer.new(specs[1], make_ctx(dir)),
+        QuotedLimitErroringReviewer.new(specs[2], make_ctx(dir))
+      ]
+      limit_texts = []
+      nonlimit_failures = []
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(
+          cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")),
+          limit_texts: limit_texts, nonlimit_failures: nonlimit_failures
+        )
+        assert_equal :ok, result
+        assert_equal 1, limit_texts.length
+        assert_equal [ "quoted" ], nonlimit_failures
+        refute Hive::Stages::Review.provider_limited_partial_failure?(limit_texts, nonlimit_failures)
+        assert Hive::Stages::Review.provider_limited_partial_failure?(limit_texts, [])
+        refute Hive::Stages::Review.provider_limited_partial_failure?(nil, nil)
+      end
+    end
+  end
+
   class UnsupportedModelErroringReviewer < Hive::Reviewers::Base
     def run!(deadline: nil)
       Hive::Reviewers::Result.new(

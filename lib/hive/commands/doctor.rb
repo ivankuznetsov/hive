@@ -8,6 +8,8 @@ require "hive/invoked_binary"
 require "hive/agent_profiles"
 require "hive/agent_skills"
 require "hive/web/environment"
+require "hive/stages/base"
+require "hive/plan_review/planner_identity"
 
 module Hive
   module Commands
@@ -45,7 +47,8 @@ module Hive
 
       def call
         legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
-                      check_web_environment_aliases + check_runtime_control_plane + check_mcp
+                      check_plan_review_independence + check_web_environment_aliases +
+                      check_runtime_control_plane + check_mcp
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -249,6 +252,39 @@ module Hive
           configured_skill: "config.yml", skill: ".hive-state/config.yml",
           message: "could not parse .hive-state/config.yml (#{@config_yml_error})"
         ) ]
+      end
+
+      # Adversarial plan-review coverage requires a reviewer from a different
+      # model family than the planner (`RouteResolver#independence`). A route
+      # sharing the plan agent's family fails every plan review with
+      # `same_model_family`, which otherwise surfaces only after each plan is
+      # written and reviewed. Warning only: it never changes the exit code.
+      def check_plan_review_independence
+        settings = @config["plan_review"]
+        return [] unless settings.is_a?(Hash)
+
+        route = settings.dig("routes", "adversarial")
+        return [] unless route.is_a?(Hash)
+
+        planner = Hive::Stages::Base.stage_profile(@config, "plan").name.to_s
+        planner_family = Hive::PlanReview::PlannerIdentity.family(planner)
+        reviewer_family = (route["family"] ||
+                           Hive::PlanReview::PlannerIdentity.family(route["agent"].to_s)).to_s.strip.downcase
+        return [] if [ planner_family, reviewer_family ].any? { |family| family.empty? || family == "unknown" }
+        return [] unless planner_family == reviewer_family
+
+        [ warning_row(
+          stage: "plan_review",
+          label: "plan_review/independence",
+          agent: route["agent"].to_s,
+          configured_skill: "plan_review.routes.adversarial",
+          skill: ".hive-state/config.yml",
+          message: "plan_review.routes.adversarial uses the #{reviewer_family} family, the same as the plan " \
+                   "stage agent (#{planner}); adversarial coverage needs an independent model family, so every " \
+                   "plan review will fail with same_model_family. Route the adversary to another provider."
+        ) ]
+      rescue Hive::ConfigError
+        []
       end
 
       def check_web_environment_aliases

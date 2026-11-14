@@ -408,6 +408,70 @@ class HiveCommandsDoctorTest < Minitest::Test
     end
   end
 
+  def plan_review_routes_yaml(adversary_agent:, adversary_family:, adversary_model:)
+    route = ->(agent, model, family, launcher) {
+      "      agent: #{agent}\n      model: #{model}\n      family: #{family}\n      effort: high\n      route: #{launcher}\n"
+    }
+    launcher = adversary_agent == "claude" ? "native_claude" : "native_codex"
+    "brainstorm:\n  agent: claude\n  skill: /x\nplan:\n  agent: codex\n  model: gpt-6.1-sol\n" \
+      "plan_review:\n  routes:\n" \
+      "    primary:\n#{route.call('codex', 'gpt-6.1-sol', 'openai', 'native_codex')}" \
+      "    adversarial:\n#{route.call(adversary_agent, adversary_model, adversary_family, launcher)}" \
+      "    verification:\n#{route.call('codex', 'gpt-6.1-sol', 'openai', 'native_codex')}"
+  end
+
+  # 2026-11-14 dogfood: swapping Muse for Codex as the planner left the
+  # Codex adversary in the same family, and every plan review then failed
+  # with same_model_family. Doctor flags it at config time.
+  def test_plan_review_independence_warns_when_adversary_shares_the_planner_family
+    with_fake_home do |home|
+      exit_code, env = doctor_json_for_project_config(
+        home, plan_review_routes_yaml(adversary_agent: "codex", adversary_family: "openai", adversary_model: "gpt-6-astra")
+      )
+      independent_exit, independent_env = doctor_json_for_project_config(
+        home, plan_review_routes_yaml(adversary_agent: "claude", adversary_family: "anthropic",
+                                      adversary_model: "claude-opus-5-5")
+      )
+
+      assert_equal independent_exit, exit_code, "a same-family adversary is a warning, not a failing check"
+      assert_equal independent_env.dig("summary", "legacy_failures"), env.dig("summary", "legacy_failures")
+      assert_doctor_schema_valid(env)
+      rows = env.fetch("checks").select { |check| check["label"] == "plan_review/independence" }
+      assert_equal 1, rows.length
+      row = rows.first
+      assert_equal %w[warning warning codex plan_review.routes.adversarial],
+                   row.values_at("kind", "status", "agent", "configured_skill")
+      assert_match(/openai family, the same as the plan stage agent \(codex\).*same_model_family/, row.fetch("message"))
+    end
+  end
+
+  def test_plan_review_independence_is_silent_for_an_independent_adversary_and_the_default_routes
+    with_fake_home do |home|
+      independent = plan_review_routes_yaml(adversary_agent: "claude", adversary_family: "anthropic",
+                                            adversary_model: "claude-opus-5-5")
+
+      [ independent, PARKED_STAGE_YAML ].each do |yaml|
+        _exit_code, env = doctor_json_for_project_config(home, yaml)
+        assert_doctor_schema_valid(env)
+        refute(env.fetch("checks").any? { |check| check["label"] == "plan_review/independence" }, yaml)
+      end
+    end
+  end
+
+  # Config.load rejects an unregistered plan agent, but an in-process caller
+  # can hand doctor a raw hash; the independence advisory then stays silent
+  # instead of turning one unresolvable profile into a doctor failure.
+  def test_plan_review_independence_is_silent_when_the_plan_agent_cannot_resolve
+    cfg = {
+      "plan" => { "agent" => "not-a-registered-agent" },
+      "plan_review" => { "routes" => { "adversarial" => { "agent" => "codex", "family" => "openai" } } }
+    }
+    doctor = Hive::Commands::Doctor.new(config: cfg, project_root: nil, output: StringIO.new, environment: {})
+
+    assert_raises(Hive::ConfigError) { Hive::Stages::Base.stage_profile(cfg, "plan") }
+    assert_equal [], doctor.send(:check_plan_review_independence)
+  end
+
   def test_claude_config_is_silent_without_claude_mode_key
     with_fake_home do |home|
       exit_code, env = doctor_json_for_project_config(home, PARKED_STAGE_YAML)

@@ -580,6 +580,7 @@ module Hive
             mark_working(task, phase: :reviewers, pass: pass)
             reviewer_limit_texts = []
             reviewer_unsupported_texts = []
+            reviewer_nonlimit_failures = []
             # A cooled retry of a triage-limited pass reuses the reviewer
             # outputs that pass already produced at this exact HEAD, so only
             # the reviewers that failed re-spend provider quota.
@@ -592,7 +593,8 @@ module Hive
               started_at: started_at, max_wall_clock_sec: max_wall_clock,
               limit_texts: reviewer_limit_texts,
               reuse: reusable_outputs, succeeded: succeeded_reviewers,
-              unsupported_texts: reviewer_unsupported_texts
+              unsupported_texts: reviewer_unsupported_texts,
+              nonlimit_failures: reviewer_nonlimit_failures
             )
             if verify_only && git_head(worktree_path) != reviewed_head
               return review_head_moved(task, pass)
@@ -721,6 +723,21 @@ module Hive
               "reviews",
               "errors-#{format('%02d', pass)}.md"
             )
+            # When every failed reviewer hit a provider quota/usage limit, the
+            # failure is the provider's, not the pass's: stamp limits_reached
+            # so recovery retries on the hourly provider cadence and never
+            # counts it toward the deterministic-failure park. (A Muse 429
+            # beside a healthy Codex reviewer parked tasks after 6 retries.)
+            if File.exist?(errors_path) && provider_limited_partial_failure?(
+              reviewer_limit_texts, reviewer_nonlimit_failures
+            )
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :reviewers, reason: "limits_reached", pass: pass,
+                                message: "some reviewers hit a usage/credit limit",
+                                retry_after: Hive::AgentLimit.retry_after_for(reviewer_limit_texts))
+              return { commit: "reviewers_limits_reached_pass_#{format('%02d', pass)}",
+                       status: :review_error }
+            end
             if File.exist?(errors_path)
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :reviewers,
@@ -1910,8 +1927,15 @@ module Hive
       # we short-circuit between reviewers as soon as the budget is
       # gone — the partial results stay on disk for the next run to
       # consume.
+      # True when this pass's reviewer failures were all provider
+      # quota/usage walls. Nil inputs mean reviewers did not run this
+      # invocation (resumed pass), so there is no fresh limit evidence.
+      def provider_limited_partial_failure?(limit_texts, nonlimit_failures)
+        !Array(limit_texts).empty? && Array(nonlimit_failures).empty?
+      end
+
       def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [],
-                        reuse: {}, succeeded: [], unsupported_texts: [])
+                        reuse: {}, succeeded: [], unsupported_texts: [], nonlimit_failures: [])
         specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
@@ -2014,6 +2038,10 @@ module Hive
           statuses << result.status
           error_messages << result.error_message if result.error?
           limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
+          if result.error? && result.limit_text.to_s.empty? &&
+             !Hive::AgentLimit.from_limit?(result.error_message.to_s)
+            nonlimit_failures << spec["name"].to_s
+          end
           succeeded << spec["output_basename"] if result.ok? && spec["output_basename"]
           handle_reviewer_result(task, cfg, ctx, spec, result)
           if fallback

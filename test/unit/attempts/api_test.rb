@@ -73,7 +73,7 @@ class AttemptsAPITest < Minitest::Test
 
     result = api.dispatch_request(
       :request, interactive: false, now: Time.at(1).utc, admission_view: :tick,
-      replay_semantic_terminal: true
+      replay_semantic_terminal: true, agent_failure_retry: true
     )
 
     assert_equal :accepted, result
@@ -82,6 +82,24 @@ class AttemptsAPITest < Minitest::Test
     assert_equal Time.at(1).utc, call.last.fetch(:now)
     assert_equal :tick, call.last.fetch(:admission_view)
     assert_equal true, call.last.fetch(:replay_semantic_terminal)
+    # 2026-11-15: the daemon passed agent_failure_retry through this wrapper,
+    # which did not accept it, and every Patrol Fix agent retry crashed the daemon.
+    assert_equal true, call.last.fetch(:agent_failure_retry)
+  end
+
+  # The daemon calls dispatch_request through API -> ConfiguredDispatcher ->
+  # Dispatcher. Every layer must accept the same keywords, or a new keyword
+  # crashes the daemon in production while stubbed unit tests stay green.
+  def test_every_dispatch_request_layer_accepts_the_same_keywords
+    keywords = lambda do |klass|
+      klass.instance_method(:dispatch_request).parameters
+        .select { |kind, _name| %i[key keyreq].include?(kind) }.map(&:last).sort
+    end
+    inner = keywords.call(Hive::Attempts::Dispatcher)
+
+    assert_includes inner, :agent_failure_retry
+    assert_equal inner, keywords.call(Hive::Attempts::API)
+    assert_equal inner, keywords.call(Hive::Attempts::ConfiguredDispatcher)
   end
 
   def test_routing_decision_delegates_read_only_daemon_projection

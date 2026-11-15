@@ -33,11 +33,13 @@ module Hive
       end
 
       def dispatch_request(request, interactive: false, now: Time.now.utc,
-                           admission_view: nil, replay_semantic_terminal: false)
+                           admission_view: nil, replay_semantic_terminal: false,
+                           agent_failure_retry: false)
         daemon.dispatch_request(
           request, interactive: interactive, now: now,
           admission_view: admission_view,
-          replay_semantic_terminal: replay_semantic_terminal
+          replay_semantic_terminal: replay_semantic_terminal,
+          agent_failure_retry: agent_failure_retry
         )
       end
 

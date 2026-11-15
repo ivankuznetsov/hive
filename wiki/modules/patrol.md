@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/, lib/hive/refactor_patrol/, lib/hive/patrol_fix/, script/migrate_patrol_findings.rb
 created: 2026-05-28
-updated: 2026-11-14
+updated: 2026-11-15
 tags: [module, patrol, architecture, workflow]
 ---
 
@@ -240,7 +240,15 @@ and retry hint without provider response text, report/parser state, firewall
 restoration, and bounded publication-policy-redacted detail. A clean report
 after Pi's recovered internal provider retry remains successful and emits no
 failure frame. Invalid Fix reports emit `fix_report_invalid`; invalid reports
-from the other managed stages emit `agent_report_invalid`. Every Patrol Fix
+from the other managed stages emit `agent_report_invalid`. The owner names who
+broke the attempt: `agent_*` codes, `fix_report_invalid`, and
+`fix_worktree_dirty` raised at the Fix stage (the agent reported `fixed` but
+left its own worktree uncommitted) are `agent`; `provider_*`/`model_*` are
+`provider`; the same dirty code at Validate/Review/Publish, worktree HEAD
+custody mismatch, validation mutation, protected Git config tamper, the state
+Git index lock, and the secret publication block stay `hive`. The daemon
+retries agent-owned failures on the attempt failure ladder and never retries
+Hive-owned ones (see [[modules/daemon]] "Patrol Fix failed-attempt routing"). Every Patrol Fix
 report string (summary, each `validation_commands[i].identity` and `.command`)
 must be a single line with no control character; the Fix prompt states that
 contract and tells the agent to chain steps with `&&`, and the rejection names

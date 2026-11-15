@@ -81,7 +81,7 @@ module Hive
           "attempt_id" => identifier(attempt_id, "attempt"),
           "correlation_id" => identifier(attempt_id, "correlation"),
           "code" => failure_code(source),
-          "owner" => owner_for(source),
+          "owner" => owner_for(source, stage),
           "status" => bounded_token(source["status"] || "error", "status"),
           "agent_reason" => optional_token(source["error_reason"] || source["agent_reason"], "agent reason"),
           "exit_code" => integer_or_nil(source["exit_code"], "exit code"),
@@ -210,14 +210,34 @@ module Hive
       end
       private_class_method :failure_code
 
-      def owner_for(source)
+      # The owner names whoever broke the attempt. The daemon retries only
+      # agent-owned failures, so a Hive-owned label must mean a Hive or
+      # custody fault, never a broken agent output contract.
+      def owner_for(source, stage)
         code = failure_code(source)
         return "provider" if code.start_with?("provider_") || code.start_with?("model_")
-        return "agent" if code.start_with?("agent_")
+        return "agent" if code.start_with?("agent_") || agent_contract_failure?(code, stage)
 
         "hive"
       end
       private_class_method :owner_for
+
+      # Two controller codes record the Fix agent breaking its own output
+      # contract:
+      # - fix_report_invalid: the controller rejected the report the agent
+      #   wrote; it is the Fix-stage twin of agent_report_invalid.
+      # - fix_worktree_dirty at the Fix stage: the agent reported `fixed` but
+      #   left uncommitted bytes in its own worktree, although its prompt
+      #   requires a commit. At Validate, Review, and Publish the agent has
+      #   already exited, so the same code is unexplained custody drift.
+      # Custody mismatch, validation mutation, protected Git config tamper,
+      # the state Git lock, and the secret publication block stay Hive-owned.
+      def agent_contract_failure?(code, stage)
+        return true if code == "fix_report_invalid"
+
+        code == "fix_worktree_dirty" && stage.to_s.sub(/\A\d+-/, "") == "fix"
+      end
+      private_class_method :agent_contract_failure?
 
       def provider_failure_class(source)
         failure = source["provider_failure"]

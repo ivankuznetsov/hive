@@ -5,6 +5,7 @@ require "hive/stages/patrol_fix/runner"
 require "hive/attempts/context"
 require "hive/attempts/diagnostic_channel"
 require "hive/github_publication"
+require "hive/patrol_fix/worktree_receipt"
 
 class PatrolFixRunnerTest < Minitest::Test
   include HiveTestHelper
@@ -74,25 +75,32 @@ class PatrolFixRunnerTest < Minitest::Test
   def test_controller_failures_publish_semantic_attempt_diagnostics_before_reraising
     cases = [
       [ "validate", Hive::StageError.new("validation changed the worktree bytes"),
-        "validation_mutation" ],
+        "validation_mutation", "hive" ],
+      [ "validate", Hive::StageError.new("fix worktree is dirty before validation"),
+        "fix_worktree_dirty", "hive" ],
       [ "publish", Hive::StageError.new("reviewed worktree is dirty before publication"),
-        "fix_worktree_dirty" ],
+        "fix_worktree_dirty", "hive" ],
       [ "publish", Hive::StageError.new("reviewed worktree HEAD changed before publication"),
-        "worktree_head_custody_mismatch" ],
+        "worktree_head_custody_mismatch", "hive" ],
       [ "fix", Hive::StageError.new("fatal: unable to create .hive-state/index.lock"),
-        "state_git_index_lock" ],
+        "state_git_index_lock", "hive" ],
       [ "publish", Hive::GithubPublication::Blocked.new(
         "secret_detected", "publication secret policy blocked body bytes"
-      ), "secret_policy_publish_blocked" ]
+      ), "secret_policy_publish_blocked", "hive" ],
+      # The Fix agent reported `fixed` but left its own worktree dirty,
+      # although its prompt requires a commit: an agent contract failure.
+      [ "fix", Hive::PatrolFix::WorktreeReceipt::InvalidWorktree.new(
+        "fix worktree is dirty; preserving it for recovery"
+      ), "fix_worktree_dirty", "agent" ]
     ]
 
-    cases.each do |stage, failure, expected_code|
+    cases.each do |stage, failure, expected_code, expected_owner|
       raised, frame = capture_controller_failure(stage: stage, failure: failure)
 
       assert_same failure, raised
       assert_equal "valid", frame.status
       assert_equal expected_code, frame.document.fetch("code")
-      assert_equal "hive", frame.document.fetch("owner")
+      assert_equal expected_owner, frame.document.fetch("owner"), "#{stage}: #{failure.message}"
     end
   end
 

@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-14
+updated: 2026-11-15
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
 ---
 
@@ -2692,3 +2692,42 @@ before the review runner starts; if review later resolves a different pass,
 the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
 failed rebase substitute writes no marker attrs (the rebase writes no marker
 at all); only the log line and receipt record it.
+
+## Patrol Fix agent-failure retry (2026-11-15)
+
+- **Attached recovery request never completes.** Dogfood b6d6001077 log,
+  2026-11-14: after a daemon restart, a first-sight `advance` dispatch and a
+  queued markerless recovery request targeted the same generation. The request
+  was admitted as `existing_live`, `mark_dispatched` bound it to the other
+  request's attempt, but its dispatch row never got `claim_attempt_id`, so
+  `reconcile_attempt_deliveries` never moved it to `terminal`. The healer
+  reported it `running` from 19:59 UTC until the task changed the next day.
+  Agent- and Hive-owned Patrol Fix failures no longer use that route, but
+  provider-owned or diagnostic-free markerless failures, and other controller
+  workflows, still do. The attach bug itself is unfixed; the cause is read
+  from the log and code, not reproduced.
+- Provider-owned Patrol Fix failures still go through the healer's
+  markerless recovery, paced by the one-hour `patrol_retry_delay` and the
+  RecoveryCoordinator ladder, not the attempt failure ladder.
+- Markerless recovery requests queued before this change keep running on the
+  old route until they finish or go stale, and the operational snapshot shows
+  their receipt instead of the new disposition.
+- The series counts identical exit statuses only. Patrol Fix failures exit 1,
+  so three different agent-owned codes in a row reach the limit. Receipts
+  carry no code; the operator reason names the latest one.
+- `agent_cancelled` (a non-TEMPFAIL cancellation) is agent-owned and retried
+  on the ladder. Cancelled outcomes never count toward the limit.
+- A failure that changes the generation (state file, dependency fingerprint,
+  or Patrol receipts) starts a new series. Only the daily dispatch caps bound
+  a failure that changes its generation every time.
+- An integrity hold also ignores operator edits to the state file: while the
+  latest attempt's diagnostic is Hive-owned, only `hive run SLUG --project
+  NAME` re-runs the stage.
+- One-shot readiness reports an agent-failure retry as `runnable_now` even
+  while admission will defer it for backoff, as for `plan-review-run`.
+- The first two ladder steps are 5 s and 10 s, so a deterministic agent
+  failure costs three runs within a few daemon ticks before the operator stop,
+  and three more after each Hive deploy.
+- The route trusts the status producer's `diagnostic` binding to
+  `current_attempt`. An unreadable diagnostic artifact falls back to the
+  markerless path.

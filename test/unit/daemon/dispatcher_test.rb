@@ -2941,7 +2941,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           unmet_dependencies: [], dependency_base_mode: "default",
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil,
-          condition_task_generation: nil, task_history_invalid: false, id: 1)
+          condition_task_generation: nil, task_history_invalid: false, id: 1,
+          current_attempt: nil, diagnostic: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, id: id, stage: stage, workflow: workflow, marker: marker,
@@ -2956,7 +2957,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation,
       condition_task_generation: condition_task_generation,
-      task_history_invalid: task_history_invalid
+      task_history_invalid: task_history_invalid,
+      current_attempt: current_attempt, diagnostic: diagnostic
     )
   end
 
@@ -3251,6 +3253,231 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.send(:observe_dispatch_outcome, observed, :attempt_failure_limit)
     assert_includes snapshot.calls.last.last.fetch(:reason), "exit unknown"
+  end
+
+  # A failed Patrol Fix attempt leaves the marker `none`, so Policy brakes the
+  # unchanged `ready_to_run` row as a markerless stall. The row's typed
+  # attempt diagnostic decides instead: an agent-owned failure retries through
+  # the attempt failure ladder; a Hive-owned integrity failure never retries.
+  def patrol_fix_failure_row(owner:, code:, slug: "pf1", current_attempt: "attempt-7",
+                             diagnostic_attempt: "attempt-7", stage: "2-fix",
+                             source: "artifact", blocked: false)
+    row(
+      slug: slug, stage: "2-fix", workflow: "patrol-fix", marker: "none",
+      action: "ready_to_run", command: "hive run #{slug} --project p1",
+      mtime: T0 - 600, current_attempt: current_attempt, blocked: blocked,
+      diagnostic: {
+        "source" => source, "owner" => owner, "code" => code,
+        "attempt_id" => diagnostic_attempt, "stage" => stage
+      }
+    )
+  end
+
+  def agent_retry_dispatcher(results, snapshot: FakeOperationalSnapshot.new)
+    calls = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+      calls << [ request, options ]
+      results.shift || raise("unexpected automatic admission")
+    end
+    dispatcher, _supervisor, controller, logger = make_dispatcher(
+      rows: [], attempt_dispatcher: attempt_dispatcher, operational_snapshot: snapshot
+    )
+    healed = []
+    dispatcher.instance_variable_get(:@stale_agent_healer)
+              .define_singleton_method(:heal_markerless_stall) { |stalled| healed << stalled.slug }
+    [ dispatcher, controller, logger, calls, healed ]
+  end
+
+  def test_agent_owned_patrol_fix_failure_redispatches_through_the_failure_ladder
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-8", "generation-7", "launching")
+    accepted = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil, attach_descriptor: nil, reason: nil
+    )
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, controller, logger, calls, healed = agent_retry_dispatcher([ accepted ], snapshot: snapshot)
+    observed = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid")
+    controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+
+    outcome = dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_equal :dispatched, outcome
+    request, options = calls.fetch(0)
+    assert_equal "agent_failure_retry", request.trigger
+    assert_equal [ "hive", "run", "pf1", "--project", "p1" ], request.argv
+    assert_equal true, options.fetch(:agent_failure_retry)
+    assert_empty healed, "an agent-owned failure must not enter markerless recovery"
+    refute events_include?(logger, :markerless_stalled)
+    dispatched = logger.events.find { |name, _attributes| name == :dispatched }
+    assert_equal "agent_failure_retry", dispatched.last.fetch(:trigger)
+    disposition = snapshot.calls.last.last
+    assert_equal [ :dispatched, "scheduler" ], disposition.values_at(:decision, :owner)
+  end
+
+  def test_agent_failure_retry_backoff_is_a_scheduler_wait_with_the_retry_time
+    ended_at = T0 - 3
+    attempt = Struct.new(:attempt_id, :task_generation, :state, :retry_charge)
+                    .new("attempt-7", "generation-7", "terminal", 1)
+    deferred = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: attempt,
+      receipt: { "ended_at" => ended_at.utc.iso8601(6), "exit_status" => 1 },
+      attach_descriptor: nil, reason: "transition_retry"
+    )
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, controller, _logger, _calls, healed = agent_retry_dispatcher([ deferred ], snapshot: snapshot)
+    observed = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid")
+    controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+
+    outcome = dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_equal :attempt_transient_retry, outcome
+    retry_at = (ended_at + Hive::Recovery::RetryPolicy.delay_sec(1)).utc.iso8601(6)
+    disposition = snapshot.calls.last.last
+    assert_equal [ :retry_cooldown, "scheduler", retry_at, false, true ],
+                 disposition.values_at(:decision, :owner, :retry_at, :retry_due, :retry_safe)
+    assert_includes disposition.fetch(:reason), "fix_report_invalid"
+    assert_includes disposition.fetch(:reason), retry_at
+    assert_empty healed
+
+    tempfail = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: nil, receipt: nil, attach_descriptor: nil,
+      reason: "transient_retry"
+    )
+    dispatcher, controller, = agent_retry_dispatcher([ tempfail ], snapshot: snapshot)
+    controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+    dispatcher.send(:handle_row, observed, now: T0)
+    unknown_time = snapshot.calls.last.last
+    assert_nil unknown_time.fetch(:retry_at)
+    assert_includes unknown_time.fetch(:reason), "the next eligible tick"
+  end
+
+  def test_agent_failure_retry_limit_is_operator_repair_naming_the_count_and_command
+    attempt = Struct.new(:attempt_id, :task_generation, :state)
+                    .new("attempt-9", "generation-7", "terminal")
+    held = Hive::Attempts::DispatchResult.new(
+      status: :deferred, attempt: attempt, receipt: { "exit_status" => 1 },
+      attach_descriptor: nil, reason: Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+    )
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, controller, logger, _calls, healed = agent_retry_dispatcher([ held ], snapshot: snapshot)
+    observed = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid")
+    controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+
+    outcome = dispatcher.send(:handle_row, observed, now: T0)
+
+    assert_equal :attempt_failure_limit, outcome
+    disposition = snapshot.calls.last.last
+    assert_equal [ :attempt_failure_limit, "operator" ], disposition.values_at(:decision, :owner)
+    reason = disposition.fetch(:reason)
+    assert_includes reason, "hive run pf1 --project p1 failed 3 times in a row"
+    assert_includes reason, "exit 1"
+    assert_includes reason, "attempt-9"
+    assert_includes reason, "fix_report_invalid"
+    assert reason.end_with?("then rerun: hive run pf1 --project p1"), reason
+    assert events_include?(logger, :attempt_failure_limit)
+    assert_empty healed
+  end
+
+  def test_hive_owned_integrity_failure_is_never_retried
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, controller, logger, calls, healed = agent_retry_dispatcher([], snapshot: snapshot)
+    %w[worktree_head_custody_mismatch protected_git_config_tamper state_git_index_lock
+       validation_mutation].each do |code|
+      observed = patrol_fix_failure_row(owner: "hive", code: code)
+      # First sight (no baseline) and the later markerless brake both hold.
+      first_sight = dispatcher.send(:handle_row, observed, now: T0)
+      controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+      braked = dispatcher.send(:handle_row, observed, now: T0)
+      controller.forget_state_file_mtime(project: "p1", slug: "pf1")
+
+      assert_equal [ :attempt_integrity_hold, :attempt_integrity_hold ], [ first_sight, braked ]
+      disposition = snapshot.calls.last.last
+      assert_equal [ :attempt_integrity_hold, "operator" ], disposition.values_at(:decision, :owner)
+      assert_includes disposition.fetch(:reason), code
+      assert_includes disposition.fetch(:reason), "then rerun: hive run pf1 --project p1"
+    end
+
+    assert_empty calls, "integrity failures never reach admission"
+    assert_empty healed, "integrity failures never enter markerless recovery"
+    refute events_include?(logger, :dispatched)
+    hold = logger.events.find { |name, attributes| name == :skipped && attributes[:reason] == "attempt_integrity_hold" }
+    assert_equal "attempt-7", hold.last.fetch(:attempt_id)
+  end
+
+  def test_unattributed_failures_keep_the_markerless_stall_brake
+    dispatcher, controller, logger, calls, healed = agent_retry_dispatcher([])
+    rows = [
+      patrol_fix_failure_row(owner: "provider", code: "provider_rate_limited", slug: "provider"),
+      patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", slug: "stale",
+                             diagnostic_attempt: "attempt-6"),
+      patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", slug: "other-stage",
+                             stage: "3-validate"),
+      patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", slug: "marker",
+                             source: "marker"),
+      patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", slug: "unbound",
+                             current_attempt: nil),
+      # An agent run that exited 0 without progress publishes no diagnostic.
+      row(slug: "no-progress", stage: "2-fix", workflow: "patrol-fix", marker: "none",
+          action: "ready_to_run", command: "hive run no-progress --project p1", mtime: T0 - 600)
+    ]
+
+    rows.each do |observed|
+      controller.observe_state_file_mtime(project: "p1", slug: observed.slug, mtime: observed.state_file_mtime)
+      dispatcher.send(:handle_row, observed, now: T0)
+    end
+
+    assert_empty calls
+    assert_equal rows.map(&:slug), healed
+    assert_equal rows.length, logger.events.count { |name, _attributes| name == :markerless_stalled }
+  end
+
+  def test_failed_attempt_route_requires_durable_admission_and_an_unblocked_run_row
+    agent = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid")
+    hive = patrol_fix_failure_row(owner: "hive", code: "validation_mutation")
+    local, = make_dispatcher(rows: [])
+
+    assert_nil local.send(:failed_attempt_route, agent, :markerless_stalled),
+               "without durable admission nothing would pace or bound the rerun"
+    assert_equal :attempt_integrity_hold, local.send(:failed_attempt_route, hive, :dispatch).first
+
+    dispatcher, = agent_retry_dispatcher([])
+    assert_equal :agent_failure_retry, dispatcher.send(:failed_attempt_route, agent, :dispatch).first
+    assert_nil dispatcher.send(:failed_attempt_route, agent, :wait_for_debounce)
+    blocked = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", blocked: true)
+    assert_nil dispatcher.send(:failed_attempt_route, blocked, :markerless_stalled)
+  end
+
+  def test_agent_failure_retry_respects_the_priority_capacity_fence
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, controller, logger, calls, = agent_retry_dispatcher([], snapshot: snapshot)
+    observed = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid")
+    controller.observe_state_file_mtime(project: "p1", slug: "pf1", mtime: observed.state_file_mtime)
+
+    outcome = dispatcher.send(:handle_row, observed, now: T0, capacity_fence: :global_cap)
+
+    assert_equal :global_cap, outcome
+    assert_empty calls
+    assert_equal :global_cap, snapshot.calls.last.last.fetch(:decision)
+    fence = logger.events.find { |name, attributes| name == :blocked && attributes[:priority_fence] }
+    assert_equal "global_cap", fence.last.fetch(:reason)
+  end
+
+  def test_one_shot_readiness_follows_the_failed_attempt_route
+    dispatcher, = agent_retry_dispatcher([])
+    agent = patrol_fix_failure_row(owner: "agent", code: "fix_report_invalid", slug: "agent")
+    hive = patrol_fix_failure_row(owner: "hive", code: "validation_mutation", slug: "hive")
+    [ agent, hive ].each do |observed|
+      dispatcher.instance_variable_get(:@controller).observe_state_file_mtime(
+        project: "p1", slug: observed.slug, mtime: observed.state_file_mtime
+      )
+    end
+
+    retry_item = dispatcher.send(:row_pending_item, agent, now: T0)
+    hold_item = dispatcher.send(:row_pending_item, hive, now: T0)
+
+    assert_equal [ "runnable_now", "eligible" ], retry_item.values_at("bucket", "reason")
+    assert_equal [ "waiting_operator", "attempt_integrity_hold" ], hold_item.values_at("bucket", "reason")
   end
 
   def test_durable_dispatch_refreshes_admission_time_after_a_long_tick

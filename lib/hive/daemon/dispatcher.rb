@@ -101,6 +101,14 @@ module Hive
       REVIEW_STAGE_DIR = Hive::Workflows::VERBS.fetch("review").fetch(:target)
       EMPTY_BRAINSTORM_ANSWER_STATE = { pending: false, complete: false }.freeze
 
+      # Controller-owned (Patrol Fix) stages leave the marker `none` when an
+      # attempt fails, so Policy sees the same `ready_to_run` row before and
+      # after the failure: first sight dispatches, later ticks brake it as a
+      # markerless stall. For these Policy outcomes the row's typed attempt
+      # diagnostic decides instead (see #failed_attempt_route).
+      FAILED_ATTEMPT_RUN_DECISIONS = %i[dispatch markerless_stalled].freeze
+      AGENT_FAILURE_RETRY_TRIGGER = "agent_failure_retry".freeze
+
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
       #   each project's own config via Hive::Config.load(project_root).
@@ -1128,6 +1136,10 @@ module Hive
         return retry_pending_item(row, now: now) if retryable_error_row?(row)
 
         decision = one_shot_policy_decision(row, now: now)
+        route, = failed_attempt_route(row, decision)
+        # An agent-failure retry is admitted like any dispatch (admission
+        # applies its backoff and limit); an integrity hold waits on the operator.
+        decision = route == :agent_failure_retry ? :dispatch : route if route
         case decision
         when :dispatch
           gate = @controller.can_dispatch?(
@@ -1160,7 +1172,8 @@ module Hive
           pending_item("waiting_external", "dispatch:task:#{row.slug}", "pull_request_pending",
                        next_check_at: @merge_watcher&.next_poll_at(now: now),
                        condition: pr_condition(row))
-        when :wait_for_answers, :admission_error, :markerless_stalled, :record_baseline
+        when :wait_for_answers, :admission_error, :markerless_stalled, :record_baseline,
+             :attempt_integrity_hold
           pending_item("waiting_operator", "dispatch:task:#{row.slug}", decision.to_s,
                        condition: operator_condition(row))
         when :skip
@@ -2380,6 +2393,12 @@ module Hive
           blocked: row.blocked == true,
           admission_error: !row.admission_error.nil?
         )
+        route, diagnostic = failed_attempt_route(row, decision)
+        if route
+          return handle_failed_attempt(
+            row, route, diagnostic, now: now, capacity_fence: capacity_fence
+          )
+        end
 
         case decision
         when :admission_error
@@ -2659,7 +2678,8 @@ module Hive
           now: now,
           trigger: trigger,
           replay_semantic_terminal: trigger == "advance" &&
-            row.marker.to_s == "none" && Policy.advance?(row.action)
+            row.marker.to_s == "none" && Policy.advance?(row.action),
+          agent_failure_retry: trigger == AGENT_FAILURE_RETRY_TRIGGER
         )
         remember_routing_observation(row, dispatch_result)
         remember_failure_limit_observation(row, dispatch_result)
@@ -2731,6 +2751,96 @@ module Hive
         end
         @logger.event(:markerless_stalled, **attributes)
         :markerless_stalled
+      end
+
+      # A failed Patrol Fix attempt publishes a typed diagnostic naming who
+      # broke it, and status binds that diagnostic to the task's current
+      # attempt. An agent-owned failure re-runs through durable admission on
+      # the shared failure ladder: RetryPolicy backoff on the attempt's retry
+      # charge, then an operator-owned stop after
+      # Attempts::Dispatcher::REPEATED_FAILURE_LIMIT identical failures. A
+      # Hive-owned failure is a custody or integrity fault (custody mismatch,
+      # validation mutation, protected Git config tamper, state Git lock) that
+      # a blind rerun cannot cure, so it is never retried automatically.
+      # Anything else (no diagnostic, a provider failure, or a run that exited
+      # 0 without progress) keeps the markerless-stall path.
+      def failed_attempt_route(row, decision)
+        return nil unless row.action == Policy::RUN_ACTION && row.blocked != true &&
+                          FAILED_ATTEMPT_RUN_DECISIONS.include?(decision)
+
+        diagnostic = current_attempt_diagnostic(row)
+        case diagnostic&.fetch("owner", nil)
+        when "agent"
+          # Without durable admission nothing would pace or bound the rerun.
+          [ :agent_failure_retry, diagnostic ] if @attempt_dispatcher && !@dry_run
+        when "hive"
+          [ :attempt_integrity_hold, diagnostic ]
+        end
+      end
+
+      def current_attempt_diagnostic(row)
+        diagnostic = row.diagnostic
+        return nil unless diagnostic.is_a?(Hash) && diagnostic["source"] == "artifact"
+        return nil if row.current_attempt.to_s.empty?
+
+        diagnostic if diagnostic["attempt_id"] == row.current_attempt.to_s &&
+                      diagnostic["stage"] == row.stage.to_s
+      end
+
+      def handle_failed_attempt(row, route, diagnostic, now:, capacity_fence:)
+        if route == :attempt_integrity_hold
+          @logger.event(:skipped, project: row.project, slug: row.slug, stage: row.stage,
+                                  action: row.action, reason: "attempt_integrity_hold",
+                                  code: diagnostic["code"], attempt_id: diagnostic["attempt_id"])
+          observe_operational_disposition(
+            row, decision: :attempt_integrity_hold, owner: "operator",
+            reason: "attempt #{diagnostic['attempt_id']} failed with the Hive-owned integrity " \
+                    "diagnostic #{diagnostic['code']}; Hive never retries integrity failures " \
+                    "automatically. Inspect the task, then rerun: #{manual_run_command(row)}"
+          )
+          return :attempt_integrity_hold
+        end
+
+        outcome = if capacity_fence
+          log_priority_capacity_fence(row, capacity_fence)
+          capacity_fence
+        else
+          dispatch_or_block(row, now: now, trigger: AGENT_FAILURE_RETRY_TRIGGER)
+        end
+        observe_agent_failure_retry(row, outcome, diagnostic)
+        outcome
+      end
+
+      def observe_agent_failure_retry(row, outcome, diagnostic)
+        evidence = @failure_limit_observations.delete([ row.project.to_s, row.slug.to_s ]) || {}
+        case outcome
+        when :attempt_transient_retry
+          retry_at = evidence["retry_at"]
+          observe_operational_disposition(
+            row, decision: :retry_cooldown, owner: "scheduler",
+            reason: "automatic retry after the agent failure #{diagnostic['code']} " \
+                    "(attempt #{diagnostic['attempt_id']}) is scheduled for " \
+                    "#{retry_at || 'the next eligible tick'}",
+            retry_at: retry_at, retry_due: false, retry_safe: true, safety_reason: nil
+          )
+        when :attempt_failure_limit
+          observe_operational_disposition(
+            row, decision: :attempt_failure_limit, owner: "operator",
+            reason: "#{manual_run_command(row)} failed " \
+                    "#{Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT} times in a row " \
+                    "(exit #{evidence['exit_status'] || 'unknown'}; latest attempt " \
+                    "#{evidence['attempt_id'] || diagnostic['attempt_id']} failed with the " \
+                    "agent-owned diagnostic #{diagnostic['code']}); automatic retry is stopped " \
+                    "until the task input or the Hive build changes. Inspect the attempt, " \
+                    "then rerun: #{manual_run_command(row)}"
+          )
+        else
+          observe_dispatch_outcome(row, outcome)
+        end
+      end
+
+      def manual_run_command(row)
+        Shellwords.join([ "hive", "run", row.slug.to_s, "--project", row.project.to_s ])
       end
 
       def dispatch_outcome(result)
@@ -2836,14 +2946,33 @@ module Hive
         ]
       end
 
+      # Evidence of the row's latest admission only: a stale backoff deadline
+      # or limit must never describe a later, different admission result.
       def remember_failure_limit_observation(row, result)
-        return unless result.is_a?(Hive::Attempts::DispatchResult) &&
-                      result.reason == Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+        @failure_limit_observations.delete([ row.project.to_s, row.slug.to_s ])
+        return unless result.is_a?(Hive::Attempts::DispatchResult)
 
-        @failure_limit_observations[[ row.project.to_s, row.slug.to_s ]] = {
-          "attempt_id" => result.attempt&.attempt_id,
-          "exit_status" => result.receipt&.fetch("exit_status", nil)
-        }
+        evidence = case result.reason
+        when Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON
+          { "exit_status" => result.receipt&.fetch("exit_status", nil) }
+        when "transition_retry"
+          { "retry_at" => transition_retry_at(result) }
+        end
+        return unless evidence
+
+        @failure_limit_observations[[ row.project.to_s, row.slug.to_s ]] =
+          evidence.merge("attempt_id" => result.attempt&.attempt_id)
+      end
+
+      # The deferral carries the failed attempt that set the backoff, so the
+      # scheduler names the exact time admission will accept the retry.
+      def transition_retry_at(result)
+        return nil unless result.receipt.is_a?(Hash) && result.attempt
+
+        Hive::Attempts::Dispatcher.transition_retry_at(
+          ended_at: result.receipt.fetch("ended_at"),
+          retry_charge: result.attempt["retry_charge"]
+        ).utc.iso8601(6)
       end
 
       def remember_routing_observation(row, result)
@@ -4935,14 +5064,15 @@ module Hive
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
                            request_id: nil, kind: :task, dispatch_token: nil,
-                           replay_semantic_terminal: false)
+                           replay_semantic_terminal: false, agent_failure_retry: false)
         return :shutdown unless admission_open?
 
         if kind == :task && @attempt_dispatcher && !@dry_run
           return dispatch_durable_command(
             command, project: project, slug: slug, stage: stage,
             now: now, trigger: trigger, request_id: request_id,
-            replay_semantic_terminal: replay_semantic_terminal
+            replay_semantic_terminal: replay_semantic_terminal,
+            agent_failure_retry: agent_failure_retry
           )
         end
 
@@ -4979,7 +5109,7 @@ module Hive
       end
 
       def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:,
-                                   replay_semantic_terminal: false)
+                                   replay_semantic_terminal: false, agent_failure_retry: false)
         return :shutdown unless admission_open?
 
         # A full daemon tick can take longer than the attempt launch window
@@ -5007,11 +5137,13 @@ module Hive
         )
         return :shutdown unless admission_open?
 
-        result = @attempt_dispatcher.dispatch_request(
-          request, interactive: false, now: now,
+        options = {
+          interactive: false, now: now,
           admission_view: @attempt_snapshot&.admission_view,
           replay_semantic_terminal: replay_semantic_terminal
-        )
+        }
+        options[:agent_failure_retry] = true if agent_failure_retry
+        result = @attempt_dispatcher.dispatch_request(request, **options)
         log_attempt_admission(result)
         if result.status == :accepted
           @logger.event(

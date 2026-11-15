@@ -87,6 +87,45 @@ class PatrolDispatchReplayTest < Minitest::Test
     end
   end
 
+  # Owner names who broke the attempt; the daemon retries only agent-owned
+  # failures. An invalid Fix report, and a Fix-stage worktree the agent left
+  # dirty, are agent contract failures. The same dirty code after the agent
+  # exited, and every custody, integrity, lock, or secret code, stay Hive's.
+  def test_incident_cohorts_normalize_to_the_party_that_broke_the_attempt
+    expected = {
+      "2-fix" => {
+        "agent_exit_nonzero" => "agent", "fix_report_invalid" => "agent",
+        "fix_worktree_dirty" => "agent", "protected_git_config_tamper" => "hive",
+        "secret_policy_publish_blocked" => "hive", "state_git_index_lock" => "hive",
+        "validation_mutation" => "hive", "worktree_head_custody_mismatch" => "hive"
+      },
+      "3-validate" => {
+        "agent_exit_nonzero" => "agent", "fix_report_invalid" => "agent",
+        "fix_worktree_dirty" => "hive", "protected_git_config_tamper" => "hive",
+        "secret_policy_publish_blocked" => "hive", "state_git_index_lock" => "hive",
+        "validation_mutation" => "hive", "worktree_head_custody_mismatch" => "hive"
+      }
+    }
+    expected.each do |stage, owners|
+      observed = replay.failure_cohorts.to_h do |cohort|
+        diagnostic = Hive::PatrolFix::AttemptDiagnostic.normalize(
+          cohort.fetch("terminal_envelope"),
+          stage: stage, task_generation: "incident-generation",
+          attempt_id: "incident-attempt", recorded_at: Time.utc(2026, 11, 14)
+        )
+        [ diagnostic.fetch("code"), diagnostic.fetch("owner") ]
+      end
+      assert_equal owners, observed, stage
+    end
+
+    bare_fix_stage = Hive::PatrolFix::AttemptDiagnostic.normalize(
+      { "status" => "error", "worktree_status" => "dirty" },
+      stage: "fix", task_generation: "incident-generation",
+      attempt_id: "incident-attempt", recorded_at: Time.utc(2026, 11, 14)
+    )
+    assert_equal [ "fix_worktree_dirty", "agent" ], bare_fix_stage.values_at("code", "owner")
+  end
+
   def test_normalizer_bounds_and_redacts_detail_and_omits_it_when_redaction_fails
     token = "ghp_" + "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hI6"
     detail = "\e[31mprovider failed #{token} \xFF".b + ("x" * 8_000)

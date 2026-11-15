@@ -2695,17 +2695,14 @@ at all); only the log line and receipt record it.
 
 ## Patrol Fix agent-failure retry (2026-11-15)
 
-- **Attached recovery request never completes.** Dogfood b6d6001077 log,
-  2026-11-14: after a daemon restart, a first-sight `advance` dispatch and a
-  queued markerless recovery request targeted the same generation. The request
-  was admitted as `existing_live`, `mark_dispatched` bound it to the other
-  request's attempt, but its dispatch row never got `claim_attempt_id`, so
-  `reconcile_attempt_deliveries` never moved it to `terminal`. The healer
-  reported it `running` from 19:59 UTC until the task changed the next day.
-  Agent- and Hive-owned Patrol Fix failures no longer use that route, but
-  provider-owned or diagnostic-free markerless failures, and other controller
-  workflows, still do. The attach bug itself is unfixed; the cause is read
-  from the log and code, not reproduced.
+- **Attached recovery request never completes (resolved).** After a daemon
+  restart, a first-sight `advance` dispatch and a queued markerless recovery
+  request targeted the same generation; the request attached as
+  `existing_live` and stayed `dispatched` overnight. The daemon now closes
+  such a request when its attempt ends; see "Attached recovery request
+  closure (2026-11-15)" below and [[modules/daemon]] "Attached recovery
+  requests". The cause is reproduced in
+  `test/integration/manual_workflow_retry_test.rb`.
 - Provider-owned Patrol Fix failures still go through the healer's
   markerless recovery, paced by the one-hour `patrol_retry_delay` and the
   RecoveryCoordinator ladder, not the attempt failure ladder.
@@ -2731,3 +2728,19 @@ at all); only the log line and receipt record it.
 - The route trusts the status producer's `diagnostic` binding to
   `current_attempt`. An unreadable diagnostic artifact falls back to the
   markerless path.
+## Attached recovery request closure (2026-11-15)
+
+- Closing an attached request is driven by the attempt record, not a bound
+  delivery, so the attached request gets no `dispatch_result` row and no
+  sequence promotion. Recovery requests carry neither today.
+- A `lost` attempt closes the attached request as `lost` instead of following
+  the lost-attempt replacement the way bound deliveries do; the healer or a
+  rearm takes over from there.
+- The reconcile runs only for projects this daemon owns. In a dispatch-disabled
+  project, a stuck `dispatched` request still waits for an operator
+  `workflow.retry` (which already finishes it from the attempt record) and
+  status keeps reporting `project_dispatch_disabled`.
+- `dispatched_attempt_unknown` maps to terminal outcome `lost`, so marker
+  recoveries get the guarded ERROR-marker repair. Whether a pruned or
+  never-recorded attempt should instead stay operator-owned is unverified.
+

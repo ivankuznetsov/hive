@@ -439,7 +439,11 @@ operator-owned, reason `project_dispatch_disabled`, remediation names the
 `daemon.enabled` flag and `hive daemon reload`) when the daemon will not
 dispatch the project. Both keep `recovery.status: queued` with the retry count,
 identical-failure count, and escalation tier, and neither counts toward
-`summary.states.running`.
+`summary.states.running`. In an enabled project the daemon closes that
+request on its next reconcile (terminal, `recovery.reason`
+`dispatched_attempt_finished` or `dispatched_attempt_unknown`), so the
+`retry_pending` projection is transient rather than a request stuck in
+`dispatched`.
 Disabling either the project daemon or global automatic retry restores the
 operator-owned `needs_repair` classification.
 

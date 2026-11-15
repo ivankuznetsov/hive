@@ -1217,8 +1217,11 @@ module Hive
           record["progress_token"].to_s == request.recovery["expected_post_clear_progress_fingerprint"].to_s
       end
 
+      # `close_reason` closes a request that no delivery owns (see
+      # #close_finished_dispatch): it records why and completes the queued
+      # row in the same transition.
       def mark_dispatched(request, attempt_id:, terminal: false, outcome: nil,
-                          now: Time.now.utc)
+                          now: Time.now.utc, close_reason: nil)
         current = request_queue.fetch(request.request_id, state_home: @state_home) || request
         recovery = current.recovery || {}
         return receipt_for_request(current, attempt_id: attempt_id) if recovery["phase"] == "terminal"
@@ -1242,6 +1245,7 @@ module Hive
         if terminal
           changes["terminal_outcome"] = outcome
           changes["terminal_at"] = now.utc.iso8601(6)
+          changes["close_reason"] = close_reason if close_reason
           # Markerless recovery uses the original failure origin as its lookup
           # key, including after terminalization and before paced rearming.
           unless markerless_failure_recovery?(recovery)
@@ -1250,7 +1254,8 @@ module Hive
             end
           end
         end
-        transitioned = request_queue.update_recovery!(
+        transitioned = request_queue.public_send(
+          close_reason ? :complete_recovery! : :update_recovery!,
           request.request_id,
           expected_phase: recovery["phase"],
           changes: changes,
@@ -1260,6 +1265,41 @@ module Hive
         return unavailable_request(current, "transition_conflict") unless transitioned && refreshed
 
         receipt_for_request(refreshed, attempt_id: attempt_id)
+      end
+
+      DISPATCHED_ATTEMPT_FINISHED = "dispatched_attempt_finished".freeze
+      DISPATCHED_ATTEMPT_UNKNOWN = "dispatched_attempt_unknown".freeze
+
+      # A `dispatched` recovery names the attempt doing its work. Attempt
+      # delivery reconciliation closes it only when that attempt was admitted
+      # for this request. A request that attached to another request's live
+      # attempt (admission returned `existing_live`, for example after a
+      # restart's first-sight dispatch won the same generation) owns no
+      # delivery, so its row stays `queued` and nothing else ever closes it.
+      # Close it from the attempt record instead: a final attempt's outcome
+      # becomes the terminal outcome; an attempt Hive cannot find closes as
+      # `lost`. Both carry a typed close reason. This never dispatches: the
+      # healer and ordinary recovery admission decide whether to retry.
+      # Returns nil while the attempt is live, or when it cannot be read.
+      def close_finished_dispatch(request, now: Time.now.utc)
+        recovery = request.recovery || {}
+        return nil unless recovery["phase"] == "dispatched" && request.state.to_s == "queued"
+
+        attempt_id = recovery["attempt_id"].to_s
+        record = attempts_store.fetch(attempt_id) unless attempt_id.empty?
+        return nil if record&.live?
+
+        ended_at = record && (record.receipt&.fetch("ended_at", nil) || record["ended_at"])
+        receipt = mark_dispatched(
+          request, attempt_id: attempt_id.empty? ? nil : attempt_id, terminal: true,
+          outcome: record.nil? || record.state == "lost" ? "lost" : record.outcome,
+          now: ended_at ? Time.iso8601(ended_at) : now,
+          close_reason: record ? DISPATCHED_ATTEMPT_FINISHED : DISPATCHED_ATTEMPT_UNKNOWN
+        )
+        repair_failed_terminal_marker(request) if receipt.phase == "terminal"
+        receipt
+      rescue Hive::Attempts::RepositoryError
+        nil
       end
 
       RETRYABLE_TERMINAL_OUTCOMES = %w[failed cancelled interrupted lost].freeze
@@ -1371,7 +1411,8 @@ module Hive
                  when "cooldown" then "scheduler"
                  else recovery["owner"]
                  end,
-          reason: blocked.empty? ? (replay ? "terminal_replay" : observation_reason) : blocked,
+          reason: blocked.empty? ?
+            (replay ? "terminal_replay" : (recovery["close_reason"] || observation_reason)) : blocked,
           remediation: blocked.empty? ? nil :
             (recovery["blocked_remediation"] || remediation_for(blocked)),
           retry_count: recovery["retry_count"],

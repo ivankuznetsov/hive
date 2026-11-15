@@ -2328,6 +2328,130 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  AttemptFixture = Struct.new(:state, :outcome, :receipt, keyword_init: true) do
+    def live? = %w[launching running].include?(state)
+    def [](key) = key == "ended_at" ? receipt&.fetch("ended_at", nil) : nil
+  end
+
+  # Reproduces the restart race at coordinator level: a queued markerless
+  # recovery request is admitted as `existing_live` because another dispatch
+  # of the same generation already owns a live attempt. mark_dispatched
+  # records that attempt, but no delivery is bound to the request row.
+  def attach_to_foreign_attempt(coordinator, row, dir)
+    admitted = coordinator.request_markerless_failure(
+      row: row, requestor: "healer",
+      reason: "agent_exited_without_terminal_marker", now: NOW
+    )
+    request = Q.fetch(admitted.request_id, state_home: dir)
+    coordinator.resume(request: request, row: row, now: Time.iso8601(admitted.next_eligible_at))
+    request = Q.fetch(admitted.request_id, state_home: dir)
+    coordinator.mark_dispatched(request, attempt_id: "foreign-attempt", now: NOW + 6)
+    Q.fetch(admitted.request_id, state_home: dir)
+  end
+
+  def test_attached_dispatch_closes_when_its_attempt_ends_and_rearms
+    record = AttemptFixture.new(state: "running")
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_id| record }
+    with_markerless_fixture(attempt_store: store) do |coordinator, row, dir, original|
+      attached = attach_to_foreign_attempt(coordinator, row, dir)
+      assert_equal [ "queued", "dispatched", "foreign-attempt" ],
+                   [ attached.state, attached.recovery["phase"], attached.recovery["attempt_id"] ]
+      assert_empty Q.claimed(state_home: dir), "an attached request owns no delivery"
+
+      assert_nil coordinator.close_finished_dispatch(attached, now: NOW + 7),
+                 "a live attempt keeps the request dispatched"
+      assert_equal "dispatched", Q.fetch(attached.request_id, state_home: dir).recovery["phase"]
+
+      record = AttemptFixture.new(
+        state: "terminal", outcome: "failed", receipt: { "ended_at" => (NOW + 8).utc.iso8601(6) }
+      )
+      closed = coordinator.close_finished_dispatch(attached, now: NOW + 9)
+
+      assert_equal [ "terminal", "terminal", "failed", "foreign-attempt", "dispatched_attempt_finished" ],
+                   [ closed.status, closed.phase, closed.terminal_outcome, closed.attempt_id, closed.reason ]
+      assert_equal (NOW + 8).utc.iso8601(6), closed.terminal_at
+      persisted = Q.fetch(attached.request_id, state_home: dir)
+      assert_equal "completed", persisted.state, "closing frees the active-subject slot"
+      assert_equal "agent_exited_without_terminal_marker", persisted.recovery["failure_origin"]
+      assert_empty Q.pending(state_home: dir)
+      assert_nil coordinator.close_finished_dispatch(persisted, now: NOW + 10), "closing is idempotent"
+      assert_equal original, File.binread(row.state_file), "closing never touches controller state"
+
+      rearmed = coordinator.request_markerless_failure(
+        row: row.with(attempt_id: "foreign-attempt"), requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW + 11
+      )
+      refute_equal attached.request_id, rearmed.request_id
+      assert_equal [ "cooldown", "admitted", 2 ], [ rearmed.status, rearmed.phase, rearmed.retry_count ]
+    end
+  end
+
+  def test_attached_dispatch_with_an_unknown_attempt_closes_as_lost_with_a_typed_reason
+    store = Object.new
+    store.define_singleton_method(:fetch) { |_id| nil }
+    with_markerless_fixture(attempt_store: store) do |coordinator, row, dir, _original|
+      attached = attach_to_foreign_attempt(coordinator, row, dir)
+      closed = coordinator.close_finished_dispatch(attached, now: NOW + 9)
+
+      assert_equal [ "terminal", "lost", "foreign-attempt", "dispatched_attempt_unknown" ],
+                   [ closed.phase, closed.terminal_outcome, closed.attempt_id, closed.reason ]
+      assert_equal (NOW + 9).utc.iso8601(6), closed.terminal_at
+      assert_equal "completed", Q.fetch(attached.request_id, state_home: dir).state
+    end
+
+    with_markerless_fixture(attempt_store: store) do |coordinator, row, dir, _original|
+      attached = attach_to_foreign_attempt(coordinator, row, dir)
+      Q.update_recovery!(attached.request_id, expected_phase: "dispatched",
+                         changes: { "attempt_id" => nil }, state_home: dir)
+      unbound = Q.fetch(attached.request_id, state_home: dir)
+      closed = coordinator.close_finished_dispatch(unbound, now: NOW + 9)
+
+      assert_equal [ "terminal", nil, "dispatched_attempt_unknown" ],
+                   [ closed.phase, closed.attempt_id, closed.reason ]
+    end
+  end
+
+  def test_close_finished_dispatch_leaves_owned_live_and_unreadable_requests_alone
+    lost = AttemptFixture.new(state: "lost")
+    store = Object.new
+    store.define_singleton_method(:fetch) do |attempt_id|
+      raise Hive::Attempts::RepositoryError, "store busy" if attempt_id == "unreadable"
+
+      lost
+    end
+    with_markerless_fixture(attempt_store: store) do |coordinator, row, dir, _original|
+      attached = attach_to_foreign_attempt(coordinator, row, dir)
+      unreadable = attached.with(recovery: attached.recovery.merge("attempt_id" => "unreadable"))
+      assert_nil coordinator.close_finished_dispatch(unreadable, now: NOW + 9)
+      assert_nil coordinator.close_finished_dispatch(attached.with(state: "admitted"), now: NOW + 9),
+                 "a request with a bound delivery closes through delivery reconciliation"
+      cleared = attached.with(recovery: attached.recovery.merge("phase" => "cleared"))
+      assert_nil coordinator.close_finished_dispatch(cleared, now: NOW + 9)
+      assert_equal "dispatched", Q.fetch(attached.request_id, state_home: dir).recovery["phase"]
+
+      closed = coordinator.close_finished_dispatch(attached, now: NOW + 9)
+      assert_equal [ "lost", "dispatched_attempt_finished" ], [ closed.terminal_outcome, closed.reason ]
+    end
+  end
+
+  def test_complete_recovery_only_closes_a_queued_row
+    with_markerless_fixture do |coordinator, row, dir, _original|
+      admitted = coordinator.request_markerless_failure(
+        row: row, requestor: "healer",
+        reason: "agent_exited_without_terminal_marker", now: NOW
+      )
+      Q.claim(admitted.request_id, pid: Process.pid, attempt_id: "own-attempt",
+              task_generation: Q.fetch(admitted.request_id, state_home: dir).task_generation,
+              state_home: dir, now: NOW + 1)
+
+      refute Q.complete_recovery!(admitted.request_id, expected_phase: "admitted",
+                                  changes: { "phase" => "terminal" }, state_home: dir)
+      assert_equal [ "claimed", "admitted" ],
+                   Q.fetch(admitted.request_id, state_home: dir).then { |r| [ r.state, r.recovery["phase"] ] }
+    end
+  end
+
   def test_markerless_controller_failure_obeys_recovery_safety_without_writing
     safety = ->(_observation) { [ false, "repair controller worktree" ] }
     with_markerless_fixture(safety: safety) do |coordinator, row, dir, original|

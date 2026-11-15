@@ -4601,10 +4601,59 @@ module Hive
                           request_id: request_id, reason: reason)
           }
         )
+        # A restart must not leave a request `dispatched` behind an attempt
+        # that already ended or no longer exists.
+        reconcile_dispatched_recoveries(now: now)
       rescue StandardError => e
         @logger.event(:fatal,
                       message: "recover_dispatch_claims raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+      end
+
+      # A recovery request that attached to another request's live attempt
+      # (admission `existing_live`; for example a restart's first-sight
+      # dispatch won the same generation first) records that attempt but owns
+      # no delivery, so #reconcile_attempt_deliveries never completes it and
+      # resume reports it running forever. Close each such request once its
+      # attempt is final or unknown, with a typed reason. Closing never
+      # dispatches; the healer and recovery admission decide any retry.
+      def reconcile_dispatched_recoveries(now:)
+        return 0 unless @recovery_coordinator
+
+        dispatch_repository.pending(state_home: dispatch_request_state_home).sum do |request|
+          next 0 unless request.recovery&.fetch("phase", nil) == "dispatched" &&
+                        scoped_project?(request.project) && project_owned?(request.project)
+
+          close_dispatched_recovery(request, now: now)
+        end
+      rescue StandardError => e
+        # Bookkeeping only: a failed read must not fail attempt reconciliation.
+        @logger.event(
+          :fatal,
+          message: "dispatched recovery reconciliation raised: #{e.class}: #{e.message}",
+          keeping_previous: true
+        )
+        0
+      end
+
+      def close_dispatched_recovery(request, now:)
+        receipt = @recovery_coordinator.close_finished_dispatch(request, now: now)
+        return 0 unless receipt&.phase == "terminal"
+
+        @logger.event(
+          :dispatch_request_recovered,
+          request_id: request.request_id, project: request.project, slug: request.slug,
+          reason: receipt.reason, attempt_id: receipt.attempt_id,
+          outcome: receipt.terminal_outcome
+        )
+        1
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "dispatched recovery close raised: #{e.class}: #{e.message}",
+          request_id: request.request_id, keeping_previous: true
+        )
+        0
       end
 
       def recover_one_shot_architecture_claims(project:, now:)
@@ -4636,6 +4685,7 @@ module Hive
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
         refresh_attempt_storage_snapshot
         reconcile_attempt_deliveries(now: now)
+        reconcile_dispatched_recoveries(now: now)
         release_abandoned_launch_reservations
         reconcile_exited_owned_processes
         true

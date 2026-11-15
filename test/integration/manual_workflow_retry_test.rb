@@ -374,6 +374,80 @@ class ManualWorkflowRetryTest < Minitest::Test
     end
   end
 
+  # Dogfood b6d6001077 restart race: after a daemon restart, the first-sight
+  # dispatch admitted the task generation, then the queued recovery request for
+  # that generation was admitted as `existing_live`. The request recorded the
+  # other request's attempt but owned no delivery, so it stayed `dispatched`
+  # until the task changed. It must close when that attempt ends.
+  def test_recovery_request_attached_to_a_first_sight_dispatch_closes_when_that_attempt_ends
+    with_retry(stage: "3-plan", marker: "ERROR", reason: "timeout") do |row, coordinator, repository, store, launcher, _runner, dispatcher|
+      task = Hive::Task.new(row.fetch("folder"))
+      prepared = coordinator.prepare_manual(row: Hive::Recovery::API.observation(row),
+        observation_token: coordinator.observation_token_for(row))
+      request = repository.fetch(prepared.request_id)
+      capability = nil
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << record
+        capability = claim_capability
+        { "claimed" => true }
+      end
+      admission = dispatcher.call({})
+      first_sight = admission.dispatch_request(
+        request.with(request_id: "first-sight", requestor: "daemon", trigger: "advance", recovery: nil),
+        interactive: false
+      ).attempt
+      assert coordinator.manual_attempt_matches?(request, first_sight)
+
+      events = []
+      daemon = Hive::Daemon::Dispatcher.allocate
+      daemon.instance_variable_set(:@dispatch_repository, repository)
+      daemon.instance_variable_set(:@attempt_dispatcher, Hive::Attempts::API.new(daemon: admission))
+      daemon.instance_variable_set(:@recovery_coordinator, coordinator)
+      daemon.instance_variable_set(:@dispatch_request_log_signatures, {})
+      logger = Object.new
+      logger.define_singleton_method(:event) { |name, **attributes| events << [ name, attributes ] }
+      daemon.instance_variable_set(:@logger, logger)
+
+      attached = daemon.send(:dispatch_request!, request, now: Time.now.utc)
+      assert_equal :existing_live, attached.status
+      bound = repository.fetch(request.request_id)
+      assert_equal [ "queued", "dispatched", first_sight.attempt_id ],
+                   [ bound.state, bound.recovery["phase"], bound.recovery["attempt_id"] ]
+      assert_nil repository.recovery_attempt_id(request.request_id), "the request owns no attempt"
+      assert_equal 0, daemon.send(:reconcile_dispatched_recoveries, now: Time.now.utc),
+                   "the request stays dispatched while the first-sight attempt runs"
+
+      claimed = store.claim(first_sight, owner: { "pid" => Process.pid },
+        claim_capability: capability, first_heartbeat_timeout_sec: 30, now: Time.now.utc)
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: Time.now.utc)
+      store.terminalize(running, outcome: "failed", exit_status: 1,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/#{first_sight.attempt_id}.frames", "size" => 0,
+          "sha256" => Digest::SHA256.hexdigest("") }, now: Time.now.utc)
+      stuck = coordinator.resume(request: repository.fetch(request.request_id), row: row, now: Time.now.utc)
+      assert_equal [ "running", "dispatched" ], [ stuck.status, stuck.phase ],
+                   "admission and delivery reconciliation never close the attached request"
+      assert_equal [ "first-sight" ], repository.claimed.map { |delivery| delivery.request.request_id },
+                   "only the first-sight request owns a delivery for the attempt"
+
+      assert_equal 1, daemon.send(:reconcile_dispatched_recoveries, now: Time.now.utc)
+      closed = repository.fetch(request.request_id)
+      assert_equal [ "completed", "terminal", "failed", first_sight.attempt_id ],
+                   [ closed.state, closed.recovery["phase"], closed.recovery["terminal_outcome"],
+                     closed.recovery["attempt_id"] ]
+      receipt = coordinator.receipt_for_request(closed)
+      assert_equal [ "terminal", "dispatched_attempt_finished" ], [ receipt.status, receipt.reason ]
+      recovered = events.find { |name, _attributes| name == :dispatch_request_recovered }
+      assert_equal [ request.request_id, "dispatched_attempt_finished", "failed" ],
+                   recovered.last.values_at(:request_id, :reason, :outcome)
+      assert_equal :error, Hive::Markers.current(task.state_file).name,
+                   "the failed generation regains its ERROR marker for ordinary recovery"
+
+      assert_equal 0, daemon.send(:reconcile_dispatched_recoveries, now: Time.now.utc), "closing is idempotent"
+      assert_equal 1, launcher.launched.size, "closing never dispatches"
+    end
+  end
+
   def test_two_consumers_reaching_admission_together_launch_once_in_either_winner_order
     %i[manual competitor].each do |winner|
       with_retry do |row, coordinator, repository, store, launcher, runner, dispatcher|

@@ -75,8 +75,8 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     dispatcher_options = nil
     downstream = Object.new
     downstream.define_singleton_method(:dispatch_request) do |_request, interactive:, now:, admission_view:,
-                                                              replay_semantic_terminal:|
-      [ interactive, now, admission_view, replay_semantic_terminal ]
+                                                              replay_semantic_terminal:, agent_failure_retry:|
+      [ interactive, now, admission_view, replay_semantic_terminal, agent_failure_retry ]
     end
     launcher_class = Class.new
     launcher_class.define_singleton_method(:new) do |**options|
@@ -115,11 +115,11 @@ class AttemptsConfiguredDispatcherTest < Minitest::Test
     )
 
     with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
-      assert_equal [ false, Time.at(0), :tick, true ],
+      assert_equal [ false, Time.at(0), :tick, true, true ],
                    adapter.dispatch_request(
                      FakeRequest.new(slug: "task", project: "demo", argv: %w[hive review task]),
                      now: Time.at(0), admission_view: :tick,
-                     replay_semantic_terminal: true
+                     replay_semantic_terminal: true, agent_failure_retry: true
                    )
     end
 

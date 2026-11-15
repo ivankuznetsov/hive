@@ -454,8 +454,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
     submit_idea
     assert_field "New idea", with: "", wait: 5
     assert_selector "html[data-project-rail-submitted='true']", wait: 10
+    # The broadcaster owns the next status scan; wait for that live update
+    # before synthesizing its refresh stream. A redirect GET intentionally
+    # reads the last completed snapshot rather than scanning the fleet.
+    assert_selector ".task-row", text: "Filter navigation draft", count: 1, wait: 10
+
     # A live refresh after the redirect consumes the one-request Rails flash.
-    # Exercise that ordering before checking the submitted idea.
+    # Exercise that ordering after the submitted task reaches the cached grid.
     execute_script <<~JS
       document.addEventListener("turbo:morph", () => {
         document.documentElement.dataset.projectRailRefreshed = "true"

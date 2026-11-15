@@ -38,6 +38,10 @@ class PatrolFixFixStageTest < Minitest::Test
       assert_includes captured.fetch(:prompt), "pristine detached checkout of this commit"
       assert_includes captured.fetch(:prompt), "include any dependency or"
       assert_includes captured.fetch(:prompt), "do not depend on ignored state"
+      # 2026-11-14: a codex fix wrote a multi-line validation script and Hive
+      # rejected the whole report; the prompt now states the string contract.
+      assert_includes captured.fetch(:prompt), "must be one line with\nno newline, tab, or other control character"
+      assert_includes captured.fetch(:prompt), "Chain setup and test steps inside one command with &&"
       receipt = result.fetch(:receipt)
       assert_equal "fix", receipt.fetch("kind")
       assert_equal "agent", receipt.dig("payload", "validation_commands", 0, "provenance")

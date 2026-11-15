@@ -6,7 +6,7 @@
 
 **Website &amp; docs: [hivecli.sh](https://hivecli.sh)** — quickstart, concepts, the full command reference, and an [`llms.txt`](https://hivecli.sh/llms.txt) for agents.
 
-Community: [join the Hive Discord](https://discord.gg/Qg5E7rMt) for questions,
+Community: [join the Hive Discord](https://discord.gg/rBTM7gqCNX) for questions,
 feedback, and release discussions.
 
 Hive is a durable, local-first workflow engine for AI agents. It orchestrates Claude, Codex, Grok, Pi, opt-in OpenCode, and Muse to run multi-step work as a *folder-as-agent pipeline*. Its flagship **`coding`** workflow turns a rough software idea into a merge-ready pull request: you sketch an idea in a few sentences, open the `hive tui` dashboard or native local web UI, and watch the work move forward — brainstorm pins down what you actually want, plan fixes the approach, execute writes the code, review hardens it, and finalize ships the PR. You can step in at any stage with a normal editor — every artefact is a markdown file in a stage folder, inspectable and editable by you or by another agent. Software delivery is the flagship proof, not the product boundary: Hive also ships `content` and `bench` workflows, installs reviewed Honeycombs, and runs the ones you author yourself for writing, research, triage, audits, and operations (see [Custom Workflows](#custom-workflows)).

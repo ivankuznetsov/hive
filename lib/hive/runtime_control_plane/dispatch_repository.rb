@@ -384,6 +384,14 @@ module Hive
         update_recovery(request_id, expected_phase, changes, state: "queued")
       end
 
+      # Close a recovery request that no delivery owns: its row is still
+      # `queued`, so attempt delivery reconciliation never completes it. The
+      # recovery transition and the `completed` row land in one transaction,
+      # which also frees the task's active-subject slot for a later rearm.
+      def complete_recovery!(request_id, expected_phase:, changes:, **)
+        update_recovery(request_id, expected_phase, changes, state: "completed", from_state: "queued")
+      end
+
       def remove_terminal_recoveries(project:, slug:, expected_stage:, except_request_id: nil, **)
         remove_matching(project, slug) do |request|
           request.request_id != except_request_id.to_s &&
@@ -848,7 +856,7 @@ module Hive
           next false unless row
           payload = Codec.load_json(row.fetch(:payload_json))
           row_changes = {}
-          result = yield(payload, row_changes)
+          result = yield(payload, row_changes, row)
           changed = db[:dispatch_requests].where(
             request_id: request_id.to_s, revision: row.fetch(:revision)
           ).update(
@@ -868,8 +876,9 @@ module Hive
         result.nil? ? true : result
       end
 
-      def update_recovery(request_id, expected_phase, changes, state:)
-        mutate_payload(request_id) do |payload, row_changes|
+      def update_recovery(request_id, expected_phase, changes, state:, from_state: nil)
+        mutate_payload(request_id) do |payload, row_changes, row|
+          next false if from_state && row.fetch(:state) != from_state
           recovery = payload["recovery"]
           next false unless recovery.is_a?(Hash) && recovery["phase"] == expected_phase
           recovery.merge!(changes.to_h.transform_keys(&:to_s))

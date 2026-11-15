@@ -3480,6 +3480,98 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal [ "waiting_operator", "attempt_integrity_hold" ], hold_item.values_at("bucket", "reason")
   end
 
+  # A coordinator double for the dispatched-recovery reconcile: closing a
+  # request turns its durable phase terminal and completes the queued row,
+  # exactly as RecoveryCoordinator#close_finished_dispatch does.
+  class ClosingCoordinator
+    attr_reader :calls
+
+    def initialize(state_home, raise_for: nil)
+      @state_home, @raise_for, @calls = state_home, raise_for, []
+    end
+
+    def close_finished_dispatch(request, now:)
+      @calls << request.request_id
+      raise Hive::Error, "task folder vanished" if request.request_id == @raise_for
+
+      SqlDispatchTestRepository.complete_recovery!(
+        request.request_id, expected_phase: "dispatched", state_home: @state_home,
+        changes: { "phase" => "terminal", "terminal_outcome" => "lost",
+                   "close_reason" => "dispatched_attempt_unknown" }
+      )
+      Hive::Daemon::RecoveryCoordinator::Receipt.from_h(
+        "status" => "terminal", "phase" => "terminal", "request_id" => request.request_id,
+        "attempt_id" => "gone-attempt", "terminal_outcome" => "lost",
+        "reason" => "dispatched_attempt_unknown"
+      )
+    end
+  end
+
+  def test_daemon_start_closes_stale_dispatched_recoveries_once
+    with_tmp_dir do |state_home|
+      write_recovery_request(state_home, project: "p1", slug: "stale", request_id: "STALE")
+      Q.update_recovery!("STALE", expected_phase: "admitted", state_home: state_home,
+                         changes: { "phase" => "dispatched", "attempt_id" => "gone-attempt" })
+      write_recovery_request(state_home, project: "p1", slug: "queued", request_id: "QUEUED")
+      write_recovery_request(state_home, project: "p2", slug: "foreign", request_id: "FOREIGN")
+      Q.update_recovery!("FOREIGN", expected_phase: "admitted", state_home: state_home,
+                         changes: { "phase" => "dispatched", "attempt_id" => "gone-attempt" })
+      coordinator = ClosingCoordinator.new(state_home)
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [], scope_projects: [ "p1" ], recovery_coordinator: coordinator,
+        dispatch_request_state_home: state_home
+      )
+
+      dispatcher.send(:recover_dispatch_claims, now: T0)
+      dispatcher.send(:recover_dispatch_claims, now: T0 + 1)
+
+      assert_equal [ "STALE" ], coordinator.calls,
+                   "only dispatched requests of owned projects are closed, and only once"
+      assert_equal [ "completed", "terminal" ],
+                   Q.fetch("STALE", state_home: state_home).then { |r| [ r.state, r.recovery["phase"] ] }
+      assert_equal "admitted", Q.fetch("QUEUED", state_home: state_home).recovery["phase"]
+      assert_equal "dispatched", Q.fetch("FOREIGN", state_home: state_home).recovery["phase"]
+      recovered = logger.events.select { |name, _attributes| name == :dispatch_request_recovered }
+      assert_equal [ [ "STALE", "dispatched_attempt_unknown", "gone-attempt", "lost" ] ],
+                   recovered.map { |_name, attributes| attributes.values_at(:request_id, :reason, :attempt_id, :outcome) }
+    end
+  end
+
+  def test_dispatched_recovery_reconcile_isolates_failures
+    with_tmp_dir do |state_home|
+      %w[BROKEN LIVE].each_with_index do |request_id, index|
+        write_recovery_request(state_home, project: "p1", slug: "task-#{index}", request_id: request_id)
+        Q.update_recovery!(request_id, expected_phase: "admitted", state_home: state_home,
+                           changes: { "phase" => "dispatched", "attempt_id" => "attempt-#{index}" })
+      end
+      coordinator = ClosingCoordinator.new(state_home, raise_for: "BROKEN")
+      coordinator.define_singleton_method(:close_finished_dispatch) do |request, now:|
+        return super(request, now: now) if request.request_id == "BROKEN"
+
+        calls << request.request_id
+        nil
+      end
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [], recovery_coordinator: coordinator, dispatch_request_state_home: state_home
+      )
+
+      assert_equal 0, dispatcher.send(:reconcile_dispatched_recoveries, now: T0)
+      assert_equal %w[BROKEN LIVE], coordinator.calls, "one failing close never blocks the others"
+      failure = logger.events.find { |name, attributes| name == :fatal && attributes[:request_id] == "BROKEN" }
+      assert_includes failure.last.fetch(:message), "task folder vanished"
+
+      dispatcher.instance_variable_set(:@dispatch_repository, Object.new)
+      assert_equal 0, dispatcher.send(:reconcile_dispatched_recoveries, now: T0),
+                   "an unreadable queue never fails attempt reconciliation"
+      assert(logger.events.any? do |name, attributes|
+        name == :fatal && attributes[:message].to_s.start_with?("dispatched recovery reconciliation raised")
+      end)
+
+      dispatcher.instance_variable_set(:@recovery_coordinator, nil)
+      assert_equal 0, dispatcher.send(:reconcile_dispatched_recoveries, now: T0)
+    end
+  end
+
   def test_durable_dispatch_refreshes_admission_time_after_a_long_tick
     admitted_at = nil
     request_created_at = nil

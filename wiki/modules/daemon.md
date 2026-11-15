@@ -518,7 +518,10 @@ reason `project_dispatch_disabled` (`retry_dispatch_disabled`, operator-owned,
 with enable-and-reload remediation) when `project_enabled?` is false for the
 project. A `completed`/`cancelled` request behind a final attempt projects
 `unavailable` with reason `recovery_transition_pending`. Retry count,
-fingerprint, and escalation tier are carried through unchanged. A failed first reconciliation publishes `failed`; a later failure is
+fingerprint, and escalation tier are carried through unchanged. In an owned,
+enabled project the daemon closes such a `queued` + `dispatched` request on
+its next reconcile (see "Attached recovery requests" below), so the
+`retry_awaiting_dispatch` projection lasts at most one tick. A failed first reconciliation publishes `failed`; a later failure is
 logged while the last completed snapshot remains authoritative until expiry.
 Every `Assembler#fail` (including a `complete` that rejects duplicate
 identities) returns an `IncompletePublication(reason, retained, duplicates)`,
@@ -830,7 +833,8 @@ diagnostic's owner (`hive` even for an invalid Fix report) with `retry: null`.
 Dogfood b6d6001077 (2026-11-14) retried that way twice at one-hour pacing,
 then a daemon restart's first-sight dispatch and the queued recovery request
 raced: the request attached to the foreign attempt and stayed `dispatched`
-overnight (see [[gaps]]).
+overnight; the daemon now closes such requests (see "Attached recovery
+requests" below).
 
 `Dispatcher#failed_attempt_route` now runs for `ready_to_run` rows whose
 Policy outcome is `:dispatch` or `:markerless_stalled`, using the row's typed
@@ -1622,6 +1626,40 @@ immediate KILL — it means "KILL on the next tick after the TERM".
 Operators tuning the grace for a hard real-time bound should account for
 the poll interval. Detached attempt supervisors use their own monotonic loop,
 so their escalation does not add the daemon poll interval.
+
+### Attached recovery requests
+
+Recovery admission can return `existing_live`: another request already owns a
+live attempt for the same task generation. Dogfood b6d6001077 (2026-11-14)
+hit this after a restart, when the first-sight `advance` dispatch admitted the
+Patrol Fix generation and the queued markerless recovery request then
+attached to that attempt. `mark_dispatched` records the attempt in the
+recovery (`phase: dispatched`, `attempt_id`), but `AdmissionTransition` binds
+`claim_attempt_id` only on the row of the request that created the attempt.
+The attached row stayed `queued` with no delivery, so
+`reconcile_attempt_deliveries` never completed it; `RecoveryCoordinator#resume`
+reported it `running`; the healer's markerless lookup kept returning it
+instead of rearming; and nothing dispatched the task until it changed.
+
+`Dispatcher#reconcile_dispatched_recoveries` now runs after attempt delivery
+reconciliation on every tick and once at start (`recover_dispatch_claims`),
+for owned, in-scope projects. For each `queued` request in phase `dispatched`
+it calls `RecoveryCoordinator#close_finished_dispatch`:
+
+- live attempt: leave it (`running`), it closes when the attempt ends;
+- final attempt: terminal with that attempt's outcome (`lost` for a lost
+  attempt) and `close_reason: dispatched_attempt_finished`;
+- attempt missing or unrecorded: terminal outcome `lost`,
+  `close_reason: dispatched_attempt_unknown`;
+- unreadable attempt storage: skipped until the next pass.
+
+The close is one `DispatchRepository#complete_recovery!` transition (terminal
+recovery plus `completed` row, only from `queued`), which frees the task's
+active-subject slot so a later rearm can write a fresh request. Marker
+recoveries then get the existing guarded `repair_failed_terminal_marker`.
+Each close logs `dispatch_request_recovered` with the reason, attempt, and
+outcome, and the terminal receipt's `reason` is the close reason. Closing never
+dispatches: the healer and ordinary recovery admission decide any retry.
 
 ### Sequence continuations
 

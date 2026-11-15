@@ -1630,6 +1630,80 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  # The daemon re-runs a Patrol Fix stage whose latest attempt failed with an
+  # agent-owned diagnostic. That retry skips the flat Patrol delay, climbs the
+  # shared RetryPolicy ladder on the attempt rows' retry charge, and stops at
+  # REPEATED_FAILURE_LIMIT identical failures of the same Hive build.
+  def test_agent_failure_retry_climbs_the_shared_ladder_then_stops_until_a_new_build
+    with_tmp_dir do |root|
+      database = attempt_database(root, projects: [ "demo" ])
+      store = Hive::Attempts::Repository.new(root: File.join(root, "attempts"), database: database)
+      launcher = FakeLauncher.new
+      build = lambda do |runtime_digest|
+        Hive::Attempts::Dispatcher.new(
+          store: store, launcher: launcher,
+          limits: { max_global: 6, max_per_project: 6, max_daily: 50 },
+          clock: -> { NOW }, id_generator: -> { SecureRandom.uuid },
+          capability_generator: -> { CLAIM_CAPABILITY }, runtime_digest: runtime_digest
+        )
+      end
+      dispatcher = build.call("a" * 64)
+      task = task_fixture(project_state_root(root, "demo"), id: 7, slug: "patrol-task", stage: "2-fix")
+      task.workflow = Hive::Workflows::PatrolFix::DESCRIPTOR
+
+      first = dispatch(dispatcher, task, request_id: "first", intended_stage: "2-fix", now: NOW)
+      assert_equal :accepted, first.status
+      ended = NOW + 1
+      terminalize_attempt(store, launcher, first, outcome: "failed", exit_status: 1, now: ended,
+                          diagnostic: true)
+
+      ordinary = dispatch(dispatcher, task, request_id: "ordinary", intended_stage: "2-fix",
+                          now: ended + 2)
+      assert_equal "patrol_retry_delay", ordinary.reason,
+                   "ordinary automatic admission keeps the flat Patrol delay"
+
+      (Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT - 1).times do |index|
+        delay = Hive::Recovery::RetryPolicy.delay_sec(index)
+        early = dispatch(dispatcher, task, request_id: "early-#{index}", intended_stage: "2-fix",
+                         now: ended + delay - 1, agent_failure_retry: true)
+        assert_equal :deferred, early.status
+        assert_equal "transition_retry", early.reason
+        assert_equal ended + delay, Hive::Attempts::Dispatcher.transition_retry_at(
+          ended_at: early.receipt.fetch("ended_at"), retry_charge: early.attempt["retry_charge"]
+        )
+
+        retried = dispatch(dispatcher, task, request_id: "retry-#{index}", intended_stage: "2-fix",
+                           now: ended + delay, agent_failure_retry: true)
+        assert_equal :accepted, retried.status
+        assert_equal index + 1, retried.attempt["retry_charge"]
+        ended += delay + 2
+        terminalize_attempt(store, launcher, retried, outcome: "failed", exit_status: 1, now: ended,
+                            diagnostic: true)
+      end
+
+      held = dispatch(dispatcher, task, request_id: "held", intended_stage: "2-fix",
+                      now: ended + 86_400, agent_failure_retry: true)
+      assert_equal :deferred, held.status
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON, held.reason
+      assert_equal 1, held.receipt.fetch("exit_status")
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_LIMIT, launcher.launched.size
+
+      operator = dispatch(dispatcher, task, request_id: "operator-rerun", intended_stage: "2-fix",
+                          now: ended + 86_401, interactive: true)
+      assert_equal :accepted, operator.status, "the manual command bypasses the automatic limit"
+      ended += 86_402
+      terminalize_attempt(store, launcher, operator, outcome: "failed", exit_status: 1, now: ended,
+                          diagnostic: true)
+      still_held = dispatch(dispatcher, task, request_id: "still-held", intended_stage: "2-fix",
+                            now: ended + 86_400, agent_failure_retry: true)
+      assert_equal Hive::Attempts::Dispatcher::REPEATED_FAILURE_REASON, still_held.reason
+
+      redeployed = dispatch(build.call("b" * 64), task, request_id: "new-build",
+                            intended_stage: "2-fix", now: ended + 86_400, agent_failure_retry: true)
+      assert_equal :accepted, redeployed.status, "a new Hive build starts a fresh series"
+    end
+  end
+
   def test_routing_collaborator_defaults
     with_dispatcher do |dispatcher, _launcher, task, _store|
       assert_match(
@@ -1724,12 +1798,12 @@ class AttemptsDispatcherTest < Minitest::Test
   end
 
   def dispatch(dispatcher, task, request_id:, interactive: false, intended_stage: "4-execute",
-               generation: nil, admission_view: nil, now: NOW)
+               generation: nil, admission_view: nil, now: NOW, agent_failure_retry: false)
     dispatcher.dispatch(
       task: task, project: "demo", intended_stage: intended_stage,
       argv: [ "hive", "run", task.slug ], request_id: request_id,
       provider: "codex", interactive: interactive, generation: generation, now: now,
-      admission_view: admission_view
+      admission_view: admission_view, agent_failure_retry: agent_failure_retry
     )
   end
 

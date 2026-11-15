@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-14
+updated: 2026-11-15
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -818,6 +818,42 @@ plan-review-run progress token includes the Hive runtime digest, so a
 deployment starts a fresh series. The daemon maps the deferral to
 `attempt_failure_limit` (log event and operator-owned `needs_repair`
 disposition).
+
+## Patrol Fix failed-attempt routing
+
+Patrol Fix is a controller workflow: a failed attempt leaves the marker `none`,
+so `Policy.decide_run` sees the same `ready_to_run` row before and after the
+failure. Before 2026-11-15 every failure took the markerless brake into
+`StaleAgentHealer#heal_markerless_stall` and a markerless recovery request
+paced by the one-hour `patrol_retry_delay`; status showed the attempt
+diagnostic's owner (`hive` even for an invalid Fix report) with `retry: null`.
+Dogfood b6d6001077 (2026-11-14) retried that way twice at one-hour pacing,
+then a daemon restart's first-sight dispatch and the queued recovery request
+raced: the request attached to the foreign attempt and stayed `dispatched`
+overnight (see [[gaps]]).
+
+`Dispatcher#failed_attempt_route` now runs for `ready_to_run` rows whose
+Policy outcome is `:dispatch` or `:markerless_stalled`, using the row's typed
+`diagnostic` only when its `attempt_id` equals the row's `current_attempt` and
+its `stage` equals the row stage:
+
+- `owner: agent` (and durable admission is configured): dispatch with trigger
+  `agent_failure_retry`. `Attempts::Dispatcher#admit` skips the flat Patrol
+  delay and applies the plan-review ladder: `transition_retry` until
+  `Attempts::Dispatcher.transition_retry_at` (receipt `ended_at` +
+  `RetryPolicy.delay_sec(retry_charge)`), then `repeated_failure_limit` after
+  three identical failed exit statuses, counted from attempt rows of the same
+  generation admitted by the current Hive build (`admission_runtime_digest`).
+  The daemon maps the backoff to a `retry_cooldown` disposition with
+  `retry_at` and the limit to operator-owned `attempt_failure_limit` naming
+  the count, exit status, latest attempt, diagnostic code, and
+  `hive run SLUG --project NAME`. Interactive operator runs bypass the ladder;
+  a new build or changed task input starts a fresh series.
+- `owner: hive`: no dispatch and no healer. The row records operator-owned
+  `attempt_integrity_hold` with the code and the manual command; one-shot
+  readiness reports it as `waiting_operator`.
+- Anything else (provider-owned, no bound diagnostic, an exit-0 run without
+  progress) keeps the markerless-stall path unchanged.
 
 ## Trust boundary
 

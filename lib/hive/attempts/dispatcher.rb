@@ -62,11 +62,19 @@ module Hive
         Hive::RuntimeIdentity.source_digest(identity)
       end
 
+      # Earliest automatic re-admission after a failed terminal attempt of one
+      # generation: the shared RetryPolicy ladder indexed by its retry charge.
+      # The daemon reads the same value to show when a pending retry is due.
+      def self.transition_retry_at(ended_at:, retry_charge:)
+        Time.iso8601(ended_at.to_s) + Hive::Recovery::RetryPolicy.delay_sec(retry_charge)
+      end
+
       def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
                    interactive: false, generation: nil,
                    inherited_outputs: [], retry_charge: 0, now: @clock.call,
                    admission_view: nil, routing_policy: nil, retry_release: false,
-                   subject: nil, replay_semantic_terminal: false)
+                   subject: nil, replay_semantic_terminal: false,
+                   agent_failure_retry: false)
         @launcher.preflight!
         generation = normalize_generation(
           generation, task: task, project: project, intended_stage: intended_stage,
@@ -80,6 +88,7 @@ module Hive
           recovery_source_attempt_id: nil, subject: subject, now: now, admission_view: admission_view,
           routing_policy: policy, retry_release: retry_release,
           replay_semantic_terminal: replay_semantic_terminal,
+          agent_failure_retry: agent_failure_retry,
           failed_route_id: nil
         )
         result
@@ -139,8 +148,13 @@ module Hive
         )
       end
 
+      # `agent_failure_retry` marks the daemon's automatic re-run of a stage
+      # whose latest attempt failed with an agent-owned diagnostic. Admission
+      # then paces it on the shared RetryPolicy ladder and stops it at
+      # REPEATED_FAILURE_LIMIT instead of the flat Patrol retry delay.
       def dispatch_request(request, interactive: false, now: @clock.call,
-                           admission_view: nil, replay_semantic_terminal: false)
+                           admission_view: nil, replay_semantic_terminal: false,
+                           agent_failure_retry: false)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
@@ -165,7 +179,8 @@ module Hive
           inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
           now: now, admission_view: admission_view,
           retry_release: explicit_retry_release?(request, task: task),
-          replay_semantic_terminal: replay_semantic_terminal
+          replay_semantic_terminal: replay_semantic_terminal,
+          agent_failure_retry: agent_failure_retry
         )
       rescue RepositoryError
         # Another consumer can win after the request lookup and before the
@@ -213,7 +228,8 @@ module Hive
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
                 inherited_outputs:, retry_charge:, recovery_source_attempt_id:, now:,
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
-                replay_semantic_terminal: false, failed_route_id: nil)
+                replay_semantic_terminal: false, failed_route_id: nil,
+                agent_failure_retry: false)
         bookkeeping_deadline = @monotonic.call + @bookkeeping_timeout_sec
         created = nil
         claim_capability = nil
@@ -295,28 +311,38 @@ module Hive
           return deferred_result("capacity")
         end
 
-        if !retry_release && CommandProgress.patrol_fix?(task) && view.patrol_retry_at(
+        # An agent-failure retry is paced by the RetryPolicy ladder below
+        # instead of this flat Patrol delay.
+        patrol_paced = !retry_release && !agent_failure_retry && CommandProgress.patrol_fix?(task)
+        if patrol_paced && view.patrol_retry_at(
           task_generation: generation.task_generation,
           subject: subject || task_subject(generation), runtime_digest: @runtime_digest, now: now
         )
           return deferred_result("patrol_retry_delay")
         end
 
-        if task && !interactive && !retry_release && !CommandProgress.patrol_fix?(task) &&
-           ("#{task.stage_index}-#{task.stage_name}" != generation.intended_stage ||
-            CommandProgress.failure_ladder?(argv))
+        if task && !interactive && !retry_release &&
+           (agent_failure_retry || (!CommandProgress.patrol_fix?(task) &&
+            ("#{task.stage_index}-#{task.stage_name}" != generation.intended_stage ||
+             CommandProgress.failure_ladder?(argv))))
           ladder_subject = subject || task_subject(generation)
           previous = view.latest_terminal_attempt(
             task_generation: generation.task_generation, subject: ladder_subject
           )
           if previous && FAILED_OUTCOMES.include?(previous.outcome)
-            if CommandProgress.failure_ladder?(argv)
-              limit = repeated_failure_limit(view, generation, ladder_subject, previous)
+            if agent_failure_retry || CommandProgress.failure_ladder?(argv)
+              # Patrol Fix generations do not include the Hive build, so its
+              # series is counted per runtime: a deploy starts a fresh one.
+              runtime_digest = CommandProgress.patrol_fix?(task) ? @runtime_digest : nil
+              limit = repeated_failure_limit(
+                view, generation, ladder_subject, previous, runtime_digest: runtime_digest
+              )
               return limit if limit
             end
 
-            retry_at = Time.iso8601(previous.receipt.fetch("ended_at")) +
-              Hive::Recovery::RetryPolicy.delay_sec(previous["retry_charge"])
+            retry_at = self.class.transition_retry_at(
+              ended_at: previous.receipt.fetch("ended_at"), retry_charge: previous["retry_charge"]
+            )
             return deferred_result("transition_retry", attempt: previous, receipt: previous.receipt) if now.utc < retry_at
 
             retry_charge = [ retry_charge, previous["retry_charge"].to_i + 1 ].max
@@ -531,13 +557,13 @@ module Hive
       # attempts agree, hold automatic admission until any of those inputs
       # change. Cancellation, interruption, and TEMPFAIL are scheduler or
       # operator events, not command verdicts, so they never count.
-      def repeated_failure_limit(view, generation, subject, latest)
+      def repeated_failure_limit(view, generation, subject, latest, runtime_digest: nil)
         exit_status = deterministic_exit_status(latest)
         return unless exit_status
 
         recent = view.recent_terminal_attempts(
           task_generation: generation.task_generation, subject: subject,
-          limit: REPEATED_FAILURE_LIMIT
+          limit: REPEATED_FAILURE_LIMIT, runtime_digest: runtime_digest
         )
         identical = recent.take_while { |record| deterministic_exit_status(record) == exit_status }
         return if identical.length < REPEATED_FAILURE_LIMIT

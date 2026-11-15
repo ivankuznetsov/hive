@@ -248,6 +248,8 @@ class ManagedAgentCustodyTest < Minitest::Test
       end
 
       assert_equal code, frame.document.fetch("code")
+      # The agent wrote the rejected report, so the agent owns the failure.
+      assert_equal "agent", frame.document.fetch("owner")
       assert_equal "invalid", frame.document.fetch("report_status")
       assert_equal parser, frame.document.fetch("report_parser")
     end

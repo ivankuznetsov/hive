@@ -1564,6 +1564,61 @@ class OperationalStatusTest < Minitest::Test
                     "hive plan-review-run failed 3 times in a row with exit 4"
   end
 
+  def patrol_fix_failure_task(owner:, code:)
+    task(action: "ready_to_run", slug: "patrol-fix-retry", marker: "none").merge(
+      "workflow" => "patrol-fix",
+      "diagnostic" => { "source" => "artifact", "code" => code, "owner" => owner,
+                        "detail" => "fix report command is invalid" }
+    )
+  end
+
+  def test_pending_agent_failure_retry_is_a_scheduler_wait_with_the_retry_time
+    source_task = patrol_fix_failure_task(owner: "agent", code: "fix_report_invalid")
+    snapshot = scheduler_snapshot_for(
+      source_task, decision: "retry_cooldown",
+      reason: "automatic retry after the agent failure fix_report_invalid is scheduled"
+    )
+    snapshot.dig("tasks", 0, "disposition").merge!(
+      "owner" => "scheduler", "retry_at" => "2026-11-14T16:50:08.000000Z",
+      "retry_due" => false, "retry_safe" => true, "safety_reason" => nil
+    )
+    projected = project(
+      status_payload(source_task), scheduler_snapshot: snapshot,
+      project_context: { "demo" => { "daemon_enabled" => true } }
+    ).fetch("tasks").first
+
+    assert_equal "waiting_on_provider_or_scheduler", projected.fetch("state")
+    assert_equal "scheduler", projected.fetch("blocker_owner")
+    assert_equal "retry_cooldown", projected.dig("reasons", 0, "code")
+    assert_equal "fix_report_invalid", projected.dig("reasons", 1, "code")
+    assert_equal({ "due" => false, "retry_at" => "2026-11-14T16:50:08.000000Z",
+                   "safe" => true, "safety_reason" => nil }, projected.fetch("retry"))
+  end
+
+  def test_exhausted_agent_failure_retry_and_integrity_holds_are_operator_repairs
+    {
+      [ "agent", "fix_report_invalid", "attempt_failure_limit" ] =>
+        "hive run patrol-fix-retry --project demo failed 3 times in a row; " \
+        "then rerun: hive run patrol-fix-retry --project demo",
+      [ "hive", "worktree_head_custody_mismatch", "attempt_integrity_hold" ] =>
+        "Hive never retries integrity failures automatically. " \
+        "Inspect the task, then rerun: hive run patrol-fix-retry --project demo"
+    }.each do |(owner, code, decision), message|
+      source_task = patrol_fix_failure_task(owner: owner, code: code)
+      snapshot = scheduler_snapshot_for(source_task, decision: decision, reason: message)
+      projected = project(
+        status_payload(source_task), scheduler_snapshot: snapshot,
+        project_context: { "demo" => { "daemon_enabled" => true } }
+      ).fetch("tasks").first
+
+      assert_equal [ "needs_repair", "operator" ],
+                   projected.values_at("state", "blocker_owner"), decision
+      assert_equal decision, projected.dig("reasons", 0, "code")
+      assert_equal message, projected.fetch("reason")
+      assert_equal code, projected.dig("reasons", 1, "code")
+    end
+  end
+
   def test_recovery_specific_scheduler_states_have_closed_classifications
     status = Hive::OperationalStatus.new(status_payload: status_payload)
 

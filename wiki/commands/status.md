@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/operational_repository.rb, lib/hive/runtime_control_plane/operational_payload_store.rb
 created: 2026-04-25
-updated: 2026-11-14
+updated: 2026-11-15
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -411,7 +411,15 @@ point-fetch diagnostic receipts on the status hot path. A provider-owned typed
 failure is provider-waiting, while other typed failures are repair-owned.
 An exit-75 receipt is scheduler contention rather than a Patrol-agent verdict,
 so status does not synthesize or project its `agent_exit_nonzero` diagnostic.
-Durable recovery disposition and pacing remain separate policy.
+Durable recovery disposition and pacing remain separate policy. For a
+daemon-enrolled Patrol Fix `ready_to_run` row, the daemon's failed-attempt
+disposition wins over the diagnostic: a pending agent-failure retry is
+`retry_cooldown` (`waiting_on_provider_or_scheduler`, scheduler-owned, `retry`
+carries `retry_at`); an exhausted series is `attempt_failure_limit` and a
+Hive-owned integrity failure is `attempt_integrity_hold`, both `needs_repair`
+and operator-owned with `hive run SLUG --project NAME` in the reason. Only the
+diagnostic-free `markerless_stalled` brake still shows the diagnostic's owner
+(see [[modules/daemon]] "Patrol Fix failed-attempt routing").
 
 For a daemon-enrolled project with global automatic retry enabled, a real
 `ERROR` or `REVIEW_ERROR` defaults to

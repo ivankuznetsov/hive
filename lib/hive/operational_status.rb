@@ -759,7 +759,8 @@ module Hive
         [ "needs_repair", disposition["owner"] || "operator" ]
       when "retry_dispatch_disabled"
         [ "needs_repair", disposition.dig("recovery", "owner") || "operator" ]
-      when "semantic_terminal_error", "attempt_failure_limit", *Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS
+      when "semantic_terminal_error", "attempt_failure_limit", "attempt_integrity_hold",
+           *Hive::Recovery::OPERATOR_OWNED_ERROR_REASONS
         [ "needs_repair", "operator" ]
       when "recovery_unavailable"
         owner = disposition["owner"] || "hive"

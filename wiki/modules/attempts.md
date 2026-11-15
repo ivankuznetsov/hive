@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-11-14
+updated: 2026-11-15
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -98,6 +98,12 @@ for the same task, generation, stage and runtime. A failed, cancelled, interrupt
 attempt delays automatic retry by `AgentLimit.retry_cooldown_sec`; success or
 changed inputs/runtime clears that delay. Explicit retry bypasses pacing, not
 live capacity or unresolved-loss recovery. There are no cohort counters or probes.
+The daemon's `agent_failure_retry` admission (a Patrol Fix stage whose latest
+attempt failed with an agent-owned diagnostic) skips that flat delay and uses
+the transition `RetryPolicy` ladder plus `REPEATED_FAILURE_LIMIT` instead; for
+Patrol Fix the failure series reads only attempts admitted by the current
+runtime digest (`recent_terminal_attempt_ids(runtime_digest:)`), because its
+generation does not include the Hive build.
 
 An interrupted attempt is terminal non-success, not a successful checkpoint
 and not an inferred loss. Its version-2 terminal receipt binds the pause

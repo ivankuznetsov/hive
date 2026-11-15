@@ -2779,3 +2779,16 @@ at all); only the log line and receipt record it.
   recoveries get the guarded ERROR-marker repair. Whether a pruned or
   never-recorded attempt should instead stay operator-owned is unverified.
 
+
+## Managed service agent discovery (2026-11-15)
+
+- Filesystem discovery preserves installed executable paths; it does not prove
+  agent authentication or the success of a real PR repair.
+- Paths selected from version-specific installation directories can become
+  stale after tool removal. Re-run service installation after moving tools;
+  stable shims/symlinks are preserved when present in the installation PATH.
+- launchd rendering and executable lookup are covered with fake CLIs on Linux;
+  a live macOS launchd restart remains unverified.
+- Shipped agent profiles and Node/Bun/Python launchers are covered. Custom
+  profile executables and launchers needing additional environment variables
+  still require explicit service configuration.

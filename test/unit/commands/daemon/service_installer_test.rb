@@ -464,7 +464,7 @@ class DaemonServiceInstallerTest < Minitest::Test
     File.write(ruby_path, "#!/bin/sh\n")
     FileUtils.chmod(0755, ruby_path)
     installer = Hive::Commands::Daemon::ServiceInstaller.new(
-      host_os: "linux", home: dir, binary_path: hive, systemctl_available: false
+      host_os: "linux", home: dir, binary_path: hive, systemctl_available: false, environment: {}
     )
     installer.define_singleton_method(:which) do |name|
       name == "ruby" ? ruby_path : nil
@@ -528,7 +528,7 @@ class DaemonServiceInstallerTest < Minitest::Test
       File.write(hive, "#!/bin/sh\n")
       FileUtils.chmod(0755, hive)
       installer = Hive::Commands::Daemon::ServiceInstaller.new(
-        host_os: "linux", home: dir, binary_path: hive, systemctl_available: false
+        host_os: "linux", home: dir, binary_path: hive, systemctl_available: false, environment: {}
       )
       installer.define_singleton_method(:which) { |_| nil }
       installer.install!(autostart: false)

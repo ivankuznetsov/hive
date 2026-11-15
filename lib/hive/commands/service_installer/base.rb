@@ -1,4 +1,5 @@
 require "cgi"
+require "hive/commands/service_installer/agent_environment"
 require "hive/install_channel"
 require "hive/invoked_binary"
 require "hive/commands/service_installer/outcome"
@@ -346,13 +347,28 @@ module Hive
         # lives under a known version manager's installs directory,
         # prepend the matching shim directory to the baked PATH so
         # `env ruby` picks up the right interpreter when the daemon
-        # forks. If no manager is detected, the minimal PATH
-        # (sufficient for system-Ruby installs) is preserved.
+        # forks. Agent/interpreter directories are discovered independently:
+        # a system Ruby installation can still use mise/npm-managed agents.
         def build_path_line
           base = %w[%h/.local/bin /usr/local/bin /usr/bin /bin]
           shim = ruby_shim_dir
           base.insert(1, shim) if shim
-          "Environment=PATH=#{base.join(':')}"
+          fallback_paths = base.map { |path| path.sub("%h", @home) }
+          discovered = (agent_environment.paths - fallback_paths).map { |path| path.gsub("%", "%%") }
+          value = (discovered + base).uniq.join(":")
+          "Environment=#{systemd_quote("PATH=#{value}")}"
+        end
+
+        def agent_environment
+          AgentEnvironment.new(@runtime_environment)
+        end
+
+        # systemd performs specifier expansion, but never shell expansion.
+        # Escape literal percent signs at the caller; retain intentional %h.
+        def systemd_quote(value)
+          return value if value.match?(/\A[\w\/:%=.-]+\z/)
+
+          '"' + value.gsub(/[\\"]/) { |character| "\\#{character}" } + '"'
         end
 
         def ruby_shim_dir
@@ -381,7 +397,8 @@ module Hive
           template
             .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} #{exec_suffix} --context local")
             .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
-            .sub(/^Environment=PATH=.*$/, build_path_line)
+            .sub(/^Environment="?PATH=.*$/) { build_path_line }
+            .then { |body| render_systemd_agent_environment(body) }
         end
 
         # Render a launchd plist from `template_path`, substituting the resolved
@@ -408,6 +425,12 @@ module Hive
             # spawn. Rewrite the bare element to the real home. The daemon plist
             # has no WorkingDirectory, so this is a no-op there.
             .gsub(%r{<string>/Users/YOU</string>}, "<string>#{escaped_home}</string>")
+            .sub(%r{(<key>PATH</key>\s*<string>)(.*?)(</string>)}m) do
+              prefix, existing, suffix = Regexp.last_match.captures
+              path = (agent_environment.paths + CGI.unescapeHTML(existing).split(":")).uniq.join(":")
+              "#{prefix}#{CGI.escapeHTML(path)}#{suffix}"
+            end
+            .then { |body| render_launchd_runtime_environment(body, values: agent_environment.overrides) }
         end
 
         # Persist only filesystem roots needed to resolve Hive's registry and
@@ -418,14 +441,21 @@ module Hive
             "Environment=#{name}=#{Shellwords.escape(value)}"
           end
           anchor = rendered.match?(/^Environment=HIVE_BIN=.*$/) ?
-            /^Environment=HIVE_BIN=.*$/ : /^Environment=PATH=.*$/
+            /^Environment=HIVE_BIN=.*$/ : /^Environment="?PATH=.*$/
           rendered.sub(anchor) do |line|
             ([ line ] + lines).join("\n")
           end
         end
 
-        def render_launchd_runtime_environment(rendered)
-          entries = resolved_runtime_environment.map do |name, value|
+        def render_systemd_agent_environment(rendered)
+          lines = agent_environment.overrides.map do |name, value|
+            "Environment=#{systemd_quote("#{name}=#{value.gsub('%', '%%')}")}"
+          end
+          rendered.sub(/^Environment="?PATH=.*$/) { |line| ([ line ] + lines).join("\n") }
+        end
+
+        def render_launchd_runtime_environment(rendered, values: resolved_runtime_environment)
+          entries = values.map do |name, value|
             "    <key>#{CGI.escapeHTML(name)}</key>\n" \
               "    <string>#{CGI.escapeHTML(value)}</string>"
           end.join("\n")

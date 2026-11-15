@@ -44,7 +44,7 @@ class ServiceInstallerBaseTest < Minitest::Test
     FileUtils.mkdir_p(File.dirname(ruby_path))
     File.write(ruby_path, "#!/bin/sh\n")
     FileUtils.chmod(0o755, ruby_path)
-    installer = build(dir)
+    installer = build(dir, environment: {})
     installer.define_singleton_method(:which) do |name|
       name == "ruby" ? ruby_path : nil
     end

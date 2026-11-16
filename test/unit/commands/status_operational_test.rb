@@ -141,6 +141,115 @@ class CommandsStatusOperationalTest < Minitest::Test
     end
   end
 
+  def test_operational_project_scope_narrows_text_and_json_and_keeps_cross_project_blockers
+    with_tmp_dir do |root|
+      alpha = scoped_project(root, "alpha")
+      beta = scoped_project(root, "beta")
+      base = "base-task-261116-abcd"
+      dependent = "dependent-task-261116-abcd"
+      write_scoped_task(beta, "2-brainstorm", base, "brainstorm.md", "# Brainstorm\n<!-- COMPLETE -->\n")
+      folder = write_scoped_task(alpha, "1-inbox", dependent, "idea.md", "<!-- WAITING -->\n")
+      Hive::TaskMeta.write(folder, id: 1, slug: dependent, display_name: nil, depends_on: "beta:#{base}")
+      projects = [ alpha, beta ].map do |project|
+        project.merge("repository_identity" => "github.com/acme/#{project.fetch('name')}")
+      end
+      identities = projects.to_h { |project| [ project.fetch("path"), project.fetch("repository_identity") ] }
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+      Hive::RuntimeControlPlane.database.migrate!
+
+      fleet, stdout, text = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { projects }) do
+        with_replaced_singleton_method(Hive::RepositoryIdentity, :current, ->(path) { identities.fetch(path) }) do
+          [
+            Hive::Commands::Status.new(json: true, operational: true)
+                                  .operational_payload(projects, scheduler_snapshot: nil),
+            capture_io { Hive::Commands::Status.new(json: true, operational: true, project: "alpha").call }.first,
+            capture_io { Hive::Commands::Status.new(operational: true, project: "alpha").call }.first
+          ]
+        end
+      end
+      scoped = JSON.parse(stdout)
+
+      fleet_row = fleet.fetch("tasks").find { |row| row.dig("identity", "slug") == dependent }
+      assert_includes fleet_row.fetch("reason"), "blocked by beta:#{base}"
+      assert_equal({ "project" => "alpha" }, scoped.fetch("scope"))
+      assert_equal [ [ "alpha", dependent ] ],
+                   scoped.fetch("tasks").map { |row| row.fetch("identity").values_at("project", "slug") }
+      assert_equal fleet_row.fetch("reason"), scoped.dig("tasks", 0, "reason")
+      assert_equal fleet_row.fetch("dependency"), scoped.dig("tasks", 0, "dependency")
+      assert_equal [ 1, 1 ], scoped.fetch("summary").values_at("active", "projects_total")
+      assert_equal 2, fleet.dig("summary", "active")
+      assert schema.valid?(scoped), schema.validate(scoped).map { |error| error.fetch("error") }.inspect
+
+      assert_match(/\ASNAPSHOT \w+ — 1 active · archive on demand · project alpha/, text)
+      assert_includes text, "alpha:#{dependent}"
+      assert_includes text, "blocked by beta:#{base}", "the blocker still names the other project's task"
+      refute_match(/^\s+beta:#{base}/, text, "the other project's own row is out of scope")
+    end
+  end
+
+  def test_operational_project_scope_reuses_the_daemon_cache_without_rescanning
+    now = Time.utc(2026, 11, 16, 10, 0, 2)
+    with_tmp_dir do |root|
+      alpha = scoped_project(root, "alpha")
+      beta = scoped_project(root, "beta")
+      write_scoped_task(alpha, "2-brainstorm", "alpha-task-261116-abcd", "brainstorm.md",
+                        "# Brainstorm\n<!-- COMPLETE -->\n")
+      write_scoped_task(beta, "2-brainstorm", "beta-task-261116-abcd", "brainstorm.md",
+                        "# Brainstorm\n<!-- COMPLETE -->\n")
+      projects = [ alpha, beta ]
+      cached_payload = Hive::Commands::Status.new(json: true).json_payload(projects, now: now - 2)
+      snapshot = {
+        "status" => "current", "phase" => "complete", "tick_sequence" => 9,
+        "observed_at" => (now - 1).iso8601(6), "valid_until" => (now + 60).iso8601(6),
+        "source_window" => { "started_at" => (now - 3).iso8601(6), "completed_at" => (now - 1).iso8601(6) },
+        "capacity" => {}, "queue" => {}, "provider_holds" => [], "tasks" => [],
+        "status_cache" => { "tick_sequence" => 9, "valid_until" => (now + 60).iso8601(6), "payload" => cached_payload }
+      }
+      command = Hive::Commands::Status.new(operational: true, project: "beta")
+      command.define_singleton_method(:status_cache_record) { |record, **| record.fetch("status_cache") }
+      command.define_singleton_method(:active_payload) do |*|
+        raise "a scoped operational read must reuse the daemon cache instead of rescanning"
+      end
+
+      payload = command.operational_payload(projects, scheduler_snapshot: snapshot, now: now)
+
+      assert_equal "daemon_cache", payload.dig("source", "task_graph", "provenance")
+      assert_equal({ "project" => "beta" }, payload.fetch("scope"))
+      assert_equal [ "beta-task-261116-abcd" ], payload.fetch("tasks").map { |row| row.dig("identity", "slug") }
+      assert_equal 1, payload.dig("summary", "projects_total")
+    end
+  end
+
+  def test_operational_project_scope_rejects_an_unknown_project_before_reading_status
+    project = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
+    command = Hive::Commands::Status.new(json: true, operational: true, project: "nope")
+    command.define_singleton_method(:active_payload) { |*| flunk "an unknown project must not scan tasks" }
+    command.define_singleton_method(:current_status_cache) { |*, **| flunk "an unknown project must not read the cache" }
+
+    stdout, _stderr, status = with_replaced_singleton_method(Hive::Config, :registered_projects, -> { [ project ] }) do
+      with_captured_exit { command.call }
+    end
+    payload = JSON.parse(stdout)
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_equal false, payload.fetch("ok")
+    assert_equal "UsageError", payload.fetch("error_class")
+    assert_equal 'unknown project "nope" (registered: demo)', payload.fetch("message")
+    assert schema.valid?(payload), schema.validate(payload).map { |error| error.fetch("error") }.inspect
+
+    blank = Hive::Commands::Status.new(operational: true, project: " ")
+    error = assert_raises(Hive::UsageError) { blank.operational_payload([ project ], scheduler_snapshot: nil) }
+    assert_equal "--project must not be empty", error.message
+  end
+
+  def test_project_without_operational_leaves_the_operational_projection_unscoped
+    project = { "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state" }
+    command = Hive::Commands::Status.new(project: "nope")
+
+    assert_nil command.send(:operational_project_scope, [ project ])
+  end
+
   def test_inspection_context_carries_through_uncached_operational_task_and_attempt_reads
     with_tmp_global_config do |state_home|
       with_tmp_dir do |project_root|
@@ -317,5 +426,21 @@ class CommandsStatusOperationalTest < Minitest::Test
     assert_equal 1, out.lines.size
     assert_includes out, "maintenance failed"
     assert_includes out, "inspect the daemon log"
+  end
+
+  private
+
+  def scoped_project(root, name)
+    path = File.join(root, name)
+    hive_state = File.join(path, ".hive-state")
+    FileUtils.mkdir_p(File.join(hive_state, "stages"))
+    { "name" => name, "path" => path, "hive_state_path" => hive_state }
+  end
+
+  def write_scoped_task(project, stage, slug, state_file, body)
+    folder = File.join(project.fetch("hive_state_path"), "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    File.write(File.join(folder, state_file), body)
+    folder
   end
 end

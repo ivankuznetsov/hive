@@ -1215,6 +1215,12 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::Status) do |calls|
+      Hive::CLI.start([ "status", "--operational", "--project", "proj" ])
+      assert_equal true, calls.first.dig(:kwargs, :operational)
+      assert_equal "proj", calls.first.dig(:kwargs, :project)
+    end
+
+    with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "status", "--internal-task-graph", "--json" ])
       assert_equal true, calls.first.dig(:kwargs, :full)
     end

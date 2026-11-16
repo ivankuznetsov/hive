@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/operational_repository.rb, lib/hive/runtime_control_plane/operational_payload_store.rb
 created: 2026-04-25
-updated: 2026-11-15
+updated: 2026-11-16
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -28,6 +28,7 @@ explicitly. See [[remote-access]] for its bounded page and authority contract.
 | `hive status --json` | `hive-running-status.v2`: active runtime identity, daemon health, and only currently live tasks, capped at 32 rows, 256 bytes per string, and 64 KiB for the complete JSON line. The v2 source counters name bounded SQL lease rows rather than the retired filesystem scan. |
 | `hive status --operational` | Concise human active-work and blocker view. |
 | `hive status --operational --json` | `hive-operational-status.v5` agent document. It includes required active runtime identity, the nullable stateless routing decision, and complete dependency fan-in state; superseded v1-v4 are removed. |
+| `hive status --operational [--json] --project NAME` | The same view, text or JSON, scoped to one registered project (see [Project scope](#project-scope)). An unknown or empty name is a usage error (exit 64). |
 | `hive status --diagnose ...` | Existing task diagnostic surface; incompatible with `--operational`. |
 | `hive task TARGET --json` | Detailed semantic workspace for one task. |
 | `hive archive [--json]` | Retention-unfiltered terminal history. |
@@ -46,6 +47,43 @@ managed-workflow breadcrumbs become one `status_warning` per tick instead of
 leaking to process stderr. Outside that scoped build the same warnings retain
 their ordinary stderr behavior. A failed scan retains warnings emitted before
 its final exception.
+
+### Project scope
+
+`--project NAME` scopes local `--operational`, `--diagnose`, and remote
+status. Plain local `hive status` (the running view) and `hive archive`
+listing still ignore it; see [[gaps]].
+
+For `--operational`, `Status#operational_project_scope` checks the name against
+the registered projects before it reads the scheduler snapshot, the daemon
+cache, or any task folder. An unknown name raises `Hive::UsageError`
+`unknown project "NAME" (registered: a, b)`, and a blank name raises
+`--project must not be empty`. Both exit 64; with `--json` the error is the
+`hive-operational-status.v5` error envelope (`error_kind: "error"`).
+
+Scoping narrows only the projection. The daemon-cache lookup and any fresh scan
+still cover every registered project, so the cached graph stays reusable (its
+registered-identity fence is unchanged), and cross-project dependency text is
+resolved exactly as in the fleet view: a row blocked by `other:slug` keeps that
+reason. `Hive::OperationalStatus` then receives `project_scope:` and builds
+every field from that project's graph entry alone:
+
+- tasks, `summary` counts and `overall_state`;
+- `archive` and `hidden_archived_task_count`;
+- project-scoped issues and completeness. Another project's load failure or
+  legacy stage dirs do not make the scoped view `partial`;
+- `source.task_graph.projects_total`, which is `1`.
+
+The scheduler and daemon blocks follow the scoped project. If it is not
+daemon-enabled, both report `not_applicable` (scheduler reason
+`project NAME is not daemon-enabled`), even when the daemon runs other
+projects. Fleet-wide attempt-storage issues remain, as do scheduler freshness
+issues when the scoped project is daemon-enabled. `recovery_rows` honors the
+same scope.
+
+The JSON document carries the additive optional `scope: { "project": NAME }`.
+Its absence means every registered project. The human heading appends
+` · project NAME`.
 
 ## Usage and examples: act
 

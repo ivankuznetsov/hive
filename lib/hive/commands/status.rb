@@ -351,6 +351,8 @@ module Hive
           payload.fetch("completeness") : "unknown"
         heading = "SNAPSHOT #{completeness.upcase} — " \
                   "#{summary.fetch('active')} active · archive on demand"
+        scope = payload.dig("scope", "project")
+        heading += " · project #{terminal_safe(scope)}" if scope
         task_graph = payload.dig("source", "task_graph") || {}
         if task_graph["provenance"] == "daemon_cache"
           heading += " · task graph cached #{task_graph.fetch('age_seconds').round}s ago"
@@ -518,7 +520,12 @@ module Hive
         end
       end
 
+      # `--operational --project NAME` scopes only the projection. The cache
+      # lookup and any fresh scan still cover every registered project, so the
+      # daemon-published graph stays reusable and cross-project dependency
+      # text (blocked by other:slug) resolves exactly as in the fleet view.
       def operational_status(projects, scheduler_snapshot:, status_payload:, now: Time.now.utc)
+        scope = operational_project_scope(projects)
         if scheduler_snapshot.equal?(AUTO_SCHEDULER_SNAPSHOT)
           scheduler_snapshot = Hive::Daemon::OperationalSnapshot::Reader.new.read(now: now)
         end
@@ -531,7 +538,8 @@ module Hive
           projects, now: now, workflow_generations: workflow_generations
         )
         project_context = operational_project_context(
-          projects, workflow_generations: workflow_generations
+          scope ? projects.select { |project| project.fetch("name") == scope } : projects,
+          workflow_generations: workflow_generations
         )
         runtime_identity = if cache
           Hive::RuntimeIdentity.parse(cache["runtime"]) || Hive::RuntimeIdentity.unknown
@@ -544,8 +552,25 @@ module Hive
           scheduler_snapshot: scheduler_snapshot,
           status_payload_tick_sequence: cache&.fetch("tick_sequence", nil),
           runtime_identity: runtime_identity,
+          project_scope: scope,
           now: now
         )
+      end
+
+      # The registered project an operational read is scoped to, or nil for the
+      # whole fleet. An unknown name fails before any scan so a typo never
+      # reads as an idle project.
+      def operational_project_scope(projects)
+        return nil unless @operational && !@project.nil?
+
+        name = @project.to_s
+        raise Hive::UsageError, "--project must not be empty" if name.strip.empty?
+
+        names = Array(projects).map { |project| project.fetch("name").to_s }
+        return name if names.include?(name)
+
+        registered = names.empty? ? "none" : names.sort.join(", ")
+        raise Hive::UsageError, "unknown project #{name.inspect} (registered: #{registered})"
       end
 
       def current_status_cache(projects, snapshot, now:)

@@ -1673,8 +1673,10 @@ module Hive
       rows and 64 KiB and reports truncation explicitly.
 
       Use --operational for the broader active-work snapshot with blocker
-      ownership and recovery actions. Inspect one task in depth with
-      `hive task TARGET --json`; use `hive archive --json` for terminal history.
+      ownership and recovery actions. Add --project NAME to scope that view,
+      text or --json, to one registered project; an unknown name is a usage
+      error. Inspect one task in depth with `hive task TARGET --json`; use
+      `hive archive --json` for terminal history.
 
       With --context REMOTE, status returns a bounded authorized task page.
       Use --cursor HANDLE from data.continuation for the next page, retaining
@@ -1703,7 +1705,8 @@ module Hive
       that idempotency check. Empty --diagnose values are rejected.
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
-    option :project, type: :string, desc: "scope diagnosis or remote status to one registered project"
+    option :project, type: :string,
+                     desc: "scope --operational, --diagnose, or remote status to one registered project"
     option :stage, type: :string,
                    desc: "scope --diagnose slug lookup to one stage (#{STAGE_VOCABULARY})"
     option :write, type: :boolean, default: false,

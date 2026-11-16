@@ -6,6 +6,7 @@ require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
 require "hive/babysitter/git_policy"
+require "hive/git_config_pins"
 require_relative "../../../bin/hive-babysitter-skip-log"
 require_relative "../../support/babysitter_git_options"
 
@@ -1272,6 +1273,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Default-deny on a malformed GIT_CONFIG_COUNT: a non-numeric value (which `.to_i` reads
       # as 0/allowed) must be rejected rather than trusted to git's own parsing.
       assert_stubbed env.merge("GIT_CONFIG_COUNT" => "not-a-number"), "git", "status"
+      # Hive's own rerere pins are not allowlisted either. The stub refuses
+      # them like any other positive count, so a dry-run babysitter spawn
+      # opts out of pinning instead of relaxing this check.
+      assert_stubbed env.merge(Hive::GitConfigPins.apply({})), "git", "status"
       assert_stubbed env, "git", "unknown-write-command"
       assert_passes env, "git", "-C", dir, "status", "--short"
       assert_passes env, "git", "config", "--get", "remote.origin.url"

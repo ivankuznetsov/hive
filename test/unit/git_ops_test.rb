@@ -765,6 +765,65 @@ class GitOpsTest < Minitest::Test
     end
   end
 
+  # The rebase conflict agent must see the real conflict. The operator's
+  # global rerere.autoupdate must not pre-stage an old recorded resolution,
+  # either in the first rebase step or in a step reached by --continue.
+  def test_rebase_leaves_conflicts_that_operator_rerere_would_have_staged
+    with_recorded_rerere_resolutions do |dir, shared|
+      ops = Hive::GitOps.new(dir)
+
+      assert_raises(Hive::RebaseConflict) { ops.rebase_onto("master") }
+      assert_includes ops.staged_unmerged_files, "shared.txt"
+      assert_includes File.read(shared), "<<<<<<<"
+
+      File.write(shared, "resolved one\n")
+      run!("git", "-C", dir, "add", "shared.txt")
+      assert_raises(Hive::RebaseConflict) { ops.rebase_continue }
+      assert_includes ops.staged_unmerged_files, "shared.txt"
+      assert_includes File.read(shared), "<<<<<<<"
+    end
+  end
+
+  # Two feature commits that conflict with master, with both resolutions
+  # already recorded under an operator config that enables rerere.
+  def with_recorded_rerere_resolutions
+    with_tmp_git_repo do |dir|
+      operator_config = File.join(dir, ".git", "operator.gitconfig")
+      File.write(operator_config, "[rerere]\n\tenabled = true\n\tautoupdate = true\n")
+      shared = File.join(dir, "shared.txt")
+      git = ->(*args) { run!("git", "-C", dir, *args) }
+      continue = -> { system({ "GIT_EDITOR" => "true" }, "git", "-C", dir, "rebase", "--continue", out: File::NULL, err: File::NULL) }
+
+      with_env("GIT_CONFIG_GLOBAL" => operator_config) do
+        File.write(shared, "v0\n")
+        git.call("add", "shared.txt")
+        git.call("commit", "-qm", "baseline")
+        git.call("checkout", "-q", "-b", "feature")
+        File.write(shared, "feature one\n")
+        git.call("commit", "-qam", "feature one")
+        File.write(shared, "feature two\n")
+        git.call("commit", "-qam", "feature two")
+        feature = git.call("rev-parse", "HEAD").strip
+        git.call("checkout", "-q", "master")
+        File.write(shared, "master\n")
+        git.call("commit", "-qam", "master")
+        git.call("checkout", "-q", "feature")
+
+        refute system("git", "-C", dir, "rebase", "master", out: File::NULL, err: File::NULL)
+        File.write(shared, "resolved one\n")
+        git.call("add", "shared.txt")
+        refute continue.call, "the second commit must conflict too"
+        File.write(shared, "resolved two\n")
+        git.call("add", "shared.txt")
+        assert continue.call
+        assert_equal 2, Dir.children(File.join(dir, ".git", "rr-cache")).length
+        git.call("reset", "-q", "--hard", feature)
+
+        yield dir, shared
+      end
+    end
+  end
+
   def test_rebase_abort_restores_pre_rebase_head
     # Same conflict setup as above, then abort.
     with_tmp_git_repo do |dir|
@@ -1117,7 +1176,8 @@ def test_rebase_continue_sets_editor_env_and_reports_failure_details
   assert_match(/\(no stderr\)/, empty.message)
   stderr = assert_raises(Hive::GitError) { ops.rebase_continue }
   assert_match(/fatal continue/, stderr.message)
-  assert captured_envs.all? { |env| env == { "GIT_EDITOR" => "true" } }
+  expected_env = Hive::GitConfigPins.apply({ "GIT_EDITOR" => "true" }, inherited: ENV)
+  assert_equal [ expected_env ] * 3, captured_envs
 end
 
 def test_rebase_continue_raises_rebase_conflict_when_rebase_remains_in_progress

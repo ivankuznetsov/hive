@@ -13,6 +13,7 @@ require "hive/agent_support"
 require "hive/agent_support/operator_authority"
 require "hive/artifact_firewall"
 require "hive/events"
+require "hive/git_config_pins"
 require "hive/lock"
 require "hive/mcp"
 require "hive/permission_scope"
@@ -73,7 +74,8 @@ module Hive
                    additional_read_roots: [], additional_write_roots: [],
                    edit_patterns: [], bash_patterns: [],
                    completion_probe: nil, isolate_environment: false,
-                   terminate_on_parent_signal: true, mcp_launch: nil)
+                   terminate_on_parent_signal: true, mcp_launch: nil,
+                   pin_git_config: true)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -104,6 +106,7 @@ module Hive
         argument.to_s.dup.freeze
       end.freeze
       @isolate_environment = isolate_environment == true
+      @pin_git_config = pin_git_config == true
       @terminate_on_parent_signal = terminate_on_parent_signal == true
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
@@ -178,14 +181,28 @@ module Hive
 
     # The child env: the base env, then the MCP launch env and the host vars
     # its servers read (so they survive `unsetenv_others`), then the
-    # provider's controller scrub.
+    # provider's controller scrub, then Hive's git config pins. The pins
+    # count entries the child inherits, so they are computed against the
+    # same environment the spawn actually passes down.
     def child_environment
       @child_environment ||= begin
         launch = mcp_launch
         base = launch ? launch.environment_for(@base_child_environment) : @base_child_environment
-        base.merge(@controller_environment_scrub)
-          .merge(Hive::AgentSupport::OperatorAuthority.launch_environment).freeze
+        environment = base.merge(@controller_environment_scrub)
+          .merge(Hive::AgentSupport::OperatorAuthority.launch_environment)
+        if @pin_git_config
+          environment = Hive::GitConfigPins.apply(
+            environment, inherited: inherits_operator_environment? ? ENV : {}
+          )
+        end
+        environment.freeze
       end
+    end
+
+    # A managed runtime policy or an isolated launch spawns with
+    # `unsetenv_others`, so only child_environment reaches the child.
+    def inherits_operator_environment?
+      !(@runtime_policy || @isolate_environment)
     end
 
     # nil when the managed runtime policy already isolates MCP.
@@ -341,7 +358,7 @@ module Hive
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
-      spawn_opts[:unsetenv_others] = true if @runtime_policy || @isolate_environment
+      spawn_opts[:unsetenv_others] = true unless inherits_operator_environment?
       spawn_opts[:in] = stdin_file if stdin_file
       pid = Process.spawn(child_environment, *cmd, **spawn_opts)
       w.close

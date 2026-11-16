@@ -128,15 +128,20 @@ class BabysitterPrFixerTest < Minitest::Test
       worktree_path = File.join(dir, "wt")
       FileUtils.mkdir_p(worktree_path)
       inflight = Set.new
+      seen_pin = nil
 
       stub_non_green_context(project, worktree_path) do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { { status: :ok } }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **kwargs|
+          seen_pin = kwargs.fetch(:pin_git_config)
+          { status: :ok }
+        }) do
           outcome = Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: inflight)
           assert_equal :success, outcome
         end
       end
 
       assert_empty inflight
+      assert_equal true, seen_pin, "a live fixer's own git must run with rerere pinned off"
       events = File.readlines(File.join(project.fetch("hive_state_path"), "babysitter", "events.jsonl")).map { |line| JSON.parse(line) }
       assert events.any? { |event| event["action"] == "agent-fix" && event["outcome"] == "success" }
     end
@@ -524,11 +529,13 @@ class BabysitterPrFixerTest < Minitest::Test
       FileUtils.mkdir_p(worktree_path)
       seen_path = nil
       seen_prompt = nil
+      seen_pin = nil
 
       stub_non_green_context(project, worktree_path) do
         with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **kwargs|
           seen_path = ENV["PATH"]
           seen_prompt = kwargs.fetch(:prompt)
+          seen_pin = kwargs.fetch(:pin_git_config)
           File.write(File.join(worktree_path, ".babysitter-dry-run-plan.md"), "would fix\n")
           { status: :ok }
         }) do
@@ -538,6 +545,8 @@ class BabysitterPrFixerTest < Minitest::Test
       end
 
       assert_includes seen_path, ".hive-babysitter-dry-run-bin"
+      assert_equal false, seen_pin,
+                   "dry-run git is the PATH stub, which must not see Hive's GIT_CONFIG_COUNT pins"
       assert_includes seen_prompt, "gh pr checks/diff/list/status/view"
       assert_includes seen_prompt, File.join(worktree_path, ".babysitter-dry-run-skipped.log")
       assert_includes seen_prompt, "[dry-run] ... skipped"

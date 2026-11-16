@@ -2,6 +2,7 @@ require "open3"
 require "set"
 require "fileutils"
 require "hive/stages"
+require "hive/git_config_pins"
 require "hive/git_ref"
 require "hive/lock"
 
@@ -610,10 +611,17 @@ module Hive
     # canonical conflict signal). Raises GitError for any other
     # non-zero exit (invalid ref, hook failure, etc.) including
     # timeout.
+    #
+    # Rerere is pinned off here too (Hive::GitConfigPins). Otherwise the
+    # operator's `rerere.autoupdate` stages a stale recorded resolution,
+    # Hive::Rebase finds nothing unmerged, and it continues the rebase
+    # itself without ever dispatching the conflict agent.
     def rebase_onto(ref, upstream: nil)
       cmd = [ "git", "-C", @project_root, "rebase" ]
       cmd += upstream ? [ "--onto", ref, upstream ] : [ ref ]
-      success, err, timed_out = run_git_with_timeout(cmd)
+      success, err, timed_out = run_git_with_timeout(
+        cmd, env: Hive::GitConfigPins.apply({}, inherited: ENV)
+      )
       return true if success
 
       if rebase_in_progress?
@@ -666,7 +674,9 @@ module Hive
     # surface on the next commit. Raises GitError otherwise (including
     # timeout).
     def rebase_continue
-      env = { "GIT_EDITOR" => "true" }  # accept default commit message; never open an editor
+      # GIT_EDITOR accepts the default commit message without opening an
+      # editor; the pins keep rerere off for the commits replayed next.
+      env = Hive::GitConfigPins.apply({ "GIT_EDITOR" => "true" }, inherited: ENV)
       success, err, timed_out = run_git_with_timeout(
         [ "git", "-C", @project_root, "rebase", "--continue" ],
         env: env

@@ -3,9 +3,44 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-15
+updated: 2026-11-16
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
 ---
+
+## Agent git rerere pins: residual scope (2026-11-16)
+
+`Hive::GitConfigPins` turns rerere off for git that agents run and for
+`GitOps#rebase_onto` / `#rebase_continue`. Its limits:
+
+- **Explicit overrides still win.** `git -c rerere.enabled=true`,
+  `git merge --rerere-autoupdate`, or an agent that rewrites
+  `GIT_CONFIG_COUNT` in its own shell all get past the pins. The pins guard
+  against inherited operator config, not against a deliberate agent choice.
+- **The operator's `rr-cache` is untouched.** Stale recorded resolutions stay
+  in the project repositories and still replay in the operator's own manual
+  merges, as several local merges did on 2026-11-16. Hive does not clear or
+  expire them. The operator can drop one with `git rerere forget <path>`
+  while the conflict is in progress, or delete `.git/rr-cache`.
+- **Attended sessions are not pinned.** The TUI steer session ("open in
+  agent") launches the agent CLI in the operator's terminal outside
+  `Hive::Agent`, so it uses the operator's own config on purpose.
+- **A malformed inherited count leaves the agent unpinned.** If the operator
+  exports a `GIT_CONFIG_COUNT` that git rejects, Hive leaves it as is. Git
+  then refuses every command, so nothing can merge. Hive does not warn about
+  it.
+- **The babysitter dry-run relies on the PATH stub, not on pins.** That is
+  safe only while the stub passes through reads alone, with global and system
+  config disabled. If a merge-capable command is ever allowlisted, the stub
+  must pin rerere in its passthrough environment, after the `GitPolicy`
+  check.
+- **Other unpinned Hive git.** `GhOps.rebase_onto_base` (babysitter
+  auto-rebase) still inherits rerere. It aborts on any conflict, and a
+  rerere-staged resolution still halts the rebase, so nothing staged is kept.
+  No other Hive-owned merge, rebase, cherry-pick, or pull was found outside
+  `Hive::AgentGitGate`.
+- **Coverage is synthetic.** Regression tests replay a recorded resolution in
+  temporary repositories. Nobody has re-run the todero PR #57 merge under the
+  new environment.
 
 ## Patrol Fix secret rework limits (2026-11-14)
 

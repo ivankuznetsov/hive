@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "time"
 require "hive/markers"
 require "hive/lock"
@@ -8,6 +9,8 @@ require "hive/agent"
 require "hive/agent_limit"
 require "hive/model_routing"
 require "hive/workflow_package/runtime_policy"
+require "hive/babysitter/git_policy"
+require "hive/git_config_pins"
 
 class AgentTest < Minitest::Test
   include HiveTestHelper
@@ -124,8 +127,10 @@ class AgentTest < Minitest::Test
         *Hive::Agent::SCRUBBED_CHILD_ENV.keys,
         *Hive::AgentProfiles.lookup(:claude).credential_environment_keys
       ]
-      assert_equal policy.environment.merge(Hive::AgentSupport::OperatorAuthority::LAUNCH_ENVIRONMENT),
-                   agent.child_environment.reject { |key, _| expected_scrubbed.include?(key) }
+      expected = Hive::GitConfigPins.apply(
+        policy.environment.merge(Hive::AgentSupport::OperatorAuthority::LAUNCH_ENVIRONMENT)
+      )
+      assert_equal expected, agent.child_environment.reject { |key, _| expected_scrubbed.include?(key) }
       assert_nil agent.child_environment.fetch("HIVE_SCREENOTE_BASE_URL")
       Hive::AgentProfiles.lookup(:claude).credential_environment_keys.each do |key|
         assert_nil agent.child_environment.fetch(key)
@@ -222,6 +227,141 @@ class AgentTest < Minitest::Test
         refute agent.child_environment.key?("DATABASE_URL")
       end
     end
+  end
+
+  OPERATOR_GIT_CONFIG = {
+    "GIT_CONFIG_COUNT" => "1",
+    "GIT_CONFIG_KEY_0" => "user.signingkey",
+    "GIT_CONFIG_VALUE_0" => "ABC123"
+  }.freeze
+
+  def test_child_environment_pins_rerere_off_after_inherited_git_config
+    with_tmp_dir do |dir|
+      with_env(OPERATOR_GIT_CONFIG) do
+        agent = Hive::Agent.new(task: make_task(dir), prompt: "test", max_budget_usd: nil, timeout_sec: 5)
+        environment = agent.child_environment
+
+        assert_equal "3", environment.fetch("GIT_CONFIG_COUNT")
+        refute environment.key?("GIT_CONFIG_KEY_0"), "the operator's own entry must be inherited untouched"
+        assert_equal %w[rerere.enabled false rerere.autoupdate false],
+                     environment.values_at("GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1",
+                                           "GIT_CONFIG_KEY_2", "GIT_CONFIG_VALUE_2")
+      end
+    end
+  end
+
+  # An isolated launch uses unsetenv_others, so the operator's inherited
+  # entries never reach the child and the pins start at index 0.
+  def test_isolated_child_environment_pins_rerere_off_from_the_first_index
+    with_tmp_dir do |dir|
+      with_env(OPERATOR_GIT_CONFIG) do
+        agent = Hive::Agent.new(
+          task: make_task(dir), prompt: "test", max_budget_usd: nil,
+          timeout_sec: 5, isolate_environment: true
+        )
+        environment = agent.child_environment
+
+        assert_equal "2", environment.fetch("GIT_CONFIG_COUNT")
+        assert_equal "rerere.enabled", environment.fetch("GIT_CONFIG_KEY_0")
+        assert_equal "rerere.autoupdate", environment.fetch("GIT_CONFIG_KEY_1")
+      end
+    end
+  end
+
+  # The babysitter dry-run opts out: its git is the PATH stub, and GitPolicy
+  # must keep refusing an inherited operator GIT_CONFIG_COUNT there.
+  def test_unpinned_child_environment_leaves_the_dry_run_git_policy_boundary_intact
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      stub_environment = lambda do
+        agent = Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: nil, timeout_sec: 5,
+          pin_git_config: false
+        )
+        refute agent.child_environment.keys.any? { |key| key.start_with?("GIT_CONFIG") }
+        ENV.to_h.merge(agent.child_environment).compact
+      end
+
+      with_env("GIT_CONFIG_COUNT" => nil) do
+        assert Hive::Babysitter::GitPolicy.classify(%w[status], environment: stub_environment.call).allowed?
+      end
+      with_env(OPERATOR_GIT_CONFIG) do
+        refute Hive::Babysitter::GitPolicy.classify(%w[status], environment: stub_environment.call).allowed?,
+               "an inherited operator GIT_CONFIG_COUNT must still be refused"
+      end
+    end
+  end
+
+  def test_agent_git_merge_leaves_the_conflict_a_stale_rerere_resolution_would_hide
+    with_tmp_dir do |dir|
+      operator_config = File.join(dir, "operator.gitconfig")
+      File.write(operator_config, <<~CONFIG)
+        [user]
+          name = Operator
+          email = operator@example.test
+        [commit]
+          gpgsign = false
+        [rerere]
+          enabled = true
+          autoupdate = true
+      CONFIG
+      repo = File.join(dir, "repo")
+      lockfile = File.join(repo, "Gemfile.lock")
+
+      with_env("GIT_CONFIG_GLOBAL" => operator_config, "GIT_CONFIG_NOSYSTEM" => "1") do
+        record_stale_lockfile_resolution(repo)
+
+        # Control: the operator's own config replays the old resolution and
+        # stages it, so the merge looks resolved.
+        merge_git(repo, {}, "merge", "main", allow_failure: true)
+        assert_equal "M  Gemfile.lock", merge_git(repo, {}, "status", "--porcelain").strip
+        assert_equal "brakeman 8.0.6\n", File.read(lockfile)
+        merge_git(repo, {}, "merge", "--abort")
+
+        agent = Hive::Agent.new(task: make_task(dir), prompt: "merge", max_budget_usd: nil, timeout_sec: 5)
+        begin
+          environment = agent.child_environment
+          output = merge_git(repo, environment, "merge", "main", allow_failure: true)
+          refute_match(/previous resolution/, output)
+          assert_equal "UU Gemfile.lock", merge_git(repo, environment, "status", "--porcelain").strip
+          assert_includes File.read(lockfile), "<<<<<<<"
+          assert_equal "Operator", merge_git(repo, environment, "config", "user.name").strip,
+                       "the operator's other global config must still apply"
+        ensure
+          agent.cleanup_mcp_launch!
+        end
+      end
+    end
+  end
+
+  def record_stale_lockfile_resolution(repo)
+    merge_git(nil, {}, "init", "--quiet", "-b", "main", repo)
+    lockfile = File.join(repo, "Gemfile.lock")
+    File.write(lockfile, "brakeman 8.0.0\n")
+    merge_git(repo, {}, "add", "Gemfile.lock")
+    merge_git(repo, {}, "commit", "--quiet", "-m", "base")
+    merge_git(repo, {}, "checkout", "--quiet", "-b", "feature")
+    File.write(lockfile, "brakeman 8.0.5\n")
+    merge_git(repo, {}, "commit", "--quiet", "-am", "feature")
+    merge_git(repo, {}, "checkout", "--quiet", "main")
+    File.write(lockfile, "brakeman 8.0.6\n")
+    merge_git(repo, {}, "commit", "--quiet", "-am", "main at 8.0.6")
+    merge_git(repo, {}, "checkout", "--quiet", "feature")
+    merge_git(repo, {}, "merge", "main", allow_failure: true)
+    File.write(lockfile, "brakeman 8.0.6\n")
+    merge_git(repo, {}, "add", "Gemfile.lock")
+    merge_git(repo, {}, "commit", "--quiet", "--no-edit")
+    assert_path_exists File.join(repo, ".git", "rr-cache"), "the resolution must be recorded"
+    # Undo the merge so the same conflict can recur. rr-cache keeps the
+    # recorded resolution, as it did on the operator's machine.
+    merge_git(repo, {}, "reset", "--quiet", "--hard", "HEAD~1")
+  end
+
+  def merge_git(repo, environment, *args, allow_failure: false)
+    argv = repo ? [ "git", "-C", repo, *args ] : [ "git", *args ]
+    output, status = Open3.capture2e(environment, *argv)
+    assert status.success?, "#{argv.join(' ')} failed:\n#{output}" unless allow_failure
+    output
   end
 
   def test_isolated_child_environment_resolves_tool_manager_launcher_without_session_blobs

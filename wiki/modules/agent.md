@@ -1,9 +1,9 @@
 ---
 title: Hive::Agent
 type: module
-source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
+source: lib/hive/agent.rb, lib/hive/agent_runtime.rb, lib/hive/agent/message_extractor.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/git_config_pins.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-08-29
+updated: 2026-11-16
 tags: [agent, claude, subprocess]
 ---
 
@@ -212,6 +212,45 @@ without resolving or replacing tool-manager launchers. As with the other
 agents, launcher output still belongs to the CLI protocol: non-JSON stdout on
 the strict JSONL run boundary becomes a typed `malformed_output` failure.
 
+## Agent git config pins
+
+Agents run `git` themselves: execute, review fix, rebase conflict
+resolution, Patrol Fix, the babysitter PR fixer, and so on. That git
+inherits the operator's global config on purpose, so identity, signing, and
+credential helpers keep working. Some of that config is unsafe without a
+human watching. With `rerere.enabled` and `rerere.autoupdate`, a merge or
+rebase silently stages a resolution recorded for an older conflict. On
+2026-11-16 the babysitter's "Merge main into PR #57 branch" on todero
+downgraded brakeman 8.1.0 to 8.0.6 in `Gemfile.lock` this way, and the agent
+never noticed.
+
+`Hive::Agent#child_environment` therefore ends with `Hive::GitConfigPins`.
+It appends `rerere.enabled=false` and `rerere.autoupdate=false` as
+`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n` / `GIT_CONFIG_VALUE_n` entries.
+These override every config file, but an explicit `git -c` still wins. The
+operator's other config is untouched. The pins are counted against what the
+child actually receives:
+
+- In a normal spawn, the child inherits `ENV`. The pins go after any
+  `GIT_CONFIG_COUNT` entries the operator already exports, and those entries
+  keep their indices.
+- An isolated launch or a managed runtime policy spawns with
+  `unsetenv_others`, so only `child_environment` counts. Entries in the
+  policy environment (a `yolo` package copies `ENV`) are extended, not
+  replaced.
+- If git itself would reject the existing count (anything but optional
+  leading whitespace, an optional `+`, and digits), the environment is left
+  alone. Git then refuses every command, so nothing can merge.
+
+Native OpenCode builds its environment from `child_environment`, so it gets
+the same pins. `pin_git_config: false` (on `Agent.new` and
+`Stages::Base.spawn_agent`) is reserved for spawns whose git already runs
+behind another config-isolating boundary. Today that is only the babysitter
+dry-run, where git is the PATH stub (see [[modules/babysitter]]). Hive's own
+managed git (`Hive::AgentGitGate`) already ignores global config and is
+unchanged. Hive's own conflict-producing rebase in `GitOps` uses the same
+pins (see [[modules/rebase]]).
+
 ## `spawn_and_wait` (the long part)
 
 1. Open an owner-private (`0600`), no-follow logfile (`<task.log_dir>/<label>-<UTC-ts>.log`). Append only bounded launch metadata (`cwd`, profile, executable basename, argv count); never serialize argv because positional profiles carry the complete prompt there. Event messages pass through the same shared secret redactor before persistence.
@@ -281,6 +320,7 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 - `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, proof that the capability is absent from unrelated launches, prompt omission from logs, credential redaction across stdout/stderr write boundaries and structured message-event boundaries, and `0600` log mode.
 - `test/unit/claude_launcher_test.rb` covers delegation to `Stages::Base.spawn_agent` (including a leftover `claude.mode: tmux` config still launching headless), MCP and allowed-tools flags, the `AskUserQuestion` deny, per-stage model/effort winning over project pins, the `claude_launch_failed` marker, and the tmux-era scratch-settings repair.
+- `test/unit/agent_test.rb` also covers the git config pins: appended after inherited operator entries, starting at index 0 for isolated launches, absent with `pin_git_config: false` (where `GitPolicy` still refuses an inherited operator count), and a real `git merge` under the agent environment that leaves the conflict a pre-recorded rerere resolution would have staged. `test/unit/git_config_pins_test.rb` covers index arithmetic, extending `Hive::AgentGitGate.read_environment`, and git-compatible count parsing.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
 - `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.
 

@@ -967,6 +967,10 @@ module Hive
       # passed add_dirs, log a warning to the task's log file so the user
       # can see that ADR-008's filesystem-isolation boundary is reduced
       # for this spawn (per ADR-018).
+      #
+      # `pin_git_config:` (default true) pins rerere off for the agent's own
+      # git (Hive::GitConfigPins). Only a spawn whose git runs through another
+      # config-isolating boundary may opt out: the babysitter dry-run PATH stub.
       def spawn_agent(task, prompt:, max_budget_usd:, timeout_sec:,
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
@@ -984,7 +988,8 @@ module Hive
                       resource_guards: nil, agent_custody: nil,
                       isolate_environment: false, launch_environment: nil,
                       terminate_on_parent_signal: true,
-                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil)
+                      receipt_model: nil, receipt_effort: nil, mcp_scope: nil,
+                      pin_git_config: true)
         mcp_launch = nil
         launch_environment = (launch_environment || {}).to_h.transform_keys(&:to_s)
         unknown_launch_keys = launch_environment.keys - CONTROLLER_LAUNCH_ENV_KEYS
@@ -1169,7 +1174,8 @@ module Hive
               isolate_environment: isolate_environment,
               completion_probe: completion_probe,
               terminate_on_parent_signal: terminate_on_parent_signal,
-              mcp_launch: mcp_launch
+              mcp_launch: mcp_launch,
+              pin_git_config: pin_git_config
             ).run!
             agent_result[:hive_observation_id] = observation.session_id if
               agent_result.is_a?(Hash) && agent_result.key?(:requested_route)

@@ -3,7 +3,7 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb, lib/hive/commands/run.rb
 created: 2026-05-14
-updated: 2026-11-09
+updated: 2026-11-16
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
 
@@ -116,6 +116,7 @@ This keeps later review-fix commits fast-forward pushable and prevents finalize 
 
 - **Per-spawn nonce wrap** (ADR-008/019): every conflict-resolution agent gets a fresh `<user_supplied_<hex>>` block around the conflict context. 64 bits of entropy per spawn; a pre-committed payload in main or the worktree cannot construct the closing tag.
 - **`add_dirs: []` isolation**: the agent's filesystem grant is empty; it physically cannot reach `task.folder`. The `Hive::ProtectedFiles::ORCHESTRATOR_OWNED` files live there, not in the worktree git tree — they cannot appear in `staged_unmerged_files` by construction. The original PR #69 had a belt-and-suspenders basename check against these files in `resolve_conflicts` but it was removed (B8) after the doc-review identified it as a false-positive generator (any project file named `plan.md` at the worktree root would have aborted the rebase) without adding real security.
+- **No rerere replay**: `GitOps#rebase_onto` and `#rebase_continue` run with the operator's config plus `Hive::GitConfigPins` (`rerere.enabled=false`, `rerere.autoupdate=false`). Without the pins, a global `rerere.autoupdate` stages an old recorded resolution and the rebase halts with nothing unmerged. The conflict loop's empty-unmerged branch then runs `rebase_continue` itself, which commits the stale content without ever dispatching the agent. The resolution agent's own git carries the same pins through `Hive::Agent` (see [[modules/agent]]).
 - **Orchestrator vs agent SHA contract**: `Hive::Rebase.perform` runs in the orchestrator and is allowed to mutate `worktree.yml` (the SHA snapshot lives only around agent spawns). The conflict-resolution agent spawn re-enters the SHA contract — but `add_dirs: []` makes this moot since the agent can't reach the protected files anyway.
 
 ## Operational latency budget

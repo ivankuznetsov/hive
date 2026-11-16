@@ -404,7 +404,14 @@ module Hive
             ),
             status_mode: :exit_code_only,
             terminate_on_parent_signal: false,
-            mcp_scope: "babysitter"
+            mcp_scope: "babysitter",
+            # A live fixer merges and rebases with real git, so pin rerere
+            # off (Hive::GitConfigPins). A dry-run's git is the PATH stub:
+            # GitPolicy refuses any GIT_CONFIG_COUNT that is not 0 and only
+            # passes reads through, with global and system config disabled.
+            # Pinning there would make the stub refuse every read, and
+            # relaxing that check for Hive's entries would weaken it.
+            pin_git_config: !@dry_run
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call

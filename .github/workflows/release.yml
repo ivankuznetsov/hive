@@ -256,7 +256,7 @@ jobs:
           cd selected/dist
           sha256sum hive-cli-*.gem hive-agent-skills-*.tar.gz hive-web-*.tar.gz > SHA256SUMS
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.10.1
+        uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v3.10.1
       - name: Sign checksums
         # `--output-certificate` writes the fulcio cert blob that
         # `cosign verify-blob --certificate ... --signature ...` needs

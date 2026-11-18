@@ -3,9 +3,30 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-16
+updated: 2026-11-18
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
 ---
+
+## Plan review decision batching: residual scope (2026-11-18)
+
+Planner revisions now wait until no gated or manual finding is open (see
+[[modules/plan_review]]). These limits remain:
+
+- **The capped row reads as agent-owned.** A `revision_round_limit` blocker
+  keeps owner `planner`, which operational status maps to `agent`. The remedy
+  (`hive run <slug> --project <project>`) is started by the operator. The owner
+  was left alone because existing records and tests carry it.
+- **Other "new linked plan" blocks still omit the command.** Verification
+  blockers ("resolve verification blockers with a new linked plan", from both
+  `Orchestrator` and `Clearance`) were not reworded.
+- **`--project` is the directory name.** `replan_action` uses
+  `Task#project_name`, the basename of the project root. That is the name
+  `hive init` registers, but a project registered under another name would
+  get a wrong `--project`.
+- **The planner's open-choices input is now always empty for new reviews.**
+  `PlannerRevision` still receives `pending_findings`, but a revision only runs
+  once none is open. Only records an older build revised mid-decision populate
+  it. The prompt section remains for them.
 
 ## Agent git rerere pins: residual scope (2026-11-16)
 

@@ -212,6 +212,20 @@ class TaskActionTest < Minitest::Test
     assert_equal "plan_review_unsupported", unsupported.key
     assert_nil unsupported.command
 
+    # The revision-limit action carries the task's own slug; a slug that
+    # happens to say "reviewer" is still a spent budget, not a repair.
+    capped = Hive::TaskAction.for(
+      task, waiting,
+      plan_review: {
+        "state" => "blocked",
+        "blockers" => [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+        "required_action" => "start a new linked plan: hive run fix-reviewer-261105-aaaa --project x " \
+                             "(operator decisions carry forward)"
+      }
+    )
+    assert_equal "plan_review_blocked", capped.key
+    assert_nil capped.command
+
     unsupported_route = Hive::TaskAction.for(
       task, waiting,
       plan_review: {
@@ -340,6 +354,55 @@ class TaskActionTest < Minitest::Test
         safe["lifecycle"] = "verified"
         done = Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" })
         assert_equal "plan_review_decision", done.key
+      end
+    end
+  end
+
+  # The orchestrator holds planner revisions until no gated or manual
+  # finding is open, so accepted work beside an open choice is the
+  # operator's wait. Classifying it as runnable would have the daemon
+  # re-dispatch plan-review-run to republish the same wait every tick.
+  def test_accepted_findings_beside_an_open_choice_wait_for_the_operator
+    Dir.mktmpdir do |project|
+      task = fake_task(stage_name: "plan", stage_index: 3, project_root: project)
+      FileUtils.mkdir_p(task.folder)
+      build = lambda do |classification, title, line, lifecycle|
+        Hive::PlanReview::Finding.new(
+          "source" => "primary", "classification" => classification, "risk" => "low",
+          "title" => title, "description" => "#{title}.",
+          "evidence" => { "path" => "plan.md", "start_line" => line, "end_line" => line, "anchor_digest" => "a" * 64 },
+          "lifecycle" => lifecycle, "display_order" => line
+        ).to_h
+      end
+      safe = build.call("safe_auto", "Name the rollback test", 1, "open")
+      approved = build.call("gated_auto", "Keep the v1 token format", 2, "approved")
+      choice = build.call("gated_auto", "Version the public endpoint", 3, "open")
+      record = {
+        "findings" => [ safe, approved, choice ],
+        "routes" => [ { "role" => "decision_triage", "triage_version" => 1, "outcome" => "success",
+                        "assessed_fingerprints" => [ safe, approved, choice ].map { |entry| entry.fetch("fingerprint") } } ]
+      }
+      record.define_singleton_method(:review_id) { "pr-#{'b' * 64}" }
+      record.define_singleton_method(:policy_fingerprint) { "c" * 64 }
+      store = Object.new
+      store.define_singleton_method(:current_validated) { record }
+      classify = lambda do
+        Hive::TaskAction.for(task, marker(:waiting), config: {}, plan_review: { "state" => "awaiting_decision" }).key
+      end
+      with_replaced_singleton_method(Hive::PlanReview::Store, :new, ->(**) { store }) do
+        assert_equal "plan_review_decision", classify.call, "an approval and a safe fix wait for the open gate"
+
+        safe["lifecycle"] = "incorporated"
+        assert_equal "plan_review_decision", classify.call,
+                     "an incorporated candidate waits too while new accepted work is held"
+
+        approved["lifecycle"] = "incorporated"
+        assert_equal "plan_reviewing", classify.call,
+                     "a legacy candidate revised mid-decision still verifies before the wait"
+
+        approved["lifecycle"] = "approved"
+        choice["lifecycle"] = "approved"
+        assert_equal "plan_reviewing", classify.call, "with every choice decided the batch revision is runnable"
       end
     end
   end

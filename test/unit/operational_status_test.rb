@@ -2356,6 +2356,23 @@ class OperationalStatusTest < Minitest::Test
     assert_equal "plan_review_blocked", enabled_reasons.first.fetch("code")
   end
 
+  # A review that spent its revision rounds offers only closure as an
+  # operational action; its reason must name the replan that carries the
+  # operator's decisions forward.
+  def test_revision_round_limit_reason_names_the_replan_command
+    action = "start a new linked plan: hive run capped-review --project demo (operator decisions carry forward)"
+    review = { "state" => "blocked", "blocker_owner" => "planner", "blocker_reason" => "revision_round_limit",
+               "required_action" => action }
+    row = task(action: "plan_review_blocked", slug: "capped-review", stage: "3-plan", plan_review: review)
+
+    assert_equal "needs_repair", classify_row(row).first
+    reasons = Hive::OperationalStatus.new(
+      status_payload: status_payload, project_context: {}, scheduler_snapshot: nil,
+      now: Time.utc(2026, 7, 20, 10, 0, 2)
+    ).send(:reasons_for, { "name" => "demo" }, row)
+    assert_equal [ "plan_review_blocked", action ], reasons.first.values_at("code", "message")
+  end
+
   def test_paused_project_plan_review_projection_counts_as_idle_not_scheduler_wait
     stale = { "state" => "blocked", "blocker_owner" => "hive",
               "required_action" => "start a linked plan review from the current plan" }

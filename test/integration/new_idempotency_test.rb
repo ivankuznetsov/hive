@@ -344,8 +344,12 @@ class NewIdempotencyTest < Minitest::Test
         "invalid terminal list", "--depends-on", "BAD TASK"
       )
       refute invalid_status.success?
-      assert_empty invalid_out
-      assert_includes invalid_err, "depends_on element 2 is invalid"
+      # Unkeyed --json still reports the failure as one hive-new.v1 document.
+      invalid_payload = JSON.parse(invalid_out)
+      assert_empty schemer.validate(invalid_payload).to_a
+      assert_equal false, invalid_payload.fetch("ok")
+      assert_includes invalid_payload.fetch("message"), "depends_on element 2 is invalid"
+      assert_empty invalid_err.lines.grep_v(/\Ahive: context=local /)
       assert_empty Dir[File.join(
         project_root, ".hive-state", "stages", "1-inbox", "invalid-terminal-list-*"
       )]

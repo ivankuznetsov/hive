@@ -115,10 +115,11 @@ module Hive
         @structured = structured
         @principal = principal
         @principal_source = principal_source
-        # Machine-readable creation was added for idempotent automation.
-        # Preserve the legacy plain-text contract for a bare `hive new --json`
-        # whose caller did not opt into that side-effect boundary.
-        @json = json && !idempotency_key.nil?
+        # `--json` always means exactly one hive-new.v1 document on stdout,
+        # keyed or not. An unkeyed `--json` that printed the human capture
+        # lines once made an agent read a successful create as a failure and
+        # retry it into a duplicate task.
+        @json = json
       end
 
       class << self
@@ -142,6 +143,9 @@ module Hive
       # screen.
       def call
         call_with_envelope do
+          # Checked inside the envelope so `--json` reports it as hive-new.v1.
+          raise Hive::Error, "missing task text" if @text.strip.empty?
+
           if @idempotency_key_raw.nil?
             call!
           else
@@ -907,3 +911,10 @@ module Hive
     end
   end
 end
+
+# The pre-dispatch JSON usage contract for this command boundary: Thor
+# rejections that never reach the handler still ride hive-new.v1 when
+# `--json` was requested (see Hive::CliUsageContracts).
+require "hive/cli_usage_contracts"
+
+Hive::CliUsageContracts.declare("new", { schema: "hive-new", error_kind: "usage" })

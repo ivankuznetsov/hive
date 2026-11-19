@@ -3,9 +3,31 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-18
-tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
+updated: 2026-11-19
+tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## CLI JSON single-document contracts: residual scope (2026-11-19)
+
+`hive new --json` and closure `hive archive --json` now print one document on
+every path the command owns (see [[commands/new]] and
+[[commands/stage_action]]). These limits remain:
+
+- **Launcher failures before dispatch use other schemas.** A runtime
+  activation failure prints `hive-runtime-maintenance`, and `new` routed to a
+  remote context reports `hive-remote`, not `hive-new`. Agents must still
+  dispatch on `schema`.
+- **A closure failure does not say whether anything was written.** The
+  `hive-task-closure-result` error arm has no `applied` field. Nearly every
+  failure happens before the receipt is written. If the transition fails after
+  `closure.json` is persisted, the document reports `ok: false` while the
+  receipt exists. A retry of the same command resumes that receipt.
+- **A JSON preview of a blocked closure still exits 0.** `ok: false`,
+  `applied: false`, and a null `next` describe it. Only `--yes` turns a blocked
+  preview into a non-zero exit.
+- **The archive Thor-level usage contract is still `hive-stage-action`.** An
+  invalid `--reason` enum on a closure invocation is rejected before dispatch
+  and rides the stage-action envelope, not `hive-task-closure-result`.
 
 ## Plan review decision batching: residual scope (2026-11-18)
 

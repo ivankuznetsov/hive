@@ -150,6 +150,10 @@ module Hive
       # task-local authorities, not agent-callable command envelopes.
       "hive-task-closure-input" => 1,
       "hive-task-closure" => 1,
+      # Agent-callable outcome of `hive archive TARGET --reason ... --json
+      # --yes` (applied closure) and of every failed closure JSON invocation.
+      # See Hive::TaskClosureResult.
+      "hive-task-closure-result" => 1,
       # Bounded, read-only detail projection shared by authenticated Web HTML
       # and JSON. It is intentionally independent from fleet-wide status v9.
       "hive-task-workspace" => 2,

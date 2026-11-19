@@ -107,6 +107,45 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  # End to end through the CLI: `--json` previews and archives nothing, and
+  # the preview's `next` command (`--yes --json`) archives and says so.
+  def test_cli_cancel_json_preview_archives_nothing_and_its_next_command_archives
+    require "hive/cli"
+    require "shellwords"
+    with_closure_project(stage: "2-brainstorm", state_file: "brainstorm.md") do |task, project|
+      argv = [
+        "archive", task.slug, "--project", project, "--reason", "cancelled",
+        "--attestation", "Feature no longer wanted", "--json"
+      ]
+      with_replaced_singleton_method(
+        Hive::Commands::Run, :new, ->(*) { flunk "cancellation must not launch a terminal agent" }
+      ) do
+        preview_out, = capture_io { Hive::CLI.start(argv) }
+        preview = single_json_document(preview_out)
+        input_schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-input")))
+        assert_empty JSONSchemer.schema(input_schema).validate(preview).to_a
+        assert_equal true, preview.fetch("ok")
+        assert_equal "preview", preview.fetch("mode")
+        assert_equal false, preview.fetch("applied")
+        assert_equal "2-brainstorm", current_stage(task.slug, project)
+
+        next_argv = Shellwords.split(preview.fetch("next"))
+        assert_equal [ "hive", *argv, "--yes" ].sort, next_argv.sort
+        result_out, = capture_io { Hive::CLI.start(next_argv.drop(1)) }
+        result = single_json_document(result_out)
+        result_schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-result")))
+        assert_empty JSONSchemer.schema(result_schema).validate(result).to_a
+        assert_equal true, result.fetch("applied")
+        assert_equal preview.fetch("preview_digest"), result.fetch("preview_digest")
+        assert_equal "9-done", current_stage(task.slug, project)
+        archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+        persisted = Hive::TaskClosure.read(archived, project: project)
+        assert persisted.valid?
+        assert_equal persisted.receipt.fetch("receipt_digest"), result.fetch("receipt_digest")
+      end
+    end
+  end
+
   def test_cancel_requires_a_reason_and_does_not_accept_delivery_claims
     with_closure_project do |task, project|
       service = service_for(gh: Object.new)
@@ -1713,6 +1752,16 @@ class TaskClosureTest < Minitest::Test
       "successor" => nil,
       "attestation" => nil
     }
+  end
+
+  def single_json_document(out)
+    assert_equal 1, out.lines.length, "stdout must be exactly one JSON document, got: #{out.inspect}"
+    JSON.parse(out)
+  end
+
+  def current_stage(slug, project)
+    task = Hive::TaskResolver.new(slug, project_filter: project).resolve
+    "#{task.stage_index}-#{task.stage_name}"
   end
 
   def service_for(gh: FakeGh.new, attempt_store: EmptyAttempts.new)

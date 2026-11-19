@@ -909,47 +909,242 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_archive_closure_json_emits_read_only_preview
-    task = Struct.new(:project_root).new("/tmp/app")
+  # Resolves TARGET to a registered task and stubs TaskClosure so the CLI's
+  # preview/confirm wiring is exercised without GitHub or a real task.
+  def with_stubbed_closure(preview_payload: { "ok" => true }, valid: true, receipt: closure_receipt_fixture)
+    task = Struct.new(:project_root, :slug).new("/tmp/app", "task")
     resolver = Struct.new(:task) { def resolve = task }.new(task)
+    preview = Struct.new(:preview_digest, :payload, :valid) do
+      def valid? = valid
+      def blockers = payload.fetch("blockers", [])
+      def to_h = payload
+    end.new("a" * 64, preview_payload, valid)
+    confirmations = []
+    previous_stdin = $stdin
+    $stdin = StringIO.new("")
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(
+        Hive::Config, :registered_projects, -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
+      ) do
+        with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+          with_replaced_singleton_method(
+            Hive::TaskClosure, :confirm!, lambda { |**kwargs| confirmations << kwargs; receipt }
+          ) do
+            yield confirmations
+          end
+        end
+      end
+    end
+  ensure
+    $stdin = previous_stdin
+  end
+
+  def closure_receipt_fixture
+    {
+      "schema" => "hive-task-closure", "schema_version" => 1, "status" => "confirmed",
+      "reason" => "cancelled", "authority" => "operator_attestation",
+      "task" => { "project" => "app", "slug" => "task", "id" => 7, "workflow" => "coding" },
+      "preview_digest" => "a" * 64, "receipt_digest" => "b" * 64
+    }
+  end
+
+  def single_json_document(out)
+    assert_equal 1, out.lines.length, "stdout must be exactly one JSON document, got: #{out.inspect}"
+    JSON.parse(out)
+  end
+
+  def assert_valid_closure_result(document)
+    require "json_schemer"
+    schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-result")))
+    assert_empty JSONSchemer.schema(schema).validate(document).to_a,
+                 "hive-task-closure-result.v1 must accept #{document.inspect}"
+  end
+
+  # `--json` without `--yes` is a read-only preview, and the document says so:
+  # `ok` only reports a valid preview, so `applied: false` and `mode` keep an
+  # agent from reading it as an archived task.
+  def test_archive_closure_json_emits_a_preview_that_says_nothing_was_applied
     payload = {
       "schema" => "hive-task-closure-input",
       "schema_version" => 1,
       "ok" => true,
       "preview_digest" => "a" * 64
     }
-    preview = Struct.new(:payload) { def to_h = payload }.new(payload)
 
-    with_replaced_singleton_method(
-      Hive::TaskResolver, :new, ->(*) { resolver }
-    ) do
-      with_replaced_singleton_method(
-        Hive::Config, :registered_projects,
-        -> { [ { "name" => "app", "path" => "/tmp/app" } ] }
-      ) do
-        with_replaced_singleton_method(
-          Hive::TaskClosure, :preview, ->(**) { preview }
-        ) do
-          out, = capture_io do
+    with_stubbed_closure(preview_payload: payload) do |confirmations|
+      out, = capture_io do
+        Hive::CLI.start([
+          "archive", "task", "--reason", "already_delivered",
+          "--evidence", "acme/app#42", "--project", "app", "--json"
+        ])
+      end
+
+      document = single_json_document(out)
+      assert_equal payload, document.slice(*payload.keys)
+      assert_equal "preview", document.fetch("mode")
+      assert_equal false, document.fetch("applied")
+      assert_equal "hive archive task --reason already_delivered --evidence acme/app\\#42 " \
+                   "--project app --yes --json",
+                   document.fetch("next")
+      assert_empty confirmations, "a JSON preview must never confirm the closure"
+    end
+  end
+
+  def test_archive_closure_json_preview_of_a_blocked_task_has_no_next_command
+    payload = { "schema" => "hive-task-closure-input", "schema_version" => 1, "ok" => false }
+
+    with_stubbed_closure(preview_payload: payload, valid: false) do |confirmations|
+      out, = capture_io do
+        Hive::CLI.start([
+          "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted", "--json"
+        ])
+      end
+
+      document = single_json_document(out)
+      assert_equal false, document.fetch("ok")
+      assert_equal false, document.fetch("applied")
+      assert_nil document.fetch("next")
+      assert_empty confirmations
+    end
+  end
+
+  # `--json --yes` once printed the preview with `ok: true` and archived
+  # nothing; it now applies the closure and reports the receipt.
+  def test_archive_closure_json_yes_applies_and_reports_one_result_document
+    receipt = closure_receipt_fixture
+
+    with_stubbed_closure(receipt: receipt) do |confirmations|
+      out, err = capture_io do
+        Hive::CLI.start([
+          "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted",
+          "--yes", "--json"
+        ])
+      end
+
+      document = single_json_document(out)
+      assert_valid_closure_result(document)
+      assert_equal true, document.fetch("ok")
+      assert_equal "apply", document.fetch("mode")
+      assert_equal true, document.fetch("applied")
+      assert_equal "cancelled", document.fetch("reason")
+      assert_equal receipt.fetch("receipt_digest"), document.fetch("receipt_digest")
+      assert_equal receipt, document.fetch("receipt")
+      refute_includes out, "hive: archived"
+      refute_includes err, "[y/N]"
+      assert_equal 1, confirmations.length
+      assert_equal "a" * 64, confirmations.first.fetch(:preview_digest)
+    end
+  end
+
+  def test_archive_closure_json_yes_blocked_preview_reports_one_failure_and_archives_nothing
+    payload = {
+      "schema" => "hive-task-closure-input", "schema_version" => 1, "ok" => false,
+      "errors" => [], "blockers" => [ { "code" => "live_owner", "message" => "task is running" } ]
+    }
+
+    with_stubbed_closure(preview_payload: payload, valid: false) do |confirmations|
+      out, = capture_io do
+        assert_raises(Hive::TaskClosure::VerificationFailed) do
+          Hive::CLI.start([
+            "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted",
+            "--yes", "--json"
+          ])
+        end
+      end
+
+      document = single_json_document(out)
+      assert_valid_closure_result(document)
+      assert_equal false, document.fetch("ok")
+      assert_equal "apply", document.fetch("mode")
+      refute document.key?("applied")
+      assert_equal "verification_failed", document.fetch("error_kind")
+      assert_equal payload, document.fetch("preview")
+      assert_empty confirmations
+    end
+  end
+
+  def test_archive_closure_json_wraps_an_unexpected_failure_as_one_internal_document
+    with_stubbed_closure do
+      with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { raise Errno::EACCES, "closure.json" }) do
+        out, = capture_io do
+          assert_raises(Hive::InternalError) do
             Hive::CLI.start([
-              "archive", "task", "--reason", "already_delivered",
-              "--evidence", "acme/app#42", "--json"
+              "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted", "--yes", "--json"
             ])
           end
-          assert_equal payload, JSON.parse(out)
         end
+
+        document = single_json_document(out)
+        assert_valid_closure_result(document)
+        assert_equal "internal", document.fetch("error_kind")
+        assert_equal Hive::ExitCodes::SOFTWARE, document.fetch("exit_code")
+
+        human_out, = capture_io do
+          assert_raises(Errno::EACCES) do
+            Hive::CLI.start([ "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted", "--yes" ])
+          end
+        end
+        assert_empty human_out, "human mode keeps the original exception and prints no JSON"
       end
     end
   end
 
-  def test_archive_closure_does_not_accept_and_ignore_a_key_on_read_only_preview
-    error = assert_raises(Hive::UsageError) do
+  def test_archive_closure_json_failure_with_a_closed_stdout_still_raises_the_original_error
+    closed = Object.new
+    closed.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+    closed.define_singleton_method(:write) { |*| raise Errno::EPIPE }
+    closed.define_singleton_method(:flush) { nil }
+    previous_stdout = $stdout
+    $stdout = closed
+
+    assert_raises(Hive::UsageError) do
       Hive::CLI.start([
-        "archive", "task", "--reason", "already_delivered",
-        "--evidence", "acme/app#42", "--idempotency-key", "closure-1", "--json"
+        "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted",
+        "--idempotency-key", "closure-1", "--json"
       ])
     end
-    assert_includes error.message, "confirmed archive closure"
+  ensure
+    $stdout = previous_stdout
+  end
+
+  def test_archive_closure_does_not_accept_and_ignore_a_key_on_read_only_preview
+    out, = capture_io do
+      error = assert_raises(Hive::UsageError) do
+        Hive::CLI.start([
+          "archive", "task", "--reason", "already_delivered",
+          "--evidence", "acme/app#42", "--idempotency-key", "closure-1", "--json"
+        ])
+      end
+      assert_includes error.message, "confirmed archive closure"
+    end
+
+    document = single_json_document(out)
+    assert_valid_closure_result(document)
+    assert_equal "usage", document.fetch("error_kind")
+    assert_equal "preview", document.fetch("mode")
+  end
+
+  def test_keyed_archive_closure_json_yes_reports_the_replayed_receipt_as_a_result
+    receipt = closure_receipt_fixture.merge(
+      "command_receipt" => { "id" => "receipt-1", "generation" => 2, "state" => "succeeded" }
+    )
+    operation = Object.new
+    operation.define_singleton_method(:call) { |&_block| receipt }
+
+    with_replaced_singleton_method(Hive::CommandOperation, :new, ->(**) { operation }) do
+      out, = capture_io do
+        Hive::CLI.start([
+          "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted",
+          "--idempotency-key", "closure-1", "--yes", "--json"
+        ])
+      end
+
+      document = single_json_document(out)
+      assert_valid_closure_result(document)
+      assert_equal true, document.fetch("applied")
+      assert_equal "receipt-1", document.dig("receipt", "command_receipt", "id")
+    end
   end
 
   def test_keyed_archive_closure_looks_up_receipts_across_registered_project_roots

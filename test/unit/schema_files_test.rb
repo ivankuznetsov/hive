@@ -3,6 +3,7 @@ require "digest"
 require "json"
 require "json_schemer"
 require "pathname"
+require "hive/task_closure_result"
 require "hive/commands/answer_digest"
 require "hive/commands/approve"
 require "hive/commands/review_grant"
@@ -687,6 +688,7 @@ class SchemaFilesTest < Minitest::Test
         rollback_failed invalid_task_path dependency_wait admission_error error
       ] + receipt_kinds,
       "hive-new" => %w[usage config concurrent_run internal error] + receipt_kinds,
+      "hive-task-closure-result" => Hive::TaskClosureResult::ERROR_KINDS,
       "hive-answer" => %w[
         invalid_binding invalid_answer wrong_stage stale ambiguous_slug invalid_task_path
         config usage internal

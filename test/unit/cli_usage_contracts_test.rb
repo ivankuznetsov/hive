@@ -22,6 +22,7 @@ class CliUsageContractsTest < Minitest::Test
     [
       [ %w[run], { schema: "hive-run", error_kind: "invalid_task_path" } ],
       [ %w[digest], { schema: "hive-digest", error_kind: "usage" } ],
+      [ %w[new], { schema: "hive-new", error_kind: "usage" } ],
       [ %w[approve], { schema: "hive-approve", error_kind: "invalid_task_path" } ],
       [ %w[brainstorm], { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => "brainstorm" } } ],
       [ %w[metrics], { schema: "hive-metrics-rollback-rate", error_kind: "error", omit_error_class: true } ],
@@ -314,6 +315,7 @@ class CliUsageContractsTest < Minitest::Test
   def test_contracts_are_declared_in_their_own_command_boundary_files
     {
       "run" => "lib/hive/commands/run.rb",
+      "new" => "lib/hive/commands/new.rb",
       "status" => "lib/hive/commands/status.rb",
       "act" => "lib/hive/commands/act.rb",
       "runtime" => "lib/hive/commands/runtime.rb",

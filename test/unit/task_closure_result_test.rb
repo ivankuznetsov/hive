@@ -16,6 +16,7 @@ class TaskClosureResultTest < Minitest::Test
       Hive::TaskClosure::VerificationFailed.new("blocked") => "verification_failed",
       Hive::TaskClosure::StalePreview.new("changed") => "stale_preview",
       Hive::TaskClosure::InvalidReceipt.new("quarantined") => "invalid_receipt",
+      Hive::TaskClosure::Error.new("closure") => "error",
       Hive::ConfigError.new("config") => "config",
       Hive::ConcurrentRunError.new("busy") => "concurrent_run",
       Hive::InternalError.new("boom") => "internal",

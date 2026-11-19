@@ -1090,6 +1090,24 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_archive_closure_json_failure_with_a_closed_stdout_still_raises_the_original_error
+    closed = Object.new
+    closed.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+    closed.define_singleton_method(:write) { |*| raise Errno::EPIPE }
+    closed.define_singleton_method(:flush) { nil }
+    previous_stdout = $stdout
+    $stdout = closed
+
+    assert_raises(Hive::UsageError) do
+      Hive::CLI.start([
+        "archive", "task", "--reason", "cancelled", "--attestation", "Not wanted",
+        "--idempotency-key", "closure-1", "--json"
+      ])
+    end
+  ensure
+    $stdout = previous_stdout
+  end
+
   def test_archive_closure_does_not_accept_and_ignore_a_key_on_read_only_preview
     out, = capture_io do
       error = assert_raises(Hive::UsageError) do

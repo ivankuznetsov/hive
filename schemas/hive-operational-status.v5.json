@@ -216,6 +216,15 @@
     "runtime": { "$ref": "#/$defs/RuntimeIdentity" },
     "generated_at": { "type": "string", "format": "date-time" },
     "completeness": { "$ref": "#/$defs/Completeness" },
+    "scope": {
+      "description": "Present only when --project narrowed the view to one registered project; absent means every registered project.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1 }
+      }
+    },
     "source": {
       "type": "object",
       "additionalProperties": false,

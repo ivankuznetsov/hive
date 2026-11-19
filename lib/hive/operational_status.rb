@@ -40,13 +40,19 @@ module Hive
     CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
     PATROL_FIX_WORKFLOW = Hive::PatrolFix::WORKFLOW_ID.to_s.freeze
 
+    # project_scope narrows the projection to one project of the supplied
+    # graph. The graph itself stays complete, so dependency text resolved
+    # against other projects (blocked by other:slug) is unchanged, and every
+    # count, issue, and completeness value is recomputed for the scope alone.
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil,
                    status_payload_tick_sequence: nil,
                    runtime_identity: Hive::RuntimeIdentity.new.to_h,
                    recovery_coordinator: nil,
+                   project_scope: nil,
                    now: Time.now.utc)
       @status_payload = status_payload
       @project_context = project_context
+      @project_scope = project_scope
       @scheduler_snapshot = scheduler_snapshot
       @status_payload_tick_sequence = status_payload_tick_sequence
       @runtime_identity = runtime_identity
@@ -56,7 +62,7 @@ module Hive
 
     def to_h
       validate_source!
-      projects = @status_payload.fetch("projects")
+      projects = scoped_projects
       archived = archive_rows(projects)
       hidden_archived_task_count = hidden_archived_task_count(projects)
       active = active_rows(projects)
@@ -86,6 +92,7 @@ module Hive
         "runtime" => @runtime_identity,
         "generated_at" => @now.iso8601,
         "completeness" => completeness,
+        **scope_payload,
         "source" => {
           "task_graph" => {
             "schema" => @status_payload.fetch("schema"),
@@ -126,7 +133,7 @@ module Hive
     # task on every poll.
     def recovery_rows
       validate_source!
-      projects = @status_payload.fetch("projects")
+      projects = scoped_projects
       @scheduler_join_issues = []
       @scheduler_join_issue_keys = {}
       scheduler = scheduler_payload(projects)
@@ -163,6 +170,22 @@ module Hive
 
       raise ArgumentError,
             "operational status requires a successful hive-status v#{current_version} payload"
+    end
+
+    # Present only for a scoped view; its absence means every registered project.
+    def scope_payload
+      @project_scope ? { "scope" => { "project" => @project_scope } } : {}
+    end
+
+    def scoped_projects
+      projects = @status_payload.fetch("projects")
+      return projects unless @project_scope
+
+      scoped = projects.select { |project| project["name"] == @project_scope }
+      return scoped unless scoped.empty?
+
+      raise ArgumentError,
+            "operational status scope #{@project_scope.inspect} is absent from the task graph"
     end
 
     def archive_rows(projects)
@@ -259,7 +282,8 @@ module Hive
       end
       if enabled.empty?
         return {
-          "status" => "not_applicable", "reason" => "no project is daemon-enabled",
+          "status" => "not_applicable",
+          "reason" => @project_scope ? "project #{@project_scope} is not daemon-enabled" : "no project is daemon-enabled",
           "observed_at" => nil, "valid_until" => nil, "tick_sequence" => nil,
           "capacity" => nil, "queue" => nil, "provider_holds" => [], "issues" => []
         }

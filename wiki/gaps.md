@@ -27,6 +27,36 @@ Planner revisions now wait until no gated or manual finding is open (see
   `PlannerRevision` still receives `pending_findings`, but a revision only runs
   once none is open. Only records an older build revised mid-decision populate
   it. The prompt section remains for them.
+updated: 2026-11-19
+tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database]
+---
+
+## Stacked PR base retarget adoption: residual scope (2026-11-19)
+
+[[publication-recovery]] adopts a GitHub retarget of a stacked task PR. Limits:
+
+- **The request must already name the new base.** Open-PR keeps requesting the
+  stacked base until Hive sees the prerequisite as delivered (`9-done` or a
+  journal merge observation) or its remote branch disappears. If GitHub
+  retargets first, the request still
+  names the old base while the PR names the new one. That window fails as
+  `revision_identity_conflict`, not `identity_drift`, and is not adopted. It
+  clears once the prerequisite's merge is observed. Until then each retry fails
+  the same way and can park as `deterministic_failure`. Not reproduced live.
+- **Squash merges wait for a rebase.** A squash-merged prerequisite leaves the
+  recorded `base_oid` off the new base, so the creation-base check refuses
+  adoption until `Rebase.reconcile_stacked_base!` moves it. No live squash-merge
+  case has been run through this path.
+- **Chains are inferred from one hop.** Evidence is the old base's own PR (merged
+  into the new base, or merged elsewhere and its branch deleted). Hive does not
+  walk a longer stack or verify the GitHub retarget event itself. It only sees
+  the PR's current base.
+- **Only an open PR is adopted.** A retargeted PR that was merged or closed
+  before open-pr reran still drifts. That path was not part of the todero case.
+- **No downgrade.** A record with `base_retargets` is `state_corrupt` to an older
+  controller, as earlier optional fields were.
+- **Live recovery of todero #100 is unverified** until a build with this change
+  is deployed and the parked open-pr retries.
 
 ## Agent git rerere pins: residual scope (2026-11-16)
 

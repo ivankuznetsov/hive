@@ -315,6 +315,13 @@ module Hive
         push_attempted_at push_observation create_attempts create_attempted_at
         pr updated_at
       ].freeze
+      OPTIONAL_STATE_FIELDS = %w[published_head_oid pending_rewrite superseded_pr base_retargets].freeze
+      BASE_RETARGET_FIELDS = %w[
+        from_base_branch from_creation_base_oid to_base_branch to_creation_base_oid
+        base_pr_number base_pr_url evidence observed_at
+      ].freeze
+      BASE_RETARGET_EVIDENCE = %w[merged_into_new_base merged_and_deleted].freeze
+      MAX_BASE_RETARGETS = 16
 
       def initialize(state_path:, git_gateway:, github_gateway:, clock: -> { Time.now.utc })
         @state_path = File.expand_path(state_path)
@@ -413,6 +420,7 @@ module Hive
           if state.fetch("phase") == "prepared" && !existing_pr_url.to_s.empty?
             state = adopt_recorded_pr(request, existing_pr_url, revalidate)
           end
+          state = adopt_base_retarget(state, request, revalidate)
           return reconcile_revision(request, state, revalidate) if
             observed_publication_revision?(state, request)
 
@@ -436,6 +444,7 @@ module Hive
           blocked!("stale_authority", "inspected PR HEAD changed") unless record.fetch("head_oid") == inspected_head
           state = read_state
           if state && state["pr"]
+            state = adopt_base_retarget(state, request, revalidate)
             unless observed_publication_revision?(state, request) && revision_owned?(record, state, request)
               blocked!("revision_identity_conflict", "inspected PR does not match the task publication")
             end
@@ -642,6 +651,96 @@ module Hive
         %w[host repository base_branch creation_base_oid branch draft].all? do |key|
           state[key] == expected[key]
         end
+      end
+
+      # todero #100: published stacked on its prerequisite's branch, the PR
+      # was retargeted to main by GitHub when the prerequisite PR merged. The
+      # re-executed task then requested base main, and the recorded stacked
+      # base turned every revision into identity_drift with no recovery path.
+      # Adopt the new base only when the recorded PR already carries it on
+      # GitHub and the old base can no longer host a stack. Hive never
+      # retargets a PR here; every other base change still drifts.
+      #
+      # The hosted marker (`id=… base=…`) and the publication_id, body and
+      # marker digests stay as creation provenance: Hive does not rewrite the
+      # PR body, and revision ownership reads number/URL/branches, never the
+      # marker. The trail keeps the previous base for audit.
+      def adopt_base_retarget(state, request, revalidate)
+        return state unless base_retarget_candidate?(state, request)
+
+        record = retargeted_pull_request(state, request)
+        retired = record && retired_base_record(state, request)
+        return state unless retired && retarget_base_consistent?(request)
+
+        revalidate!(revalidate, :retarget)
+        record_base_retarget(state, request, retired)
+      end
+
+      def base_retarget_candidate?(state, request)
+        return false unless state.fetch("phase") == "pr_observed" && state.fetch("pr")
+
+        expected = identity(request)
+        state["base_branch"] != expected["base_branch"] &&
+          %w[host repository branch draft].all? { |key| state[key] == expected[key] }
+      end
+
+      # The recorded PR, matched exactly as a revision matches it (number,
+      # URL, branches, and base == the requested base), is the only live PR
+      # on the branch and is still open.
+      def retargeted_pull_request(state, request)
+        records = complete_inventory(request)
+        candidates = branch_candidates(records, request) { |record| revision_owned?(record, state, request) }
+        exact = candidates.select { |record| revision_owned?(record, state, request) }
+        return unless candidates.one? && exact.one? && exact.first.fetch("state") == "OPEN"
+
+        exact.first
+      end
+
+      # A same-repository PR from the old base merged into the new base (what
+      # triggers GitHub's automatic retarget), or merged elsewhere and its
+      # branch is gone. An open PR from the old base keeps it a live stacking
+      # target. Returns the merged base PR with its evidence kind, or nil.
+      def retired_base_record(state, request)
+        old_base = state.fetch("base_branch")
+        records = complete_inventory(request, branch: old_base).select do |record|
+          record.fetch("head_branch") == old_base &&
+            record.fetch("head_repository")&.casecmp?(request.repository) &&
+            record.fetch("base_repository").casecmp?(request.repository)
+        end
+        return if records.any? { |record| record.fetch("state") == "OPEN" }
+
+        merged = records.select { |record| record.fetch("state") == "MERGED" }
+        into_new_base = merged.find { |record| record.fetch("base_branch") == request.base_branch }
+        return [ into_new_base, "merged_into_new_base" ] if into_new_base
+        return if merged.empty? || observe(request, branch: old_base).fetch("oid")
+
+        [ merged.first, "merged_and_deleted" ]
+      end
+
+      # The caller's change base is the merge base of the requested base
+      # branch and the head, so a creation base below it lies on the new
+      # base's history as well as under the head being published.
+      def retarget_base_consistent?(request)
+        revision_ancestor?(request, request.creation_base_oid, request.scan_base_oid) &&
+          revision_ancestor?(request, request.scan_base_oid, request.head_oid)
+      end
+
+      def record_base_retarget(state, request, retired)
+        record, evidence = retired
+        rebased = { "base_branch" => request.base_branch, "creation_base_oid" => request.creation_base_oid }
+        entry = {
+          "from_base_branch" => state.fetch("base_branch"),
+          "from_creation_base_oid" => state.fetch("creation_base_oid"),
+          "to_base_branch" => request.base_branch,
+          "to_creation_base_oid" => request.creation_base_oid,
+          "base_pr_number" => record.fetch("number"), "base_pr_url" => record.fetch("url"),
+          "evidence" => evidence, "observed_at" => timestamp
+        }
+        trail = (Array(state["base_retargets"]) + [ entry ]).last(MAX_BASE_RETARGETS)
+        write_state(state.merge(rebased).merge(
+          "pr" => state.fetch("pr").merge(rebased),
+          "base_retargets" => trail, "updated_at" => timestamp
+        ))
       end
 
       # PRs on the task branch that can compete for its identity. A closed,
@@ -890,10 +989,10 @@ module Hive
         )
       end
 
-      def complete_inventory(request)
+      def complete_inventory(request, branch: request.branch)
         records = @github.list_pull_requests(
           repository: request.repository, host: request.host,
-          branch: request.branch, state: "all"
+          branch: branch, state: "all"
         )
         unless records.is_a?(Array)
           blocked!("inventory_incomplete", "pull-request inventory is incomplete")
@@ -981,9 +1080,9 @@ module Hive
         observed
       end
 
-      def observe(request)
+      def observe(request, branch: request.branch)
         value = @git.observe(
-          worktree_path: request.worktree_path, branch: request.branch
+          worktree_path: request.worktree_path, branch: branch
         )
         unless value.is_a?(Hash) && value.keys.sort == %w[oid remote_fingerprint] &&
                (value["oid"].nil? || value["oid"].to_s.match?(OID)) &&
@@ -1064,7 +1163,7 @@ module Hive
 
       def validate_state(state)
         unless state.is_a?(Hash) &&
-               (state.keys - %w[published_head_oid pending_rewrite superseded_pr]).sort == STATE_FIELDS.sort &&
+               (state.keys - OPTIONAL_STATE_FIELDS).sort == STATE_FIELDS.sort &&
                state["schema"] == SCHEMA && state["schema_version"] == SCHEMA_VERSION &&
                PHASES.include?(state["phase"]) && state["publication_id"].to_s.match?(PUBLICATION_ID) &&
                state["creation_base_oid"].to_s.match?(OID) &&
@@ -1087,6 +1186,9 @@ module Hive
                  rewrite.values.all? { |oid| oid.is_a?(String) && oid.match?(OID) } && state["pr"]
             blocked!("state_corrupt", "publication rewrite is invalid")
           end
+        end
+        if state.key?("base_retargets") && !valid_base_retargets?(state)
+          blocked!("state_corrupt", "publication base retarget trail is invalid")
         end
         %w[host repository base_branch branch].each do |key|
           blocked!("state_corrupt", "publication state contract is invalid") unless
@@ -1114,6 +1216,30 @@ module Hive
                               superseded["published_head_oid"].to_s.match?(OID)
         end
         expected.nil? || (!superseded.nil? && expected == superseded["published_head_oid"])
+      end
+
+      # The newest adopted retarget must describe the base the record holds.
+      def valid_base_retargets?(state)
+        trail = state["base_retargets"]
+        return false unless state["pr"] && trail.is_a?(Array) &&
+                            trail.length.between?(1, MAX_BASE_RETARGETS) &&
+                            trail.all? { |entry| valid_base_retarget?(entry) }
+
+        trail.last["to_base_branch"] == state["base_branch"] &&
+          trail.last["to_creation_base_oid"] == state["creation_base_oid"]
+      end
+
+      def valid_base_retarget?(entry)
+        return false unless entry.is_a?(Hash) && entry.keys.sort == BASE_RETARGET_FIELDS.sort
+
+        Hive::GitRef.validate_branch_name(entry["from_base_branch"]) == entry["from_base_branch"] &&
+          Hive::GitRef.validate_branch_name(entry["to_base_branch"]) == entry["to_base_branch"] &&
+          entry["from_base_branch"] != entry["to_base_branch"] &&
+          entry.values_at("from_creation_base_oid", "to_creation_base_oid").all? { |oid| oid.to_s.match?(OID) } &&
+          entry["base_pr_number"].is_a?(Integer) && entry["base_pr_number"].positive? &&
+          entry["base_pr_url"].is_a?(String) && entry["base_pr_url"].start_with?("https://") &&
+          BASE_RETARGET_EVIDENCE.include?(entry["evidence"]) &&
+          entry["observed_at"].is_a?(String) && !Time.iso8601(entry["observed_at"]).nil?
       end
 
       def validate_state_relations!(state)

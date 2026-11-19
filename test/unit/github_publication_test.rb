@@ -8,13 +8,14 @@ class GithubPublicationTest < Minitest::Test
   include HiveTestHelper
 
   class FakeGithub
-    attr_reader :creates
+    attr_reader :creates, :listed_branches
     attr_accessor :records, :crash_after_create, :fail_before_create,
                   :definite_fail_before_create, :invalid_inventory, :list_error
 
     def initialize(records: [])
       @records = records
       @creates = 0
+      @listed_branches = []
       @crash_after_create = false
       @fail_before_create = false
       @definite_fail_before_create = false
@@ -26,7 +27,10 @@ class GithubPublicationTest < Minitest::Test
       true
     end
 
-    def list_pull_requests(**)
+    # Records the requested head branch but returns every record, so the
+    # controller's own head-branch filtering stays under test.
+    def list_pull_requests(branch: nil, **)
+      @listed_branches << branch
       raise Hive::GhError, "remote list failed with sensitive-looking details" if list_error
       return {} if invalid_inventory
 
@@ -668,6 +672,209 @@ class GithubPublicationTest < Minitest::Test
       end
       assert_equal "pr_identity_conflict", error.code
       assert_equal 0, github.creates
+    end
+  end
+
+  # todero #100: the task PR was stacked on its prerequisite's branch. When
+  # the prerequisite PR merged, GitHub retargeted #100 to main and the
+  # re-executed task requested main, so every open-pr blocked identity_drift.
+  def test_github_retarget_after_the_stacked_base_merged_is_adopted_as_a_revision
+    with_stacked_publication do |repo, remote, original, controller, github, git|
+      revised = stacked_retarget(repo, original, github)
+      phases = []
+
+      result = controller.publish!(revised, revalidate: ->(phase) { phases << phase; true })
+
+      assert_equal revised.head_oid, result.fetch("head_oid")
+      assert_equal "main", result.fetch("base_branch")
+      assert_equal original.publication_id, result.fetch("publication_id")
+      assert_equal revised.head_oid, remote_oid(remote, revised.branch)
+      assert_equal 2, git.pushes
+      assert_equal 1, github.creates
+      assert_includes phases, :retarget
+      assert_includes github.listed_branches, STACKED_BASE
+      state = JSON.parse(File.read(state_path(repo)))
+      assert_equal %w[main main], [ state.fetch("base_branch"), state.dig("pr", "base_branch") ]
+      assert_equal original.creation_base_oid, state.fetch("creation_base_oid")
+      assert_equal original.marker_digest, state.fetch("marker_digest")
+      assert_equal revised.head_oid, state.fetch("published_head_oid")
+      assert_equal [ {
+        "from_base_branch" => STACKED_BASE, "from_creation_base_oid" => original.creation_base_oid,
+        "to_base_branch" => "main", "to_creation_base_oid" => original.creation_base_oid,
+        "base_pr_number" => 7, "base_pr_url" => "https://github.com/acme/demo/pull/7",
+        "evidence" => "merged_into_new_base"
+      } ], state.fetch("base_retargets").map { |entry| entry.except("observed_at") }
+
+      github.records.first["head_oid"] = revised.head_oid
+      listed = github.listed_branches.length
+      replay = controller.publish!(revised, revalidate: ->(*) { true })
+      assert_equal revised.head_oid, replay.fetch("head_oid")
+      refute_includes github.listed_branches.drop(listed), STACKED_BASE
+      assert_equal 1, JSON.parse(File.read(state_path(repo))).fetch("base_retargets").length
+      assert_equal 2, git.pushes
+    end
+  end
+
+  # Hive's rebase moves a stale stacked base_oid to the merge base with the
+  # new target, so the retargeted request may also carry a new creation base.
+  def test_retarget_adopts_a_creation_base_reconciled_onto_the_new_base
+    with_stacked_publication do |repo, remote, original, controller, github, _git|
+      stacked_retarget(repo, original, github)
+      task_head = capture("git", "-C", repo, "rev-parse", "HEAD").strip
+      capture("git", "-C", repo, "checkout", "-q", "-b", "upstream", original.creation_base_oid)
+      later_main = commit(repo, "upstream.txt", "upstream\n", "main moves on")
+      capture("git", "-C", repo, "push", "-q", "origin", "#{later_main}:refs/heads/main")
+      capture("git", "-C", repo, "checkout", "-q", "main")
+      capture("git", "-C", repo, "merge", "-q", "--no-edit", later_main)
+      merged_head = capture("git", "-C", repo, "rev-parse", "HEAD").strip
+      refute_equal task_head, merged_head
+      revised = stacked_request(repo, base_branch: "main", creation_base: later_main, head: merged_head)
+
+      result = controller.publish!(revised, revalidate: ->(*) { true })
+
+      assert_equal merged_head, result.fetch("head_oid")
+      assert_equal later_main, result.fetch("creation_base_oid")
+      assert_equal merged_head, remote_oid(remote, revised.branch)
+      state = JSON.parse(File.read(state_path(repo)))
+      assert_equal [ later_main, later_main ], [ state.fetch("creation_base_oid"), state.dig("pr", "creation_base_oid") ]
+      assert_equal [ original.creation_base_oid, later_main ],
+                   state.fetch("base_retargets").last.values_at("from_creation_base_oid", "to_creation_base_oid")
+    end
+  end
+
+  def test_base_change_without_a_github_retarget_still_drifts
+    with_stacked_publication do |repo, remote, original, controller, github, git|
+      revised = stacked_retarget(repo, original, github, retargeted: false)
+      before = File.binread(state_path(repo))
+
+      assert_revision_error("identity_drift", controller, revised)
+
+      assert_equal before, File.binread(state_path(repo))
+      assert_equal original.head_oid, remote_oid(remote, revised.branch)
+      assert_equal 1, git.pushes
+    end
+  end
+
+  def test_retarget_is_refused_while_the_old_base_can_still_host_a_stack
+    [
+      { foundation: nil },
+      { foundation: { "state" => "OPEN" } },
+      { foundation: { "state" => "CLOSED" }, delete_base: true },
+      { foundation: { "state" => "MERGED", "base_branch" => "release" } },
+      { foundation: { "state" => "MERGED", "head_repository" => "fork/demo" }, delete_base: true },
+      { reopened: true }
+    ].each do |scenario|
+      with_stacked_publication do |repo, remote, original, controller, github, git|
+        revised = stacked_retarget(repo, original, github, **scenario.except(:reopened))
+        if scenario[:reopened]
+          github.records << github.owned_pr(original, number: 8, overrides: {
+            "head_branch" => STACKED_BASE, "base_branch" => "main", "body" => "follow-up\n"
+          })
+        end
+        before = File.binread(state_path(repo))
+
+        assert_revision_error("identity_drift", controller, revised)
+
+        assert_includes github.listed_branches, STACKED_BASE, scenario.inspect
+        assert_equal before, File.binread(state_path(repo)), scenario.inspect
+        assert_equal original.head_oid, remote_oid(remote, revised.branch)
+        assert_equal 1, git.pushes
+      end
+    end
+  end
+
+  def test_retarget_accepts_a_base_merged_elsewhere_once_its_branch_is_deleted
+    with_stacked_publication do |repo, remote, original, controller, github, _git|
+      revised = stacked_retarget(
+        repo, original, github,
+        foundation: { "state" => "MERGED", "base_branch" => "release" }, delete_base: true
+      )
+      capture("git", "-C", repo, "push", "-q", "origin", "#{revised.head_oid}:refs/heads/#{revised.branch}")
+      github.records.first["head_oid"] = revised.head_oid
+
+      # Operator recovery reaches the same adoption as ordinary publication.
+      result = controller.reconcile_inspected!(
+        revised, pr_url: github.records.first.fetch("url"),
+                 inspected_head: revised.head_oid, revalidate: ->(*) { true }
+      )
+
+      assert_equal "main", result.fetch("base_branch")
+      assert_equal revised.head_oid, result.fetch("head_oid")
+      assert_equal "merged_and_deleted",
+                   JSON.parse(File.read(state_path(repo))).fetch("base_retargets").last.fetch("evidence")
+      assert_nil remote_oid(remote, STACKED_BASE)
+    end
+  end
+
+  def test_retarget_requires_the_recorded_pr_to_be_the_only_open_pr_on_the_branch
+    [
+      lambda do |github, original|
+        github.records.first["state"] = "CLOSED"
+        github.records << github.owned_pr(original, number: 77, overrides: { "base_branch" => "main" })
+      end,
+      lambda do |github, original|
+        github.records << github.owned_pr(original, number: 77, overrides: { "base_branch" => "main" })
+      end,
+      ->(github, _original) { github.records.first["state"] = "CLOSED" }
+    ].each do |competing|
+      with_stacked_publication do |repo, remote, original, controller, github, git|
+        revised = stacked_retarget(repo, original, github)
+        competing.call(github, original)
+        before = File.binread(state_path(repo))
+
+        assert_revision_error("identity_drift", controller, revised)
+
+        assert_equal before, File.binread(state_path(repo))
+        assert_equal original.head_oid, remote_oid(remote, revised.branch)
+        assert_equal 1, git.pushes
+      end
+    end
+  end
+
+  # A squash-merged base leaves the recorded creation base off main until
+  # Hive's rebase reconciles it, so the request cannot be adopted yet.
+  def test_retarget_is_refused_when_the_creation_base_is_not_on_the_new_base
+    with_stacked_publication do |repo, remote, original, controller, github, git|
+      revised = stacked_retarget(repo, original, github)
+      squash_parent = capture("git", "-C", repo, "rev-parse", "#{original.creation_base_oid}~1").strip
+      squash = capture("git", "-C", repo, "commit-tree", "#{original.creation_base_oid}^{tree}",
+                       "-p", squash_parent, "-m", "Squashed foundation").strip
+      capture("git", "-C", repo, "push", "-q", "--force", "origin", "#{squash}:refs/heads/main")
+      scan_base = capture("git", "-C", repo, "merge-base", squash, revised.head_oid).strip
+      revised = stacked_request(
+        repo, base_branch: "main", creation_base: original.creation_base_oid,
+              head: revised.head_oid, scan_base: scan_base
+      )
+
+      assert_revision_error("identity_drift", controller, revised)
+
+      assert_equal STACKED_BASE, JSON.parse(File.read(state_path(repo))).fetch("base_branch")
+      assert_equal original.head_oid, remote_oid(remote, revised.branch)
+      assert_equal 1, git.pushes
+    end
+  end
+
+  def test_base_retarget_trail_must_describe_the_recorded_base
+    with_stacked_publication do |repo, _remote, original, controller, github, _git|
+      controller.publish!(stacked_retarget(repo, original, github), revalidate: ->(*) { true })
+      state = JSON.parse(File.read(state_path(repo)))
+      entry = state.fetch("base_retargets").first
+      assert_equal state, controller.send(:validate_state, state)
+
+      [
+        state.merge("base_retargets" => []),
+        state.merge("base_retargets" => entry),
+        state.merge("base_retargets" => [ entry ] * (Hive::GithubPublication::Controller::MAX_BASE_RETARGETS + 1)),
+        state.merge("base_retargets" => [ entry.merge("to_base_branch" => "release") ]),
+        state.merge("base_retargets" => [ entry.merge("to_creation_base_oid" => "f" * 40) ]),
+        state.merge("base_retargets" => [ entry.merge("evidence" => "operator_said_so") ]),
+        state.merge("base_retargets" => [ entry.merge("from_base_branch" => "bad..branch") ]),
+        state.merge("base_retargets" => [ entry.merge("observed_at" => nil) ]),
+        state.merge("base_retargets" => [ entry.merge("extra" => true) ])
+      ].each do |invalid|
+        error = assert_raises(Hive::GithubPublication::Blocked) { controller.send(:validate_state, invalid) }
+        assert_equal "state_corrupt", error.code
+      end
     end
   end
 
@@ -1545,6 +1752,52 @@ class GithubPublicationTest < Minitest::Test
       revised = revised_request(repo, original, revised_head)
       yield repo, remote, original, revised, controller, github
     end
+  end
+
+  STACKED_BASE = "typed-lists-foundation".freeze
+
+  # A task PR published on its prerequisite's branch: the with_local_remote
+  # head is the prerequisite tip, and the task adds one commit on top.
+  def with_stacked_publication
+    with_local_remote do |repo, remote, foundation|
+      capture("git", "-C", repo, "push", "-q", "origin", "#{foundation}:refs/heads/#{STACKED_BASE}")
+      task_head = commit(repo, "task.txt", "task\n", "task")
+      original = stacked_request(repo, base_branch: STACKED_BASE, creation_base: foundation, head: task_head)
+      github = FakeGithub.new
+      git = CountingGit.new(remote)
+      controller = controller_for(repo, remote, github, git_gateway: git)
+      controller.publish!(original, revalidate: ->(*) { true })
+      yield repo, remote, original, controller, github, git
+    end
+  end
+
+  # The prerequisite merges into main (fast-forward), foundation PR #7
+  # records it, GitHub retargets the task PR, and the task gains a commit.
+  # Each keyword flips exactly one retarget condition.
+  def stacked_retarget(repo, original, github, foundation: { "state" => "MERGED" },
+                       retargeted: true, delete_base: false)
+    capture("git", "-C", repo, "push", "-q", "origin", "#{original.creation_base_oid}:refs/heads/main")
+    capture("git", "-C", repo, "push", "-q", "origin", "--delete", STACKED_BASE) if delete_base
+    if foundation
+      github.records << github.owned_pr(original, number: 7, overrides: {
+        "head_branch" => STACKED_BASE, "head_oid" => original.creation_base_oid,
+        "base_branch" => "main", "title" => "Foundation", "body" => "foundation\n"
+      }.merge(foundation))
+    end
+    github.records.first["base_branch"] = "main" if retargeted
+    head = commit(repo, "follow-up.txt", "follow-up\n", "task follow-up")
+    stacked_request(repo, base_branch: "main", creation_base: original.creation_base_oid, head: head)
+  end
+
+  def stacked_request(repo, base_branch:, creation_base:, head:, scan_base: creation_base)
+    diff = capture("git", "-C", repo, "diff", "#{scan_base}..#{head}")
+    Hive::GithubPublication::Request.new(
+      worktree_path: repo, host: "github.com", repository: "acme/demo",
+      base_branch: base_branch, creation_base_oid: creation_base, scan_base_oid: scan_base,
+      branch: "hive/task/shopping-lists", head_oid: head,
+      diff: diff, diff_digest: Digest::SHA256.hexdigest(diff),
+      title: "Shopping lists", body: "## Summary\n\nStacked task.\n", draft: true
+    )
   end
 
   def assert_revision_error(code, controller, request)

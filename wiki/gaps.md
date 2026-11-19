@@ -41,6 +41,20 @@ tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-da
 - **Coverage is synthetic.** Regression tests replay a recorded resolution in
   temporary repositories. Nobody has re-run the todero PR #57 merge under the
   new environment.
+## Status `--project` is still ignored outside operational and diagnose (2026-11-16)
+
+`hive status --operational --project NAME` now scopes the view and rejects an
+unknown name. Two local surfaces still accept `--project` and silently ignore
+it:
+
+- plain `hive status --project NAME`, the bounded running view;
+- `hive archive --project NAME` listing, which routes through
+  `Status.new(project:, archive: true)`.
+
+Both return every registered project. Neither was changed with the
+operational fix. A scoped operational read also still scans every project when
+the daemon cache is unavailable. That keeps cross-project dependency text
+exact, but it costs the same as a fleet read.
 
 ## Patrol Fix secret rework limits (2026-11-14)
 

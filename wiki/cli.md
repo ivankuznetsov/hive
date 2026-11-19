@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hive-e2e, bin/hv, lib/hive/cli.rb, lib/hive/runtime_identity.rb, lib/hive/cli_argv_policy.rb, lib/hive/commands/answer.rb, lib/hive/commands/task.rb, lib/hive/commands/proposal.rb, schemas/hive-answer.v1.json, schemas/hive-task-workspace.v2.json, schemas/hive-proposal-*.v1.json, schemas/hive-version.v1.json
 created: 2026-04-25
-updated: 2026-11-09
+updated: 2026-11-16
 tags: [cli, api, skills, agents, operational, provisioning, brainstorm, plan-review, proposals]
 ---
 
@@ -164,7 +164,7 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive workflow commit ID` | Validate and commit a populated owner-authored workflow under the shared Hive state commit lock | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive proposal SUBCOMMAND ...` | Submit/evaluate through a durable proposal-bound task; list/show/filter live canonical history; append authority-gated decisions, supersession, and rollback; or enter the managed deterministic wiki refresh boundary. JSON uses the versioned proposal list/show/mutation contracts. Tracking only: no subcommand activates or reverts an artifact. | `Hive::Commands::Proposal` → `Hive::Proposals` | [[commands/proposal]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
-| `hive status [--json \| --operational [--json] \| --diagnose SLUG ...]` | Default text/JSON is bounded daemon and verified-live-task status (`hive-running-status.v2` for JSON); `--operational --json` emits `hive-operational-status.v5`; `--diagnose` inspects one red task. Use `hive task TARGET --json` for general single-task detail. | `Hive::Commands::Status` | [[commands/status]] |
+| `hive status [--json \| --operational [--json] [--project NAME] \| --diagnose SLUG ...]` | Default text/JSON is bounded daemon and verified-live-task status (`hive-running-status.v2` for JSON); `--operational --json` emits `hive-operational-status.v5`, and `--project NAME` scopes the operational view to one registered project; `--diagnose` inspects one red task. Use `hive task TARGET --json` for general single-task detail. | `Hive::Commands::Status` | [[commands/status]] |
 | `hive review-grant TARGET --project PROJECT --passes N --reason TEXT --evidence-token TOKEN [--json]` | Record an operator decision granting 1–3 extra fixes to one evidenced final-fix-unverified review; identical replay adds no allowance. JSON is `hive-review-grant.v1`. | `Hive::Commands::ReviewGrant` | [[commands/review-grant]] |
 | `hive task TARGET [--project NAME] [--json]` | Resolve one registered task and emit the same bounded semantic `hive-task-workspace` v2 projection used by normal Web HTML: canonical headline/action, workflow result, primary artifact, applicable evidence, exact usage/API-equivalent coverage, and correlated diagnostic-log reference. Read-only; no provider-health or billing-invoice claim. | `Hive::Commands::Task` | [[commands/task]] |
 | `hive answer TARGET [--project NAME] [--binding TOKEN] [--json]` | Without a binding, inventory every coding-brainstorm slot in physical document order without a write or task lock. With a fresh opaque binding, read one final literal answer from stdin and atomically write only that exact slot under identity, stage, generation, and fingerprint checks. Never recommends or dispatches. | `Hive::Commands::Answer` | [[commands/answer]] |

@@ -323,6 +323,77 @@ class OperationalStatusTest < Minitest::Test
     assert_equal diagnostic, projected.dig("evidence", "diagnostic")
   end
 
+  def test_project_scope_recomputes_one_project_and_keeps_cross_project_dependency_text
+    unmet = [ { "reference" => "other:base", "blocked_by" => "other:base",
+                "dependency_stage" => "4-execute", "required_gate" => "9-done" } ]
+    payload = two_project_status_payload(
+      demo: [
+        task(action: "ready_to_run", slug: "fan-in", blocked: true,
+             depends_on: %w[other:base], unmet_dependencies: unmet),
+        task(action: "needs_input", slug: "question", stage: "2-brainstorm", unanswered_questions: 1),
+        task(action: "archived", slug: "shipped", stage: "9-done", marker: "complete")
+      ],
+      other: [
+        task(action: "agent_running", slug: "base", stage: "4-execute", live_task_lock: true, task_lock_pid: 42),
+        task(action: "error", slug: "broken", marker: "error", attrs: { "reason" => "agent_died" }),
+        task(action: "archived", slug: "old", stage: "9-done", marker: "complete"),
+        task(action: "archived", slug: "older", stage: "9-done", marker: "complete")
+      ]
+    )
+
+    fleet = project(payload)
+    scoped = project(payload, project_scope: "demo")
+
+    refute fleet.key?("scope"), "the fleet view keeps its existing shape"
+    assert_equal({ "project" => "demo" }, scoped.fetch("scope"))
+    assert_equal fleet.fetch("tasks").select { |row| row.dig("identity", "project") == "demo" },
+                 scoped.fetch("tasks")
+    fan_in = scoped.fetch("tasks").find { |row| row.dig("identity", "slug") == "fan-in" }
+    assert_equal "blocked by other:base (4-execute, needs 9-done)", fan_in.fetch("reason")
+    assert_equal unmet, fan_in.dig("dependency", "unmet_dependencies")
+
+    assert_equal [ 4, 3, 7, 2 ], fleet.fetch("summary").values_at(
+      "active", "archived", "hidden_archived_task_count", "projects_total"
+    )
+    assert_equal [ 2, 1, 2, 1, 1 ], scoped.fetch("summary").values_at(
+      "active", "archived", "hidden_archived_task_count", "projects_total", "projects_healthy"
+    )
+    assert_equal 2, scoped.dig("summary", "states").values.sum
+    assert_equal 0, scoped.dig("summary", "states", "running")
+    assert_equal "waiting_on_you", scoped.dig("summary", "overall_state")
+    assert_equal({ "count" => 1, "by_project" => [ { "project" => "demo", "count" => 1 } ], "closures" => [] },
+                 scoped.fetch("archive"))
+    assert_equal 1, scoped.dig("source", "task_graph", "projects_total")
+
+    assert_equal "partial", fleet.fetch("completeness"), "the other project's legacy dirs degrade the fleet"
+    assert_equal "complete", scoped.fetch("completeness")
+    assert_includes fleet.fetch("issues").map { |issue| issue.fetch("project") }, "other"
+    assert_empty scoped.fetch("issues")
+    assert_equal "project demo is not daemon-enabled", scoped.dig("scheduler", "reason")
+
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert_empty schema.validate(scoped).to_a
+    assert_empty schema.validate(fleet).to_a
+    refute schema.valid?(scoped.merge("scope" => { "project" => "" })), "scope.project must name a project"
+  end
+
+  def test_project_scope_narrows_recovery_rows_and_rejects_a_project_absent_from_the_graph
+    payload = two_project_status_payload(
+      demo: [ task(action: "error", slug: "mine", marker: "error", attrs: { "reason" => "agent_died" }) ],
+      other: [ task(action: "error", slug: "theirs", marker: "error", attrs: { "reason" => "agent_died" }) ]
+    )
+    recoveries = lambda do |scope|
+      Hive::OperationalStatus.new(
+        status_payload: payload, project_scope: scope, now: Time.utc(2026, 7, 20, 10, 0, 2)
+      ).recovery_rows.map { |row| row.dig("identity", "project") }
+    end
+
+    assert_equal %w[demo other], recoveries.call(nil).sort
+    assert_equal %w[demo], recoveries.call("demo")
+    error = assert_raises(ArgumentError) { project(payload, project_scope: "missing") }
+    assert_includes error.message, "\"missing\" is absent from the task graph"
+  end
+
   def test_projects_all_unmet_dependencies_and_base_mode_with_complete_reason
     unmet = [
       { "reference" => "first", "blocked_by" => "first",
@@ -2509,13 +2580,33 @@ class OperationalStatusTest < Minitest::Test
     ).send(:classify, { "name" => "demo" }, row)
   end
 
-  def project(payload, project_context: {}, scheduler_snapshot: nil)
+  def project(payload, project_context: {}, scheduler_snapshot: nil, project_scope: nil)
     Hive::OperationalStatus.new(
       status_payload: payload,
       project_context: project_context,
       scheduler_snapshot: scheduler_snapshot,
+      project_scope: project_scope,
       now: Time.utc(2026, 7, 20, 10, 0, 2)
     ).to_h
+  end
+
+  # "other" carries a legacy stage dir so its project-scoped issue and the
+  # fleet's partial completeness are observable from the scoped view.
+  def two_project_status_payload(demo:, other:)
+    payload = status_payload
+    payload["projects"] = [
+      {
+        "name" => "demo", "path" => "/tmp/demo", "hive_state_path" => "/tmp/demo/.hive-state",
+        "tasks" => demo, "legacy_stage_dirs" => [], "legacy_state_guide" => nil,
+        "hidden_archived_task_count" => 2
+      },
+      {
+        "name" => "other", "path" => "/tmp/other", "hive_state_path" => "/tmp/other/.hive-state",
+        "tasks" => other, "legacy_stage_dirs" => [ { "stage_dir" => "3-plan", "task_count" => 1 } ],
+        "legacy_state_guide" => nil, "hidden_archived_task_count" => 5
+      }
+    ]
+    payload
   end
 
   def scheduler_snapshot_for(source_task, decision:, reason:)

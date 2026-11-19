@@ -66,7 +66,19 @@
     "evidence_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "preview_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "errors": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
-    "blockers": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } }
+    "blockers": { "type": "array", "items": { "$ref": "#/$defs/Diagnostic" } },
+    "mode": {
+      "const": "preview",
+      "description": "Present on CLI `hive archive --json` output: this document is a read-only preview and archived nothing."
+    },
+    "applied": {
+      "const": false,
+      "description": "Present on CLI `hive archive --json` output: the closure was not applied. `ok` only reports whether the preview is valid."
+    },
+    "next": {
+      "type": ["string", "null"],
+      "description": "Present on CLI `hive archive --json` output: the command that applies this closure (`--yes --json`), or null while the preview is blocked."
+    }
   },
   "$defs": {
     "RetainedFixDetails": {

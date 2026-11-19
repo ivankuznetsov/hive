@@ -21,6 +21,17 @@ hive finalize SLUG --project PROJECT --json
 hive archive SLUG --project PROJECT --json
 ```
 
+`hive new PROJECT --json "task description"` prints exactly one `hive-new.v1`
+document, on success or failure; read `ok` and `created`. Add
+`--idempotency-key KEY` whenever you might retry, so a retry returns the
+original task instead of creating a duplicate.
+
+An operator closure (`hive archive SLUG --reason ... --json`) is a read-only
+preview: `mode: "preview"`, `applied: false`. It archives nothing, even when
+`ok` is true. Only with explicit user approval run its `next` command
+(`--yes --json`), which archives and returns `hive-task-closure-result` with
+`applied: true`.
+
 Hive can also run project-authored workflows. Inspect them with `hive workflow list --json`; do not assume every task uses the coding stage names.
 
 Reviewed project-local modules use one shared status and lifecycle contract:

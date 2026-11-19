@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:task-closure-result:v1",
+  "title": "hive archive closure result (v1)",
+  "description": "Outcome of `hive archive TARGET --reason ... --json --yes`, and the error document of any closure `--json` invocation. A read-only `--json` preview without `--yes` emits hive-task-closure-input instead.",
+  "oneOf": [
+    { "$ref": "#/$defs/AppliedPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "id", "workflow"],
+      "properties": {
+        "project": { "type": "string" },
+        "slug": { "type": "string" },
+        "id": { "type": ["integer", "null"] },
+        "workflow": { "type": "string" }
+      }
+    },
+    "CommandReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "generation", "state"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "state": {
+          "type": "string",
+          "enum": ["prepared", "executing", "unresolved", "succeeded", "failed", "settled", "aborted"]
+        }
+      }
+    },
+    "AppliedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "mode", "applied", "reason", "task",
+        "preview_digest", "receipt_digest", "receipt"
+      ],
+      "properties": {
+        "schema": { "const": "hive-task-closure-result" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "mode": { "const": "apply" },
+        "applied": {
+          "const": true,
+          "description": "The task was archived under a confirmed closure receipt."
+        },
+        "reason": { "enum": ["already_delivered", "superseded", "cancelled"] },
+        "task": { "$ref": "#/$defs/Task" },
+        "preview_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "receipt_digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "receipt": {
+          "type": "object",
+          "description": "The persisted hive-task-closure receipt (schemas/hive-task-closure.v1.json).",
+          "required": ["schema", "status", "receipt_digest"],
+          "properties": {
+            "schema": { "const": "hive-task-closure" },
+            "status": { "const": "confirmed" }
+          }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "mode", "error_class", "error_kind", "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-task-closure-result" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "mode": {
+          "enum": ["preview", "apply"],
+          "description": "`apply` when --yes was passed. A failure never reports an applied closure; retrying the same command is safe because confirmation resumes an existing valid receipt."
+        },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": [
+            "usage",
+            "wrong_stage",
+            "unauthorized",
+            "verification_failed",
+            "stale_preview",
+            "invalid_receipt",
+            "config",
+            "concurrent_run",
+            "internal",
+            "error",
+            "command_conflict",
+            "command_in_progress",
+            "command_unresolved_pending",
+            "command_pin_horizon_elapsed",
+            "command_capacity_exhausted",
+            "command_nonterminal_limit",
+            "command_concurrency_limit",
+            "command_prune_busy",
+            "command_prune_storage_unavailable",
+            "command_prune_preview_unavailable",
+            "command_orphaned_pin",
+            "command_original_result_unavailable",
+            "command_intake_disabled"
+          ]
+        },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" },
+        "preview": {
+          "type": "object",
+          "description": "The hive-task-closure-input preview that failed verification, when one was computed (schemas/hive-task-closure-input.v1.json).",
+          "required": ["schema", "ok", "errors", "blockers"],
+          "properties": {
+            "schema": { "const": "hive-task-closure-input" }
+          }
+        },
+        "candidates": { "type": "array" },
+        "current_stage": { "type": "string" },
+        "target_stage": { "type": "string" },
+        "holder": { "type": "object" },
+        "lock_path": { "type": "string" },
+        "path": { "type": "string" },
+        "reason": { "type": "string" },
+        "state": { "type": "string" },
+        "scope": { "type": "string" },
+        "command_receipt": { "$ref": "#/$defs/CommandReceipt" }
+      }
+    }
+  }
+}

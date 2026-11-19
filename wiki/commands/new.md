@@ -3,7 +3,7 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-11-07
+updated: 2026-11-19
 tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow, dependencies, base-branch]
 ---
 
@@ -12,7 +12,7 @@ tags: [command, capture, slug, task-id, idempotency, json, commit-lock, workflow
 ## Usage
 
 ```
-hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on TASK]... TEXT...
+hive new PROJECT [--workflow NAME] [--base BRANCH] [--depends-on TASK]... [--idempotency-key KEY] [--json] TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
@@ -56,8 +56,8 @@ booleans. The
 first remaining positional is `PROJECT`; the rest remains literal task text
 behind a `--` sentinel. That makes the canonical workflow-authoring hint work:
 `hive new PROJECT --workflow my-flow "<your idea>"` pins the task instead of
-capturing `--workflow my-flow` in `idea.md`. `--json` is lifted too, but `new`
-still emits the plain text surface below.
+capturing `--workflow my-flow` in `idea.md`. `--json` is lifted too and turns
+stdout into one `hive-new.v1` document (see [JSON output](#json-output)).
 
 Only the closed allow-list is lifted. `hive new PROJECT add --help docs`
 captures `add --help docs` instead of rendering help,
@@ -67,7 +67,7 @@ assignment literally instead of failing the wrapper boolean grammar, and
 as a command option. A `--workflow` substring inside one quoted argv element
 also remains literal task text.
 
-The human stdout surface is still plain text:
+Without `--json`, the human stdout surface is plain text:
 
 ```
 hive: captured <task>/idea.md
@@ -227,19 +227,44 @@ raised after directory ownership, including `EEXIST`, likewise remove only the
 owned candidate before propagating the original error.
 
 The `hive-new.v1` success payload contains `created`, `slug`, `workflow`,
-`current_stage`, `task_folder`, and a structured `next_action`. Callers without
-an idempotency key retain the existing capture behavior. The workflow creator
+`current_stage`, `task_folder`, and a structured `next_action`. An unkeyed
+create gets the same document with `created: true` and no `command_receipt`.
+The workflow creator
 uses this surface only when task creation was explicit in the original request;
 creation-only workflow authoring never invokes `hive new`.
 
 The internal structured adapter also records `task_id` in its original durable
 result. This lets the remote API acknowledge the captured native task without
-reopening an old folder after advancement. Local CLI JSON remains unchanged.
+reopening an old folder after advancement. Local CLI JSON does not carry it.
+
+## JSON output
+
+`hive new ... --json` prints exactly one `hive-new.v1` document on stdout, on
+success and on every failure, with or without `--idempotency-key`. Before
+2026-11-19 an unkeyed `--json` printed the human `hive: captured` / `next:`
+lines instead. An agent could not parse them, assumed the create had failed,
+and retried into a duplicate task. Read `ok` and `created`. Use
+`--idempotency-key` whenever a caller may retry, because only a key makes a
+retry return the original task.
+
+Every failure path is covered:
+
+- Empty task text is checked inside `New#call`, so it is an error document
+  (`message: "missing task text"`, exit 1) rather than a launcher stderr line.
+- Thor rejections before dispatch (for example `hive new --json` with no
+  PROJECT) use the `new` usage contract that `lib/hive/commands/new.rb`
+  declares: `hive-new`, `error_kind: "usage"`, exit 64.
+- Stderr carries the multi-`--depends-on` notice, the receipt fallback notice,
+  and the `hive: context=local ...` banner. A failure inside the command adds
+  no stderr line in JSON mode. A pre-dispatch Thor rejection also prints
+  `hive: <message>` on stderr.
+- Keyed intake that is disabled (`command_intake_disabled`) was already a
+  `hive-new.v1` error document and is unchanged.
+
+The schema is unchanged; only which invocations emit it changed.
 
 ## Serialization fallback
 
-Without an idempotency key, `hive new --json` retains its legacy text output.
-With `--idempotency-key KEY --json`, success and error output use `hive-new.v1`.
 The shared envelope emitter wraps success-serialization failures as internal
 errors. If encoding the error envelope also raises `JSON::GeneratorError`, the command
 re-raises that encoding error and emits no fallback document. Programmatic

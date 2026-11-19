@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/cli"
@@ -393,6 +394,53 @@ class NewTest < Minitest::Test
 
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "array-dependency-*")].first
         assert_equal [ "base-task" ], Hive::TaskMeta.read(folder)[:depends_on]
+      end
+    end
+  end
+
+  # An unkeyed `--json` once printed the human capture lines; an agent read
+  # that as a failed create and retried it into a duplicate task.
+  def test_unkeyed_json_success_is_exactly_one_hive_new_document
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        out, err = capture_io { Hive::Commands::New.new(project, "json without a key", json: true).call }
+
+        assert_equal 1, out.lines.length, "stdout must be one JSON document, got: #{out.inspect}"
+        payload = JSON.parse(out)
+        assert_valid_hive_new(payload)
+        assert_equal true, payload.fetch("ok")
+        assert_equal true, payload.fetch("created")
+        refute payload.key?("command_receipt"), "an unkeyed create has no command receipt"
+        refute_includes out, "hive: captured"
+        assert_empty err
+        folders = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "json-without-a-key-*")]
+        assert_equal [ payload.fetch("task_folder") ], folders
+      end
+    end
+  end
+
+  def test_unkeyed_json_failures_are_exactly_one_hive_new_document
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        [
+          [ project, "   ", "missing task text", Hive::ExitCodes::GENERIC ],
+          [ "no-such-project", "an idea", "project not initialized", Hive::ExitCodes::GENERIC ]
+        ].each do |name, text, message, exit_code|
+          out, err, status = with_captured_exit { Hive::Commands::New.new(name, text, json: true).call }
+
+          assert_equal exit_code, status
+          assert_equal 1, out.lines.length, "stdout must be one JSON document, got: #{out.inspect}"
+          payload = JSON.parse(out)
+          assert_valid_hive_new(payload)
+          assert_equal false, payload.fetch("ok")
+          assert_includes payload.fetch("message"), message
+          assert_empty err
+        end
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
       end
     end
   end
@@ -1151,5 +1199,12 @@ class NewTest < Minitest::Test
         assert_match(/invalid attachment filename/, err.message)
       end
     end
+  end
+
+  private
+
+  def assert_valid_hive_new(payload)
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+    assert_empty schemer.validate(payload).to_a, "hive-new.v1 must accept #{payload.inspect}"
   end
 end

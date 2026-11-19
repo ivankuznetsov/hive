@@ -836,10 +836,14 @@ module Hive
       uses the project's default workflow; pass --workflow to pin a registered
       workflow for this task. (Options may also follow the text.)
 
+      --json prints exactly one hive-new.v1 document on stdout, on success and
+      on error, with or without --idempotency-key. Notices and diagnostics go
+      to stderr.
+
       --idempotency-key makes retries state-wide and machine-safe. Hive stores
       the opaque key with a fingerprint of the input and resolved workflow,
       returns the original task after it moves stages, and rejects reuse for
-      different input. Pair it with --json for the hive-new.v1 result.
+      different input. Use it whenever a caller may retry the same request.
 
       One --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until it reaches the project's configured dependency gate.
@@ -878,9 +882,9 @@ module Hive
                              desc: "return the original task on a retry with identical input; reject conflicting reuse"
     def new_task(project, *text_parts)
       require "hive/commands/new"
+      # An empty TEXT is rejected inside New#call so `--json` reports it as a
+      # hive-new.v1 error document like every other failure.
       text = text_parts.join(" ")
-      raise Hive::Error, "missing task text" if text.strip.empty?
-
       occurrences = Array(options[:depends_on])
       declaration = occurrences.length == 1 ? occurrences.first : occurrences
       declaration = nil if occurrences.empty?
@@ -1262,6 +1266,23 @@ module Hive
 
       With TARGET, preserves the workflow behavior: move a completed finalize
       task into done, or run an existing done task.
+
+      --reason (with --evidence, --successor, or --attestation as the reason
+      requires) closes an active task outside its ordinary path. Hive verifies
+      and prints a preview, asks y/N, then archives; --yes skips the prompt.
+
+      With --json, stdout is exactly one document. --json alone is a read-only
+      preview and archives nothing: hive-task-closure-input with "mode":
+      "preview", "applied": false, and a "next" command that applies it.
+      --json --yes verifies and archives, then prints hive-task-closure-result
+      with "mode": "apply", "applied": true, and the receipt_digest. Any
+      failure prints a hive-task-closure-result document with "ok": false.
+
+      Examples:
+
+        hive archive 42 --reason cancelled --attestation "Not wanted" --json
+
+        hive archive 42 --reason cancelled --attestation "Not wanted" --yes --json
     DESC
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
@@ -1275,7 +1296,7 @@ module Hive
     option :attestation, type: :string,
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
     option :yes, type: :boolean, default: false,
-                 desc: "confirm an evidence closure without the y/N prompt"
+                 desc: "confirm an evidence closure without the y/N prompt; with --json, apply instead of preview"
     option :idempotency_key, type: :string,
                              desc: "durably replay an identical targeted archive; invalid for listing"
     option :retry_horizon_expires_at, type: :string,
@@ -1300,10 +1321,12 @@ module Hive
       end
 
       if closure_options?
-        if options[:retry_horizon_expires_at] && !options[:idempotency_key]
-          raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+        return with_closure_json_errors do
+          if options[:retry_horizon_expires_at] && !options[:idempotency_key]
+            raise Hive::UsageError, "--retry-horizon-expires-at requires --idempotency-key"
+          end
+          close_task_interactively(target)
         end
-        return close_task_interactively(target)
       end
 
       run_stage_action("archive", target)
@@ -2698,9 +2721,10 @@ module Hive
 
       def close_task_interactively(target)
         if options[:idempotency_key]
-          if options[:json]
+          if closure_json_preview?
             raise Hive::UsageError,
-                  "--idempotency-key applies to confirmed archive closure, not read-only JSON preview"
+                  "--idempotency-key applies to confirmed archive closure, not read-only JSON preview; " \
+                  "add --yes to apply the closure"
           end
           require "hive/command_operation"
           result = Hive::CommandOperation.new(
@@ -2750,16 +2774,22 @@ module Hive
           "successor" => options[:successor],
           "attestation" => options[:attestation]
         }
-        if options[:json]
-          preview = Hive::TaskClosure.preview(
-            task: task, project: project, input: input
-          )
-          puts JSON.generate(preview.to_h)
-          return preview.to_h
-        end
         preview = Hive::TaskClosure.preview(task: task, project: project, input: input)
-        puts JSON.pretty_generate(preview.to_h)
-        preview.blockers.each { |entry| puts Hive::TaskClosure.format_diagnostic(entry) }
+        if closure_json_preview?
+          require "hive/task_closure_result"
+          payload = Hive::TaskClosureResult.preview(
+            preview.to_h, next_command: (closure_apply_command(target) if preview.valid?)
+          )
+          emit_closure_json(payload)
+          return payload
+        end
+        if options[:json]
+          # `--json --yes` prints one result document; a failure carries this.
+          @closure_preview = preview.to_h
+        else
+          puts JSON.pretty_generate(preview.to_h)
+          preview.blockers.each { |entry| puts Hive::TaskClosure.format_diagnostic(entry) }
+        end
         unless preview.valid?
           raise Hive::TaskClosure::VerificationFailed,
                 "closure preview failed; correct its field errors and blockers"
@@ -2790,7 +2820,59 @@ module Hive
         ).resolve
       end
 
+      # `--json` alone previews; `--json --yes` applies (see `hive help archive`).
+      def closure_json_preview?
+        options[:json] && !options[:yes]
+      end
+
+      def closure_apply_command(target)
+        require "shellwords"
+        argv = [ "hive", "archive", target ]
+        argv.push("--reason", options[:reason]) if options[:reason]
+        argv.push("--evidence", *options[:evidence]) if Array(options[:evidence]).any?
+        { "--successor" => :successor, "--attestation" => :attestation,
+          "--project" => :project, "--from" => :from }.each do |flag, key|
+          argv.push(flag, options[key]) if options[key]
+        end
+        Shellwords.join(argv.push("--yes", "--json"))
+      end
+
+      def emit_closure_json(payload)
+        puts JSON.generate(payload)
+        @closure_json_emitted = true
+      end
+
+      # Every closure JSON invocation ends with exactly one stdout document,
+      # failures included. Human mode keeps bin/hive's stderr-only rendering.
+      def with_closure_json_errors
+        yield
+      rescue Hive::Error => error
+        emit_closure_failure(error) if options[:json]
+        raise
+      rescue StandardError => error
+        raise unless options[:json]
+
+        wrapped = Hive::InternalError.wrap(error)
+        emit_closure_failure(wrapped)
+        raise wrapped
+      end
+
+      def emit_closure_failure(error)
+        return if @closure_json_emitted
+
+        require "hive/task_closure_result"
+        mode = options[:yes] ? Hive::TaskClosureResult::APPLY : Hive::TaskClosureResult::PREVIEW
+        emit_closure_json(Hive::TaskClosureResult.failed(error, mode: mode, preview: @closure_preview))
+      rescue Errno::EPIPE, JSON::GeneratorError
+        nil
+      end
+
       def emit_closure_success(receipt, slug: nil)
+        if options[:json]
+          require "hive/task_closure_result"
+          return emit_closure_json(Hive::TaskClosureResult.applied(receipt))
+        end
+
         slug ||= receipt.dig("task", "slug") || receipt["task_slug"] || "task"
         puts "hive: archived #{slug} as #{receipt.fetch('reason')}"
         puts "  receipt: #{receipt.fetch('receipt_digest')}"

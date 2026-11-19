@@ -1,9 +1,9 @@
 ---
 title: Workflow verbs
 type: command
-source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
+source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/task_closure_result.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-11-08
+updated: 2026-11-19
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
@@ -29,6 +29,10 @@ hive archive <slug> --reason superseded \
   --attestation "Delivered by the successor"
 hive archive <slug> --reason cancelled \
   --attestation "No longer wanted"         # preserve history and worktree; no delivery claim
+hive archive <slug> --reason cancelled \
+  --attestation "No longer wanted" --json  # read-only preview: mode=preview, applied=false, next
+hive archive <slug> --reason cancelled \
+  --attestation "No longer wanted" --yes --json  # archive; hive-task-closure-result, applied=true
 hive archive                              # list every 9-done task via Status archive mode
 hive archive --json                       # hive-status payload filtered to 9-done rows
 
@@ -50,9 +54,29 @@ registered repository identity, immutable GitHub facts, live owner state, and
 owned-worktree safety. A failing preview never archives. A passing one asks
 `Archive <slug> as <reason>? [y/N]`; `--yes` confirms without the prompt (for
 scripts and agents), and without a terminal or `--yes` the closure fails closed.
-`--json` stays a read-only preview. The earlier `CLOSE <digest-prefix>` phrase
+The earlier `CLOSE <digest-prefix>` phrase
 was removed on 2026-10-27. Confirmation re-reads every mutable fact before
 writing `closure.json`.
+
+### Closure JSON
+
+With `--json`, stdout is exactly one document, and `--yes` picks the mode:
+
+| Invocation | Document | Meaning |
+|---|---|---|
+| `--json` | `hive-task-closure-input.v1` plus `mode: "preview"`, `applied: false`, `next` | Read-only. Nothing is archived. `ok` only says the preview is valid. `next` is the shell-quoted `--yes --json` command that applies this exact closure, or `null` while the preview has errors or blockers. |
+| `--json --yes` | `hive-task-closure-result.v1` with `ok: true`, `mode: "apply"`, `applied: true` | The task was archived. Carries `reason`, `task`, `preview_digest`, `receipt_digest`, and the full `receipt`. |
+| any failure | `hive-task-closure-result.v1` error arm, `ok: false`, `mode` | Closed `error_kind` (`Hive::TaskClosureResult::ERROR_KINDS`). A blocked `--yes` run includes the failed `preview`. bin/hive still prints `hive: <message>` on stderr and exits with the error's code. |
+
+Before 2026-11-19, `--json --yes` printed only the preview (`ok: true`) and
+exited without archiving, while the same command without `--json` archived. An
+agent read `ok: true` as an archived task. `--json` without `--yes` is still a
+preview, so existing preview readers see the same fields plus the three
+additive ones. `Hive::TaskClosureResult` (`lib/hive/task_closure_result.rb`)
+builds all three shapes. `--idempotency-key` now works with `--json --yes`: the
+keyed `CommandOperation` result, including `command_receipt` inside `receipt`,
+is reported as the result document. A keyed `--json` preview is still refused
+as a usage error, because a read-only preview has nothing to key.
 
 `already_delivered` requires at least one same-repository merged PR or full
 commit OID that is reachable from the repository default branch.

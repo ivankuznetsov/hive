@@ -1,4 +1,6 @@
 require "test_helper"
+require "json"
+require "json_schemer"
 require "open3"
 require "rbconfig"
 require "hive/commands/init"
@@ -176,17 +178,45 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
-  def test_json_boolean_after_project_is_lifted_but_new_stays_plain_text
+  # Without --idempotency-key, `--json` once printed the human capture lines
+  # on stdout. An agent failed to parse them, assumed the create had failed,
+  # and retried into a duplicate task.
+  def test_json_boolean_after_project_is_lifted_and_stdout_is_one_hive_new_document
     with_cli_project do |home, project_root, project|
       out, err, status = run_hive(home, "new", project, "--json", "json flag task", chdir: project_root)
 
       assert status.success?, "--json after project should not be swallowed into text, stderr was: #{err}"
-      assert_includes out, "hive: captured"
-      refute_match(/\A\s*\{/, out, "hive new still emits plain text even when --json is lifted")
+      payload = parse_single_json_document(out)
+      assert_valid_hive_new(payload)
+      assert_equal true, payload.fetch("ok")
+      assert_equal true, payload.fetch("created")
+      refute_includes out, "hive: captured"
+      refute_includes out, "next: "
+      assert_includes err, "hive: context=local", "the local-context banner stays on stderr"
       folder = only_task_folder(project_root)
+      assert_equal folder, payload.fetch("task_folder")
       assert_nil Hive::TaskMeta.read(folder)[:workflow]
       refute_includes File.read(File.join(folder, "idea.md")), "--json"
       assert_includes File.read(File.join(folder, "idea.md")), "json flag task"
+    end
+  end
+
+  def test_json_failures_without_a_key_are_one_hive_new_document
+    with_cli_project do |home, project_root, project|
+      [
+        [ [ "new", project, "--json" ], Hive::ExitCodes::GENERIC, "missing task text" ],
+        [ [ "new", "--json" ], Hive::ExitCodes::USAGE, nil ],
+        [ [ "new", project, "--workflow", "no-such-flow", "--json", "bad flow" ], Hive::ExitCodes::USAGE, "no-such-flow" ]
+      ].each do |argv, exit_code, message|
+        out, err, status = run_hive(home, *argv, chdir: project_root)
+
+        assert_equal exit_code, status.exitstatus, "#{argv.inspect} stderr: #{err}"
+        payload = parse_single_json_document(out)
+        assert_valid_hive_new(payload)
+        assert_equal false, payload.fetch("ok")
+        assert_includes payload.fetch("message"), message if message
+      end
+      assert_empty task_folders(project_root)
     end
   end
 
@@ -302,6 +332,16 @@ class NewWrapperArgvTest < Minitest::Test
 
   def task_folders(project_root)
     Dir[File.join(project_root, ".hive-state", "stages", "*", "*")].select { |path| File.directory?(path) }
+  end
+
+  def parse_single_json_document(out)
+    assert_equal 1, out.lines.length, "stdout must be exactly one JSON document, got: #{out.inspect}"
+    JSON.parse(out)
+  end
+
+  def assert_valid_hive_new(payload)
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-new"))))
+    assert_empty schemer.validate(payload).to_a, "hive-new.v1 must accept #{payload.inspect}"
   end
 
   def assert_pinned_to_my_flow(folder)

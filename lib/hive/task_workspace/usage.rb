@@ -6,6 +6,8 @@ require "hive/task_workspace"
 module Hive
   module TaskWorkspace
     class Usage
+      IDLE_TOKEN_KEYS = %w[input output cache_read cache_write reasoning].freeze
+
       def initialize(attempts_panel:, usage_reader: Hive::UsageDb,
                      pricing: Hive::ModelPricing.new, limits: Limits.new)
         @attempts_panel = attempts_panel.to_h
@@ -126,7 +128,10 @@ module Hive
             [ session["stage"].to_s, session["outcome"].to_s,
               session["started_at"].to_s, session["session_id"] ]
           end,
-          "groups" => grouped_sessions(sessions),
+          # Per-session detail lists only sessions that did metered work.
+          # Technical retries (a provider 429 that exits in seconds) leave no
+          # usage row or zero tokens; they still count in the totals above.
+          "groups" => grouped_sessions(sessions.reject { |session| idle_session?(session) }),
           "diagnostics" => diagnostics
         }
       end
@@ -312,6 +317,15 @@ module Hive
             "sessions" => rows.sort_by { |row| [ row["started_at"].to_s, row["session_id"] ] }
           }
         end
+      end
+
+      # A finished session with no metered tokens: no usage row at all, or a
+      # row whose every token category is absent or zero. Live sessions are
+      # never idle; their usage simply has not landed yet.
+      def idle_session?(session)
+        return false if session["live"]
+
+        IDLE_TOKEN_KEYS.all? { |key| session[key].to_i.zero? }
       end
 
       def available_count(row, category)

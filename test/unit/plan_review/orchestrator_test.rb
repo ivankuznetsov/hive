@@ -605,6 +605,49 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # The batched revision's verification can hit a provider quota wall. It
+  # retries hourly without exhausting the transient budget or spending another
+  # round, then clears once the provider recovers.
+  def test_batched_revision_verification_rides_out_a_provider_limit_hourly
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      walls = 2
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification" && (walls -= 1) >= 0
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit", retry_at: "2026-08-19T00:00:00Z")
+        else
+          successful_result(request, findings: request.kind == "primary" ? [
+            finding("gated_auto", "Keep the v1 token format"),
+            finding("gated_auto", "Version the public endpoint", line: 2)
+          ] : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      now = Time.utc(2026, 8, 12, 12)
+      advance = ->(clock = now) { orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock }).advance! }
+
+      initial = advance.call
+      first, second = open_findings(initial.record).map { |entry| entry.fetch("fingerprint") }
+      decide(task, initial.record, "approve_finding", first)
+      waiting = advance.call
+      assert_equal "awaiting_decision", waiting.record.state
+      decide(task, waiting.record, "approve_finding", second)
+
+      2.times do |hour|
+        clock = now + (hour * 3600)
+        walled = advance.call(clock)
+        assert_equal "retry_scheduled", walled.record.state
+        assert_equal (clock + 3600).utc.iso8601(6), walled.record["retry_at"]
+        assert_equal 1, revision.calls.size
+      end
+      cleared = advance.call(now + 7200)
+      assert_equal "cleared", cleared.record.state
+      assert_equal 1, revision.calls.size
+      assert_equal [ first, second ].sort, revision.calls.first[:findings].map(&:fingerprint).sort
+      assert_equal 3, adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
   # A manual answer and a gated approval, decided in either order, plus a safe
   # fix accepted automatically: nothing revises until both choices are made,
   # then one round integrates all three.
@@ -912,7 +955,9 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_pending_choice_does_not_hide_exhausted_verification
+  # A provider quota wall never exhausts the transient budget: even with
+  # max_transient=0 the leg stays retry_scheduled on the hourly cadence.
+  def test_provider_limit_never_exhausts_the_transient_budget
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0
       adapter = FakeAdapter.new do |request|
@@ -924,12 +969,39 @@ class PlanReviewOrchestratorTest < Minitest::Test
         end
       end
       revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      now = Time.utc(2026, 8, 12, 12)
+      3.times do |hour|
+        clock = now + (hour * 3600)
+        runner = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock })
+        # The candidate was revised mid-decision by an older build; the
+        # current build keeps verifying it hourly while the choice is open.
+        runner = unbatched(runner) if hour.zero?
+        projection = runner.advance!
+        assert_equal "retry_scheduled", projection.record.state
+        assert_equal (clock + 3600).utc.iso8601(6), projection.record["retry_at"]
+        refute projection.record.execution_allowed?
+      end
+      assert_equal 3, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal 1, revision.calls.size
+    end
+  end
+
+  def test_pending_choice_does_not_hide_exhausted_verification
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification"
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "timeout")
+        else
+          successful_result(request, findings: request.kind == "primary" ?
+            [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
       blocked = unbatched(orchestrator(task, cfg, adapter:, planner_revision: revision)).advance!
       assert_equal "blocked", blocked.record.state
       assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
-      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_provider_limit" }
-      assert_match(/plan-review retry/, blocked.record["required_action"],
-                   "a quota-only block points at retry, not a new linked plan")
+      assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_timeout" }
       refute blocked.record.execution_allowed?
       calls = adapter.calls.size
       assert_equal "blocked", orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record.state
@@ -1692,13 +1764,15 @@ class PlanReviewOrchestratorTest < Minitest::Test
     with_task(standard_plan) do |task, cfg|
       finding = finding("safe_auto", "Clarify tests")
       verification_calls = 0
-      retry_at = "2026-08-12T13:00:00Z"
+      # The provider announces a reset days away; Hive retries hourly anyway.
+      provider_reset = "2026-08-19T00:00:00Z"
+      retry_at = "2026-08-12T13:00:00.000000Z"
       adapter = FakeAdapter.new do |request|
         if request.kind == "primary"
           successful_result(request, findings: [ finding ])
         elsif request.kind == "verification" && (verification_calls += 1) == 1
           Hive::PlanReview::Adapters::Base::Result.new(
-            outcome: "provider_limit", retry_at:
+            outcome: "provider_limit", retry_at: provider_reset
           )
         else
           successful_result(request)

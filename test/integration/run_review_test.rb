@@ -4232,6 +4232,57 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # todero typed-lists (2026-11-07): a Muse reviewer 429 ("Subscription quota
+  # exhausted") beside a healthy Codex reviewer was stamped
+  # reviewer_partial_failure; after 6 identical retries the recovery
+  # coordinator parked it as deterministic_failure. When every failed reviewer
+  # hit a provider limit, the pass is limits_reached (hourly, never parked).
+  def test_provider_limited_reviewer_partial_failure_yields_limits_reached
+    [
+      [ [], "limits_reached" ],
+      [ [ "broken-reviewer" ], "reviewer_partial_failure" ]
+    ].each do |nonlimit, expected_reason|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir)
+
+          with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers,
+                                         lambda { |_cfg, ctx, _task, limit_texts:, nonlimit_failures:, **_kwargs|
+            reviews = File.join(ctx.task_folder, "reviews")
+            FileUtils.mkdir_p(reviews)
+            File.write(File.join(reviews, "stub-reviewer-01.md"), "# Clean\n")
+            File.write(File.join(reviews, "errors-01.md"), "# Reviewer infra errors for pass 01\n")
+            limit_texts << "API error 429: Subscription quota exhausted. Your usage window resets at " \
+                           "2026-11-16T00:00:00Z. (rate_limit_error)"
+            nonlimit_failures.concat(nonlimit)
+            :ok
+          }) do
+            with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+              escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
+              File.write(escalations, "# Escalations for pass 01\n")
+              Hive::Stages::Review::Triage::Result.new(
+                status: :ok, escalations_path: escalations, error_message: nil, tampered_files: [], limit_text: nil
+              )
+            }) do
+              _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+              assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+            end
+          end
+
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "reviewers", marker.attrs["phase"]
+          assert_equal expected_reason, marker.attrs["reason"]
+          assert_equal "1", marker.attrs["pass"]
+          if expected_reason == "limits_reached"
+            assert Hive::AgentLimit.held?(marker.name, marker.attrs)
+            refute_empty marker.attrs["retry_after"].to_s
+          end
+        end
+      end
+    end
+  end
+
   def test_cleared_reviewer_partial_failure_retries_reviewers
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

@@ -178,8 +178,14 @@ Automatic series resets do not break the count; an operator `retry` or
 `request-review` reset does. `TaskAction` classifies that block as
 `plan_review_unsupported` (needs repair, no automatic command). Initial legs require empty `residual_evidence`; only disposition
 verification may emit verified fingerprint attestations there.
-`unsupported` is stable and consumes no transient retry. Provider limits,
-timeouts, and retryable failures preserve retry metadata and use at most one
+`unsupported` is stable and consumes no transient retry. A `provider_limit`
+outcome also consumes no transient retry (`attempts_in_current_run` skips it):
+the orchestrator overwrites its `retry_at` with `clock +
+AgentLimit.retry_cooldown_sec` (hourly by default), ignoring any
+provider-announced reset, so a quota wall keeps the leg `retry_scheduled` and
+re-tries every hour instead of exhausting the series or blocking verification
+(operator decision, 2026-11-14; a weekly limit can be days away). Timeouts and
+retryable failures preserve retry metadata and use at most one
 initial attempt plus `plan_review.attempts.max_transient` retries in one
 attempt series for primary, adversarial, verification, and original-planner
 revision legs. Exhausting a mandatory primary or adversarial series, or any

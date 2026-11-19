@@ -48,6 +48,9 @@ plan, even though the operator had answered everything.
   revision with both after the second); manual plus gated plus a deferred safe
   fix, decided out of order; the live repro at a one-round base budget; a
   verification follow-up gate holding a reopened residual; the ceiling fence
-  at the follow-up with the replan command; TaskAction ownership and the
-  slug-regex guard; the operational reason text. Five existing legacy-path
-  tests now build their mid-decision records with an `unbatched` runner.
+  at the follow-up with the replan command; the batched revision's
+  verification riding out a `provider_limit` hourly (#1650) without blocking
+  or spending another round; TaskAction ownership and the slug-regex guard;
+  the operational reason text. Existing legacy-path tests, including #1650's
+  provider-limit and timeout tests, now build their mid-decision records
+  with an `unbatched` runner.

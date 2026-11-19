@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-11-11
+updated: 2026-11-18
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -295,12 +295,34 @@ New verification findings pass through the same reconciliation boundary,
 together with still-unanswered gates so recurring concerns can be consolidated.
 Approved or answered findings remain outside that reassessment.
 
-Routine revisions can proceed while unrelated human choices remain open.
-Both planner and verifier receive those unresolved choices separately and must
-preserve them without choosing defaults. The candidate remains an internal
-artifact; it cannot authorize execution or replace the canonical plan while
-any required decision remains. The successful revision-round cap also applies
-to re-entry from `awaiting_decision`.
+Planner revisions are batched behind operator decisions (2026-11-18). While
+any `gated_auto` or `manual` finding is still open, the orchestrator launches no
+revision, even when other findings are already accepted. It parks in
+`awaiting_decision` with the next open finding as `required_action`. Once the
+last decision lands, one revision integrates every accepted finding together:
+operator approvals and answers, auto-accepted `safe_auto` fixes, and
+policy-approved gates. Previously each decision started its own round. Two
+gates open at once could then spend the operator-decision round on the first
+approval and block the second with `revision_round_limit`, even though the
+operator had answered everything (todero, 2026-11-16).
+
+The resume path and the verification follow-up apply the same rule. A
+verifier that reopens a safe residual and also raises a new gate parks the
+review rather than revising the residual alone. Incorporated findings whose
+candidate still awaits verification are verified before the review parks,
+because verification spends no round. That case only arises for records an
+older build revised mid-decision. The verifier still receives any open choices
+separately. The candidate remains an internal artifact; it cannot authorize
+execution or replace the canonical plan while any required decision remains.
+The successful revision-round cap also applies to re-entry from
+`awaiting_decision`.
+
+Deferral has costs. Safe fixes are no longer incorporated and verified while
+the operator is deciding, so the operator decides against a plan without them.
+Their verification findings also surface only after the last decision. In
+return, no automatic default is written into a candidate before the choice
+it might contradict is made, and safe fixes no longer use up rounds separately
+from the decisions.
 
 The fingerprint binds classification, risk, source, and exact plan evidence,
 but deliberately excludes model-authored title, description, and excerpt
@@ -360,7 +382,21 @@ when the accepted findings include an operator decision (an approved
 `gated_auto` or answered `manual` finding). Safe fixes can spend the three
 rounds before the operator decides, and without this round every late decision
 forced a new linked plan whose fresh review restarted the cycle. The ceiling
-stays fixed at four, and safe-only residue still blocks at three.
+stays fixed at four, and safe-only residue still blocks at three. Open gated
+or manual findings count toward that round too, because the batched revision
+cannot run until they are decided. A review at the base budget therefore waits
+for them instead of blocking on its safe residue. One that has already used
+the extra round blocks, even with a choice still open. Both the resume path
+and the verification follow-up use one fence (`revision_round_limit_block`).
+
+A `revision_round_limit` block's `required_action` names the way forward:
+`start a new linked plan: hive run <slug> --project <project> (operator
+decisions carry forward)`. The project is the task's project directory name,
+which is the name `hive init` registers. The operational reason repeats it,
+because the row's only operational action is `workflow.close_with_evidence`.
+No routine replan action was added. `workflow.advance` is daemon-admissible,
+and an automatic replan would restart the linked-plan loop this round exists
+to prevent.
 
 Re-running the plan stage on a plan that is already COMPLETE, and whose review
 has cleared and is still current (`TransitionGuard.freshness`), is a no-op
@@ -488,7 +524,8 @@ terminal completion, including on legacy capability-recovery re-entry.
 When a review ends `blocked` and a new linked plan runs, the planner receives
 every operator approval and answer from that review as a `plan_review_decisions`
 data block, so accepted decisions that only reached unpromoted candidate plans are
-not lost and are not re-asked.
+not lost and are not re-asked. For `revision_round_limit` the blocked
+`required_action` names that run: `hive run <slug> --project <project>`.
 
 Plan-review agents, planner revisions, and the planner itself inspect a disposable
 detached checkout of the execution base (`origin/<default>` after a fetch, else
@@ -566,7 +603,11 @@ Verification-created findings are policy-matched before the runner returns, so
 they cannot be stranded in an operator-owned state. As a crash/upgrade recovery
 path, `TaskAction` also classifies a legacy `awaiting_decision` record as
 runnable when every blocking finding is gated and currently policy-matched;
-manual or unmatched decisions remain operator-owned.
+manual or unmatched decisions remain operator-owned. Accepted findings next to
+an open choice are operator-owned too, because the orchestrator would only
+republish the same wait. Without a choice open, accepted or incorporated
+findings are runnable. With one open, only an incorporated candidate with
+nothing else accepted is runnable, for its verification.
 
 ## Shared status and Web projection
 

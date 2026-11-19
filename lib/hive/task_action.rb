@@ -1030,19 +1030,27 @@ module Hive
       false
     end
 
+    # The orchestrator holds every planner revision while a gated or manual
+    # finding is open, so one round integrates all operator decisions. With
+    # a choice still open, accepted findings are the operator's wait, not
+    # runnable work; only verifying an already incorporated candidate (a
+    # record an older build revised mid-decision) or consuming an approval
+    # policy for every open gate is.
     def auto_plan_review_decision?
       return false unless task.folder && File.directory?(task.folder)
 
       record = Hive::PlanReview::Store.new(task_folder: task.folder).current_validated
       return true unless Hive::PlanReview::DecisionTriage.pending(record).empty?
-      return true if Array(record["findings"]).any? do |entry|
-        entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
-          %w[approved answered incorporated].include?(entry["lifecycle"])
-      end
 
-      pending = record["findings"].map { |entry| Hive::PlanReview::Finding.new(entry) }
-        .select(&:blocking?)
-      return false if pending.empty?
+      findings = Array(record["findings"])
+      accepted = findings.any? do |entry|
+        entry["classification"] == "safe_auto" && entry["lifecycle"] == "open" ||
+          %w[approved answered].include?(entry["lifecycle"])
+      end
+      incorporated = findings.any? { |entry| entry["lifecycle"] == "incorporated" }
+      pending = findings.map { |entry| Hive::PlanReview::Finding.new(entry) }.select(&:blocking?)
+      return accepted || incorporated if pending.empty?
+      return true if incorporated && !accepted
 
       pending.all? do |finding|
         finding.classification == "gated_auto" &&
@@ -1058,7 +1066,14 @@ module Hive
 
     # Repeatedly rejected reviewer output is also a repair, not a verdict:
     # the reviewer contract must change before another attempt is useful.
+    # A spent revision budget is a verdict, and its required action names the
+    # task's own `hive run` command, so a slug such as `fix-reviewer-…` must
+    # not read as a reviewer repair.
     def unsupported_review?
+      return false if Array(plan_review["blockers"]).any? do |blocker|
+        blocker.is_a?(Hash) && blocker["reason"] == "revision_round_limit"
+      end
+
       plan_review["required_action"].to_s.match?(/capability|configuration|reviewer/i) ||
         Array(plan_review["blockers"]).any? do |blocker|
           blocker.is_a?(Hash) && blocker["reason"] == "reviewer_output_rejected"

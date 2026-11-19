@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb, lib/hive/task_action/diagnostic.rb, lib/hive/task_workspace/builder.rb, lib/hive/terminal_outcome.rb
 created: 2026-04-26
-updated: 2026-08-30
+updated: 2026-11-18
 tags: [module, status, action, classifier, human-stage, diagnostic, blocked, plan-review, terminal-outcomes]
 ---
 
@@ -172,10 +172,14 @@ a complete plan is `ready_to_develop`, never a misleading
 | future transient retry | `plan_review_retry` | no command until `retry_at` |
 | due transient retry | `plan_review_retry` | `hive plan-review-run ...` |
 | legacy blocked mandatory coverage with an attempted transient primary/adversarial leg | `plan_reviewing` | `hive plan-review-run ...`; orchestrator restores the paced retry series |
-| open gated/manual decision | `plan_review_decision` | no synthesized authority command; operator |
+| open gated/manual decision (also with accepted findings held for the batched revision) | `plan_review_decision` | no synthesized authority command; operator |
 | `degraded_cleared` | `plan_review_degraded` | guarded `hive develop ...` with degradation retained |
 | unsupported/configuration block | `plan_review_unsupported` | operator/configuration |
-| mandatory, stale, corrupt, or other block | `plan_review_blocked` | Hive/operator repair |
+| mandatory, stale, corrupt, or other block (including `revision_round_limit`, whose required action names `hive run <slug> --project <project>`) | `plan_review_blocked` | Hive/operator repair |
+
+`revision_round_limit` is never classified as `plan_review_unsupported`. That
+classifier matches capability/configuration/reviewer words in
+`required_action`, and this action contains the task's own slug.
 | `skipped` or `cleared` | ordinary plan-complete action | guarded `hive develop ...` |
 
 Invalid or digest-mismatched evidence projects a visible inert block. The

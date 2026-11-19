@@ -205,6 +205,8 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal "blocked", record.state
       assert_equal 1, revision.calls.size
       assert_equal [ { "owner" => "planner", "reason" => "revision_round_limit" } ], record["blockers"]
+      assert_equal "start a new linked plan: hive run demo-task --project hivedev (operator decisions carry forward)",
+                   record.required_action
     end
   end
 
@@ -565,7 +567,250 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
-  def test_legacy_decisions_are_reassessed_and_routine_fixes_proceed_without_answering_real_choices
+  # Two gated findings open at once used to cost a revision round per
+  # approval, so the second approval could hit revision_round_limit after the
+  # operator had answered everything (todero, 2026-11-16).
+  def test_simultaneous_gated_findings_are_integrated_in_one_revision_round
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      adapter = success_adapter(primary_findings: [
+        finding("gated_auto", "Keep the v1 token format"),
+        finding("gated_auto", "Version the public endpoint", line: 2)
+      ])
+      revision = FakeRevision.new(revised)
+      advance = -> { orchestrator(task, cfg, adapter:, planner_revision: revision).advance! }
+
+      initial = advance.call
+      assert_equal "awaiting_decision", initial.record.state
+      first, second = open_findings(initial.record).map { |entry| entry.fetch("fingerprint") }
+      assert_equal "approve gated plan finding #{first}", initial.record.required_action
+
+      decide(task, initial.record, "approve_finding", first)
+      waiting = advance.call
+      assert_equal "awaiting_decision", waiting.record.state
+      assert_empty revision.calls, "an approval with another gate still open must not spend a round"
+      assert_equal "approve gated plan finding #{second}", waiting.record.required_action
+      assert_equal [ second ], waiting.record["blockers"].map { |blocker| blocker["finding_fingerprint"] }
+      assert_equal "approved", waiting.record["findings"].find { |entry| entry["fingerprint"] == first }["lifecycle"]
+      refute waiting.record.execution_allowed?
+
+      decide(task, waiting.record, "approve_finding", second)
+      cleared = advance.call
+      assert_equal "cleared", cleared.record.state
+      assert_equal 1, revision.calls.size
+      assert_equal [ first, second ].sort, revision.calls.first[:findings].map(&:fingerprint).sort
+      assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal 2, cleared.summary.dig("finding_counts", "verified")
+      assert_equal revised, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  # The batched revision's verification can hit a provider quota wall. It
+  # retries hourly without exhausting the transient budget or spending another
+  # round, then clears once the provider recovers.
+  def test_batched_revision_verification_rides_out_a_provider_limit_hourly
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["attempts"]["max_transient"] = 0
+      walls = 2
+      adapter = FakeAdapter.new do |request|
+        if request.kind == "verification" && (walls -= 1) >= 0
+          Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit", retry_at: "2026-08-19T00:00:00Z")
+        else
+          successful_result(request, findings: request.kind == "primary" ? [
+            finding("gated_auto", "Keep the v1 token format"),
+            finding("gated_auto", "Version the public endpoint", line: 2)
+          ] : [])
+        end
+      end
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
+      now = Time.utc(2026, 8, 12, 12)
+      advance = ->(clock = now) { orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock }).advance! }
+
+      initial = advance.call
+      first, second = open_findings(initial.record).map { |entry| entry.fetch("fingerprint") }
+      decide(task, initial.record, "approve_finding", first)
+      waiting = advance.call
+      assert_equal "awaiting_decision", waiting.record.state
+      decide(task, waiting.record, "approve_finding", second)
+
+      2.times do |hour|
+        clock = now + (hour * 3600)
+        walled = advance.call(clock)
+        assert_equal "retry_scheduled", walled.record.state
+        assert_equal (clock + 3600).utc.iso8601(6), walled.record["retry_at"]
+        assert_equal 1, revision.calls.size
+      end
+      cleared = advance.call(now + 7200)
+      assert_equal "cleared", cleared.record.state
+      assert_equal 1, revision.calls.size
+      assert_equal [ first, second ].sort, revision.calls.first[:findings].map(&:fingerprint).sort
+      assert_equal 3, adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
+  # A manual answer and a gated approval, decided in either order, plus a safe
+  # fix accepted automatically: nothing revises until both choices are made,
+  # then one round integrates all three.
+  def test_mixed_manual_and_gated_decisions_share_one_round_with_deferred_safe_fixes
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    with_task(standard_plan) do |task, cfg|
+      adapter = success_adapter(primary_findings: [
+        finding("safe_auto", "Name the rollback test"),
+        finding("gated_auto", "Approve the schema migration", line: 2),
+        finding("manual", "Choose the retention window", line: 3)
+      ])
+      revision = FakeRevision.new(revised)
+      advance = -> { orchestrator(task, cfg, adapter:, planner_revision: revision).advance! }
+
+      initial = advance.call
+      assert_equal "awaiting_decision", initial.record.state
+      assert_empty revision.calls, "the safe fix waits for the open choices"
+      safe = open_finding(initial.record, "safe_auto").fetch("fingerprint")
+      gated = open_finding(initial.record, "gated_auto").fetch("fingerprint")
+      manual = open_finding(initial.record, "manual").fetch("fingerprint")
+      assert_equal "approve gated plan finding #{gated}", initial.record.required_action
+
+      decide(task, initial.record, "answer_finding", manual, answer: "Keep 30 days")
+      waiting = advance.call
+      assert_equal "awaiting_decision", waiting.record.state
+      assert_empty revision.calls
+      assert_equal "approve gated plan finding #{gated}", waiting.record.required_action
+      assert_equal [ "gated_approval_required" ], waiting.record["blockers"].map { |blocker| blocker["reason"] }
+
+      decide(task, waiting.record, "approve_finding", gated)
+      cleared = advance.call
+      assert_equal "cleared", cleared.record.state
+      assert_equal 1, revision.calls.size
+      integrated = revision.calls.first[:findings]
+      assert_equal [ safe, gated, manual ].sort, integrated.map(&:fingerprint).sort
+      assert_equal "Keep 30 days", integrated.find { |entry| entry.fingerprint == manual }["answer"]
+      assert_empty revision.calls.first[:pending_findings]
+      assert_equal revised, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  # The live failure: safe fixes spent the base budget, then verification
+  # raised two gates at once. Both decisions now share the single
+  # operator-decision round instead of the second one blocking.
+  def test_decisions_raised_at_the_base_cap_share_the_operator_decision_round
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["max_revision_rounds"] = { "standard" => 1, "mandatory" => 1 }
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = case request.kind
+        when "primary" then [ finding("safe_auto", "Clarify tests") ]
+        when "verification"
+          (verification_calls += 1) == 1 ?
+            [ finding("gated_auto", "Keep the v1 token format", line: 2),
+              finding("gated_auto", "Version the public endpoint", line: 3) ] : []
+        else []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(
+        standard_plan.sub("# Plan", "# Revised once"), standard_plan.sub("# Plan", "# Revised twice")
+      )
+      advance = -> { orchestrator(task, cfg, adapter:, planner_revision: revision).advance! }
+
+      gated = advance.call
+      assert_equal "awaiting_decision", gated.record.state
+      assert_equal 1, revision.calls.size, "the safe fix used the whole base budget"
+      first, second = open_findings(gated.record).map { |entry| entry.fetch("fingerprint") }
+
+      decide(task, gated.record, "approve_finding", first)
+      waiting = advance.call
+      assert_equal "awaiting_decision", waiting.record.state
+      assert_equal 1, revision.calls.size
+
+      decide(task, waiting.record, "approve_finding", second)
+      cleared = advance.call
+      assert_equal "cleared", cleared.record.state,
+                   "the second decision must not hit revision_round_limit"
+      assert_equal 2, revision.calls.size
+      assert_equal [ first, second ].sort, revision.calls.last[:findings].map(&:fingerprint).sort
+      assert_equal standard_plan.sub("# Plan", "# Revised twice"), File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  # The verification follow-up is the second place a round can start. A new
+  # gate raised next to a reopened safe residual parks the review; the
+  # approval then revises both in one round from the latest candidate.
+  def test_verification_followup_holds_accepted_residuals_behind_a_new_gate
+    revised_once = standard_plan.sub("# Plan", "# Revised once")
+    revised_twice = standard_plan.sub("# Plan", "# Revised twice")
+    with_task(standard_plan) do |task, cfg|
+      residual = finding("safe_auto", "Clarify tests")
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = case request.kind
+        when "primary" then [ residual ]
+        when "verification"
+          (verification_calls += 1) == 1 ? [ residual, finding("gated_auto", "New regression", line: 2) ] : []
+        else []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(revised_once, revised_twice)
+      advance = -> { orchestrator(task, cfg, adapter:, planner_revision: revision).advance! }
+
+      parked = advance.call
+      assert_equal "awaiting_decision", parked.record.state
+      assert_equal 1, revision.calls.size
+      safe = open_finding(parked.record, "safe_auto").fetch("fingerprint")
+      gate = open_finding(parked.record, "gated_auto").fetch("fingerprint")
+      assert_equal "approve gated plan finding #{gate}", parked.record.required_action
+
+      decide(task, parked.record, "approve_finding", gate)
+      cleared = advance.call
+      assert_equal "cleared", cleared.record.state
+      assert_equal 2, revision.calls.size
+      assert_equal revised_once, revision.calls.last.fetch(:plan_bytes)
+      assert_equal [ safe, gate ].sort, revision.calls.last[:findings].map(&:fingerprint).sort
+      assert_equal revised_twice, File.read(File.join(task.folder, "plan.md"))
+    end
+  end
+
+  # Past the operator-decision round the fence still blocks at the follow-up,
+  # even with a gate open, and names the replan command.
+  def test_followup_at_the_ceiling_blocks_with_the_replan_command
+    with_task(standard_plan) do |task, cfg|
+      cfg["plan_review"]["max_revision_rounds"] = { "standard" => 1, "mandatory" => 1 }
+      verification_calls = 0
+      adapter = FakeAdapter.new do |request|
+        findings = case request.kind
+        when "primary" then [ finding("safe_auto", "Clarify tests") ]
+        when "verification"
+          case verification_calls += 1
+          when 1 then [ finding("gated_auto", "Keep the v1 token format", line: 2) ]
+          when 2 then [ finding("safe_auto", "Another edge", line: 3), finding("gated_auto", "Late gate", line: 4) ]
+          else []
+          end
+        else []
+        end
+        successful_result(request, findings:)
+      end
+      revision = SequencedRevision.new(
+        standard_plan.sub("# Plan", "# Revised once"), standard_plan.sub("# Plan", "# Revised twice")
+      )
+      advance = -> { orchestrator(task, cfg, adapter:, planner_revision: revision).advance! }
+
+      gated = advance.call
+      decide(task, gated.record, "approve_finding", open_finding(gated.record, "gated_auto").fetch("fingerprint"))
+      capped = advance.call.record
+
+      assert_equal "blocked", capped.state
+      assert_equal 2, revision.calls.size
+      assert_equal [ { "owner" => "planner", "reason" => "revision_round_limit" } ], capped["blockers"]
+      assert_equal "start a new linked plan: hive run demo-task --project hivedev (operator decisions carry forward)",
+                   capped.required_action
+      calls = adapter.calls.size
+      assert_equal capped.to_h, advance.call.record.to_h
+      assert_equal calls, adapter.calls.size
+      assert_equal 2, revision.calls.size
+    end
+  end
+
+  def test_legacy_decisions_are_reassessed_and_routine_fixes_wait_for_real_choices
     with_task(standard_plan) do |task, cfg|
       correction = finding("gated_auto", "Add successful delivery test")
       duplicate = Hive::PlanReview::Finding.new(correction.to_h.except("fingerprint").merge("source" => "adversarial"))
@@ -599,20 +844,32 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
         task:, projection: repaired, config: cfg
       ).fetch("status")
-      assert_equal %w[decision_triage verification], adapter.calls.map(&:kind)
-      assert_equal 1, revision.calls.size
-      assert_equal 1, revision.calls.first[:findings].size
-      assert_equal 1, revision.calls.first[:pending_findings].size
-      assert_equal 1, adapter.calls.last.pending_findings.size
+      assert_equal %w[decision_triage], adapter.calls.map(&:kind)
+      assert_empty revision.calls, "the routine fix waits for the open choice instead of spending a round"
       assert_equal standard_plan, File.read(File.join(task.folder, "plan.md")), "pending choices must prevent promotion"
       assert_equal original_attempts, repaired.record["attempt_ids"].take(original_attempts.size)
       assert_empty repaired.record["decisions"]
       assert_equal 1, repaired.summary.dig("finding_counts", "open_manual")
       assert_equal 0, repaired.summary.dig("finding_counts", "open_gated")
-      assert_equal 1, repaired.summary.dig("finding_counts", "verified")
+      assert_equal 0, repaired.summary.dig("finding_counts", "verified")
       assert_empty Hive::PlanReview::DecisionTriage.pending(repaired.record)
-      orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
-      assert_equal 2, adapter.calls.size, "settled triage must not run again on daemon re-entry"
+      reentered = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal 1, adapter.calls.size, "settled triage must not run again on daemon re-entry"
+      assert_empty revision.calls
+
+      manual = open_finding(reentered.record, "manual")
+      answered = decide(task, reentered.record, "answer_finding", manual.fetch("fingerprint"),
+                        answer: "Bounded grace")
+      cleared = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      assert_equal "cleared", cleared.record.state
+      assert_equal %w[decision_triage verification], adapter.calls.map(&:kind)
+      assert_equal 1, revision.calls.size
+      assert_equal open_findings(repaired.record).map { |entry| entry.fetch("fingerprint") }.sort,
+                   revision.calls.first[:findings].map(&:fingerprint).sort,
+                   "one round integrates the answer together with the deferred routine fix"
+      assert_empty revision.calls.first[:pending_findings]
+      assert_equal 1, answered["decisions"].size
+      assert_equal 2, cleared.summary.dig("finding_counts", "verified")
     end
   end
 
@@ -628,7 +885,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
         end
       end
       revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
-      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      first = unbatched(orchestrator(task, cfg, adapter:, planner_revision: revision)).advance!
       assert_equal "retry_scheduled", first.record.state
       assert_equal 1, first.summary.dig("finding_counts", "incorporated")
       retry_at = Time.parse(first.record["retry_at"])
@@ -670,7 +927,7 @@ class PlanReviewOrchestratorTest < Minitest::Test
         end
       end
       revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised plan"))
-      first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      first = unbatched(orchestrator(task, cfg, adapter:, planner_revision: revision)).advance!
       assert_equal "retry_scheduled", first.record.state
       assert_equal 1, first.summary.dig("finding_counts", "incorporated")
       retry_at = Time.parse(first.record["retry_at"])
@@ -715,12 +972,17 @@ class PlanReviewOrchestratorTest < Minitest::Test
       now = Time.utc(2026, 8, 12, 12)
       3.times do |hour|
         clock = now + (hour * 3600)
-        projection = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock }).advance!
+        runner = orchestrator(task, cfg, adapter:, planner_revision: revision, clock: -> { clock })
+        # The candidate was revised mid-decision by an older build; the
+        # current build keeps verifying it hourly while the choice is open.
+        runner = unbatched(runner) if hour.zero?
+        projection = runner.advance!
         assert_equal "retry_scheduled", projection.record.state
         assert_equal (clock + 3600).utc.iso8601(6), projection.record["retry_at"]
         refute projection.record.execution_allowed?
       end
       assert_equal 3, adapter.calls.count { |request| request.kind == "verification" }
+      assert_equal 1, revision.calls.size
     end
   end
 
@@ -735,15 +997,14 @@ class PlanReviewOrchestratorTest < Minitest::Test
             [ finding("safe_auto", "Clarify tests"), finding("manual", "Choose replay", line: 2) ] : [])
         end
       end
-      runner = orchestrator(task, cfg, adapter:,
-                            planner_revision: FakeRevision.new(standard_plan.sub("# Plan", "# Revised")))
-      blocked = runner.advance!
+      revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
+      blocked = unbatched(orchestrator(task, cfg, adapter:, planner_revision: revision)).advance!
       assert_equal "blocked", blocked.record.state
       assert_equal 1, blocked.summary.dig("finding_counts", "open_manual")
       assert blocked.record["blockers"].any? { |entry| entry["reason"] == "candidate_verification_timeout" }
       refute blocked.record.execution_allowed?
       calls = adapter.calls.size
-      assert_equal "blocked", runner.advance!.record.state
+      assert_equal "blocked", orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record.state
       assert_equal calls, adapter.calls.size
     end
   end
@@ -771,7 +1032,8 @@ class PlanReviewOrchestratorTest < Minitest::Test
         result
       end
       revision = FakeRevision.new(standard_plan.sub("# Plan", "# Revised"))
-      result = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
+      result = unbatched(orchestrator(task, cfg, adapter:, planner_revision: revision)).advance!
+      assert_equal 1, revision.calls.size
       assert_equal "awaiting_decision", result.record.state
       assert_equal 1, result.summary.dig("finding_counts", "open_manual")
       assert_equal 0, result.summary.dig("finding_counts", "incorporated")
@@ -853,13 +1115,15 @@ class PlanReviewOrchestratorTest < Minitest::Test
                     task_generation: record.task_generation, policy_fingerprint: record.policy_fingerprint,
                     expected_artifact_digest: Hive::PlanReview::Projection.new(record).observation_digest,
                     target_fingerprint: approved.fingerprint, origin: "cli", operator: "test", authorized: true)
-      result = orchestrator(task, cfg, adapter:, planner_revision: FakeRevision.new(standard_plan)).advance!
+      revision = FakeRevision.new(standard_plan)
+      result = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!
       assert_equal "awaiting_decision", result.record.state
       assert_equal 2, adapter.calls.count { |request| request.kind == "decision_triage" }
       assert_equal [ pending.fingerprint ], adapter.calls.select { |request| request.kind == "decision_triage" }.last.pending_findings.map { |f| f.fetch("fingerprint") }
       assert_equal 1, result.record["decisions"].size
       assert_equal approved.fingerprint, result.record["decisions"].first["target_fingerprint"]
-      assert_equal "verified", result.record["findings"].find { |f| f["fingerprint"] == approved.fingerprint }["lifecycle"]
+      assert_equal "approved", result.record["findings"].find { |f| f["fingerprint"] == approved.fingerprint }["lifecycle"]
+      assert_empty revision.calls, "the approval waits for the open manual choice"
     end
   end
 
@@ -1230,6 +1494,13 @@ class PlanReviewOrchestratorTest < Minitest::Test
       refute runner.send(:revision_round_limit_reached?, record.call(max), answered)
       assert runner.send(:revision_round_limit_reached?, record.call(max + extra), approved),
              "the integration round is bounded"
+
+      # An open gate holds the round until the operator decides it, so safe
+      # residue accepted meanwhile waits for that round instead of blocking
+      # at the base cap. The ceiling still holds.
+      open_gate = [ finding("gated_auto", "Undecided") ]
+      refute runner.send(:revision_round_limit_reached?, record.call(max), safe, pending: open_gate)
+      assert runner.send(:revision_round_limit_reached?, record.call(max + extra), safe, pending: open_gate)
     end
   end
 
@@ -2194,6 +2465,38 @@ class PlanReviewOrchestratorTest < Minitest::Test
   end
 
   private
+
+  # Older builds launched a planner revision for accepted findings while a
+  # gated or manual finding was still open. Hiding open choices from one
+  # runner's batching guard reproduces the records they left behind.
+  def unbatched(runner)
+    runner.define_singleton_method(:pending_decision_findings) { |_record| [] }
+    runner
+  end
+
+  # Applies an operator approval or answer the way `hive plan-review` does
+  # and returns the resulting record.
+  def decide(task, record, action, fingerprint, answer: nil)
+    service = Hive::PlanReview::DecisionService.new(
+      task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+      committer: ->(*) { }, freshness_checker: ->(*) { }
+    )
+    service.apply(
+      action:, review_id: record.review_id, task_generation: record.task_generation,
+      policy_fingerprint: record.policy_fingerprint,
+      expected_artifact_digest: Hive::PlanReview::Projection.new(record).observation_digest,
+      target_fingerprint: fingerprint, value: answer && { "answer" => answer },
+      origin: "cli", operator: "test", authorized: true
+    ).projection.record
+  end
+
+  def open_findings(record)
+    record["findings"].select { |entry| entry.fetch("lifecycle") == "open" }
+  end
+
+  def open_finding(record, classification)
+    open_findings(record).find { |entry| entry.fetch("classification") == classification }
+  end
 
   def with_runner_custody(runner, task, observation: nil)
     owned = observation.nil?

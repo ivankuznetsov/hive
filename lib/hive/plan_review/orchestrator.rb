@@ -1,6 +1,7 @@
 require "digest"
 require "fileutils"
 require "json"
+require "shellwords"
 require "time"
 require "tmpdir"
 require "hive/agent_limit"
@@ -36,7 +37,9 @@ module Hive
       # Safe fixes can spend the whole budget before an operator approves a
       # gated finding or answers a manual one; without this round every late
       # decision forced a new linked plan whose fresh review restarted the
-      # cycle. The ceiling stays fixed, so the loop remains bounded.
+      # cycle. The ceiling stays fixed, so the loop remains bounded. Revision
+      # waits until no gated or manual finding is open, so this one round
+      # integrates every decision the operator made, not just the first.
       OPERATOR_DECISION_ROUNDS = 1
       CAPABILITY_STABLE_PROBE_LIMIT = 3
       CAPABILITY_RETRY_COOLDOWN_SEC = 5 * 60
@@ -212,14 +215,7 @@ module Hive
         pending = pending_decision_findings(record)
         accepted = accepted_findings(record)
         if !pending.empty? && accepted.empty? && verification_targets(record).empty?
-          blockers = pending.map { |finding| Clearance.send(:finding_blocker, finding) }
-          action = pending.first.classification == "manual" ?
-            "answer manual plan finding #{pending.first.fingerprint}" :
-            "approve gated plan finding #{pending.first.fingerprint}"
-          return Projection.new(publish_transition(
-            record, state: "awaiting_decision", required_action: action,
-            blockers: blockers
-          ))
+          return await_operator_decision(record, pending)
         end
         if record.effective_level == "standard" && initial_coverage.degraded? &&
            initial_coverage.degradation_reason != "partial_coverage" &&
@@ -235,15 +231,14 @@ module Hive
           # automatic continuation below. A capped terminal record otherwise
           # retained enough accepted evidence to launch revision N+1 on every
           # later advance! call.
-          if revision_round_limit_reached?(record, accepted)
-            return Projection.new(record) if record.state == "blocked"
-
-            return terminal(
-              record, state: "blocked", outcome: "blocked",
-              blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
-              required_action: "resolve remaining findings with a new linked plan"
-            )
-          end
+          capped = revision_round_limit_block(record, accepted, pending:)
+          return capped if capped
+          # One planner round integrates every operator decision. Revising
+          # for the findings accepted so far while another gated or manual
+          # finding is still open spent a round per decision, so a second
+          # approval could hit the cap after the operator had answered
+          # everything (todero, 2026-11-16).
+          return await_operator_decision(record, pending) unless pending.empty?
 
           verification_route = latest_route(record, "verification")
           if candidate_bytes && verification_route &&
@@ -1115,6 +1110,9 @@ module Hive
       # decision when the same fingerprint recurs, consume any matching
       # approval policy immediately, and hand the daemon a runnable `revising`
       # state instead of parking on an operator-owned `awaiting_decision` row.
+      # Only a gated or manual finding the operator has not decided yet parks
+      # the review: the next round then integrates that decision together
+      # with the residuals accepted here.
       def prepare_verification_followup(record, findings, observed, outcome, plan_bytes:)
         actionable = Array(observed).map do |entry|
           entry.is_a?(Finding) ? entry : Finding.new(entry)
@@ -1132,14 +1130,10 @@ module Hive
         findings = record["findings"]
         accepted = accepted_findings(record)
         return [ record, findings, nil ] if accepted.empty?
-        if revision_round_limit_reached?(record, accepted)
-          blocked = terminal(
-            record, state: "blocked", outcome: "blocked", findings:,
-            blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
-            required_action: "resolve remaining findings with a new linked plan"
-          )
-          return [ blocked.record, findings, blocked ]
-        end
+        pending = pending_decision_findings(record)
+        stopped = revision_round_limit_block(record, accepted, pending:)
+        stopped ||= await_operator_decision(record, pending) unless pending.empty?
+        return [ stopped.record, stopped.record["findings"], stopped ] if stopped
 
         reset = Hive::PlanReview.recovery_reset_route(
           latest_route(record, "verification"),
@@ -1174,13 +1168,54 @@ module Hive
         )
       end
 
-      def revision_round_limit_reached?(record, accepted)
+      # Whether the next planner round would exceed the budget. `pending` are
+      # the gated and manual findings still awaiting the operator; the round
+      # waits for them and can only run once each is approved or answered, so
+      # they count toward the operator-decision round already.
+      def revision_round_limit_reached?(record, accepted, pending: [])
         rounds = verification_revision_rounds(record)
         limit = max_revision_rounds(record)
         return false if rounds < limit
         return true if rounds >= limit + OPERATOR_DECISION_ROUNDS
 
-        accepted.none? { |finding| operator_decision?(finding) }
+        pending.empty? && accepted.none? { |finding| operator_decision?(finding) }
+      end
+
+      # Terminal for a review whose next round would exceed the budget, and a
+      # no-op on re-entry once it is blocked. One fence for both the resume
+      # path and the verification follow-up.
+      def revision_round_limit_block(record, accepted, pending: [])
+        return nil unless revision_round_limit_reached?(record, accepted, pending:)
+        return Projection.new(record) if record.state == "blocked"
+
+        terminal(
+          record, state: "blocked", outcome: "blocked",
+          blockers: [ { "owner" => "planner", "reason" => "revision_round_limit" } ],
+          required_action: replan_action
+        )
+      end
+
+      # A capped review cannot run another round, so the way forward is the
+      # plan stage itself: the new planner run receives every operator
+      # approval and answer from this review (Stages::Plan#carried_decisions_text)
+      # and its review links to this one.
+      def replan_action
+        project = @task.respond_to?(:project_name) ? @task.project_name : File.basename(@task.project_root.to_s)
+        command = Shellwords.join([ "hive", "run", @task.slug.to_s, "--project", project.to_s ])
+        "start a new linked plan: #{command} (operator decisions carry forward)"
+      end
+
+      # Parks the review on the first open gated or manual finding. Accepted
+      # findings stay accepted until the operator decides the rest.
+      def await_operator_decision(record, pending)
+        first = pending.first
+        action = first.classification == "manual" ?
+          "answer manual plan finding #{first.fingerprint}" :
+          "approve gated plan finding #{first.fingerprint}"
+        Projection.new(publish_transition(
+          record, state: "awaiting_decision", required_action: action,
+          blockers: pending.map { |finding| Clearance.send(:finding_blocker, finding) }
+        ))
       end
 
       # Planner revision rounds allowed for the record's effective level. A

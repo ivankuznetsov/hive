@@ -39,6 +39,11 @@
 
   <details class="usage-details" data-workspace-disclosure-key="usage-details">
     <summary>Show details</summary>
+    <% listed_sessions = Array(usage["groups"]).sum { |group| Array(group["sessions"]).size } %>
+    <% hidden_sessions = usage["details_truncated"] ? 0 : usage["sessions_count"].to_i - listed_sessions %>
+    <% if hidden_sessions.positive? %>
+      <p class="muted usage-hidden-sessions"><%= pluralize(hidden_sessions, "technical retry", plural: "technical retries") %> with no metered usage hidden</p>
+    <% end %>
     <% if Array(usage["groups"]).empty? %>
       <p class="workspace-empty">No exactly attributed session detail is available.</p>
     <% else %>

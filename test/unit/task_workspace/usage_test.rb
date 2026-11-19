@@ -58,6 +58,36 @@ class TaskWorkspaceUsageTest < Minitest::Test
                     "attempt_inventory_truncated"
   end
 
+  # A provider 429 that exits in seconds leaves no usage row (or a zero row).
+  # Those technical retries stay in the totals but not in the per-session list.
+  def test_sessions_without_metered_usage_are_hidden_from_groups_but_counted
+    attempts = attempts_panel
+    attempts["records"] << attempt("attempt-quota", "failed", "session-quota")
+    attempts["records"] << attempt("attempt-zero", "failed", "session-zero")
+    attempts["records"].last["sessions"] << session_binding("session-live", outcome: nil, live: true)
+    reader = lambda do |attempt_id:, **|
+      rows = case attempt_id
+      when "attempt-retry" then [ usage_row("session-retry", input: 200, output: 50) ]
+      when "attempt-failed" then [ usage_row("session-failed", input: 100, output: 25) ]
+      when "attempt-zero" then [ usage_row("session-zero", input: 0, output: 0) ]
+      else []
+      end
+      { available: true, sessions: rows, unattributed_count: 0 }
+    end
+
+    envelope = Hive::TaskWorkspace::Usage.new(
+      attempts_panel: attempts, usage_reader: reader, pricing: unavailable_pricing
+    ).call
+
+    assert_equal 5, envelope.fetch("sessions_count")
+    assert_equal 1, envelope.fetch("unmetered_sessions_count")
+    assert_equal 375, envelope.dig("tokens", "input_output")
+    assert_equal 5, envelope.fetch("sessions").length, "the full session list keeps every session"
+    listed = envelope.fetch("groups").flat_map { |group| group.fetch("sessions") }.map { |row| row.fetch("session_id") }
+    assert_equal %w[session-failed session-live session-retry], listed.sort,
+                 "no-usage and zero-token sessions are hidden; a live session is not"
+  end
+
   def test_usage_rows_without_a_durable_session_binding_are_excluded_and_reported
     reader = lambda do |attempt_id:, **|
       sessions = attempt_id == "attempt-failed" ?

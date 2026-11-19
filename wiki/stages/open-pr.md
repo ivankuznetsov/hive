@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-09-06
+updated: 2026-11-19
 tags: [stage, pr, github]
 ---
 
@@ -54,9 +54,11 @@ that path.
 - create the PR only after intent is durable and exact local/remote evidence is
   revalidated;
 - after review or artifact rework, fast-forward the same controller-owned draft
-  only when its original number, URL, title, body marker, repository, base, and
-  branch are unchanged, the hosted head still equals the remote branch, and
-  that head is an ancestor of the new local commit;
+  only when its original number, URL, repository, base, and branch are
+  unchanged, the hosted head still equals the remote branch, and that head is
+  an ancestor of the new local commit. Title and body edits do not change the
+  identity. The one accepted base change is a GitHub retarget of a stacked PR
+  after its prerequisite merged (see [[publication-recovery]]);
 - safely retry a failed absent-branch push or a definite `gh pr create`
   failure; unknown attempted outcomes remain reconciliation-only.
 

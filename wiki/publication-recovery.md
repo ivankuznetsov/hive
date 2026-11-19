@@ -50,6 +50,50 @@ Any manual push to a task branch (for example the merge commit a
 PR head, so the next review reports `pr_head_moved`. Run
 `hive publication-reconcile` with the pushed full SHA before `workflow.retry`.
 
+## Stacked base retarget
+
+A task PR stacked on its prerequisite's branch is retargeted by GitHub when the
+prerequisite PR merges (todero #100: stacked on `typed-lists-foundation-…`,
+retargeted to `main` after #99 merged). Open-PR then builds its request from
+`main`, because `DependencySnapshot.stacked_base` drops a delivered
+prerequisite. Before 2026-11-19 the recorded `base_branch` made every revision
+`github_publication_identity_drift`, and `publication-reconcile` had the same
+requirement, so the task could only be closed.
+
+`GithubPublication::Controller#adopt_base_retarget` now accepts the new base
+inside `publish!` and `reconcile_inspected!` only when all of these hold:
+
+- the record is `pr_observed` with a PR, host/repository/branch/draft are
+  unchanged, and only `base_branch` (optionally `creation_base_oid`) differs;
+- the complete branch inventory holds exactly one live PR, the recorded one
+  (number and URL as `revision_owned?` matches them), open, and already based on
+  the requested branch. Hive never retargets a PR itself;
+- the old base cannot host a stack: no open same-repository PR has it as head,
+  and one merged into the requested base, or merged elsewhere while the old
+  branch is now absent from the remote. This is a second `list_pull_requests`
+  call with the old base as head branch plus, only for the second case, a
+  remote branch observation;
+- the request's `creation_base_oid` is an ancestor of its change base (the merge
+  base of the requested base and HEAD), which is an ancestor of HEAD. A
+  squash-merged prerequisite therefore keeps drifting until Hive's rebase
+  reconciles the stale `base_oid` (see [[modules/rebase]]).
+
+On success it revalidates the request (`:retarget` phase), atomically rewrites
+`base_branch` and `creation_base_oid` in the record and its `pr` observation,
+appends a bounded `base_retargets` entry (from/to base and creation base, the
+base PR number/URL, `merged_into_new_base` or `merged_and_deleted`, time), and
+continues through the ordinary revision path. The PR-body marker
+(`id=… base=…`) and `publication_id`, body and marker digests stay as creation
+provenance. Hive does not rewrite the hosted body, and revision ownership reads
+number, URL and branches, never the marker. The marker only matters to
+`exact_owned?` before a PR is observed, and in Patrol's format-only regex.
+Any other base change still blocks as `identity_drift`.
+
+A task parked on the old drift recovers through ordinary retry once the fixed
+build runs: a new runtime digest rearms the deterministic park once, and a
+fresh `hive act workflow.retry PROJECT:SLUG --observation TOKEN` also works.
+No `publication-reconcile` step is needed.
+
 ## Patrol Fix
 
 Independent review uses the same disposable exact-HEAD materialization as

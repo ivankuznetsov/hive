@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb
 created: 2026-06-18
-updated: 2026-11-07
+updated: 2026-11-19
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -262,6 +262,12 @@ stale, and execute records the exact start ref as `base_ref` in `worktree.yml`
 only in a log line. Open-PR uses the prerequisite base only while that remote
 branch exists. Explicit cross-project scalars and all lists—including
 singleton arrays—return no stacked base and report `dependency_base_mode: default`.
+
+A dependent PR published while stacked keeps the prerequisite branch as its
+recorded base. Once the prerequisite is delivered, Open-PR requests the default
+branch instead. The publication controller adopts that change only after GitHub
+has already retargeted the PR and the old base's PR has merged; see
+[[publication-recovery]].
 
 ## Bounded task-workspace component
 

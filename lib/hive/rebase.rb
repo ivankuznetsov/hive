@@ -113,6 +113,7 @@ module Hive
     def perform(task, cfg)
       enabled = cfg.dig("rebase", "enabled")
       return Result.disabled if enabled == false
+      return Result.skipped(:published_review_branch) if published_review_branch?(task)
 
       worktree = task.worktree_path
       return Result.skipped(:no_worktree) if worktree.nil? || worktree.to_s.strip.empty?
@@ -470,6 +471,30 @@ module Hive
       return false unless task.respond_to?(:workflow) && task.workflow
 
       task.workflow.stage_named(task.stage_name)&.execution_strategy == :review
+    end
+
+    # A published pull request in review is past the point where Hive may
+    # rewrite its branch. Review settles hosted CI on the exact published
+    # head, and its base-conflict recovery is a merge commit only: no rebase,
+    # no force-push (reviews/ci-blocked.md). An auto-rebase here would replace
+    # the head GitHub just evaluated and lease-push over the PR under review
+    # (todero #100: the conflict agent ran ahead of a review retry while the
+    # PR was CONFLICTING). Base drift is review's to report: base_conflict on
+    # a conflict, an informational BEHIND note otherwise. Reviewers diff
+    # `<base>...HEAD`, so an unrebased branch shows no phantom deletions.
+    def published_review_branch?(task)
+      review_stage?(task) && published_pull_request?(task)
+    end
+
+    # Hive's publication record or a PR link in pr.md means the branch is, or
+    # is being, published. Existence is enough: an unreadable record must not
+    # be overwritten either.
+    def published_pull_request?(task)
+      folder = task.folder.to_s
+      return false if folder.empty?
+      return true if File.exist?(File.join(folder, "github-publication.json"))
+
+      !Hive::Gh.pr_frontmatter(File.join(folder, "pr.md"))["pr_url"].to_s.strip.empty?
     end
 
     # The review pass this run is about to execute, so the receipt lands

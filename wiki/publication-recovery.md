@@ -49,6 +49,12 @@ Any manual push to a task branch (for example the merge commit a
 `base_conflict` recovery asks for) leaves `github-publication.json` behind the
 PR head, so the next review reports `pr_head_moved`. Run
 `hive publication-reconcile` with the pushed full SHA before `workflow.retry`.
+The reconciled `published_head_oid` and the task branch HEAD are part of the
+retry's failure fingerprint for operator-owned review gate blocks, so that
+retry starts a fresh series instead of parking as a repeat of the pre-merge
+conflict. Hive's auto-rebase never rewrites a published branch while it is in
+review (`published_review_branch`), so the lease-push path above applies only
+to other stages.
 
 ## Stacked base retarget
 

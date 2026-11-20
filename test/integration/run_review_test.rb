@@ -561,6 +561,46 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # todero #100: workflow.retry clears REVIEW_CI_STALE reason=base_conflict
+  # before it dispatches review (RecoveryCoordinator#resume), so the retry
+  # re-runs the GitHub gate on the operator's merge commit instead of
+  # replaying the stale marker; a MERGEABLE head lets review finish.
+  def test_cleared_base_conflict_reruns_the_github_gate_on_the_merged_head
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        state_file = File.join(folder, "task.md")
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        Hive::Markers.set(state_file, :review_ci_stale, gate: "github", reason: "base_conflict", attempts: 1, pass: 1)
+        gate_heads = []
+        remote = lambda do |ctx:, **|
+          gate_heads << Hive::Stages::Review.git_head(ctx.worktree_path)
+          Hive::Stages::Review::CiFix::Result.new(
+            status: :green, attempts: 1, last_output: "GitHub checks settled",
+            error_message: nil, limit_text: nil
+          )
+        end
+
+        with_replaced_singleton_method(Hive::Stages::Review::RemoteCi, :run!, remote) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+          assert_empty gate_heads, "an uncleared marker short-circuits before the gate"
+          assert_equal :review_ci_stale, Hive::Markers.current(state_file).name
+
+          run!("git", "-C", worktree, "commit", "--allow-empty", "-m", "Merge origin/main", "--quiet")
+          merged = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+          stale = Hive::Markers.current(state_file)
+          assert Hive::Markers.clear_current(state_file, expected_name: :review_ci_stale,
+                                             match_attrs: stale.attrs, purge_history: true)
+
+          capture_io { Hive::Commands::Run.new(folder).call }
+          refute_empty gate_heads, "the retry must re-query GitHub"
+          assert_equal [ merged ], gate_heads.uniq
+        end
+        assert_equal :review_complete, Hive::Markers.current(state_file).name
+      end
+    end
+  end
+
   def test_review_stale_marker_short_circuits
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

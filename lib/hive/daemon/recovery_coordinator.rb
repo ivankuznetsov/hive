@@ -1,7 +1,9 @@
 require "digest"
 require "json"
+require "open3"
 require "shellwords"
 require "time"
+require "yaml"
 require "hive/agent_limit"
 require "hive/artifacts/runtime_residue_recovery"
 require "hive/attempts/generation"
@@ -1614,6 +1616,23 @@ module Hive
         !TASK_OWNED_FAILURE_MARKERS.include?(value(row, :marker).to_s)
       end
 
+      OBJECT_ID = /\A[0-9a-f]{40,64}\z/i
+
+      # Review CI-gate blocks that stop before any Hive agent runs. GitHub
+      # reported the exact head unmergeable, or never settled its checks, so
+      # no Hive retry can change the outcome; only an operator can (merge the
+      # base, re-trigger checks, reconcile a pushed head). The marker keeps
+      # the same attrs until the stage re-runs, so without the head in the
+      # fingerprint the first retry after a remediation counted as one more
+      # identical failure and parked the task (todero #100). Red local CI
+      # (REVIEW_CI_STALE without a reason) is excluded on purpose: its CI-fix
+      # agent commits on every run, and a head-keyed series would never
+      # converge on the deterministic park.
+      CI_GATE_MARKERS = %w[review_ci_stale review_error].freeze
+      OPERATOR_REMEDIATED_CI_GATE_REASONS = %w[
+        base_conflict mergeability_unknown required_checks_missing required_checks_unknown
+      ].freeze
+
       def retry_count_for_failure(row, attrs)
         durable = durable_retry_count(row)
         return durable unless @request_queue
@@ -1666,8 +1685,14 @@ module Hive
             value(row, :provider)).to_s,
           "status_code" => (attrs["status_code"] || attrs["status"]).to_s,
           "message_digest" => Digest::SHA256.hexdigest(normalized_message),
-          "progress_revision" => dirty_progress_revision(row, attrs)
+          "progress_revision" => progress_revision(row, attrs)
         ))
+      end
+
+      def progress_revision(row, attrs)
+        return ci_gate_progress_revision(row) if operator_remediated_ci_gate?(row, attrs)
+
+        dirty_progress_revision(row, attrs)
       end
 
       def rearm_markerless_recovery(request, row:, reason:, now:)
@@ -1734,10 +1759,62 @@ module Hive
                       "dirty_worktree"
 
           sha = (item["sha"] || item[:sha]).to_s
-          return sha.downcase if sha.match?(/\A[0-9a-f]{40,64}\z/i)
+          return sha.downcase if sha.match?(OBJECT_ID)
         end
 
         ""
+      end
+
+      def operator_remediated_ci_gate?(row, attrs)
+        CI_GATE_MARKERS.include?(value(row, :marker).to_s.downcase) &&
+          !attrs["gate"].to_s.empty? &&
+          OPERATOR_REMEDIATED_CI_GATE_REASONS.include?(attrs["reason"].to_s)
+      end
+
+      # The heads a CI-gate retry evaluates: the task branch HEAD the gate
+      # settles, and the head Hive last recorded as published
+      # (`hive publication-reconcile` moves it after a manual push). A change
+      # in either is a new input. A source that cannot be read contributes
+      # nothing, so an unreadable task degrades to the marker-only series.
+      def ci_gate_progress_revision(row)
+        folder = value(row, :folder).to_s
+        return "" if folder.empty?
+
+        local = task_branch_head(folder)
+        published = published_head(folder)
+        return "" if local.nil? && published.nil?
+
+        "head=#{local};published=#{published}"
+      end
+
+      def task_branch_head(folder)
+        pointer = File.join(folder, "worktree.yml")
+        return nil unless File.file?(pointer)
+
+        data = YAML.safe_load(File.read(pointer), permitted_classes: [], aliases: false)
+        path = data.is_a?(Hash) ? data["path"].to_s : ""
+        return nil if path.empty? || !File.directory?(path)
+
+        out, _err, status = Open3.capture3(
+          "git", "-C", path, "rev-parse", "--verify", "--quiet", "HEAD^{commit}"
+        )
+        sha = out.strip.downcase
+        status.success? && sha.match?(OBJECT_ID) ? sha : nil
+      rescue Psych::Exception, SystemCallError, IOError
+        nil
+      end
+
+      def published_head(folder)
+        path = File.join(folder, "github-publication.json")
+        return nil unless File.file?(path)
+
+        state = JSON.parse(File.read(path))
+        return nil unless state.is_a?(Hash)
+
+        sha = (state["published_head_oid"] || state["head_oid"]).to_s.downcase
+        sha.match?(OBJECT_ID) ? sha : nil
+      rescue JSON::ParserError, SystemCallError, IOError
+        nil
       end
 
       def source_receipt_for(marker:, task:, project:)

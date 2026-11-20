@@ -1665,4 +1665,133 @@ class HiveRebaseTest < Minitest::Test
   ensure
     teardown_dirs(worktree, folder)
   end
+
+  # ---- published review branches (todero #100) ----
+
+  PUBLISHED_PR = "---\npr_url: https://github.com/acme/app/pull/100\npr_number: 100\n---\n".freeze
+
+  # Review recovers base drift with a merge commit only (no rebase, no
+  # force-push). The conflict agent used to run ahead of every review retry
+  # of a published PR that GitHub had just reported CONFLICTING.
+  def test_published_review_pull_request_is_never_rebased
+    { "pr.md" => PUBLISHED_PR, "github-publication.json" => "{}" }.each do |name, body|
+      worktree, folder = make_worktree_and_folder
+      begin
+        File.write(File.join(folder, name), body)
+        task = make_review_task(worktree: worktree, folder: folder)
+        spawned = false
+        result = nil
+        no_git = ->(*) { raise "a published review branch must not touch git" }
+        with_replaced_singleton_method(Hive::GitOps, :new, no_git) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*, **) { spawned = true }) do
+            result = Hive::Rebase.perform(task, base_cfg)
+          end
+        end
+
+        assert_equal :published_review_branch, result.reason, name
+        refute result.attempted
+        assert_nil result.commits_behind
+        refute spawned, "no conflict-resolution agent for a published review branch"
+        assert Hive::Rebase.published_review_branch?(task)
+      ensure
+        teardown_dirs(worktree, folder)
+      end
+    end
+  end
+
+  def test_publication_guard_is_scoped_to_review_with_a_published_pull_request
+    worktree, folder = make_worktree_and_folder
+    unpublished_review = make_review_task(worktree: worktree, folder: folder)
+    refute Hive::Rebase.published_review_branch?(unpublished_review), "nothing published yet"
+
+    git = FakeGitOps.new(worktree)
+    git.commits_behind_value = 0
+    stub_gitops!(git) do
+      assert_nil Hive::Rebase.perform(unpublished_review, base_cfg).reason,
+                 "an unpublished review branch keeps the ordinary ladder"
+    end
+
+    File.write(File.join(folder, "pr.md"), "---\npr_url: \"\"\n---\n")
+    refute Hive::Rebase.published_review_branch?(unpublished_review), "an empty PR link is not a publication"
+
+    File.write(File.join(folder, "pr.md"), PUBLISHED_PR)
+    refute Hive::Rebase.published_review_branch?(make_review_task(worktree: worktree, folder: folder, stage_name: "execute")),
+           "other stages keep their existing rebase policy"
+    refute Hive::Rebase.published_review_branch?(make_task(worktree: worktree, folder: folder))
+  ensure
+    teardown_dirs(worktree, folder)
+  end
+
+  # The live case: a stacked task whose prerequisite was squash-merged into
+  # main and deleted, retargeted to main, then remediated with a merge of
+  # origin/main. Its upstream still names the stale prerequisite branch,
+  # which carries a pre-squash commit the task never had. "Behind" is
+  # measured against origin/<default_branch>, so a branch that already
+  # contains it is a no-op: no rebase, no conflict agent, HEAD untouched.
+  def test_branch_that_already_contains_the_base_is_not_rebased_despite_a_stale_stacked_upstream
+    scenario = make_stale_stacked_upstream_scenario
+    worktree = scenario.fetch(:worktree)
+    task = make_task(worktree: worktree, folder: scenario.fetch(:folder))
+    head = run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+    assert_equal "1", run!("git", "-C", worktree, "rev-list", "--count", "HEAD..@{u}").strip,
+                 "fixture: the stale upstream has a commit the task branch lacks"
+
+    spawned = false
+    result = with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*, **) { spawned = true }) do
+      # No configured default branch: the git-derived base is still main.
+      Hive::Rebase.perform(task, base_cfg("default_branch" => nil))
+    end
+
+    assert result.succeeded
+    assert_equal 0, result.commits_behind
+    assert_nil result.reason
+    refute spawned
+    assert_equal head, run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+  ensure
+    teardown_dirs(scenario&.fetch(:root))
+  end
+
+  def make_stale_stacked_upstream_scenario
+    root = Dir.mktmpdir("hive-rebase-stacked")
+    origin = File.join(root, "origin.git")
+    worktree = File.join(root, "worktree")
+    folder = File.join(root, "task")
+    FileUtils.mkdir_p(folder)
+    git = ->(*args) { run!("git", "-C", worktree, *args) }
+    commit = lambda do |file, message|
+      File.write(File.join(worktree, file), "#{message}\n")
+      git.call("add", file)
+      git.call("commit", "-m", message, "--quiet")
+    end
+
+    run!("git", "init", "--bare", "--quiet", origin)
+    run!("git", "init", "-b", "main", "--quiet", worktree)
+    git.call("config", "user.email", "test@example.com")
+    git.call("config", "user.name", "Test")
+    git.call("config", "commit.gpgsign", "false")
+    git.call("remote", "add", "origin", origin)
+    commit.call("README.md", "base")
+    git.call("push", "-u", "origin", "main", "--quiet")
+
+    git.call("checkout", "-b", "prereq", "--quiet")
+    commit.call("prereq.txt", "prerequisite")
+    git.call("push", "-u", "origin", "prereq", "--quiet")
+    git.call("checkout", "-b", "task", "--track", "origin/prereq", "--quiet")
+    commit.call("task.txt", "task work")
+
+    git.call("checkout", "prereq", "--quiet")
+    commit.call("prereq-fix.txt", "pre-squash fix")
+    git.call("push", "origin", "prereq", "--quiet")
+    git.call("checkout", "main", "--quiet")
+    git.call("merge", "--squash", "prereq", "--quiet")
+    git.call("commit", "-m", "prerequisite (#99)", "--quiet")
+    commit.call("other.txt", "another merged pull request")
+    git.call("push", "origin", "main", "--quiet")
+    run!("git", "--git-dir", origin, "branch", "-D", "prereq", "--quiet") # merged and deleted on the host
+
+    git.call("checkout", "task", "--quiet")
+    git.call("fetch", "origin", "main", "--quiet")
+    git.call("merge", "--no-ff", "origin/main", "-m", "Merge origin/main into task", "--quiet")
+    { root: root, worktree: worktree, folder: folder }
+  end
 end

@@ -187,6 +187,52 @@ class AttemptsBookkeepingRetryTest < Minitest::Test
     assert_equal "runtime_bookkeeping_busy", error.reason
   end
 
+  # 2026-11-20: an operation that inherited a deadline spent by earlier phases
+  # reported "exhausted after 0.0s (0 busy tries)", measured from its own
+  # construction. Elapsed now runs from the shared budget's origin.
+  def test_inherited_spent_budget_reports_its_real_elapsed_time_and_no_try
+    @now = 31.0
+    retries = Hive::Attempts::BookkeepingRetry.new(
+      operation: "arm_handoff", attempt_id: "attempt-1", budget_sec: 30, started_at: 0.0,
+      monotonic: -> { @now }, sleeper: ->(_seconds) { flunk "a spent budget must not back off" }
+    )
+    assert_equal 30.0, retries.deadline, "the budget runs from its origin, not from construction"
+
+    error = assert_raises(Hive::Attempts::BookkeepingBusy) do
+      retries.run { flunk "a spent budget must not start a try" }
+    end
+
+    assert_equal 0, error.retry_count
+    assert_equal 31.0, error.elapsed_sec
+    assert_nil error.cause
+    assert_equal "runtime_bookkeeping_busy: arm_handoff exhausted after 31.0s " \
+                 "(0 busy tries; budget spent before the first try)", error.message
+  end
+
+  def test_exhaustion_message_counts_busy_tries_from_the_budget_origin
+    @now = 10.0
+    @sleeps = []
+    retries = Hive::Attempts::BookkeepingRetry.new(
+      operation: "admission", budget_sec: 2, started_at: 10.0, monotonic: -> { @now },
+      sleeper: ->(seconds) { @sleeps << seconds; @now += seconds }, random: -> { 0.5 }
+    )
+    tries = 0
+    error = assert_raises(Hive::Attempts::BookkeepingBusy) do
+      retries.run do |_timeout|
+        tries += 1
+        @now = tries == 1 ? 11.0 : 12.0
+        raise SQLite3::BusyException, "busy"
+      end
+    end
+
+    assert_equal 2, tries
+    assert_equal [ 0.05 ], @sleeps, "one bounded backoff between the two busy tries"
+    assert_equal 2, error.retry_count
+    assert_equal 2.0, error.elapsed_sec
+    assert_instance_of SQLite3::BusyException, error.cause
+    assert_equal "runtime_bookkeeping_busy: admission exhausted after 2.0s (2 busy tries)", error.message
+  end
+
   def test_invalid_budgets_are_rejected
     [ 0, -1, Float::INFINITY, Float::NAN ].each do |budget|
       assert_raises(ArgumentError) { retryer(budget: budget) }

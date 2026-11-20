@@ -3,9 +3,42 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-19
+updated: 2026-11-20
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## Operator-remediated review gate retries: residual scope (2026-11-20)
+
+The retry fingerprint for operator-owned review gate blocks now includes the
+task branch HEAD and the published head, and auto-rebase skips published
+review branches (see [[modules/daemon]], [[modules/rebase]],
+[[stages/review]]). These limits remain:
+
+- **A remote-only remediation counts only once it is reconciled.** The
+  fingerprint reads the local HEAD and `github-publication.json`. A conflict
+  resolved in GitHub's web editor changes neither until the operator runs
+  `hive publication-reconcile`, so a retry before that still counts as
+  identical. No `git ls-remote` runs on the assessment path.
+- **The healer still auto-retries `base_conflict`.** Only an operator merge
+  can clear it, yet the shared ladder re-queries GitHub until the
+  deterministic park (five times in 35 minutes for todero #100). Each retry is
+  now cheap (no conflict agent), but making the block operator-owned would be
+  a separate policy change.
+- **Post-review stages still auto-rebase published branches.** 7-artifacts
+  and 8-finalize keep the leased rebase-and-push policy that finalize's
+  stale-rebase resync relies on. Whether they should adopt review's
+  merge-only contract is open.
+- **Deploy rearm ignores task ownership.** `rearm_changed_runtime` rearms any
+  parked `deterministic_failure` request once per new runtime digest. That
+  includes a task-owned `review_ci_stale` park, whose new-request series
+  (`TASK_OWNED_FAILURE_MARKERS`) is meant to survive deploys. Whether the
+  rearmed probe then reopens a full identical-failure series was not checked.
+  Not changed here.
+- **Conflict-agent identity is by design.** The rebase conflict agent resolves
+  `execute.agent` from the project config at run time (or the durable
+  attempt's explicit route), never from the task's captured implementation
+  identity. The todero #100 Muse runs (2026-11-19 16:23Z and 17:05Z) predate
+  the Grok stand-in written to the config on 2026-11-20 16:08Z.
 
 ## CLI JSON single-document contracts: residual scope (2026-11-19)
 

@@ -171,6 +171,7 @@
                 "managed_draft_pr_handoff",
                 "pending_head_bound_approval",
                 "pending_review_grant_fix",
+                "published_review_branch",
                 "manual_steering",
                 "human_stage",
                 "no_worktree",

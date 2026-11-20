@@ -178,7 +178,7 @@ class HiveCommandsRunNoRebaseTest < Minitest::Test
     cmd = Hive::Commands::Run.new("demo-260514-bbbb")
     [ :disabled, :no_worktree, :cli_override, :managed_draft_pr_handoff,
       :controller_workflow, :pending_head_bound_approval, :pending_review_grant_fix,
-      :dirty_worktree, :detached_head ].each do |reason|
+      :published_review_branch, :dirty_worktree, :detached_head ].each do |reason|
       result = Hive::Rebase::Result.skipped(reason)
       _, err = capture_io { cmd.send(:log_rebase_outcome, fake_task, result) }
       assert_equal "", err, "reason=#{reason} must stay silent (still skip-state, attempted=false)"

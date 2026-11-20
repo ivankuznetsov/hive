@@ -1423,6 +1423,7 @@ class SchemaFilesTest < Minitest::Test
     assert_includes reasons, "controller_workflow"
     assert_includes reasons, "managed_draft_pr_handoff"
     assert_includes reasons, "pending_review_grant_fix"
+    assert_includes reasons, "published_review_branch"
   end
 
   # OPTIONAL_PAYLOAD_KEYS documents fields that are valid in SuccessPayload

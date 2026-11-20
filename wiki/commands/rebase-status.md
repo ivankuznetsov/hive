@@ -3,7 +3,7 @@ title: hive rebase-status
 type: command
 source: lib/hive/commands/rebase_status.rb
 created: 2026-05-14
-updated: 2026-09-02
+updated: 2026-11-20
 tags: [command, rebase, read-only, inspector]
 ---
 
@@ -25,6 +25,7 @@ hive rebase-status <project>/.hive-state/stages/<N>-<stage>/<slug> [--json]
 | `controller_workflow` | `<slug>: controller workflow owns checkout movement; generic auto-rebase does not apply` | The workflow's receipts and controller own the checkout |
 | `managed_draft_pr_handoff` | `<slug>: draft-PR handoff owns exact checkout identity; generic auto-rebase does not apply` | The managed handoff receipt owns the checkout pair |
 | `disabled` | `<slug>: auto-rebase DISABLED via cfg.rebase.enabled = false` | Project opted out |
+| `published_review_branch` | `<slug>: pull request is published and in review; Hive never rewrites it. Recover base drift with a merge commit (no rebase, no force-push)` | The task is in a review-runner stage and `github-publication.json` exists or `pr.md` carries a `pr_url` |
 | `no_worktree` | `<slug>: no worktree at this stage (<stage>); rebase not applicable` | Brainstorm/plan/inbox/done, or worktree path missing |
 | `pre_existing_rebase` | `<slug>: pre-existing rebase state on disk; rebase would skip. Run `git -C <wt> rebase --abort` to clean up.` | A prior aborted run left `.git/rebase-merge/` or `rebase-apply/` |
 | `dirty_worktree` | `<slug>: worktree dirty; rebase would skip until clean` | Uncommitted changes |

@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-10-02
+updated: 2026-11-20
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
@@ -95,10 +95,13 @@ second conflict-resolution agent into a one-agent workflow.
 3. Marker `REVIEW_WAITING reason=fix_guardrail` with a `head=` binding → `Result.skipped(:pending_head_bound_approval)`. The operator's approval is tied to that exact HEAD, so a rebase here would turn the resume into `approval_head_mismatch`.
 4. `--no-rebase` → `Result.skipped(:cli_override)`.
 5. `cfg.rebase.enabled == false` → `Result.disabled`.
-6. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
-7. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
-8. Worktree dirty → `Result.skipped(:dirty_worktree)`.
-9. Detached HEAD → `Result.skipped(:detached_head)`.
+6. The current stage runs the review runner and the task's pull request is published (`github-publication.json` exists or `pr.md` has a `pr_url`) → `Result.skipped(:published_review_branch)`. Review's `base_conflict` recovery is a merge commit with no rebase and no force-push, and its GitHub gate settles CI on the exact published head, so Hive never rewrites it. This covers the daemon's `workflow.retry` dispatch (`hive review … --from 6-review`) as well as a manual `hive run`.
+7. `task.worktree_path` missing → `Result.skipped(:no_worktree)`.
+8. `.git/rebase-merge/` or `.git/rebase-apply/` directory exists (pre-existing half-rebase from a prior aborted run) → `Result.skipped(:pre_existing_rebase)`. Emits a louder stderr warning naming the manual recovery: `cd <worktree_path> && git rebase --abort`.
+9. Worktree dirty → `Result.skipped(:dirty_worktree)`.
+10. Detached HEAD → `Result.skipped(:detached_head)`.
+
+**Behind:** after the fetch, Hive counts `HEAD..origin/<default_branch>`. The branch's configured upstream (for a stacked task, possibly a merged and deleted prerequisite) is never consulted, and a branch that already contains `origin/<default_branch>` is a no-op.
 
 **Fetch:** `git fetch origin <default_branch>` runs with `GIT_TERMINAL_PROMPT=0` and `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` set in the spawn environment, plus a Ruby-side wall-clock budget (`FETCH_TIMEOUT_SEC = 60`) enforced via `Process.spawn` + `Process.waitpid2` polling with SIGTERM→SIGKILL escalation. So both credential/host-key prompts and HTTPS network hangs fail immediately rather than blocking the run. Failure → `Result.skipped(:fetch_failed)`.
 
@@ -150,6 +153,9 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `cli_override` | `--no-rebase` was passed for this run |
 | `controller_workflow` | The workflow owns checkout movement through its controller state machine; generic auto-rebase is prohibited |
 | `managed_draft_pr_handoff` | The task workflow owns an exact receipt-backed draft-PR handoff; auto-rebase is prohibited |
+| `pending_head_bound_approval` | A `fix_guardrail` approval is bound to the current HEAD |
+| `pending_review_grant_fix` | A preserved-findings review grant owns the next fix HEAD |
+| `published_review_branch` | The task is in review with a published pull request; review recovers base drift with a merge commit only |
 | `no_worktree` | Stage has no worktree (brainstorm/plan) or worktree directory missing |
 | `pre_existing_rebase` | `.git/rebase-merge/` or `.git/rebase-apply/` already exists; operator cleanup required |
 | `dirty_worktree` | Uncommitted changes; rebase requires a clean tree |

@@ -48,6 +48,9 @@ module Hive
         enabled = cfg.dig("rebase", "enabled") != false
         return { state: :disabled, would_rebase: false } unless enabled
 
+        require "hive/rebase"
+        return { state: :published_review_branch, would_rebase: false } if Hive::Rebase.published_review_branch?(task)
+
         worktree = task.worktree_path
         return { state: :no_worktree, would_rebase: false } if worktree.nil? || worktree.to_s.strip.empty?
         return { state: :no_worktree, would_rebase: false } unless File.directory?(worktree)
@@ -85,6 +88,9 @@ module Hive
           puts "#{task.slug}: draft-PR handoff owns exact checkout identity; generic auto-rebase does not apply"
         when :disabled
           puts "#{task.slug}: auto-rebase DISABLED via cfg.rebase.enabled = false"
+        when :published_review_branch
+          puts "#{task.slug}: pull request is published and in review; Hive never rewrites it. " \
+               "Recover base drift with a merge commit (no rebase, no force-push)"
         when :no_worktree
           puts "#{task.slug}: no worktree at this stage (#{task.stage_name}); rebase not applicable"
         when :pre_existing_rebase

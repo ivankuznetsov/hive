@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-11-15
+updated: 2026-11-20
 tags: [daemon, module, automation, dispatcher, operational-status, snapshots, terminal-outcomes, recovery, plan-review, bounded-storage, daily-digest]
 ---
 
@@ -616,6 +616,19 @@ pass, so later rows do not each wait out the same lock; `run_forever` logs
 raises a SQLite busy error, then keeps ticking. Startup dispatch-claim
 recovery retries busy with bounded backoff (2 s, 5 s, 10 s, logged as
 `startup_deferred`) before failing.
+Exhausted attempt bookkeeping (`Hive::Attempts::BookkeepingBusy`, reason
+`runtime_bookkeeping_busy`, also exit 75) is the same transient. The row loop
+logs `dispatch_deferred` with the typed `reason`, `operation`, `attempt_id`,
+`retry_count`, `elapsed_sec` and `budget_sec` and stops the pass. The next
+tick re-admits the row. Either no attempt row exists, or `Dispatcher#admit`
+already recorded pending-bookkeeping evidence for the admitted attempt.
+`run_forever` treats a top-level `BookkeepingBusy` or `RuntimeDatabaseBusy`
+like a SQLite busy, with or without a SQLite cause. It logs `tick_deferred`
+and fails the snapshot with the typed reason. Before 2026-11-20 a
+`BookkeepingBusy` with no SQLite cause escaped every rescue and exited the
+daemon (status 75) until the systemd restart 30 s later. A
+`BookkeepingBusy` that is only the cause of another error is not treated as
+contention through that typed check.
 Non-busy repository, corruption, schema, and storage errors still propagate.
 `OperationalRepository#publish` encodes the observation document (the
 scheduler snapshot plus the multi-MB `hive-status` projection) before

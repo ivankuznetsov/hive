@@ -2689,6 +2689,34 @@ sibling `hive-attempt-*.scope` units, so which daemon-spawned path launched a
 provider inside the service cgroup is unknown. Existing installs keep the old
 `StartLimitBurst=3` unit until `hive daemon install --force` rewrites it.
 
+## Daemon exit on exhausted admission bookkeeping (2026-11-20)
+
+At 18:39:31 the daemon (deployment `cc0628924`) logged a 13.26 s
+`attempt.observe_task_source` lock hold, then
+`runtime_bookkeeping_busy: admission exhausted after 0.0s (0 busy tries)`, and
+exited 75. A large container image build was loading the host. The fix gives
+pre-admission operations their own budgets, starts the durable chain budget at
+the admission write, and has the daemon defer instead of exit. Still
+unresolved:
+
+- The log cannot show how the remaining ~17 s of the old 30 s admission
+  budget went. It could have been busy `observe_source` tries before the
+  committed one, or the unbudgeted admission-view reads and context work
+  between observation and admission.
+- Worst case, one admission can now block a tick for longer. `observe_source`,
+  `read_admission` and the durable chain each have up to 30 s, plus commit
+  holds that no budget bounds. Before, one 30 s deadline covered all of them.
+  The row loop still stops the pass after the first busy row.
+- `record_attempt_admission` and `capture_launch_context` run inside the
+  chain budget, between the admission write and `arm_handoff`. Under heavy
+  load they can still leave `arm_handoff` a spent deadline. The attempt is
+  then recorded as pending bookkeeping and recovered as lost after its launch
+  timeout; it is not admitted twice.
+- The detached launcher and supervisor still report bookkeeping `elapsed_sec`
+  from their own construction (see [[modules/attempts]]).
+- A 13 s hold on a small `task_subjects` upsert suggests fsync stalls under I/O
+  pressure (FULL synchronous WAL). This has not been measured.
+
 
 ## Plan review: stale reviews held by dependencies (2026-11-06)
 

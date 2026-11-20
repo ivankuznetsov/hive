@@ -879,24 +879,51 @@ module Hive
         end
       end
 
-      # A tick that loses the runtime database busy timeout ends early and the
-      # next tick retries. Lock contention is normal when many `hive`
-      # processes share the database; it must never terminate the daemon.
-      # Corruption, schema, and storage failures are not busy errors and still
-      # propagate.
+      # A tick that loses the runtime database busy timeout, or exhausts a
+      # bounded attempt-bookkeeping budget (BookkeepingBusy, TEMPFAIL), ends
+      # early and the next tick retries. Lock contention is normal when many
+      # `hive` processes share the database; it must never terminate the
+      # daemon. Corruption, schema, and storage failures are not busy errors
+      # and still propagate.
       def survive_runtime_database_busy(now:)
         yield
       rescue StandardError => error
-        raise unless Hive::InternalError.sqlite_busy?(error)
+        raise unless runtime_contention?(error)
 
+        attributes = runtime_contention_attributes(error)
+        attributes.delete(:message)
         @logger.event(
-          :tick_deferred, reason: "runtime_database_busy",
+          :tick_deferred, **attributes,
           error: "#{error.class}: #{error.message.to_s[0, 300]}"
         )
         publish_operational_snapshot(
-          :fail, phase: "failed", reason: "runtime_database_busy", now: now
+          :fail, phase: "failed", reason: attributes.fetch(:reason), now: now
         )
         nil
+      end
+
+      # Transient runtime lock contention, never a reason to exit: a SQLite
+      # busy anywhere in the cause chain, or a typed attempt busy raised
+      # directly. A typed busy is checked only at the top level: one that is
+      # merely the cause of another error (for example a pending-bookkeeping
+      # storage failure) does not make that error transient. A busy with no
+      # SQLite cause (a spent shared deadline) is still contention.
+      def runtime_contention?(error)
+        error.is_a?(Hive::Attempts::BookkeepingBusy) ||
+          error.is_a?(Hive::Attempts::RuntimeDatabaseBusy) ||
+          Hive::InternalError.sqlite_busy?(error)
+      end
+
+      def runtime_contention_attributes(error)
+        unless error.is_a?(Hive::Attempts::BookkeepingBusy)
+          return { reason: "runtime_database_busy", message: error.message.to_s[0, 300] }
+        end
+
+        {
+          reason: error.reason, operation: error.operation, attempt_id: error.attempt_id,
+          retry_count: error.retry_count, elapsed_sec: error.elapsed_sec.round(3),
+          budget_sec: error.budget_sec, message: error.message.to_s[0, 300]
+        }.compact
       end
 
       def live_attempt?(project)
@@ -3241,14 +3268,17 @@ module Hive
             # propagates.
             log_attempt_admission_failure(row, error)
             next
-          rescue Hive::Attempts::RuntimeDatabaseBusy => error
+          rescue Hive::Attempts::RuntimeDatabaseBusy, Hive::Attempts::BookkeepingBusy => error
             # Another Hive process held the runtime database write lock past
-            # the busy timeout. Nothing was written. Every later row would
-            # wait out the same timeout, so defer the rest of this pass; the
-            # next tick re-evaluates all of them.
+            # the busy timeout (nothing was written), or bounded attempt
+            # bookkeeping spent its whole budget on it. In the latter case
+            # either no attempt row exists, or Attempts::Dispatcher#admit has
+            # already recorded pending-bookkeeping evidence for the admitted
+            # attempt. Every later row would wait out the same lock, so defer
+            # the rest of this pass; the next tick re-evaluates all of them.
             @logger.event(
               :dispatch_deferred, project: row.project, slug: row.slug, stage: row.stage,
-              reason: "runtime_database_busy", message: error.message.to_s[0, 300]
+              **runtime_contention_attributes(error)
             )
             break
           end

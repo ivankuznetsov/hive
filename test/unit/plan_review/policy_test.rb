@@ -12,6 +12,11 @@ class PlanReviewPolicyTest < Minitest::Test
       }
     end
   end
+  FakeReview = Data.define(:resolved, :routes) do
+    def execution_allowed? = resolved
+
+    def [](key) = key.to_s == "routes" ? routes : nil
+  end
 
   def test_non_coding_workflows_are_not_applicable
     result = Hive::PlanReview::Policy.evaluate(
@@ -223,7 +228,149 @@ class PlanReviewPolicyTest < Minitest::Test
                  affecting.fetch("adapter_contract_version")
   end
 
+  def test_reviewer_routing_is_who_reviews_without_the_planner_fallback
+    full = routed_config
+    full["plan_review"]["routes"]["planner_revision_fallback"] = route("codex", "gpt-5.6-sol", "openai")
+
+    routing = Hive::PlanReview::Policy.reviewer_routing(full)
+
+    assert_equal %w[model_routing reviewers routes], routing.keys.sort
+    assert_equal full.dig("plan_review", "reviewers"), routing.fetch("reviewers")
+    assert_equal %w[adversarial fallbacks primary verification], routing.fetch("routes").keys.sort
+    assert_equal({ "plan_review" => { "effort" => "xhigh" } }, routing.fetch("model_routing"))
+  end
+
+  # Restoring a review's own reviewer routing leaves only verdict-relevant
+  # drift: rerouting every reviewer (and its model routing) reproduces the
+  # recorded fingerprint, while any change to what a review must establish
+  # still does not.
+  def test_restoring_recorded_reviewer_routing_isolates_verdict_relevant_drift
+    policy = Hive::PlanReview::Policy
+    base = routed_config
+    recorded = policy.configuration_fingerprint(base)
+    routing = policy.reviewer_routing(base)
+    rerouted = reroute(base)
+    refute_equal recorded, policy.configuration_fingerprint(rerouted)
+    assert_equal recorded, policy.configuration_fingerprint(policy.with_reviewer_routing(rerouted, routing))
+
+    verdict_changes = {
+      "minimum_level" => ->(cfg) { cfg["plan_review"]["minimum_level"] = "mandatory" },
+      "coding minimum_level" => ->(cfg) { cfg["plan_review"]["coding"]["minimum_level"] = "standard" },
+      "protected_paths" => ->(cfg) { cfg["plan_review"]["protected_paths"] << "app/models/**" },
+      "coverage" => ->(cfg) { cfg["plan_review"]["coverage"]["optional"] << "security" },
+      "classifier_version" => ->(cfg) { cfg["plan_review"]["classifier_version"] = 2 },
+      "adapter" => ->(cfg) { cfg["plan_review"]["adapter"] = "replacement_review" }
+    }
+    verdict_changes.each do |label, change|
+      changed = Marshal.load(Marshal.dump(rerouted))
+      change.call(changed)
+      refute_equal recorded,
+                   policy.configuration_fingerprint(policy.with_reviewer_routing(changed, routing)),
+                   "#{label} must still stale a resolved review"
+    end
+    assert_equal Hive::PlanReview::ADAPTER_CONTRACT_VERSION,
+                 policy.policy_affecting_config(
+                   policy.with_reviewer_routing(rerouted, routing)["plan_review"]
+                 ).fetch("adapter_contract_version")
+  end
+
+  def test_configuration_current_ignores_reviewer_routing_only_for_resolved_reviews
+    policy = Hive::PlanReview::Policy
+    base = routed_config
+    artifact = {
+      "configuration_fingerprint" => policy.configuration_fingerprint(base),
+      "reviewer_routing" => policy.reviewer_routing(base)
+    }
+    rerouted = reroute(base)
+    raised = Marshal.load(Marshal.dump(rerouted))
+    raised["plan_review"]["minimum_level"] = "mandatory"
+
+    assert policy.configuration_current?(rerouted, artifact:, record: review(resolved: true))
+    refute policy.configuration_current?(raised, artifact:, record: review(resolved: true))
+    refute policy.configuration_current?(rerouted, artifact:, record: review(resolved: false))
+    assert policy.configuration_current?(base, artifact:, record: review(resolved: false))
+  end
+
+  # Policy artifacts from before `reviewer_routing` was recorded: the routing
+  # is rebuilt from the review's own route receipts and trusted only when it
+  # reproduces the recorded digest.
+  def test_legacy_resolved_review_rebuilds_its_routing_from_route_receipts
+    policy = Hive::PlanReview::Policy
+    base = routed_config
+    legacy = { "configuration_fingerprint" => policy.configuration_fingerprint(base) }
+    receipts = %w[primary adversarial verification].map do |role|
+      { "role" => role, "requested" => receipt_route(base.dig("plan_review", "routes", role)) }
+    end
+    rerouted = reroute(base, model_routing: false)
+    raised = Marshal.load(Marshal.dump(rerouted))
+    raised["plan_review"]["protected_paths"] << "app/models/**"
+    resolved = review(resolved: true, routes: receipts)
+
+    # Upgrading Hive alone never stales a legacy review.
+    assert policy.configuration_current?(base, artifact: legacy, record: review(resolved: true))
+    assert policy.configuration_current?(rerouted, artifact: legacy, record: resolved)
+    refute policy.configuration_current?(raised, artifact: legacy, record: resolved)
+    refute policy.configuration_current?(rerouted, artifact: legacy, record: review(resolved: false, routes: receipts))
+    # What the receipts cannot show fails closed: a rerouted role the review
+    # never ran, or a review model routing change.
+    refute policy.configuration_current?(
+      rerouted, artifact: legacy, record: review(resolved: true, routes: receipts.first(2))
+    )
+    refute policy.configuration_current?(reroute(base), artifact: legacy, record: resolved)
+  end
+
   private
+
+  def review(resolved:, routes: [])
+    FakeReview.new(resolved:, routes:)
+  end
+
+  def route(agent, model, family, effort: "high", route: "native_#{agent}")
+    { "agent" => agent, "model" => model, "family" => family, "effort" => effort, "route" => route }
+  end
+
+  def receipt_route(row)
+    {
+      "provider" => row.fetch("agent"), "model" => row.fetch("model"),
+      "family" => row.fetch("family"), "effort" => row.fetch("effort"), "route" => row.fetch("route")
+    }
+  end
+
+  def routed_config
+    {
+      "plan_review" => config.merge(
+        "coverage" => { "required" => %w[whole_document adversarial], "optional" => [] },
+        "adapter" => "ce_doc_review",
+        "reviewers" => {
+          "primary" => "plan_review", "adversarial" => "plan_review_adversarial",
+          "verification" => "plan_review_verification"
+        },
+        "routes" => {
+          "primary" => route("muse", "muse-wonder-full-1.0", "meta", effort: "xhigh"),
+          "adversarial" => route("codex", "gpt-6-astra", "openai"),
+          "verification" => route("muse", "muse-wonder-full-1.0", "meta", effort: "xhigh"),
+          "fallbacks" => []
+        }
+      ),
+      "models" => {
+        "plan_review" => { "effort" => "xhigh" },
+        "execute" => { "model" => "gpt-5.6-terra" }
+      }
+    }
+  end
+
+  # The todero reroute of 2026-11-20 (Muse and Codex out of quota), by default
+  # with a review model routing change too.
+  def reroute(base, model_routing: true)
+    rerouted = Marshal.load(Marshal.dump(base))
+    routes = rerouted["plan_review"]["routes"]
+    grok = route("grok", "grok-4.7", "grok", effort: "xhigh", route: "native_grok_build")
+    routes["primary"] = grok
+    routes["verification"] = grok
+    routes["adversarial"] = route("claude", "claude-opus-5-5", "anthropic", effort: "xhigh")
+    rerouted["models"]["plan_review_verification"] = { "effort" => "high" } if model_routing
+    rerouted
+  end
 
   def config
     {

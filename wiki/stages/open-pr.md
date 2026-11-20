@@ -3,7 +3,7 @@ title: 5-open-pr stage
 type: stage
 source: lib/hive/stages/open_pr.rb, lib/hive/github_publication.rb, templates/open_pr_prompt.md.erb
 created: 2026-05-13
-updated: 2026-11-19
+updated: 2026-11-20
 tags: [stage, pr, github]
 ---
 
@@ -98,6 +98,32 @@ Revalidation still checks the exact candidate and change range before effects.
   head was hosted: publish a successor PR (see above).
 - Conflict, secret, ambiguous inventory, or unknown remote outcome: write an
   attributed `github_publication_*` error and leave the task retryable.
+- Authoring agent hit a provider limit: `ERROR reason=limits_reached
+  provider=<agent>`, retried by the daemon after the shared cooldown.
+
+## Provider-limit fallback
+
+Field case (2026-11-20): hivedev task `adr-0004-rollout-step-3-261115-9cdb`
+failed `limits_reached` on every scheduled retry because its open_pr identity
+was already resolved to Codex for the generation, while Codex was out of quota
+for three days and the project config had been rerouted to grok.
+
+With the opt-in `implementation.limit_fallback` (see [[modules/config]]), an
+authoring run that would write `limits_reached` is retried once on the mapped
+fallback profile under fresh custody. The primary's partial `pr-draft.json`
+is deleted first. The substitute identity is `open_pr.agent` / `model` /
+`effort` when `open_pr.agent` names the fallback, else the fallback profile's
+default model at the stage's `medium` effort. It is journaled as
+`implementation_identity_substituted` before launch, with log label
+`open-pr-author-fallback-<agent>` and no route observation. The open_pr pin
+for the generation is unchanged, so every attempt starts on the primary. A
+successful substitute's draft feeds the same publication controller. A
+substitute that is also limited or fails, a short reset (`waiting`), an
+unresolvable identity (`unresolved`), or a failed journal append (`failed`)
+keeps the primary's `limits_reached` marker annotated with `primary_agent=`,
+`fallback_agent=`, and `fallback_outcome=`. Refused models and generic
+authoring failures never fall back. See [[stages/execute]] for the shared
+rules.
 
 ## Backlinks
 

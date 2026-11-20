@@ -23,6 +23,7 @@ require "hive/patrol_fix/attempt_diagnostic"
 require "hive/task_projection/reader"
 require "hive/task_closure"
 require "hive/implementation_identity/resolver"
+require "hive/limit_fallback"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
@@ -1094,7 +1095,9 @@ module Hive
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
         payload.delete("implementation_identity") unless row[:implementation_identity]
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
-          payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
+          payload["held"] = Hive::AgentLimit.held_field(
+            row[:marker_attrs], held_limit_fallback(row)
+          )
         end
         payload
       end
@@ -1467,7 +1470,39 @@ module Hive
           row[:implementation_identity] = implementation_identity_status(
             row.dig(:projection_data, "implementation_identity"), config
           )
+          row[:configured_limit_fallback] = configured_limit_fallback(row, config)
         end
+      end
+
+      # Coding stage (by directory name) => the limit_fallback block that
+      # covers its agent launches.
+      LIMIT_FALLBACK_PATHS = {
+        "execute" => Hive::Config::IMPLEMENTATION_LIMIT_FALLBACK_PATH,
+        "open-pr" => Hive::Config::IMPLEMENTATION_LIMIT_FALLBACK_PATH,
+        "artifacts" => Hive::Config::IMPLEMENTATION_LIMIT_FALLBACK_PATH,
+        "finalize" => Hive::Config::IMPLEMENTATION_LIMIT_FALLBACK_PATH,
+        "review" => Hive::Config::REVIEW_LIMIT_FALLBACK_PATH
+      }.freeze
+
+      # The fallback agent the current config maps the held provider to, for
+      # a quota-held coding row. Status reads config only: whether the next
+      # attempt actually substitutes is still decided at launch.
+      def configured_limit_fallback(row, config)
+        return nil unless config && Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
+
+        path = LIMIT_FALLBACK_PATHS[row[:stage].to_s.sub(/\A\d+-/, "")]
+        provider = Hive::AgentLimit.held_provider(row[:marker_attrs])
+        return nil unless path && provider
+
+        Hive::LimitFallback.configured_fallback(config, path, provider)
+      end
+
+      # A marker stamped by a fallback evaluation wins; otherwise a held row
+      # whose provider is mapped in config reports the fallback as available.
+      def held_limit_fallback(row)
+        Hive::AgentLimit.held_fallback(row[:marker_attrs]) ||
+          (row[:configured_limit_fallback] &&
+            { "agent" => row[:configured_limit_fallback], "outcome" => "available" }.freeze)
       end
 
       def implementation_identity_status(projected, config)
@@ -1489,7 +1524,29 @@ module Hive
             "resolution_error" => e.message.to_s[0, 240]
           }
         end
-        { "generation" => generation, "pending" => false, "stages" => stages }
+        status = { "generation" => generation, "pending" => false, "stages" => stages }
+        substitutions = Array(projected["substitutions"]).map { |entry| public_substitution(entry) }
+        status["substitutions"] = substitutions unless substitutions.empty?
+        status
+      end
+
+      # One journaled provider-limit substitution: which provider actually
+      # ran for one attempt, with the pinned primary kept for audit.
+      def public_substitution(entry)
+        route = lambda do |value|
+          value.is_a?(Hash) ? value.slice("provider", "model", "requested_effort", "source") : {}
+        end
+        {
+          "stage" => entry["stage"],
+          "role" => entry["role"],
+          "attempt_id" => entry["attempt_id"],
+          "occurred_at" => entry["occurred_at"],
+          "scope" => entry["scope"],
+          "primary" => route.call(entry["primary"]),
+          "substitute" => route.call(entry["substitute"]),
+          "limit" => entry["limit"],
+          "retry_after" => entry["retry_after"]
+        }
       end
 
       def public_identity_stage(identity, status:)

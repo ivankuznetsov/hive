@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/running_status.rb, lib/hive/task_projection/reader.rb, lib/hive/task_closure.rb, lib/hive/operational_status.rb, lib/hive/runtime_identity.rb, lib/hive/operational_action.rb, lib/hive/daemon/operational_snapshot.rb, lib/hive/diagnostic_evidence.rb, lib/hive/runtime_control_plane/operational_inspection.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/operational_repository.rb, lib/hive/runtime_control_plane/operational_payload_store.rb
 created: 2026-04-25
-updated: 2026-11-16
+updated: 2026-11-20
 tags: [command, status, operational, agents, observability, json, diagnostics, archive, closure, blocked, plan-review, terminal-outcomes, dependencies, scheduler, task-journal, read-only]
 ---
 
@@ -755,6 +755,10 @@ becomes `dependency_validation_failed`, never an unblocked row.
 Coding task rows may also carry `implementation_identity`: the numeric generation, a pending flag, and stage entries for `execute`, `open_pr`, `review.fix`, and `review.ci`. Resolved entries come from projected journal launch events; unlaunched downstream entries are read-only previews from the persisted execute owner plus raw override provenance. Each entry exposes provider, concrete model, requested/effective effort, support, source (`persisted_execute`, `explicit_override`, or `legacy_backfill`), attempts, and resolved/preview status. Unsupported effort is rendered as requested but not applied.
 
 Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append journal events. Text and TUI rows append a bounded execute-owner token after primary error/dependency signals; `I` opens the TUI's full four-stage table, and Hive web task details show the same projection.
+
+When the current generation journaled provider-limit substitutions (`implementation.limit_fallback`, see [[modules/config]]), `implementation_identity.substitutions` lists them in order. Each carries stage, role, attempt, time, `scope: "attempt"`, the pinned `primary` and the `substitute` that actually ran (provider, model, effort, source), the first limit line, and the explicit reset when known. The stage entries above keep the pinned identities. The operational row adds a `limit_fallback_used` reason (`limits_reached on codex until …; fallback grok used for open_pr in this attempt; the codex pin is unchanged`) while the latest substitution belongs to the row's `current_attempt`.
+
+A quota-held row (`held`) gains an optional `fallback` object `{agent, outcome}`. The outcome comes from the marker that the last fallback evaluation stamped (`fallback_outcome=waiting|limited|failed|unresolved|unsupported`, also written by `review.limit_fallback` as `limited|failed`). When the marker carries none but the project config maps the held provider for the row's coding stage, it is `available`, meaning the next attempt substitutes it. The config check does not see explicit provider routing. `held_label`, the operational `provider_quota` reason, and the operational `provider.fallback` field all render it, e.g. `codex quota hold until 2026-11-23T14:18:00Z; fallback grok available; the next attempt substitutes it`.
 
 ## Archived tasks
 

@@ -12,6 +12,7 @@ require "hive/artifacts/outcome_evidence/store"
 require "hive/stages/base"
 require "hive/worktree"
 require "hive/implementation_identity/store"
+require "hive/implementation_limit_fallback"
 require "hive/git_ops"
 require "hive/agent_git_gate"
 require "hive/markers"
@@ -209,38 +210,12 @@ module Hive
         checkout_failure = validate_execution_checkout(task, cfg, worktree_path, worktree_git, baseline_head)
         return checkout_failure if checkout_failure
 
-        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
-          execute_custody_manifest(
-            task, worktree_path,
-            extra_protected: rework_context.fetch("protected_paths")
-          )
+        implementer = run_implementer_in_custody(
+          task, cfg, worktree_path, rework_context, identity: identity
         )
-        begin
-          impl_result = spawn_implementation(
-            task, cfg, worktree_path, identity: identity,
-            agent_custody: agent_custody,
-            rework_feedback: rework_context.fetch("feedback")
-          )
-        rescue Hive::ProviderRouteFailed
-          record_implementation_exception(task, agent_custody) do
-            mark_provider_route_failure(task)
-          end
-          raise
-        rescue StandardError => e
-          record_implementation_exception(task, agent_custody) do
-            mark_implementer_exception(task, cfg, e)
-          end
-          raise
-        end
-        custody_report = agent_custody.report
-        if custody_report&.tampered?
-          return record_tamper(
-            task, custody_report.tampered_labels, who: "implementer",
-            restored: custody_report.restored?,
-            restore_error: custody_report.restore_diagnostic
-          )
-        end
+        return implementer.fetch(:terminal) if implementer.key?(:terminal)
 
+        impl_result = implementer.fetch(:result)
         # task.md is protected from the implementation agent. Persist the
         # controller-owned final-message transcript only after that custody
         # window has closed, otherwise our own write is indistinguishable
@@ -251,9 +226,23 @@ module Hive
           task, cfg, "execute", impl_result
         )
 
+        limit_fallback_attrs = {}
+        if implementer_limit_failure?(impl_result)
+          fallback = run_implementer_limit_fallback(
+            task, cfg, worktree_path, rework_context, identity, impl_result
+          )
+          return fallback.fetch(:terminal) if fallback.key?(:terminal)
+
+          impl_result = fallback.fetch(:result) if fallback.key?(:result)
+          limit_fallback_attrs = fallback.fetch(:marker_attrs, {})
+        end
+
         completion_candidate = commit_completion_candidate?(impl_result)
         if agent_failed?(impl_result) && !completion_candidate
-          return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+          return mark_implementer_failure(
+            task, cfg, impl_result, worktree_path, baseline_head,
+            limit_fallback_attrs: limit_fallback_attrs
+          )
         end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
@@ -292,7 +281,10 @@ module Hive
                            !dirty_worktree && new_commit && ancestor_ok &&
                            completion_attested?(worktree_git, head_after, task)
         if agent_failed?(impl_result) && !commit_recovered
-          return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+          return mark_implementer_failure(
+            task, cfg, impl_result, worktree_path, baseline_head,
+            limit_fallback_attrs: limit_fallback_attrs
+          )
         end
 
         if new_commit && !ancestor_ok
@@ -486,7 +478,102 @@ module Hive
         "#{COMPLETION_TRAILER}: #{Digest::SHA256.hexdigest(plan_bytes)}"
       end
 
-      def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
+      # Spawn one implementer under fresh single-use custody. Returns
+      # `{ result: }`, or `{ terminal: }` when the agent tampered with
+      # controller-owned state. Exceptions record a recoverable marker and
+      # propagate exactly as before.
+      def run_implementer_in_custody(task, cfg, worktree_path, rework_context,
+                                     identity:, limit_fallback: nil)
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(
+          execute_custody_manifest(
+            task, worktree_path,
+            extra_protected: rework_context.fetch("protected_paths")
+          )
+        )
+        begin
+          spawn_kwargs = {
+            identity: identity, agent_custody: agent_custody,
+            rework_feedback: rework_context.fetch("feedback")
+          }
+          spawn_kwargs[:limit_fallback] = limit_fallback if limit_fallback
+          result = spawn_implementation(task, cfg, worktree_path, **spawn_kwargs)
+        rescue Hive::ProviderRouteFailed
+          record_implementation_exception(task, agent_custody) do
+            mark_provider_route_failure(task)
+          end
+          raise
+        rescue StandardError => e
+          record_implementation_exception(task, agent_custody) do
+            mark_implementer_exception(task, cfg, e)
+          end
+          raise
+        end
+        custody_report = agent_custody.report
+        if custody_report&.tampered?
+          return {
+            terminal: record_tamper(
+              task, custody_report.tampered_labels, who: "implementer",
+              restored: custody_report.restored?,
+              restore_error: custody_report.restore_diagnostic
+            )
+          }
+        end
+
+        { result: result }
+      end
+
+      # The failure mark_implementer_failure would publish as limits_reached:
+      # attempt bookkeeping and refused models are classified first and never
+      # fall back, exactly as they never inherit the provider cooldown.
+      def implementer_limit_failure?(impl_result)
+        agent_failed?(impl_result) &&
+          !commit_completion_candidate?(impl_result) &&
+          !Hive::Attempts::BookkeepingReason.from(impl_result) &&
+          !implementer_model_unsupported?(impl_result) &&
+          implementer_hit_limit?(impl_result)
+      end
+
+      # implementation.limit_fallback for the execute implementer (see
+      # Hive::ImplementationLimitFallback). An approved substitute is
+      # journaled, then launched once under fresh custody on the same
+      # worktree; the execute pin is not rewritten. Returns `{ result: }`
+      # when the substitute's result replaces the primary's, `{ terminal: }`
+      # when the substitute tampered, or `{ marker_attrs: }` naming why the
+      # primary's limit stands (possibly empty).
+      def run_implementer_limit_fallback(task, cfg, worktree_path, rework_context, identity, impl_result)
+        primary = implementation_provider(impl_result, cfg)
+        plan = Hive::ImplementationLimitFallback.plan(
+          cfg: cfg, stage: "execute", primary: primary,
+          limit_text: implementer_limit_text(impl_result),
+          error_message: impl_result[:error_message], execute_identity: identity
+        )
+        return {} unless plan
+        return { marker_attrs: plan.marker_attrs } unless plan.substitute?
+
+        recorded = Hive::ImplementationLimitFallback.record!(
+          task: task, cfg: cfg, plan: plan, primary: identity || { "provider" => primary }
+        )
+        return { marker_attrs: plan.marker_attrs("failed") } unless recorded
+
+        substitute = run_implementer_in_custody(
+          task, cfg, worktree_path, rework_context,
+          identity: plan.identity, limit_fallback: plan
+        )
+        return substitute if substitute.key?(:terminal)
+
+        result = substitute.fetch(:result)
+        append_implementation_output(task, result)
+        ok = !agent_failed?(result) || commit_completion_candidate?(result)
+        outcome = Hive::ImplementationLimitFallback.finish(
+          plan, ok: ok, limited: implementer_hit_limit?(result)
+        )
+        return { result: result } if ok
+
+        { marker_attrs: plan.marker_attrs(outcome) }
+      end
+
+      def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head,
+                                   limit_fallback_attrs: {})
         if (reason = Hive::Attempts::BookkeepingReason.from(impl_result))
           return apply_execute_outcome(
             task, cfg, worktree_path, baseline_head,
@@ -520,12 +607,13 @@ module Hive
             attrs: {
               reason: "limits_reached",
               provider: implementation_provider(impl_result, cfg),
-               message: "implementer hit a usage/credit limit",
-               retry_after: Hive::AgentLimit.retry_after(text: implementer_limit_text(impl_result))
-             },
+              message: "implementer hit a usage/credit limit",
+              retry_after: Hive::AgentLimit.retry_after(text: implementer_limit_text(impl_result)),
+              **limit_fallback_attrs
+            },
             commit: "limits_reached", status: :error,
-             waiting_reason: "agent_limit"
-           )
+            waiting_reason: "agent_limit"
+          )
         end
 
         apply_execute_outcome(
@@ -635,7 +723,8 @@ module Hive
       end
 
       def spawn_implementation(task, cfg, worktree_path, identity: nil,
-                               agent_custody: nil, rework_feedback: nil)
+                               agent_custody: nil, rework_feedback: nil,
+                               limit_fallback: nil)
         plan_path = File.join(task.folder, "plan.md")
         plan_text = File.read(plan_path)
         prompt = Hive::Stages::Base.render(
@@ -650,8 +739,13 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        identity ||= capture_implementation_identity(task, cfg)
-        profile = if identity
+        # A limit-fallback substitute launches the journaled substitute
+        # identity on the fallback profile; it never captures or observes
+        # the execute pin (see run_implementer_limit_fallback).
+        identity ||= capture_implementation_identity(task, cfg) unless limit_fallback
+        profile = if limit_fallback
+          Hive::AgentProfiles.lookup(limit_fallback.fallback, cfg: cfg)
+        elsif identity
           Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
         else
           Hive::Stages::Base.stage_profile(cfg, "execute")
@@ -668,7 +762,7 @@ module Hive
         # so there is no durable Selection to carry models.execute_implementation
         # into the spawn. Resolve that same closed routing cell here instead of
         # leaving a route-required profile with a nil model.
-        if identity.nil?
+        if identity.nil? && !limit_fallback
           launch_arguments.merge!(
             Hive::Stages::Base.model_launch_arguments(
               cfg, "execute_implementation", profile,
@@ -694,9 +788,9 @@ module Hive
           cwd: worktree_path,
           max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "execute_implementation", profile),
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
-          log_label: "execute-impl",
+          log_label: limit_fallback ? limit_fallback.log_label("execute-impl") : "execute-impl",
           profile: profile,
-          implementation_stage: "execute",
+          implementation_stage: (limit_fallback ? nil : "execute"),
           agent_custody: agent_custody,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only,

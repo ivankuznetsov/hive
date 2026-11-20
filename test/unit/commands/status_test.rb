@@ -1741,6 +1741,82 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  # implementation.limit_fallback: a held coding row whose provider the
+  # project maps reports the fallback as available; a marker stamped by a
+  # fallback evaluation reports that outcome instead.
+  def test_json_payload_reports_the_limit_fallback_for_a_held_row
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), <<~YAML)
+        implementation:
+          limit_fallback:
+            enabled: true
+            agents:
+              codex: grok
+      YAML
+      write_status_task(hive_state, "5-open-pr", "available-task-261120-abcd",
+                        state_file: "pr.md",
+                        marker: "ERROR reason=limits_reached provider=codex")
+      write_status_task(hive_state, "4-execute", "limited-task-261120-abcd",
+                        state_file: "task.md",
+                        marker: "ERROR reason=limits_reached provider=muse primary_agent=muse " \
+                                "fallback_agent=grok fallback_outcome=limited")
+      write_status_task(hive_state, "4-execute", "unmapped-task-261120-abcd",
+                        state_file: "task.md",
+                        marker: "ERROR reason=limits_reached provider=pi")
+
+      payload = Hive::Commands::Status.new.json_payload([ status_project(project_root, hive_state) ])
+      held = payload.fetch("projects").first.fetch("tasks").to_h do |row|
+        [ row.fetch("slug"), row["held"] ]
+      end
+
+      assert_equal({ "agent" => "grok", "outcome" => "available" },
+                   held.fetch("available-task-261120-abcd").fetch("fallback"))
+      assert_equal({ "agent" => "grok", "outcome" => "limited" },
+                   held.fetch("limited-task-261120-abcd").fetch("fallback"))
+      refute held.fetch("unmapped-task-261120-abcd").key?("fallback")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+      assert_empty schema.validate(payload).to_a
+    end
+  end
+
+  def test_implementation_identity_status_exposes_journaled_substitutions
+    execute_fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
+    cfg = {
+      "execute" => execute_fields.dup,
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => execute_fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
+      }.freeze
+    }
+    execute = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
+      generation: 2, attempt_id: "execute-2"
+    ).to_h
+    substitution = {
+      "event_id" => "event", "attempt_id" => "execute-3", "occurred_at" => "2026-11-20T10:00:00Z",
+      "generation" => 2, "stage" => "execute", "role" => "execute", "scope" => "attempt",
+      "primary" => execute, "substitute" => { "provider" => "grok", "model" => "grok-4.7" },
+      "limit" => "usage limit", "retry_after" => nil
+    }
+    command = Hive::Commands::Status.new
+
+    status = command.implementation_identity_status(
+      { "generation" => 2, "execute" => execute, "stages" => {}, "substitutions" => [ substitution ] }, cfg
+    )
+    plain = command.implementation_identity_status(
+      { "generation" => 2, "execute" => execute, "stages" => {} }, cfg
+    )
+
+    public_substitution = status.fetch("substitutions").first
+    assert_equal({ "provider" => "codex", "model" => "gpt-5.6-sol", "requested_effort" => nil,
+                   "source" => "persisted_execute" }, public_substitution.fetch("primary"))
+    assert_equal({ "provider" => "grok", "model" => "grok-4.7" }, public_substitution.fetch("substitute"))
+    assert_equal "execute-3", public_substitution.fetch("attempt_id")
+    assert_equal "codex", status.dig("stages", "execute", "provider")
+    refute plain.key?("substitutions")
+    assert_equal({}, command.send(:public_substitution, "primary" => "codex").fetch("primary"))
+  end
+
   # The resolved branch of the text-mode indicator was only exercised via
   # the TUI's separate renderer, so swapping the two branches in
   # Commands::Status would have passed every test. Pin a below-gate

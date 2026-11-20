@@ -450,8 +450,34 @@ module Hive
         "execute" => execute,
         "stages" => stages,
         "history" => execute_history,
-        "fallback_warnings" => warnings
+        "fallback_warnings" => warnings,
+        "substitutions" => limit_fallback_substitutions(authoritative, generation)
       }
+    end
+
+    # Provider-limit substitutions journaled in the current generation, in
+    # order. Each is scoped to the attempt that made it; the pinned stage
+    # identities above are never replaced by one.
+    def limit_fallback_substitutions(authoritative, generation)
+      authoritative.filter_map do |record|
+        next unless record["event_type"] == "implementation_identity_substituted"
+        next unless record["task_generation"] == generation
+
+        payload = Hive::StringifyKeys.call(record["payload"] || {})
+        {
+          "event_id" => record["event_id"],
+          "attempt_id" => record["attempt_id"],
+          "occurred_at" => record["occurred_at"],
+          "generation" => record["task_generation"],
+          "stage" => payload["stage"],
+          "role" => payload["role"],
+          "scope" => payload["scope"],
+          "primary" => payload["primary"],
+          "substitute" => payload["substitute"],
+          "limit" => payload["limit"],
+          "retry_after" => payload["retry_after"]
+        }
+      end
     end
 
     def projected_identity(record)

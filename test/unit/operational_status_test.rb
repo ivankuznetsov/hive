@@ -585,6 +585,62 @@ class OperationalStatusTest < Minitest::Test
     assert_empty schema.validate(result).to_a
   end
 
+  # implementation.limit_fallback: the held row says which fallback the next
+  # attempt substitutes, and the provider payload carries it.
+  def test_provider_quota_reason_explains_the_limit_fallback
+    fallback = { "agent" => "grok", "outcome" => "available" }
+    row = task(
+      action: "ready_to_run", slug: "limited", stage: "5-open-pr",
+      held: { "reason" => "quota", "provider" => "codex", "retry_after" => "2026-11-23T14:18:00Z",
+              "fallback" => fallback }
+    )
+
+    result = project(status_payload(row))
+    projected = result.fetch("tasks").first
+
+    assert_equal "codex quota hold until 2026-11-23T14:18:00Z; fallback grok available; " \
+                 "the next attempt substitutes it", projected.fetch("reason")
+    assert_equal fallback, projected.dig("provider", "fallback")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status"))))
+    assert_empty schema.validate(result).to_a
+
+    running = task(
+      action: "agent_running", slug: "overlap", live_task_lock: true,
+      held: { "reason" => "quota", "provider" => "codex", "retry_after" => nil,
+              "fallback" => { "agent" => "grok", "outcome" => "limited" } }
+    )
+    reasons = project(status_payload(running)).fetch("tasks").first.fetch("reasons")
+    quota = reasons.find { |reason| reason.fetch("code") == "provider_quota" }
+    assert_equal "codex quota hold; fallback grok also limited", quota.fetch("message")
+  end
+
+  def test_limit_fallback_used_reason_names_the_provider_that_ran_this_attempt
+    substitution = {
+      "stage" => "open_pr", "role" => "open_pr", "attempt_id" => "attempt-2",
+      "occurred_at" => "2026-11-20T10:00:00Z", "scope" => "attempt",
+      "primary" => { "provider" => "codex", "model" => "gpt-5.6-terra" },
+      "substitute" => { "provider" => "grok", "model" => "grok-4.7" },
+      "limit" => "usage limit", "retry_after" => "2026-11-23T14:18:00Z"
+    }
+    row = task(action: "agent_running", slug: "substituted", stage: "5-open-pr", live_task_lock: true)
+    row["current_attempt"] = "attempt-2"
+    row["implementation_identity"] = {
+      "generation" => 1, "pending" => false, "stages" => {}, "substitutions" => [ substitution ]
+    }
+
+    reasons = project(status_payload(row)).fetch("tasks").first.fetch("reasons")
+    used = reasons.find { |reason| reason.fetch("code") == "limit_fallback_used" }
+    assert_equal "limits_reached on codex until 2026-11-23T14:18:00Z; fallback grok used for open_pr " \
+                 "in this attempt; the codex pin is unchanged", used.fetch("message")
+
+    row["current_attempt"] = "attempt-3"
+    reasons = project(status_payload(row)).fetch("tasks").first.fetch("reasons")
+    refute(reasons.any? { |reason| reason.fetch("code") == "limit_fallback_used" })
+    row["implementation_identity"] = { "generation" => 1, "pending" => false, "stages" => {} }
+    reasons = project(status_payload(row)).fetch("tasks").first.fetch("reasons")
+    refute(reasons.any? { |reason| reason.fetch("code") == "limit_fallback_used" })
+  end
+
   def test_running_precedence_retains_provider_hold_as_secondary_reason
     row = task(
       action: "agent_running", slug: "overlap", live_task_lock: true,

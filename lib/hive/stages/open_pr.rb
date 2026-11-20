@@ -1,4 +1,5 @@
 require "digest"
+require "fileutils"
 require "json"
 require "hive/agent_git_gate"
 require "hive/artifact_firewall"
@@ -7,6 +8,7 @@ require "hive/dependencies"
 require "hive/dependency_snapshot"
 require "hive/github_publication"
 require "hive/git_ops"
+require "hive/implementation_limit_fallback"
 require "hive/markers"
 require "hive/model_unsupported"
 require "hive/stages/base"
@@ -96,20 +98,57 @@ module Hive
           authoring_path: path,
           base_branch: publication_base_branch(task, cfg, pointer)
         )
+        authored = run_authoring_agent(
+          task, cfg, prompt, profile, path,
+          identity: identity, launch_arguments: launch_arguments
+        )
+        return authored.fetch(:terminal) if authored.key?(:terminal)
+
+        spawn_result = authored.fetch(:result)
+        Hive::Stages::Base.record_deferred_agent_observation(
+          task, cfg, "open_pr", spawn_result
+        )
+        return model_unsupported_error(task, profile, spawn_result) if authoring_model_unsupported?(spawn_result)
+
+        if authoring_limit?(spawn_result)
+          fallback = authoring_limit_fallback(task, cfg, prompt, profile, path, identity, spawn_result)
+          return fallback.fetch(:terminal) if fallback.key?(:terminal)
+          unless fallback.key?(:result)
+            return limits_reached_error(
+              task, profile, spawn_result, attrs: fallback.fetch(:marker_attrs, {})
+            )
+          end
+
+          spawn_result = fallback.fetch(:result)
+        end
+
+        unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
+          return authoring_error(
+            task, "open_pr_authoring_failed", spawn_result&.fetch(:error_message, nil)
+          )
+        end
+        read_authoring(path)
+      end
+
+      # Spawn one authoring agent under fresh single-use custody. Returns
+      # `{ result: }`, or `{ terminal: }` for missing custody or tampering.
+      def run_authoring_agent(task, cfg, prompt, profile, path, identity:,
+                              launch_arguments: nil, limit_fallback: nil)
         custody_manifest = Hive::ArtifactFirewall::Manifest.new(
           root: task.folder,
           protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
           permitted_writable_roots: [ task.folder ]
         )
         agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-        spawn_result = spawn_open_pr_agent(
-          task, cfg, prompt, profile, task.folder,
+        spawn_kwargs = {
           identity: identity, launch_arguments: launch_arguments,
           agent_custody: agent_custody, expected_output: path
-        )
+        }
+        spawn_kwargs[:limit_fallback] = limit_fallback if limit_fallback
+        spawn_result = spawn_open_pr_agent(task, cfg, prompt, profile, task.folder, **spawn_kwargs)
         custody_report = agent_custody.report
         if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
-          return authoring_error(task, "open_pr_custody_missing")
+          return { terminal: authoring_error(task, "open_pr_custody_missing") }
         end
         if custody_report&.tampered?
           Hive::Markers.set(
@@ -119,21 +158,57 @@ module Hive
             restored: custody_report.restored?,
             restore_error: custody_report.restore_diagnostic.to_s[0, 200]
           )
-          return { commit: "open_pr_tampered", status: :error }
+          return { terminal: { commit: "open_pr_tampered", status: :error } }
         end
 
-        Hive::Stages::Base.record_deferred_agent_observation(
-          task, cfg, "open_pr", spawn_result
+        { result: spawn_result }
+      end
+
+      # implementation.limit_fallback for the PR author (see
+      # Hive::ImplementationLimitFallback). The open_pr pin persisted for this
+      # generation is not rewritten: the substitute is journaled and runs for
+      # this attempt only. Returns `{ result: }` when the substitute authored
+      # successfully, `{ terminal: }` when it tampered, or `{ marker_attrs: }`
+      # naming why the primary's limit stands (possibly empty).
+      def authoring_limit_fallback(task, cfg, prompt, profile, path, identity, spawn_result)
+        return {} unless Hive::ImplementationLimitFallback.settings(cfg)
+
+        plan = Hive::ImplementationLimitFallback.plan(
+          cfg: cfg, stage: "open_pr", primary: profile.name.to_s,
+          limit_text: authoring_limit_text(spawn_result),
+          error_message: spawn_result[:error_message],
+          execute_identity: Hive::ImplementationLimitFallback.current_execute_identity(task, cfg)
         )
-        return model_unsupported_error(task, profile, spawn_result) if authoring_model_unsupported?(spawn_result)
-        return limits_reached_error(task, profile, spawn_result) if authoring_limit?(spawn_result)
+        return {} unless plan
+        return { marker_attrs: plan.marker_attrs } unless plan.substitute?
 
-        unless spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
-          return authoring_error(
-            task, "open_pr_authoring_failed", spawn_result&.fetch(:error_message, nil)
-          )
-        end
-        read_authoring(path)
+        recorded = Hive::ImplementationLimitFallback.record!(
+          task: task, cfg: cfg, plan: plan, primary: identity || { "provider" => profile.name.to_s }
+        )
+        return { marker_attrs: plan.marker_attrs("failed") } unless recorded
+
+        # The limited primary's partial draft is not authoritative.
+        FileUtils.rm_f(path)
+        fallback_profile = Hive::AgentProfiles.lookup(plan.fallback, cfg: cfg)
+        substitute = run_authoring_agent(
+          task, cfg, prompt, fallback_profile, path,
+          identity: plan.identity, limit_fallback: plan
+        )
+        return substitute if substitute.key?(:terminal)
+
+        result = substitute.fetch(:result)
+        ok = result.is_a?(Hash) && result[:status] == :ok
+        outcome = Hive::ImplementationLimitFallback.finish(
+          plan, ok: ok, limited: authoring_limit?(result)
+        )
+        return { result: result } if ok
+
+        { marker_attrs: plan.marker_attrs(outcome) }
+      end
+
+      def authoring_limit_text(spawn_result)
+        text = spawn_result[:limit_text].to_s
+        text.empty? ? spawn_result[:error_message].to_s : text
       end
 
       # A provider quota wall during authoring must publish limits_reached so
@@ -168,7 +243,7 @@ module Hive
         { commit: Hive::ModelUnsupported::REASON, status: :error }
       end
 
-      def limits_reached_error(task, profile, spawn_result)
+      def limits_reached_error(task, profile, spawn_result, attrs: {})
         message = spawn_result[:error_message].to_s
         limit_text = spawn_result[:limit_text].to_s
         limit_text = message if limit_text.empty?
@@ -178,7 +253,8 @@ module Hive
             reason: "limits_reached",
             provider: profile&.name&.to_s,
             message: message.byteslice(0, 200).to_s.scrub,
-            retry_after: spawn_result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text)
+            retry_after: spawn_result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text),
+            **attrs
           }.compact
         )
         { commit: "limits_reached", status: :error }
@@ -194,7 +270,8 @@ module Hive
 
       def spawn_open_pr_agent(task, cfg, prompt, profile, cwd,
                               identity: nil, launch_arguments: nil,
-                              agent_custody: nil, expected_output: nil)
+                              agent_custody: nil, expected_output: nil,
+                              limit_fallback: nil)
         launch_arguments ||=
           Hive::Stages::Base.implementation_launch_arguments(identity, profile)
         expected_output ||= authoring_path(task)
@@ -218,9 +295,9 @@ module Hive
           cwd: cwd,
           max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "open_pr", profile, default: 50),
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
-          log_label: "open-pr-author",
+          log_label: limit_fallback ? limit_fallback.log_label("open-pr-author") : "open-pr-author",
           profile: profile,
-          implementation_stage: "open_pr",
+          implementation_stage: (limit_fallback ? nil : "open_pr"),
           agent_custody: agent_custody,
           expected_output: expected_output,
           status_mode: :output_file_exists,

@@ -1,8 +1,7 @@
 require "fileutils"
 require "json"
 require "time"
-require "hive/agent_limit"
-require "hive/attempts/context"
+require "hive/limit_fallback"
 
 module Hive
   module Stages
@@ -26,16 +25,13 @@ module Hive
       # conflict-resolution agent when `hive run` rebases a task in the
       # review stage (Hive::Rebase, phase "rebase").
       #
-      # A fallback is attempted only when every condition holds:
-      #   - the option is enabled and maps the primary profile to a different
-      #     profile;
-      #   - the primary run failed with a classified provider limit (the same
-      #     signal that produces `reason=limits_reached`); generic failures,
-      #     auth/preflight errors, and refused models never fall back;
-      #   - the provider's explicit reset hint is absent, or is at least
-      #     `min_wait_sec` away (a short wall is better waited out);
-      #   - the durable attempt is not under explicit provider-account
-      #     routing, whose router already owns adapter selection.
+      # A fallback is attempted only under the shared Hive::LimitFallback
+      # rules: the option is enabled and maps the primary profile to a
+      # different profile; the primary failed with a classified provider
+      # limit (generic failures, auth/preflight errors, and refused models
+      # never fall back); the explicit reset hint is absent or at least
+      # `min_wait_sec` away; and the durable attempt is not under explicit
+      # provider-account routing.
       #
       # A substitute is tried at most once per role invocation. If it fails
       # (limit or otherwise) the caller keeps the primary's limit result, so
@@ -48,98 +44,49 @@ module Hive
       # `*-NN.md` reviewer-file glob) and echoed as a `[hive.review]` log
       # line naming the role, primary, fallback, and the limit.
       module LimitFallback
+        CONFIG_PATH = %w[review limit_fallback].freeze
         RECEIPT_BASENAME = "limit-fallback".freeze
-        DEFAULT_MIN_WAIT_SEC = 3600
+        DEFAULT_MIN_WAIT_SEC = Hive::LimitFallback::DEFAULT_MIN_WAIT_SEC
         THREAD_KEY = :hive_review_limit_fallback_failures
-        LIMIT_DETAIL_MAX = 200
+        LIMIT_DETAIL_MAX = Hive::LimitFallback::LIMIT_DETAIL_MAX
 
         # One approved substitution. `phase` is the review phase whose marker
         # would carry a failed attempt ("reviewers", "triage", "fix", "ci";
         # "rebase" for the pre-stage conflict agent, which writes no marker);
         # `role` is the display name (a reviewer's name, or the phase).
-        # `retry_after` is the provider's explicit reset estimate (ISO-8601),
-        # or nil when the provider gave none.
-        Decision = Data.define(:phase, :role, :primary, :fallback, :retry_after, :limit_detail)
+        Decision = Hive::LimitFallback::Decision
 
         module_function
 
         # The validated settings hash when the option is enabled, else nil.
         def settings(cfg)
-          raw = cfg.is_a?(Hash) ? cfg.dig("review", "limit_fallback") : nil
-          return nil unless raw.is_a?(Hash) && raw["enabled"] == true
-
-          raw
+          Hive::LimitFallback.settings(cfg, CONFIG_PATH)
         end
 
         # Fallback profile name configured for `primary`, or nil.
         def configured_fallback(cfg, primary)
-          opts = settings(cfg)
-          return nil unless opts && primary
-
-          agents = opts["agents"]
-          return nil unless agents.is_a?(Hash)
-
-          fallback = agents[primary.to_s]
-          fallback = fallback.to_s.strip
-          return nil if fallback.empty? || fallback == primary.to_s
-
-          fallback
-        end
-
-        def limited?(limit_text:, error_message:)
-          !limit_text.to_s.empty? || Hive::AgentLimit.from_limit?(error_message.to_s)
+          Hive::LimitFallback.configured_fallback(cfg, CONFIG_PATH, primary)
         end
 
         # Decide whether a review role whose primary agent `primary` just
         # failed may be retried on its configured fallback profile. Returns a
-        # Decision or nil. Every refusal after a classified limit on an
-        # enabled config is logged so an operator can see why no substitute
-        # ran.
+        # Decision or nil.
         def decide(cfg, phase:, primary:, limit_text:, error_message:, role: phase, now: Time.now.utc)
-          opts = settings(cfg)
-          return nil unless opts
-          return nil unless limited?(limit_text: limit_text, error_message: error_message)
-
-          text = limit_text.to_s.empty? ? error_message.to_s : limit_text.to_s
-          primary = primary.to_s
-          fallback = configured_fallback(cfg, primary)
-          unless fallback
-            log("#{role}: #{primary.inspect} hit a usage/credit limit; no fallback agent configured " \
-                "for it in review.limit_fallback.agents")
-            return nil
-          end
-          if Hive::Attempts::Context.current&.explicit_routing?
-            log("#{role}: #{primary} hit a usage/credit limit; fallback to #{fallback} skipped " \
-                "because this attempt uses explicit provider routing")
-            return nil
-          end
-
-          explicit = Hive::AgentLimit.explicit_retry_after(text, now: now)
-          min_wait = min_wait_sec(opts)
-          if explicit && (explicit - now) < min_wait
-            log("#{role}: #{primary} hit a usage/credit limit resetting at #{explicit.iso8601} " \
-                "(< min_wait_sec=#{min_wait}); waiting for reset instead of falling back to #{fallback}")
-            return nil
-          end
-
-          Decision.new(
-            phase: phase.to_s, role: role.to_s, primary: primary, fallback: fallback,
-            retry_after: explicit&.iso8601,
-            limit_detail: Hive::AgentLimit.first_useful_line(text)[0, LIMIT_DETAIL_MAX]
+          Hive::LimitFallback.decide(
+            cfg, path: CONFIG_PATH, phase: phase, primary: primary, role: role,
+            limit_text: limit_text, error_message: error_message, now: now,
+            log: method(:log)
           )
         end
 
         # Receipt outcome for a finished substitute run: "used" when it
         # succeeded, "limited" when it also hit a limit, else "failed".
         def outcome(ok:, limit_text:, error_message:)
-          return "used" if ok
-
-          limited?(limit_text: limit_text, error_message: error_message) ? "limited" : "failed"
+          Hive::LimitFallback.outcome(ok: ok, limit_text: limit_text, error_message: error_message)
         end
 
         def min_wait_sec(opts)
-          value = opts["min_wait_sec"]
-          value.is_a?(Integer) && value >= 0 ? value : DEFAULT_MIN_WAIT_SEC
+          Hive::LimitFallback.min_wait_sec(opts)
         end
 
         def receipt_path(task_folder, pass)

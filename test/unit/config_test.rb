@@ -3113,6 +3113,50 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  # --- implementation.limit_fallback --------------------------------------
+
+  def test_implementation_limit_fallback_defaults_to_disabled
+    cfg = load_limit_fallback_yaml("{}\n")
+
+    assert_equal({ "enabled" => false, "min_wait_sec" => 3600, "agents" => {} },
+                 cfg.dig("implementation", "limit_fallback"))
+  end
+
+  def test_implementation_limit_fallback_accepts_a_provider_map_beside_review
+    cfg = load_limit_fallback_yaml(<<~YAML)
+      implementation:
+        limit_fallback:
+          enabled: true
+          min_wait_sec: 7200
+          agents:
+            codex: grok
+            muse: grok
+    YAML
+
+    assert_equal(
+      { "enabled" => true, "min_wait_sec" => 7200, "agents" => { "codex" => "grok", "muse" => "grok" } },
+      cfg.dig("implementation", "limit_fallback")
+    )
+    assert_equal false, cfg.dig("review", "limit_fallback", "enabled")
+  end
+
+  def test_implementation_limit_fallback_rejects_invalid_shapes
+    {
+      "implementation: yes\n" => /implementation .*must be a Hash/,
+      "implementation:\n  limit_fallbacks: {}\n" => /implementation .*unknown field\(s\): limit_fallbacks/,
+      "implementation:\n  limit_fallback: yes\n" => /implementation\.limit_fallback .*must be a Hash/,
+      "implementation:\n  limit_fallback:\n    agent: grok\n" => /unknown field\(s\): agent/,
+      "implementation:\n  limit_fallback:\n    enabled: maybe\n" => /implementation\.limit_fallback\.enabled .*must be a boolean/,
+      "implementation:\n  limit_fallback:\n    min_wait_sec: -1\n" => /implementation\.limit_fallback\.min_wait_sec/,
+      "implementation:\n  limit_fallback:\n    agents:\n      codex: nonesuch\n" =>
+        /implementation\.limit_fallback\.agents\.codex "nonesuch".*not a registered/,
+      "implementation:\n  limit_fallback:\n    agents:\n      codex: codex\n" => /cannot fall back to itself/
+    }.each do |yaml, pattern|
+      err = assert_raises(Hive::ConfigError, yaml) { load_limit_fallback_yaml(yaml) }
+      assert_match pattern, err.message, yaml
+    end
+  end
+
   # --- Validation --------------------------------------------------------
 
   def test_load_raises_when_reviewers_is_not_an_array

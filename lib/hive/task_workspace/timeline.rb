@@ -19,7 +19,8 @@ module Hive
         condition_observed generation_advanced commit_generation_advanced
         operator_action implementation_identity_captured
         implementation_identity_backfilled implementation_identity_fallback
-        implementation_stage_resolved activity_recorded
+        implementation_identity_substituted implementation_stage_resolved
+        activity_recorded
       ].freeze
       MATERIAL_EVENT_TYPES = %w[
         stage_enter stage_exit agent_start agent_end error round_waiting

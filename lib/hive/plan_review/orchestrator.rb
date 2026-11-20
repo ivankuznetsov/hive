@@ -141,7 +141,7 @@ module Hive
         generation = task_generation
         if current && Identity.task_generation_current?(@task, current.task_generation) &&
            current.plan_digest == signals.plan_digest &&
-           current.policy_fingerprint == policy.policy_fingerprint && !restart_requested?(current)
+           policy_identity_current?(current, policy, signals) && !restart_requested?(current)
           return Projection.new(current) if current.execution_allowed?
 
           return resume_review(current, plan_text(plan_path))
@@ -382,7 +382,8 @@ module Hive
           review_id:, basename: "policy-#{policy.policy_fingerprint}.json",
           content: policy.to_h.merge(
             "signals" => signals.to_h,
-            "configuration_fingerprint" => Policy.configuration_fingerprint(@cfg)
+            "configuration_fingerprint" => Policy.configuration_fingerprint(@cfg),
+            "reviewer_routing" => Policy.reviewer_routing(@cfg)
           ), json: true
         )
         version = current ? current.version + 1 : 1
@@ -1544,14 +1545,41 @@ module Hive
       end
 
       def policy_configuration_fresh?(record)
-        reference = record["artifacts"]["policy"]
-        return false unless reference
+        artifact = policy_artifact(record)
+        return false unless artifact
 
-        artifact = JSON.parse(@store.read_reference(reference))
-        artifact["configuration_fingerprint"] == Policy.configuration_fingerprint(@cfg) &&
+        Policy.configuration_current?(@cfg, artifact:, record:) &&
           record["level_sources"]&.dig("run") == persisted_run_level
       rescue JSON::ParserError, KeyError, TypeError
         false
+      end
+
+      # The review's own policy identity still holds. A resolved review whose
+      # reviewer routing alone moved keeps its verdict: re-derive its policy
+      # fingerprint from today's plan signals and verdict-relevant settings
+      # with the routing it ran under (see Policy.configuration_current?).
+      def policy_identity_current?(record, policy, signals)
+        return true if record.policy_fingerprint == policy.policy_fingerprint
+        return false unless record.execution_allowed?
+
+        artifact = policy_artifact(record)
+        return false unless artifact
+
+        Policy.evaluate(
+          workflow_id: @task.workflow.id, signals:,
+          config: Policy.resolved_review_config(@cfg, artifact:, record:),
+          run_level: persisted_run_level
+        ).policy_fingerprint == record.policy_fingerprint
+      rescue JSON::ParserError, KeyError, TypeError
+        false
+      end
+
+      def policy_artifact(record)
+        reference = record["artifacts"]["policy"]
+        return nil unless reference
+
+        artifact = JSON.parse(@store.read_reference(reference))
+        artifact.is_a?(Hash) ? artifact : nil
       end
 
       def retry_in_future?(value)

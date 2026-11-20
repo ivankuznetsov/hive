@@ -1871,6 +1871,56 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # A resolved review keeps its verdict when only reviewer routing moves, both
+  # when the reviewed plan is the original (identity path) and when a revised
+  # candidate was promoted (candidate path); a verdict-relevant change still
+  # starts a linked review.
+  def test_reviewer_reroute_keeps_a_cleared_review_but_a_level_raise_rekeys_it
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    [ [], [ finding("safe_auto", "Clarify tests") ] ].each do |findings|
+      with_task(standard_plan) do |task, cfg|
+        adapter = success_adapter(primary_findings: findings)
+        revision = FakeRevision.new(revised)
+        first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+        assert_equal "cleared", first.state
+        calls = adapter.calls.length
+
+        rerouted = reroute(cfg)
+        kept = orchestrator(task, rerouted, adapter:, planner_revision: revision).advance!.record
+        assert_equal [ first.review_id, first.version, "cleared" ], [ kept.review_id, kept.version, kept.state ]
+        assert_equal calls, adapter.calls.length, "a kept verdict must not call a reviewer"
+
+        rerouted["plan_review"]["minimum_level"] = "mandatory"
+        raised = orchestrator(task, rerouted, adapter:, planner_revision: revision).advance!.record
+        refute_equal first.review_id, raised.review_id
+        assert_equal first.review_id, raised.prior_review_id
+        assert_equal "mandatory", raised.effective_level
+      end
+    end
+  end
+
+  # An unresolved review is still waiting on its reviewers: a reroute (here
+  # the fix for an unlaunchable reviewer) starts a linked review on the new
+  # route instead of replaying the old one.
+  def test_reviewer_reroute_rekeys_an_unresolved_review
+    with_task(mandatory_plan) do |task, cfg|
+      unavailable = FakeAdapter.new(capability: ->(**) { { "status" => "unsupported" } }) do
+        Hive::PlanReview::Adapters::Base::Result.new(
+          outcome: "unsupported", diagnostic: "missing reviewer",
+          route_receipt: { "capability_result" => "unsupported" }
+        )
+      end
+      waiting = orchestrator(task, cfg, adapter: unavailable).advance!.record
+      refute waiting.execution_allowed?
+
+      rerouted = orchestrator(task, reroute(cfg), adapter: success_adapter).advance!.record
+
+      refute_equal waiting.review_id, rerouted.review_id
+      assert_equal waiting.review_id, rerouted.prior_review_id
+      assert_equal "cleared", rerouted.state
+    end
+  end
+
   def test_metadata_drift_rolls_a_cleared_plan_into_a_new_review
     with_task(standard_plan) do |task, cfg|
       first = orchestrator(task, cfg, adapter: success_adapter).advance!
@@ -2160,6 +2210,20 @@ class PlanReviewOrchestratorTest < Minitest::Test
         )
       )
       refute runner.send(:policy_configuration_fresh?, invalid_policy)
+      assert record.execution_allowed?
+      moved_policy = Struct.new(:policy_fingerprint).new("0" * 64)
+      refute runner.send(:policy_identity_current?, no_policy, moved_policy, nil)
+      refute runner.send(:policy_identity_current?, invalid_policy, moved_policy, nil)
+      list_policy = store.write_review_artifact!(
+        review_id: record.review_id, basename: "list-policy.json", content: "[]"
+      )
+      refute runner.send(
+        :policy_identity_current?,
+        Hive::PlanReview::Record.new(
+          record.to_h.merge("artifacts" => record["artifacts"].merge("policy" => list_policy))
+        ),
+        moved_policy, nil
+      )
       refute runner.send(:retry_in_future?, "not-a-time")
       assert_nil runner.send(:safe_plan_digest, File.join(task.folder, "missing-plan.md"))
       assert_equal "symbol", runner.send(:stringify, :symbol)
@@ -2538,6 +2602,24 @@ class PlanReviewOrchestratorTest < Minitest::Test
         "capability_result" => "present", "independence_verified" => true
       }
     )
+  end
+
+  # Every reviewer route moved, as an operator does when providers run out
+  # of quota.
+  def reroute(cfg)
+    rerouted = Marshal.load(Marshal.dump(cfg))
+    grok = {
+      "agent" => "grok", "model" => "grok-4.7", "family" => "grok",
+      "effort" => "xhigh", "route" => "native_grok_build"
+    }
+    rerouted["plan_review"]["routes"].merge!(
+      "primary" => grok, "verification" => grok,
+      "adversarial" => {
+        "agent" => "claude", "model" => "claude-opus-5-5", "family" => "anthropic",
+        "effort" => "xhigh", "route" => "native_claude"
+      }
+    )
+    rerouted
   end
 
   def route_identity(provider, model, family, route)

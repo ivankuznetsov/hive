@@ -2953,3 +2953,22 @@ at all); only the log line and receipt record it.
 - An execute substitute runs on the same worktree after the limited primary,
   so partial primary edits are its starting point, exactly as on a retry.
 
+## Plan-review reviewer routing and resolved reviews (2026-11-20)
+
+- A legacy policy artifact (written before `reviewer_routing` was recorded)
+  proves route-only drift only when its route receipts rebuild the old routing
+  exactly. Some changes cannot be rebuilt: a rerouted role the review never
+  ran (such as the adversarial leg of a standard review, or every role of a
+  `skipped` review), a changed
+  `routes.fallbacks`, or a `models.plan_review*` override that changed the
+  requested model. Such a review stays stale and needs the old remedy (back to
+  `3-plan`, restart the review). This affects only reviews resolved before the
+  change.
+- `degraded_cleared(review_unavailable)` counts as resolved, so fixing the
+  reviewer route no longer triggers a real review of it. Whether a degraded
+  clearance should be re-reviewed once its reviewer is available is an open
+  product question.
+- `plan_review.adversarial_min_level` and `max_revision_rounds` change what a
+  review requires but are not in `policy_affecting_config`, so changing them
+  stales no review, resolved or not. Unverified whether that is intended.
+

@@ -17,8 +17,10 @@ module Hive
         @reason = reason
         @operation, @attempt_id = operation.to_s, attempt_id&.to_s
         @retry_count, @elapsed_sec, @budget_sec = retry_count, elapsed_sec, budget_sec
-        super("#{reason}: #{@operation} exhausted after #{@elapsed_sec.round(3)}s " \
-              "(#{@retry_count} busy tries)")
+        # Zero tries means a shared deadline was already spent by earlier
+        # phases; say so instead of implying the operation itself was busy.
+        tries = @retry_count.zero? ? "0 busy tries; budget spent before the first try" : "#{@retry_count} busy tries"
+        super("#{reason}: #{@operation} exhausted after #{@elapsed_sec.round(3)}s (#{tries})")
       end
 
       def exit_code = Hive::ExitCodes::TEMPFAIL
@@ -65,7 +67,12 @@ module Hive
         Thread.current[:hive_launch_bookkeeping_deadline] = prior
       end
 
+      # `started_at` is the monotonic origin of a budget shared across
+      # operations (default: now). Exhaustion reports elapsed time from that
+      # origin, so an operation that inherits a spent deadline reports how long
+      # the budget actually ran rather than its own near-zero lifetime.
       def initialize(operation:, attempt_id: nil, budget_sec: PRESTART_BUDGET_SEC, deadline: nil,
+                     started_at: nil,
                      monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) },
                      sleeper: ->(seconds) { sleep(seconds) }, random: -> { Random.rand })
         @budget_sec = Float(budget_sec)
@@ -73,7 +80,7 @@ module Hive
 
         @operation, @attempt_id = operation, attempt_id
         @monotonic, @sleeper, @random = monotonic, sleeper, random
-        @started_at = @monotonic.call
+        @started_at = started_at.nil? ? @monotonic.call : Float(started_at)
         @deadline = [ @started_at + @budget_sec, deadline || Float::INFINITY ].min
         @retry_count = 0
         @last_error = nil
@@ -134,7 +141,7 @@ module Hive
       def exhaust!
         raise BookkeepingBusy.new(
           operation: @operation, attempt_id: @attempt_id, retry_count: retry_count,
-          elapsed_sec: @monotonic.call - @started_at, budget_sec: budget_sec
+          elapsed_sec: [ @monotonic.call - @started_at, 0.0 ].max, budget_sec: budget_sec
         ), cause: @last_error
       end
     end

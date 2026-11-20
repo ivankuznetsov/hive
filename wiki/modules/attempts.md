@@ -3,7 +3,7 @@ title: Hive::Attempts
 type: module
 source: lib/hive/attempts/, lib/hive/runtime_control_plane/admission_transition.rb
 created: 2026-07-16
-updated: 2026-11-15
+updated: 2026-11-20
 tags: [attempts, admission, sqlite, recovery, capacity]
 ---
 
@@ -479,7 +479,25 @@ Attempt bookkeeping uses `BookkeepingRetry` with a single monotonic deadline
 per operation. Admission through wrapper registration, claim, first heartbeat
 and worker registration shares `attempt_bookkeeping_timeout_sec` (30 seconds
 by default), capped at 30 seconds and clamped strictly inside persisted
-launch/first-heartbeat expiry.
+launch/first-heartbeat expiry. That shared chain budget starts in
+`Dispatcher#admit` immediately before the admission write
+(`create_launching`). The pre-admission `observe_source` write and
+`read_admission` read each have their own budget. Before 2026-11-20 one deadline
+was taken at the top of `admit`, so a slow `attempt.observe_task_source`
+commit (13.26 s lock hold on a loaded host) could spend it. The admission
+write then exhausted before its first try ("admission exhausted after 0.0s
+(0 busy tries)") and the TEMPFAIL killed the daemon. The worktree
+`git rev-parse` for `starting_revision` now runs once before the admission
+retry, not inside each one-second try.
+
+`BookkeepingRetry.new(started_at:)` names the monotonic origin of a shared
+budget. Exhaustion reports `elapsed_sec` from that origin, not from the
+operation's own construction. A zero-try exhaustion says
+`0 busy tries; budget spent before the first try`, so an inherited spent
+deadline is not mistaken for a busy operation. The dispatcher passes the chain
+origin. The detached launcher and supervisor still measure from construction:
+their exported deadline may be lifecycle-capped, so the origin cannot be
+derived exactly.
 The detached handoff exports the remaining absolute deadline through its private
 supervisor transport; it never retries the launcher, process spawn or agent body.
 A delayed claim still requires the capability, unchanged lease and a matching

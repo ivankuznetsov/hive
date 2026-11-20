@@ -230,20 +230,24 @@ module Hive
                 subject: nil, admission_view: nil, routing_policy:, retry_release: false,
                 replay_semantic_terminal: false, failed_route_id: nil,
                 agent_failure_retry: false)
-        bookkeeping_deadline = @monotonic.call + @bookkeeping_timeout_sec
+        # Each pre-admission operation has its own bounded budget. The durable
+        # chain shares one budget that starts at its first write (below), so a
+        # slow observation commit (13 s under host I/O load, 2026-11-20) can no
+        # longer hand a later operation a deadline that expired before its
+        # first try.
         created = nil
         claim_capability = nil
         route_decision = nil
         view = admission_view
         if task
-          bookkeeping_retry("observe_source", deadline: bookkeeping_deadline).run do |timeout|
+          bookkeeping_retry("observe_source").run do |timeout|
             @store.observe_task_source(
               task: task, generation: generation, observed_at: [ now, @clock.call ].max,
               timeout_sec: timeout
             )
           end
         end
-        view ||= bookkeeping_retry("read_admission", deadline: bookkeeping_deadline).run do |timeout|
+        view ||= bookkeeping_retry("read_admission").run do |timeout|
           AdmissionView.new(store: @store, records: @store.active_attempts(timeout_sec: timeout))
         end
         records = view.records
@@ -360,8 +364,7 @@ module Hive
           inherited_outputs: inherited_outputs,
           subject: subject,
           now: now,
-          admission: patrol_admission_metadata(task: task),
-          bookkeeping_deadline: bookkeeping_deadline
+          admission: patrol_admission_metadata(task: task)
         }
 
         if routing_policy.explicit?
@@ -383,28 +386,28 @@ module Hive
               decision: route_decision
             )
           end
-
-          claim_capability = @capability_generator.call
-          attempt_id = @id_generator.call
-          created = persist_launching_attempt(
-            **launching_attributes,
-            attempt_id: attempt_id,
-            provider: route_decision.adapter,
-            routing: nil,
-            claim_capability: claim_capability,
-            route_decision: route_decision
-          )
-        else
-          claim_capability = @capability_generator.call
-          attempt_id = @id_generator.call
-          created = persist_launching_attempt(
-            **launching_attributes,
-            attempt_id: attempt_id,
-            provider: provider.to_s,
-            routing: { "mode" => "legacy" },
-            claim_capability: claim_capability
-          )
         end
+
+        claim_capability = @capability_generator.call
+        attempt_id = @id_generator.call
+        # Non-SQL work stays outside the retried admission try: a slow git
+        # process on a loaded host must not spend every 1-second try allowance.
+        revision = starting_revision(task)
+        # One budget covers the durable chain: this admission write, handoff
+        # arm, detached reservation, wrapper claim and first heartbeat.
+        bookkeeping_started_at = @monotonic.call
+        bookkeeping_deadline = bookkeeping_started_at + @bookkeeping_timeout_sec
+        created = persist_launching_attempt(
+          **launching_attributes,
+          attempt_id: attempt_id,
+          provider: route_decision ? route_decision.adapter : provider.to_s,
+          routing: route_decision ? nil : { "mode" => "legacy" },
+          claim_capability: claim_capability,
+          route_decision: route_decision,
+          starting_revision: revision,
+          bookkeeping_started_at: bookkeeping_started_at,
+          bookkeeping_deadline: bookkeeping_deadline
+        )
 
         if created.attempt_id != attempt_id || created.wrapper || created.state != "launching"
           adopted = result_for_adopted_handoff(created, interactive: interactive)
@@ -414,7 +417,10 @@ module Hive
         record_attempt_admission(task, created, now)
         capture_launch_context(task, created, generation, now)
         handoff_now = [ now.utc, @clock.call.utc ].max
-        created = bookkeeping_retry("arm_handoff", attempt_id: created.attempt_id, deadline: bookkeeping_deadline).run do |timeout|
+        created = bookkeeping_retry(
+          "arm_handoff", attempt_id: created.attempt_id,
+          deadline: bookkeeping_deadline, started_at: bookkeeping_started_at
+        ).run do |timeout|
           @store.arm_launch_handoff(
             created, launch_timeout_sec: @launch_timeout_sec, now: [ handoff_now, @clock.call.utc ].max,
             timeout_sec: timeout
@@ -810,9 +816,13 @@ module Hive
       def persist_launching_attempt(view:, attempt_id:, request_id:, recovery_source_attempt_id:,
                                     task:, generation:, argv:, provider:, routing:,
                                     claim_capability:, retry_charge:, inherited_outputs:,
-                                    subject:, now:, admission:,
-                                    route_decision: nil, bookkeeping_deadline:)
-        admission_retry = bookkeeping_retry("admission", attempt_id: attempt_id, deadline: bookkeeping_deadline)
+                                    subject:, now:, admission:, starting_revision:,
+                                    bookkeeping_started_at:, bookkeeping_deadline:,
+                                    route_decision: nil)
+        admission_retry = bookkeeping_retry(
+          "admission", attempt_id: attempt_id,
+          deadline: bookkeeping_deadline, started_at: bookkeeping_started_at
+        )
         admission_retry.run do |_timeout|
           winner = @store.attempt_id_for_request(request_id: request_id, timeout_sec: admission_retry.timeout_sec)
           next @store.fetch(winner, timeout_sec: admission_retry.timeout_sec) if winner
@@ -834,7 +844,7 @@ module Hive
             route_decision: route_decision,
             worker_argv: argv,
             claim_capability_digest: Capability.digest(claim_capability),
-            starting_revision: starting_revision(task),
+            starting_revision: starting_revision,
             retry_charge: retry_charge,
             inherited_outputs: inherited_outputs || [],
             subject: subject,
@@ -847,10 +857,10 @@ module Hive
         end
       end
 
-      def bookkeeping_retry(operation, attempt_id: nil, deadline:)
+      def bookkeeping_retry(operation, attempt_id: nil, deadline: nil, started_at: nil)
         BookkeepingRetry.new(
           operation: operation, attempt_id: attempt_id,
-          budget_sec: @bookkeeping_timeout_sec, deadline: deadline,
+          budget_sec: @bookkeeping_timeout_sec, deadline: deadline, started_at: started_at,
           monotonic: @monotonic, sleeper: @sleeper, random: @random
         )
       end

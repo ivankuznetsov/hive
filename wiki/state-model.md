@@ -475,6 +475,19 @@ attempt retries and configuration drift cannot replace a launched stage's
 identity. Idempotency keys are generation-and-stage scoped: equivalent retries
 are no-ops and conflicting captures preserve the first journal winner.
 
+`implementation_identity_substituted` (reason `provider_limit_fallback`)
+records one opt-in `implementation.limit_fallback` substitution before the
+substitute launches: stage (`execute`, `open_pr`, or the config-driven
+`artifacts` / `finalize`), role, `scope: "attempt"`, the pinned `primary`
+identity kept for audit, the `substitute` identity or `{provider, model}`
+route that actually runs, the first limit line, and the explicit reset when
+known. Its idempotency key is attempt-and-payload scoped, so identical
+repeats inside one attempt are no-ops. It never replaces the captured or
+resolved identity above: the projection lists the current generation's
+substitutions separately under `implementation_identity.substitutions`, and
+the next attempt starts on the pinned primary again. A failed append keeps
+the primary's limit instead of launching an unrecorded substitute.
+
 New routed identities also store a JSON-safe routing snapshot: the public stage,
 concrete effective model/effort, and exact/coarse/current/legacy field
 provenance. Durable stages map to public keys as `execute` →

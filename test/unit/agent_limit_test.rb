@@ -312,6 +312,27 @@ class AgentLimitTest < Minitest::Test
     end
   end
 
+  # review.limit_fallback / implementation.limit_fallback stamp the fallback
+  # they evaluated on the held marker; status and labels name it.
+  def test_held_label_and_field_name_the_limit_fallback
+    attrs = {
+      "provider" => "codex", "primary_agent" => "codex",
+      "fallback_agent" => "grok", "fallback_outcome" => "limited"
+    }
+
+    assert_equal "held: agent quota (codex); Hive retries hourly; top up or switch execute agent; " \
+                 "fallback grok also limited", Hive::AgentLimit.held_label(attrs)
+    assert_equal({ "agent" => "grok", "outcome" => "limited" },
+                 Hive::AgentLimit.held_field(attrs).fetch("fallback"))
+    assert_equal({ "agent" => "grok", "outcome" => nil },
+                 Hive::AgentLimit.held_fallback("fallback_agent" => "grok", "fallback_outcome" => "bogus"))
+    assert_nil Hive::AgentLimit.held_fallback("fallback_agent" => "not a provider!")
+    assert_equal "fallback grok tried",
+                 Hive::AgentLimit.fallback_summary("agent" => "grok", "outcome" => nil)
+    assert_equal "fallback grok available; the next attempt substitutes it",
+                 Hive::AgentLimit.fallback_summary("agent" => "grok", "outcome" => "available")
+  end
+
   def test_held_field_serializes_quota_shape
     attrs = {
       "provider" => "codex",

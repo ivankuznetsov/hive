@@ -2841,8 +2841,9 @@ identity.
 
 The auto-rebase conflict agent applies `review.limit_fallback` only when the
 task's current stage runs the review runner. A rebase ahead of execute or
-open-PR still aborts as `agent_failed` on a provider limit, because there is
-no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+open-PR still aborts as `agent_failed` on a provider limit, because the rebase
+consults only `review.limit_fallback` (not `implementation.limit_fallback`,
+added 2026-11-20). The receipt pass is `next_pass_for` as seen
 before the review runner starts; if review later resolves a different pass,
 the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
 failed rebase substitute writes no marker attrs (the rebase writes no marker
@@ -2898,4 +2899,29 @@ at all); only the log line and receipt record it.
 - `dispatched_attempt_unknown` maps to terminal outcome `lost`, so marker
   recoveries get the guarded ERROR-marker repair. Whether a pruned or
   never-recorded attempt should instead stay operator-owned is unverified.
+
+## Implementation limit fallback scope (2026-11-20)
+
+- `implementation.limit_fallback` substitutes for one attempt only. While a
+  multi-day wall lasts, every attempt (and every downstream stage inheriting
+  the execute pin) spends one limited launch on the primary before
+  substituting. There is no "skip the primary until its reset" mode, because
+  Hive keeps provider reset hints display-only.
+- The artifacts producer never substitutes: its capture toolkit, permission
+  arguments, and runtime policy are prepared for the producer profile before
+  launch. Its limit is annotated `fallback_outcome=unsupported`; artifacts'
+  best-effort policy still lets most tasks continue without evidence.
+- A substitute is not route-observed, so an OpenCode fallback's
+  requested-versus-actual route is not journaled.
+- Review fix and CI-fix substitutions (`review.limit_fallback`) are still not
+  journaled as `implementation_identity_substituted`; only their
+  `limit-fallback-NN.jsonl` receipts record them.
+- The auto-rebase conflict agent still uses `review.limit_fallback` only in
+  the review stage. A rebase ahead of execute or open-PR could use
+  `implementation.limit_fallback` but does not.
+- Status derives `held.fallback.outcome=available` from config alone. It does
+  not see explicit provider-account routing, under which the next attempt
+  will not substitute.
+- An execute substitute runs on the same worktree after the limited primary,
+  so partial primary edits are its starting point, exactly as on a retry.
 

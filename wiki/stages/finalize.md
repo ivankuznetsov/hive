@@ -3,7 +3,7 @@ title: 8-finalize stage
 type: stage
 source: lib/hive/stages/finalize.rb, lib/hive/task_closure.rb, templates/finalize_prompt.md.erb, templates/finalize_summary.md.erb
 created: 2026-05-13
-updated: 2026-11-08
+updated: 2026-11-20
 tags: [stage, finalize, pr, github, clean-exit, closure]
 ---
 
@@ -97,7 +97,19 @@ not repeat accepted work.
    `ERROR reason=finalize_tampered restored=true|false` is written. The prompt
    instructs the agent to update the PR body, write `summary.md`, append
    `<!-- COMPLETE pr_url=... is_draft=false -->` to `pr.md`, and leave the
-   ready-state mutation to the controller.
+   ready-state mutation to the controller. If the agent hits a provider limit
+   (`Hive::Agent` writes `ERROR reason=limits_reached`) and the opt-in
+   `implementation.limit_fallback` maps `finalize.agent` to another profile,
+   the agent is relaunched once on that profile under fresh custody, with
+   log label `finalize-fallback-<agent>` and the profile's default model
+   (`finalize.model` / `effort` name the primary's model and are withheld).
+   The substitution is journaled as `implementation_identity_substituted`.
+   `finalize.agent` is read from config on every attempt, so there is no pin
+   to bypass. A successful substitute's own marker decides the stage. When
+   the fallback is deferred, unresolvable, or the substitute also fails, the
+   primary's limit marker is republished with `provider=`,
+   `primary_agent=`, `fallback_agent=`, and `fallback_outcome=`. See
+   [[stages/execute]] and [[modules/config]].
 7. Re-check the marker/frontmatter URL binding and refresh exact local/remote
    PR head identity again after the agent. Head or URL drift fails before the
    post-agent remote scan or ready mutation.

@@ -4,6 +4,7 @@ require "hive/conditions/generation_tracker"
 require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/agent_support"
+require "hive/stringify_keys"
 require "hive/task_journal"
 require "hive/task_projection/reader"
 require "digest"
@@ -12,6 +13,11 @@ require "json"
 module Hive
   module ImplementationIdentity
     class Store
+      # Stages whose provider-limit substitutions are journaled: the durable
+      # implementation stages plus the config-driven artifacts/finalize
+      # launches that implementation.limit_fallback also covers.
+      LIMIT_FALLBACK_STAGES = (Resolver::IMPLEMENTATION_STAGES + %w[artifacts finalize]).freeze
+
       def initialize(task:, cfg:, attempt_store: nil, writer: nil, history_reader: nil,
                      resolver: nil, generation_tracker: Hive::Conditions::GenerationTracker.new)
         @task = task
@@ -97,6 +103,52 @@ module Hive
           return selection_from_projection(existing)
         end
         selection
+      end
+
+      # The execute identity pinned for the current generation, or nil. A
+      # pure read: unlike ensure_execute! it never reconstructs or appends.
+      def current_execute
+        context = context!
+        existing = projected_execute(context.task_generation, projection: @history_reader.read)
+        existing && selection_from_projection(existing)
+      end
+
+      # Journal one opt-in provider-limit substitution before the substitute
+      # launches (Hive::ImplementationLimitFallback). The stage's pinned
+      # identity is untouched: the event keeps the primary for audit, names
+      # the substitute that actually runs, and scopes it to this attempt.
+      # Identical repeats inside one attempt are idempotent no-ops.
+      def record_limit_fallback!(stage:, role:, primary:, substitute:, retry_after:, limit_detail:)
+        stage = stage.to_s
+        unless LIMIT_FALLBACK_STAGES.include?(stage)
+          raise ResolutionError, "#{stage.inspect} does not support limit-fallback substitutions"
+        end
+
+        context = context!
+        payload = {
+          "stage" => stage,
+          "role" => role.to_s,
+          "scope" => "attempt",
+          "primary" => route_value(primary),
+          "substitute" => route_value(substitute),
+          "limit" => limit_detail.to_s,
+          "retry_after" => retry_after
+        }
+        digest = Digest::SHA256.hexdigest(JSON.generate(payload)).slice(0, 24)
+        @writer.append_idempotent(
+          @event_builder.build(
+            context,
+            event_type: "implementation_identity_substituted",
+            reason: "provider_limit_fallback",
+            provenance: { "source" => Resolver::LIMIT_FALLBACK_SOURCE },
+            payload: payload
+          ),
+          idempotency_key: [
+            task_key, context.task_generation, stage, context.attempt_id,
+            "limit-fallback", digest
+          ].join("/")
+        )
+        payload
       end
 
       def observe_route!(stage:, requested_route:, actual_route:,
@@ -198,6 +250,21 @@ module Hive
 
       def persisted_identity(selection)
         selection.to_h.reject { |key, _| key == "native_arguments" }
+      end
+
+      # A Selection persists like any identity event. Stages without a
+      # durable identity (artifacts, finalize) pass a {provider, model} route
+      # whose nil model means the profile's default.
+      def route_value(value)
+        return persisted_identity(value) if value.is_a?(Selection)
+        raise InvalidIdentity, "limit-fallback route must be a Selection or a mapping" unless value.is_a?(Hash)
+
+        route = Hive::StringifyKeys.call(value).slice("provider", "model", "requested_effort")
+        if route["provider"].to_s.strip.empty?
+          raise InvalidIdentity, "limit-fallback route must name a provider"
+        end
+
+        route.compact
       end
 
       def identity_key(generation)

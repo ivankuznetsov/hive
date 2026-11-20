@@ -217,6 +217,19 @@ module Hive
         "capture" => { "provider" => nil }
       },
       "finalize" => { "agent" => "claude" },
+      # Opt-in substitute agent for the implementation stages (execute,
+      # open_pr, artifacts, finalize) whose primary provider hits a classified
+      # usage/credit limit. Same shape and rules as `review.limit_fallback`;
+      # the substitution holds for the attempt that made it only, and the
+      # task's pinned implementation identity is never rewritten. Disabled by
+      # default: no substitution ever happens unless `enabled: true`.
+      "implementation" => {
+        "limit_fallback" => {
+          "enabled" => false,
+          "min_wait_sec" => 3600,
+          "agents" => {}
+        }
+      },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or
       # version. Adding a new top-level profile is not yet supported here
@@ -2243,7 +2256,8 @@ module Hive
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
-      validate_review_limit_fallback!(cfg, source_path)
+      validate_limit_fallback!(cfg, REVIEW_LIMIT_FALLBACK_PATH, source_path)
+      validate_implementation!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
@@ -2293,6 +2307,7 @@ module Hive
       open_pr
       artifacts
       finalize
+      implementation
       budget_usd
       timeout_sec
       review
@@ -3193,17 +3208,31 @@ module Hive
             "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
 
-    REVIEW_LIMIT_FALLBACK_KEYS = %w[enabled min_wait_sec agents].freeze
+    LIMIT_FALLBACK_KEYS = %w[enabled min_wait_sec agents].freeze
+    REVIEW_LIMIT_FALLBACK_PATH = %w[review limit_fallback].freeze
+    IMPLEMENTATION_LIMIT_FALLBACK_PATH = %w[implementation limit_fallback].freeze
+    IMPLEMENTATION_KEYS = %w[limit_fallback].freeze
 
-    def validate_review_limit_fallback!(cfg, source_path)
-      fallback = cfg.dig("review", "limit_fallback")
-      label = "review.limit_fallback"
+    # `implementation` holds settings shared by the implementation stages
+    # (execute, open_pr, artifacts, finalize). It is closed so a misspelled
+    # key cannot silently leave an opt-in disabled.
+    def validate_implementation!(cfg, source_path)
+      validate_closed_mapping!(cfg["implementation"], IMPLEMENTATION_KEYS, "implementation", source_path)
+      validate_limit_fallback!(cfg, IMPLEMENTATION_LIMIT_FALLBACK_PATH, source_path)
+    end
+
+    # One validator for every `<block>.limit_fallback` (Hive::LimitFallback):
+    # closed keys, a boolean `enabled`, a bounded `min_wait_sec`, and an
+    # `agents` map whose fallback is always a different registered profile.
+    def validate_limit_fallback!(cfg, path, source_path)
+      fallback = cfg.dig(*path)
+      label = path.join(".")
       unless fallback.is_a?(Hash)
         raise ConfigError,
               "#{label} in #{describe_source(source_path)} must be a Hash; got #{fallback.inspect} (#{fallback.class})"
       end
 
-      validate_closed_mapping!(fallback, REVIEW_LIMIT_FALLBACK_KEYS, label, source_path)
+      validate_closed_mapping!(fallback, LIMIT_FALLBACK_KEYS, label, source_path)
       validate_required_boolean!(fallback["enabled"], "#{label}.enabled", source_path)
       validate_bounded_integer!(fallback["min_wait_sec"], "#{label}.min_wait_sec", 0, MAX_LIMIT_FALLBACK_WAIT_SEC, source_path)
       agents = fallback["agents"]

@@ -263,6 +263,20 @@ artifacts:
 finalize:
   agent: claude
 
+# Opt-in: when an implementation stage's agent (execute, open_pr, artifacts
+# inference/reviewer, finalize) hits a usage/credit limit whose reset is absent
+# or at least min_wait_sec away, retry that launch once on the mapped fallback
+# agent. The substitution holds for that attempt only: the task's pinned
+# implementation identity is unchanged, and the journal records both identities.
+# The fallback runs the model the stage's own config names for it, else its
+# profile default.
+# implementation:
+#   limit_fallback:
+#     enabled: true
+#     min_wait_sec: 3600
+#     agents:
+#       codex: claude
+
 # Optional screenshot hosting for artifacts-stage media is authorized once with
 # `hive connect screenote`; the global config can override only the service URL:
 # screenote:

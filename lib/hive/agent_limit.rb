@@ -229,7 +229,7 @@ module Hive
     # Single-line operator label. Provider reset estimates remain visible, but
     # the periodic retry policy is explicit so the date is not mistaken for a
     # hard scheduling embargo.
-    def held_label(attrs)
+    def held_label(attrs, fallback = held_fallback(attrs))
       label = "held: agent quota"
       provider = held_provider(attrs)
       label = "#{label} (#{provider})" if provider
@@ -237,7 +237,38 @@ module Hive
       retry_display = held_retry_display(attrs)
       label = "#{label} — reset estimate #{retry_display}" if retry_display
 
-      "#{label}; Hive retries #{retry_interval_label}; top up or switch execute agent"
+      label = "#{label}; Hive retries #{retry_interval_label}; top up or switch execute agent"
+      fallback ? "#{label}; #{fallback_summary(fallback)}" : label
+    end
+
+    # Outcomes a `review.limit_fallback` / `implementation.limit_fallback`
+    # evaluation stamps on a held marker as `fallback_outcome=`, plus
+    # "available" (status-derived: configured for the held provider, not yet
+    # tried by the attempt that wrote the marker).
+    FALLBACK_OUTCOMES = %w[available waiting limited failed unresolved unsupported].freeze
+    FALLBACK_OUTCOME_TEXT = {
+      "available" => "available; the next attempt substitutes it",
+      "waiting" => "not used; the reset is sooner than min_wait_sec",
+      "limited" => "also limited",
+      "failed" => "failed",
+      "unresolved" => "could not be resolved",
+      "unsupported" => "not supported for this role"
+    }.freeze
+
+    # The limit-fallback facts a held marker carries, or nil.
+    def held_fallback(attrs)
+      agent = safe_provider(attr_value(attrs, "fallback_agent"))
+      return nil unless agent
+
+      outcome = attr_value(attrs, "fallback_outcome")
+      { "agent" => agent, "outcome" => (outcome if FALLBACK_OUTCOMES.include?(outcome)) }.freeze
+    end
+
+    # "fallback grok also limited" — one clause for status rows and labels.
+    def fallback_summary(fallback)
+      outcome = fallback["outcome"]
+      text = FALLBACK_OUTCOME_TEXT[outcome] || outcome || "tried"
+      "fallback #{fallback.fetch('agent')} #{text}"
     end
 
     def retry_interval_label
@@ -257,12 +288,14 @@ module Hive
     # `retry_after` are nullable here precisely because legacy / attr-less
     # markers can omit them. Frozen to match the codebase's immutable-payload
     # convention (Snapshot Rows/ProjectViews) — it is only read/serialized.
-    def held_field(attrs)
-      {
+    def held_field(attrs, fallback = held_fallback(attrs))
+      field = {
         "reason" => "quota",
         "provider" => held_provider(attrs),
         "retry_after" => retry_after_time(attrs)&.iso8601
-      }.freeze
+      }
+      field["fallback"] = fallback if fallback
+      field.freeze
     end
 
     def first_useful_line(text)

@@ -962,7 +962,19 @@
               "required": ["name", "retry_after"],
               "properties": {
                 "name": { "type": ["string", "null"] },
-                "retry_after": { "type": ["string", "null"], "format": "date-time" }
+                "retry_after": { "type": ["string", "null"], "format": "date-time" },
+                "fallback": {
+                  "description": "Opt-in provider-limit fallback for the held provider (see hive-status Task.held.fallback).",
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["agent", "outcome"],
+                  "properties": {
+                    "agent": { "type": "string" },
+                    "outcome": {
+                      "enum": ["available", "waiting", "limited", "failed", "unresolved", "unsupported", null]
+                    }
+                  }
+                }
               }
             }
           ]

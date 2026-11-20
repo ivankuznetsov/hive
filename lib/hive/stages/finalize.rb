@@ -1,9 +1,11 @@
 require "fileutils"
 require "open3"
 require "time"
+require "hive/agent_limit"
 require "hive/artifact_firewall"
 require "hive/gh"
 require "hive/git_ops"
+require "hive/implementation_limit_fallback"
 require "hive/markers"
 require "hive/review_pass"
 require "hive/claude_launcher"
@@ -102,28 +104,18 @@ module Hive
 
         prompt = render_prompt(task, worktree_path, branch, pr_url)
         profile = Hive::Stages::Base.stage_profile(cfg, "finalize")
-        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
-          root: task.folder,
-          protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
-          permitted_writable_roots: [ task.folder, worktree_path ]
-        )
-        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
-        spawn_result = spawn_finalize_agent(
-          task, cfg, prompt, profile, worktree_path,
-          agent_custody: agent_custody
-        )
-        custody_report = agent_custody.report
-        if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
-          Hive::Markers.set(task.state_file, :error, reason: "finalize_custody_missing")
-          return { commit: "finalize_custody_missing", status: :error }
-        end
-        if custody_report&.tampered?
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "finalize_tampered",
-                            files: custody_report.tampered_labels.join(","),
-                            restored: custody_report.restored?,
-                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
-          return { commit: "finalize_tampered", status: :error }
+        finalized = run_finalize_agent(task, cfg, prompt, profile, worktree_path)
+        return finalized.fetch(:terminal) if finalized.key?(:terminal)
+
+        spawn_result = finalized.fetch(:result)
+        if finalize_limit?(spawn_result)
+          fallback = finalize_limit_fallback(task, cfg, prompt, profile, worktree_path, spawn_result)
+          return fallback.fetch(:terminal) if fallback.key?(:terminal)
+          unless fallback.key?(:result)
+            return finalize_limits_reached(
+              task, profile, spawn_result, fallback.fetch(:marker_attrs, {})
+            )
+          end
         end
 
         marker = Hive::Markers.current(task.state_file)
@@ -181,25 +173,134 @@ module Hive
         { commit: "pr_finalized", status: :complete }
       end
 
+      # Spawn one finalize agent under fresh single-use custody. Returns
+      # `{ result: }`, or `{ terminal: }` for missing custody or tampering.
+      def run_finalize_agent(task, cfg, prompt, profile, worktree_path, limit_fallback: nil)
+        custody_manifest = Hive::ArtifactFirewall::Manifest.new(
+          root: task.folder,
+          protected_anchors: Hive::ArtifactFirewall::ORCHESTRATOR_OWNED,
+          permitted_writable_roots: [ task.folder, worktree_path ]
+        )
+        agent_custody = Hive::ArtifactFirewall::AgentCustody.new(custody_manifest)
+        spawn_kwargs = { agent_custody: agent_custody }
+        spawn_kwargs[:limit_fallback] = limit_fallback if limit_fallback
+        spawn_result = spawn_finalize_agent(task, cfg, prompt, profile, worktree_path, **spawn_kwargs)
+        custody_report = agent_custody.report
+        if !custody_report && spawn_result.is_a?(Hash) && spawn_result[:status] == :ok
+          Hive::Markers.set(task.state_file, :error, reason: "finalize_custody_missing")
+          return { terminal: { commit: "finalize_custody_missing", status: :error } }
+        end
+        if custody_report&.tampered?
+          Hive::Markers.set(task.state_file, :error,
+                            reason: "finalize_tampered",
+                            files: custody_report.tampered_labels.join(","),
+                            restored: custody_report.restored?,
+                            restore_error: custody_report.restore_diagnostic.to_s[0, 200])
+          return { terminal: { commit: "finalize_tampered", status: :error } }
+        end
+
+        { result: spawn_result }
+      end
+
+      # Hive::Agent already classified the run (refused models first) and
+      # wrote the limits_reached marker for the :state_file_marker launch.
+      def finalize_limit?(spawn_result)
+        spawn_result.is_a?(Hash) && %i[error timeout].include?(spawn_result[:status]) &&
+          spawn_result[:error_reason].to_s == "limits_reached"
+      end
+
+      # implementation.limit_fallback for the finalize agent (see
+      # Hive::ImplementationLimitFallback). finalize.agent is read from config
+      # on every attempt, so there is no pin to bypass: an approved
+      # substitute is journaled and launched once on the fallback profile's
+      # default model. Returns `{ result: }` when the substitute ran
+      # cleanly (its own terminal marker then decides the stage),
+      # `{ terminal: }` when it tampered, or `{ marker_attrs: }` naming why
+      # the primary's limit stands (possibly empty).
+      def finalize_limit_fallback(task, cfg, prompt, profile, worktree_path, spawn_result)
+        plan = Hive::ImplementationLimitFallback.plan(
+          cfg: cfg, stage: "finalize", primary: profile.name.to_s,
+          limit_text: finalize_limit_text(spawn_result),
+          error_message: spawn_result[:error_message]
+        )
+        return {} unless plan
+        return { marker_attrs: plan.marker_attrs } unless plan.substitute?
+
+        recorded = Hive::ImplementationLimitFallback.record!(
+          task: task, cfg: cfg, plan: plan,
+          primary: { "provider" => profile.name.to_s, "model" => cfg.dig("finalize", "model") },
+          substitute: { "provider" => plan.fallback }
+        )
+        return { marker_attrs: plan.marker_attrs("failed") } unless recorded
+
+        fallback_profile = Hive::AgentProfiles.lookup(plan.fallback, cfg: cfg)
+        substitute = run_finalize_agent(
+          task, Hive::ImplementationLimitFallback.fallback_cfg(cfg), prompt,
+          fallback_profile, worktree_path, limit_fallback: plan
+        )
+        return substitute if substitute.key?(:terminal)
+
+        result = substitute.fetch(:result)
+        ok = result.is_a?(Hash) && !%i[error timeout].include?(result[:status])
+        outcome = Hive::ImplementationLimitFallback.finish(
+          plan, ok: ok, limited: finalize_limit?(result)
+        )
+        return { result: result } if ok
+
+        { marker_attrs: plan.marker_attrs(outcome) }
+      end
+
+      def finalize_limit_text(spawn_result)
+        text = spawn_result[:limit_text].to_s
+        text.empty? ? spawn_result[:error_message].to_s : text
+      end
+
+      # Republish the primary's limit after a fallback was evaluated: a
+      # failed substitute may have overwritten the marker with its own error.
+      def finalize_limits_reached(task, profile, spawn_result, attrs)
+        unless attrs.empty?
+          message = spawn_result[:error_message].to_s
+          Hive::Markers.set(
+            task.state_file, :error,
+            **{
+              reason: "limits_reached",
+              provider: profile.name.to_s,
+              message: message.byteslice(0, 200).to_s.scrub,
+              retry_after: spawn_result[:retry_at] ||
+                Hive::AgentLimit.retry_after(text: finalize_limit_text(spawn_result)),
+              **attrs
+            }.compact
+          )
+        end
+        { commit: nil, status: Hive::Markers.current(task.state_file).name }
+      end
+
       def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path,
-                               agent_custody: nil)
+                               agent_custody: nil, limit_fallback: nil)
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "finalize", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
         )
+        # finalize.model / finalize.effort name the primary's model; a
+        # limit-fallback substitute runs its profile's default instead.
+        model_arguments = if limit_fallback
+          {}
+        else
+          Hive::Stages::Base.model_launch_arguments(
+            cfg, "finalize", profile,
+            current: Hive::Stages::Base.model_routing_current(cfg["finalize"])
+          )
+        end
         kwargs = {
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: Hive::Stages::Base.stage_budget_usd(cfg, "finalize", profile, default: 50),
           timeout_sec: finalize_timeout(cfg),
-          log_label: "finalize",
+          log_label: limit_fallback ? limit_fallback.log_label("finalize") : "finalize",
           profile: profile,
           agent_custody: agent_custody,
-          **Hive::Stages::Base.model_launch_arguments(
-            cfg, "finalize", profile,
-            current: Hive::Stages::Base.model_routing_current(cfg["finalize"])
-          ),
+          **model_arguments,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }

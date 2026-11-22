@@ -143,8 +143,9 @@ when `source` stringifies case-insensitively to `ad-hoc`.
 After each reviewer file is written, `Review::GithubPublisher.publish!` posts a
 PR-level comment headed `### Reviewer: <name> - Pass NN` when
 `review.github_publish.enabled` is true. The header is the dedupe key and is
-generation-scoped: after a backward approve archived earlier generations
-(`PassArchive.generation` = 1 + directories under `reviews/archive/`), the
+generation-scoped: after a backward approve, an outcome-evidence rework or an
+external fast-forward adoption ([[publication-recovery]]) archived earlier
+generations (`PassArchive.generation` = 1 + directories under `reviews/archive/`), the
 header becomes `### Reviewer: <name> - Pass NN (review generation G)`, so the
 rewound pass 01 is no longer mistaken for the archived generation's comment.
 The first generation keeps the bare header (comments posted before the suffix

@@ -762,6 +762,35 @@ class ReviewRemoteCiTest < Minitest::Test
     end
   end
 
+  def test_publication_stops_on_a_remote_fast_forward_and_still_refuses_true_divergence
+    with_fixture do |repo, head, task, ctx, gh, _clock, _runner|
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "operator pushed outside Hive")
+      ahead = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", head)
+      gh.metadata = gh.metadata.with(head_ref_oid: ahead)
+
+      adoptable = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh).publish!(expected_head: head)
+      assert_equal "behind", adoptable.evidence["classification"]
+      assert_equal "remote_fast_forward_adoptable", adoptable.evidence["failure_reason"]
+      assert_equal "unknown", adoptable.evidence["publication"]
+      assert_equal ahead, adoptable.evidence["remote_head"]
+      assert_empty adoptable.evidence["unpushed_shas"]
+      assert_nil adoptable.evidence["push_command"]
+      assert_empty gh.pushes, "publication never pushes over a fast-forwarded PR"
+      assert_equal head, run!("git", "-C", repo, "rev-parse", "HEAD").strip, "adoption belongs to recovery"
+
+      run!("git", "-C", repo, "commit", "--allow-empty", "-qm", "local-only fix")
+      local = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      divergent = Hive::Stages::Review::Publication.new(task: task, cfg: cfg, ctx: ctx,
+        pr_url: gh.metadata.url, gh: gh).publish!(expected_head: local)
+      assert_equal "divergent", divergent.evidence["classification"]
+      assert_equal "remote_conflict", divergent.evidence["failure_reason"]
+      assert_equal [ local ], divergent.evidence["unpushed_shas"]
+      assert_empty gh.pushes
+    end
+  end
+
   def test_withheld_publication_rejects_a_context_outside_the_owned_worktree
     with_fixture do |_repo, head, task, ctx, gh, _clock, _runner|
       Dir.mktmpdir do |other|

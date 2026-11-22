@@ -375,6 +375,116 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_fast_forward_adopts_an_exact_observed_descendant_of_a_clean_branch
+    with_fast_forward_fixture do |repo, remote, base, ahead, observation|
+      receipt = Hive::AgentGitGate.fast_forward(
+        repository_path: repo, branch: "task", expected_oid: base,
+        observation: observation, remote: remote, allow_local_transport: true
+      )
+
+      assert_equal base, receipt.before_oid
+      assert_equal ahead, receipt.after_oid
+      assert_equal "task", receipt.branch
+      assert_equal observation.remote_fingerprint, receipt.remote_fingerprint
+      assert_equal ahead, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      assert_equal "task", run!("git", "-C", repo, "branch", "--show-current").strip
+      assert_empty run!("git", "-C", repo, "status", "--porcelain").strip
+    end
+  end
+
+  def test_fast_forward_refuses_every_unproven_local_precondition_without_moving
+    with_fast_forward_fixture do |repo, remote, base, _ahead, observation|
+      attempt = lambda do |expected = base, current = observation|
+        Hive::AgentGitGate.fast_forward(
+          repository_path: repo, branch: "task", expected_oid: expected,
+          observation: current, remote: remote, allow_local_transport: true
+        )
+      end
+
+      File.write(File.join(repo, "untracked.txt"), "operator scratch\n")
+      dirty = assert_raises(Hive::AgentGitGate::FastForwardRefused) { attempt.call }
+      assert_equal :dirty_worktree, dirty.reason
+      File.delete(File.join(repo, "untracked.txt"))
+
+      moved = assert_raises(Hive::AgentGitGate::FastForwardRefused) { attempt.call("d" * 40) }
+      assert_equal :local_head_moved, moved.reason
+
+      missing = assert_raises(Hive::AgentGitGate::FastForwardRefused) do
+        attempt.call(base, observation.with(oid: "e" * 40))
+      end
+      assert_equal :remote_object_unavailable, missing.reason
+
+      same = assert_raises(Hive::AgentGitGate::FastForwardRefused) do
+        attempt.call(base, observation.with(oid: base))
+      end
+      assert_equal :not_fast_forward, same.reason
+
+      local = commit_file(repo, "local.txt", "local only\n", "local-only commit")
+      divergent = assert_raises(Hive::AgentGitGate::FastForwardRefused) { attempt.call(local) }
+      assert_equal :not_fast_forward, divergent.reason
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", base)
+
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "elsewhere")
+      branch = assert_raises(Hive::AgentGitGate::FastForwardRefused) { attempt.call }
+      assert_equal :branch_moved, branch.reason
+      run!("git", "-C", repo, "checkout", "--quiet", "task")
+
+      assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      assert_raises(ArgumentError) { Hive::AgentGitGate::FastForwardRefused.new(:other, "unknown") }
+    end
+  end
+
+  def test_fast_forward_refuses_remote_movement_and_invalid_observations
+    with_fast_forward_fixture do |repo, remote, base, ahead, observation|
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", ahead)
+      newer = commit_file(repo, "newer.txt", "newer\n", "newer")
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", base)
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{newer}:refs/heads/task")
+      moved = assert_raises(Hive::AgentGitGate::RemoteConflict) do
+        Hive::AgentGitGate.fast_forward(repository_path: repo, branch: "task", expected_oid: base,
+          observation: observation, remote: remote, allow_local_transport: true)
+      end
+      assert_match(/moved after observation/, moved.message)
+
+      retargeted = assert_raises(Hive::AgentGitGate::RemoteConflict) do
+        Hive::AgentGitGate.fast_forward(repository_path: repo, branch: "task", expected_oid: base,
+          observation: observation.with(remote_fingerprint: "f" * 64), remote: remote,
+          allow_local_transport: true)
+      end
+      assert_match(/target changed/, retargeted.message)
+
+      [ observation.with(oid: nil), observation.with(branch: "other", ref: "refs/heads/other"), Object.new ].each do |invalid|
+        assert_raises(Hive::AgentGitGate::InvalidRequest) do
+          Hive::AgentGitGate.fast_forward(repository_path: repo, branch: "task", expected_oid: base,
+            observation: invalid, remote: remote, allow_local_transport: true)
+        end
+      end
+      assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      refute_equal ahead, newer
+    end
+  end
+
+  def test_fast_forward_fails_closed_when_the_merge_or_its_result_is_unverifiable
+    with_fast_forward_fixture do |repo, remote, base, _ahead, observation|
+      original = Hive::ManagedGit.method(:capture3)
+      [ 1, 0 ].each do |exitstatus|
+        fake = lambda do |path, *args, **options|
+          next original.call(path, *args, **options) unless args.first == "merge"
+
+          [ "", "", GateStatus.new(exitstatus) ]
+        end
+        with_replaced_singleton_method(Hive::ManagedGit, :capture3, fake) do
+          error = assert_raises(Hive::AgentGitGate::CommandFailed) do
+            Hive::AgentGitGate.fast_forward(repository_path: repo, branch: "task", expected_oid: base,
+              observation: observation, remote: remote, allow_local_transport: true)
+          end
+          assert_match(exitstatus.zero? ? /could not be verified/ : /exact fast-forward failed/, error.message)
+        end
+      end
+      assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+    end
+  end
+
   def test_closed_read_vocabulary_covers_object_history_and_diff_queries
     with_tmp_git_repo do |repo|
       base = commit_file(repo, "one.txt", "one\n", "one")
@@ -761,6 +871,21 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_fast_forward_receipt_rejects_invalid_shapes
+    valid = { remote_fingerprint: "f" * 64, branch: "task", before_oid: "a" * 40, after_oid: "b" * 40 }
+    assert_equal "b" * 40, Hive::AgentGitGate::FastForwardReceipt.new(**valid).after_oid
+    [
+      valid.merge(remote_fingerprint: "not-a-fingerprint"),
+      valid.merge(branch: "bad//branch"),
+      valid.merge(before_oid: "not-an-oid"),
+      valid.merge(after_oid: "a" * 40)
+    ].each do |attributes|
+      assert_raises(Hive::AgentGitGate::InvalidRequest) do
+        Hive::AgentGitGate::FastForwardReceipt.new(**attributes)
+      end
+    end
+  end
+
   def test_signal_death_is_valid_exactly_when_overflow_was_proven
     killed = Hive::AgentGitGate::ReadResult.new(
       operation: :object_content, stdout: "a", stderr: "",
@@ -947,6 +1072,22 @@ class AgentGitGateTest < Minitest::Test
       remote = File.join(root, "remote.git")
       run!("git", "init", "--bare", "--quiet", remote)
       with_tmp_git_repo { |repo| yield repo, remote }
+    end
+  end
+
+  # A clean `task` branch at `base` whose published remote branch was
+  # fast-forwarded to `ahead` outside the worktree.
+  def with_fast_forward_fixture
+    with_local_remote do |repo, remote|
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "task")
+      ahead = commit_file(repo, "operator.txt", "operator change\n", "operator change")
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{ahead}:refs/heads/task")
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", base)
+      observation = Hive::AgentGitGate.observe_remote_branch(
+        repository_path: repo, branch: "task", remote: remote, allow_local_transport: true
+      )
+      yield repo, remote, base, ahead, observation
     end
   end
 

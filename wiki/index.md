@@ -49,7 +49,7 @@ The public native release surface is the `hive-cli` rubygem plus authenticated m
 
 ## Pages
 
-- [[publication-recovery]] — PR identity, rebase recovery, revalidation and exact secret-scan exceptions.
+- [[publication-recovery]] — PR identity, rebase recovery, external fast-forward adoption, revalidation and exact secret-scan exceptions.
 
 - [[active-areas]] — `wiki/active-areas.md`
 - [[architecture]] — `wiki/architecture.md`

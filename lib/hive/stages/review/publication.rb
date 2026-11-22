@@ -23,6 +23,7 @@ module Hive
         # the receipt-proven head; any other head fails closed at once.
         PR_HEAD_SETTLE_DELAYS = [ 1, 2, 3, 5, 8 ].freeze
         PUBLICATION_STATE_FILE = "github-publication.json".freeze
+        REMOTE_FAST_FORWARD_ADOPTABLE = "remote_fast_forward_adoptable".freeze
 
         attr_reader :evidence, :identity
 
@@ -62,6 +63,11 @@ module Hive
           @evidence.merge!(classification.reject { |k, _| k == "head_delivered" })
           raise Stop, "pr_reference_unavailable" if classification["classification"] == "unknown"
           raise Hive::AgentGitGate::RemoteConflict, "divergent history" if classification["classification"] == "divergent"
+          # The PR was fast-forwarded past the reviewed head outside Hive. This
+          # run's passes and any grant are bound to the old head, so stop and
+          # leave adoption to recovery (Hive::ReviewFastForwardAdoption), which
+          # retires this review generation before the next run.
+          raise Stop, REMOTE_FAST_FORWARD_ADOPTABLE if classification["classification"] == "behind"
           # Safe gate uses an exact lease; require ahead-only history above so
           # it can never turn operator guidance into a forceful rewrite.
           receipt = with_publication_anchor(identity[:branch], identity[:remote_head], expected_head) do

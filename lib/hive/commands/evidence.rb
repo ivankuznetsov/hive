@@ -9,7 +9,7 @@ require "hive/commands/approve"
 require "hive/config"
 require "hive/lock"
 require "hive/markers"
-require "hive/review_pass"
+require "hive/stages/review/pass_archive"
 require "hive/task_resolver"
 require "hive/terminal_outcome"
 
@@ -338,20 +338,9 @@ module Hive
       # without this a task that needed rework could never be reviewed again.
       # Keep the earlier passes for provenance under reviews/archive/.
       def archive_review_passes!(locked_task, sequence)
-        reviews = File.join(locked_task.folder, "reviews")
-        passes = Dir[File.join(reviews, "*")].select do |path|
-          Hive::ReviewPass.number(path) || Hive::ReviewPass.budget_receipt?(path)
-        end.sort_by { |path| Hive::ReviewPass.sort_key(path) }
-        return if passes.empty?
-
-        if passes.any? { |path| Hive::ReviewPass.budget_receipt?(path) }
-          Hive::ReviewBudget.new(task: locked_task, project: locked_task.project_name)
-            .record_expiry!(reason: "review_reset")
-        end
-
-        archive = File.join(reviews, "archive", format("rework-%02d", sequence.to_i))
-        FileUtils.mkdir_p(archive)
-        passes.each { |path| FileUtils.mv(path, File.join(archive, File.basename(path))) }
+        Hive::Stages::Review::PassArchive.retire!(
+          locked_task, label: format("rework-%02d", sequence.to_i), expiry_reason: "review_reset"
+        )
       end
 
       def emit_rework(payload)

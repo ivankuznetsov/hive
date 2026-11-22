@@ -190,7 +190,10 @@ Markers' lossy quote/comment-delimiter formatting without changing legacy attrs.
 Evidence names the owned worktree/branch, PR URL/number/state/draft metadata,
 local and observed remote full heads, publication (`published`, `unpublished`,
 `unknown`, `not_applicable`) and verification (`pending`, `failed`, `verified`),
-commit classification and full unpushed SHAs, observation time and failure reason.
+commit classification (`equal`, `ahead`, `behind`, `divergent` or `unknown`) and
+full unpushed SHAs, observation time and failure reason. `behind` (the PR was
+fast-forwarded past the reviewed head) records
+`publication_reason=remote_fast_forward_adoptable`; see [[publication-recovery]].
 CI evidence includes its head and explicitly labels configured-out gates skipped.
 Oversized fields are unavailable with named diagnostics; executable strings and
 commit identifiers are never shortened into different values.

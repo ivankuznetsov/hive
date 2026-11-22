@@ -83,6 +83,49 @@ class ReviewPublicationRecoveryTest < Minitest::Test
     end
   end
 
+  def test_classification_distinguishes_a_remote_fast_forward_from_true_divergence
+    with_tmp_git_repo do |repo|
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      commit = lambda do |name|
+        File.write(File.join(repo, name), name)
+        run!("git", "-C", repo, "add", name)
+        run!("git", "-C", repo, "commit", "-qm", name)
+        run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      end
+      remote = commit.call("operator")
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", base)
+
+      behind = Recovery.classify(worktree: repo, reference_oid: remote)
+      assert_equal "behind", behind["classification"]
+      assert_empty behind["unpushed_shas"], "the PR already holds every local commit"
+      assert_nil behind["failure_reason"]
+
+      equal = Recovery.classify(worktree: repo, reference_oid: base)
+      assert_equal "equal", equal["classification"]
+
+      local = commit.call("local")
+      divergent = Recovery.classify(worktree: repo, reference_oid: remote)
+      assert_equal "divergent", divergent["classification"]
+      assert_equal [ local ], divergent["unpushed_shas"]
+    end
+  end
+
+  def test_projection_names_an_adoptable_fast_forward_and_the_legacy_conflict
+    adoptable = Recovery.project(Recovery.encode("publication" => "unknown", "classification" => "behind",
+      "failure_reason" => "remote_fast_forward_adoptable"))
+    assert_includes adoptable["remediation"], "fast-forwarded outside Hive"
+    assert_includes adoptable["remediation"], "git merge --ff-only"
+    assert_includes adoptable["remediation"], "new review generation"
+
+    legacy = Recovery.project(Recovery.encode("publication" => "unknown", "classification" => "divergent",
+      "failure_reason" => "remote_conflict"))
+    assert_includes legacy["remediation"], "reconcile divergence"
+    assert_includes legacy["remediation"], "workflow.retry re-observes it and adopts it"
+
+    other = Recovery.project(Recovery.encode("publication" => "unknown", "failure_reason" => "pr_reference_unavailable"))
+    refute_includes other["remediation"], "adopts"
+  end
+
   def test_recipe_executes_only_current_canonical_retry_for_exact_task
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin")

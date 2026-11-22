@@ -65,6 +65,12 @@ module Hive
 
     # Explicit PR reference, never origin/default..HEAD. Delivery ancestry is
     # separate from publication and is supplied by the closure caller.
+    #
+    # `equal`: the PR names the local head. `ahead`: the PR reference is an
+    # ancestor of the local head, so only local commits are missing from it.
+    # `behind`: the local head is a strict ancestor of the PR reference, so
+    # the PR was fast-forwarded past it and holds every local commit.
+    # `divergent`: each side has commits the other lacks.
     def classify(worktree:, reference_oid:, delivered_heads: [], head: "HEAD")
       local = git(worktree, "rev-parse", "--verify", "#{head}^{commit}")&.strip
       reference = reference_oid.to_s.downcase
@@ -80,10 +86,11 @@ module Hive
       shas = commits.lines.map(&:strip)
       return unknown.merge("failure_reason" => "commit_evidence_exceeds_bound") if shas.size > 256
       ancestor = git(worktree, "merge-base", "--is-ancestor", reference, local)
+      behind = !ancestor && shas.empty? && git(worktree, "merge-base", "--is-ancestor", local, reference)
       delivered = Array(delivered_heads).any? do |oid|
         oid.to_s.match?(OID) && git(worktree, "merge-base", "--is-ancestor", local, oid)
       end
-      { "classification" => local == reference ? "equal" : ancestor ? "ahead" : "divergent",
+      { "classification" => local == reference ? "equal" : ancestor ? "ahead" : behind ? "behind" : "divergent",
         "unpushed_shas" => shas, "candidate_shas" => [], "failure_reason" => nil,
         "head_delivered" => !!delivered }
     end
@@ -150,6 +157,10 @@ module Hive
       if attrs["reason"] == "final_fix_unverified" || evidence["origin_reason"] == "final_fix_unverified"
         suffix = format("%02d", attrs["pass"].to_i)
         result["remediation"] = "Resolve escalations=#{attrs['escalations'].to_i} and accepted=#{attrs['accepted'].to_i} findings in #{Array(evidence["reviewer_files"]).empty? ? "reviews/*-#{suffix}.md (reviewer file list unavailable)" : evidence["reviewer_files"].join(", ")}. Commit fixes locally before explicit operator/coordinator verification retry. Editing review checkboxes does not apply fixes. Raising review.max_passes explicitly authorizes a changed repair budget."
+      elsif evidence["failure_reason"] == "remote_fast_forward_adoptable"
+        result["remediation"] = "The PR branch was fast-forwarded outside Hive: the observed PR head descends from the reviewed local head and holds every local commit. " \
+          "workflow.retry adopts that exact PR head into the clean owned worktree with git merge --ff-only, expires review grants and archives review passes bound to the old head, " \
+          "and starts a new review generation. It refuses a dirty worktree, local-only commits, a PR head missing from the local object store, or a PR head that moves again before adoption."
       else
         result["remediation"] = case evidence["publication"]
         when "published"
@@ -161,7 +172,11 @@ module Hive
         when "not_applicable"
           "Publication is not applicable to this review."
         else
-          "Publication is unknown. Inspect the PR branch and reconcile divergence or identity failures before another push."
+          remediation = "Publication is unknown. Inspect the PR branch and reconcile divergence or identity failures before another push."
+          if evidence["failure_reason"] == "remote_conflict"
+            remediation += " If the PR head only fast-forwarded past the local head, workflow.retry re-observes it and adopts it into the clean owned worktree; true divergence still needs operator reconciliation."
+          end
+          remediation
         end
       end
       result["recovery_guidance"] = result["retry_command"] ? "Use the current observation-bound workflow.retry action." :

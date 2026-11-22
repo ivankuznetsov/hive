@@ -3,7 +3,7 @@ title: Hive::AgentGitGate
 type: module
 source: lib/hive/agent_git_gate.rb, lib/hive/managed_git.rb
 created: 2026-07-26
-updated: 2026-08-27
+updated: 2026-11-22
 tags: [git, security, publication, worktree, boundary]
 ---
 
@@ -32,9 +32,13 @@ argv directly.
 | `RemoteObservation` | Exact branch/ref/OID observation plus a SHA-256 fingerprint of the resolved transport target. It never stores the remote URL or credentials. |
 | `MaterializationReceipt` | Exact commit, root-confined destination, and `created`/`existing` disposition for a verified detached clean worktree. |
 | `PublicationReceipt` | Expected, before, published, and independently observed after OIDs plus the non-secret remote fingerprint. |
+| `FastForwardReceipt` | Branch, distinct before/after OIDs, and the remote fingerprint of the observation a clean local fast-forward adopted. |
 
 Typed failures are `InvalidRequest`, `UnsupportedOperation`, `CommandFailed`,
-`RemoteConflict`, `MaterializationFailed`, and `PublicationFailed`.
+`RemoteConflict`, `MaterializationFailed`, `PublicationFailed`, and
+`FastForwardRefused` (with a stable `reason`: `branch_moved`,
+`local_head_moved`, `dirty_worktree`, `remote_object_unavailable`,
+`not_fast_forward`).
 
 ## Closed operations
 
@@ -75,6 +79,22 @@ the branch, pushes
 again, and returns a receipt only when the remote names the published OID.
 `publish_local_branch` is the Hive compatibility adapter: it resolves the local
 branch once and delegates its immutable OID to `publish`.
+
+`fast_forward` is the only local branch mutation. It takes a present
+`RemoteObservation` of the same branch and requires the following:
+
+- the worktree is attached to that branch at `expected_oid`;
+- strict status is clean, with no staged, unstaged or untracked changes;
+- the observed commit is already present locally and strictly descends from
+  `expected_oid`;
+- the re-resolved remote fingerprint and a fresh observation still match.
+
+Only then does it run `merge --ff-only --no-edit --no-stat <exact oid>`. It
+verifies the branch, HEAD and cleanliness before returning a
+`FastForwardReceipt`. It never resets, forces, rebases or fetches. Hive uses it
+for [[publication-recovery]] external fast-forward adoption
+(`Hive::ReviewFastForwardAdoption`). `merge` is the one mutating command this
+adds to the private executor's allowlist.
 
 ## Process hardening
 

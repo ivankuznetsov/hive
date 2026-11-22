@@ -25,6 +25,10 @@
       <dd><%= @preview.task_repository&.values_at("identity", "path")&.compact&.first || "unavailable" %></dd>
       <dt>Authority</dt>
       <dd><%= @preview.authority || "unavailable" %></dd>
+      <% if (successor = @preview.successor) %>
+        <dt>Successor</dt>
+        <dd><%= successor.fetch("project") %>:<%= successor.fetch("slug") %> (<%= successor.fetch("stage") %>)</dd>
+      <% end %>
       <dt>Evidence digest</dt>
       <dd><code><%= @preview.evidence_digest %></code></dd>
     </dl>
@@ -63,7 +67,7 @@
           selected: @closure_input["reason"] %>
   </div>
   <div>
-    <%= form.label :evidence, "Immutable GitHub PR or commit evidence (leave empty for cancellation)" %>
+    <%= form.label :evidence, "Immutable GitHub PR or commit evidence (leave empty for cancellation, or for supersession proven by its successor task)" %>
     <%= text_area_tag "evidence[]", Array(@closure_input["evidence"]).join("\n"),
           rows: 6 %>
   </div>

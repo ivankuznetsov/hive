@@ -3,7 +3,7 @@ title: Workflow verbs
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/task_closure.rb, lib/hive/task_closure_result.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-11-19
+updated: 2026-11-22
 tags: [command, workflow, verbs, stage_action, json, closure, evidence]
 ---
 
@@ -27,6 +27,9 @@ hive archive <slug> --reason superseded \
   --evidence other/repo#7 \
   --successor project:new-task \
   --attestation "Delivered by the successor"
+hive archive <slug> --reason superseded \
+  --successor project:rails-port \
+  --attestation "The Rails port replaces this task"  # successor is the proof; keeps worktree
 hive archive <slug> --reason cancelled \
   --attestation "No longer wanted"         # preserve history and worktree; no delivery claim
 hive archive <slug> --reason cancelled \
@@ -84,11 +87,28 @@ An owned worktree may still contain commits after a squash merge: closure
 accepts it when the clean worktree HEAD is exactly the verified merged PR head
 or a local Git ancestor of that head. A different or unverifiable unique HEAD
 continues to block closure.
-`superseded` additionally requires exactly one registered `project:slug`
-successor and a non-empty operator attestation; cross-repository evidence is
-recorded under `operator_attestation` authority. Equal refs, a clean branch,
+`superseded` requires exactly one registered `project:slug` successor and a
+non-empty operator attestation; its authority is always
+`operator_attestation`. `--evidence` is optional for it. When given, the
+evidence is verified exactly as for `already_delivered`, except that
+cross-repository evidence is accepted; unverifiable evidence fails the preview
+and never falls back to the successor alone. Equal refs, a clean branch,
 similar titles, a merely closed PR, and shortened SHAs are never delivery
 proof.
+
+Without `--evidence` (added 2026-11-22), the registered successor task is the
+supersession proof: the closed task is linked to the task that replaces it,
+and nothing was delivered. That closure follows the cancellation path: it binds
+the registered local checkout (`task_repository: {path}`, no GitHub access),
+records `evidence: []`, skips the owned-worktree delivery blockers so the
+worktree and branch stay for the successor, moves to the terminal stage
+without the terminal runner (`COMPLETE outcome=superseded`), and does not
+satisfy dependents: admission reports `dependency_validation_failed` telling
+them to depend on the successor instead. The receipt records the resolved
+successor (`project`, `slug`, `id`, `stage`). A successor that is the task
+itself, unresolvable, cancelled, itself superseded without delivery (which
+also refuses supersession cycles), or carrying an unreadable closure receipt
+is refused; an active successor or one archived with delivery qualifies.
 
 `cancelled` retires unwanted work without claiming delivery. It requires a
 non-empty operator reason, accepts neither evidence nor a successor, and needs
@@ -102,7 +122,9 @@ inert terminals retain their manifest unchanged. A cancelled prerequisite does
 not count as delivered: dependents must remove or replace that dependency.
 An invalid closure receipt blocks dependency admission, including after another
 consumer quarantines it. Admission reads closure evidence without moving it.
-The Web archive form and bot `/close` accept the same reason.
+The Web archive form and bot `/close` accept the same reasons; both show the
+resolved successor of a supersession, and `/close --reason superseded`
+requires `--successor` but not `--evidence`.
 
 The receipt is written atomically before transition. Its exact digest enters a
 separate `TransitionGuard.validate_closure!` path; it is not attempt success

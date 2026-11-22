@@ -95,11 +95,18 @@ module Hive
     end
     private_constant :Blocker, :Evaluation, :Frame
 
+    # `cancelled` and `superseded_by` mark a task archived by a closure that
+    # proves no delivery: cancellation, or supersession resting only on its
+    # registered successor (`superseded_by` is that successor's project:slug).
     TaskSnapshot = Data.define(
       :project, :slug, :id, :stage, :workflow_stages, :depends_on,
       :metadata_status, :metadata_error, :plan_status, :plan_dependency,
-      :plan_error, :folder, :validation_error, :cancelled
-    )
+      :plan_error, :folder, :validation_error, :cancelled, :superseded_by
+    ) do
+      def initialize(superseded_by: nil, **fields)
+        super
+      end
+    end
 
     ProjectSnapshot = Data.define(
       :name, :path, :repository_identity, :live_repository_identity,
@@ -179,7 +186,7 @@ module Hive
         end
         source = source_matches.first
         return admission_error("dependency_task_missing", "#{project}:#{slug}", task_correction(project)) unless source
-        return clear if source.cancelled
+        return clear if source.cancelled || source.superseded_by
 
         @verdict_cache_mutex.synchronize do
           cached = @verdict_cache[qualify(source)]
@@ -534,6 +541,12 @@ module Hive
         if prerequisite.cancelled
           return validation_failure(
             "task was cancelled, not delivered; remove or replace this prerequisite", reference.to_s
+          )
+        end
+        if prerequisite.superseded_by
+          return validation_failure(
+            "task was superseded by #{prerequisite.superseded_by} without delivery; " \
+            "depend on #{prerequisite.superseded_by} instead (hive stack --on)", reference.to_s
           )
         end
         depending_project = unique_project(depending_task.project)

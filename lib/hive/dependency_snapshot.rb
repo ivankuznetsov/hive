@@ -55,7 +55,8 @@ module Hive
                 "metadata_status" => task.metadata_status,
                 "plan_status" => task.plan_status,
                 "validation_error" => task.validation_error.to_s,
-                "cancelled" => task.cancelled
+                "cancelled" => task.cancelled,
+                "superseded_by" => task.superseded_by
               }
             end.sort_by { |task| [ task["project"].to_s, task["slug"].to_s, task["id"].to_s ] }
           }
@@ -913,6 +914,7 @@ module Hive
         validation_error = "task folder changed while dependency admission was taking its snapshot"
       end
       cancelled = false
+      superseded_by = nil
       if File.basename(File.dirname(folder)) == workflow_stages.last
         require "hive/task_closure"
         closure = Hive::TaskClosure.read(
@@ -920,7 +922,12 @@ module Hive
           project: project_name, quarantine: false
         )
         if closure.valid?
-          cancelled = closure.receipt["reason"] == "cancelled"
+          receipt = closure.receipt
+          cancelled = receipt["reason"] == "cancelled"
+          if !cancelled && Hive::TaskClosure.undelivered?(receipt["reason"], receipt["evidence"])
+            successor = receipt.fetch("successor")
+            superseded_by = "#{successor.fetch('project')}:#{successor.fetch('slug')}"
+          end
         elsif !closure.absent?
           validation_error ||= "invalid task closure receipt: #{closure.error}"
         end
@@ -948,7 +955,8 @@ module Hive
         plan_error: plan.error,
         folder: folder,
         validation_error: validation_error,
-        cancelled: cancelled
+        cancelled: cancelled,
+        superseded_by: superseded_by
       )
     end
 

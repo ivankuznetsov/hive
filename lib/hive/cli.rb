@@ -1308,7 +1308,8 @@ module Hive
     end
 
     desc "archive [TARGET]", "List done tasks, or move a completed finalize task into done"
-    long_desc <<~DESC
+    # wrap: false keeps the per-reason list and the example's line breaks.
+    long_desc <<~DESC, wrap: false
       With no TARGET, lists every task currently in 9-done across registered
       projects. Pass --json for the same archive-scoped status payload.
 
@@ -1319,6 +1320,20 @@ module Hive
       requires) closes an active task outside its ordinary path. Hive verifies
       and prints a preview, asks y/N, then archives; --yes skips the prompt.
 
+        already_delivered  --evidence: merged PRs or default-branch commits
+                           in the task's own repository.
+        superseded         --successor project:slug, the registered task that
+                           replaces this one, and --attestation. --evidence is
+                           optional; when given it is verified the same way
+                           and may come from another repository. Without it
+                           the successor is the proof and nothing was
+                           delivered: Hive keeps the worktree and branch for
+                           the successor, skips the done stage, and
+                           dependents must depend on the successor instead.
+                           A successor that was itself closed without
+                           delivery is refused.
+        cancelled          --attestation only. Keeps the worktree and branch.
+
       With --json, stdout is exactly one document. --json alone is a read-only
       preview and archives nothing: hive-task-closure-input with "mode":
       "preview", "applied": false, and a "next" command that applies it.
@@ -1327,6 +1342,9 @@ module Hive
       failure prints a hive-task-closure-result document with "ok": false.
 
       Examples:
+
+        hive archive 42 --reason superseded --successor app:rails-port \\
+          --attestation "The Rails port replaces this task" --json
 
         hive archive 42 --reason cancelled --attestation "Not wanted" --json
 
@@ -1338,9 +1356,11 @@ module Hive
     option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
                     desc: "operator closure reason: already_delivered, superseded or cancelled"
     option :evidence, type: :array,
-                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
+                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag); " \
+                            "optional for superseded"
     option :successor, type: :string,
-                       desc: "registered project:slug that supersedes this task"
+                       desc: "registered project:slug that supersedes this task; " \
+                             "enough on its own for superseded"
     option :attestation, type: :string,
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
     option :yes, type: :boolean, default: false,

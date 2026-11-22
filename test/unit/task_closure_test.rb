@@ -267,6 +267,246 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  # The operator's case: a task replaced by another Hive task (a Rails port)
+  # closes with the registered successor as its only proof. Nothing was
+  # delivered, so it behaves like cancellation: local, no GitHub access, no
+  # terminal runner, worktree and branch kept, dependents not satisfied.
+  def test_superseded_by_successor_without_evidence_archives_and_keeps_the_work
+    with_closure_project(successor: true) do |task, project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "port-notes.md"), "committed work\n")
+      run!("git", "-C", worktree.path, "add", "port-notes.md")
+      run!("git", "-C", worktree.path, "commit", "-m", "unique work", "--quiet")
+      File.write(File.join(worktree.path, "unfinished.txt"), "keep this work\n")
+      branch_head = run!("git", "-C", worktree.path, "rev-parse", "HEAD").strip
+      seed_task(task, slug: "follower-task", id: 3, depends_on: task.slug)
+
+      # Object.new has no GitHub methods: any remote lookup would raise.
+      service = service_for(gh: Object.new)
+      input = {
+        "reason" => "superseded",
+        "successor" => "#{project}:successor-task",
+        "attestation" => "The successor task replaces this work."
+      }
+      preview = service.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      assert_equal "operator_attestation", preview.authority
+      assert_empty preview.evidence
+      assert_equal({ "path" => File.realpath(task.project_root) }, preview.task_repository)
+      assert_equal(
+        { "project" => project, "slug" => "successor-task", "id" => 2, "stage" => "1-inbox" },
+        preview.successor
+      )
+      input_schema = JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::INPUT_SCHEMA)))
+      assert_empty JSONSchemer.schema(input_schema).validate(preview.to_h).to_a
+
+      with_replaced_singleton_method(
+        Hive::Commands::Run, :new, ->(*) { flunk "undelivered supersession must not launch a terminal runner" }
+      ) do
+        receipt = service.confirm!(
+          task: task, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        archived = Hive::TaskResolver.new(task.slug, project_filter: project).resolve
+        assert_equal "9-done", "#{archived.stage_index}-#{archived.stage_name}"
+        marker = Hive::Markers.current(archived.state_file)
+        assert_equal :complete, marker.name
+        assert_equal "superseded", marker.attrs["outcome"]
+        assert_equal "archived", Hive::TaskAction.new(archived, marker).key
+        assert_equal "superseded", receipt.fetch("reason")
+        assert_equal "operator_attestation", receipt.fetch("authority")
+        assert_empty receipt.fetch("evidence")
+        assert_equal preview.successor, receipt.fetch("successor")
+        receipt_schema = JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA)))
+        assert_empty JSONSchemer.schema(receipt_schema).validate(receipt).to_a
+        assert service.read(archived, project: project).valid?
+        assert Hive::Conditions::TransitionGuard.validate_closure!(
+          archived, receipt_digest: receipt.fetch("receipt_digest"), project: project
+        )
+
+        assert_equal "keep this work\n", File.read(File.join(worktree.path, "unfinished.txt"))
+        assert_equal branch_head,
+                     run!("git", "-C", task.project_root, "rev-parse", "refs/heads/#{task.slug}").strip
+
+        context = Hive::DependencySnapshot.admission_context(Hive::Config.registered_projects)
+        assert context.verdict(project: project, slug: task.slug).clear?
+        verdict = context.verdict(project: project, slug: "follower-task")
+        assert verdict.blocked?
+        assert_includes verdict.admission_error.safe_correction,
+                        "superseded by #{project}:successor-task without delivery"
+
+        replay = service.confirm!(
+          task: archived, project: project, input: input,
+          preview_digest: preview.preview_digest,
+          operator: "tester", channel: "cli", authorized: true
+        )
+        assert_equal receipt, replay
+      end
+    end
+  end
+
+  def test_cli_supersedes_by_successor_task_without_evidence
+    require "hive/cli"
+    require "shellwords"
+    with_closure_project(successor: true) do |task, project|
+      argv = [
+        "archive", task.slug, "--project", project, "--reason", "superseded",
+        "--successor", "#{project}:successor-task",
+        "--attestation", "The Rails port replaces this task", "--json"
+      ]
+      with_replaced_singleton_method(
+        Hive::Commands::Run, :new, ->(*) { flunk "undelivered supersession must not launch a terminal runner" }
+      ) do
+        preview_out, = capture_io { Hive::CLI.start(argv) }
+        preview = single_json_document(preview_out)
+        assert_equal true, preview.fetch("ok"), preview.inspect
+        assert_equal "successor-task", preview.dig("successor", "slug")
+        assert_equal "4-execute", current_stage(task.slug, project)
+
+        next_argv = Shellwords.split(preview.fetch("next"))
+        assert_equal [ "hive", *argv, "--yes" ].sort, next_argv.sort
+        result_out, = capture_io { Hive::CLI.start(next_argv.drop(1)) }
+        result = single_json_document(result_out)
+        result_schema = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-closure-result")))
+        assert_empty JSONSchemer.schema(result_schema).validate(result).to_a
+        assert_equal true, result.fetch("applied")
+        assert_equal "9-done", current_stage(task.slug, project)
+      end
+    end
+  end
+
+  # Superseding by a successor that cannot deliver would orphan the work, so
+  # the successor must be active or archived with delivery.
+  def test_superseded_successor_must_still_be_able_to_deliver
+    with_closure_project(successor: true) do |task, project|
+      service = service_for(gh: Object.new)
+      third = seed_task(task, slug: "third-task", id: 3)
+      supersede = lambda do |closing, successor|
+        {
+          "reason" => "superseded",
+          "successor" => "#{project}:#{successor}",
+          "attestation" => "#{successor} replaces #{closing.slug}"
+        }
+      end
+      close = lambda do |closing, input, closure_service = service|
+        preview = closure_service.preview(task: closing, project: project, input: input)
+        assert preview.valid?, preview.to_h.inspect
+        closure_service.confirm!(task: closing, project: project, input: input,
+                                 preview_digest: preview.preview_digest,
+                                 operator: "tester", channel: "cli", authorized: true)
+      end
+      successor_error = lambda do |closing, successor|
+        preview = service.preview(task: closing, project: project, input: supersede.call(closing, successor))
+        refute preview.valid?
+        preview.errors.find { |entry| entry["field"] == "successor" }
+      end
+
+      # An active successor and one archived with delivery both qualify.
+      assert service.preview(task: task, project: project,
+                             input: supersede.call(task, "successor-task")).valid?
+      delivered = Hive::TaskResolver.new("successor-task", project_filter: project).resolve
+      close.call(delivered, input_for("acme/app#42"), service_for)
+      assert service.preview(task: task, project: project,
+                             input: supersede.call(task, "successor-task")).valid?
+
+      # A cancelled successor will never deliver the work.
+      close.call(third, { "reason" => "cancelled", "attestation" => "Not wanted" })
+      error = successor_error.call(task, "third-task")
+      assert_equal "cancelled", error.fetch("code")
+      assert_includes error.fetch("message"), "#{project}:third-task was cancelled"
+
+      # A successor superseded without delivery passed the work on: name the
+      # task carrying it now. This also refuses a supersession cycle.
+      fourth = seed_task(task, slug: "fourth-task", id: 4)
+      close.call(fourth, supersede.call(fourth, "closure-task"))
+      error = successor_error.call(task, "fourth-task")
+      assert_equal "superseded", error.fetch("code")
+      assert_includes error.fetch("message"),
+                      "#{project}:fourth-task was itself superseded by #{project}:closure-task without delivery"
+
+      # An unreadable successor receipt fails closed and stays in place.
+      fifth = seed_task(task, slug: "fifth-task", id: 5)
+      File.write(File.join(fifth.folder, "closure.json"), "{broken json")
+      error = successor_error.call(task, "fifth-task")
+      assert_equal "closure_invalid", error.fetch("code")
+      assert File.file?(File.join(fifth.folder, "closure.json"))
+    end
+  end
+
+  def test_superseded_with_evidence_keeps_remote_verification_and_worktree_guard
+    with_closure_project(successor: true) do |task, project|
+      input = {
+        "reason" => "superseded",
+        "evidence" => [ "acme/app#42" ],
+        "successor" => "#{project}:successor-task",
+        "attestation" => "Delivered through the successor's PR."
+      }
+      preview = service_for.preview(task: task, project: project, input: input)
+      assert preview.valid?, preview.to_h.inspect
+      assert_equal "github.com/acme/app", preview.task_repository.fetch("identity")
+      assert_equal 1, preview.evidence.length
+
+      # Unverifiable evidence never falls back to the successor alone.
+      open_preview = service_for(gh: FakeGh.new(state: "OPEN")).preview(task: task, project: project, input: input)
+      refute open_preview.valid?
+      assert open_preview.errors.any? { |entry| entry["code"] == "verification_failed" }
+      assert open_preview.errors.any? { |entry| entry["code"] == "unverified" }
+
+      worktree = Hive::Worktree.new(task.project_root, task.slug)
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "unfinished.txt"), "unique\n")
+      blocked = service_for.preview(task: task, project: project, input: input)
+      refute blocked.valid?
+      assert blocked.blockers.any? { |entry| entry["code"] == "unique_worktree_changes" }
+
+      # Without a successor, supersession still has nothing to rest on.
+      missing = service_for(gh: Object.new).preview(
+        task: task, project: project,
+        input: { "reason" => "superseded", "attestation" => "Replaced elsewhere." }
+      )
+      refute missing.valid?
+      assert_equal [ "successor" ], missing.errors.map { |entry| entry["field"] }.uniq
+    end
+  end
+
+  def test_undelivered_superseded_receipt_binds_checkout_successor_and_attestation
+    with_closure_project(successor: true) do |task, project|
+      service = service_for(gh: Object.new)
+      preview = service.preview(task: task, project: project, input: {
+        "reason" => "superseded", "successor" => "#{project}:successor-task",
+        "attestation" => "Replaced by the successor task."
+      })
+      base = service.send(:build_receipt, preview, operator: "tester", channel: "cli")
+      assert_equal base, service.send(:validate_receipt!, deep_copy(base), task: task, project: project)
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(Hive::TaskClosure::SCHEMA))))
+      assert schema.valid?(base), schema.validate(base).to_a.inspect
+
+      remote = {
+        "host" => "github.com", "repository" => "acme/app",
+        "identity" => "github.com/acme/app", "default_branch" => "main"
+      }
+      [
+        ->(receipt) { receipt["task_repository"]["path"] = "/different-checkout" },
+        ->(receipt) { receipt["task_repository"] = remote },
+        ->(receipt) { receipt["authority"] = "remote_merge" },
+        ->(receipt) { receipt["successor"] = nil },
+        ->(receipt) { receipt["attestation"] = "" }
+      ].each_with_index do |mutation, index|
+        receipt = deep_copy(base)
+        mutation.call(receipt)
+        refresh_receipt_digests!(receipt)
+        assert_raises(Hive::TaskClosure::InvalidReceipt) do
+          service.send(:validate_receipt!, receipt, task: task, project: project)
+        end
+        refute schema.valid?(receipt), "schema must reject mutation #{index}" unless index.zero?
+      end
+    end
+  end
+
   Attempt = Struct.new(:attempt_id, :state, :payload, keyword_init: true) do
     def [](key) = payload[key]
     def live? = %w[launching running].include?(state)
@@ -1743,6 +1983,14 @@ class TaskClosureTest < Minitest::Test
     unsigned = receipt.reject { |key, _| key == "receipt_digest" }
     receipt["receipt_digest"] = Hive::TaskClosure.digest(unsigned)
     receipt
+  end
+
+  def seed_task(task, slug:, id:, depends_on: nil)
+    folder = File.join(task.hive_state_path, "stages", "1-inbox", slug)
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: id, slug: slug, display_name: slug, depends_on: depends_on)
+    File.write(File.join(folder, "idea.md"), "# #{slug}\n")
+    Hive::Task.new(folder)
   end
 
   def input_for(*evidence)

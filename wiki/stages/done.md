@@ -3,21 +3,25 @@ title: 9-done stage
 type: stage
 source: lib/hive/stages/done.rb
 created: 2026-04-25
-updated: 2026-08-06
+updated: 2026-11-22
 tags: [stage, done, archive]
 ---
 
 **TLDR**: Archive stage. `hive run` here does not spawn an agent; it prints the manual cleanup commands (`git worktree remove`, `git branch -d`) and stamps `<!-- COMPLETE -->` on the state file.
 
-Receipt-backed delivered or superseded closure invokes this runner with
-auto-rebase disabled. Closure has already verified immutable delivery and this
-stage never reads the feature worktree, so rebasing an obsolete branch would
-only add latency and conflict-agent work. Ordinary workflow dispatch keeps its
-existing rebase policy.
+Receipt-backed delivered closure, and superseded closure with delivery
+evidence, invokes this runner with auto-rebase disabled. Closure has already
+verified immutable delivery and this stage never reads the feature worktree, so
+rebasing an obsolete branch would only add latency and conflict-agent work.
+Ordinary workflow dispatch keeps its existing rebase policy.
 
 Operator cancellation (`archive --reason cancelled --attestation "reason"`)
 skips this runner altogether. It records cancellation and retains the worktree
 and history; it does not publish a successful-delivery completion event.
+Supersession by a successor task without delivery evidence
+(`archive --reason superseded --successor project:slug --attestation "..."`)
+takes the same path and records `COMPLETE outcome=superseded`; the worktree and
+branch stay for the successor.
 
 ## State file
 

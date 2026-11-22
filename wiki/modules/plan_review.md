@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-11-20
+updated: 2026-11-22
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -322,8 +322,12 @@ manual.
 
 Before an open `gated_auto` or `manual` finding can stop the workflow, a
 `decision_triage` pass reconciles its claimed approval boundary against the plan
-and repository. It uses the configured verification route and the existing
-read-only reviewer workspace and typed result envelope. Each disposition must
+and repository. It runs on the optional `plan_review.routes.decision_triage` row
+(agent, model, family, effort, route) when the project configures one, and on the
+verification route otherwise, in the existing read-only reviewer workspace with
+the typed result envelope. A configured triage row is part of reviewer routing:
+changing it rekeys an unresolved review but not a resolved one. Its model-routing
+identity stays `plan_review_verification`. Each disposition must
 account for its exact source fingerprints; the set must cover every supplied
 finding exactly once. Duplicate concerns may share one disposition. A retained
 human gate must name the unresolved or exceeded contract clause, the material

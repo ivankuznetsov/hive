@@ -213,6 +213,7 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
         "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
         "plan_review:\n  routes:\n    planner_revision_fallback: nope\n" => /planner_revision_fallback.*must be a Hash/i,
+        "plan_review:\n  routes:\n    decision_triage: nope\n" => /decision_triage.*must be a Hash/i,
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
@@ -254,6 +255,19 @@ class ConfigTest < Minitest::Test
                    Hive::Config.load(dir).dig(
                      "plan_review", "routes", "planner_revision_fallback", "model"
                    )
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            decision_triage:
+              agent: claude
+              model: claude-sonnet-5-5
+              family: anthropic
+              effort: low
+              route: claude-code/v1
+      YAML
+      assert_equal "claude-sonnet-5-5",
+                   Hive::Config.load(dir).dig("plan_review", "routes", "decision_triage", "model")
 
       policy = {
         "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",

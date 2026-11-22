@@ -491,8 +491,16 @@ module Hive
         [ resumed, false ]
       end
 
+      # Decision triage runs on `plan_review.routes.decision_triage` when the
+      # project configures one, and on the verification route otherwise.
+      def route_role(role)
+        return role unless role == "decision_triage"
+
+        @cfg.is_a?(Hash) && @cfg.dig("plan_review", "routes", "decision_triage") ? role : "verification"
+      end
+
       def probe_reviewer_capability(record, role)
-        resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
+        resolution = @route_resolver.call(role: route_role(role), planner_identity: planner_identity(record))
         unless resolution.resolved?
           return [ false, stringify(resolution.receipt).merge(
             "outcome" => "unsupported",
@@ -748,8 +756,7 @@ module Hive
       def dispatch_attempt(record, role, plan_bytes, requested, merge_coverage: true,
                            merge_findings: true, verification_findings: [], pending_findings: [])
         resolution = @route_resolver.call(
-          role: role == "decision_triage" ? "verification" : role,
-          planner_identity: planner_identity(record)
+          role: route_role(role), planner_identity: planner_identity(record)
         )
         attempt_id = Identity.attempt(record.review_id)
         if resolution.resolved?

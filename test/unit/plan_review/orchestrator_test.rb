@@ -1071,6 +1071,37 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_decision_triage_uses_its_own_route_only_when_one_is_configured
+    [ false, true ].each do |configured|
+      with_task(standard_plan) do |task, cfg|
+        cfg["plan_review"]["attempts"]["max_transient"] = 0
+        if configured
+          cfg["plan_review"]["routes"]["decision_triage"] = {
+            "agent" => "claude", "model" => "claude-sonnet-5-5", "family" => "anthropic",
+            "effort" => "low", "route" => "claude-code/v1"
+          }
+        end
+        roles = []
+        resolver = lambda do |role:, **options|
+          roles << role
+          resolve_route(role:, **options)
+        end
+        adapter = FakeAdapter.new do |request|
+          if request.kind == "decision_triage"
+            Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+          else
+            successful_result(request, findings: request.kind == "primary" ? [ finding("manual", "Choose replay") ] : [])
+          end
+        end
+
+        orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!
+
+        assert_includes adapter.calls.map(&:kind), "decision_triage"
+        assert_equal configured, roles.include?("decision_triage"), "configured=#{configured}: #{roles.inspect}"
+      end
+    end
+  end
+
   def test_malformed_triage_output_stops_after_the_bounded_attempts_with_original_findings_intact
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0

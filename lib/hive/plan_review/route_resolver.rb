@@ -11,7 +11,10 @@ module Hive
       ROLE_IDENTITIES = {
         "primary" => "plan_review",
         "adversarial" => "plan_review_adversarial",
-        "verification" => "plan_review_verification"
+        "verification" => "plan_review_verification",
+        # Triage keeps the model-routing identity it had while it always ran
+        # on the verification route.
+        "decision_triage" => "plan_review_verification"
       }.freeze
 
       Resolution = Data.define(:status, :candidate, :receipt) do

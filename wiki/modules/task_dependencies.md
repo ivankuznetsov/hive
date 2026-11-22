@@ -1,9 +1,9 @@
 ---
 title: Task dependencies
 type: module
-source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb
+source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/task_workspace/dependency_component.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb, lib/hive/plan_dependency_adoption.rb, lib/hive/commands/stack.rb
 created: 2026-06-18
-updated: 2026-11-19
+updated: 2026-11-22
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -14,7 +14,8 @@ scheduling-only, always branch from the project default, and require every
 prerequisite to reach `9-done`. One shared fail-closed validator returns clear,
 benign wait, or admission error for status, daemon, `hive run`, and forward
 `hive approve`. Invalid or indeterminate evidence never becomes “no
-dependency.”
+dependency.” The declaration is set at capture (`hive new --depends-on`) or at
+any later unfinished stage (`hive stack`).
 
 ## Declaration shape and grammar
 
@@ -294,10 +295,33 @@ once and non-tree, cyclic, or back edges become labeled cross-references. An
 always-present semantic node/edge table is authoritative for the complete
 bounded relationship set. See [[modules/task_workspace]].
 
+## Changing a dependency after creation
+
+`hive stack TARGET --on REF [--on REF ...]` and `hive stack TARGET --clear`
+([[commands/stack]]) rewrite the same `meta.yml` field under the task lease
+and record one `hive/state` commit, so every consumer above sees the change on
+its next read; daemon fingerprints include the declaration, so queued
+generation-bound work goes stale. Write-time validation matches creation:
+grammar errors, cycles, and self-references are refused, while a missing or
+otherwise unhealthy prerequisite is written and reported as a hold. Two rules
+are specific to an existing task. The task's own `plan.md` frontmatter, when
+it declares a dependency, must match the request exactly, because admission
+compares them; `hive stack` refuses rather than edit the reviewed plan, and
+setting the plan's value is how an operator repairs `plan_dependency_mismatch`.
+A finished (terminal-stage) task is refused.
+
+The command never rebases. Execute reads `stacked_base` only when it creates
+the worktree, so restacking a task that already has one changes scheduling
+and open-pr's PR base, not the branch's starting commit; the command notes the
+recorded `base_ref`. `DependencySnapshot.proposed_dependency_verdict` computes
+the verdict by replacing the task's snapshot in place in a targeted context
+(an appended overlay would be a duplicate identity, which fails closed).
+
 ## Recovery
 
 Inspect `hive status --operational --json` or the TUI's admission text, then repair the named
-`meta.yml`, `plan.md`, project enrollment, remote, workflow, or gate. Do not
+`meta.yml` (`hive stack` for a valid declaration), `plan.md`, project
+enrollment, remote, workflow, or gate. Do not
 delete dependency metadata merely to clear the row unless removing the edge is
 the intended model change. For corrupt state that must move out of a forward
 stage, use a backward `hive approve --to ...`; forward run/approval resumes only
@@ -317,6 +341,8 @@ array as a scalar to make the old reader proceed.
   `plan_frontmatter_test.rb` pin the declaration grammar and strict evidence.
 - `test/unit/dependency_admission_test.rb`, `dependency_snapshot_test.rb`, and
   `repository_identity_test.rb` pin graph, gate, workflow, and remote identity.
+- `test/integration/stack_test.rb` pins post-creation set/replace/clear, the
+  creation-equivalent refusals, plan.md agreement, lease and commit custody.
 - `test/unit/task_workspace/dependency_component_test.rb` pins bounded reverse
   traversal, cycles, missing nodes, divergence, truncation, and deterministic
   forest/table parity without additional scans or remote calls.
@@ -333,4 +359,4 @@ array as a scalar to make the old reader proceed.
 - [[modules/task]] · [[commands/status]] · [[modules/daemon]]
 - [[commands/run]] · [[commands/approve]] · [[commands/new]] · [[stages/plan]]
 - [[modules/worktree]] · [[stages/execute]] · [[stages/open-pr]]
-- [[modules/task_workspace]]
+- [[modules/task_workspace]] · [[commands/stack]]

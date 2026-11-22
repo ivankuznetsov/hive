@@ -919,6 +919,54 @@ module Hive
     end
     map "generate-name" => :generate_name
 
+    desc "stack TARGET (--on PREREQUISITE... | --clear)",
+         "Set or clear TARGET's prerequisite task at any unfinished stage"
+    long_desc <<~DESC
+      Change an existing task's dependency without recreating it. --on takes
+      the same references as `hive new --depends-on`: a task id or slug, or
+      project:slug for an explicit cross-project dependency. One --on stacks
+      TARGET on that prerequisite; repeat --on to require every prerequisite
+      (scheduling-only, each must reach 9-done). --clear removes the
+      dependency.
+
+      The new declaration gates scheduling immediately: status, the daemon,
+      `hive run`, and forward `hive approve` hold TARGET until it is satisfied.
+      A same-project single prerequisite also becomes the branch base the next
+      time execute creates a worktree or open-pr opens a PR. An existing
+      worktree branch is never rebased.
+
+      Hive refuses a reference that would close a cycle, a finished task, a
+      draft-PR workflow, and a value that disagrees with TARGET's own plan.md
+      frontmatter. A missing or blocked prerequisite is written anyway and
+      reported, because admission holds TARGET until it resolves. While a
+      stage agent is running for TARGET the change waits for its task lease
+      (exit 75).
+
+      Examples:
+
+        hive stack 1702 --on 1695
+
+        hive stack wire-up-export-260618-ab12 --on api:add-export-endpoint-260618-ab12
+
+        hive stack release-export --on api-task --on ui-task
+
+        hive stack 1702 --clear --json
+    DESC
+    option :on, type: :string, repeatable: true,
+                desc: "prerequisite task id, slug, or project:slug (repeat for a scheduling-only list)"
+    option :clear, type: :boolean, default: false, desc: "remove TARGET's dependency"
+    option :project, type: :string, desc: "scope TARGET lookup to one registered project"
+    def stack(target)
+      require "hive/commands/stack"
+      Hive::Commands::Stack.new(
+        target,
+        on: options[:on],
+        clear: options[:clear],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
+
     desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :stage, type: :string,

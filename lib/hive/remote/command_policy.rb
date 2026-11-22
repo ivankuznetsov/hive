@@ -24,7 +24,7 @@ module Hive
       SUPPORTED_REMOTE = %w[status task new act answer approve operation].freeze
       LOCAL_ONLY = %w[
         init forget prune receipt doctor setup-agents setup update connect disconnect mcp uninstall
-        runtime wiki workflow module bench generate-name run rebase-status publication-reconcile
+        runtime wiki workflow module bench generate-name stack run rebase-status publication-reconcile
         worktree evidence brainstorm plan plan-review plan-review-run develop open-pr review review-grant artifacts
         finalize archive drop patrol refactor-patrol refactor-patrol-scheduled refactor-patrol-classify
         __patrol_fix_semantic_decision answer-digest digest watch decide proposal findings accept-finding

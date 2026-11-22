@@ -1988,6 +1988,78 @@ class SchemaFilesTest < Minitest::Test
            "schema must reject error_kind values outside ForgetErrorKind::ALL"
   end
 
+  # ── hive-stack ─────────────────────────────────────────────────────────
+
+  def test_hive_stack_error_kinds_match_closed_enum
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stack")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal Hive::Schemas::StackErrorKind::ALL.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror Hive::Schemas::StackErrorKind::ALL"
+  end
+
+  # Each error is classified by the command's own mapping, so a producer
+  # kind outside the enum, or an extra envelope field the schema does not
+  # admit, fails here rather than in an agent's JSON parser.
+  def test_hive_stack_error_payload_validates_for_every_producer_kind
+    require "hive/commands/stack"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-stack"))))
+    command = Hive::Commands::Stack.new("task")
+    refusal = ->(kind) { Hive::Commands::Stack::Refusal.new(kind, error_kind: kind) }
+    kinds = Hive::Schemas::StackErrorKind
+    errors = [
+      refusal.call(kinds::USAGE),
+      refusal.call(kinds::INVALID_DEPENDENCY),
+      refusal.call(kinds::DEPENDENCY_CYCLE),
+      refusal.call(kinds::UNSUPPORTED_WORKFLOW),
+      Hive::InvalidTaskPath.new("no task folder"),
+      Hive::AmbiguousSlug.new("ambiguous", slug: "task", candidates: [ { "project" => "a" } ]),
+      Hive::WrongStage.new("finished", current_stage: "9-done"),
+      Hive::DependencyAdmissionError.new(
+        "plan disagrees", reason_code: "plan_dependency_mismatch",
+        offending_ref: "other-task", safe_correction: "edit plan.md"
+      ),
+      Hive::ConcurrentRunError.new("busy", holder: { "pid" => 1 }, lock_path: "runtime-control-plane:task:1"),
+      Hive::TaskMeta::StaleTask.new("moved"),
+      Hive::ConfigError.new("bad meta"),
+      Hive::GitError.new("commit failed"),
+      Hive::UsageError.new("bad argv"),
+      Hive::InternalError.new("boom"),
+      Hive::Error.new("other")
+    ]
+    emitted = errors.map do |error|
+      kind = command.envelope_error_kind(error)
+      payload = Hive::Schemas::ErrorEnvelope.build(schema: "hive-stack", error: error, error_kind: kind)
+      assert schemer.valid?(payload),
+             "hive-stack ErrorPayload must accept #{error.class} as #{kind.inspect} " \
+             "(errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+      kind
+    end
+    assert_equal kinds::ALL.sort, emitted.uniq.sort, "every StackErrorKind must have a producer"
+  end
+
+  def test_hive_stack_success_payload_requires_the_verdict_and_rejects_extra_keys
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-stack"))))
+    payload = {
+      "schema" => "hive-stack", "schema_version" => 1, "ok" => true,
+      "project" => "demo", "slug" => "task", "id" => 7, "stage" => "3-plan",
+      "depends_on" => %w[a-task b-task], "previous_depends_on" => nil,
+      "changed" => true, "committed" => true,
+      "dependency" => {
+        "state" => "wait",
+        "unmet_dependencies" => [
+          { "reference" => "a-task", "blocked_by" => "a-task", "dependency_stage" => "1-inbox",
+            "required_gate" => "9-done" }
+        ],
+        "admission_error" => nil
+      },
+      "notes" => []
+    }
+    assert schemer.valid?(payload), schemer.validate(payload).map { |e| e["error"] }.inspect
+    refute schemer.valid?(payload.merge("extra" => true))
+    refute schemer.valid?(payload.merge("depends_on" => []))
+    refute schemer.valid?(payload.reject { |key, _| key == "dependency" })
+  end
+
   # ── hive-drop ──────────────────────────────────────────────────────────
 
   def test_hive_drop_schema_file_exists_and_is_valid_json

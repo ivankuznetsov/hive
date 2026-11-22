@@ -95,12 +95,32 @@ class McpProvidersTest < Minitest::Test
     end
   end
 
+  # OpenCode 2.x prints its config sources in load order, MCP servers under
+  # `mcp.servers`; later sources override earlier ones.
+  def test_opencode_2x_debug_config_sources_disable_every_configured_server
+    with_catalog do
+      with_tmp_dir do |dir|
+        work = File.join(dir, "work")
+        FileUtils.mkdir_p(work)
+        profile = fake_opencode(dir, <<~SH)
+          [ "$1 $2" = "debug config" ] || exit 9
+          printf '[{"type":"document","path":"/g/opencode.json","info":{"mcp":{"servers":{"personal":{"type":"remote","url":"https://p","disabled":false}}}}},{"type":"directory","path":"/g","info":null},{"type":"document","path":"/e/opencode.json","info":{"mcp":{}}},{"type":"document","path":"/p/opencode.json","info":{"mcp":{"servers":{"project":{"type":"local","command":["x"],"disabled":false}}}}}]'
+        SH
+        launch = opencode_prepare(profile, granted, cwd: work)
+
+        assert_equal :isolated, launch.isolation
+        assert_equal({ "personal" => { "enabled" => false }, "project" => { "enabled" => false } },
+                     launch.config_overlay.fetch("mcp"))
+      end
+    end
+  end
+
   def test_opencode_probe_failures_launch_with_a_notice
     with_tmp_dir do |dir|
       {
         "exit 3" => "`opencode debug config` exited 3",
         "printf 'not json'" => "`opencode debug config` returned malformed JSON",
-        "printf '[]'" => "`opencode debug config` returned malformed JSON",
+        "printf '[1]'" => "`opencode debug config` returned a malformed mcp table",
         %(printf '{"mcp":[]}') => "`opencode debug config` returned a malformed mcp table"
       }.each do |body, message|
         launch = opencode_prepare(fake_opencode(dir, body))

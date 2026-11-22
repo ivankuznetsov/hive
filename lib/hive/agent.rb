@@ -799,14 +799,18 @@ module Hive
       end
     end
 
+    # +fsize_limit+ caps every file the child writes, not just the capture.
+    # Pass false for a child that writes its own large files (OpenCode 2.x's
+    # private server opens a multi-gigabyte session database); the capture is
+    # still read back with +file_limit+, so an oversized reply is detected.
     def capture_process_files(argv:, environment:, file_limit:, stderr_limit:,
-                              timeout_sec:)
+                              timeout_sec:, fsize_limit: true)
       Tempfile.create([ "hive-agent-capture-", ".stdout" ]) do |stdout_file|
         Tempfile.create([ "hive-agent-capture-", ".stderr" ]) do |stderr_file|
+          limits = fsize_limit ? { rlimit_fsize: [ file_limit, file_limit ] } : {}
           pid = Process.spawn(
             environment, *argv, chdir: @cwd, pgroup: true, in: :close,
-            out: stdout_file, err: stderr_file, unsetenv_others: true,
-            rlimit_fsize: [ file_limit, file_limit ]
+            out: stdout_file, err: stderr_file, unsetenv_others: true, **limits
           )
           pgid = begin
             Process.getpgid(pid)

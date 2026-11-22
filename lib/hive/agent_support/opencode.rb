@@ -34,21 +34,91 @@ module Hive::AgentSupport::OpenCode
   end
 
   # The private-server arguments for an `opencode run` of +executable+, read
-  # from its own `run --help` (which starts no server). A binary that cannot
-  # spawn or exits nonzero is left for the run itself to report; a help that
-  # hangs fails the launch rather than risk attaching to a shared server.
+  # from its own `run --help` (which starts no server).
   def private_server_launch_arguments(executable, environment: ENV.to_h)
+    private_server_arguments(run_help(executable, environment:))
+  end
+
+  # OpenCode 2.2 removed `run --variant` and `run --dir`: the effort moved into
+  # the model (`provider/model#variant`) and the working directory is the
+  # process's own. It also removed `export`. Hive compiles the 1.x shape; the
+  # contract read from the binary's `run --help` says how to adapt it.
+  LEGACY_RUN_FLAGS = %w[--variant --dir].freeze
+
+  RunContract = Data.define(:server_arguments, :legacy_flags) do
+    # Only the 1.x CLI has `export --sanitize`.
+    def legacy? = legacy_flags.include?("--variant")
+  end
+
+  # One `run --help` read for the whole launch. When the help is unavailable
+  # the argv is left in its 1.x shape and the run itself reports the problem.
+  def run_contract(executable, environment: ENV.to_h)
+    help = run_help(executable, environment:)
+    legacy = help ? LEGACY_RUN_FLAGS.select { |flag| advertised?(help, flag) } : LEGACY_RUN_FLAGS
+    RunContract.new(server_arguments: private_server_arguments(help), legacy_flags: legacy.freeze)
+  end
+
+  # Rewrites a compiled 1.x argv for a CLI that lacks the legacy flags. Only
+  # OpenCode's own arguments (from +start+, after any sandbox prefix such as
+  # bwrap, which has its own `--dir`) are touched.
+  def adapt_run_arguments(argv, contract, start: 0)
+    argv = argv.dup
+    find = ->(flag) { (start...argv.length).find { |index| argv[index] == flag } }
+    unless contract.legacy_flags.include?("--variant")
+      index = find.call("--variant")
+      if index
+        variant = argv.delete_at(index + 1)
+        argv.delete_at(index)
+        model = find.call("--model")
+        raise Hive::AgentError, "OpenCode #{variant} variant needs a pinned --model" unless model && argv[model + 1]
+
+        argv[model + 1] = "#{argv[model + 1]}##{variant}"
+      end
+    end
+    unless contract.legacy_flags.include?("--dir")
+      index = find.call("--dir")
+      argv.slice!(index, 2) if index
+    end
+    argv
+  end
+
+  # 2.x has no `export`; its server API returns the terminal message instead
+  # (`GET /api/session/:id/message/:message_id`). Reduce it to the
+  # sanitized-export shape the result parser validates: identity and usage
+  # only, no message content.
+  def session_export(session_id, output)
+    document = JSON.parse(output)
+    message = document.is_a?(Hash) ? document["data"] : nil
+    raise JSON::ParserError, "OpenCode session message must be an object" unless message.is_a?(Hash)
+
+    model = message["model"].is_a?(Hash) ? message["model"] : {}
+    record = {
+      "id" => message["id"], "sessionID" => session_id, "role" => message["type"],
+      "finish" => message["finish"], "providerID" => model["providerID"],
+      "modelID" => model["id"], "tokens" => message["tokens"], "cost" => message["cost"]
+    }
+    JSON.generate("info" => { "id" => session_id }, "messages" => [ { "info" => record } ])
+  end
+
+  # The help text of `opencode run`, or nil when the binary cannot spawn or
+  # exits nonzero (left for the run itself to report). A help that hangs
+  # fails the launch rather than risk attaching to a shared server.
+  def run_help(executable, environment:)
     out, err, status = AgentCliRuntime::Profiles.fetch(:opencode).capture_local(
       "run", "--help", env: environment, executable: executable.to_s,
       timeout_sec: PRIVATE_SERVER_PROBE_TIMEOUT_SECONDS
     )
-    status.success? ? private_server_arguments("#{out}\n#{err}") : [].freeze
+    status.success? ? "#{out}\n#{err}" : nil
   rescue Timeout::Error
     raise Hive::AgentError,
           "`#{File.basename(executable.to_s)} run --help` timed out after " \
           "#{PRIVATE_SERVER_PROBE_TIMEOUT_SECONDS}s; cannot tell whether it needs #{PRIVATE_SERVER_FLAG}"
   rescue SystemCallError
-    [].freeze
+    nil
+  end
+
+  def advertised?(help, flag)
+    help.to_s.match?(/(?:\A|[\s,])#{Regexp.escape(flag)}(?:[\s,=\[]|$)/)
   end
 
   # A self-spawning launcher's run request (Hive::Mcp.compile), with the

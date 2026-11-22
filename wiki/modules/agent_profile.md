@@ -129,6 +129,24 @@ the OpenCode support module's `spawn_request`. The check lives in Hive
 the unreleased agent-cli-runtime helper, so installed Hive still runs against
 the published 0.2.4 component.
 
+OpenCode 2.2+ also removed `run --variant`, `run --dir`, `export`, and the
+`OPENCODE_PERMISSION` variable. The same `run --help` read
+(`Hive::AgentSupport::OpenCode.run_contract`) decides the shape: when
+`--variant` is not advertised, Execution folds the effort into the model
+(`--model provider/model#variant`) and drops `--dir` (the process already
+starts in the working directory); only OpenCode's own arguments after any
+sandbox prefix are touched. Inspection then reads the terminal message with
+`opencode api --standalone GET /api/session/:id/message/:message_id` and
+`session_export` reduces it to the sanitized-export identity and usage the
+result parser validates. That call runs without the capture's
+`RLIMIT_FSIZE`, because the private server opens the user's session database
+(over a gigabyte here), which the 64 MiB cap made it die on. The permission
+policy is sent in `OPENCODE_CONFIG_CONTENT` (`permission`) as well as in
+`OPENCODE_PERMISSION`: 2.3.2 ignored an env-only deny under `--auto` but
+enforced the config one. MCP isolation reads 2.x `debug config`, which lists
+config sources (`[{info: {mcp: {servers: ...}}}]`) instead of one resolved
+object. Verified end to end against OpenCode 2.3.2 on 2026-11-22.
+
 Implementation-owning stages journal OpenCode's observed route and nullable
 usage only after their artifact-firewall snapshot validates. This keeps
 `task-journal.jsonl` controller-owned: the agent cannot modify it, while Hive's

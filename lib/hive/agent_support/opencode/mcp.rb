@@ -47,7 +47,7 @@ module Hive::AgentSupport::OpenCode::Mcp
     stdout, status = capture.call(debug_config_argv(bin, cwd, capture), chdir: cwd, timeout: probe_timeout)
     raise Hive::AgentError, "`opencode debug config` exited #{status.exitstatus}" unless status.success?
 
-    servers = JSON.parse(stdout).fetch("mcp", {})
+    servers = mcp_servers(JSON.parse(stdout))
     raise Hive::AgentError, "`opencode debug config` returned a malformed mcp table" unless servers.is_a?(Hash)
 
     servers.keys
@@ -66,7 +66,7 @@ module Hive::AgentSupport::OpenCode::Mcp
       raise Discovery::Skipped, "opencode could not run (#{e.class.name.split('::').last})"
     end
     document = Discovery.probe(capture, argv, cwd, "opencode")
-    servers = document.is_a?(Hash) ? document["mcp"] || {} : nil
+    servers = mcp_servers(document)
     raise Discovery::Skipped, "`opencode debug config` returned no mcp table" unless servers.is_a?(Hash)
 
     servers.map do |name, entry|
@@ -84,6 +84,25 @@ module Hive::AgentSupport::OpenCode::Mcp
   end
 
   def probe_timeout = PROBE_TIMEOUT_SECONDS
+
+  # The configured MCP servers (name => entry) in `opencode debug config`
+  # output. 1.x prints the resolved config ({"mcp" => {name => entry}}); 2.x
+  # prints its sources in load order ([{"info" => {"mcp" => {"servers" =>
+  # {name => entry}}}}]), so later sources override earlier ones. nil when
+  # the document has neither shape.
+  def mcp_servers(document)
+    return document["mcp"] || {} if document.is_a?(Hash)
+    return nil unless document.is_a?(Array) && document.all?(Hash)
+
+    document.each_with_object({}) do |source, servers|
+      # A `directory` source may carry `"info": null`.
+      table = source["info"].is_a?(Hash) ? source["info"]["mcp"] : nil
+      next unless table.is_a?(Hash)
+
+      table = table["servers"] if table["servers"].is_a?(Hash)
+      servers.merge!(table)
+    end
+  end
 
   # `[bin, "debug", "config"]`, plus `--standalone` when this binary's help
   # advertises it. A help that exits nonzero leaves the plain command to report

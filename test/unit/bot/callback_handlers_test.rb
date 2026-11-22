@@ -23,7 +23,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   end
   StatusRow = Hive::Bot::StatusWatcher::Row
   ClosurePreview = Struct.new(
-    :input, :evidence, :preview_digest, :errors, :blockers,
+    :input, :evidence, :successor, :preview_digest, :errors, :blockers,
     keyword_init: true
   ) do
     def valid? = errors.empty? && blockers.empty?
@@ -184,6 +184,42 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     assert_equal task, calls.first.fetch(:task)
     assert_equal "app", calls.first.fetch(:project)
     assert_equal input, calls.first.fetch(:input)
+  end
+
+  def test_closure_preview_names_the_successor_of_an_evidence_free_supersession
+    input = {
+      "reason" => "superseded",
+      "evidence" => [],
+      "successor" => "app:rails-port",
+      "attestation" => "The Rails port replaces this task"
+    }
+    payload = closure_callback(
+      "closure_preview",
+      "project" => "app", "slug" => "old-task", "input" => input
+    )
+    resolver = Struct.new(:task) { def resolve = task }.new(Object.new)
+    preview = ClosurePreview.new(
+      input: input,
+      evidence: [],
+      successor: { "project" => "app", "slug" => "rails-port", "id" => 7, "stage" => "4-execute" },
+      preview_digest: "d" * 64,
+      errors: [],
+      blockers: []
+    )
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*) { resolver }) do
+      with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+        result = @handlers.handle(
+          :callback_closure_preview,
+          Struct.new(:callback_data, :chat_id, :from_id).new(payload, 7, 8)
+        )
+
+        assert_equal :edit_reply, result.action
+        assert_match(/Verified superseded closure for app\/old-task/, result.text)
+        assert_includes result.text, "Successor app:rails-port (4-execute)"
+        assert_equal "Confirm and archive", result.reply_markup.first.first.fetch(:text)
+      end
+    end
   end
 
   def test_closure_preview_reports_blockers_and_rejects_unexpected_callback_fields

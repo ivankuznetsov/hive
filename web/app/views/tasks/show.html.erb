@@ -47,6 +47,9 @@
     <p>
       Archived as <strong><%= closure.fetch("reason").tr("_", " ") %></strong>
       via <%= closure.fetch("authority").tr("_", " ") %>.
+      <% if (successor = closure["successor"]).is_a?(Hash) %>
+        Superseded by <%= successor["project"] %>:<%= successor["slug"] %>.
+      <% end %>
     </p>
     <ul>
       <% Array(closure["evidence"]).each do |item| %>

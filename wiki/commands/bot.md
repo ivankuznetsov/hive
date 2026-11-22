@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-08-30
+updated: 2026-11-22
 tags: [command, bot, telegram, mobile, json, closure]
 ---
 
@@ -52,7 +52,7 @@ Telegram is reachable.
 | `/approve <id\|slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface after resolving numeric ids through the current status snapshot. Inline approval buttons usually use the workflow verb instead. |
 | `/autofix <id\|slug>` | Submits the latest observed recoverable row through `Hive::Recovery::API` and renders the durable coordinator receipt, matching the inline 🔧 Autofix button. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers. |
 | `/details <id\|slug>` | Resolves an id or slug against the latest `StatusWatcher` snapshot and replies with the same in-process details text as the inline "Show details" button: row summary, next-step hint, and cached diagnostic summary/detail when the row carries one. |
-| `/close <id\|slug> --reason <already_delivered\|superseded> --evidence <PR-or-commit> ...` | Starts the evidence-bound operator closure flow for an active status row. Repeat `--evidence` as needed; `superseded` also uses `--successor project:slug --attestation "statement"`. The command creates only a compacted **Verify evidence** callback. The first tap re-resolves and verifies immutable evidence; a separate allowlisted **Confirm and archive** tap is still required. |
+| `/close <id\|slug> --reason <already_delivered\|superseded\|cancelled> ...` | Starts the evidence-bound operator closure flow for an active status row. `already_delivered` needs at least one `--evidence <PR-or-commit>` (repeat as needed). `superseded` needs `--successor project:slug --attestation "statement"`; its `--evidence` is optional, and without it the registered successor is the proof. `cancelled` needs `--attestation "reason"`. The command creates only a compacted **Verify evidence** callback. The first tap re-resolves and verifies immutable evidence and the successor (shown as `Successor project:slug (stage)`); a separate allowlisted **Confirm and archive** tap is still required. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the typeable workflow command set. |
 

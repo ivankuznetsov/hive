@@ -3,9 +3,28 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-20
+updated: 2026-11-22
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## Supersession by a successor task: residual scope (2026-11-22)
+
+`hive archive TASK --reason superseded --successor project:slug --attestation
+"..."` now closes without `--evidence` (see [[commands/stage_action]]). Open
+edges:
+
+- **Older readers reject the new receipt shape.** A superseded receipt with
+  `evidence: []` and a path-only `task_repository` fails validation in a Hive
+  built before this change, which quarantines it. Do not downgrade after
+  creating one.
+- **The successor is checked only at preview and confirmation.** If it is
+  cancelled or superseded later, nothing revisits the archived task; its
+  receipt keeps naming that successor, and its dependents keep the admission
+  error telling them to depend on it.
+- **Dependents are not re-pointed automatically.** Admission names the
+  successor; the operator moves each dependent with `hive stack --on`.
+- **Not yet validated against live state.** Covered by unit, CLI, bot, and
+  Web tests only.
 
 ## Operator-remediated review gate retries: residual scope (2026-11-20)
 

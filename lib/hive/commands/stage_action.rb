@@ -256,7 +256,8 @@ module Hive
       def archive_ways_forward(task, current_stage)
         "Either merge the PR and re-run `hive archive #{task.slug} --from #{current_stage}`, " \
           "or close the task explicitly with `hive archive #{task.slug} " \
-          "--reason already_delivered|superseded|cancelled` (plus its --evidence/--attestation)."
+          "--reason already_delivered|superseded|cancelled` (plus the --evidence, " \
+          "--successor, or --attestation that reason requires; see `hive help archive`)."
       end
 
       # See `Hive::Markers::TERMINAL_MARKER_NAMES` for the canonical

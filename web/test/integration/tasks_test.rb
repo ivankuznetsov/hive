@@ -158,6 +158,32 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".closure-evidence li", 0
   end
 
+  test "supersession by a successor task previews without delivery evidence" do
+    input = {
+      "reason" => "superseded",
+      "evidence" => [],
+      "successor" => "#{@project}:rails-port",
+      "attestation" => "The Rails port replaces this task"
+    }
+    preview = Hive::TaskClosure::Preview.new(
+      input: input, task: { "project" => @project, "slug" => @slug },
+      task_repository: { "path" => "/checkout/app" }, evidence: [],
+      successor: { "project" => @project, "slug" => "rails-port", "id" => 7, "stage" => "4-execute" },
+      authority: "operator_attestation", evidence_digest: "e" * 64,
+      preview_digest: "d" * 64, errors: [], blockers: []
+    )
+
+    with_replaced_singleton_method(Hive::TaskClosure, :preview, ->(**) { preview }) do
+      post "/tasks/#{@project}/#{@slug}/closure", params: input.merge("evidence" => [ "" ])
+    end
+
+    assert_response :success
+    assert_select ".closure-preview dd", text: "#{@project}:rails-port (4-execute)"
+    assert_select ".closure-evidence li", 0
+    assert_select "form input[name=successor][value=?]", "#{@project}:rails-port"
+    assert_select "form input[name=preview_digest][value=?]", "d" * 64
+  end
+
   test "closure confirmation uses the authenticated web operator" do
     calls = []
     confirmer = lambda do |**kwargs|
@@ -221,6 +247,26 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".task-closure a[href='https://github.com/acme/app/pull/42']",
                   text: /42/
     assert_select ".task-closure code", count: 0
+  end
+
+  test "task detail names the successor of a superseded closure" do
+    receipt = {
+      "schema" => Hive::TaskClosure::SCHEMA,
+      "schema_version" => 1,
+      "reason" => "superseded",
+      "authority" => "operator_attestation",
+      "receipt_digest" => "d" * 64,
+      "evidence" => [],
+      "successor" => { "project" => @project, "slug" => "rails-port", "id" => 7, "stage" => "4-execute" }
+    }
+
+    with_replaced_singleton_method(Hive::TaskClosure, :projection, ->(*, **) { receipt }) do
+      get "/tasks/#{@project}/#{@slug}"
+    end
+
+    assert_response :success
+    assert_select ".task-closure", text: /Superseded by #{@project}:rails-port\./
+    assert_select ".task-closure li", 0
   end
 
   test "an archive link resolves a task omitted from the ordinary snapshot" do

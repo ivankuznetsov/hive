@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-11-20
+updated: 2026-11-22
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -143,16 +143,24 @@ agent attempt into success.
 
 The receipt records:
 
-- `already_delivered` or `superseded`, with authority `remote_merge` or
-  `operator_attestation`;
+- `already_delivered`, `superseded`, or `cancelled`, with authority
+  `remote_merge` or `operator_attestation`;
 - exact task/project/workflow identity plus task and marker generation;
-- canonical task repository identity and default branch;
+- canonical task repository identity and default branch, or only the
+  registered checkout path for undelivered closure (below);
 - at most 16 canonical merged-PR/full-commit facts, including full PR head and
   merge OIDs where applicable, default-branch reachability, and one canonical
-  evidence digest;
+  evidence digest (`evidence: []` for undelivered closure);
 - the registered successor and bounded attestation for supersession;
 - exact preview digest, operator/channel, timestamp, and canonical receipt
   digest.
+
+Undelivered closure (`Hive::TaskClosure.undelivered?`) is `cancelled`, or
+`superseded` with no evidence, where the registered successor task is the only
+proof. It binds the local checkout instead of GitHub, keeps the owned worktree
+and branch, records the reason as the terminal outcome instead of running the
+terminal stage, and never satisfies a dependency. A superseded receipt with
+evidence keeps the remote shape and full verification.
 
 Preview is read-only. Public confirmation requires an authenticated
 CLI/web/bot operator, names the exact preview digest, and re-verifies

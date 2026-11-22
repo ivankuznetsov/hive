@@ -198,6 +198,15 @@ The admission-error object contains exactly `reason_code`, `offending_ref`, and
 Safe corrections describe the smallest known repair. They do not include a
 command unless Hive can prove it is valid for that state.
 
+A terminal prerequisite whose closure receipt proves no delivery is not a
+delivered prerequisite. `DependencySnapshot` reads the receipt (without
+quarantining it) into `TaskSnapshot#cancelled` or `#superseded_by` (the
+successor's `project:slug` for supersession without delivery evidence), and
+`validate_gate` returns `dependency_validation_failed`: remove or replace a
+cancelled prerequisite, or depend on the named successor (`hive stack --on`).
+An invalid receipt is also an admission error. Superseded closure with
+delivery evidence is delivered and clears as usual.
+
 ## Enforcement boundaries
 
 `hive status` builds one immutable context and is the canonical snapshot for

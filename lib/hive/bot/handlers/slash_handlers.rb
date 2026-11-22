@@ -373,10 +373,12 @@ module Hive
           callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
             "closure_preview", payload
           )
+          successor = input["successor"] ? " by successor #{input['successor']}" : ""
           @result_class.new(
             action: :reply,
             text: "Review #{input.fetch('reason').tr('_', ' ')} closure for " \
-                  "#{row.project}/#{row.slug} using #{input.fetch('evidence').length} evidence item(s). " \
+                  "#{row.project}/#{row.slug}#{successor} " \
+                  "using #{input.fetch('evidence').length} evidence item(s). " \
                   "Nothing is archived until verification and a separate confirmation.",
             reply_markup: [
               [
@@ -433,15 +435,19 @@ module Hive
                   "--reason must be one of #{Hive::TaskClosureContract::REASONS.join(', ')}"
           end
           raise ArgumentError, "at least one --evidence reference is required" if
-            input["evidence"].empty? && input["reason"] != "cancelled"
+            input["evidence"].empty? && input["reason"] == "already_delivered"
+          # The registered successor alone can prove supersession; --evidence
+          # stays optional there.
+          raise ArgumentError, "--successor project:slug is required for superseded" if
+            input["reason"] == "superseded" && input["successor"].nil?
 
           [ target, input ]
         end
 
         def closure_usage
-          "Use /close <id|slug> --reason <already_delivered|superseded|cancelled> " \
-            "[--evidence <PR-or-commit>] " \
-            "[--successor project:slug --attestation \"statement\"]."
+          "Use /close <id|slug> --reason already_delivered --evidence <PR-or-commit>, " \
+            "--reason superseded --successor project:slug --attestation \"statement\" " \
+            "[--evidence <PR-or-commit>], or --reason cancelled --attestation \"reason\"."
         end
 
         # details_reply renders from a live Row and never raises today, but it

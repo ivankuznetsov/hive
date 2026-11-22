@@ -1,0 +1,306 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-stack.v1.json",
+  "title": "hive stack output (v1)",
+  "description": "Stable contract emitted by `hive stack TARGET (--on PREREQUISITE... | --clear) --json`. Sets or clears an existing unfinished task's meta.yml depends_on declaration under the task lease and records one hive/state commit. The success payload reports the admission verdict the task now has; a missing or blocked prerequisite is a successful write with dependency.state wait or admission_error, while a cycle, a finished task, a draft-PR workflow, or a conflicting plan.md frontmatter declaration is an error.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "Declaration": {
+      "description": "A depends_on declaration: null (none), one task reference, or a nonempty flat list of references (scheduling-only).",
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      ]
+    },
+    "UnmetDependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "blocked_by",
+        "dependency_stage",
+        "required_gate"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string"
+        },
+        "blocked_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependency_stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_gate": {
+          "type": "string"
+        }
+      }
+    },
+    "AdmissionError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason_code",
+        "offending_ref",
+        "safe_correction"
+      ],
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "description": "A Hive::DependencyAdmission::REASON_CODES value; deliberately unenumerated here so new admission reasons do not fan out to this schema."
+        },
+        "offending_ref": {
+          "type": "string"
+        },
+        "safe_correction": {
+          "type": "string"
+        }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "slug",
+        "id",
+        "stage",
+        "depends_on",
+        "previous_depends_on",
+        "changed",
+        "committed",
+        "dependency",
+        "notes"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-stack"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": true
+        },
+        "project": {
+          "type": "string",
+          "description": "Registry name of the task's project."
+        },
+        "slug": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Numeric task id from meta.yml, or null for a legacy task without one."
+        },
+        "stage": {
+          "type": "string",
+          "description": "Stage directory the task is in, e.g. 3-plan. Never the workflow's terminal stage."
+        },
+        "depends_on": {
+          "$ref": "#/$defs/Declaration",
+          "description": "The declaration meta.yml now holds."
+        },
+        "previous_depends_on": {
+          "$ref": "#/$defs/Declaration",
+          "description": "The declaration meta.yml held before this command."
+        },
+        "changed": {
+          "type": "boolean",
+          "description": "False when the requested declaration already matched meta.yml; nothing was written."
+        },
+        "committed": {
+          "type": "boolean",
+          "description": "True when the change was recorded as a hive/state commit."
+        },
+        "dependency": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "state",
+            "unmet_dependencies",
+            "admission_error"
+          ],
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "clear",
+                "wait",
+                "admission_error"
+              ],
+              "description": "Admission verdict for the task with its new declaration, as status and the daemon will report it."
+            },
+            "unmet_dependencies": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/UnmetDependency"
+              }
+            },
+            "admission_error": {
+              "oneOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "$ref": "#/$defs/AdmissionError"
+                }
+              ]
+            }
+          }
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Human-readable consequences: list or cross-project scheduling-only policy, an existing worktree that is not rebased, or the admission hold to resolve."
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-stack"
+        },
+        "schema_version": {
+          "const": 1
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string",
+          "description": "Short name (no module prefix) of the Hive::Error subclass that was raised."
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "usage",
+            "invalid_task_path",
+            "ambiguous_slug",
+            "wrong_stage",
+            "invalid_dependency",
+            "dependency_cycle",
+            "unsupported_workflow",
+            "plan_conflict",
+            "concurrent_run",
+            "stale_task",
+            "config",
+            "git",
+            "internal",
+            "error"
+          ],
+          "description": "usage = malformed invocation, or neither/both of --on and --clear (64). invalid_task_path / ambiguous_slug = TARGET did not resolve to one task (64). wrong_stage = TARGET is in its workflow's terminal stage (4). invalid_dependency = a reference failed the depends_on grammar (64). dependency_cycle = the edge would close a cycle or point at TARGET itself (64). unsupported_workflow = draft-PR workflows do not support dependency stacking (64). plan_conflict = TARGET's plan.md frontmatter declares a different dependency (78). concurrent_run = a stage agent or another writer holds TARGET's lease or the commit lock (75). stale_task = TARGET moved during the update (75). config = invalid meta.yml or project enrollment (78). git = the hive/state commit failed and meta.yml was restored (70). internal = uncategorised crash (70). error = any other Hive::Error (1)."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [
+            1,
+            4,
+            64,
+            70,
+            75,
+            78
+          ],
+          "description": "Process exit code (Hive::ExitCodes). 1=GENERIC, 4=WRONG_STAGE, 64=USAGE, 70=SOFTWARE, 75=TEMPFAIL, 78=CONFIG."
+        },
+        "message": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Present on ambiguous_slug."
+        },
+        "current_stage": {
+          "type": "string",
+          "description": "Present on wrong_stage."
+        },
+        "reason_code": {
+          "type": "string",
+          "description": "Present on plan_conflict: plan_dependency_mismatch or plan_dependency_missing."
+        },
+        "offending_ref": {
+          "type": "string",
+          "description": "Present on plan_conflict: the declaration plan.md holds."
+        },
+        "safe_correction": {
+          "type": "string",
+          "description": "Present on plan_conflict: the exact edit that makes plan.md agree."
+        },
+        "holder": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Present on concurrent_run when the existing lease holder's metadata is recoverable. Properties are best-effort.",
+          "properties": {
+            "pid": {
+              "type": "integer"
+            },
+            "slug": {
+              "type": "string"
+            },
+            "stage": {
+              "type": "string"
+            },
+            "started_at": {
+              "type": "string"
+            },
+            "process_start_time": {
+              "type": "string"
+            }
+          }
+        },
+        "lock_path": {
+          "type": "string",
+          "description": "Present on concurrent_run and stale_task: the lease or lock that refused the write."
+        }
+      }
+    }
+  }
+}

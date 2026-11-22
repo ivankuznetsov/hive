@@ -108,6 +108,40 @@ class InvocationProcessCustodyTest < Minitest::Test
     end
   end
 
+  # A zombie keeps its /proc entry, uid, and pid, but reading its environ
+  # raises ESRCH. Any unreaped same-uid child on the host used to abort every
+  # invocation's cleanup (live: `codex <defunct>` children of the Codex
+  # app-server failed every OpenCode reviewer launch in one second).
+  def test_a_zombie_process_is_skipped_by_the_real_procfs_inventory
+    skip "exact process-custody integration requires Linux procfs" unless
+      RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
+
+    zombie = Process.spawn(RbConfig.ruby, "-e", "exit 0")
+    wait_for_zombie(zombie)
+    assert_raises(Errno::ESRCH) { File.binread("/proc/#{zombie}/environ") }
+
+    assert Hive::InvocationProcessCustody.new.cleanup!
+  ensure
+    Process.wait(zombie) if zombie
+  end
+
+  def test_an_environ_read_that_reports_esrch_is_a_non_match
+    with_tmp_dir do |dir|
+      write_proc_entry(dir, 424_242, environ: custody_environ(TOKEN))
+      zombie_environ = File.join(dir, "424242", "environ")
+      real_binread = File.method(:binread)
+      reader = lambda do |path, *args|
+        raise Errno::ESRCH, path if path == zombie_environ
+
+        real_binread.call(path, *args)
+      end
+
+      with_replaced_singleton_method(File, :binread, reader) do
+        assert build_custody(dir).send(:inventory).empty?
+      end
+    end
+  end
+
   def test_an_empty_process_environment_is_a_non_match
     skip "exact process-custody integration requires Linux procfs" unless
       RUBY_PLATFORM.include?("linux") && File.directory?("/proc")
@@ -365,6 +399,15 @@ class InvocationProcessCustodyTest < Minitest::Test
 
   def custody_environ(token)
     "PATH=/usr/bin\0#{Hive::InvocationProcessCustody::ENVIRONMENT_KEY}=#{token}\0"
+  end
+
+  def wait_for_zombie(pid)
+    50.times do
+      return if File.read("/proc/#{pid}/stat")[/\) (\S)/, 1] == "Z"
+
+      sleep 0.02
+    end
+    flunk "child #{pid} did not become a zombie"
   end
 
   def write_proc_entry(root, pid, environ:)

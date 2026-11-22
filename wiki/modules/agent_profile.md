@@ -3,7 +3,7 @@ title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,muse,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-11-10
+updated: 2026-11-22
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -80,7 +80,14 @@ cancellation before parsing.
 Each run also carries a random invocation-custody ID. After the run exits,
 Hive terminates only same-user processes carrying that exact ID, closing a
 `setsid` escape without affecting another invocation. A custody-cleanup
-failure overrides an otherwise successful transcript.
+failure overrides an otherwise successful transcript. The procfs inventory
+skips rows whose `environ` cannot be read as gone or foreign: vanished
+(`ENOENT`), zombie or mid-exit (`ESRCH`, no address space), and non-dumpable
+service managers (`EACCES`/`EPERM`/`EIO`). A zombie is already dead and cannot
+carry a live custody ID; before 2026-11-22 one unreaped same-user child
+anywhere on the host (`codex <defunct>` under the Codex app-server) raised
+`Errno::ESRCH` out of `after_exit`, discarding OpenCode's captured output and
+failing every OpenCode role in about a second.
 After a zero exit it may start one non-model `opencode export --sanitize`
 inspection to correlate the terminal message with observed provider/model and
 usage evidence. Non-zero, timed-out, cancelled, or malformed runs skip that

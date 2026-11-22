@@ -6,7 +6,7 @@ module Hive
       module Execution
         NativeLaunch = Data.define(
           :invocation, :requested_route, :environment, :executable,
-          :server_arguments
+          :server_arguments, :legacy_cli
         )
         RUN_CAPTURE_BYTES = AgentCliRuntime::OpenCode::ResultParser::MAX_RUN_BYTES + 1
         EXPORT_CAPTURE_BYTES = AgentCliRuntime::OpenCode::ResultParser::MAX_EXPORT_BYTES + 1
@@ -81,11 +81,12 @@ module Hive
           executable = @runtime_policy&.executable || @profile.bin
           executable = isolated_executable(executable) if @isolate_environment
           environment = native_environment(configuration)
-          # A private server (OpenCode 2.x) makes the run and its export load
-          # the environment built here rather than a shared service's.
-          server_arguments = Hive::AgentSupport::OpenCode.private_server_launch_arguments(
+          # A private server (OpenCode 2.x) makes the run and its inspection
+          # load the environment built here rather than a shared service's.
+          contract = Hive::AgentSupport::OpenCode.run_contract(
             executable, environment: effective_native_environment(environment)
           )
+          server_arguments = contract.server_arguments
           invocation = Hive::AgentRuntime.compile(Hive::AgentRuntime::Request.new(
             profile: @profile,
             prompt: @prompt,
@@ -103,12 +104,18 @@ module Hive
             command_prefix: @runtime_policy&.command_prefix || [],
             denied_commands: review_budget_task? ? [ "review-grant" ] : []
           ))
+          invocation = invocation.with(
+            argv: Hive::AgentSupport::OpenCode.adapt_run_arguments(
+              invocation.argv, contract, start: (@runtime_policy&.command_prefix || []).length + 1
+            )
+          )
           NativeLaunch.new(
             invocation:,
             requested_route: route,
             environment:,
             executable:,
-            server_arguments:
+            server_arguments:,
+            legacy_cli: contract.legacy?
           )
         end
 
@@ -175,8 +182,6 @@ module Hive
           if configuration.configuration_path
             environment["OPENCODE_CONFIG"] = configuration.configuration_path
           end
-          content = native_configuration_content(configuration)
-          environment["OPENCODE_CONFIG_CONTENT"] = JSON.generate(content) unless content.empty?
           permission = AgentCliRuntime::OpenCode::Permissions.compile(
             permission_mode: @permission_mode,
             permission_policy: @permission_policy,
@@ -191,6 +196,13 @@ module Hive
             permission["bash"]["*review-grant*"] = "deny"
           end
           environment["OPENCODE_PERMISSION"] = JSON.generate(permission) if permission
+          # OpenCode 2.x no longer reads OPENCODE_PERMISSION; it enforces the
+          # same policy only from configuration (verified on 2.3.2: an
+          # env-only deny was ignored under --auto). Carry it in the config
+          # content too, where it overrides any configured permission.
+          content = native_configuration_content(configuration)
+          content["permission"] = permission if permission
+          environment["OPENCODE_CONFIG_CONTENT"] = JSON.generate(content) unless content.empty?
           environment.freeze
         end
 
@@ -226,11 +238,14 @@ module Hive
           return [ nil, nil ] unless run.termination.success?
 
           parsed = Hive::AgentRuntime.parse_run(@profile, stdout: run.stdout)
+          argv = if launch.legacy_cli
+            [ launch.executable, "export", parsed.session_id, "--sanitize", *launch.server_arguments ]
+          else
+            [ launch.executable, "api", *launch.server_arguments, "GET",
+              "/api/session/#{parsed.session_id}/message/#{parsed.terminal_message_id}" ]
+          end
           inspection = Hive::AgentRuntime::InspectionCommand.new(
-            argv: [
-              launch.executable, "export", parsed.session_id, "--sanitize",
-              *launch.server_arguments
-            ],
+            argv:,
             environment: launch.environment,
             credential_environment_keys: [],
             session_id: parsed.session_id,
@@ -242,7 +257,8 @@ module Hive
               environment: effective_native_environment(inspection.environment),
               file_limit: EXPORT_CAPTURE_BYTES,
               stderr_limit: self.class::FINAL_MESSAGE_TAIL_BYTES,
-              timeout_sec: INSPECTION_TIMEOUT_SECONDS
+              timeout_sec: INSPECTION_TIMEOUT_SECONDS,
+              fsize_limit: launch.legacy_cli
             )
             unless captured.termination.success? &&
                    !captured.stdout_truncated && !captured.stderr_truncated
@@ -250,6 +266,9 @@ module Hive
             end
 
             begin
+              return [ Hive::AgentSupport::OpenCode.session_export(parsed.session_id, captured.stdout), nil ] unless
+                launch.legacy_cli
+
               JSON.parse(captured.stdout)
               return [ captured.stdout, nil ]
             rescue JSON::ParserError => error

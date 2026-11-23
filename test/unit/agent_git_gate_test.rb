@@ -434,6 +434,29 @@ class AgentGitGateTest < Minitest::Test
     end
   end
 
+  def test_fast_forward_never_overwrites_a_locally_ignored_file
+    with_local_remote do |repo, remote|
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "checkout", "--quiet", "-b", "task")
+      ahead = commit_file(repo, ".env", "TRACKED=1\n", "operator tracks .env")
+      run!("git", "-C", repo, "push", "--quiet", remote, "#{ahead}:refs/heads/task")
+      run!("git", "-C", repo, "reset", "--hard", "--quiet", base)
+      File.write(File.join(repo, ".git", "info", "exclude"), ".env\n")
+      File.write(File.join(repo, ".env"), "SECRET=local\n")
+      observation = Hive::AgentGitGate.observe_remote_branch(
+        repository_path: repo, branch: "task", remote: remote, allow_local_transport: true
+      )
+
+      error = assert_raises(Hive::AgentGitGate::CommandFailed) do
+        Hive::AgentGitGate.fast_forward(repository_path: repo, branch: "task", expected_oid: base,
+          observation: observation, remote: remote, allow_local_transport: true)
+      end
+      assert_match(/ignored local file/, error.message)
+      assert_equal "SECRET=local\n", File.read(File.join(repo, ".env"))
+      assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+    end
+  end
+
   def test_fast_forward_refuses_remote_movement_and_invalid_observations
     with_fast_forward_fixture do |repo, remote, base, ahead, observation|
       run!("git", "-C", repo, "reset", "--hard", "--quiet", ahead)

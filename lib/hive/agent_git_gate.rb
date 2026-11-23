@@ -539,9 +539,13 @@ module Hive
         raise RemoteConflict, "remote branch moved after observation; fast-forward refused"
       end
 
+      # `--no-overwrite-ignore`: status does not list ignored files, so a
+      # locally ignored file at a path the adopted commits track must stop the
+      # merge rather than be replaced.
       command!(
-        repository, "merge", "--ff-only", "--no-edit", "--no-stat", after,
-        error_class: CommandFailed, message: "exact fast-forward failed"
+        repository, "merge", "--ff-only", "--no-overwrite-ignore", "--no-edit", "--no-stat", after,
+        error_class: CommandFailed,
+        message: "exact fast-forward failed (an ignored local file may occupy a path the adopted commits track)"
       )
       unless read(repository, :current_branch).stdout.strip == name &&
              read(repository, :head_oid).stdout.strip.downcase == after &&

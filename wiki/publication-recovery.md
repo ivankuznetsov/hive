@@ -97,18 +97,21 @@ it. The adoption runs these steps:
    only.
 3. The observed commit must be present locally, classify must return `behind`,
    and the worktree must be clean.
-4. `AgentGitGate.fast_forward` re-observes the remote immediately before
-   `git merge --ff-only <exact oid>` and verifies HEAD, the branch and a clean
-   worktree afterwards. It never resets, forces or rebases.
-5. `PassArchive.retire!` ends the old review generation. It is the same reset as
-   a rewind or an outcome-evidence rework. Grants get an audit `expiry` with
-   `expiry_reason=remote_fast_forward_adopted`. Numbered passes and grant or
-   completion receipts move to
+4. `PassArchive.retire!` ends the old review generation before any merge. It
+   is the same reset as a rewind or an outcome-evidence rework. Grants get an
+   audit `expiry` with `expiry_reason=remote_fast_forward_adopted`. Numbered
+   passes and grant or completion receipts move to
    `reviews/archive/<utc>-remote-fast-forward-<oid12>/`. A `retirement.json`
    records `before_oid` (the reviewed head), `after_oid`, the branch and the
    PR URL.
+5. `AgentGitGate.fast_forward` re-observes the remote immediately before
+   `git merge --ff-only --no-overwrite-ignore <exact oid>` and verifies HEAD,
+   the branch and a clean worktree afterwards. It never resets, forces or
+   rebases, and a locally ignored file in the way stops the merge instead of
+   being replaced.
 6. When the task has an attempt binding, it also writes a `recovery_recorded`
-   task-journal activity with payload `adopted_remote_fast_forward`.
+   task-journal activity with payload `adopted_remote_fast_forward`. A replay
+   that meets the already-journaled operation treats it as recorded.
 
 The coordinator then clears the marker as usual. The next run starts at pass 1
 on the adopted head and cannot reuse grant evidence or findings bound to the
@@ -123,6 +126,11 @@ These cases keep their previous behavior:
   recovery then decide, as before.
 - If the PR branch was deleted, or the PR names the reviewed head again,
   adoption returns nil as well.
+- A legacy `remote_conflict` marker cannot tell a fast-forward from true
+  divergence. Until the fast-forward is established, any failure to observe or
+  resolve the PR head returns nil for it, so the old retry path runs. The
+  refusals below apply to such markers only after the fast-forward is
+  established, and to `remote_fast_forward_adoptable` markers throughout.
 
 When adoption is provable but unsafe, the request is blocked with
 `remote_fast_forward_refused`. The remediation starts with the reason:
@@ -138,8 +146,14 @@ When adoption is provable but unsafe, the request is blocked with
   (owner `hive`): these are transient, and the next daemon tick re-observes the
   PR branch.
 
-A crash after the merge is safe to retry. HEAD then equals the PR head, and
-retirement reuses the archive whose `retirement.json` matches.
+Retirement precedes the merge, so a crash after the merge cannot let the next
+run reuse passes or grants bound to the old head, whatever the PR branch does
+afterwards. A retry after a crash or refusal before the merge reuses the
+archive whose `retirement.json` matches, and skips the grant expiry, which a
+partly moved receipt chain would no longer validate. A refusal after
+retirement, for example `remote_moved`, has already ended the grant: the next
+retry adopts the newer fast-forward, or the review restarts at pass 1 on the
+old head.
 
 Other `classify` consumers: `TaskClosure#retained_fix_details` now labels a
 PR reference ahead of the worktree `behind`/`published`. Closure still

@@ -140,7 +140,11 @@ class ReviewFastForwardAdoptionTest < Minitest::Test
       git(task, "merge", "--ff-only", "--quiet", ahead)
       records = []
       activity = Object.new
-      activity.define_singleton_method(:record) { |**kwargs| records << kwargs }
+      activity.define_singleton_method(:record) do |**kwargs|
+        raise Hive::TaskActivity::Conflict, "already journaled" if records.any?
+
+        records << kwargs
+      end
       gate = Hive::AgentGitGate.dup
       gate.define_singleton_method(:fast_forward) { |**| raise "an adopted head is never merged again" }
       adopter = Adoption.new(task: task, gate: gate, remote_target: ->(*) { bare },
@@ -157,6 +161,15 @@ class ReviewFastForwardAdoptionTest < Minitest::Test
       assert_equal "review-remote-fast-forward:#{reviewed}:#{ahead}", records.first.fetch(:operation_id)
       assert_equal receipt, records.first.fetch(:payload).fetch("adopted_remote_fast_forward")
 
+      # The generation retired before the merge, so a PR branch rewritten
+      # after the crash cannot bring the old passes back.
+      other = git(task, "commit-tree", "-m", "force-pushed elsewhere", "#{reviewed}^{tree}")
+      run!("git", "-C", task.worktree_path, "push", "--quiet", "--force", bare, "#{other}:refs/heads/#{task.slug}")
+      assert_nil adopter.adopt!(marker: Hive::Markers.current(task.state_file))
+      assert_equal 0, Hive::Stages::Review.max_review_pass(task.folder)
+      refute Hive::ReviewBudget.new(task: task, project: task.project_name).present?
+
+      run!("git", "-C", task.worktree_path, "push", "--quiet", "--force", bare, "#{ahead}:refs/heads/#{task.slug}")
       File.write(File.join(task.worktree_path, "scratch.txt"), "x\n")
       dirty = assert_raises(Adoption::Refused) { adopter.adopt!(marker: Hive::Markers.current(task.state_file)) }
       assert_equal "dirty_worktree", dirty.reason
@@ -165,12 +178,13 @@ class ReviewFastForwardAdoptionTest < Minitest::Test
 
   def test_identity_and_observation_failures_refuse_with_an_owner
     with_adoption_fixture(grant: false) do |task, bare, reviewed, ahead|
-      mark_publication_failure(task, reviewed: reviewed, remote_head: ahead, branch: "other-branch")
+      adoptable = "remote_fast_forward_adoptable"
+      mark_publication_failure(task, reviewed: reviewed, remote_head: ahead, branch: "other-branch", failure: adoptable)
       marker = -> { Hive::Markers.current(task.state_file) }
       moved = assert_raises(Adoption::Refused) { adopter(task, bare).adopt!(marker: marker.call) }
       assert_equal "publication_identity_changed", moved.reason
 
-      mark_publication_failure(task, reviewed: reviewed, remote_head: ahead)
+      mark_publication_failure(task, reviewed: reviewed, remote_head: ahead, failure: adoptable)
       with_replaced_singleton_method(Hive::Worktree, :read_owned_pointer, ->(*, **) { raise Hive::WorktreeError, "torn" }) do
         missing = assert_raises(Adoption::Refused) { adopter(task, bare).adopt!(marker: marker.call) }
         assert_equal "worktree_unavailable", missing.reason
@@ -212,14 +226,33 @@ class ReviewFastForwardAdoptionTest < Minitest::Test
         assert_raises(Adoption::Refused) { Adoption.new(task: task, gate: gate).adopt!(marker: marker.call) }
       end
       assert_equal [ "https://github.com/acme/app.git" ], observed
+
+      # A legacy remote_conflict marker cannot tell a fast-forward from true
+      # divergence, so until the fast-forward is established every one of
+      # these failures keeps the ordinary retry path.
+      mark_publication_failure(task, reviewed: reviewed, remote_head: ahead)
+      assert_nil adopter(task, File.join(bare, "missing.git")).adopt!(marker: marker.call)
+      assert_nil adopter(task, bare, gate: unreadable).adopt!(marker: marker.call)
+      with_replaced_singleton_method(Hive::Gh, :origin_push_url, foreign) do
+        assert_nil Adoption.new(task: task).adopt!(marker: marker.call)
+      end
       assert_equal reviewed, git_head(task)
+      assert_empty Dir[File.join(task.reviews_dir, "archive", "*")]
     end
   end
 
-  def test_races_inside_the_gate_and_invalid_budget_evidence_refuse_before_retirement
+  def test_gate_races_and_invalid_budget_evidence_refuse_and_a_retry_completes
     with_adoption_fixture do |task, bare, reviewed, ahead|
       mark_publication_failure(task, reviewed: reviewed, remote_head: ahead)
       marker = Hive::Markers.current(task.state_file)
+
+      grant_path = Dir[File.join(task.reviews_dir, "review-grant-*.json")].fetch(0)
+      File.chmod(0o644, grant_path)
+      assert_raises(Hive::ReviewBudget::Refused) { adopter(task, bare).adopt!(marker: marker) }
+      assert_equal reviewed, git_head(task)
+      assert_empty Dir[File.join(task.reviews_dir, "archive", "*")], "nothing retires before the grant evidence validates"
+      File.chmod(0o600, grant_path)
+
       {
         Hive::AgentGitGate::RemoteConflict.new("remote branch moved after observation") => [ "remote_moved", "hive" ],
         Hive::AgentGitGate::FastForwardRefused.new(:dirty_worktree, "raced") => [ "dirty_worktree", "operator" ],
@@ -232,12 +265,33 @@ class ReviewFastForwardAdoptionTest < Minitest::Test
         assert_equal reason, refused.reason
         assert_equal owner, refused.owner
       end
-
-      grant_path = Dir[File.join(task.reviews_dir, "review-grant-*.json")].fetch(0)
-      File.chmod(0o644, grant_path)
-      assert_raises(Hive::ReviewBudget::Refused) { adopter(task, bare).adopt!(marker: marker) }
       assert_equal reviewed, git_head(task)
-      assert_empty Dir[File.join(task.reviews_dir, "archive", "*")]
+      archives = Dir[File.join(task.reviews_dir, "archive", "*-remote-fast-forward-*")]
+      assert_equal 1, archives.size, "the generation retires once, before the merge, and every retry reuses it"
+      refute_empty Dir[File.join(archives.first, "review-grant-*.json")]
+
+      receipt = adopter(task, bare).adopt!(marker: marker)
+      assert_equal ahead, git_head(task)
+      assert_equal archives.first.delete_prefix("#{task.folder}/"), receipt.fetch("archive")
+    end
+  end
+
+  def test_resumed_retirement_moves_the_rest_without_revalidating_a_partial_chain
+    with_tmp_dir do |folder|
+      task = Struct.new(:folder, :project_name).new(folder, "demo")
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      File.write(File.join(reviews, "codex-01.md"), "- [x] finding\n")
+      first = Hive::Stages::Review::PassArchive.retire!(task, label: "x", expiry_reason: "review_reset",
+        receipt: { "after_oid" => "a" * 40 })
+      # An interrupted move left a receipt behind whose chain no longer validates.
+      File.write(File.join(reviews, "review-completion-#{'c' * 64}-01.json"), "{torn")
+      File.write(File.join(reviews, "codex-02.md"), "- [x] later\n")
+      resumed = Hive::Stages::Review::PassArchive.retire!(task, label: "y", expiry_reason: "review_reset",
+        receipt: { "after_oid" => "a" * 40 })
+      assert_equal first, resumed
+      assert_equal [ "codex-01.md", "codex-02.md", "retirement.json", "review-completion-#{'c' * 64}-01.json" ].sort,
+                   Dir.children(File.join(folder, first)).sort
     end
   end
 

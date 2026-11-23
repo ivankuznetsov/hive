@@ -13,14 +13,16 @@
   task lock, through `Hive::ReviewFastForwardAdoption`. It handles
   `review_publication_failed` markers whose reason is
   `remote_fast_forward_adoptable` or legacy `remote_conflict`.
-- Adoption re-observes the PR branch, requires a clean worktree and a locally
-  present strict descendant, and merges through the new
-  `AgentGitGate.fast_forward` (`merge --ff-only` at the exact OID after a
-  fresh re-observation). It then retires the review generation with
-  `PassArchive.retire!`: grants expire with
+- Adoption re-observes the PR branch and requires a clean worktree and a
+  locally present strict descendant. It first retires the review generation
+  with `PassArchive.retire!`: grants expire with
   `expiry_reason=remote_fast_forward_adopted`, and passes and receipts move to
   `reviews/archive/<utc>-remote-fast-forward-<oid12>/` with a
-  `retirement.json`. The next run starts at pass 1 on the adopted head.
+  `retirement.json`. It then merges through the new `AgentGitGate.fast_forward`
+  (`merge --ff-only --no-overwrite-ignore` at the exact OID after a fresh
+  re-observation). The next run starts at pass 1 on the adopted head.
+- A legacy `remote_conflict` marker falls back to the old retry path whenever
+  the fast-forward cannot be established.
 - Non-fast-forwards keep their old outcome. Unsafe fast-forwards block as
   `remote_fast_forward_refused` with the exact operator action.
 - Outcome-evidence rework now archives through the same `PassArchive.retire!`.

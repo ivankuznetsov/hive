@@ -89,9 +89,12 @@ branch once and delegates its immutable OID to `publish`.
   `expected_oid`;
 - the re-resolved remote fingerprint and a fresh observation still match.
 
-Only then does it run `merge --ff-only --no-edit --no-stat <exact oid>`. It
-verifies the branch, HEAD and cleanliness before returning a
-`FastForwardReceipt`. It never resets, forces, rebases or fetches. Hive uses it
+Only then does it run `merge --ff-only --no-overwrite-ignore --no-edit
+--no-stat <exact oid>`. Strict status does not list ignored files, so a locally
+ignored file at a path the adopted commits track makes the merge fail with
+`CommandFailed` instead of being replaced. It verifies the branch, HEAD and
+cleanliness before returning a `FastForwardReceipt`. It never resets, forces,
+rebases or fetches. Hive uses it
 for [[publication-recovery]] external fast-forward adoption
 (`Hive::ReviewFastForwardAdoption`). `merge` is the one mutating command this
 adds to the private executor's allowlist.

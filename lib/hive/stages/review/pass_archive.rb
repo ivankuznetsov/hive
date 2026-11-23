@@ -54,7 +54,9 @@ module Hive
           end.sort_by { |name| Hive::ReviewPass.sort_key(name) }
           return relative if names.empty? && (relative || document.nil?)
 
-          if names.any? { |name| Hive::ReviewPass.budget_receipt?(name) }
+          # A matching retirement receipt is written only after the expiry, so
+          # a resumed move must not revalidate a partially moved receipt chain.
+          if !relative && names.any? { |name| Hive::ReviewPass.budget_receipt?(name) }
             Hive::ReviewBudget.new(task: task, project: task.project_name).record_expiry!(reason: expiry_reason)
           end
           unless relative

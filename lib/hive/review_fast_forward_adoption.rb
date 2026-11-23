@@ -3,7 +3,6 @@ require "time"
 require "hive/agent_git_gate"
 require "hive/errors"
 require "hive/gh"
-require "hive/review_budget"
 require "hive/review_publication_recovery"
 require "hive/stages/review/pass_archive"
 require "hive/task_activity"
@@ -19,13 +18,13 @@ module Hive
   # REVIEW_ERROR marker, so a routine `workflow.retry` (or the daemon's own
   # retry) performs the adoption.
   #
-  # Adoption fast-forwards the clean owned worktree to the exact re-observed PR
-  # head through `Hive::AgentGitGate.fast_forward` (`merge --ff-only`, never a
-  # reset, force or rebase), then retires the review generation the same way a
-  # rewind or outcome-evidence rework does: review grants expire in the budget
-  # audit and numbered passes move to `reviews/archive/`. The next review run
-  # therefore starts at pass 1 on the adopted head and cannot reuse findings or
-  # grant evidence bound to the old one.
+  # Adoption retires the review generation the same way a rewind or
+  # outcome-evidence rework does (review grants expire in the budget audit and
+  # numbered passes move to `reviews/archive/`), then fast-forwards the clean
+  # owned worktree to the exact re-observed PR head through
+  # `Hive::AgentGitGate.fast_forward` (`merge --ff-only`, never a reset, force
+  # or rebase). The next review run therefore starts at pass 1 on the adopted
+  # head and cannot reuse findings or grant evidence bound to the old one.
   #
   # Only a provable fast-forward of a clean worktree is adopted. Anything that
   # is not one (true divergence, local-only commits, a deleted PR branch, a
@@ -65,7 +64,12 @@ module Hive
 
     # Call only while holding the task lock. Returns nil when the marker does
     # not describe a provable fast-forward, otherwise the durable adoption
-    # receipt (also when it completes an adoption interrupted after the merge).
+    # receipt (also when it completes an interrupted adoption).
+    #
+    # The review generation is retired before the merge, so a crash after the
+    # merge can never let the next run reuse passes or grants bound to the old
+    # head, whatever the PR branch does in the meantime. A retry after a crash
+    # before the merge finds the same retirement and only merges.
     def adopt!(marker:)
       return nil unless self.class.candidate?(marker)
 
@@ -73,6 +77,31 @@ module Hive
       reviewed = evidence["local_head"].to_s.downcase
       return nil unless reviewed.match?(OID) && Hive::Gh.parse_pull_request_url(evidence["pr_url"])
 
+      legacy = marker.attrs["publication_reason"].to_s == "remote_conflict"
+      path, branch, head, observation, target = establish(evidence, reviewed, legacy)
+      return nil unless observation
+
+      require_clean!(path)
+      receipt = retire!(reviewed, observation.oid, branch, evidence["pr_url"])
+      fast_forward!(path, branch, head, observation, target) unless head == observation.oid
+      record!(reviewed, observation.oid, receipt)
+      receipt
+    rescue Hive::AgentGitGate::Error => e
+      # Unsafe repository-local Git config, or a merge that failed or could
+      # not be verified: the worktree needs inspection before another try.
+      raise Refused.new("git_unavailable", "the owned review worktree could not be read or fast-forwarded safely (#{e.message}); " \
+        "inspect it with `git status --ignored` before retrying")
+    end
+
+    private
+
+    # Returns [path, branch, head, observation, target] when the PR head is a
+    # fast-forward of the owned worktree (or the worktree already sits on it
+    # after an interrupted adoption), nil otherwise. A legacy `remote_conflict`
+    # marker cannot tell a fast-forward from true divergence, so until that is
+    # established any failure keeps the ordinary retry path instead of
+    # blocking it.
+    def establish(evidence, reviewed, legacy)
       path, branch = owned_worktree(evidence)
       head = head_oid(path)
       return nil unless head == reviewed || ancestor?(path, reviewed, head)
@@ -81,29 +110,19 @@ module Hive
       observation = observe(path, branch, target)
       return nil unless observation.present?
 
-      adopted = observation.oid
-      if adopted == head
-        # The PR names the reviewed head again (nothing to adopt), or an earlier
-        # adoption merged before it was interrupted and only retirement remains.
+      if observation.oid == head
         return nil if head == reviewed
-
-        require_clean!(path)
       else
-        require_present!(path, branch, adopted)
-        classification = Hive::ReviewPublicationRecovery.classify(worktree: path, reference_oid: adopted, head: head)
+        require_present!(path, branch, observation.oid)
+        classification = Hive::ReviewPublicationRecovery.classify(worktree: path, reference_oid: observation.oid, head: head)
         return nil unless classification.fetch("classification") == "behind"
-
-        fast_forward!(path, branch, head, observation, target)
       end
-      retire!(reviewed, adopted, branch, evidence["pr_url"])
-    rescue Hive::AgentGitGate::Error => e
-      # Unsafe repository-local Git config, or a merge that failed or could
-      # not be verified: the worktree needs inspection before another try.
-      raise Refused.new("git_unavailable", "the owned review worktree could not be read or fast-forwarded safely (#{e.message}); " \
-        "inspect it with `git status` before retrying")
-    end
+      [ path, branch, head, observation, target ]
+    rescue Refused, Hive::AgentGitGate::Error
+      raise unless legacy
 
-    private
+      nil
+    end
 
     def owned_worktree(evidence)
       pointer = Hive::Worktree.read_owned_pointer(
@@ -172,9 +191,6 @@ module Hive
     end
 
     def fast_forward!(path, branch, head, observation, target)
-      require_clean!(path)
-      budget = Hive::ReviewBudget.new(task: @task, project: @task.project_name)
-      budget.store.records if budget.present?
       @gate.fast_forward(repository_path: path, branch: branch, expected_oid: head, observation: observation,
                          remote: target, allow_local_transport: @allow_local_transport)
     rescue Hive::AgentGitGate::FastForwardRefused => e
@@ -194,13 +210,19 @@ module Hive
         @task, label: "#{Time.now.utc.strftime('%Y%m%dT%H%M%SZ')}-remote-fast-forward-#{adopted[0, 12]}",
         expiry_reason: EXPIRY_REASON, receipt: receipt
       )
-      receipt = receipt.merge("archive" => archive)
+      receipt.merge("archive" => archive)
+    end
+
+    def record!(reviewed, adopted, receipt)
       @activity.call&.record(
         kind: "recovery_recorded", operation_id: "review-remote-fast-forward:#{reviewed}:#{adopted}",
         reason: "adopted an external fast-forward of the review branch", source: "recovery_service",
         payload: { ACTIVITY_KEY => receipt }
       )
-      receipt
+    rescue Hive::TaskActivity::Conflict
+      # A retry after the activity was journaled: the deterministic operation
+      # is already recorded with an earlier timestamp.
+      nil
     end
   end
 end

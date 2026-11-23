@@ -256,3 +256,12 @@ command shapes exit `64`, and software failures exit `70`.
 - [[cli]]
 - [[modules/babysitter]] · [[modules/config]] · [[modules/agent_profile]]
 - [[operating]]
+
+### Repair agent executable lookup in the managed service
+
+If Codex works in a terminal but the babysitter reports `codex (ENOENT)`,
+upgrade Hive and run `hive babysit install --force` from that terminal.
+The shared installer now retains discovered agent/interpreter directories and
+explicit binary overrides in the generated service environment; it backs up
+an existing changed unit before replacing it. See
+[[modules/user_service]] for discovery, override, and upgrade boundaries.

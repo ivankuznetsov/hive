@@ -24,6 +24,31 @@ Existing bare definitions require `hive --context local SERVICE install --force`
 for each installed service before a saved remote client selection can coexist
 with managed startup (`SERVICE` is `daemon`, `web`, `bot`, or `babysit`).
 
+## Agent executable discovery
+
+The shared installer discovers shipped agent CLI executables independently of
+Ruby's version manager. It retains directories containing the first executable
+for each agent and Node, Bun, or Python interpreter on the installation PATH,
+then adds the service's existing fallback PATH. Only absolute paths without
+control bytes are eligible; unrelated PATH entries and shell credentials are
+not copied. Symlink and shim paths are retained rather than dereferenced.
+Explicit agent binary environment overrides declared by agent-cli-runtime
+(including `HIVE_CODEX_BIN` and `AGENT_CLI_RUNTIME_CODEX_BIN`) are resolved and
+persisted. An unresolvable explicit override reports a configuration error.
+This applies to daemon, babysitter, bot, and web on systemd and launchd.
+
+Run installation from a shell where the agents and their interpreters are
+available. Existing services require `hive SERVICE install --force` (`SERVICE`
+is `daemon`, `babysit`, `bot`, or `web`); the existing lifecycle backs up changed
+definitions and restarts enabled services when requested by installation.
+Operator systemd drop-ins still take precedence and are not rewritten.
+Re-run installation after moving tools or replacing version-specific paths.
+
+Discovery is filesystem-only, so status/planning never runs agent commands or
+model inference. Regression tests launch version-only fake agents under the
+rendered environment, including a Node interpreter in a separate directory.
+This proves executable lookup, not provider authentication or paid repair.
+
 ## Linux user-unit invariant
 
 Every shipped `examples/systemd/*.service` file is a user-manager unit. The

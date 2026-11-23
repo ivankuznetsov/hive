@@ -1,8 +1,80 @@
 require "test_helper"
 require "hive/commands/babysit/service_installer"
+require "hive/commands/daemon/service_installer"
+require "hive/commands/bot/service_installer"
+require "hive/commands/web/service_installer"
 
 class BabysitServiceInstallerTest < Minitest::Test
   include HiveTestHelper
+
+  # Execute version-only fake CLIs with only the environment rendered for the
+  # service: an interactive-shell probe would miss this regression.
+  def test_service_environment_can_run_managed_agents_without_managed_ruby
+    with_tmp_dir do |dir|
+      agent_bin = File.join(dir, "tools with spaces % and &", "bin")
+      node_bin = File.join(dir, "node", "bin")
+      FileUtils.mkdir_p([ agent_bin, node_bin ])
+      File.write(File.join(agent_bin, "codex"), "#!/usr/bin/env node\n")
+      File.write(File.join(node_bin, "node"), "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+      FileUtils.chmod(0755, [ File.join(agent_bin, "codex"), File.join(node_bin, "node") ])
+      installers = [ Hive::Commands::Babysit::ServiceInstaller, Hive::Commands::Daemon::ServiceInstaller,
+                     Hive::Commands::Bot::ServiceInstaller, Hive::Commands::Web::ServiceInstaller ]
+      installers.product(%w[linux darwin]).each do |installer_class, platform|
+        installer = installer_class.new(
+          host_os: platform, home: dir, binary_path: "/usr/bin/hive",
+          environment: { "PATH" => "#{agent_bin}:#{node_bin}:/usr/bin:/bin" },
+          systemctl_available: false, launchctl_available: false
+        )
+        installer.define_singleton_method(:ruby_shim_dir) { nil }
+        installer.install!(autostart: false)
+        environment = rendered_environment(installer, platform, dir)
+        profile = AgentCliRuntime::Profiles.fetch(:codex)
+        assert_equal "1.0.0", profile.check_version!(env: environment)
+        assert_includes environment.fetch("PATH"), agent_bin
+        assert_includes environment.fetch("PATH"), node_bin
+      end
+    end
+  end
+
+  def test_service_environment_preserves_explicit_agent_override_without_credentials
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "custom tools"))
+      executable = File.join(dir, "custom tools", 'codex %n "quoted"')
+      File.write(executable, "#!/bin/sh\nprintf 'codex-cli 1.0.0\\n'\n")
+      FileUtils.chmod(0755, executable)
+      installers = [ Hive::Commands::Babysit::ServiceInstaller, Hive::Commands::Daemon::ServiceInstaller,
+                     Hive::Commands::Bot::ServiceInstaller, Hive::Commands::Web::ServiceInstaller ]
+      installers.product(%w[linux darwin]).each do |installer_class, platform|
+        installer = installer_class.new(
+          host_os: platform, home: dir, binary_path: "/usr/bin/hive",
+          environment: { "PATH" => "/usr/bin:/bin", "HIVE_CODEX_BIN" => executable,
+                         "OPENAI_API_KEY" => "must-not-be-persisted" },
+          systemctl_available: false, launchctl_available: false
+        )
+        installer.install!(autostart: false)
+        environment = rendered_environment(installer, platform, dir)
+        assert_equal executable, environment.fetch("HIVE_CODEX_BIN")
+        assert_equal "1.0.0", AgentCliRuntime::Profiles.fetch(:codex).check_version!(env: environment)
+        refute_includes File.read(installer.target_path), "must-not-be-persisted"
+      end
+    end
+  end
+
+  def rendered_environment(installer, platform, home)
+    body = File.read(installer.target_path)
+    if platform == "linux"
+      body.lines.grep(/^Environment=/).to_h do |line|
+        assignment = Shellwords.split(line.delete_prefix("Environment=")).fetch(0)
+        key, value = assignment.split("=", 2)
+        [ key, value.gsub("%%", "\0").gsub("%h", home).gsub("\0", "%") ]
+      end
+    else
+      require "rexml/document"
+      doc = REXML::Document.new(body)
+      dict = REXML::XPath.first(doc, "//key[.='EnvironmentVariables']/following-sibling::dict[1]")
+      dict.elements.to_a.each_slice(2).to_h { |key, value| [ key.text, value.text ] }
+    end
+  end
 
   def test_labels_the_managed_unit_for_operator_messages
     installer = Hive::Commands::Babysit::ServiceInstaller.new(host_os: "linux")

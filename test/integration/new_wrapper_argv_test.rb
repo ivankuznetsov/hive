@@ -280,6 +280,31 @@ class NewWrapperArgvTest < Minitest::Test
     end
   end
 
+  # hivedev probe-help-261119-f0b6: `hive new PROJECT probe --help` captured a
+  # task named "probe --help". A standalone help flag anywhere after the
+  # project prints usage and creates nothing.
+  def test_help_flag_after_the_text_prints_usage_and_creates_no_task
+    with_cli_project do |home, project_root, project|
+      %w[--help -h].each do |flag|
+        out, err, status = run_hive(home, "new", project, "probe", flag, chdir: project_root)
+
+        assert status.success?, "#{flag} should print usage, stderr was: #{err}"
+        assert_includes out, "hive new PROJECT TEXT"
+        refute_includes out, "hive: captured"
+        assert_empty task_folders(project_root), "#{flag} must not capture a task"
+      end
+    end
+  end
+
+  def test_help_words_inside_a_longer_token_are_still_task_text
+    with_cli_project do |home, project_root, project|
+      _out, err, status = run_hive(home, "new", project, "document", "--help-text", "usage", chdir: project_root)
+
+      assert status.success?, "a non-flag token stays task text, stderr was: #{err}"
+      assert_includes File.read(File.join(only_task_folder(project_root), "idea.md")), "--help-text"
+    end
+  end
+
   private
 
   def with_workflow_project

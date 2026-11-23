@@ -830,6 +830,8 @@ module Hive
       end
     end
 
+    NEW_HELP_FLAGS = %w[-h --help].freeze
+
     desc "new PROJECT TEXT", "Create a new task in PROJECT"
     long_desc <<~DESC
       Create a new task in PROJECT from the free-text TEXT. By default, the task
@@ -881,6 +883,15 @@ module Hive
     option :idempotency_key, type: :string,
                              desc: "return the original task on a retry with identical input; reject conflicting reuse"
     def new_task(project, *text_parts)
+      # Thor shows help only when the flag directly follows the command, so
+      # `hive new PROJECT idea --help` used to capture "idea --help" as a task
+      # (hivedev probe-help-261119-f0b6). A standalone -h/--help token anywhere
+      # in the text is a help request: print usage and create nothing.
+      if text_parts.any? { |part| NEW_HELP_FLAGS.include?(part) }
+        self.class.command_help(shell, "new_task")
+        return
+      end
+
       require "hive/commands/new"
       # An empty TEXT is rejected inside New#call so `--json` reports it as a
       # hive-new.v1 error document like every other failure.

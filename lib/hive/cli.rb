@@ -1313,8 +1313,9 @@ module Hive
       With no TARGET, lists every task currently in 9-done across registered
       projects. Pass --json for the same archive-scoped status payload.
 
-      With TARGET, preserves the workflow behavior: move a completed finalize
-      task into done, or run an existing done task.
+      With TARGET and no --reason, it runs at once, with no preview or prompt
+      (--json only shapes the output): a completed finalize task moves into
+      done and its done stage runs, or an existing done task runs again.
 
       --reason (with --evidence, --successor, or --attestation as the reason
       requires) closes an active task outside its ordinary path. Hive verifies
@@ -1334,9 +1335,10 @@ module Hive
                            delivery is refused.
         cancelled          --attestation only. Keeps the worktree and branch.
 
-      With --json, stdout is exactly one document. --json alone is a read-only
-      preview and archives nothing: hive-task-closure-input with "mode":
-      "preview", "applied": false, and a "next" command that applies it.
+      With --json, stdout is exactly one document. For a --reason closure,
+      --json alone is a read-only preview and archives nothing:
+      hive-task-closure-input with "mode": "preview", "applied": false, and
+      a "next" command that applies it.
       --json --yes verifies and archives, then prints hive-task-closure-result
       with "mode": "apply", "applied": true, and the receipt_digest. Any
       failure prints a hive-task-closure-result document with "ok": false.

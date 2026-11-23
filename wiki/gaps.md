@@ -3026,3 +3026,16 @@ at all); only the log line and receipt record it.
   task has an attempt binding (`TaskActivity.for_task`). The always-written
   durable record is `reviews/archive/<label>/retirement.json` plus the budget
   audit expiry.
+
+## Managed service agent discovery (2026-11-15)
+
+- Filesystem discovery preserves installed executable paths; it does not prove
+  agent authentication or the success of a real PR repair.
+- Paths selected from version-specific installation directories can become
+  stale after tool removal. Re-run service installation after moving tools;
+  stable shims/symlinks are preserved when present in the installation PATH.
+- launchd rendering and executable lookup are covered with fake CLIs on Linux;
+  a live macOS launchd restart remains unverified.
+- Shipped agent profiles and Node/Bun/Python launchers are covered. Custom
+  profile executables and launchers needing additional environment variables
+  still require explicit service configuration.

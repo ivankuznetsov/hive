@@ -586,15 +586,23 @@ module Hive
       ).call
     end
 
-    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads)"
+    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads), or create it (init)"
     long_desc <<~DESC
-      Actions (all read-only; nothing is created, migrated, or repaired):
+      Read-only actions (nothing is created, migrated, or repaired):
         status      Validate the current runtime database (exit 1 when absent).
         projects    List registered projects with their path, real_path and
                     hive_state_path from the global registry.
         payloads    List runtime payload references (kind, state, task/attempt
                     id, relative_path and the absolute path resolved under the
                     payload root). Missing storage reports phase "absent".
+
+      Bootstrap:
+        init        Create the runtime database when it is missing (an
+                    existing one is validated, never repaired) and record every
+                    registered project in it, then report status. This is the
+                    runtime step of `hive setup` alone: no services, agent
+                    skills, bundles or project enrollment, for containers and
+                    hosts without a user service manager. Idempotent.
 
       --json emits the hive-runtime-maintenance envelope.
     DESC

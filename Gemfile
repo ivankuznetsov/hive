@@ -18,7 +18,7 @@ gem "agent-cli-runtime", path: "components/agent-cli-runtime"
 gemspec
 
 group :development, :test do
-  gem "minitest", "~> 6.0"
+  gem "minitest", "~> 6.1"
   gem "rake", "~> 13.0"
   gem "rubocop", "~> 1.92", require: false
   gem "rubocop-rails-omakase", "~> 1.1", require: false

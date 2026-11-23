@@ -2,8 +2,8 @@
 title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/worktree.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
-updated: 2026-10-30
-tags: [command, sqlite, status, read-only, audit]
+updated: 2026-11-23
+tags: [command, sqlite, status, read-only, audit, bootstrap]
 ---
 
 `hive runtime status [--json]` validates the current SQLite database read-only.
@@ -45,6 +45,29 @@ than a successful status document. JSON storage failures use the
 `hive-runtime-maintenance.v1` fields `runtime_code` and `next_action`. Because
 runtime status shares this policy, it should not be recommended as a recovery
 step for a path where the same inspection has already failed.
+
+## Service-free bootstrap: `init`
+
+`hive runtime init [--json]` (added 2026-11-23) is the one writing action. It
+runs the runtime step of `hive setup` alone: `Installation.setup` creates and
+migrates the database when it is missing (an existing one is validated, never
+repaired), then `Hive::Config.sync_runtime_projects!` records every
+registered project in it. The result is the `status` result with
+`action: "init"`; it exits 0 when the runtime is `active`. Rerunning it keeps
+the installation and its data. It installs no services and touches no agent
+skills, qmd or web bundles, or project enrollment, so containers and hosts
+without a user service manager can run durable attempts. A corrupt or
+unsupported existing database fails at process start with the usual typed
+error and backup action.
+
+Why the project sync matters: registration syncs into the runtime only when
+the database already exists. A project registered before it (for example by
+`hive init` in a fresh container, or by `hive setup`'s own enrollment, which
+runs before its runtime phase) had no runtime row. Its tasks then failed
+dispatch with "attempt project identity is not registered for the task path".
+`hive setup`'s runtime phase now runs the same sync. Tasks created while the
+runtime was absent still have no task id (`TaskCounter.next_or_nil` returns
+nil) and cannot be dispatched as attempts; recreate them after `init`.
 
 ## Audit listings: `projects` and `payloads`
 

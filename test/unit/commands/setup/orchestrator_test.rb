@@ -504,6 +504,24 @@ class SetupOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_runtime_bootstrap_records_projects_enrolled_before_the_database_existed
+    with_tmp_global_config(runtime: false) do |home|
+      root = File.join(home, "workspace", "demo")
+      File.write(Hive::Config.global_config_path, {
+        "registered_projects" => [ { "name" => "demo", "path" => root } ]
+      }.to_yaml)
+      setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
+
+      setup.send(:bootstrap_runtime_control_plane)
+
+      assert setup.instance_variable_get(:@phases).last.fetch("ok")
+      database = Hive::RuntimeControlPlane::Database.new(path: Hive::Paths.runtime_control_plane_path)
+      rows = database.read { |db| db[:projects].exclude(project_id: "global-maintenance").select_map(%i[name state_root_path]) }
+      database.disconnect
+      assert_equal [ [ "demo", File.join(root, ".hive-state") ] ], rows
+    end
+  end
+
   def test_yes_does_not_imply_command_receipt_installation
     setup = Hive::Commands::Setup.new(json: true, yes: true, output: StringIO.new)
     received = nil

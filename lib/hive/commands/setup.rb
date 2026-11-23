@@ -321,6 +321,9 @@ require "hive/runtime_identity"
             writer_guard: @command_schema_writer_guard,
             web_running: method(:managed_web_running?)
           )
+          # enroll_project runs before this phase, so on a fresh install its
+          # registration found no database to sync into.
+          Hive::Config.sync_runtime_projects!
           details = {
             "phase" => status.fetch("phase"),
             "database" => status.fetch("database").fetch("path"),

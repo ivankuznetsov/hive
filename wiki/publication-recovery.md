@@ -56,6 +56,110 @@ conflict. Hive's auto-rebase never rewrites a published branch while it is in
 review (`published_review_branch`), so the lease-push path above applies only
 to other stages.
 
+## External fast-forward of a review branch
+
+An operator (or a delegated agent) may push commits straight onto a task's
+published PR branch. When the owned worktree head is a strict ancestor of the
+PR head, that is a fast-forward, not a conflict. Before 2026-11-22
+`ReviewPublicationRecovery.classify` knew only `equal`, `ahead` and
+`divergent`, so it recorded this as `divergent`/`remote_conflict`. The
+advertised `workflow.retry` then wedged on the suspended review grant
+(`review_grant_evidence_changed`). That was the hivedev F4 task: 35
+operator commits on top of worktree head `6ede822b`.
+
+Classification now has four outcomes:
+
+| Classification | Meaning |
+|---|---|
+| `equal` | The PR names the local head. |
+| `ahead` | The PR head is an ancestor of the local head; only local commits are missing. |
+| `behind` | The local head is a strict ancestor of the PR head; the PR holds every local commit. |
+| `divergent` | Each side has commits the other lacks. |
+
+`Review::Publication#publish!` never pushes over `behind` and never adopts it
+mid-run, because the run's passes and grant are bound to the old head. It stops
+with `REVIEW_ERROR reason=review_publication_failed
+publication_reason=remote_fast_forward_adoptable`. Operational status names the
+case in `review_publication.remediation`.
+
+Adoption happens in the routine retry path. `RecoveryCoordinator#resume` holds
+the task lock and runs `Hive::ReviewFastForwardAdoption#adopt!` before grant
+validation. This applies to `review_publication_failed` markers whose
+publication reason is `remote_fast_forward_adoptable` or the legacy
+`remote_conflict`. Daemon retries and an operator's `workflow.retry` both reach
+it. The adoption runs these steps:
+
+1. It reads the owned worktree pointer. The pointer's branch and path must match
+   the recorded evidence, and HEAD must be the reviewed `local_head` or a
+   descendant of it.
+2. It resolves the managed origin push URL, which must be the PR repository, and
+   re-observes the PR branch live. The recorded `remote_head` is informational
+   only.
+3. The observed commit must be present locally, classify must return `behind`,
+   and the worktree must be clean.
+4. `PassArchive.retire!` ends the old review generation before any merge. It
+   is the same reset as a rewind or an outcome-evidence rework. Grants get an
+   audit `expiry` with `expiry_reason=remote_fast_forward_adopted`. Numbered
+   passes and grant or completion receipts move to
+   `reviews/archive/<utc>-remote-fast-forward-<oid12>/`. A `retirement.json`
+   records `before_oid` (the reviewed head), `after_oid`, the branch and the
+   PR URL.
+5. `AgentGitGate.fast_forward` re-observes the remote immediately before
+   `git merge --ff-only --no-overwrite-ignore <exact oid>` and verifies HEAD,
+   the branch and a clean worktree afterwards. It never resets, forces or
+   rebases, and a locally ignored file in the way stops the merge instead of
+   being replaced.
+6. When the task has an attempt binding, it also writes a `recovery_recorded`
+   task-journal activity with payload `adopted_remote_fast_forward`. A replay
+   that meets the already-journaled operation treats it as recorded.
+
+The coordinator then clears the marker as usual. The next run starts at pass 1
+on the adopted head and cannot reuse grant evidence or findings bound to the
+old head. `github-publication.json` needs no `publication-reconcile`: the old
+anchor is an ancestor of the adopted head, so the next leased publication
+advances it.
+
+These cases keep their previous behavior:
+
+- If the PR head is not a fast-forward (divergent, or the worktree has
+  local-only commits), adoption returns nil. Grant validation and ordinary
+  recovery then decide, as before.
+- If the PR branch was deleted, or the PR names the reviewed head again,
+  adoption returns nil as well.
+- A legacy `remote_conflict` marker cannot tell a fast-forward from true
+  divergence. Until the fast-forward is established, any failure to observe or
+  resolve the PR head returns nil for it, so the old retry path runs. The
+  refusals below apply to such markers only after the fast-forward is
+  established, and to `remote_fast_forward_adoptable` markers throughout.
+
+When adoption is provable but unsafe, the request is blocked with
+`remote_fast_forward_refused`. The remediation starts with the reason:
+
+- `dirty_worktree` (owner `operator`): the remediation names `git status`. Hive
+  never discards edits.
+- `remote_object_unavailable` (owner `operator`): the remediation gives the
+  exact `git -C <worktree> fetch origin <branch>`.
+- `publication_identity_changed`, `worktree_unavailable` or `git_unavailable`
+  (owner `operator`). `git_unavailable` covers unsafe repository-local Git
+  config and a merge that failed or could not be verified.
+- `remote_moved`, `remote_observation_unavailable` or `remote_unavailable`
+  (owner `hive`): these are transient, and the next daemon tick re-observes the
+  PR branch.
+
+Retirement precedes the merge, so a crash after the merge cannot let the next
+run reuse passes or grants bound to the old head, whatever the PR branch does
+afterwards. A retry after a crash or refusal before the merge reuses the
+archive whose `retirement.json` matches, and skips the grant expiry, which a
+partly moved receipt chain would no longer validate. A refusal after
+retirement, for example `remote_moved`, has already ended the grant: the next
+retry adopts the newer fast-forward, or the review restarts at pass 1 on the
+old head.
+
+Other `classify` consumers: `TaskClosure#retained_fix_details` now labels a
+PR reference ahead of the worktree `behind`/`published`. Closure still
+requires the operator decision. `confirm_absence` still marks only `ahead` as
+`unpublished`. Push guidance is still emitted only for `ahead`.
+
 ## Stacked base retarget
 
 A task PR stacked on its prerequisite's branch is retargeted by GitHub when the

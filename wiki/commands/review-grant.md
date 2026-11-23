@@ -86,7 +86,10 @@ parks suspend unused allowance and retain incomplete slots; existing recovery
 rules alone decide whether the task can resume. Changed or ambiguous evidence
 refuses reuse. Completion, a new review/reset or an integer task-input
 generation change expires the scope. Reset archives receipts with pass
-artifacts while retaining the task-root audit. Audit alone never reconstructs
+artifacts while retaining the task-root audit. Adopting a PR branch that was
+fast-forwarded outside Hive is such a reset: the audit records
+`expiry_reason=remote_fast_forward_adopted` and the next review starts a new
+generation on the adopted head (see [[publication-recovery]]). Audit alone never reconstructs
 active allowance. Version 1 has no release or cancel verb.
 
 This command is non-interactive and operator-only. Hive's Claude, Codex, Pi,

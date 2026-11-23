@@ -2991,3 +2991,38 @@ at all); only the log line and receipt record it.
   review requires but are not in `policy_affecting_config`, so changing them
   stales no review, resolved or not. Unverified whether that is intended.
 
+## External fast-forward adoption of review branches (2026-11-22)
+
+- Adoption requires the PR head's commit to be in the local object store. Hive
+  does not fetch it: the `remote_object_unavailable` refusal asks the operator
+  to `git fetch origin <branch>` first. A remote that moves ahead with objects
+  never fetched is recorded at publication as `pr_reference_unavailable`. That
+  reason is not an adoption candidate, so it keeps the old route.
+- A fix-mode review run does not observe the PR before its CI-fix and fix
+  agents run. If someone pushes onto the PR branch during such a run, the
+  run's own fix commits make the history truly divergent, which still needs
+  operator reconciliation. Only verify-mode runs publish (and so observe)
+  before agents. An observe-only preflight was out of scope.
+- The coordinator's `resume` re-evaluates a blocked request on every daemon
+  tick, so a request blocked by adoption (including `dirty_worktree`) re-observes
+  the PR branch over the network once per tick until it clears. Observation
+  precedes the local cleanliness check on purpose: a dirty worktree with a
+  truly divergent PR must keep the ordinary path rather than block. Each
+  observation is bounded by the managed-Git 60s deadline. Whether that load is
+  acceptable on hosts with flaky remotes is unmeasured.
+- Only `review_publication_failed` markers are candidates. A PR head that
+  fast-forwards after Hive's own publication surfaces as
+  `review_publication_confirmation_failed publication_reason=pr_head_moved`.
+  The retry re-runs the review, whose publication then stops as
+  `remote_fast_forward_adoptable`, so adoption takes one extra cycle there.
+- Adoption does not secret-scan the adopted commits; they were already
+  published to the PR by whoever pushed them. The next Hive publication of a
+  descendant head goes through the usual paths.
+- The failure fingerprint of `review_publication_failed` does not include the
+  task head. Repeated adoptable failures after successive operator pushes
+  therefore count as identical failures. Each retry adopts, so this does not
+  park in practice, but it is not head-keyed like the CI-gate reasons.
+- The journal activity `adopted_remote_fast_forward` is written only when the
+  task has an attempt binding (`TaskActivity.for_task`). The always-written
+  durable record is `reviews/archive/<label>/retirement.json` plus the budget
+  audit expiry.

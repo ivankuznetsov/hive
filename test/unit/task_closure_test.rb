@@ -1415,6 +1415,32 @@ class TaskClosureTest < Minitest::Test
     end
   end
 
+  # A PR reference that fast-forwarded past the worktree holds every local
+  # commit. Closure still requires the operator decision; only the label
+  # changes from the old "divergent"/unknown to behind/published.
+  def test_pr_reference_ahead_of_the_worktree_is_published_but_still_blocks
+    with_closure_project do |task, _project|
+      worktree = Hive::Worktree.new(task.project_root, task.slug,
+        worktree_root: Hive::Worktree.canonical_root(task.project_root))
+      worktree.create!(task.slug, default_branch: "main")
+      worktree.write_pointer!(task.folder, task.slug)
+      File.write(File.join(worktree.path, "published-fix"), "retained")
+      run!("git", "-C", worktree.path, "add", "published-fix")
+      run!("git", "-C", worktree.path, "commit", "-qm", "published fix")
+      head = Hive::GitOps.new(worktree.path).head_sha
+      run!("git", "-C", worktree.path, "commit", "--allow-empty", "-qm", "operator follow-up")
+      reference = Hive::GitOps.new(worktree.path).head_sha
+      run!("git", "-C", worktree.path, "reset", "--hard", "--quiet", head)
+      File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\nhead_oid: #{reference}\n---\n")
+      blocker = service_for(gh: Object.new).send(:worktree_blockers, task).first
+      assert_equal "unique_worktree_changes", blocker["code"]
+      assert_equal "behind", blocker.dig("details", "classification")
+      assert_equal "published", blocker.dig("details", "publication")
+      assert_equal [], blocker.dig("details", "local_fix_shas")
+      assert_equal head, Hive::GitOps.new(worktree.path).head_sha
+    end
+  end
+
   def test_public_helpers_and_fallbacks_fail_closed
     with_closure_project do |task, project|
       input = input_for("acme/app#42")

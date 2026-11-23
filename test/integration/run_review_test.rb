@@ -8,6 +8,7 @@ require "hive/markers"
 require "hive/agent_limit"
 require "hive/stages/review"
 require "hive/commands/review_grant"
+require "hive/review_fast_forward_adoption"
 require_relative "../support/review_grant_fixture"
 
 # Integration coverage for the 6-review runner. The unit-level tests for
@@ -3504,6 +3505,39 @@ class RunReviewTest < Minitest::Test
         assert_equal "published", diagnostic["publication"]
         assert_equal "pending", diagnostic["verification"]
         assert_equal "final_fix_unverified", diagnostic["origin_reason"]
+      end
+    end
+  end
+
+  # An operator pushed onto the published PR branch outside Hive. The run never
+  # pushes over it and never adopts it mid-run: it stops with a distinct,
+  # routinely retryable publication reason that recovery adopts.
+  def test_pr_fast_forwarded_outside_hive_stops_with_an_adoptable_publication_failure
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir, cfg_overrides: {
+          "review" => { "max_passes" => 1, "reviewers" => [ STUB_REVIEWER_SPEC ], "github_checks" => { "enabled" => false } }
+        })
+        worktree = YAML.safe_load_file(File.join(folder, "worktree.yml")).fetch("path")
+        reviewed = review_head(worktree)
+        run!("git", "-C", worktree, "commit", "--allow-empty", "-qm", "operator change")
+        operator = review_head(worktree)
+        run!("git", "-C", worktree, "reset", "--hard", "--quiet", reviewed)
+        with_review_pr(folder, worktree) do |published, move_remote|
+          move_remote.call(operator)
+          drive_review_loop(folder, worktree, findings: { 1 => "" }, expect_error: true)
+          assert_empty published
+        end
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "review_publication_failed", marker.attrs["reason"]
+        assert_equal "remote_fast_forward_adoptable", marker.attrs["publication_reason"]
+        evidence = Hive::ReviewPublicationRecovery.decode(marker.attrs)
+        assert_equal "behind", evidence["classification"]
+        assert_equal operator, evidence["remote_head"]
+        assert_equal reviewed, evidence["local_head"]
+        assert_equal reviewed, review_head(worktree)
+        assert Hive::ReviewFastForwardAdoption.candidate?(marker)
       end
     end
   end

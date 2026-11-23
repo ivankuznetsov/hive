@@ -3,7 +3,7 @@
   <% if board.empty? %>
     <div class="empty-state">
       <p>No projects yet.</p>
-      <p class="hint"><%= link_to "Add a repository", repos_path %> to start the pipeline.</p>
+      <p class="hint"><%= link_to "Add a project", projects_path %> to start the pipeline.</p>
     </div>
   <% else %>
     <% board.bands.each do |band| %>

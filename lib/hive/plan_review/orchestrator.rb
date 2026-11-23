@@ -141,7 +141,7 @@ module Hive
         generation = task_generation
         if current && Identity.task_generation_current?(@task, current.task_generation) &&
            current.plan_digest == signals.plan_digest &&
-           current.policy_fingerprint == policy.policy_fingerprint && !restart_requested?(current)
+           policy_identity_current?(current, policy, signals) && !restart_requested?(current)
           return Projection.new(current) if current.execution_allowed?
 
           return resume_review(current, plan_text(plan_path))
@@ -382,7 +382,8 @@ module Hive
           review_id:, basename: "policy-#{policy.policy_fingerprint}.json",
           content: policy.to_h.merge(
             "signals" => signals.to_h,
-            "configuration_fingerprint" => Policy.configuration_fingerprint(@cfg)
+            "configuration_fingerprint" => Policy.configuration_fingerprint(@cfg),
+            "reviewer_routing" => Policy.reviewer_routing(@cfg)
           ), json: true
         )
         version = current ? current.version + 1 : 1
@@ -490,8 +491,16 @@ module Hive
         [ resumed, false ]
       end
 
+      # Decision triage runs on `plan_review.routes.decision_triage` when the
+      # project configures one, and on the verification route otherwise.
+      def route_role(role)
+        return role unless role == "decision_triage"
+
+        @cfg.is_a?(Hash) && @cfg.dig("plan_review", "routes", "decision_triage") ? role : "verification"
+      end
+
       def probe_reviewer_capability(record, role)
-        resolution = @route_resolver.call(role:, planner_identity: planner_identity(record))
+        resolution = @route_resolver.call(role: route_role(role), planner_identity: planner_identity(record))
         unless resolution.resolved?
           return [ false, stringify(resolution.receipt).merge(
             "outcome" => "unsupported",
@@ -747,8 +756,7 @@ module Hive
       def dispatch_attempt(record, role, plan_bytes, requested, merge_coverage: true,
                            merge_findings: true, verification_findings: [], pending_findings: [])
         resolution = @route_resolver.call(
-          role: role == "decision_triage" ? "verification" : role,
-          planner_identity: planner_identity(record)
+          role: route_role(role), planner_identity: planner_identity(record)
         )
         attempt_id = Identity.attempt(record.review_id)
         if resolution.resolved?
@@ -1228,12 +1236,23 @@ module Hive
       # Initial review legs. The adversarial leg runs only when the record
       # requested adversarial coverage, so a review created before the
       # adversarial lens became level-gated keeps the coverage it asked for.
+      # The legs come from the record's own coverage, so a review keeps the
+      # adversarial leg it requested. Two operator authority actions end it:
+      # a waiver of that coverage, and a downgrade below adversarial_min_level.
+      # Otherwise an unavailable adversarial family (e.g. Grok missing from a
+      # container) keeps the review in a capability wait neither can end.
       def initial_roles(record)
-        if record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" }
+        adversarial = record["coverage"].find { |entry| entry.fetch("name") == "adversarial" }
+        if adversarial && adversarial["status"] != "waived" && !downgraded_below_adversarial_lens?(record)
           %w[primary adversarial]
         else
           %w[primary]
         end
+      end
+
+      def downgraded_below_adversarial_lens?(record)
+        Array(record["decisions"]).any? { |decision| decision["action"] == "downgrade_level" } &&
+          !adversarial_lens?(record.effective_level)
       end
 
       # "off" disables the adversarial leg at every level for projects whose
@@ -1544,14 +1563,41 @@ module Hive
       end
 
       def policy_configuration_fresh?(record)
-        reference = record["artifacts"]["policy"]
-        return false unless reference
+        artifact = policy_artifact(record)
+        return false unless artifact
 
-        artifact = JSON.parse(@store.read_reference(reference))
-        artifact["configuration_fingerprint"] == Policy.configuration_fingerprint(@cfg) &&
+        Policy.configuration_current?(@cfg, artifact:, record:) &&
           record["level_sources"]&.dig("run") == persisted_run_level
       rescue JSON::ParserError, KeyError, TypeError
         false
+      end
+
+      # The review's own policy identity still holds. A resolved review whose
+      # reviewer routing alone moved keeps its verdict: re-derive its policy
+      # fingerprint from today's plan signals and verdict-relevant settings
+      # with the routing it ran under (see Policy.configuration_current?).
+      def policy_identity_current?(record, policy, signals)
+        return true if record.policy_fingerprint == policy.policy_fingerprint
+        return false unless record.execution_allowed?
+
+        artifact = policy_artifact(record)
+        return false unless artifact
+
+        Policy.evaluate(
+          workflow_id: @task.workflow.id, signals:,
+          config: Policy.resolved_review_config(@cfg, artifact:, record:),
+          run_level: persisted_run_level
+        ).policy_fingerprint == record.policy_fingerprint
+      rescue JSON::ParserError, KeyError, TypeError
+        false
+      end
+
+      def policy_artifact(record)
+        reference = record["artifacts"]["policy"]
+        return nil unless reference
+
+        artifact = JSON.parse(@store.read_reference(reference))
+        artifact.is_a?(Hash) ? artifact : nil
       end
 
       def retry_in_future?(value)

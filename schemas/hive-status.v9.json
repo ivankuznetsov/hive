@@ -207,7 +207,19 @@
           "properties": {
             "reason": { "const": "quota" },
             "provider": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" },
-            "retry_after": { "type": ["string", "null"], "format": "date-time" }
+            "retry_after": { "type": ["string", "null"], "format": "date-time" },
+            "fallback": {
+              "description": "Opt-in provider-limit fallback (review.limit_fallback / implementation.limit_fallback) for the held provider. `available` is derived from config: the next attempt substitutes it. Other outcomes come from the marker the last attempt wrote.",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["agent", "outcome"],
+              "properties": {
+                "agent": { "type": "string", "pattern": "^[A-Za-z0-9_-]+$" },
+                "outcome": {
+                  "enum": ["available", "waiting", "limited", "failed", "unresolved", "unsupported", null]
+                }
+              }
+            }
           }
         },
         "mtime": { "type": "string", "format": "date-time" },
@@ -566,7 +578,39 @@
             "review.fix": { "$ref": "#/$defs/ImplementationIdentityStage" },
             "review.ci": { "$ref": "#/$defs/ImplementationIdentityStage" }
           }
+        },
+        "substitutions": {
+          "description": "Provider-limit substitutions (implementation.limit_fallback) journaled in this generation, in order. Each names the provider that actually ran for one attempt; the pinned stage identities above are never replaced by one.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/ImplementationSubstitution" }
         }
+      }
+    },
+    "ImplementationSubstitution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "role", "attempt_id", "occurred_at", "scope", "primary", "substitute", "limit", "retry_after"],
+      "properties": {
+        "stage": { "enum": ["execute", "open_pr", "review.fix", "review.ci", "artifacts", "finalize"] },
+        "role": { "type": "string" },
+        "attempt_id": { "type": "string" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "scope": { "const": "attempt" },
+        "primary": { "$ref": "#/$defs/ImplementationSubstitutionRoute" },
+        "substitute": { "$ref": "#/$defs/ImplementationSubstitutionRoute" },
+        "limit": { "type": "string" },
+        "retry_after": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "ImplementationSubstitutionRoute": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] },
+        "requested_effort": { "type": ["string", "null"] },
+        "source": { "type": "string" }
       }
     },
     "ImplementationIdentityStage": {

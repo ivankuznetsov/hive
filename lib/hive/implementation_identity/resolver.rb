@@ -20,6 +20,7 @@ module Hive
         "review.ci" => "review_ci"
       }.freeze
       IMPLEMENTATION_STAGES = ROUTING_STAGES.keys.freeze
+      LIMIT_FALLBACK_SOURCE = "limit_fallback".freeze
 
       def initialize(cfg:)
         @cfg = cfg || {}
@@ -110,6 +111,51 @@ module Hive
           generation: identity_value(execute_identity, :generation),
           originating_attempt: attempt_id || identity_value(execute_identity, :originating_attempt),
           routing_stage: routing_stage
+        )
+      end
+
+      # The one-attempt substitute identity launched by an opt-in provider
+      # limit fallback (Hive::ImplementationLimitFallback). It is journaled
+      # as a substitution and never replaces the stage's pinned identity.
+      #
+      # When the stage's own config names the fallback agent (an operator
+      # reroute), the ordinary resolution applies, so its model, effort and
+      # `models:` routes were authored for that agent. Otherwise the fallback
+      # profile's concrete default model runs, with the stage's default
+      # effort, and the primary's model pins and `models:` routes are not
+      # consulted.
+      def resolve_limit_fallback(stage, provider:, execute_identity:, generation:, attempt_id:)
+        stage = stage.to_s
+        unless IMPLEMENTATION_STAGES.include?(stage)
+          raise ResolutionError, "#{stage.inspect} is not an implementation-owning stage"
+        end
+
+        profile = Hive::AgentProfiles.lookup(provider, cfg: @cfg)
+        fields = Hive::Config.implementation_identity_fields(@cfg, stage)
+        selection =
+          if fields["agent"].to_s == profile.name.to_s
+            if stage == "execute"
+              resolve_execute(generation: generation, attempt_id: attempt_id)
+            else
+              resolve_stage(
+                stage,
+                execute_identity: execute_identity || { "generation" => generation },
+                attempt_id: attempt_id
+              )
+            end
+          else
+            effort = DOWNSTREAM_EFFORT.fetch(stage) { configured_effort(profile) }
+            build_selection(
+              stage: stage, profile: profile,
+              model: profile.concrete_default_model(cfg: @cfg, project_root: @cfg["project_root"]),
+              effort: effort, pin_model: true, source: LIMIT_FALLBACK_SOURCE,
+              generation: generation, originating_attempt: attempt_id, routing_stage: nil
+            )
+          end
+        Selection.new(
+          **selection.to_h.transform_keys(&:to_sym).merge(
+            source: LIMIT_FALLBACK_SOURCE, generation: generation, originating_attempt: attempt_id
+          )
         )
       end
 

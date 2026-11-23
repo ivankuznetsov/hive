@@ -1,4 +1,6 @@
 require "fileutils"
+require "json"
+require "hive/atomic_file"
 
 module Hive
   module Stages
@@ -21,8 +23,78 @@ module Hive
       module PassArchive
         ARCHIVE_DIR = "archive".freeze
         NUMBERED_PASS_RE = /\A.+-\d{2}\.md\z/
+        RETIREMENT_RECEIPT = "retirement.json".freeze
+        RETIREMENT_SCHEMA = "hive.review-generation-retirement".freeze
 
         module_function
+
+        # Retires the live review generation without a stage move: review
+        # grants expire in the budget audit (`expiry_reason`), then numbered
+        # pass files and grant/completion receipts move into a fresh
+        # `reviews/archive/<label>/`. This is the same reset a rewind or an
+        # outcome-evidence rework applies, so the next review starts at pass
+        # 1 and no grant or finding bound to the old work can be reused.
+        #
+        # A `receipt` (deterministic Hash) is written into the archive first.
+        # A retry after an interruption finds that receipt and finishes the
+        # move into the same directory instead of starting another one; with
+        # a receipt the directory is created even when nothing is left to
+        # move. Returns the task-relative archive directory, or nil.
+        def retire!(task, label:, expiry_reason:, receipt: nil)
+          require "hive/review_budget"
+          require "hive/review_pass"
+          reviews = File.join(task.folder, "reviews")
+          return nil unless File.directory?(reviews) && !File.symlink?(reviews)
+
+          document = receipt && retirement_document(receipt, expiry_reason)
+          relative = document && existing_retirement(task.folder, document)
+          names = Dir.children(reviews).select do |name|
+            (Hive::ReviewPass.number(name) || Hive::ReviewPass.budget_receipt?(name)) &&
+              File.lstat(File.join(reviews, name)).then { |stat| stat.file? || stat.symlink? }
+          end.sort_by { |name| Hive::ReviewPass.sort_key(name) }
+          return relative if names.empty? && (relative || document.nil?)
+
+          # A matching retirement receipt is written only after the expiry, so
+          # a resumed move must not revalidate a partially moved receipt chain.
+          if !relative && names.any? { |name| Hive::ReviewPass.budget_receipt?(name) }
+            Hive::ReviewBudget.new(task: task, project: task.project_name).record_expiry!(reason: expiry_reason)
+          end
+          unless relative
+            relative = create_archive_dir!(reviews, label)
+            write_retirement(File.join(task.folder, relative), document) if document
+          end
+          names.each do |name|
+            File.rename(File.join(reviews, name), File.join(task.folder, relative, name))
+          end
+          Hive::AtomicFile.fsync_directory(File.join(task.folder, relative))
+          Hive::AtomicFile.fsync_directory(reviews)
+          relative
+        end
+
+        def retirement_document(receipt, expiry_reason)
+          { "schema" => RETIREMENT_SCHEMA, "schema_version" => 1,
+            "expiry_reason" => expiry_reason.to_s }.merge(receipt.transform_keys(&:to_s))
+        end
+
+        def existing_retirement(task_folder, document)
+          root = File.join(task_folder, "reviews", ARCHIVE_DIR)
+          return nil unless File.directory?(root) && !File.symlink?(root)
+
+          Dir.children(root).sort.each do |name|
+            path = File.join(root, name, RETIREMENT_RECEIPT)
+            next unless File.file?(path) && !File.symlink?(path)
+
+            existing = JSON.parse(File.read(path, 64 * 1024))
+            return File.join("reviews", ARCHIVE_DIR, name) if existing == document
+          rescue JSON::ParserError
+            next
+          end
+          nil
+        end
+
+        def write_retirement(directory, document)
+          Hive::AtomicFile.create(File.join(directory, RETIREMENT_RECEIPT), "#{JSON.pretty_generate(document)}\n")
+        end
 
         # Moves numbered pass files into a fresh `reviews/archive/<label>[-N]/`
         # directory. Each completed move is appended to +moves+ as a

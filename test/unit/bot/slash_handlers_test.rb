@@ -152,6 +152,36 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_empty payload.dig("input", "evidence")
   end
 
+  def test_close_accepts_supersession_by_a_successor_task_without_evidence
+    handlers = autofix_handlers([ REVIEW_ERROR_ROW ])
+    result = handlers.closure(Update.new(
+      text: "/close 9281 --reason superseded --successor hive:rails-port " \
+            '--attestation "The Rails port replaces this task"',
+      chat_id: 1
+    ))
+    assert_match(/closure for hive\/\S+ by successor hive:rails-port using 0 evidence item/, result.text)
+    token = result.reply_markup.dig(0, 0, :callback_data)
+    callback = Hive::Bot::NotificationBuilders.resolve_callback(token)
+    prefix, encoded = callback.split(":", 2)
+    payload = JSON.parse(Base64.urlsafe_decode64(encoded))
+
+    assert_equal "closure_preview", prefix
+    assert_equal "superseded", payload.dig("input", "reason")
+    assert_equal "hive:rails-port", payload.dig("input", "successor")
+    assert_empty payload.dig("input", "evidence")
+  end
+
+  def test_close_requires_a_successor_for_supersession
+    result = @handlers.closure(Update.new(
+      text: '/close task-260525-abcd --reason superseded --attestation "Replaced"',
+      chat_id: 1
+    ))
+
+    assert_match(%r{\AUse /close}, result.text)
+    assert_match(/--successor project:slug is required for superseded/, result.text)
+    assert_nil result.reply_markup
+  end
+
   def test_close_rejects_duplicate_and_unknown_options
     commands = [
       "/close task --reason superseded --evidence acme/app#42 " \

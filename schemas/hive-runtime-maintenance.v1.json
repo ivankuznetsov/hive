@@ -17,7 +17,7 @@
         "schema": { "const": "hive-runtime-maintenance" },
         "schema_version": { "const": 1 },
         "ok": { "type": "boolean" },
-        "action": { "type": "string", "enum": ["status"] },
+        "action": { "type": "string", "enum": ["status", "init"] },
         "result": { "$ref": "#/$defs/StatusResult" }
       },
       "if": { "properties": { "result": { "properties": { "phase": { "const": "active" } } } } },

@@ -1071,6 +1071,37 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_decision_triage_uses_its_own_route_only_when_one_is_configured
+    [ false, true ].each do |configured|
+      with_task(standard_plan) do |task, cfg|
+        cfg["plan_review"]["attempts"]["max_transient"] = 0
+        if configured
+          cfg["plan_review"]["routes"]["decision_triage"] = {
+            "agent" => "claude", "model" => "claude-sonnet-5-5", "family" => "anthropic",
+            "effort" => "low", "route" => "claude-code/v1"
+          }
+        end
+        roles = []
+        resolver = lambda do |role:, **options|
+          roles << role
+          resolve_route(role:, **options)
+        end
+        adapter = FakeAdapter.new do |request|
+          if request.kind == "decision_triage"
+            Hive::PlanReview::Adapters::Base::Result.new(outcome: "provider_limit")
+          else
+            successful_result(request, findings: request.kind == "primary" ? [ finding("manual", "Choose replay") ] : [])
+          end
+        end
+
+        orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!
+
+        assert_includes adapter.calls.map(&:kind), "decision_triage"
+        assert_equal configured, roles.include?("decision_triage"), "configured=#{configured}: #{roles.inspect}"
+      end
+    end
+  end
+
   def test_malformed_triage_output_stops_after_the_bounded_attempts_with_original_findings_intact
     with_task(standard_plan) do |task, cfg|
       cfg["plan_review"]["attempts"]["max_transient"] = 0
@@ -1267,6 +1298,61 @@ class PlanReviewOrchestratorTest < Minitest::Test
       assert_equal 1, adapter.calls.count { |request| request.kind == "primary" }
       assert_equal 1, adapter.calls.count { |request| request.kind == "adversarial" }
       assert_equal 1, adapter.calls.count { |request| request.kind == "verification" }
+    end
+  end
+
+  # A waiver of the adversarial coverage, or a downgrade below
+  # adversarial_min_level, ends the wait for an unavailable adversarial family.
+  %w[waive_coverage downgrade_level].each do |action|
+    define_method("test_#{action}_ends_the_wait_for_an_unavailable_adversarial_family") do
+      with_task(mandatory_plan) do |task, cfg|
+        # The shipped default: the adversarial lens applies only at mandatory.
+        cfg["plan_review"]["adversarial_min_level"] = "mandatory"
+        resolver = lambda do |role:, **|
+          next resolve_route(role:) unless role == "adversarial"
+
+          requested = route_identity("grok", "grok-4.6", "grok", "native_adversarial")
+          Hive::PlanReview::RouteResolver::Resolution.new(
+            status: "unsupported", candidate: nil,
+            receipt: {
+              "role" => role, "requested" => requested, "actual" => {},
+              "capability_result" => "unsupported", "independence_verified" => false,
+              "independence_reason" => "reviewer_family_unavailable",
+              "attempts" => [ { "candidate" => requested, "status" => "unsupported" } ]
+            }
+          )
+        end
+        adapter = success_adapter
+        waiting = orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!.record
+        assert_equal "reviewing", waiting.state
+
+        coverage = waiting["coverage"].find { |entry| entry.fetch("name") == "adversarial" }
+        service = Hive::PlanReview::DecisionService.new(
+          task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+          committer: ->(*) { }, freshness_checker: ->(*) { }
+        )
+        value, target = if action == "waive_coverage"
+          fingerprint = coverage["fingerprint"] || Hive::PlanReview::Identity.coverage(
+            review_id: waiving_id = waiting.review_id, name: "adversarial",
+            policy_fingerprint: waiting.policy_fingerprint
+          )
+          [ { "coverage" => "adversarial" }, fingerprint ]
+        else
+          [ { "level" => "standard" }, nil ]
+        end
+        service.apply(
+          action:, review_id: waiting.review_id, task_generation: waiting.task_generation,
+          policy_fingerprint: waiting.policy_fingerprint,
+          expected_artifact_digest: Hive::PlanReview::Projection.new(waiting).observation_digest,
+          target_fingerprint: target, value:, reason: "No adversarial family in this install.",
+          origin: "cli", operator: "test", authorized: true
+        )
+
+        resumed = orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!.record
+
+        refute_includes %w[reviewing retry_scheduled], resumed.state, resumed.required_action
+        assert_equal 0, adapter.calls.count { |request| request.kind == "adversarial" }
+      end
     end
   end
 
@@ -1871,6 +1957,56 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # A resolved review keeps its verdict when only reviewer routing moves, both
+  # when the reviewed plan is the original (identity path) and when a revised
+  # candidate was promoted (candidate path); a verdict-relevant change still
+  # starts a linked review.
+  def test_reviewer_reroute_keeps_a_cleared_review_but_a_level_raise_rekeys_it
+    revised = standard_plan.sub("# Plan", "# Revised plan")
+    [ [], [ finding("safe_auto", "Clarify tests") ] ].each do |findings|
+      with_task(standard_plan) do |task, cfg|
+        adapter = success_adapter(primary_findings: findings)
+        revision = FakeRevision.new(revised)
+        first = orchestrator(task, cfg, adapter:, planner_revision: revision).advance!.record
+        assert_equal "cleared", first.state
+        calls = adapter.calls.length
+
+        rerouted = reroute(cfg)
+        kept = orchestrator(task, rerouted, adapter:, planner_revision: revision).advance!.record
+        assert_equal [ first.review_id, first.version, "cleared" ], [ kept.review_id, kept.version, kept.state ]
+        assert_equal calls, adapter.calls.length, "a kept verdict must not call a reviewer"
+
+        rerouted["plan_review"]["minimum_level"] = "mandatory"
+        raised = orchestrator(task, rerouted, adapter:, planner_revision: revision).advance!.record
+        refute_equal first.review_id, raised.review_id
+        assert_equal first.review_id, raised.prior_review_id
+        assert_equal "mandatory", raised.effective_level
+      end
+    end
+  end
+
+  # An unresolved review is still waiting on its reviewers: a reroute (here
+  # the fix for an unlaunchable reviewer) starts a linked review on the new
+  # route instead of replaying the old one.
+  def test_reviewer_reroute_rekeys_an_unresolved_review
+    with_task(mandatory_plan) do |task, cfg|
+      unavailable = FakeAdapter.new(capability: ->(**) { { "status" => "unsupported" } }) do
+        Hive::PlanReview::Adapters::Base::Result.new(
+          outcome: "unsupported", diagnostic: "missing reviewer",
+          route_receipt: { "capability_result" => "unsupported" }
+        )
+      end
+      waiting = orchestrator(task, cfg, adapter: unavailable).advance!.record
+      refute waiting.execution_allowed?
+
+      rerouted = orchestrator(task, reroute(cfg), adapter: success_adapter).advance!.record
+
+      refute_equal waiting.review_id, rerouted.review_id
+      assert_equal waiting.review_id, rerouted.prior_review_id
+      assert_equal "cleared", rerouted.state
+    end
+  end
+
   def test_metadata_drift_rolls_a_cleared_plan_into_a_new_review
     with_task(standard_plan) do |task, cfg|
       first = orchestrator(task, cfg, adapter: success_adapter).advance!
@@ -2160,6 +2296,20 @@ class PlanReviewOrchestratorTest < Minitest::Test
         )
       )
       refute runner.send(:policy_configuration_fresh?, invalid_policy)
+      assert record.execution_allowed?
+      moved_policy = Struct.new(:policy_fingerprint).new("0" * 64)
+      refute runner.send(:policy_identity_current?, no_policy, moved_policy, nil)
+      refute runner.send(:policy_identity_current?, invalid_policy, moved_policy, nil)
+      list_policy = store.write_review_artifact!(
+        review_id: record.review_id, basename: "list-policy.json", content: "[]"
+      )
+      refute runner.send(
+        :policy_identity_current?,
+        Hive::PlanReview::Record.new(
+          record.to_h.merge("artifacts" => record["artifacts"].merge("policy" => list_policy))
+        ),
+        moved_policy, nil
+      )
       refute runner.send(:retry_in_future?, "not-a-time")
       assert_nil runner.send(:safe_plan_digest, File.join(task.folder, "missing-plan.md"))
       assert_equal "symbol", runner.send(:stringify, :symbol)
@@ -2538,6 +2688,24 @@ class PlanReviewOrchestratorTest < Minitest::Test
         "capability_result" => "present", "independence_verified" => true
       }
     )
+  end
+
+  # Every reviewer route moved, as an operator does when providers run out
+  # of quota.
+  def reroute(cfg)
+    rerouted = Marshal.load(Marshal.dump(cfg))
+    grok = {
+      "agent" => "grok", "model" => "grok-4.7", "family" => "grok",
+      "effort" => "xhigh", "route" => "native_grok_build"
+    }
+    rerouted["plan_review"]["routes"].merge!(
+      "primary" => grok, "verification" => grok,
+      "adversarial" => {
+        "agent" => "claude", "model" => "claude-opus-5-5", "family" => "anthropic",
+        "effort" => "xhigh", "route" => "native_claude"
+      }
+    )
+    rerouted
   end
 
   def route_identity(provider, model, family, route)

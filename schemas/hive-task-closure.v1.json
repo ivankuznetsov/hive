@@ -276,17 +276,48 @@
         }
       },
       "else": {
-        "properties": {
-          "evidence": {
-            "minItems": 1
-          },
-          "task_repository": {
-            "required": [
-              "host",
-              "repository",
-              "identity",
-              "default_branch"
-            ]
+        "if": {
+          "properties": {
+            "reason": {
+              "const": "superseded"
+            },
+            "evidence": {
+              "maxItems": 0
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "task_repository": {
+              "required": [
+                "path"
+              ]
+            },
+            "authority": {
+              "const": "operator_attestation"
+            },
+            "successor": {
+              "type": "object"
+            },
+            "attestation": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "evidence": {
+              "minItems": 1
+            },
+            "task_repository": {
+              "required": [
+                "host",
+                "repository",
+                "identity",
+                "default_branch"
+              ]
+            }
           }
         }
       }

@@ -26,6 +26,23 @@ module Hive
     class RemoteConflict < Error; end
     class MaterializationFailed < Error; end
     class PublicationFailed < Error; end
+    # A local fast-forward precondition does not hold. `reason` is a stable
+    # symbol so callers can name the exact operator action.
+    class FastForwardRefused < Error
+      REASONS = %i[
+        branch_moved local_head_moved dirty_worktree remote_object_unavailable
+        not_fast_forward
+      ].freeze
+
+      attr_reader :reason
+
+      def initialize(reason, message)
+        raise ArgumentError, "unknown fast-forward refusal #{reason.inspect}" unless REASONS.include?(reason)
+
+        @reason = reason
+        super(message)
+      end
+    end
 
     ReadResult = Data.define(
       :operation, :stdout, :stderr, :exitstatus, :overflow
@@ -184,6 +201,33 @@ module Hive
         end
 
         value
+      end
+    end
+
+    FastForwardReceipt = Data.define(
+      :remote_fingerprint, :branch, :before_oid, :after_oid
+    ) do
+      def initialize(remote_fingerprint:, branch:, before_oid:, after_oid:)
+        fingerprint = remote_fingerprint.to_s.downcase
+        unless fingerprint.match?(/\A[0-9a-f]{64}\z/)
+          raise InvalidRequest, "fast-forward receipt fingerprint is invalid"
+        end
+
+        name = Hive::GitRef.validate_branch_name(branch)
+        before = before_oid.to_s.downcase
+        after = after_oid.to_s.downcase
+        unless before.match?(OID) && after.match?(OID) && before != after
+          raise InvalidRequest, "fast-forward receipt OIDs are invalid"
+        end
+
+        super(
+          remote_fingerprint: fingerprint.dup.freeze,
+          branch: name.dup.freeze,
+          before_oid: before.dup.freeze,
+          after_oid: after.dup.freeze
+        )
+      rescue ArgumentError, TypeError
+        raise InvalidRequest, "fast-forward receipt is invalid"
       end
     end
 
@@ -461,6 +505,60 @@ module Hive
       )
     end
 
+    # Fast-forward a clean, attached worktree to the exact OID of a present
+    # RemoteObservation. Never resets, forces, or rebases: the branch must
+    # still name `expected_oid`, the worktree must be clean, the observed
+    # commit must already be present and descend strictly from it, and the
+    # remote must still name the observed OID immediately before
+    # `merge --ff-only`. The receipt is returned only after HEAD, branch and
+    # cleanliness are verified at the new commit.
+    def fast_forward(repository_path:, branch:, expected_oid:, observation:,
+                     remote: "origin", allow_local_transport: false)
+      repository = repository_path(repository_path)
+      name = branch_name(branch)
+      before = exact_oid(expected_oid, label: "expected local OID")
+      unless observation.is_a?(RemoteObservation) && observation.present? &&
+             observation.branch == name
+        raise InvalidRequest, "fast-forward requires a present RemoteObservation of the same branch"
+      end
+
+      after = observation.oid
+      assert_fast_forward_local!(repository, name, before, after)
+      target = resolve_remote_target(
+        repository, remote, push: false,
+        allow_local_transport: allow_local_transport
+      )
+      unless remote_fingerprint(target) == observation.remote_fingerprint
+        raise RemoteConflict, "remote target changed after observation"
+      end
+      current = observe_resolved_remote(
+        repository, target, name,
+        allow_local_transport: allow_local_transport
+      )
+      unless current.oid == after
+        raise RemoteConflict, "remote branch moved after observation; fast-forward refused"
+      end
+
+      # `--no-overwrite-ignore`: status does not list ignored files, so a
+      # locally ignored file at a path the adopted commits track must stop the
+      # merge rather than be replaced.
+      command!(
+        repository, "merge", "--ff-only", "--no-overwrite-ignore", "--no-edit", "--no-stat", after,
+        error_class: CommandFailed,
+        message: "exact fast-forward failed (an ignored local file may occupy a path the adopted commits track)"
+      )
+      unless read(repository, :current_branch).stdout.strip == name &&
+             read(repository, :head_oid).stdout.strip.downcase == after &&
+             read(repository, :status).then { |status| status.success? && status.stdout.empty? }
+        raise CommandFailed, "fast-forward result could not be verified"
+      end
+
+      FastForwardReceipt.new(
+        remote_fingerprint: observation.remote_fingerprint, branch: name,
+        before_oid: before, after_oid: after
+      )
+    end
+
     def remote_urls(repository_path:, remote: "origin", push: false)
       repository = repository_path(repository_path)
       name = remote_name(remote)
@@ -496,6 +594,29 @@ module Hive
       )
       :removed
     end
+
+    def assert_fast_forward_local!(repository, name, before, after)
+      branch = read(repository, :current_branch)
+      unless branch.success? && branch.stdout.strip == name
+        raise FastForwardRefused.new(:branch_moved, "worktree is not attached to #{name}")
+      end
+      head = read(repository, :head_oid)
+      unless head.success? && head.stdout.strip.downcase == before
+        raise FastForwardRefused.new(:local_head_moved, "worktree HEAD no longer names the expected commit")
+      end
+      status = read(repository, :status)
+      unless status.success? && status.stdout.empty?
+        raise FastForwardRefused.new(:dirty_worktree, "worktree has staged, unstaged or untracked changes")
+      end
+      object = read(repository, :commit_oid, oid: after)
+      unless object.success? && object.stdout.strip.downcase == after
+        raise FastForwardRefused.new(:remote_object_unavailable, "observed remote commit is not present locally")
+      end
+      return if before != after && read(repository, :ancestor, base_oid: before, head_oid: after).success?
+
+      raise FastForwardRefused.new(:not_fast_forward, "observed remote commit does not strictly descend from the worktree HEAD")
+    end
+    private_class_method :assert_fast_forward_local!
 
     def read_arguments(operation, parameters)
       args = case operation.to_sym

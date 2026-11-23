@@ -30,6 +30,10 @@ rejected. Programmatic callers may pass the same declaration as a nonempty
 flat array, and a singleton array remains an array rather than silently
 becoming a scalar.
 
+To add, replace, or remove the dependency after capture, at any unfinished
+stage, use [[commands/stack]] (`hive stack TARGET --on REF` / `--clear`); it
+takes the same grammar and writes the same `meta.yml` field.
+
 Declaration shape is policy. One scalar keeps same-project branch stacking and
 the project's configured dependency gate. Adding a second flag changes the
 whole declaration—including the first edge—to scheduling-only list policy:

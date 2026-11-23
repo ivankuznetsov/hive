@@ -150,6 +150,132 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  # todero (2026-11-20): providers ran out of quota and the operator rerouted
+  # the plan-review reviewers. Tasks whose reviews had already cleared were
+  # refused at execute entry ("plan review policy changed after resolution"),
+  # and reverting the reroute would have refused the next batch. A finished
+  # verdict does not depend on who would review next.
+  def test_resolved_review_stays_current_across_a_reviewer_reroute_and_its_revert
+    %w[skipped cleared degraded_cleared].each do |state|
+      with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+        projection = publish_projection(task, cfg, state:, policy_format: :current)
+        rerouted = reroute(routed_as_cleared(cfg))
+
+        assert_equal "current", freshness_status(task, projection, rerouted), state
+        assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: rerouted)
+      end
+    end
+
+    with_task do |task, cfg|
+      projection = publish_projection(task, cfg, state: "cleared", policy_format: :current)
+      rerouted = reroute(cfg)
+      observation = Hive::PlanReview::TransitionGuard.prepare!(
+        task:, destination: "4-execute", config: rerouted,
+        orchestrator: ->(**) { projection }
+      )
+      assert Hive::PlanReview::TransitionGuard.verify!(
+        task:, destination: "4-execute", observation:, config: rerouted
+      )
+    end
+
+    # Cleared under the temporary routes, then the operator reverts them.
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      temporary = reroute(cfg)
+      projection = publish_projection(task, temporary, state: "cleared", policy_format: :current)
+
+      assert_equal "current", freshness_status(task, projection, cfg)
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: cfg)
+    end
+  end
+
+  def test_verdict_relevant_policy_change_still_stales_a_resolved_review
+    changes = {
+      "minimum_level" => ->(cfg) { cfg["plan_review"]["minimum_level"] = "mandatory" },
+      "coding minimum_level" => ->(cfg) { cfg["plan_review"]["coding"]["minimum_level"] = "mandatory" },
+      "protected_paths" => ->(cfg) { cfg["plan_review"]["protected_paths"] += [ "app/**" ] },
+      "coverage" => ->(cfg) { cfg["plan_review"]["coverage"]["optional"] = [ "security" ] },
+      "classifier_version" => ->(cfg) { cfg["plan_review"]["classifier_version"] += 1 }
+    }
+    changes.each do |label, change|
+      with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+        publish_projection(task, cfg, state: "cleared", policy_format: :current)
+        changed = reroute(cfg)
+        change.call(changed)
+
+        error = assert_raises(Hive::PlanReview::TransitionBlocked, label) do
+          Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: changed)
+        end
+        assert_equal "plan review policy changed after resolution", error.blocked_reason, label
+      end
+    end
+  end
+
+  # Routes stay in the comparison while a review is unresolved: a review
+  # blocked because a reviewer could not be launched (`unsupported`) must
+  # restart once the route is fixed, rather than replay the stale block.
+  def test_unresolved_or_blocked_review_goes_stale_on_a_reviewer_reroute
+    with_task do |task, cfg|
+      blocked = publish_projection(
+        task, cfg, state: "blocked", policy_format: :current,
+        blockers: [ { "owner" => "operator", "reason" => "coverage_unsupported" } ],
+        required_action: "waive named coverage or restore required reviewer capability"
+      )
+
+      assert_equal "current", freshness_status(task, blocked, cfg)
+      fixed = Hive::PlanReview::TransitionGuard.freshness(task:, projection: blocked, config: reroute(cfg))
+      assert_equal [ "stale", "plan review policy changed after resolution" ],
+                   fixed.values_at("status", "reason")
+    end
+
+    with_task do |task, cfg|
+      reviewing = publish_projection(task, cfg, state: "reviewing", policy_format: :current)
+
+      assert_equal "stale", freshness_status(task, reviewing, reroute(cfg))
+    end
+  end
+
+  # Mirrors the two todero tasks (agent-and-app-api-v1-261105-7d3c,
+  # shared-wishlists-with-gift-reservations-261105-d8c8): a cleared review
+  # recorded by an older Hive (combined policy fingerprint only), already at
+  # 4-execute, and its route receipts. Upgrading Hive must let the execute
+  # retry pass while the reroute is still in place, without making the legacy
+  # record any less sensitive to verdict-relevant drift.
+  def test_legacy_cleared_review_passes_the_execute_retry_after_a_reviewer_reroute
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      as_cleared = routed_as_cleared(cfg)
+      projection = publish_projection(
+        task, as_cleared, state: "cleared", routes: route_receipts(as_cleared)
+      )
+      rerouted = reroute(as_cleared)
+
+      assert_equal "current", freshness_status(task, projection, as_cleared),
+                   "upgrading Hive alone must not stale a legacy review"
+      refute_equal Hive::PlanReview::Policy.configuration_fingerprint(as_cleared),
+                   Hive::PlanReview::Policy.configuration_fingerprint(rerouted)
+      assert_equal "current", freshness_status(task, projection, rerouted)
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: rerouted)
+
+      raised = Marshal.load(Marshal.dump(rerouted))
+      raised["plan_review"]["protected_paths"] += [ "app/**" ]
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: raised)
+      end
+      assert_equal "plan review policy changed after resolution", error.blocked_reason
+    end
+
+    # Without receipts for the rerouted roles the route-only drift cannot be
+    # proven, so the legacy record keeps the old fail-closed behavior.
+    with_task(stage_index: 4, stage_name: "execute") do |task, cfg|
+      as_cleared = routed_as_cleared(cfg)
+      publish_projection(task, as_cleared, state: "cleared")
+
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task:, config: reroute(as_cleared))
+      end
+      assert_equal "plan review policy changed after resolution", error.blocked_reason
+    end
+  end
+
   def test_non_coding_and_non_boundary_moves_are_not_applicable
     with_task(workflow_id: "custom") do |task, cfg|
       assert_nil Hive::PlanReview::TransitionGuard.prepare!(
@@ -465,8 +591,67 @@ class PlanReviewTransitionGuardTest < Minitest::Test
     end
   end
 
+  def freshness_status(task, projection, cfg)
+    Hive::PlanReview::TransitionGuard.freshness(task:, projection:, config: cfg).fetch("status")
+  end
+
+  def route_row(agent, model, family, effort:, route:)
+    { "agent" => agent, "model" => model, "family" => family, "effort" => effort, "route" => route }
+  end
+
+  # todero's routes when its reviews cleared (2026-11-19): Muse reviewers and
+  # a Claude adversary standing in for Codex.
+  def routed_as_cleared(cfg)
+    cleared = Marshal.load(Marshal.dump(cfg))
+    muse = route_row("muse", "muse-wonder-full-1.0", "meta", effort: "xhigh", route: "native_muse")
+    cleared["plan_review"]["routes"].merge!(
+      "primary" => muse, "verification" => muse,
+      "adversarial" => route_row("claude", "claude-opus-5-5", "anthropic", effort: "xhigh", route: "native_claude")
+    )
+    cleared
+  end
+
+  # The 2026-11-20 reroute: Muse out of quota, Grok stands in.
+  def reroute(cfg)
+    rerouted = Marshal.load(Marshal.dump(cfg))
+    grok = route_row("grok", "grok-4.7", "grok", effort: "xhigh", route: "native_grok_build")
+    rerouted["plan_review"]["routes"].merge!("primary" => grok, "verification" => grok)
+    rerouted
+  end
+
+  # Route receipts shaped like the ones a cleared review writes: the planner,
+  # each reviewer leg (requested = the configured row, `agent` as
+  # `provider`) and the planner revision.
+  def route_receipts(cfg)
+    planner = {
+      "provider" => "muse", "model" => "muse-wonder-full-1.0", "family" => "meta",
+      "effort" => "xhigh", "route" => "muse-code/v1"
+    }
+    reviewers = %w[primary adversarial verification].to_h do |role|
+      row = cfg.dig("plan_review", "routes", role)
+      requested = {
+        "provider" => row.fetch("agent"), "model" => row.fetch("model"), "family" => row.fetch("family"),
+        "effort" => row.fetch("effort"), "route" => row.fetch("route")
+      }
+      [ role, {
+        "role" => role, "requested" => requested, "actual" => requested,
+        "attempt_id" => "pra-#{Digest::SHA256.hexdigest(role)}", "capability_result" => "present",
+        "independence_verified" => role == "adversarial", "outcome" => "success"
+      } ]
+    end
+    [
+      { "role" => "planner", "requested" => planner, "actual" => planner, "capability_result" => "captured" },
+      reviewers.fetch("primary"), reviewers.fetch("adversarial"),
+      { "role" => "planner_revision", "requested" => planner, "actual" => planner, "outcome" => "success" },
+      reviewers.fetch("verification")
+    ]
+  end
+
+  # `policy_format: :legacy` writes the policy artifact older Hive builds
+  # wrote: the combined configuration fingerprint only.
   def publish_projection(task, cfg, state:, blockers: [], required_action: nil,
-                         plan_digest: nil, candidate_digest: nil)
+                         plan_digest: nil, candidate_digest: nil, routes: [],
+                         policy_format: :legacy)
     store = Hive::PlanReview::Store.new(task_folder: task.folder)
     plan_digest ||= Digest::SHA256.file(File.join(task.folder, "plan.md")).hexdigest
     review_id = Hive::PlanReview::Identity.logical(
@@ -483,11 +668,14 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       "created_at" => "2026-08-12T12:00:00.000000Z"
     }
     store.create_review!(Hive::PlanReview::Record.new(common.merge("kind" => "manifest")))
+    policy_content = {
+      "configuration_fingerprint" => Hive::PlanReview::Policy.configuration_fingerprint(cfg)
+    }
+    unless policy_format == :legacy
+      policy_content["reviewer_routing"] = Hive::PlanReview::Policy.reviewer_routing(cfg)
+    end
     policy_ref = store.write_review_artifact!(
-      review_id:, basename: "policy.json", json: true,
-      content: {
-        "configuration_fingerprint" => Hive::PlanReview::Policy.configuration_fingerprint(cfg)
-      }
+      review_id:, basename: "policy.json", json: true, content: policy_content
     )
     executable = %w[skipped cleared degraded_cleared].include?(state)
     outcome = executable ? state : (state == "blocked" ? "blocked" : nil)
@@ -496,7 +684,7 @@ class PlanReviewTransitionGuardTest < Minitest::Test
       "candidate_plan_digest" => candidate_digest,
       "state" => state, "outcome" => outcome,
       "attempt_ids" => [], "current_attempt_id" => nil,
-      "coverage" => [], "findings" => [], "decisions" => [], "routes" => [],
+      "coverage" => [], "findings" => [], "decisions" => [], "routes" => routes,
       "artifacts" => { "policy" => policy_ref }, "blockers" => blockers,
       "required_action" => required_action, "degradation_reason" => nil,
       "execution_allowed" => executable, "policy_reasons" => [],

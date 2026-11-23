@@ -286,8 +286,12 @@ The deterministic v5 request does not expire behind admission gates; a crash
 before or after clear resumes its persisted phase, while stale identity is
 blocked instead of crossing into a replacement task generation.
 Each terminal marker is fingerprinted from its reason, provider, status code,
-and normalized diagnostic. A changed fingerprint keeps autonomous retries
-unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
+and normalized diagnostic. Review CI-gate blocks that only an operator can
+clear (`base_conflict` and the hosted gate's mergeability/required-check
+blocks) also fingerprint the task branch HEAD and the published head, so a
+retry after an operator merge or `hive publication-reconcile` starts a fresh
+series instead of counting as one more identical failure. A changed
+fingerprint keeps autonomous retries unbounded. Repetition is exposed as `escalation_tier=degraded`; after three
 identical failures at the ladder ceiling the request parks once with
 `reason=deterministic_failure`, its fingerprint, and bounded attempt history,
 so it stops consuming dispatch slots while other tasks continue. Terminal

@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_closure.rb, lib/hive/task_journal.rb, lib/hive/task_projection.rb, lib/hive/work_ledger.rb, lib/hive/terminal_outcome.rb, lib/hive/completion_time.rb, lib/hive/archive_filter.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/daily_digest/*, lib/hive/runtime_control_plane/*, lib/hive/lock.rb, lib/hive/process_kill.rb, lib/hive/commands/drop.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/*, lib/hive/patrol_fix/*, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb, web/app/javascript/status_stream_source.js
 created: 2026-04-25
-updated: 2026-11-15
+updated: 2026-11-22
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, retention, terminal-outcomes, dependencies, admission, web, bounded-storage, daily-digest]
 ---
 
@@ -143,16 +143,24 @@ agent attempt into success.
 
 The receipt records:
 
-- `already_delivered` or `superseded`, with authority `remote_merge` or
-  `operator_attestation`;
+- `already_delivered`, `superseded`, or `cancelled`, with authority
+  `remote_merge` or `operator_attestation`;
 - exact task/project/workflow identity plus task and marker generation;
-- canonical task repository identity and default branch;
+- canonical task repository identity and default branch, or only the
+  registered checkout path for undelivered closure (below);
 - at most 16 canonical merged-PR/full-commit facts, including full PR head and
   merge OIDs where applicable, default-branch reachability, and one canonical
-  evidence digest;
+  evidence digest (`evidence: []` for undelivered closure);
 - the registered successor and bounded attestation for supersession;
 - exact preview digest, operator/channel, timestamp, and canonical receipt
   digest.
+
+Undelivered closure (`Hive::TaskClosure.undelivered?`) is `cancelled`, or
+`superseded` with no evidence, where the registered successor task is the only
+proof. It binds the local checkout instead of GitHub, keeps the owned worktree
+and branch, records the reason as the terminal outcome instead of running the
+terminal stage, and never satisfies a dependency. A superseded receipt with
+evidence keeps the remote shape and full verification.
 
 Preview is read-only. Public confirmation requires an authenticated
 CLI/web/bot operator, names the exact preview digest, and re-verifies
@@ -474,6 +482,19 @@ the first resolution for each downstream stage in the current generation, so
 attempt retries and configuration drift cannot replace a launched stage's
 identity. Idempotency keys are generation-and-stage scoped: equivalent retries
 are no-ops and conflicting captures preserve the first journal winner.
+
+`implementation_identity_substituted` (reason `provider_limit_fallback`)
+records one opt-in `implementation.limit_fallback` substitution before the
+substitute launches: stage (`execute`, `open_pr`, or the config-driven
+`artifacts` / `finalize`), role, `scope: "attempt"`, the pinned `primary`
+identity kept for audit, the `substitute` identity or `{provider, model}`
+route that actually runs, the first limit line, and the explicit reset when
+known. Its idempotency key is attempt-and-payload scoped, so identical
+repeats inside one attempt are no-ops. It never replaces the captured or
+resolved identity above: the projection lists the current generation's
+substitutions separately under `implementation_identity.substitutions`, and
+the next attempt starts on the pinned primary again. A failed append keeps
+the primary's limit instead of launching an unrecorded substitute.
 
 New routed identities also store a JSON-safe routing snapshot: the public stage,
 concrete effective model/effort, and exact/coarse/current/legacy field
@@ -1200,7 +1221,7 @@ stages:                  # stage-runner-level invariants enforced by `Hive::Stag
   ensure_clean_on_exit: true            # default true; `Hive::Stages::CleanExit` runs as a post-yield hook on every WORKTREE_OWNING stage (`4-execute`, `6-review`, `8-finalize`). Clean worktree → no-op. `git add -A` means enabled projects must keep `.gitignore` strict. Residue must pass the configured filename scope, staged-symlink rejection, and added-line secret scan before auto-commit. Rejection or git failure writes `ERROR reason=ensure_clean_on_exit_failed`. PAUSE_MARKERS (`:execute_waiting`, `:review_waiting`) skip enforcement. Finalize also runs CleanExit as an entry backstop. The resolved boolean is published under the internal task graph's project `config_summary`.
 ```
 
-The `rebase:` block (added 2026-05-14) drives a pre-dispatch step in `hive run`: before invoking the stage runner, the runner detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches, attempts `git rebase`, and on conflict spawns the project's `cfg.execute.agent` against `templates/rebase_conflict_resolution.md.erb` to resolve them. Fail-soft — any failure aborts the rebase, cleans agent-created untracked files, and proceeds with the stale base. The agent-dispatch cap (`MAX_CONFLICT_RESOLUTIONS = 5`) is a Ruby constant in `lib/hive/rebase.rb`, not config. See [[modules/git_ops]] and [[modules/config]].
+The `rebase:` block (added 2026-05-14) drives a pre-dispatch step in `hive run`: before invoking the stage runner, the runner detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches, attempts `git rebase`, and on conflict spawns the project's `cfg.execute.agent` against `templates/rebase_conflict_resolution.md.erb` to resolve them. Fail-soft — any failure aborts the rebase, cleans agent-created untracked files, and proceeds with the stale base. "Behind" is `HEAD..origin/<default_branch>`, never the branch's configured upstream, so a branch that already contains the default branch is a no-op. A review-stage task with a published pull request is never rebased (`rebase.reason=published_review_branch`); review recovers base drift with a merge commit. The agent-dispatch cap (`MAX_CONFLICT_RESOLUTIONS = 5`) is a Ruby constant in `lib/hive/rebase.rb`, not config. See [[modules/git_ops]] and [[modules/config]].
 
 `Config::ROLE_AGENT_PATHS` (validated by `validate_role_agent_names!`) now also covers the three new stage-agent paths: `%w[brainstorm agent]`, `%w[plan agent]`, `%w[execute agent]` — alongside the existing `review.{ci,triage,fix,browser_test}.agent` paths.
 

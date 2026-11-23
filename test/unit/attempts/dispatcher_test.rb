@@ -94,6 +94,97 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "launching", attempt.state
       assert_nil attempt["loss"]
       assert_empty launcher.launched
+      # Already admitted, so the give-up is durable pending-bookkeeping
+      # evidence rather than a silently half-admitted attempt.
+      pending = store.pending_bookkeeping.read(attempt)
+      assert_equal :valid, pending.status
+      assert_equal "arm_handoff", pending.document.fetch("operation")
+      assert_equal "runtime_bookkeeping_busy", pending.document.fetch("reason")
+      assert_nil pending.document.fetch("terminal_receipt")
+    end
+  end
+
+  # Regression (2026-11-20): attempt.observe_task_source held the runtime
+  # write lock for 13.26 s on a loaded host. Admission inherited the deadline
+  # taken before that commit, so it exhausted "after 0.0s (0 busy tries)"
+  # without one try, and the TEMPFAIL killed the daemon.
+  def test_slow_source_observation_leaves_admission_its_own_retry_budget
+    with_dispatcher do |dispatcher, launcher, task, store|
+      mono = 0.0
+      sleeps = []
+      dispatcher.instance_variable_set(:@monotonic, -> { mono })
+      dispatcher.instance_variable_set(:@sleeper, ->(seconds) { sleeps << seconds; mono += seconds })
+      dispatcher.instance_variable_set(:@random, -> { 0.5 })
+      dispatcher.instance_variable_set(:@bookkeeping_timeout_sec, 10.0)
+      observe = store.method(:observe_task_source)
+      store.define_singleton_method(:observe_task_source) do |**attributes|
+        observed = observe.call(**attributes)
+        mono += 13.26 # the commit's lock hold outlasted the whole budget
+        observed
+      end
+      create = store.method(:create_launching)
+      creates = 0
+      store.define_singleton_method(:create_launching) do |**attributes|
+        creates += 1
+        if creates == 1
+          mono += attributes.fetch(:timeout_sec)
+          raise SQLite3::BusyException, "another writer still holds the lock"
+        end
+        create.call(**attributes)
+      end
+      deadline = nil
+      launch = launcher.method(:launch)
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        deadline = Hive::Attempts::BookkeepingRetry.launch_deadline
+        launch.call(record, claim_capability: claim_capability)
+      end
+
+      result = dispatch(dispatcher, task, request_id: "slow-observation")
+
+      assert_equal :accepted, result.status
+      assert_equal 2, creates, "a busy first try is retried once the lock frees"
+      assert_equal 1, sleeps.length, "one bounded backoff between the admission tries"
+      assert_operator sleeps.first, :<=, 1.0
+      assert_equal 1, launcher.launched.length
+      assert_in_delta 23.26, deadline, 1e-9, "the durable chain budget starts at the admission write"
+    end
+  end
+
+  def test_admission_give_up_is_truthful_and_leaves_no_half_admitted_attempt
+    with_dispatcher do |dispatcher, launcher, task, store|
+      mono = 0.0
+      dispatcher.instance_variable_set(:@monotonic, -> { mono })
+      dispatcher.instance_variable_set(:@sleeper, ->(seconds) { mono += seconds })
+      dispatcher.instance_variable_set(:@random, -> { 0.5 })
+      dispatcher.instance_variable_set(:@bookkeeping_timeout_sec, 2.0)
+      observe = store.method(:observe_task_source)
+      store.define_singleton_method(:observe_task_source) do |**attributes|
+        observed = observe.call(**attributes)
+        mono += 5.0 # longer than the whole budget, before admission starts
+        observed
+      end
+      creates = 0
+      store.define_singleton_method(:create_launching) do |timeout_sec:, **|
+        creates += 1
+        mono += timeout_sec
+        raise SQLite3::BusyException, "held writer"
+      end
+
+      error = assert_raises(Hive::Attempts::BookkeepingBusy) do
+        dispatch(dispatcher, task, request_id: "busy-admission")
+      end
+
+      assert_equal "admission", error.operation
+      assert_equal "attempt-one", error.attempt_id
+      assert_operator creates, :>=, 2, "at least one busy retry after backoff"
+      assert_equal creates, error.retry_count
+      assert_in_delta 2.0, error.elapsed_sec, 1e-9, "elapsed covers the admission budget only"
+      assert_equal "runtime_bookkeeping_busy: admission exhausted after 2.0s (#{creates} busy tries)",
+                   error.message
+      assert_instance_of SQLite3::BusyException, error.cause
+      assert_nil store.attempt_id_for_request(request_id: "busy-admission")
+      assert_empty store.active_attempts
+      assert_empty launcher.launched
     end
   end
 

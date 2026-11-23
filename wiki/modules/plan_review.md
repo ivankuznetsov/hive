@@ -3,7 +3,7 @@ title: Plan review
 type: module
 source: lib/hive/plan_review.rb, lib/hive/plan_review/, lib/hive/commands/plan_review.rb, schemas/hive-plan-review.v1.json
 created: 2026-08-12
-updated: 2026-11-18
+updated: 2026-11-22
 tags: [plan, review, policy, findings, coverage, execution, audit]
 ---
 
@@ -16,12 +16,18 @@ resolution can authorize `3-plan` to `4-execute`. Markers, generic approval,
 `--force`, daemon automation, Web forms, and direct execute entry cannot replace
 that authority.
 
+A resolved review (`skipped`, `cleared`, `degraded_cleared`) keeps its verdict
+when only reviewer routing changes afterwards; see
+[Reviewer routing and resolved reviews](#reviewer-routing-and-resolved-reviews).
+An unresolved or blocked review still goes stale on a routing change, and any
+verdict-relevant policy change still stales a resolved one.
+
 An implementation returned from `7-artifacts` by the native outcome-evidence
-rework command retains that already-used clearance when reviewer routing changes
-later. The exact rework receipt and current evidence package must validate first;
-the reviewed plan digest, task generation, executable resolution, and empty
-blocker set remain mandatory. Raw moves and first-time plan transitions still
-require the current review policy fingerprint.
+rework command additionally retains that already-used clearance across any
+later policy drift. The exact rework receipt and current evidence package must
+validate first; the reviewed plan digest, task generation, executable
+resolution, and empty blocker set remain mandatory. Raw moves and first-time
+plan transitions still require the current verdict-relevant policy.
 
 A pending revised candidate does not make the original canonical plan stale.
 Until execution is cleared, freshness accepts either the original digest or the
@@ -88,7 +94,54 @@ mandatory review even when nearby prose never says "secret" or "credential".
 Project and coding-workflow minimums plus `hive plan --review-level standard|mandatory`
 are raise-only. A lower mandatory level can come only from a current audited
 `downgrade-level` decision. The policy fingerprint covers classifier version,
-normalized policy settings, extracted evidence, and every level source.
+normalized policy settings (including reviewer routing), extracted evidence,
+and every level source.
+
+### Reviewer routing and resolved reviews
+
+`Policy.policy_affecting_config` has two parts. The verdict-relevant part is
+what a review must establish: `classifier_version`, `minimum_level`,
+`coding.minimum_level`, `skip`, `protected_paths`, `coverage`, `adapter`, and
+the adapter-contract version. The reviewer-routing part
+(`Policy.reviewer_routing`) is who reviews: `reviewers`, `routes` (minus
+`planner_revision_fallback`), and the review model routing
+(`models.plan_review*`). Each policy artifact records the combined
+`configuration_fingerprint` and, since 2026-11-20, the plain
+`reviewer_routing` it was computed from.
+
+`Policy.configuration_current?` decides freshness for both the transition
+guard and the orchestrator:
+
+- An unresolved or blocked review compares the whole configuration. A
+  routing change still restarts it, so a corrected route un-stales an
+  `unsupported` capability block instead of replaying it.
+- A resolved review is compared with its own recorded routing put back
+  (`Policy.with_reviewer_routing`), so only verdict-relevant drift can make it
+  stale. The orchestrator applies the same rule to the policy fingerprint
+  (`policy_identity_current?`), so a cleared review in `3-plan` is reused
+  rather than rekeyed when only routes move.
+
+Legacy policy artifacts (no `reviewer_routing`) are handled by
+`Policy.legacy_reviewer_routing`. It rebuilds the routing from the review's own
+route receipts, because a reviewer receipt's `requested` is the configured row
+it ran (`agent` recorded as `provider`). A role without a receipt keeps today's
+row. The rebuild counts only when it reproduces the recorded digest exactly,
+so a wrong rebuild leaves the review stale as before. Upgrading Hive alone
+never stales a legacy review, because the combined digest is unchanged.
+
+Observed on todero, 2026-11-20. With Muse and Codex out of quota, the operator
+moved `plan_review.routes.primary`/`verification` from Muse to Grok (the
+adversary had already moved from Codex to Claude). Two tasks whose reviews had
+cleared and were already executing were then refused at execute entry with
+`plan review policy changed after resolution`. Reverting the reroute would
+have staled every review cleared under the temporary routes. Both legacy
+records rebuild exactly from their receipts, so after the fix their execute
+retry passes the guard.
+
+A consequence is that `hive plan-review TASK restart` (stale reviews only) no
+longer applies to a resolved review whose routing alone changed. Re-reviewing
+it with the new reviewers needs a plan edit or a verdict-relevant policy
+change, such as a raised review level.
 
 ## Reviewer and routing contract
 
@@ -237,7 +290,7 @@ review under a valid current identity; ordinary provider retries remain active.
 
 ## Convergence defaults (2026-11-03)
 
-- **Adversarial lens is level-gated.** `plan_review.adversarial_min_level` (default `mandatory`, or `standard`, or `off` to disable it at every level) decides whether a new review requests adversarial coverage and runs the adversarial leg. Below that level the review needs only whole-document coverage. `Orchestrator#initial_roles` derives the legs from the record's own coverage, so a review created before this change keeps the adversarial leg it requested.
+- **Adversarial lens is level-gated.** `plan_review.adversarial_min_level` (default `mandatory`, or `standard`, or `off` to disable it at every level) decides whether a new review requests adversarial coverage and runs the adversarial leg. Below that level the review needs only whole-document coverage. `Orchestrator#initial_roles` derives the legs from the record's own coverage, so a review created before this change keeps the adversarial leg it requested. Two operator authority actions end that leg (2026-11-23): `waive-coverage adversarial`, and a `downgrade-level` that takes the review below `adversarial_min_level`. Before this, both were recorded but the review kept probing the missing adversarial family and stayed in its capability wait (`retry_scheduled`, "restore reviewer capability"), for example in a container without Grok.
 - **Revision rounds per level.** `plan_review.max_revision_rounds` (default `standard: 1`, `mandatory: 3`) replaces the fixed `MAX_VERIFICATION_REVISION_ROUNDS` budget for the record's effective level; operator decisions still earn one extra round.
 - **Evidence gates stay out of requirements.** The planner prompt now places CI signoff, exact-commit checks and acceptance re-runs in a `## Definition of Done` section rather than `## Requirements Trace`, because as requirements every fix commit re-triggers them in code review.
 - Neither key is part of `Policy.configuration_fingerprint`, so changing them does not invalidate in-flight reviews.
@@ -269,8 +322,12 @@ manual.
 
 Before an open `gated_auto` or `manual` finding can stop the workflow, a
 `decision_triage` pass reconciles its claimed approval boundary against the plan
-and repository. It uses the configured verification route and the existing
-read-only reviewer workspace and typed result envelope. Each disposition must
+and repository. It runs on the optional `plan_review.routes.decision_triage` row
+(agent, model, family, effort, route) when the project configures one, and on the
+verification route otherwise, in the existing read-only reviewer workspace with
+the typed result envelope. A configured triage row is part of reviewer routing:
+changing it rekeys an unresolved review but not a resolved one. Its model-routing
+identity stays `plan_review_verification`. Each disposition must
 account for its exact source fingerprints; the set must cover every supplied
 finding exactly once. Duplicate concerns may share one disposition. A retained
 human gate must name the unresolved or exceeded contract clause, the material
@@ -364,7 +421,8 @@ The fallback is deliberately excluded from the reviewer-policy fingerprint so
 recovery preserves all finding decisions. It has no authority to change review
 routes or verdicts: each revision receipt names both the original planner
 authority and the effective fallback route, while reviewer-route changes still
-rekey the review.
+rekey an unresolved review (a resolved one keeps its verdict; see
+[Reviewer routing and resolved reviews](#reviewer-routing-and-resolved-reviews)).
 
 Each accepted finding
 requires explicit fingerprint-bound verification evidence; absence from a
@@ -448,7 +506,7 @@ on a fresh timestamp before `current.json` can advance.
 The logical review ID binds task identity, initial plan generation/digest,
 policy fingerprint, and prior lineage identity. Transient retries stay in that
 lineage and preserve stable finding decisions. An external plan edit or
-material policy change creates a new review whose `prior_review_id` points at
+material policy change (for a resolved review, a verdict-relevant one) creates a new review whose `prior_review_id` points at
 the previous manifest; returning A-to-B-to-A creates a third linked review
 instead of colliding with immutable history.
 
@@ -480,7 +538,8 @@ it. A backward `hive approve` into `4-execute` from a later coding stage
 `TransitionGuard.validate_execute_reentry!`: the same evidence execute entry
 checks, without writing a legacy adoption receipt and tolerating policy drift
 alone (a validated outcome-evidence rework may keep its clearance across
-reviewer-routing changes). A refusal names the remedy as its required action
+verdict-relevant policy changes; reviewer-routing changes never stale a
+resolved review). A refusal names the remedy as its required action
 (back to `3-plan`, then restart or rerun the review, or restore the reviewed
 plan); `--force` does not bypass it. The preflight runs before the locks, so
 execute entry remains the authority.

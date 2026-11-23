@@ -11,6 +11,7 @@ require "hive/artifacts/outcome_evidence/identity"
 require "hive/artifacts/outcome_evidence/rework"
 require "hive/artifacts/outcome_evidence/store"
 require "hive/atomic_file"
+require "hive/implementation_limit_fallback"
 require "hive/markers"
 require "hive/terminal_outcome"
 require "hive/stages/base"
@@ -27,12 +28,16 @@ module Hive
       class RoleOutputError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       class IntegrityError < Hive::Artifacts::OutcomeEvidence::StoreError; end
       class RoleAgentError < StandardError
-        attr_reader :role, :profile, :result
+        attr_reader :role, :profile, :result, :fallback_attrs
 
-        def initialize(role:, profile:, result:)
+        # `fallback_attrs` names an implementation.limit_fallback evaluation
+        # that left this role's limit standing (primary_agent /
+        # fallback_agent / fallback_outcome); empty otherwise.
+        def initialize(role:, profile:, result:, fallback_attrs: {})
           @role = role.to_s
           @profile = profile
           @result = result
+          @fallback_attrs = fallback_attrs
           super("#{@role} agent did not return a successful durable output")
         end
       end
@@ -115,7 +120,8 @@ module Hive
             reason: "limits_reached",
             provider: provider,
             message: message.byteslice(0, 200).to_s.scrub,
-            retry_after: result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text)
+            retry_after: result[:retry_at] || Hive::AgentLimit.retry_after(text: limit_text),
+            **error.fallback_attrs
           )
           return { commit: "limits_reached", status: :error }
         end
@@ -501,14 +507,20 @@ module Hive
 
       def run_role!(role:, task:, cfg:, prompt:, identity:, writable_root: nil,
                     launch_environment: nil, producer_add_dirs: [],
-                    producer_permission_arguments: nil, producer_runtime_policy: nil)
+                    producer_permission_arguments: nil, producer_runtime_policy: nil,
+                    limit_fallback: nil)
         role = role.to_s
         raise Hive::ConfigError, "unknown outcome-evidence role #{role.inspect}" unless EVIDENCE_ROLES.include?(role)
 
+        role_prompt = prompt
         actor_cfg = evidence_role_config(cfg, role)
-        profile = Hive::Stages::Base.stage_profile(
-          cfg, "artifacts", explicit_agent: actor_cfg["agent"] || cfg.dig("artifacts", "agent")
-        )
+        profile = if limit_fallback
+          Hive::AgentProfiles.lookup(limit_fallback.fallback, cfg: cfg)
+        else
+          Hive::Stages::Base.stage_profile(
+            cfg, "artifacts", explicit_agent: actor_cfg["agent"] || cfg.dig("artifacts", "agent")
+          )
+        end
         context_id = "#{role}-#{SecureRandom.hex(12)}"
         prompt = "Context identity: #{context_id}\n\n#{prompt}"
         FileUtils.mkdir_p(writable_root, mode: 0o700) if writable_root
@@ -518,13 +530,17 @@ module Hive
           role, task: task, cfg: cfg, profile: profile, actor_cfg: actor_cfg,
           writable_root: writable_root, producer_runtime_policy: producer_runtime_policy
         )
-        launch_cfg = evidence_role_launch_config(cfg, actor_cfg)
+        launch_cfg, model_cfg = if limit_fallback
+          fallback_role_launch_config(cfg, profile)
+        else
+          [ evidence_role_launch_config(cfg, actor_cfg), cfg ]
+        end
         context = Hive::Attempts::Context.current
         launch_arguments = if context&.explicit_routing?
           { routing_arguments: nil }
         else
           Hive::Stages::Base.model_launch_arguments(
-            cfg, "artifacts", profile,
+            model_cfg, "artifacts", profile,
             current: Hive::Stages::Base.model_routing_current(launch_cfg)
           )
         end
@@ -546,7 +562,9 @@ module Hive
               cfg, "artifacts", profile, default: Hive::Config::DEFAULTS.dig("budget_usd", "artifacts")
             ),
             timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
-            log_label: "artifacts-#{role}-#{context_id}", profile: profile,
+            log_label: limit_fallback ? limit_fallback.log_label("artifacts-#{role}-#{context_id}") :
+              "artifacts-#{role}-#{context_id}",
+            profile: profile,
             status_mode: :exit_code_only, cfg: cfg, mcp_scope: "artifacts",
             **launch_arguments,
             permission_arguments: permission_arguments,
@@ -582,6 +600,13 @@ module Hive
                 "#{role} modified protected task state: #{report.diagnostic}"
         end
         unless result && result[:status] == :ok
+          if !limit_fallback && result.is_a?(Hash) && role_agent_limit?(result)
+            return run_role_limit_fallback!(
+              role: role, task: task, cfg: cfg, prompt: role_prompt, identity: identity,
+              profile: profile, launch_cfg: launch_cfg, result: result
+            )
+          end
+
           raise RoleAgentError.new(role: role, profile: profile, result: result)
         end
         if result[:final_message_truncated] == true
@@ -609,6 +634,78 @@ module Hive
           },
           output: parse_role_output!(result[:final_message], role)
         }
+      end
+
+      # implementation.limit_fallback for the read-only inference and
+      # reviewer roles (see Hive::ImplementationLimitFallback). The producer
+      # is excluded: its capture toolkit, permission arguments and runtime
+      # policy were prepared for the producer profile before launch, so its
+      # limit is annotated `fallback_outcome=unsupported` instead. An
+      # approved substitute is journaled and the role re-runs once, in a
+      # fresh context, on the fallback profile. A substitute that also fails
+      # keeps the primary's limit, annotated with the fallback outcome.
+      def run_role_limit_fallback!(role:, task:, cfg:, prompt:, identity:, profile:, launch_cfg:, result:)
+        primary_error = lambda do |attrs|
+          RoleAgentError.new(role: role, profile: profile, result: result, fallback_attrs: attrs)
+        end
+        if role == "producer"
+          fallback = Hive::ImplementationLimitFallback.configured_fallback(cfg, profile.name)
+          raise primary_error.call({}) unless fallback
+
+          Hive::ImplementationLimitFallback.log(
+            "artifacts producer: #{profile.name} hit a usage/credit limit; fallback #{fallback} is not " \
+            "supported for the producer, whose capture toolkit is prepared for #{profile.name}"
+          )
+          raise primary_error.call(
+            primary_agent: profile.name.to_s, fallback_agent: fallback, fallback_outcome: "unsupported"
+          )
+        end
+
+        limit_text = result[:limit_text].to_s
+        limit_text = result[:error_message].to_s if limit_text.empty?
+        plan = Hive::ImplementationLimitFallback.plan(
+          cfg: cfg, stage: "artifacts", role: "artifacts #{role}", primary: profile.name.to_s,
+          limit_text: limit_text, error_message: result[:error_message]
+        )
+        raise primary_error.call({}) unless plan
+        raise primary_error.call(plan.marker_attrs) unless plan.substitute?
+
+        substitute_launch, = fallback_role_launch_config(
+          cfg, Hive::AgentProfiles.lookup(plan.fallback, cfg: cfg)
+        )
+        recorded = Hive::ImplementationLimitFallback.record!(
+          task: task, cfg: cfg, plan: plan,
+          primary: { "provider" => profile.name.to_s, "model" => launch_cfg["model"] },
+          substitute: { "provider" => plan.fallback, "model" => substitute_launch["model"] }
+        )
+        raise primary_error.call(plan.marker_attrs("failed")) unless recorded
+
+        begin
+          substituted = run_role!(
+            role: role, task: task, cfg: cfg, prompt: prompt, identity: identity,
+            limit_fallback: plan
+          )
+        rescue RoleAgentError => e
+          outcome = Hive::ImplementationLimitFallback.finish(
+            plan, ok: false, limited: e.result.is_a?(Hash) && role_agent_limit?(e.result)
+          )
+          raise primary_error.call(plan.marker_attrs(outcome))
+        end
+        Hive::ImplementationLimitFallback.finish(plan, ok: true, limited: false)
+        substituted
+      end
+
+      # [launch_cfg, model_routing_cfg] for a substitute role launch:
+      # artifacts.model/effort and the `models:` routes apply only when
+      # artifacts.agent names the fallback; otherwise the fallback profile's
+      # default model runs.
+      def fallback_role_launch_config(cfg, profile)
+        stage = cfg["artifacts"].is_a?(Hash) ? cfg["artifacts"] : {}
+        if stage["agent"].to_s == profile.name.to_s
+          [ stage.slice("model", "effort"), cfg ]
+        else
+          [ {}, Hive::ImplementationLimitFallback.fallback_cfg(cfg) ]
+        end
       end
 
       def cleanup_producer_process_group(result)

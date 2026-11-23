@@ -177,6 +177,52 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
     end
   end
 
+  # todero (2026-11-20): with Muse and Codex out of quota the operator moved
+  # the plan-review reviewer routes in project config. Tasks whose reviews had
+  # cleared and that were already executing were then refused at execute
+  # entry and parked on `plan_review_blocked`. Rerouting reviewers must not
+  # reopen a finished verdict; raising what a review must establish still does.
+  def test_reviewer_reroute_in_project_config_keeps_an_executing_review_cleared
+    with_plan_task(standard_plan) do |dir, task|
+      assert_equal "cleared", orchestrator(task, FakeAdapter.new("success")).advance!.record.state
+      execute = File.join(dir, ".hive-state", "stages", "4-execute", task.slug)
+      FileUtils.mkdir_p(File.dirname(execute))
+      FileUtils.mv(task.folder, execute)
+      executing = Hive::Task.new(execute)
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task: executing)
+
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      config = YAML.safe_load(File.read(config_path)) || {}
+      grok = {
+        "agent" => "grok", "model" => "grok-4.7", "family" => "grok",
+        "effort" => "xhigh", "route" => "native_grok_build"
+      }
+      config["plan_review"] = (config["plan_review"] || {}).merge(
+        "routes" => {
+          "primary" => grok, "verification" => grok.dup, # no YAML aliases
+          "adversarial" => {
+            "agent" => "claude", "model" => "claude-opus-5-5", "family" => "anthropic",
+            "effort" => "xhigh", "route" => "native_claude"
+          }
+        }
+      )
+      File.write(config_path, config.to_yaml)
+
+      assert Hive::PlanReview::TransitionGuard.validate_execute_entry!(task: executing)
+      projection = Hive::PlanReview::Projection.load(task_folder: execute)
+      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+        task: executing, projection:, config: Hive::Config.load(dir)
+      ).fetch("status")
+
+      config["plan_review"]["minimum_level"] = "mandatory"
+      File.write(config_path, config.to_yaml)
+      error = assert_raises(Hive::PlanReview::TransitionBlocked) do
+        Hive::PlanReview::TransitionGuard.validate_execute_entry!(task: executing)
+      end
+      assert_equal "plan review policy changed after resolution", error.blocked_reason
+    end
+  end
+
   def test_external_plan_edit_creates_a_linked_review_and_keeps_prior_artifacts
     with_plan_task(skip_plan) do |_dir, task|
       first = orchestrator(task, FakeAdapter.new("success")).advance!

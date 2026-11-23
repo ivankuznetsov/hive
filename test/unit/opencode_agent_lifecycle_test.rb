@@ -141,6 +141,91 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     end
   end
 
+  # OpenCode 2.2+ removed `run --variant`, `run --dir`, and `export`.
+  def test_opencode_2x_folds_the_variant_into_the_model_and_inspects_through_the_api
+    with_fixture(mode: :v2) do |fixture|
+      task = make_task(fixture.fetch(:dir), slug: "opencode-two-260812-aaaa")
+
+      result = with_env("ANTHROPIC_API_KEY" => "secret-canary") do
+        build_agent(task, fixture).run!
+      end
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal :completed, result.fetch(:normalized_outcome_kind)
+      assert_equal ROUTE, result.fetch(:actual_route)
+      assert_equal 5, result.dig(:usage, :input)
+      assert_equal 2, result.dig(:usage, :cache_read)
+      calls = File.readlines(fixture.fetch(:calls), chomp: true)
+      run = calls.find { |line| line.start_with?("run --auto ") }.split
+      assert_includes run, "#{ROUTE}#high"
+      assert_includes run, "--standalone"
+      refute_includes run, "--variant"
+      refute_includes run, "--dir"
+      assert_includes calls, "api --standalone GET /api/session/ses_contract_one/message/msg_assistant_final"
+      assert_equal 0, calls.count { |line| line.start_with?("export") }
+      # 2.x enforces permissions only from configuration.
+      environment = JSON.parse(File.read(fixture.fetch(:environment)))
+      assert_equal JSON.parse(environment.fetch("OPENCODE_PERMISSION")),
+                   JSON.parse(environment.fetch("OPENCODE_CONFIG_CONTENT")).fetch("permission")
+    end
+  end
+
+  def test_run_arguments_adapt_only_opencodes_own_flags_to_the_cli_contract
+    support = Hive::AgentSupport::OpenCode
+    argv = %w[bwrap --dir /etc opencode run --auto --model p/m --variant high --dir /work --format json]
+    modern = support::RunContract.new(server_arguments: [ "--standalone" ], legacy_flags: [])
+    legacy = support::RunContract.new(server_arguments: [], legacy_flags: %w[--variant --dir])
+
+    assert_equal %w[bwrap --dir /etc opencode run --auto --model p/m#high --format json],
+                 support.adapt_run_arguments(argv, modern, start: 4)
+    assert_equal argv, support.adapt_run_arguments(argv, legacy, start: 4)
+    assert_equal %w[opencode run --model p/m], support.adapt_run_arguments(%w[opencode run --model p/m --dir /w], modern, start: 1)
+    assert_equal %w[opencode run --model p/m], support.adapt_run_arguments(%w[opencode run --model p/m], modern, start: 1)
+    refute modern.legacy?
+    assert legacy.legacy?
+    assert_raises(Hive::AgentError) do
+      support.adapt_run_arguments(%w[opencode run --variant high], modern, start: 1)
+    end
+  end
+
+  def test_run_contract_reads_legacy_flags_and_keeps_the_1x_shape_when_help_is_unusable
+    support = Hive::AgentSupport::OpenCode
+    with_tmp_dir do |dir|
+      two = File.join(dir, "opencode-two")
+      File.write(two, "#!/bin/sh\ncat #{File.expand_path("../fixtures/opencode/v2.3.2/run-help.txt", __dir__).dump}\n")
+      File.chmod(0o755, two)
+      contract = support.run_contract(two)
+      assert_equal [ "--standalone" ], contract.server_arguments
+      assert_empty contract.legacy_flags
+
+      broken = File.join(dir, "opencode-broken")
+      File.write(broken, "#!/bin/sh\nexit 3\n")
+      File.chmod(0o755, broken)
+      assert support.run_contract(broken).legacy?
+    end
+  end
+
+  def test_session_export_reduces_a_2x_terminal_message_to_identity_and_usage
+    message = {
+      "data" => {
+        "id" => "msg_1", "type" => "assistant", "finish" => "stop",
+        "model" => { "id" => "google/gemini-4-neon", "providerID" => "openrouter", "variant" => "medium" },
+        "tokens" => { "input" => 9, "output" => 1, "cache" => { "read" => 0, "write" => 0 } },
+        "cost" => 0.01, "content" => [ { "type" => "text", "text" => "private" } ]
+      }
+    }
+    export = JSON.parse(Hive::AgentSupport::OpenCode.session_export("ses_1", JSON.generate(message)))
+
+    assert_equal({ "id" => "ses_1" }, export.fetch("info"))
+    record = export.fetch("messages").first.fetch("info")
+    assert_equal %w[msg_1 ses_1 assistant stop openrouter google/gemini-4-neon],
+                 record.values_at("id", "sessionID", "role", "finish", "providerID", "modelID")
+    refute_includes JSON.generate(export), "private"
+    assert_raises(JSON::ParserError) { Hive::AgentSupport::OpenCode.session_export("ses_1", "[]") }
+    modelless = JSON.parse(Hive::AgentSupport::OpenCode.session_export("ses_1", JSON.generate("data" => { "id" => "msg_2" })))
+    assert_nil modelless.fetch("messages").first.fetch("info").fetch("providerID")
+  end
+
   def test_private_server_probe_omits_the_flag_for_unusable_help_and_fails_closed_on_a_hang
     support = Hive::AgentSupport::OpenCode
     with_tmp_dir do |dir|
@@ -886,6 +971,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     ))
     run_help += "  --standalone  Run with a private server instead of the background service\n" if
       mode == :private_server
+    run_help = File.read(File.expand_path("../fixtures/opencode/v2.3.2/run-help.txt", __dir__)) if
+      mode == :v2
     export_help = File.read(File.join(source_root_for_fixtures, "export-help.txt"))
     run_output = File.read(File.join(
       source_root_for_fixtures,
@@ -908,6 +995,15 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
     export_output = File.read(File.join(
       source_root_for_fixtures, "session-export-matching.json"
     ))
+    # OpenCode 2.x answers `api GET /api/session/:id/message/:message_id`
+    # with the terminal message; same identity and usage as the 1.x export.
+    terminal = JSON.parse(export_output).fetch("messages").map { |message| message.fetch("info") }
+      .find { |record| record["role"] == "assistant" }
+    api_output = JSON.generate("data" => {
+      "id" => terminal.fetch("id"), "type" => "assistant", "finish" => terminal.fetch("finish"),
+      "model" => { "id" => terminal.fetch("modelID"), "providerID" => terminal.fetch("providerID"), "variant" => "high" },
+      "tokens" => terminal.fetch("tokens"), "cost" => terminal.fetch("cost"), "content" => []
+    })
     <<~RUBY
       #!/usr/bin/ruby --disable-gems
       require "json"
@@ -983,6 +1079,8 @@ class OpenCodeAgentLifecycleTest < Minitest::Test
           print #{run_output.dump}
           warn "authentication failed" if #{mode == :auth_failure}
           exit(#{%i[auth_failure rate_limited].include?(mode) ? 1 : 0})
+        elsif ARGV.first == "api" && #{mode == :v2}
+          print #{api_output.dump}
         elsif ARGV.first == "export"
           sleep 10 if #{mode == :inspection_timeout}
           exit 1 if #{mode == :inspection_empty_failure}

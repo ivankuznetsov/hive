@@ -257,6 +257,7 @@ class ComponentBoundariesTest < Minitest::Test
                  git_gate.dig("entrypoint", "constant")
     assert_equal(
       %w[
+        Hive::AgentGitGate::FastForwardReceipt
         Hive::AgentGitGate::MaterializationReceipt
         Hive::AgentGitGate::PublicationReceipt
         Hive::AgentGitGate::ReadResult

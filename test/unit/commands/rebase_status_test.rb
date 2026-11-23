@@ -11,18 +11,21 @@ require "json"
 class HiveCommandsRebaseStatusTest < Minitest::Test
   include HiveTestHelper
 
-  FakeWorkflow = Struct.new(:controller, :draft_pr_handoff) do
+  FakeStage = Struct.new(:execution_strategy)
+  FakeWorkflow = Struct.new(:controller, :draft_pr_handoff, :review) do
     def controller? = controller
     def draft_pr_handoff? = draft_pr_handoff
+    def stage_named(_name) = FakeStage.new(review ? :review : :agent)
   end
   FakeTask = Struct.new(:slug, :stage_name, :folder, :worktree_path, :project_root, :workflow)
 
-  def make_task(worktree:, dir: nil, controller: false, draft_pr_handoff: false)
+  def make_task(worktree:, dir: nil, controller: false, draft_pr_handoff: false, review: false)
     project_root = dir || Dir.mktmpdir("rebase-status-proj")
-    folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260514-aaaa")
+    stage = review ? "6-review" : "4-execute"
+    folder = File.join(project_root, ".hive-state", "stages", stage, "demo-260514-aaaa")
     FileUtils.mkdir_p(folder)
-    workflow = FakeWorkflow.new(controller, draft_pr_handoff)
-    FakeTask.new("demo-260514-aaaa", "4-execute", folder, worktree, project_root, workflow)
+    workflow = FakeWorkflow.new(controller, draft_pr_handoff, review)
+    FakeTask.new("demo-260514-aaaa", stage, folder, worktree, project_root, workflow)
   end
 
   class FakeGit
@@ -121,6 +124,29 @@ class HiveCommandsRebaseStatusTest < Minitest::Test
     out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: FakeGit.new)
 
     assert_match(/draft-PR handoff owns exact checkout identity/, out)
+  end
+
+  def test_published_review_pull_request_reports_merge_only_recovery
+    task = make_task(worktree: Dir.mktmpdir("wt"), review: true)
+    File.write(File.join(task.folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/100\n---\n")
+    git = FakeGit.new; git.commits_behind_value = 9
+
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: git)
+    assert_match(/published and in review; Hive never rewrites it/, out)
+    assert_match(/merge commit \(no rebase, no force-push\)/, out)
+
+    payload = JSON.parse(run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: git, json: true))
+    assert_equal "published_review_branch", payload["state"]
+    assert_equal false, payload["would_rebase"]
+    assert_nil payload["commits_behind"]
+  end
+
+  def test_unpublished_review_task_keeps_the_ordinary_ladder
+    task = make_task(worktree: Dir.mktmpdir("wt"), review: true)
+    git = FakeGit.new; git.commits_behind_value = 2
+
+    out = run_status(task: task, cfg: { "rebase" => { "enabled" => true } }, git: git)
+    assert_match(/2 commits behind origin\/main/, out)
   end
 
   def test_no_worktree_when_directory_missing

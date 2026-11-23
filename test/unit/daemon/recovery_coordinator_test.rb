@@ -1079,6 +1079,107 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
     end
   end
 
+  BASE_CONFLICT_ATTRS = {
+    "gate" => "github", "reason" => "base_conflict", "attempts" => "1", "pass" => "1",
+    "marker_id" => "marker-conflict", "attempt_id" => "attempt-6"
+  }.freeze
+
+  # todero #100: the healer retried an unmerged base conflict to the ceiling,
+  # then the operator merged the base, pushed, reconciled, and retried. The
+  # marker attrs were unchanged, so that retry counted as identical failure
+  # six and parked. The reconciled head is the changed input.
+  def test_base_conflict_retry_after_a_reconciled_merge_starts_a_fresh_series_and_clears_the_marker
+    with_fixture(marker_attrs: BASE_CONFLICT_ATTRS, marker_name: "REVIEW_CI_STALE", mtime: NOW - 3600) do |coordinator, row, state_home|
+      worktree = init_task_worktree(row.folder, state_home)
+      conflicting = git_head(worktree)
+      write_publication_head(row.folder, conflicting)
+      conflicted = coordinator.send(:failure_fingerprint, row, BASE_CONFLICT_ATTRS)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: conflicted, identical_failure_count: 5,
+        failure_attempt_history: %w[attempt-1 attempt-2 attempt-3 attempt-4 attempt-5]
+      )
+      merged = commit_merge(worktree)
+      write_publication_head(row.folder, merged) # hive publication-reconcile --head <merge>
+
+      receipt = coordinator.request(row:, requestor: "action", request_id: "remediated", now: NOW)
+
+      assert_equal "queued", receipt.status
+      request = Q.fetch("remediated", state_home: state_home)
+      assert_nil request.recovery.fetch("blocked_reason")
+      assert_equal 1, request.recovery.fetch("identical_failure_count")
+      assert_equal 1, request.recovery.fetch("retry_count"), "a changed input restarts the retry ladder"
+      refute_equal conflicted, request.recovery.fetch("failure_fingerprint")
+
+      # The dispatched retry re-runs review (and its GitHub gate) because the
+      # stale marker is cleared first, not replayed.
+      resumed = coordinator.resume(request:, row:, now: NOW + 1)
+      assert_equal "queued", resumed.status
+      assert_equal "cleared", resumed.phase
+      assert Hive::Markers.current(row.state_file).none?
+    end
+  end
+
+  def test_base_conflict_retry_at_the_same_head_remains_an_identical_failure
+    with_fixture(marker_attrs: BASE_CONFLICT_ATTRS, marker_name: "REVIEW_CI_STALE", mtime: NOW - 3600) do |coordinator, row, state_home|
+      worktree = init_task_worktree(row.folder, state_home)
+      write_publication_head(row.folder, git_head(worktree))
+      fingerprint = coordinator.send(:failure_fingerprint, row, BASE_CONFLICT_ATTRS)
+      write_terminal_recovery_history(
+        row:, state_home:, retry_count: Hive::Daemon::RecoveryCoordinator::RETRY_BACKOFF_SEC.length,
+        failure_fingerprint: fingerprint, identical_failure_count: 2,
+        failure_attempt_history: %w[attempt-1 attempt-2]
+      )
+
+      receipt = coordinator.request(row:, requestor: "action", request_id: "unchanged", now: NOW)
+
+      assert_equal "blocked", receipt.status
+      assert_equal "deterministic_failure", receipt.reason
+      request = Q.fetch("unchanged", state_home: state_home)
+      assert_equal 3, request.recovery.fetch("identical_failure_count")
+      assert_equal fingerprint, request.recovery.fetch("failure_fingerprint")
+      assert_equal :review_ci_stale, Hive::Markers.current(row.state_file).name
+    end
+  end
+
+  def test_ci_gate_fingerprint_tracks_local_and_published_heads_only_for_operator_gate_blocks
+    with_fixture(marker_attrs: BASE_CONFLICT_ATTRS, marker_name: "REVIEW_CI_STALE") do |coordinator, row, state_home|
+      worktree = init_task_worktree(row.folder, state_home)
+      write_publication_head(row.folder, git_head(worktree))
+      fingerprint = ->(target_row, attrs) { coordinator.send(:failure_fingerprint, target_row, attrs) }
+      before = fingerprint.call(row, BASE_CONFLICT_ATTRS)
+
+      # A remote-only remediation recorded by publication-reconcile counts.
+      write_publication_head(row.folder, "f" * 40)
+      published_moved = fingerprint.call(row, BASE_CONFLICT_ATTRS)
+      refute_equal before, published_moved
+      # So does a local merge the gate has not published yet.
+      commit_merge(worktree)
+      refute_equal published_moved, fingerprint.call(row, BASE_CONFLICT_ATTRS)
+
+      # The hosted gate's other operator-owned blocks use the same input.
+      unknown = { "phase" => "ci", "gate" => "github", "reason" => "mergeability_unknown", "marker_id" => "m" }
+      error_row = row.with(marker: "review_error", marker_attrs: unknown)
+      refute_equal "", coordinator.send(:progress_revision, error_row, unknown)
+
+      # Red local CI keeps its marker-only series: its CI-fix agent commits on
+      # every run, so a head-keyed series would never converge on the park.
+      red_ci = { "gate" => "local", "attempts" => "3", "pass" => "1", "marker_id" => "m" }
+      assert_equal "", coordinator.send(:progress_revision, row.with(marker_attrs: red_ci), red_ci)
+      # So do review errors that are not gate blocks.
+      agent = { "phase" => "ci", "gate" => "local", "reason" => "ci_unrunnable", "marker_id" => "m" }
+      assert_equal "", coordinator.send(:progress_revision, row.with(marker: "review_error"), agent)
+      # An unreadable task degrades to the marker-only series.
+      File.write(File.join(row.folder, "worktree.yml"), "path: [unclosed\n")
+      File.write(File.join(row.folder, "github-publication.json"), "{not json")
+      assert_equal "", coordinator.send(:progress_revision, row, BASE_CONFLICT_ATTRS)
+      File.write(File.join(row.folder, "worktree.yml"), { "path" => File.join(state_home, "gone") }.to_yaml)
+      File.write(File.join(row.folder, "github-publication.json"), "[]")
+      assert_equal "", coordinator.send(:progress_revision, row, BASE_CONFLICT_ATTRS)
+      assert_equal "", coordinator.send(:progress_revision, row.with(folder: ""), BASE_CONFLICT_ATTRS)
+    end
+  end
+
   # The cooldown paces Hive's own retry sweep. First failure waits the first
   # backoff step, not the provider-sized hour.
   def test_request_before_cooldown_returns_cooldown_without_writing
@@ -2999,6 +3100,31 @@ class HiveDaemonRecoveryCoordinatorTest < Minitest::Test
 
   def dirty_commit_evidence(sha)
     { "type" => "commit", "observation" => "dirty_worktree", "sha" => sha }
+  end
+
+  def init_task_worktree(folder, dir)
+    worktree = File.join(dir, "task-worktree")
+    run!("git", "init", "-b", "main", "--quiet", worktree)
+    run!("git", "-C", worktree, "config", "user.email", "test@example.com")
+    run!("git", "-C", worktree, "config", "user.name", "Test")
+    run!("git", "-C", worktree, "config", "commit.gpgsign", "false")
+    run!("git", "-C", worktree, "commit", "--allow-empty", "-m", "conflicting head", "--quiet")
+    File.write(File.join(folder, "worktree.yml"), { "path" => worktree, "branch" => "demo-task" }.to_yaml)
+    worktree
+  end
+
+  def commit_merge(worktree)
+    run!("git", "-C", worktree, "commit", "--allow-empty", "-m", "Merge origin/main", "--quiet")
+    git_head(worktree)
+  end
+
+  def git_head(worktree)
+    run!("git", "-C", worktree, "rev-parse", "HEAD").strip
+  end
+
+  def write_publication_head(folder, head)
+    File.write(File.join(folder, "github-publication.json"),
+               JSON.generate("head_oid" => "a" * 40, "published_head_oid" => head))
   end
 
   def request_for_helpers(recovery: nil)

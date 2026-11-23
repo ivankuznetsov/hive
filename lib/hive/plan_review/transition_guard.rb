@@ -239,8 +239,10 @@ module Hive
         return false unless reference
 
         artifact = JSON.parse(store.read_reference(reference))
+        return false unless artifact.is_a?(Hash)
+
         run_level = persisted_run_level(store)
-        artifact["configuration_fingerprint"] == Policy.configuration_fingerprint(cfg) &&
+        Policy.configuration_current?(cfg, artifact:, record:) &&
           record["level_sources"]&.dig("run") == run_level
       rescue JSON::ParserError, KeyError, TypeError
         false

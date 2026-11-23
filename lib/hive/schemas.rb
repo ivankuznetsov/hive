@@ -53,6 +53,7 @@ module Hive
       # 2026-10-15-001); `hive mcp login` failures share its error arm.
       "hive-mcp-import" => 1,
       "hive-drop" => 2,
+      "hive-stack" => 1,
       "hive-prune" => 1,
       "hive-worktree" => 1,
       "hive-daemon-status" => 1,
@@ -532,6 +533,30 @@ module Hive
       UNKNOWN_PROJECT = "unknown_project".freeze
       CONFIG          = "config".freeze
       INTERNAL        = "internal".freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive stack --json`.
+    # Resolution and argv failures are USAGE (64); a cycle or malformed
+    # reference names the requested edge itself; PLAN_CONFLICT is the task's
+    # own plan.md frontmatter disagreeing with the requested declaration
+    # (exit 78, carrying the admission reason fields); CONCURRENT_RUN and
+    # STALE_TASK are retryable custody failures (75).
+    module StackErrorKind
+      USAGE                = "usage".freeze
+      INVALID_TASK_PATH    = "invalid_task_path".freeze
+      AMBIGUOUS_SLUG       = "ambiguous_slug".freeze
+      WRONG_STAGE          = "wrong_stage".freeze
+      INVALID_DEPENDENCY   = "invalid_dependency".freeze
+      DEPENDENCY_CYCLE     = "dependency_cycle".freeze
+      UNSUPPORTED_WORKFLOW = "unsupported_workflow".freeze
+      PLAN_CONFLICT        = "plan_conflict".freeze
+      CONCURRENT_RUN       = "concurrent_run".freeze
+      STALE_TASK           = "stale_task".freeze
+      CONFIG               = "config".freeze
+      GIT                  = "git".freeze
+      INTERNAL             = "internal".freeze
+      ERROR                = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 

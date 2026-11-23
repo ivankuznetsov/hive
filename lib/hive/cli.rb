@@ -586,15 +586,23 @@ module Hive
       ).call
     end
 
-    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads)"
+    desc "runtime ACTION", "Inspect the runtime database and registry read-only (status, projects, payloads), or create it (init)"
     long_desc <<~DESC
-      Actions (all read-only; nothing is created, migrated, or repaired):
+      Read-only actions (nothing is created, migrated, or repaired):
         status      Validate the current runtime database (exit 1 when absent).
         projects    List registered projects with their path, real_path and
                     hive_state_path from the global registry.
         payloads    List runtime payload references (kind, state, task/attempt
                     id, relative_path and the absolute path resolved under the
                     payload root). Missing storage reports phase "absent".
+
+      Bootstrap:
+        init        Create the runtime database when it is missing (an
+                    existing one is validated, never repaired) and record every
+                    registered project in it, then report status. This is the
+                    runtime step of `hive setup` alone: no services, agent
+                    skills, bundles or project enrollment, for containers and
+                    hosts without a user service manager. Idempotent.
 
       --json emits the hive-runtime-maintenance envelope.
     DESC
@@ -918,6 +926,54 @@ module Hive
       ).call
     end
     map "generate-name" => :generate_name
+
+    desc "stack TARGET (--on PREREQUISITE... | --clear)",
+         "Set or clear TARGET's prerequisite task at any unfinished stage"
+    long_desc <<~DESC
+      Change an existing task's dependency without recreating it. --on takes
+      the same references as `hive new --depends-on`: a task id or slug, or
+      project:slug for an explicit cross-project dependency. One --on stacks
+      TARGET on that prerequisite; repeat --on to require every prerequisite
+      (scheduling-only, each must reach 9-done). --clear removes the
+      dependency.
+
+      The new declaration gates scheduling immediately: status, the daemon,
+      `hive run`, and forward `hive approve` hold TARGET until it is satisfied.
+      A same-project single prerequisite also becomes the branch base the next
+      time execute creates a worktree or open-pr opens a PR. An existing
+      worktree branch is never rebased.
+
+      Hive refuses a reference that would close a cycle, a finished task, a
+      draft-PR workflow, and a value that disagrees with TARGET's own plan.md
+      frontmatter. A missing or blocked prerequisite is written anyway and
+      reported, because admission holds TARGET until it resolves. While a
+      stage agent is running for TARGET the change waits for its task lease
+      (exit 75).
+
+      Examples:
+
+        hive stack 1702 --on 1695
+
+        hive stack wire-up-export-260618-ab12 --on api:add-export-endpoint-260618-ab12
+
+        hive stack release-export --on api-task --on ui-task
+
+        hive stack 1702 --clear --json
+    DESC
+    option :on, type: :string, repeatable: true,
+                desc: "prerequisite task id, slug, or project:slug (repeat for a scheduling-only list)"
+    option :clear, type: :boolean, default: false, desc: "remove TARGET's dependency"
+    option :project, type: :string, desc: "scope TARGET lookup to one registered project"
+    def stack(target)
+      require "hive/commands/stack"
+      Hive::Commands::Stack.new(
+        target,
+        on: options[:on],
+        clear: options[:clear],
+        project: options[:project],
+        json: options[:json]
+      ).call
+    end
 
     desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
@@ -1260,25 +1316,45 @@ module Hive
     end
 
     desc "archive [TARGET]", "List done tasks, or move a completed finalize task into done"
-    long_desc <<~DESC
+    # wrap: false keeps the per-reason list and the example's line breaks.
+    long_desc <<~DESC, wrap: false
       With no TARGET, lists every task currently in 9-done across registered
       projects. Pass --json for the same archive-scoped status payload.
 
-      With TARGET, preserves the workflow behavior: move a completed finalize
-      task into done, or run an existing done task.
+      With TARGET and no --reason, it runs at once, with no preview or prompt
+      (--json only shapes the output): a completed finalize task moves into
+      done and its done stage runs, or an existing done task runs again.
 
       --reason (with --evidence, --successor, or --attestation as the reason
       requires) closes an active task outside its ordinary path. Hive verifies
       and prints a preview, asks y/N, then archives; --yes skips the prompt.
 
-      With --json, stdout is exactly one document. --json alone is a read-only
-      preview and archives nothing: hive-task-closure-input with "mode":
-      "preview", "applied": false, and a "next" command that applies it.
+        already_delivered  --evidence: merged PRs or default-branch commits
+                           in the task's own repository.
+        superseded         --successor project:slug, the registered task that
+                           replaces this one, and --attestation. --evidence is
+                           optional; when given it is verified the same way
+                           and may come from another repository. Without it
+                           the successor is the proof and nothing was
+                           delivered: Hive keeps the worktree and branch for
+                           the successor, skips the done stage, and
+                           dependents must depend on the successor instead.
+                           A successor that was itself closed without
+                           delivery is refused.
+        cancelled          --attestation only. Keeps the worktree and branch.
+
+      With --json, stdout is exactly one document. For a --reason closure,
+      --json alone is a read-only preview and archives nothing:
+      hive-task-closure-input with "mode": "preview", "applied": false, and
+      a "next" command that applies it.
       --json --yes verifies and archives, then prints hive-task-closure-result
       with "mode": "apply", "applied": true, and the receipt_digest. Any
       failure prints a hive-task-closure-result document with "ok": false.
 
       Examples:
+
+        hive archive 42 --reason superseded --successor app:rails-port \\
+          --attestation "The Rails port replaces this task" --json
 
         hive archive 42 --reason cancelled --attestation "Not wanted" --json
 
@@ -1290,9 +1366,11 @@ module Hive
     option :reason, type: :string, enum: Hive::TaskClosureContract::REASONS,
                     desc: "operator closure reason: already_delivered, superseded or cancelled"
     option :evidence, type: :array,
-                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag)"
+                      desc: "immutable GitHub PR/commit evidence (repeat values after the flag); " \
+                            "optional for superseded"
     option :successor, type: :string,
-                       desc: "registered project:slug that supersedes this task"
+                       desc: "registered project:slug that supersedes this task; " \
+                             "enough on its own for superseded"
     option :attestation, type: :string,
                          desc: "operator reason for cancellation or superseded/cross-repository delivery"
     option :yes, type: :boolean, default: false,

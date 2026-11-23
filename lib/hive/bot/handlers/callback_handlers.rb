@@ -121,13 +121,17 @@ module Hive
           callback = Hive::Bot::NotificationBuilders.encode_closure_callback(
             "closure_confirm", confirm_payload
           )
-          evidence = preview.evidence.map do |item|
+          lines = preview.evidence.map do |item|
             "#{item.fetch('repository')} #{item['number'] ? "PR ##{item['number']}" : item.fetch('oid')[0, 12]}"
+          end
+          if (successor = preview.successor)
+            lines << "Successor #{successor.fetch('project')}:#{successor.fetch('slug')} " \
+                     "(#{successor.fetch('stage')})"
           end
           closure_edit_result(
             "Verified #{preview.input.fetch('reason').tr('_', ' ')} closure for " \
             "#{payload.fetch('project')}/#{payload.fetch('slug')}.\n" \
-            "#{evidence.join("\n")}\nDigest #{preview.preview_digest[0, 12]}",
+            "#{lines.join("\n")}\nDigest #{preview.preview_digest[0, 12]}",
             reply_markup: [
               [
                 Hive::Bot::NotificationBuilders.button("Confirm and archive", callback)

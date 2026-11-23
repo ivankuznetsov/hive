@@ -31,6 +31,15 @@ declares a list and the prerequisite workflow that cannot reach that gate.
 Repair the named workflow or metadata. Never drop, collapse, or reorder
 prerequisites merely to clear admission.
 
+When the operator asks to stack an existing task on another, or to change or
+remove its prerequisite, run `hive stack TARGET --on PREREQUISITE` (repeat
+`--on` for a scheduling-only list) or `hive stack TARGET --clear`. It works at
+any unfinished stage, refuses cycles, finished tasks, and a value that
+disagrees with the task's own `plan.md` frontmatter, and never rebases an
+existing worktree branch. Exit 75 means a stage agent holds the task; retry
+after it finishes. Do not use it to clear an admission error the operator did
+not ask to change.
+
 Always inspect the required `attempt_storage` cell. If it is `degraded`, report
 its `degraded_reason` and last error operation as a Hive-owned migration or
 maintenance fault; do not call the pipeline healthy merely because task rows

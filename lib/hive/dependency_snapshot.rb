@@ -55,7 +55,8 @@ module Hive
                 "metadata_status" => task.metadata_status,
                 "plan_status" => task.plan_status,
                 "validation_error" => task.validation_error.to_s,
-                "cancelled" => task.cancelled
+                "cancelled" => task.cancelled,
+                "superseded_by" => task.superseded_by
               }
             end.sort_by { |task| [ task["project"].to_s, task["slug"].to_s, task["id"].to_s ] }
           }
@@ -284,6 +285,28 @@ module Hive
       context.verdict(project: project.fetch("name"), slug: slug)
     end
 
+    # The admission verdict an existing task would get if its dependency
+    # declaration were `depends_on` (nil clears it). The task's own snapshot
+    # is replaced in place rather than appended as an overlay: a second
+    # snapshot with the same slug would be a duplicate identity, which
+    # admission fails closed on. Everything else (stage, workflow, plan
+    # frontmatter, upstream chain) is read from disk exactly as admission
+    # reads it, so the answer matches what status/daemon will report once
+    # the declaration is written.
+    def proposed_dependency_verdict(project:, slug:, depends_on:,
+                                    registry_entries: Hive::Config.registered_projects)
+      entries = Array(registry_entries)
+      name = project.fetch("name")
+      generations = capture_workflow_generations(entries)
+      context = targeted_admission_context(
+        entries,
+        targets: { name => [ slug ] },
+        workflow_generations: generations,
+        dependency_overrides: { name => { slug => Hive::Dependencies.normalize_declaration(depends_on) } }
+      )
+      context.verdict(project: name, slug: slug)
+    end
+
     def capture_workflow_generations(registry_entries)
       Array(registry_entries).each_with_object({}) do |entry, generations|
         root = File.expand_path(entry.fetch("path"))
@@ -338,7 +361,7 @@ module Hive
     # This is the dependency counterpart to Status's partial exact-task
     # projection used by bounded watchers.
     def targeted_admission_context(registry_entries, targets:, workflow_generations: nil,
-                                   overlays: nil)
+                                   overlays: nil, dependency_overrides: nil)
       entries = Array(registry_entries)
       project_configs = {}
       projects = entries.map do |entry|
@@ -358,6 +381,17 @@ module Hive
       projects = projects.map do |project|
         additions = Array(overlays&.fetch(project.name, nil))
         additions.empty? ? project : project.with(tasks: (project.tasks + additions).freeze)
+      end
+      # Overrides apply before the fallback walk so prerequisites named only
+      # by the replacement declaration are still loaded from terminal history.
+      projects = projects.map do |project|
+        replacements = dependency_overrides&.fetch(project.name, nil)
+        next project if replacements.nil? || replacements.empty?
+
+        tasks = project.tasks.map do |task|
+          replacements.key?(task.slug) ? task.with(depends_on: replacements.fetch(task.slug)) : task
+        end
+        project.with(tasks: tasks.freeze)
       end
       admission_context_with_fallback(
         entries, projects, workflow_generations: workflow_generations,
@@ -880,6 +914,7 @@ module Hive
         validation_error = "task folder changed while dependency admission was taking its snapshot"
       end
       cancelled = false
+      superseded_by = nil
       if File.basename(File.dirname(folder)) == workflow_stages.last
         require "hive/task_closure"
         closure = Hive::TaskClosure.read(
@@ -887,7 +922,12 @@ module Hive
           project: project_name, quarantine: false
         )
         if closure.valid?
-          cancelled = closure.receipt["reason"] == "cancelled"
+          receipt = closure.receipt
+          cancelled = receipt["reason"] == "cancelled"
+          if !cancelled && Hive::TaskClosure.undelivered?(receipt["reason"], receipt["evidence"])
+            successor = receipt.fetch("successor")
+            superseded_by = "#{successor.fetch('project')}:#{successor.fetch('slug')}"
+          end
         elsif !closure.absent?
           validation_error ||= "invalid task closure receipt: #{closure.error}"
         end
@@ -915,7 +955,8 @@ module Hive
         plan_error: plan.error,
         folder: folder,
         validation_error: validation_error,
-        cancelled: cancelled
+        cancelled: cancelled,
+        superseded_by: superseded_by
       )
     end
 

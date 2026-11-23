@@ -10,7 +10,7 @@ module Hive
         def initialize(environment: ENV, config: nil, **kwargs)
           @web_environment = environment
           @web_config = config || Hive::Config.load_global_web
-          super(**kwargs)
+          super(environment: environment, **kwargs)
         end
 
         def service_name

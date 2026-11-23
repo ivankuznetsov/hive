@@ -3,9 +3,61 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-19
+updated: 2026-11-22
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## Supersession by a successor task: residual scope (2026-11-22)
+
+`hive archive TASK --reason superseded --successor project:slug --attestation
+"..."` now closes without `--evidence` (see [[commands/stage_action]]). Open
+edges:
+
+- **Older readers reject the new receipt shape.** A superseded receipt with
+  `evidence: []` and a path-only `task_repository` fails validation in a Hive
+  built before this change, which quarantines it. Do not downgrade after
+  creating one.
+- **The successor is checked only at preview and confirmation.** If it is
+  cancelled or superseded later, nothing revisits the archived task; its
+  receipt keeps naming that successor, and its dependents keep the admission
+  error telling them to depend on it.
+- **Dependents are not re-pointed automatically.** Admission names the
+  successor; the operator moves each dependent with `hive stack --on`.
+- **Not yet validated against live state.** Covered by unit, CLI, bot, and
+  Web tests only.
+
+## Operator-remediated review gate retries: residual scope (2026-11-20)
+
+The retry fingerprint for operator-owned review gate blocks now includes the
+task branch HEAD and the published head, and auto-rebase skips published
+review branches (see [[modules/daemon]], [[modules/rebase]],
+[[stages/review]]). These limits remain:
+
+- **A remote-only remediation counts only once it is reconciled.** The
+  fingerprint reads the local HEAD and `github-publication.json`. A conflict
+  resolved in GitHub's web editor changes neither until the operator runs
+  `hive publication-reconcile`, so a retry before that still counts as
+  identical. No `git ls-remote` runs on the assessment path.
+- **The healer still auto-retries `base_conflict`.** Only an operator merge
+  can clear it, yet the shared ladder re-queries GitHub until the
+  deterministic park (five times in 35 minutes for todero #100). Each retry is
+  now cheap (no conflict agent), but making the block operator-owned would be
+  a separate policy change.
+- **Post-review stages still auto-rebase published branches.** 7-artifacts
+  and 8-finalize keep the leased rebase-and-push policy that finalize's
+  stale-rebase resync relies on. Whether they should adopt review's
+  merge-only contract is open.
+- **Deploy rearm ignores task ownership.** `rearm_changed_runtime` rearms any
+  parked `deterministic_failure` request once per new runtime digest. That
+  includes a task-owned `review_ci_stale` park, whose new-request series
+  (`TASK_OWNED_FAILURE_MARKERS`) is meant to survive deploys. Whether the
+  rearmed probe then reopens a full identical-failure series was not checked.
+  Not changed here.
+- **Conflict-agent identity is by design.** The rebase conflict agent resolves
+  `execute.agent` from the project config at run time (or the durable
+  attempt's explicit route), never from the task's captured implementation
+  identity. The todero #100 Muse runs (2026-11-19 16:23Z and 17:05Z) predate
+  the Grok stand-in written to the config on 2026-11-20 16:08Z.
 
 ## CLI JSON single-document contracts: residual scope (2026-11-19)
 
@@ -2656,6 +2708,34 @@ sibling `hive-attempt-*.scope` units, so which daemon-spawned path launched a
 provider inside the service cgroup is unknown. Existing installs keep the old
 `StartLimitBurst=3` unit until `hive daemon install --force` rewrites it.
 
+## Daemon exit on exhausted admission bookkeeping (2026-11-20)
+
+At 18:39:31 the daemon (deployment `cc0628924`) logged a 13.26 s
+`attempt.observe_task_source` lock hold, then
+`runtime_bookkeeping_busy: admission exhausted after 0.0s (0 busy tries)`, and
+exited 75. A large container image build was loading the host. The fix gives
+pre-admission operations their own budgets, starts the durable chain budget at
+the admission write, and has the daemon defer instead of exit. Still
+unresolved:
+
+- The log cannot show how the remaining ~17 s of the old 30 s admission
+  budget went. It could have been busy `observe_source` tries before the
+  committed one, or the unbudgeted admission-view reads and context work
+  between observation and admission.
+- Worst case, one admission can now block a tick for longer. `observe_source`,
+  `read_admission` and the durable chain each have up to 30 s, plus commit
+  holds that no budget bounds. Before, one 30 s deadline covered all of them.
+  The row loop still stops the pass after the first busy row.
+- `record_attempt_admission` and `capture_launch_context` run inside the
+  chain budget, between the admission write and `arm_handoff`. Under heavy
+  load they can still leave `arm_handoff` a spent deadline. The attempt is
+  then recorded as pending bookkeeping and recovered as lost after its launch
+  timeout; it is not admitted twice.
+- The detached launcher and supervisor still report bookkeeping `elapsed_sec`
+  from their own construction (see [[modules/attempts]]).
+- A 13 s hold on a small `task_subjects` upsert suggests fsync stalls under I/O
+  pressure (FULL synchronous WAL). This has not been measured.
+
 
 ## Plan review: stale reviews held by dependencies (2026-11-06)
 
@@ -2808,8 +2888,9 @@ identity.
 
 The auto-rebase conflict agent applies `review.limit_fallback` only when the
 task's current stage runs the review runner. A rebase ahead of execute or
-open-PR still aborts as `agent_failed` on a provider limit, because there is
-no stage-neutral fallback option. The receipt pass is `next_pass_for` as seen
+open-PR still aborts as `agent_failed` on a provider limit, because the rebase
+consults only `review.limit_fallback` (not `implementation.limit_fallback`,
+added 2026-11-20). The receipt pass is `next_pass_for` as seen
 before the review runner starts; if review later resolves a different pass,
 the rebase receipt sits in the neighbouring `limit-fallback-NN.jsonl`. A
 failed rebase substitute writes no marker attrs (the rebase writes no marker
@@ -2866,3 +2947,95 @@ at all); only the log line and receipt record it.
   recoveries get the guarded ERROR-marker repair. Whether a pruned or
   never-recorded attempt should instead stay operator-owned is unverified.
 
+## Implementation limit fallback scope (2026-11-20)
+
+- `implementation.limit_fallback` substitutes for one attempt only. While a
+  multi-day wall lasts, every attempt (and every downstream stage inheriting
+  the execute pin) spends one limited launch on the primary before
+  substituting. There is no "skip the primary until its reset" mode, because
+  Hive keeps provider reset hints display-only.
+- The artifacts producer never substitutes: its capture toolkit, permission
+  arguments, and runtime policy are prepared for the producer profile before
+  launch. Its limit is annotated `fallback_outcome=unsupported`; artifacts'
+  best-effort policy still lets most tasks continue without evidence.
+- A substitute is not route-observed, so an OpenCode fallback's
+  requested-versus-actual route is not journaled.
+- Review fix and CI-fix substitutions (`review.limit_fallback`) are still not
+  journaled as `implementation_identity_substituted`; only their
+  `limit-fallback-NN.jsonl` receipts record them.
+- The auto-rebase conflict agent still uses `review.limit_fallback` only in
+  the review stage. A rebase ahead of execute or open-PR could use
+  `implementation.limit_fallback` but does not.
+- Status derives `held.fallback.outcome=available` from config alone. It does
+  not see explicit provider-account routing, under which the next attempt
+  will not substitute.
+- An execute substitute runs on the same worktree after the limited primary,
+  so partial primary edits are its starting point, exactly as on a retry.
+
+## Plan-review reviewer routing and resolved reviews (2026-11-20)
+
+- A legacy policy artifact (written before `reviewer_routing` was recorded)
+  proves route-only drift only when its route receipts rebuild the old routing
+  exactly. Some changes cannot be rebuilt: a rerouted role the review never
+  ran (such as the adversarial leg of a standard review, or every role of a
+  `skipped` review), a changed
+  `routes.fallbacks`, or a `models.plan_review*` override that changed the
+  requested model. Such a review stays stale and needs the old remedy (back to
+  `3-plan`, restart the review). This affects only reviews resolved before the
+  change.
+- `degraded_cleared(review_unavailable)` counts as resolved, so fixing the
+  reviewer route no longer triggers a real review of it. Whether a degraded
+  clearance should be re-reviewed once its reviewer is available is an open
+  product question.
+- `plan_review.adversarial_min_level` and `max_revision_rounds` change what a
+  review requires but are not in `policy_affecting_config`, so changing them
+  stales no review, resolved or not. Unverified whether that is intended.
+
+## External fast-forward adoption of review branches (2026-11-22)
+
+- Adoption requires the PR head's commit to be in the local object store. Hive
+  does not fetch it: the `remote_object_unavailable` refusal asks the operator
+  to `git fetch origin <branch>` first. A remote that moves ahead with objects
+  never fetched is recorded at publication as `pr_reference_unavailable`. That
+  reason is not an adoption candidate, so it keeps the old route.
+- A fix-mode review run does not observe the PR before its CI-fix and fix
+  agents run. If someone pushes onto the PR branch during such a run, the
+  run's own fix commits make the history truly divergent, which still needs
+  operator reconciliation. Only verify-mode runs publish (and so observe)
+  before agents. An observe-only preflight was out of scope.
+- The coordinator's `resume` re-evaluates a blocked request on every daemon
+  tick, so a request blocked by adoption (including `dirty_worktree`) re-observes
+  the PR branch over the network once per tick until it clears. Observation
+  precedes the local cleanliness check on purpose: a dirty worktree with a
+  truly divergent PR must keep the ordinary path rather than block. Each
+  observation is bounded by the managed-Git 60s deadline. Whether that load is
+  acceptable on hosts with flaky remotes is unmeasured.
+- Only `review_publication_failed` markers are candidates. A PR head that
+  fast-forwards after Hive's own publication surfaces as
+  `review_publication_confirmation_failed publication_reason=pr_head_moved`.
+  The retry re-runs the review, whose publication then stops as
+  `remote_fast_forward_adoptable`, so adoption takes one extra cycle there.
+- Adoption does not secret-scan the adopted commits; they were already
+  published to the PR by whoever pushed them. The next Hive publication of a
+  descendant head goes through the usual paths.
+- The failure fingerprint of `review_publication_failed` does not include the
+  task head. Repeated adoptable failures after successive operator pushes
+  therefore count as identical failures. Each retry adopts, so this does not
+  park in practice, but it is not head-keyed like the CI-gate reasons.
+- The journal activity `adopted_remote_fast_forward` is written only when the
+  task has an attempt binding (`TaskActivity.for_task`). The always-written
+  durable record is `reviews/archive/<label>/retirement.json` plus the budget
+  audit expiry.
+
+## Managed service agent discovery (2026-11-15)
+
+- Filesystem discovery preserves installed executable paths; it does not prove
+  agent authentication or the success of a real PR repair.
+- Paths selected from version-specific installation directories can become
+  stale after tool removal. Re-run service installation after moving tools;
+  stable shims/symlinks are preserved when present in the installation PATH.
+- launchd rendering and executable lookup are covered with fake CLIs on Linux;
+  a live macOS launchd restart remains unverified.
+- Shipped agent profiles and Node/Bun/Python launchers are covered. Custom
+  profile executables and launchers needing additional environment variables
+  still require explicit service configuration.

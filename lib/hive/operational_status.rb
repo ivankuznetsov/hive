@@ -1,4 +1,5 @@
 require "time"
+require "hive/agent_limit"
 require "hive/review_publication_recovery"
 require "hive/attempts/storage_status"
 require "hive/operational_action"
@@ -1294,7 +1295,9 @@ module Hive
         held = row.fetch("held")
         provider = held["provider"] || "provider"
         retry_text = held["retry_after"] ? " until #{held.fetch('retry_after')}" : ""
-        reasons << reason("provider_quota", "#{provider} quota hold#{retry_text}", "provider")
+        reasons << reason(
+          "provider_quota", "#{provider} quota hold#{retry_text}#{limit_fallback_text(held)}", "provider"
+        )
       elsif daemon_plan_approval?(project, row)
         reasons << reason("daemon_plan_approval", "daemon owns plan approval for this enrolled project", "scheduler")
       elsif terminal_parked?(row)
@@ -1314,7 +1317,12 @@ module Hive
 
       if row["held"] && reasons.none? { |entry| entry["code"] == "provider_quota" }
         held = row.fetch("held")
-        reasons << reason("provider_quota", "#{held['provider'] || 'provider'} quota hold", "provider")
+        reasons << reason(
+          "provider_quota", "#{held['provider'] || 'provider'} quota hold#{limit_fallback_text(held)}", "provider"
+        )
+      end
+      if (substituted = limit_fallback_used_reason(row))
+        reasons << substituted
       end
       if dependency_wait?(row) && reasons.none? { |entry| entry["code"] == "dependency_wait" }
         reasons << reason("dependency_wait", dependency_wait_message(row), "dependency")
@@ -1396,7 +1404,40 @@ module Hive
     def provider_payload(row)
       return nil unless row["held"]
 
-      { "name" => row.dig("held", "provider"), "retry_after" => row.dig("held", "retry_after") }
+      payload = { "name" => row.dig("held", "provider"), "retry_after" => row.dig("held", "retry_after") }
+      fallback = row.dig("held", "fallback")
+      payload["fallback"] = fallback if fallback.is_a?(Hash)
+      payload
+    end
+
+    # "; fallback grok available; the next attempt substitutes it" for a
+    # quota hold whose provider has an opt-in limit fallback.
+    def limit_fallback_text(held)
+      fallback = held["fallback"]
+      return "" unless fallback.is_a?(Hash) && fallback["agent"]
+
+      "; #{Hive::AgentLimit.fallback_summary(fallback)}"
+    end
+
+    # The latest attempt substituted a fallback provider for a limited one
+    # (implementation.limit_fallback). Shown until a later attempt journals,
+    # so the row says which provider actually ran.
+    def limit_fallback_used_reason(row)
+      substitution = Array(row.dig("implementation_identity", "substitutions")).last
+      return nil unless substitution.is_a?(Hash)
+
+      attempt = substitution["attempt_id"].to_s
+      return nil if attempt.empty? || attempt != row["current_attempt"].to_s
+
+      primary = substitution.dig("primary", "provider") || "provider"
+      substitute = substitution.dig("substitute", "provider") || "fallback"
+      until_text = substitution["retry_after"] ? " until #{substitution['retry_after']}" : ""
+      reason(
+        "limit_fallback_used",
+        "limits_reached on #{primary}#{until_text}; fallback #{substitute} used for " \
+        "#{substitution['stage']} in this attempt; the #{primary} pin is unchanged",
+        "provider"
+      )
     end
 
     def liveness_status(row)

@@ -3064,6 +3064,110 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :dispatcher_stopping)
   end
 
+  # The exact 2026-11-20 shape: admission inherited a spent deadline, so the
+  # TEMPFAIL has no busy try and no SQLite cause.
+  def spent_admission_budget_error
+    retries = Hive::Attempts::BookkeepingRetry.new(
+      operation: "admission", attempt_id: "attempt-1", budget_sec: 30, started_at: 0.0,
+      monotonic: -> { 30.5 }
+    )
+    retries.run { flunk "a spent admission budget must not try" }
+  rescue Hive::Attempts::BookkeepingBusy => error
+    error
+  end
+
+  def test_busy_admission_bookkeeping_defers_the_tick_and_retries_on_a_later_tick
+    # Regression (2026-11-20): BookkeepingBusy escaped the row loop, the tick
+    # and run_forever, and the daemon exited 75 until systemd restarted it.
+    first = row(slug: "first-task", id: 1, action: "ready_to_run", command: "hive run first-task --project p1")
+    second = row(slug: "second-task", id: 2, action: "ready_to_run", command: "hive run second-task --project p1")
+    busy = spent_admission_budget_error
+    requests = []
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **|
+      requests << request.slug
+      raise busy if requests.length == 1
+
+      attempt = Struct.new(:attempt_id, :task_generation, :state)
+                      .new("attempt-#{request.slug}", "generation-#{request.slug}", "launching")
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [ first, second ], attempt_dispatcher: attempt_dispatcher
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal %w[first-task], requests, "later rows wait for the next tick instead of the same lock"
+    deferred = logger.events.select { |name, _| name == :dispatch_deferred }
+    assert_equal 1, deferred.size
+    attributes = deferred.first.last
+    assert_equal "first-task", attributes[:slug]
+    assert_equal "runtime_bookkeeping_busy", attributes[:reason]
+    assert_equal "admission", attributes[:operation]
+    assert_equal "attempt-1", attributes[:attempt_id]
+    assert_equal 0, attributes[:retry_count]
+    assert_equal 30.5, attributes[:elapsed_sec]
+    assert_match(/budget spent before the first try/, attributes[:message])
+    assert events_include?(logger, :tick_end)
+
+    dispatcher.tick(now: T0 + 30)
+
+    assert_equal %w[first-task first-task second-task], requests, "the deferred admission is retried"
+    dispatched = logger.events.select { |name, _| name == :dispatched }.map { |_, attrs| attrs[:slug] }
+    assert_equal %w[first-task second-task], dispatched
+    assert_empty supervisor.spawned
+  end
+
+  def test_run_forever_survives_a_tick_that_exhausts_attempt_bookkeeping
+    snapshot = FakeOperationalSnapshot.new
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(operational_snapshot: snapshot)
+    busy = spent_admission_budget_error
+    refute Hive::InternalError.sqlite_busy?(busy), "no SQLite cause, as in the incident"
+    ticks = 0
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    dispatcher.define_singleton_method(:tick) do |now: Time.now|
+      ticks += 1
+      raise busy if ticks == 1
+
+      request_shutdown!
+    end
+
+    dispatcher.run_forever
+
+    assert_equal 2, ticks, "the daemon keeps ticking after an exhausted admission"
+    deferred = logger.events.find { |name, _| name == :tick_deferred }
+    refute_nil deferred
+    assert_equal "runtime_bookkeeping_busy", deferred.last[:reason]
+    assert_equal "admission", deferred.last[:operation]
+    assert_match(/BookkeepingBusy: runtime_bookkeeping_busy: admission exhausted/, deferred.last[:error])
+    assert(snapshot.calls.any? { |name, attrs| name == :fail && attrs[:reason] == "runtime_bookkeeping_busy" })
+    assert events_include?(logger, :dispatcher_stopping)
+  end
+
+  def test_run_forever_does_not_treat_a_failure_caused_by_bookkeeping_busy_as_contention
+    dispatcher, = make_dispatcher
+    dispatcher.define_singleton_method(:install_signal_handlers!) { true }
+    dispatcher.define_singleton_method(:interruptible_sleep) { |_| }
+    busy = spent_admission_budget_error
+    storage = begin
+      begin
+        raise busy
+      rescue Hive::Attempts::BookkeepingBusy
+        raise Hive::Attempts::PendingBookkeeping::StorageError, "pending bookkeeping storage failed"
+      end
+    rescue Hive::Attempts::PendingBookkeeping::StorageError => error
+      error
+    end
+    assert_same busy, storage.cause
+    dispatcher.define_singleton_method(:tick) { |now: Time.now| raise storage }
+
+    assert_raises(Hive::Attempts::PendingBookkeeping::StorageError) { dispatcher.run_forever }
+  end
+
   def test_run_forever_still_fails_closed_on_non_busy_tick_errors
     dispatcher, = make_dispatcher
     dispatcher.define_singleton_method(:install_signal_handlers!) { true }

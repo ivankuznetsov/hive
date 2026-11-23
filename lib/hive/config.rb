@@ -217,6 +217,19 @@ module Hive
         "capture" => { "provider" => nil }
       },
       "finalize" => { "agent" => "claude" },
+      # Opt-in substitute agent for the implementation stages (execute,
+      # open_pr, artifacts, finalize) whose primary provider hits a classified
+      # usage/credit limit. Same shape and rules as `review.limit_fallback`;
+      # the substitution holds for the attempt that made it only, and the
+      # task's pinned implementation identity is never rewritten. Disabled by
+      # default: no substitution ever happens unless `enabled: true`.
+      "implementation" => {
+        "limit_fallback" => {
+          "enabled" => false,
+          "min_wait_sec" => 3600,
+          "agents" => {}
+        }
+      },
       # Per-CLI agent profiles. Each project may override `bin`,
       # `env_override`, or `min_version` to pin to a different binary or
       # version. Adding a new top-level profile is not yet supported here
@@ -1862,9 +1875,17 @@ module Hive
       entry
     end
 
+    # Mirrors the global registry into the runtime database's project rows.
+    # Registration syncs only when the database already exists, so whatever
+    # creates the database (`hive setup`, `hive runtime init`) calls this
+    # afterwards: projects registered before that would otherwise have no row,
+    # and their tasks cannot be dispatched as attempts.
     def sync_runtime_projects!
       path = Hive::Paths.runtime_control_plane_path
-      return unless File.file?(path)
+      # Without the registry's directory nothing was ever registered under
+      # this home and its lock cannot be taken. A missing registry file in an
+      # existing directory still deactivates every runtime project.
+      return unless File.file?(path) && File.directory?(File.dirname(global_config_path))
 
       require "hive/runtime_control_plane"
       with_global_config_lock do
@@ -1901,7 +1922,6 @@ module Hive
     rescue Hive::RuntimeControlPlane::Error, Sequel::Error => error
       raise ConfigError, "runtime project registry synchronization failed: #{error.message}"
     end
-    private_class_method :sync_runtime_projects!
 
     def inactive_runtime_project_identity(name:, state_root_path:)
       return unless File.file?(Hive::Paths.runtime_control_plane_path)
@@ -2243,7 +2263,8 @@ module Hive
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
-      validate_review_limit_fallback!(cfg, source_path)
+      validate_limit_fallback!(cfg, REVIEW_LIMIT_FALLBACK_PATH, source_path)
+      validate_implementation!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_artifact_evidence!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
@@ -2293,6 +2314,7 @@ module Hive
       open_pr
       artifacts
       finalize
+      implementation
       budget_usd
       timeout_sec
       review
@@ -2386,7 +2408,7 @@ module Hive
       "max_revision_rounds" => %w[standard mandatory],
       "reviewers" => %w[primary adversarial verification],
       "routes" => %w[
-        primary adversarial verification fallbacks planner_revision_fallback
+        primary adversarial verification fallbacks decision_triage planner_revision_fallback
       ]
     }.freeze
     PLAN_REVIEW_ADAPTERS = %w[ce_doc_review].freeze
@@ -2523,19 +2545,18 @@ module Hive
         validate_closed_mapping!(row, route_keys, "plan_review.routes.fallbacks[#{index}]", source_path)
         validate_plan_review_route_row!(row, "plan_review.routes.fallbacks[#{index}]", source_path)
       end
-      planner_fallback = routes["planner_revision_fallback"]
-      return unless routes.key?("planner_revision_fallback")
+      # Optional rows: decision triage (otherwise it uses the verification
+      # route) and the planner revision fallback.
+      %w[decision_triage planner_revision_fallback].each do |role|
+        next unless routes.key?(role)
 
-      unless planner_fallback.is_a?(Hash)
-        raise ConfigError,
-              "plan_review.routes.planner_revision_fallback in #{describe_source(source_path)} must be a Hash"
+        row = routes[role]
+        unless row.is_a?(Hash)
+          raise ConfigError, "plan_review.routes.#{role} in #{describe_source(source_path)} must be a Hash"
+        end
+        validate_closed_mapping!(row, route_keys, "plan_review.routes.#{role}", source_path)
+        validate_plan_review_route_row!(row, "plan_review.routes.#{role}", source_path)
       end
-      validate_closed_mapping!(
-        planner_fallback, route_keys, "plan_review.routes.planner_revision_fallback", source_path
-      )
-      validate_plan_review_route_row!(
-        planner_fallback, "plan_review.routes.planner_revision_fallback", source_path
-      )
     end
 
     def validate_plan_review_route_row!(row, label, source_path)
@@ -3193,17 +3214,31 @@ module Hive
             "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
 
-    REVIEW_LIMIT_FALLBACK_KEYS = %w[enabled min_wait_sec agents].freeze
+    LIMIT_FALLBACK_KEYS = %w[enabled min_wait_sec agents].freeze
+    REVIEW_LIMIT_FALLBACK_PATH = %w[review limit_fallback].freeze
+    IMPLEMENTATION_LIMIT_FALLBACK_PATH = %w[implementation limit_fallback].freeze
+    IMPLEMENTATION_KEYS = %w[limit_fallback].freeze
 
-    def validate_review_limit_fallback!(cfg, source_path)
-      fallback = cfg.dig("review", "limit_fallback")
-      label = "review.limit_fallback"
+    # `implementation` holds settings shared by the implementation stages
+    # (execute, open_pr, artifacts, finalize). It is closed so a misspelled
+    # key cannot silently leave an opt-in disabled.
+    def validate_implementation!(cfg, source_path)
+      validate_closed_mapping!(cfg["implementation"], IMPLEMENTATION_KEYS, "implementation", source_path)
+      validate_limit_fallback!(cfg, IMPLEMENTATION_LIMIT_FALLBACK_PATH, source_path)
+    end
+
+    # One validator for every `<block>.limit_fallback` (Hive::LimitFallback):
+    # closed keys, a boolean `enabled`, a bounded `min_wait_sec`, and an
+    # `agents` map whose fallback is always a different registered profile.
+    def validate_limit_fallback!(cfg, path, source_path)
+      fallback = cfg.dig(*path)
+      label = path.join(".")
       unless fallback.is_a?(Hash)
         raise ConfigError,
               "#{label} in #{describe_source(source_path)} must be a Hash; got #{fallback.inspect} (#{fallback.class})"
       end
 
-      validate_closed_mapping!(fallback, REVIEW_LIMIT_FALLBACK_KEYS, label, source_path)
+      validate_closed_mapping!(fallback, LIMIT_FALLBACK_KEYS, label, source_path)
       validate_required_boolean!(fallback["enabled"], "#{label}.enabled", source_path)
       validate_bounded_integer!(fallback["min_wait_sec"], "#{label}.min_wait_sec", 0, MAX_LIMIT_FALLBACK_WAIT_SEC, source_path)
       agents = fallback["agents"]

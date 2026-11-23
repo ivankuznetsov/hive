@@ -213,6 +213,7 @@ class ConfigTest < Minitest::Test
         "plan_review:\n  routes:\n    fallbacks: nope\n" => /fallbacks.*must be an Array/i,
         "plan_review:\n  routes:\n    fallbacks: [nope]\n" => /fallbacks\[0\].*must be a Hash/i,
         "plan_review:\n  routes:\n    planner_revision_fallback: nope\n" => /planner_revision_fallback.*must be a Hash/i,
+        "plan_review:\n  routes:\n    decision_triage: nope\n" => /decision_triage.*must be a Hash/i,
         "plan_review:\n  routes:\n    primary:\n      model: ''\n" => /primary\.model.*must be non-empty/i,
         "plan_review:\n  routes:\n    primary:\n      effort: impossible\n" => /primary\.effort.*must be one of/i,
         "plan_review:\n  approval_policies: nope\n" => /approval_policies.*must be an Array/i,
@@ -254,6 +255,19 @@ class ConfigTest < Minitest::Test
                    Hive::Config.load(dir).dig(
                      "plan_review", "routes", "planner_revision_fallback", "model"
                    )
+
+      File.write(config_path, <<~YAML)
+        plan_review:
+          routes:
+            decision_triage:
+              agent: claude
+              model: claude-sonnet-5-5
+              family: anthropic
+              effort: low
+              route: claude-code/v1
+      YAML
+      assert_equal "claude-sonnet-5-5",
+                   Hive::Config.load(dir).dig("plan_review", "routes", "decision_triage", "model")
 
       policy = {
         "id" => "bounded_policy", "version" => 1, "action" => "approve_finding",
@@ -3107,6 +3121,50 @@ class ConfigTest < Minitest::Test
       "review:\n  limit_fallback:\n    agents:\n      nonesuch: claude\n" => /limit_fallback\.agents key "nonesuch"/,
       "review:\n  limit_fallback:\n    agents:\n      codex: codex\n" => /cannot fall back to itself/,
       "review:\n  limit_fallback:\n    agents:\n      codex:\n" => /cannot fall back to itself/
+    }.each do |yaml, pattern|
+      err = assert_raises(Hive::ConfigError, yaml) { load_limit_fallback_yaml(yaml) }
+      assert_match pattern, err.message, yaml
+    end
+  end
+
+  # --- implementation.limit_fallback --------------------------------------
+
+  def test_implementation_limit_fallback_defaults_to_disabled
+    cfg = load_limit_fallback_yaml("{}\n")
+
+    assert_equal({ "enabled" => false, "min_wait_sec" => 3600, "agents" => {} },
+                 cfg.dig("implementation", "limit_fallback"))
+  end
+
+  def test_implementation_limit_fallback_accepts_a_provider_map_beside_review
+    cfg = load_limit_fallback_yaml(<<~YAML)
+      implementation:
+        limit_fallback:
+          enabled: true
+          min_wait_sec: 7200
+          agents:
+            codex: grok
+            muse: grok
+    YAML
+
+    assert_equal(
+      { "enabled" => true, "min_wait_sec" => 7200, "agents" => { "codex" => "grok", "muse" => "grok" } },
+      cfg.dig("implementation", "limit_fallback")
+    )
+    assert_equal false, cfg.dig("review", "limit_fallback", "enabled")
+  end
+
+  def test_implementation_limit_fallback_rejects_invalid_shapes
+    {
+      "implementation: yes\n" => /implementation .*must be a Hash/,
+      "implementation:\n  limit_fallbacks: {}\n" => /implementation .*unknown field\(s\): limit_fallbacks/,
+      "implementation:\n  limit_fallback: yes\n" => /implementation\.limit_fallback .*must be a Hash/,
+      "implementation:\n  limit_fallback:\n    agent: grok\n" => /unknown field\(s\): agent/,
+      "implementation:\n  limit_fallback:\n    enabled: maybe\n" => /implementation\.limit_fallback\.enabled .*must be a boolean/,
+      "implementation:\n  limit_fallback:\n    min_wait_sec: -1\n" => /implementation\.limit_fallback\.min_wait_sec/,
+      "implementation:\n  limit_fallback:\n    agents:\n      codex: nonesuch\n" =>
+        /implementation\.limit_fallback\.agents\.codex "nonesuch".*not a registered/,
+      "implementation:\n  limit_fallback:\n    agents:\n      codex: codex\n" => /cannot fall back to itself/
     }.each do |yaml, pattern|
       err = assert_raises(Hive::ConfigError, yaml) { load_limit_fallback_yaml(yaml) }
       assert_match pattern, err.message, yaml

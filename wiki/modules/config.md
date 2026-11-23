@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-11-14
+updated: 2026-11-20
 tags: [config, yaml, validation, plan-review, opencode, daily-digest]
 ---
 
@@ -439,6 +439,9 @@ reference.
          "temporal_video" => true}}},
    "capture" => {"provider" => nil}},
  "finalize" => {"agent" => "claude"},
+ "implementation" =>
+  {"limit_fallback" =>
+    {"enabled" => false, "min_wait_sec" => 3600, "agents" => {}}},
  "agents" =>
   {"claude" =>
     {"bin" => "claude",
@@ -1087,14 +1090,77 @@ review:
       codex: claude      # primary profile => fallback profile
 ```
 
-`validate_review_limit_fallback!` keeps the mapping closed to `enabled`,
+`validate_limit_fallback!` (shared with `implementation.limit_fallback`)
+keeps the mapping closed to `enabled`,
 `min_wait_sec`, and `agents`. `enabled` must be a boolean, and
 `min_wait_sec` must be an Integer from 0 to 366 days in seconds. `agents` must
 map registered profile names to different registered profile names, so a
 provider can never fall back to itself. One map covers every review role that
 launches an agent: reviewers, triage, fix, and CI fix, plus the auto-rebase
 conflict-resolution agent when `hive run` rebases a task in the review stage. Runtime semantics are in
-[[stages/review]] under "Provider-limit fallback".
+[[stages/review]] under "Provider-limit fallback". The decision rules live in
+the shared `Hive::LimitFallback` core (`lib/hive/limit_fallback.rb`), which
+both blocks use with their own config path.
+
+## Implementation limit fallback (`implementation.limit_fallback`)
+
+Opt-in, disabled by default, with the same closed shape, defaults, and
+validation as `review.limit_fallback`. `implementation` is a closed
+top-level mapping whose only key is `limit_fallback`:
+
+```yaml
+implementation:
+  limit_fallback:
+    enabled: true
+    min_wait_sec: 3600   # wait out a provider reset sooner than this
+    agents:
+      codex: grok        # primary profile => fallback profile
+      muse: grok
+```
+
+It covers the implementation stages' launches: the execute implementer,
+the open-PR author, the artifacts inference and reviewer roles (the
+producer reports `fallback_outcome=unsupported`), and the finalize agent.
+The 6-review roles, including the `review.fix` / `review.ci` implementation
+identities, stay on `review.limit_fallback`.
+
+Why a separate block rather than one shared top-level key:
+`review.limit_fallback` already ships with review-specific semantics
+(reviewer output renaming, `reviews/limit-fallback-NN.jsonl` receipts, the
+rebase conflict agent), and the two lists of roles can reasonably map to
+different fallbacks. A sibling block keeps the existing key unchanged, needs
+no migration or precedence rules, and reuses the same validator and decision
+core.
+
+Rules (`Hive::ImplementationLimitFallback`):
+
+- Substitute only for a launch the stage already classified as
+  `limits_reached`, whose explicit reset is absent or at least
+  `min_wait_sec` away, and never under explicit provider-account routing.
+  Generic failures, auth/preflight errors, bookkeeping reasons, and refused
+  models never fall back.
+- The substitute's model is the one the stage's own config names when that
+  stage config names the fallback agent (an operator reroute such as
+  `open_pr: { agent: grok, model: grok-4.7 }`); otherwise the fallback
+  profile's default model. The primary's model pins and `models:` routes
+  never reach it.
+- Scope: the substitution holds for the attempt that made it only. The
+  stage's pinned implementation identity is never rewritten, so a retry, or a
+  later stage inheriting the execute pin, starts on the primary again and
+  re-evaluates its limit (one limited launch per attempt while the wall
+  lasts).
+- Durable record: `implementation_identity_substituted` in the task journal,
+  with the primary identity kept for audit and the substitute that actually
+  ran ([[state-model]]). Status exposes it under
+  `implementation_identity.substitutions` and as the `limit_fallback_used`
+  operational reason ([[commands/status]]).
+- Markers: a substitute that is also limited or fails, a deferral, an
+  unresolvable identity, or a failed journal append keeps the primary's
+  `limits_reached` marker annotated with `primary_agent=`,
+  `fallback_agent=`, and `fallback_outcome=limited|failed|waiting|unresolved`.
+
+Stage details: [[stages/execute]], [[stages/open-pr]],
+[[stages/artifacts]], [[stages/finalize]].
 
 ## Stage runners reach into config like this
 

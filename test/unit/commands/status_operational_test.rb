@@ -103,6 +103,28 @@ class CommandsStatusOperationalTest < Minitest::Test
     end
   end
 
+  def test_operational_status_names_an_adoptable_remote_fast_forward
+    with_tmp_dir do |project_root|
+      state = File.join(project_root, ".hive-state")
+      folder = File.join(state, "stages", "6-review", "fix-261101-abcd")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "task.md"), "# Fix\n")
+      Hive::Markers.set(File.join(folder, "task.md"), :review_error, reason: "review_publication_failed",
+        publication_reason: "remote_fast_forward_adoptable",
+        **Hive::ReviewPublicationRecovery.encode("publication" => "unknown", "verification" => "pending",
+          "classification" => "behind", "failure_reason" => "remote_fast_forward_adoptable",
+          "local_head" => "a" * 40, "remote_head" => "b" * 40, "unpushed_shas" => []))
+      command = Hive::Commands::Status.new(operational: true)
+      payload = command.operational_payload([ { "name" => "demo", "path" => project_root, "hive_state_path" => state } ])
+      publication = payload.fetch("tasks").first.fetch("review_publication")
+      assert_equal "remote_fast_forward_adoptable", publication["failure_reason"]
+      assert_includes publication["remediation"], "fast-forwarded outside Hive"
+      output, = capture_io { command.render_operational(payload) }
+      assert_includes output, "Failure: remote_fast_forward_adoptable"
+      assert_includes output, "workflow.retry adopts that exact PR head"
+    end
+  end
+
   def test_operational_payload_is_additive_and_keeps_current_status_v9_unchanged
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

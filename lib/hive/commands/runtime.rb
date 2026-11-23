@@ -9,9 +9,10 @@ module Hive
   module Commands
     # Read-only diagnosis of the current runtime database, plus read-only
     # listings of registered projects and runtime payload references for
-    # external audits (e.g. a container's read-only workspace audit).
+    # external audits (e.g. a container's read-only workspace audit). `init`
+    # is the one writing action: the service-free runtime bootstrap.
     class Runtime
-      ACTIONS = %w[status projects payloads].freeze
+      ACTIONS = %w[status projects payloads init].freeze
 
       def initialize(action, json: false, output: $stdout,
                      state_home: Hive::Paths.state_home)
@@ -27,10 +28,11 @@ module Hive
         end
         result = case @action
         when "status" then Hive::RuntimeControlPlane::Installation.status(state_home: @state_home)
+        when "init" then init
         when "projects" then projects
         else Hive::RuntimeControlPlane::Installation.payloads(state_home: @state_home)
         end
-        healthy = @action != "status" || result.fetch("phase") == "active"
+        healthy = !%w[status init].include?(@action) || result.fetch("phase") == "active"
         envelope = {
           "schema" => "hive-runtime-maintenance",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-runtime-maintenance"),
@@ -44,6 +46,18 @@ module Hive
       end
 
       private
+
+      # The runtime half of `hive setup` alone: creates and migrates the
+      # runtime database when it is missing (an existing one is validated,
+      # never repaired), then mirrors the global registry into it, so tasks
+      # of projects registered before the database existed can be dispatched.
+      # No services, agent skills, bundles or project enrollment, so it suits
+      # containers and other hosts without a user service manager.
+      def init
+        Hive::RuntimeControlPlane::Installation.setup(state_home: @state_home)
+        Hive::Config.sync_runtime_projects!
+        Hive::RuntimeControlPlane::Installation.status(state_home: @state_home)
+      end
 
       # Registry rows plus each project's effective worktree root. Project
       # config is not loaded (no validation, workflow loading, or managed-store

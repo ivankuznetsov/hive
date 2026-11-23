@@ -93,6 +93,15 @@ module Hive
         capture_identity(pid)
       rescue Errno::ENOENT
         nil
+      # A zombie keeps its /proc entry, uid, and pid until its parent reaps
+      # it, but it has no address space, so reading its environ fails with
+      # ESRCH (the same error a process mid-exit can produce). It is already
+      # dead and cannot be signalled out of existence, so it is never one of
+      # this invocation's live processes. One unreaped child anywhere on the
+      # host (a CLI's app-server leaves `<defunct>` children) used to abort
+      # every invocation's inventory here.
+      rescue Errno::ESRCH
+        nil
       # Same-uid service managers can be deliberately non-dumpable, making
       # their environ unreadable even to their owner. Omit those pre-existing
       # system rows instead of making every invocation fail on systemd hosts;

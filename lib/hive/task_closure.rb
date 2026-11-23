@@ -187,6 +187,15 @@ module Hive
           task.workflow.stages.max_by(&:index).dir
       end
 
+      # Closure that proves no delivery: cancellation, or supersession whose
+      # only proof is the registered successor task. There is no remote truth
+      # to bind, so it binds the registered checkout, keeps the worktree and
+      # branch for whoever continues the work, skips the delivery terminal
+      # stage, and never satisfies a dependency.
+      def undelivered?(reason, evidence)
+        reason == "cancelled" || (reason == "superseded" && evidence == [])
+      end
+
       def canonical_json(value)
         Hive::WorkflowPackage::CanonicalJSON.generate(value)
       end
@@ -293,8 +302,10 @@ module Hive
       errors = []
       blockers = []
       normalized_input = normalize_input(input, errors)
-      cancelled = normalized_input["reason"] == "cancelled"
-      task_repository = resolve_task_repository(task, project, errors, local: cancelled)
+      undelivered = self.class.undelivered?(
+        normalized_input["reason"], normalized_input["evidence"]
+      )
+      task_repository = resolve_task_repository(task, project, errors, local: undelivered)
       successor = resolve_successor(normalized_input, task, errors)
       evidence = verify_evidence(normalized_input, task_repository, errors)
       authority = closure_authority(normalized_input, task_repository, evidence, errors)
@@ -303,7 +314,7 @@ module Hive
                             item["same_repository"] == true
       end
       blockers.concat(
-        task_blockers(task, project, delivered_heads: delivered_heads, preserve_worktree: cancelled)
+        task_blockers(task, project, delivered_heads: delivered_heads, preserve_worktree: undelivered)
       )
 
       task_observation = observation(task, project)
@@ -527,8 +538,10 @@ module Hive
           "successor and attestation are only accepted for superseded closure"
         )
       end
+      # Supersession may rest on its registered successor alone; delivery
+      # evidence, when supplied, is still verified exactly.
       errors << field_error("evidence", "required", "at least one immutable delivery item is required") if
-        references.empty? && reason != "cancelled"
+        references.empty? && !%w[cancelled superseded].include?(reason)
 
       {
         "reason" => reason,
@@ -610,6 +623,10 @@ module Hive
         errors << field_error("successor", "self_reference", "a task cannot supersede itself")
         return nil
       end
+      if (refusal = successor_closure_refusal(successor, project_name))
+        errors << refusal
+        return nil
+      end
       {
         "project" => project_name,
         "slug" => successor.slug,
@@ -619,6 +636,39 @@ module Hive
     rescue Hive::Error => e
       errors << field_error("successor", "unregistered", e.message)
       nil
+    end
+
+    # The successor must still be able to deliver the work: active, or
+    # archived with delivery. A successor closed without delivery would
+    # orphan this task's work (cancelled) or chain to a task that no longer
+    # carries it (an undelivered supersession, which could also form a
+    # cycle). An unreadable successor receipt fails closed.
+    def successor_closure_refusal(successor, project_name)
+      closure = read(successor, project: project_name, quarantine: false)
+      return nil if closure.absent?
+      unless closure.valid?
+        return field_error(
+          "successor", "closure_invalid",
+          "successor closure receipt is invalid (#{closure.error}); inspect it before superseding by this task"
+        )
+      end
+
+      receipt = closure.receipt
+      return nil unless undelivered_receipt?(receipt)
+      if receipt.fetch("reason") == "cancelled"
+        return field_error(
+          "successor", "cancelled",
+          "successor #{project_name}:#{successor.slug} was cancelled and will not deliver this work; " \
+          "cancel this task instead or name a successor that will deliver it"
+        )
+      end
+
+      field_error(
+        "successor", "superseded",
+        "successor #{project_name}:#{successor.slug} was itself superseded by " \
+        "#{successor_reference(receipt.fetch('successor'))} without delivery; " \
+        "name the task that will deliver this work"
+      )
     end
 
     def verify_evidence(input, task_repository, errors)
@@ -816,7 +866,9 @@ module Hive
 
     def closure_authority(input, task_repository, evidence, errors)
       return nil unless task_repository
-      return "operator_attestation" if input["reason"] == "cancelled"
+      # Cancellation, or supersession resting on its registered successor:
+      # the operator statement is the only authority.
+      return "operator_attestation" if self.class.undelivered?(input["reason"], input["evidence"])
       if evidence.empty?
         errors << field_error("evidence", "unverified", "at least one verified immutable delivery item is required")
         return nil
@@ -1143,20 +1195,20 @@ module Hive
              observation.fetch("marker_generation").to_s.match?(/\A[0-9a-f]{64}\z/)
         raise InvalidReceipt, "closure receipt observation is malformed"
       end
-      cancelled = receipt["reason"] == "cancelled"
-      if cancelled
+      evidence = receipt.fetch("evidence")
+      undelivered = self.class.undelivered?(receipt["reason"], evidence)
+      if undelivered
         repository_errors = []
         repository = resolve_task_repository(task, expected_project, repository_errors, local: true)
         unless repository_errors.empty? && repository == receipt.fetch("task_repository")
-          raise InvalidReceipt, "cancelled task no longer matches its registered checkout"
+          raise InvalidReceipt, "#{receipt['reason']} task no longer matches its registered checkout"
         end
       else
         repository = validate_receipt_repository!(receipt.fetch("task_repository"))
         validate_receipt_registration!(repository, task: task, project: expected_project)
       end
-      evidence = receipt.fetch("evidence")
       raise InvalidReceipt, "closure receipt has invalid evidence" unless
-        evidence.is_a?(Array) && (cancelled ? evidence.empty? : evidence.length.between?(1, MAX_EVIDENCE))
+        evidence.is_a?(Array) && (undelivered ? evidence.empty? : evidence.length.between?(1, MAX_EVIDENCE))
       evidence.each { |item| validate_receipt_evidence!(item, repository) }
       unless self.class.secure_compare(
         receipt.fetch("evidence_digest"), self.class.digest(evidence)
@@ -1337,7 +1389,7 @@ module Hive
         end
         blockers = task_blockers(
           task, project, delivered_heads: delivered_heads,
-          preserve_worktree: receipt["reason"] == "cancelled"
+          preserve_worktree: undelivered_receipt?(receipt)
         )
         raise VerificationFailed, blockers.map { |entry| self.class.format_diagnostic(entry) }.join("; ") unless blockers.empty?
       end
@@ -1375,7 +1427,9 @@ module Hive
         current_stage: "#{task.stage_index}-#{task.stage_name}",
         target_stage: target_stage,
         project: project,
-        terminal_outcome: receipt["reason"] == "cancelled" ? "cancelled" : nil,
+        # Undelivered closure records its reason as the terminal outcome
+        # instead of running the delivery terminal stage.
+        terminal_outcome: undelivered_receipt?(receipt) ? receipt.fetch("reason") : nil,
         transition_guard: lambda do |locked_task|
           Hive::Conditions::TransitionGuard.validate_closure!(
             locked_task,
@@ -1394,7 +1448,7 @@ module Hive
 
       repository_errors = []
       live_repository = resolve_task_repository(
-        task, project, repository_errors, local: receipt["reason"] == "cancelled"
+        task, project, repository_errors, local: undelivered_receipt?(receipt)
       )
       unless repository_errors.empty? &&
              live_repository == receipt.fetch("task_repository")
@@ -1430,7 +1484,7 @@ module Hive
         task, project,
         ignore_task_lock: true,
         delivered_heads: delivered_heads,
-        preserve_worktree: receipt["reason"] == "cancelled"
+        preserve_worktree: undelivered_receipt?(receipt)
       )
       unless blockers.empty?
         raise VerificationFailed,
@@ -1544,6 +1598,10 @@ module Hive
       errors = []
       parse_evidence_reference(reference, task_repository, 0, errors)&.fetch("url") ||
         reference
+    end
+
+    def undelivered_receipt?(receipt)
+      self.class.undelivered?(receipt.fetch("reason"), receipt.fetch("evidence"))
     end
 
     def successor_reference(successor)

@@ -891,6 +891,7 @@ components:
         - Hive::AgentGitGate::RemoteObservation
         - Hive::AgentGitGate::MaterializationReceipt
         - Hive::AgentGitGate::PublicationReceipt
+        - Hive::AgentGitGate::FastForwardReceipt
       errors:
         - Hive::AgentGitGate::InvalidRequest
         - Hive::AgentGitGate::UnsupportedOperation
@@ -898,6 +899,7 @@ components:
         - Hive::AgentGitGate::RemoteConflict
         - Hive::AgentGitGate::MaterializationFailed
         - Hive::AgentGitGate::PublicationFailed
+        - Hive::AgentGitGate::FastForwardRefused
     owned_paths:
       - lib/hive/agent_git_gate.rb
       - lib/hive/managed_git.rb
@@ -905,8 +907,10 @@ components:
       - "Repository objects, refs, worktrees, and publication receipts"
     schema_contracts:
       - "Expected remote object identity and before/after publication receipt"
+      - "Expected local OID and observed remote OID for a clean fast-forward receipt"
     lock_contracts:
       - "Expected-OID lease is revalidated at publication"
+      - "Observed remote OID is re-observed immediately before a fast-forward"
     component_dependencies: []
     allowed_hive_dependencies:
       - hive/errors
@@ -920,6 +924,7 @@ components:
       - lib/hive/worktree.rb
       - lib/hive/stages/agent_report.rb
       - lib/hive/stages/draft_pr_handoff.rb
+      - lib/hive/review_fast_forward_adoption.rb
     mutation_authority: "Hive injects credential, transport, branch, PR, and operator-approval policy."
     recovery_surface: "Receipts preserve observed identities; publication failure remains explicit and retryable."
     wiki_page: wiki/modules/agent_git_gate.md

@@ -3,7 +3,7 @@ title: 7-artifacts stage
 type: stage
 source: lib/hive/stages/artifacts.rb
 created: 2026-05-22
-updated: 2026-09-06
+updated: 2026-11-20
 tags: [stage, artifacts, evidence, review]
 ---
 
@@ -377,6 +377,19 @@ and reviewer capability. Legacy media follows in a visibly labelled
   producer, or reviewer prompt. Other typed provider failures retain
   `reason=provider_error`, the provider, status code when supplied, and a
   bounded message rather than being mislabeled as invalid evidence.
+- Opt-in `implementation.limit_fallback` (see [[modules/config]]): when the
+  inference or reviewer role hits a classified limit and its profile is
+  mapped, `run_role!` re-runs that role once, in a fresh context, on the
+  fallback profile (log label suffix `-fallback-<agent>`). The substitution is
+  journaled as `implementation_identity_substituted` and the evidence actor
+  names the agent that actually ran. `artifacts.model` / `effort` and the
+  `models:` routes apply to the substitute only when `artifacts.agent` names
+  the fallback; otherwise it runs the profile's default model. The producer
+  never substitutes: its capture toolkit, permission arguments, and runtime
+  policy are prepared for the producer profile before launch, so its limit
+  is annotated `fallback_outcome=unsupported`. A deferred, unrecorded, or
+  failed substitute keeps the primary's `limits_reached` marker annotated
+  with `primary_agent=`, `fallback_agent=`, and `fallback_outcome=`.
 
 ## Backlinks
 

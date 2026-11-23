@@ -40,6 +40,21 @@ class DependencyAdmissionTest < Minitest::Test
     assert_nil active.task_snapshot(project: "app", slug: "missing")
   end
 
+  # A prerequisite archived as superseded without delivery evidence did not
+  # deliver: its dependents must move to the successor, like cancellation.
+  def test_undelivered_supersession_does_not_satisfy_a_dependency
+    superseded = task("app", "base", stage: "9-done").with(superseded_by: "app:rails-port")
+    tasks = [ task("app", "dependent", depends_on: "base"), superseded, task("app", "rails-port") ]
+    ctx = context(project(tasks: tasks))
+
+    verdict = ctx.verdict(project: "app", slug: "dependent")
+    assert_error verdict, "dependency_validation_failed"
+    assert_includes verdict.admission_error.safe_correction,
+                    "superseded by app:rails-port without delivery; depend on app:rails-port instead"
+    assert ctx.verdict(project: "app", slug: "base").clear?
+    assert_nil task("app", "plain").superseded_by
+  end
+
   def test_cross_project_reference_requires_exact_project_and_repository_identity
     app = project(tasks: [ task("app", "dependent", depends_on: "data:base") ])
     data = project(name: "data", stored: "github.com/acme/data", live: "github.com/acme/data",

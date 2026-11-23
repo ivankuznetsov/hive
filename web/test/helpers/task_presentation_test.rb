@@ -111,6 +111,11 @@ class TaskPresentationTest < ActionView::TestCase
     assert_select ".primary-markdown h1.document-section-label", count: 0
   end
 
+  test "image-only markdown document is not treated as empty" do
+    doc = render_markdown_document("![Architecture](https://example.com/diagram.png)")
+    refute doc.fetch(:empty)
+  end
+
   test "repository web url normalizes native and common repository spellings" do
     assert_equal "https://github.com/acme/demo", repository_web_url("github.com/acme/demo")
     assert_equal "https://github.com/acme/demo", repository_web_url("https://github.com/acme/demo.git")

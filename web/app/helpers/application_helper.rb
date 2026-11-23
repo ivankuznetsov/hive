@@ -133,9 +133,15 @@ module ApplicationHelper
 
     {
       html: fragment.to_html.html_safe,
-      empty: fragment.element_children.none? { |node| node["hidden"].nil? && node.text.strip.present? },
+      empty: fragment.element_children.none? { |node| visible_markdown_content?(node) },
       outline: outline.length >= 4 ? outline.freeze : [].freeze
     }.freeze
+  end
+
+  def visible_markdown_content?(node)
+    return false unless node["hidden"].nil?
+
+    node.text.strip.present? || node.at_css("img, svg, video").present? || node.name.in?(%w[img svg video])
   end
 
   # execute writes a bare "## Implementation" stub into task.md before any

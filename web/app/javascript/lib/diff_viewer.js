@@ -6,7 +6,7 @@ async function enhance(host) {
   if (!raw || !raw.textContent.includes('diff --git ')) return;
   host.dataset.diffReady = 'loading';
   try {
-    renderer ||= import('lib/diff_renderer');
+    renderer ||= import('lib/diff_renderer').catch(err => { renderer = null; throw err; });
     const { Diff2HtmlUI } = await renderer;
     if (!host.isConnected) return;
     const output = document.createElement('div');

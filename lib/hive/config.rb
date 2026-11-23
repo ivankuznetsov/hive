@@ -1875,9 +1875,17 @@ module Hive
       entry
     end
 
+    # Mirrors the global registry into the runtime database's project rows.
+    # Registration syncs only when the database already exists, so whatever
+    # creates the database (`hive setup`, `hive runtime init`) calls this
+    # afterwards: projects registered before that would otherwise have no row,
+    # and their tasks cannot be dispatched as attempts.
     def sync_runtime_projects!
       path = Hive::Paths.runtime_control_plane_path
-      return unless File.file?(path)
+      # Without the registry's directory nothing was ever registered under
+      # this home and its lock cannot be taken. A missing registry file in an
+      # existing directory still deactivates every runtime project.
+      return unless File.file?(path) && File.directory?(File.dirname(global_config_path))
 
       require "hive/runtime_control_plane"
       with_global_config_lock do
@@ -1914,7 +1922,6 @@ module Hive
     rescue Hive::RuntimeControlPlane::Error, Sequel::Error => error
       raise ConfigError, "runtime project registry synchronization failed: #{error.message}"
     end
-    private_class_method :sync_runtime_projects!
 
     def inactive_runtime_project_identity(name:, state_root_path:)
       return unless File.file?(Hive::Paths.runtime_control_plane_path)

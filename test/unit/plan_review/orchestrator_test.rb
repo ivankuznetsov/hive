@@ -1301,6 +1301,61 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  # A waiver of the adversarial coverage, or a downgrade below
+  # adversarial_min_level, ends the wait for an unavailable adversarial family.
+  %w[waive_coverage downgrade_level].each do |action|
+    define_method("test_#{action}_ends_the_wait_for_an_unavailable_adversarial_family") do
+      with_task(mandatory_plan) do |task, cfg|
+        # The shipped default: the adversarial lens applies only at mandatory.
+        cfg["plan_review"]["adversarial_min_level"] = "mandatory"
+        resolver = lambda do |role:, **|
+          next resolve_route(role:) unless role == "adversarial"
+
+          requested = route_identity("grok", "grok-4.6", "grok", "native_adversarial")
+          Hive::PlanReview::RouteResolver::Resolution.new(
+            status: "unsupported", candidate: nil,
+            receipt: {
+              "role" => role, "requested" => requested, "actual" => {},
+              "capability_result" => "unsupported", "independence_verified" => false,
+              "independence_reason" => "reviewer_family_unavailable",
+              "attempts" => [ { "candidate" => requested, "status" => "unsupported" } ]
+            }
+          )
+        end
+        adapter = success_adapter
+        waiting = orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!.record
+        assert_equal "reviewing", waiting.state
+
+        coverage = waiting["coverage"].find { |entry| entry.fetch("name") == "adversarial" }
+        service = Hive::PlanReview::DecisionService.new(
+          task:, task_locker: ->(&block) { block.call }, commit_locker: ->(&block) { block.call },
+          committer: ->(*) { }, freshness_checker: ->(*) { }
+        )
+        value, target = if action == "waive_coverage"
+          fingerprint = coverage["fingerprint"] || Hive::PlanReview::Identity.coverage(
+            review_id: waiving_id = waiting.review_id, name: "adversarial",
+            policy_fingerprint: waiting.policy_fingerprint
+          )
+          [ { "coverage" => "adversarial" }, fingerprint ]
+        else
+          [ { "level" => "standard" }, nil ]
+        end
+        service.apply(
+          action:, review_id: waiting.review_id, task_generation: waiting.task_generation,
+          policy_fingerprint: waiting.policy_fingerprint,
+          expected_artifact_digest: Hive::PlanReview::Projection.new(waiting).observation_digest,
+          target_fingerprint: target, value:, reason: "No adversarial family in this install.",
+          origin: "cli", operator: "test", authorized: true
+        )
+
+        resumed = orchestrator(task, cfg, adapter:, route_resolver: resolver).advance!.record
+
+        refute_includes %w[reviewing retry_scheduled], resumed.state, resumed.required_action
+        assert_equal 0, adapter.calls.count { |request| request.kind == "adversarial" }
+      end
+    end
+  end
+
   # Mandatory capability failures get cheap re-probes, then move to a paced
   # retry instead of growing current.json on every daemon tick or parking
   # forever after the provider becomes available.

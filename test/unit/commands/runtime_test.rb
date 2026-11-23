@@ -105,6 +105,50 @@ class RuntimeCommandTest < Minitest::Test
     end
   end
 
+  def test_init_creates_the_database_and_records_projects_registered_before_it
+    with_tmp_global_config(runtime: false) do |home|
+      root = File.join(home, "workspace", "demo")
+      write_registry(root)
+      path = Hive::Paths.runtime_control_plane_path
+      refute_path_exists path
+
+      output = StringIO.new
+      assert_equal 0, Hive::Commands::Runtime.new("init", json: true, output: output).call
+      payload = JSON.parse(output.string)
+      assert_empty runtime_schema.validate(payload).to_a
+      assert_equal [ true, "init", "active" ], [ payload.fetch("ok"), payload.fetch("action"), payload.dig("result", "phase") ]
+      assert_path_exists path
+      assert_equal [ [ "demo", 1, File.join(root, ".hive-state") ] ], runtime_projects
+    end
+  end
+
+  def test_init_is_idempotent_and_keeps_the_installation
+    with_tmp_global_config(runtime: false) do |home|
+      write_registry(File.join(home, "workspace", "demo"))
+      ids = 2.times.map do
+        output = StringIO.new
+        assert_equal 0, Hive::Commands::Runtime.new("init", json: true, output: output).call
+        JSON.parse(output.string).dig("result", "installation_id")
+      end
+      assert_equal 1, ids.uniq.size
+      assert_equal 1, runtime_projects.size
+    end
+  end
+
+  def test_executable_init_bootstraps_without_services
+    with_tmp_global_config(runtime: false) do |home|
+      output, errors, process = Open3.capture3(
+        { "HIVE_HOME" => home }, RbConfig.ruby,
+        File.expand_path("../../../bin/hive", __dir__), "runtime", "init", "--json"
+      )
+      assert_equal 0, process.exitstatus, errors
+      payload = JSON.parse(output)
+      assert_equal [ true, "active" ], [ payload.fetch("ok"), payload.dig("result", "phase") ]
+      assert_empty runtime_schema.validate(payload).to_a
+      refute_path_exists File.join(home, ".config", "systemd")
+    end
+  end
+
   def test_projects_lists_registry_paths_without_loading_project_config
     with_tmp_global_config(runtime: false) do |home|
       root = File.join(home, "workspace", "demo")
@@ -275,6 +319,19 @@ class RuntimeCommandTest < Minitest::Test
   end
 
   private
+
+  def write_registry(root)
+    File.write(Hive::Config.global_config_path, {
+      "registered_projects" => [ { "name" => "demo", "path" => root } ]
+    }.to_yaml)
+  end
+
+  def runtime_projects
+    database = Hive::RuntimeControlPlane::Database.new(path: Hive::Paths.runtime_control_plane_path)
+    database.read { |db| db[:projects].exclude(project_id: "global-maintenance").select_map(%i[name active state_root_path]) }
+  ensure
+    database&.disconnect
+  end
 
   # Seeds one task-owned reference, then leaves a clean WAL database with no
   # sidecars, which is what a quiesced, read-only-mounted state root holds.

@@ -1236,12 +1236,23 @@ module Hive
       # Initial review legs. The adversarial leg runs only when the record
       # requested adversarial coverage, so a review created before the
       # adversarial lens became level-gated keeps the coverage it asked for.
+      # The legs come from the record's own coverage, so a review keeps the
+      # adversarial leg it requested. Two operator authority actions end it:
+      # a waiver of that coverage, and a downgrade below adversarial_min_level.
+      # Otherwise an unavailable adversarial family (e.g. Grok missing from a
+      # container) keeps the review in a capability wait neither can end.
       def initial_roles(record)
-        if record["coverage"].any? { |entry| entry.fetch("name") == "adversarial" }
+        adversarial = record["coverage"].find { |entry| entry.fetch("name") == "adversarial" }
+        if adversarial && adversarial["status"] != "waived" && !downgraded_below_adversarial_lens?(record)
           %w[primary adversarial]
         else
           %w[primary]
         end
+      end
+
+      def downgraded_below_adversarial_lens?(record)
+        Array(record["decisions"]).any? { |decision| decision["action"] == "downgrade_level" } &&
+          !adversarial_lens?(record.effective_level)
       end
 
       # "off" disables the adversarial leg at every level for projects whose

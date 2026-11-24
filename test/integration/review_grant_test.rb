@@ -75,6 +75,83 @@ class ReviewGrantIntegrationTest < Minitest::Test
     end
   end
 
+  # The uk-new-companies wedge, end to end: the hosted gate parked a granted
+  # review on a base conflict, the operator merged the base as
+  # reviews/ci-blocked.md instructs, and a routine retry must restart CI and
+  # review on the merged head exactly once, without the stale grant.
+  def test_base_merge_after_a_granted_base_conflict_restarts_one_fresh_review
+    with_base_merge_grant_task do |task, approved|
+      ci_dir = Dir.mktmpdir("base-merge-ci")
+      ci_log = File.join(ci_dir, "ci-heads.log")
+      ci_script = File.join(ci_dir, "record-ci-head.sh")
+      File.write(ci_script, "git rev-parse HEAD >> #{Shellwords.escape(ci_log)}\n")
+      config_path = File.join(task.hive_state_path, "config.yml")
+      config = YAML.safe_load(File.read(config_path))
+      config["review"]["ci"]["command"] = [ "sh", ci_script ]
+      File.write(config_path, config.to_yaml)
+      merged = merge_task_base(task)
+      mark_task_base_conflict(task, blocked: approved)
+      marker = Hive::Markers.current(task.state_file)
+      row = { project: task.project_name, slug: task.slug, folder: task.folder,
+        state_file: task.state_file, stage: "6-review", workflow: "coding",
+        marker: marker.name.to_s, marker_attrs: marker.attrs,
+        state_file_mtime: Time.now.utc - 3600, live_task_lock: false }
+      generation = Struct.new(:task_generation, :progress_token).new("a" * 64, "b" * 64)
+      coordinator = Hive::Daemon::RecoveryCoordinator.new(task_resolver: ->(**) { task },
+        safety: ->(_) { [ true, "safe" ] }, generation_resolver: ->(*, **) { generation })
+      admitted = coordinator.request(row: row, requestor: "cli")
+      request = coordinator.instance_variable_get(:@request_queue).fetch(admitted.request_id)
+      assert_equal "cleared", coordinator.resume(request: request, row: row).phase
+      assert_equal "cleared", coordinator.resume(request: request, row: row).phase
+
+      reviews = []
+      fixes = []
+      clean_review = lambda do |_cfg, ctx, _task, **|
+        reviews << [ ctx.pass, Hive::Stages::Review.git_head(ctx.worktree_path) ]
+        File.write(File.join(ctx.task_folder, "reviews", "codex-#{format('%02d', ctx.pass)}.md"), "## High\nNo findings.\n")
+        :ok
+      end
+      triage = lambda do |cfg:, ctx:|
+        path = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
+        File.write(path, "# Escalations\n")
+        Hive::Stages::Review::Triage::Result.new(status: :ok, escalations_path: path,
+          error_message: nil, tampered_files: [], limit_text: nil)
+      end
+      fix = lambda do |_task, _cfg, ctx, **|
+        fixes << ctx.pass
+        { status: :ok }
+      end
+      2.times do
+        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, clean_review) do
+          with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, triage) do
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, fix) do
+              capture_io { Hive::Commands::Run.new(task.folder).call }
+            end
+          end
+        end
+      end
+
+      assert_equal [ [ 1, merged ] ], reviews, "one fresh review, of the merged head, from pass 1"
+      ci_heads = File.readlines(ci_log, chomp: true)
+      refute_empty ci_heads, "CI runs again after the retry"
+      assert_equal [ merged ], ci_heads.uniq, "CI runs only on the merged head"
+      assert_empty fixes, "the expired grant admits no fix pass"
+      assert_equal :review_complete, Hive::Markers.current(task.state_file).name
+      assert_equal merged, Hive::Stages::Review.git_head(task.worktree_path)
+      budget = Hive::ReviewBudget.new(task: Hive::Task.new(task.folder), project: task.project_name)
+      refute budget.present?
+      audit = File.readlines(budget.audit_path).map { |line| JSON.parse(line) }
+      assert_equal [ %w[grant], %w[expiry base_merge_adopted] ],
+                   audit.map { |entry| [ entry.fetch("event"), entry["expiry_reason"] ].compact }
+      archives = Dir[File.join(task.folder, "reviews", "archive", "*")]
+      assert_equal 1, archives.size
+      assert File.file?(File.join(archives.first, "codex-04.md")), "the stale accepted finding is archived, not reused"
+      assert_empty Dir[File.join(task.folder, "reviews", "review-completion-*.json")]
+    ensure
+      FileUtils.rm_rf(ci_dir) if ci_dir
+    end
+  end
+
   def test_managed_process_with_valid_fresh_token_cannot_grant_or_mutate_task
     with_review_grant_task do |task, _cfg|
       budget = Hive::ReviewBudget.new(task: task, project: task.project_name)

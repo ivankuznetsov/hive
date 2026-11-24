@@ -1,9 +1,9 @@
 ---
 title: hive review-grant
 type: command
-source: lib/hive/commands/review_grant.rb, lib/hive/review_budget.rb, lib/hive/daemon/recovery_coordinator.rb, schemas/hive-review-grant.v1.json
+source: lib/hive/commands/review_grant.rb, lib/hive/review_budget.rb, lib/hive/daemon/recovery_coordinator.rb, lib/hive/review_base_merge_adoption.rb, schemas/hive-review-grant.v1.json
 created: 2026-11-02
-updated: 2026-11-02
+updated: 2026-11-24
 tags: [command, review, recovery, operator]
 ---
 
@@ -89,7 +89,13 @@ generation change expires the scope. Reset archives receipts with pass
 artifacts while retaining the task-root audit. Adopting a PR branch that was
 fast-forwarded outside Hive is such a reset: the audit records
 `expiry_reason=remote_fast_forward_adopted` and the next review starts a new
-generation on the adopted head (see [[publication-recovery]]). Audit alone never reconstructs
+generation on the adopted head (see [[publication-recovery]]). Adopting the
+operator's base merge after `REVIEW_CI_STALE reason=base_conflict` is the
+other such reset. It applies only when HEAD is one merge commit of the blocked
+head with a commit already on `origin/<base>`, and the grant validates at the
+blocked head. The audit records `expiry_reason=base_merge_adopted`, and one
+fresh review of the merged head follows, with no grant allowance. Any other
+head change keeps the `review_grant_evidence_changed` refusal. Audit alone never reconstructs
 active allowance. Version 1 has no release or cancel verb.
 
 This command is non-interactive and operator-only. Hive's Claude, Codex, Pi,

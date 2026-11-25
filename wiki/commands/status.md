@@ -221,7 +221,11 @@ PID-only compatibility. Malformed
 leases and task folders that move during observation do not abort the fleet
 response: they are counted under `source.malformed_locks` or
 `source.transition_skips`, and `complete` becomes false because liveness could
-not be proven. Malformed, absent, unreadable, or oversized metadata does not
+not be proven. A moved task folder counts as a transition only while its lease
+holder (runner or agent) is alive: a dead holder's lease that outlived its
+task's move (the holder died before releasing it, and nothing reclaims a lease
+once the task is done) counts under `source.stale_locks` and leaves `complete`
+true. Malformed, absent, unreadable, or oversized metadata does not
 hide a live task; the row falls back to its bounded folder identity and reports
 `metadata_status`.
 

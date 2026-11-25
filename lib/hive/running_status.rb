@@ -113,7 +113,20 @@ module Hive
         unless folder.start_with?("#{File.expand_path(project.fetch('hive_state_path'))}/stages/") &&
                File.basename(folder) == slug && Hive::Workflows.stage_dir?(stage) &&
                real_directory?(folder)
-          counters["transition_skips"] += 1
+          # A moved folder is an in-flight transition only while the lease
+          # holder lives. A dead holder's lease outlives its task's move (the
+          # process died before releasing it) and is never reclaimed once the
+          # task is done, so it is stale, not a reason to call the status
+          # partial forever.
+          begin
+            if lease_holder_alive?(lease.fetch(:payload))
+              counters["transition_skips"] += 1
+            else
+              counters["stale_locks"] += 1
+            end
+          rescue MalformedLock
+            counters["malformed_locks"] += 1
+          end
           next
         end
         begin
@@ -129,7 +142,13 @@ module Hive
       counters["projects_unavailable"] += by_state_root&.size.to_i
     end
 
-    def live_row(project, stage, folder_slug, task_folder, lock)
+    def lease_holder_alive?(lock)
+      task_lock_alive, agent_pid_alive = lease_liveness(lock)
+      task_lock_alive || agent_pid_alive ? true : false
+    end
+
+    # [runner alive, agent alive or nil when no agent pid is recorded].
+    def lease_liveness(lock)
       runner_pid = lock["pid"]
       raise MalformedLock unless runner_pid.is_a?(Integer) && runner_pid.positive?
 
@@ -147,6 +166,12 @@ module Hive
       else
         false
       end
+      [ task_lock_alive, agent_pid_alive ]
+    end
+
+    def live_row(project, stage, folder_slug, task_folder, lock)
+      runner_pid = lock["pid"]
+      task_lock_alive, agent_pid_alive = lease_liveness(lock)
       return nil unless task_lock_alive || agent_pid_alive
 
       metadata_status, metadata = read_metadata(task_folder)
@@ -175,7 +200,7 @@ module Hive
           "task_lock_alive" => task_lock_alive,
           "agent_pid_alive" => agent_pid_alive,
           "runner_pid" => task_lock_alive ? runner_pid : nil,
-          "agent_pid" => agent_pid_alive ? raw_agent_pid : nil
+          "agent_pid" => agent_pid_alive ? lock["claude_pid"] : nil
         }
       }
     end

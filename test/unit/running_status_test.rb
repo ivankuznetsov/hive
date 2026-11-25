@@ -423,6 +423,38 @@ class RunningStatusTest < Minitest::Test
     end
   end
 
+  # A holder that died after its task moved (a crash between the move and the
+  # release) leaves a lease no one reclaims once the task is done. It is a
+  # stale lock, not an in-flight transition, and keeps the status complete.
+  def test_moved_task_with_a_dead_holder_is_stale_not_a_transition
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "finished-task")
+      write_lock(folder, "pid" => 2_147_483_647, "lock_id" => "leaked")
+      FileUtils.mv(folder, "#{folder}-moved")
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal [], payload.fetch("tasks")
+      assert_equal 0, payload.dig("source", "transition_skips")
+      assert_equal 1, payload.dig("source", "stale_locks")
+      assert_equal true, payload.fetch("complete")
+    end
+  end
+
+  def test_moved_task_with_a_malformed_holder_is_counted_malformed
+    with_project do |project, hive_state|
+      folder = task_folder(hive_state, "1-inbox", "garbled-task")
+      write_lock(folder, "pid" => "not-a-pid", "lock_id" => "garbled")
+      FileUtils.mv(folder, "#{folder}-moved")
+
+      payload = status.payload([ project ], now: NOW)
+
+      assert_equal 0, payload.dig("source", "transition_skips")
+      assert_equal 1, payload.dig("source", "malformed_locks")
+      refute payload.fetch("complete")
+    end
+  end
+
   def test_malformed_metadata_does_not_hide_a_live_task
     with_project do |project, hive_state|
       folder = task_folder(hive_state, "1-inbox", "bad-meta-task")

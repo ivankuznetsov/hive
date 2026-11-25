@@ -1,0 +1,1 @@
+- 2026-11-25: `hive status` counts a moved task folder as a transition only while the lease holder lives. A dead holder's lease that outlived its task's move is now a stale lock, so a leaked lease on a done task no longer marks the status `PARTIAL — 1 transitions skipped` forever ([[commands/status]]).

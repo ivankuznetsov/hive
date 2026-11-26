@@ -38,7 +38,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     script = <<~'RUBY'
       require "agent_cli_runtime"
       abort "loaded Hive unexpectedly" if defined?(Hive)
-      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.4"
+      abort "wrong version" unless AgentCliRuntime::VERSION == "0.2.5"
       puts AgentCliRuntime::Profiles.names.join(",")
     RUBY
     out, err, status = Bundler.with_unbundled_env do
@@ -333,6 +333,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.4"))
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.5"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.99"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))
     assert File.read(File.expand_path("../../lib/hive.rb", __dir__))

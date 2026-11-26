@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-11-26
+
+Adds built-in **Antigravity CLI (`agy`)** and **Muse Code (`muse`)** providers alongside OpenCode 2.x compatibility and sharper provider error and environment handling. All changes are additive and backwards-compatible with `~> 0.2.0` consumers.
+
+### New providers
+
+- **Antigravity CLI (`:agy`)**: Seventh built-in provider, appended after `:muse` without changing existing provider ordering. Compiles headless print mode (`agy --input-format=text --dangerously-skip-permissions --output-format stream-json`) over piped stdin so large prompts stay out of `argv`, with repeatable `--add-dir`, `--model`, and `--effort` flags. Includes binary-safe OAuth token probing (`~/.gemini/antigravity-cli/antigravity-oauth-token`), `step_update`/`result` usage extraction (`input_tokens`, `output_tokens`, `thinking_tokens` as `reasoning`, `cache_read_tokens` as `cache_read`, `output_includes_reasoning: true`), and non-`SUCCESS` `result` error extraction. Scoped `read-only` / `workspace-write` flags fail closed.
+- **Muse Code (`:muse`)**: Sixth built-in provider, appended after `:opencode`. Compiles `muse exec --prompt-file=/dev/stdin --json` with tempfile-backed stdin, model and reasoning-effort pinning, sandboxed `workspace-write` and `read-only` modes, `run.usage` per-model token aggregation, `run.terminal` error extraction, and XDG config/data resolution. Adds three reusable profile hooks: dual-form version parsing (when one numeric core appears twice, e.g. `1.4.14 (1.4.14-R7309.1)`), `configuration_directory_probe`, and `prompt_argument`.
+
+### Provider compatibility & error handling
+
+- **OpenCode 2.x private servers (`--standalone`)**: The route probe detects `--standalone` from `run --help`, records `:private_server` capability evidence, and threads the flag through `auth list`, `models`, prepared `run`, and sanitized `export` so isolated runs do not collide with OpenCode 2.x's shared background server. OpenCode 1.x is unchanged.
+- **OpenCode 2.x flattened error payloads**: Parses both OpenCode 1.x nested (`error.name` + `error.data.message`) and 2.x flattened (`error.type` + `error.message` + `error.status`) error events, including pre-session errors without a `sessionID`, so upstream rate limits surface as typed `rate_limited` errors instead of `MalformedOutput`.
+- **Claude quota window events**: Extracts Claude's message-free rejected `rate_limit_event` for `five_hour` and `seven_day` account windows as a typed `provider_limit` with bounded quota text.
+- **Codex transport retry filtering**: Skips `Reconnecting... n/m` progress notices in provider error extraction so transient reconnect lines do not mask the terminal error (such as a `401` from a revoked login), and parses `unexpected status NNN` HTTP status codes.
+
+### Isolation & security
+
+- **OpenCode probe & overlay environment hardening**: `ProbeRequest` restricts environment overrides to `OPENCODE_OVERLAY_ENVIRONMENT_KEYS` and scrubs Ruby/Bundler injection variables (`RUBYOPT`, `RUBYLIB`, `GEM_HOME`, `GEM_PATH`, `BUNDLE_BIN_PATH`, `BUNDLE_GEMFILE`) last; both `ProbeRequest` and `OpenCodePreparationRequest` reject credential keys overlapping `SCRUBBED_RUNTIME_ENVIRONMENT_KEYS`.
+
 ## 0.2.4 - 2026-08-25
 
 - Expose the OpenCode permission compiler independently from the prepared

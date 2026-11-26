@@ -3,9 +3,32 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-22
+updated: 2026-11-26
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## E2E binary fixture concurrency (2026-11-26)
+
+Binary tests temporarily edit the shared coverage catalog and scenario tree.
+Attempt-unique unexpected-failure scenario names avoid name collisions, but do
+not make the shared catalog updates safe for parallel execution. Keep these
+fixtures serial unless catalog isolation or coordination is added. The
+`:missing_scenario` fixture also leaves a dangling symlink in the real scenario
+tree for the duration of its block. Concurrent catalog readers (`list`, `run`,
+and `coverage`) can fail during that window, even if they never write the
+catalog; avoid running them alongside these tests.
+
+## E2E errors after report emission (2026-11-26)
+
+`bin/hive-e2e run --json` emits its report before the final summary lookup and
+exit decision. A later `StandardError` still appends a `run_failed` error
+envelope, so stdout then contains two JSON documents. This pre-existing
+ordering remains unchanged by the run-failure diagnostic fix; there is no
+suppression guard. The filesystem regressions in
+`test/e2e/lib/hive_e2e_binary_test.rb` prove a single schema-valid error
+document only for failures before report emission. No dedicated post-emission
+regression exists. See [[e2e]] for the scoped class prefix and stderr-only
+`HIVE_E2E_DEBUG=1` contract.
 
 ## Supersession by a successor task: residual scope (2026-11-22)
 

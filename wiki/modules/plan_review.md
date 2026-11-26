@@ -281,6 +281,14 @@ or message-start events, ignoring events with `parent_tool_use_id`. Aggregate
 An explicit main-agent identity takes precedence over usage; ambiguous usage
 without identity stays unknown instead of borrowing the configured model.
 
+Antigravity reports its selected model in the initial stream event. The
+adversarial review requires a matching observed model and family. For example,
+a Gemini Neon XHigh review can establish independence from an OpenAI planner.
+Antigravity planners also need an observed model. Hive treats an older planner
+receipt with a conflicting model and family as unverified.
+Each metered review attempt stores its token counts alongside the actual route
+in the immutable receipt. Parser-rejected reviews retain the same accounting.
+
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;
 the durable identity records provider-default sentinels instead. Historical

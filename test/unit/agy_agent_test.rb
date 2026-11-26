@@ -7,6 +7,7 @@ require "hive/implementation_identity/utility_models"
 require "hive/model_routing"
 require "hive/plan_review/planner_identity"
 require "hive/task"
+require "hive/stages/base"
 
 # Antigravity CLI (`agy`) as a built-in Hive agent profile, exercised through
 # the fake-agy fixture binary so argv, version, auth, settings model
@@ -237,15 +238,26 @@ class AgyAgentTest < Minitest::Test
       ENV["GOOGLE_API_KEY"] = "must-not-reach-child"
       ENV["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/fake-adc.json"
 
-      result = Hive::Agent.new(
-        task: task, prompt: "secret prompt body", max_budget_usd: 1,
-        timeout_sec: 10, profile: Hive::AgentProfiles.lookup(:agy),
-        expected_output: output
-      ).run!
+      database = Hive::RuntimeControlPlane::Database.new(path: File.join(dir, "usage.sqlite3")).migrate!
+      result = with_replaced_singleton_method(Hive::UsageDb, :database, -> { database }) do
+        Hive::Stages::Base.spawn_agent(
+          task, prompt: "secret prompt body", max_budget_usd: 1,
+          timeout_sec: 10, profile: Hive::AgentProfiles.lookup(:agy),
+          expected_output: output, model: "requested-model"
+        )
+      end
 
       assert_equal :ok, result[:status], result.inspect
       assert_equal "fake agy final", result[:final_message]
       assert_equal :structured, result[:final_message_source]
+      assert_equal "gemini-4-neon-xhigh", result[:model]
+      assert_equal result[:model], result.dig(:usage, :model)
+      assert_equal "provider_stream_event", result[:execution_identity_source]
+      row = database.read do |db|
+        db[:token_usage].where(task_slug: task.slug, agent: "agy").first
+      end
+      assert_equal [ "requested-model", "gemini-4-neon-xhigh", 120, 45, 20, 10 ],
+                   row.values_at(:requested_model, :actual_model, :input, :output, :reasoning, :cache_read)
       assert_equal 120, result[:usage][:input]
       assert_equal 45, result[:usage][:output]
       assert_equal 20, result[:usage][:reasoning]
@@ -264,7 +276,28 @@ class AgyAgentTest < Minitest::Test
       refute_includes log, "fake agy final"
       assert_includes log, "[structured message omitted type=step_update]"
       assert_includes log, "[structured message omitted type=result]"
+    ensure
+      database&.disconnect
     end
+  end
+
+  def test_only_concrete_models_from_the_main_conversation_identify_the_run
+    identity = Hive::AgentSupport.for(:agy)::Stream::ModelIdentity.new
+    identity.observe("event" => "step_update", "step_update" => { "conversation_id" => "child",
+                     "step_type" => "agent_response", "model" => "child-model" })
+    identity.observe("event" => "init", "conversation_id" => "main", "init" => { "model" => "default" })
+    identity.observe("event" => "result", "result" => { "conversation_id" => "child", "model" => "child-model" })
+    assert_nil identity.model
+
+    identity.observe("event" => "init", "conversation_id" => "main",
+                     "init" => { "model" => "Gemini 4 Neon (XHigh)" })
+    assert_equal "gemini-4-neon-xhigh", identity.model
+    identity.observe("event" => "step_update", "step_update" => { "conversation_id" => "main",
+                     "step_type" => "agent_response", "model" => "claude-opus-5-5-high" })
+    assert_equal "claude-opus-5-5-high", identity.model
+    identity.observe("event" => "result", "result" => { "conversation_id" => "main", "model" => "another-model" })
+    assert_nil identity.model
+    assert_equal [ nil, nil ], Hive::AgentSupport::Agy.execution_identity(identity.model)
   end
 
   def test_spawn_result_error_event_is_an_error_despite_zero_exit
@@ -350,7 +383,7 @@ class AgyAgentTest < Minitest::Test
                  Hive::AgentSupport::Agy.state_directory(environment: env)
     assert_equal [ "google", "gemini-4-neon-xhigh" ],
                  Hive::AgentSupport::Agy.execution_identity("gemini-4-neon-xhigh")
-    assert_equal [ "google", nil ],
+    assert_equal [ nil, nil ],
                  Hive::AgentSupport::Agy.execution_identity("")
     assert_equal({ permission_mode: nil, allowed_tools: nil, disallowed_tools: nil },
                  Hive::AgentSupport::Agy.plan_review_launch_kwargs(permission_mode: "read-only"))

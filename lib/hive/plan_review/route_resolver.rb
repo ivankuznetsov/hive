@@ -173,7 +173,13 @@ module Hive
       end
 
       def independence(planner_identity, actual)
-        planner = normalize_hash(planner_identity || {})["family"].to_s.strip.downcase
+        identity = normalize_hash(planner_identity || {})
+        planner = identity["family"].to_s.strip.downcase
+        # Older Antigravity records labeled every planner Google, including Claude.
+        support = Hive::AgentSupport.for(identity["provider"])
+        if support&.respond_to?(:model_family) && support.model_family(identity["model"]) != planner
+          return [ false, "planner_family_unknown" ]
+        end
         reviewer = actual["family"].to_s.strip.downcase
         return [ false, "planner_family_unknown" ] if planner.empty?
         return [ false, "reviewer_family_unknown" ] if reviewer.empty?
@@ -205,6 +211,9 @@ module Hive
           attested = support&.respond_to?(:attests_family_without_served_model?) &&
                      support.attests_family_without_served_model?(family:)
           return attested ? actual.merge("family" => redact(family)).freeze : actual
+        end
+        if support&.respond_to?(:model_family) && support.model_family(served_model) != family.strip.downcase
+          return actual
         end
         equivalent = served_model == requested_model ||
                      support&.respond_to?(:model_identity_equivalent?) &&

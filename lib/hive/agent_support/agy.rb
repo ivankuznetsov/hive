@@ -41,8 +41,20 @@ module Hive::AgentSupport::Agy
     )
   end
 
+  # Antigravity can run models from more than one vendor.
+  def model_family(model)
+    case model.to_s
+    when /\Agemini-/ then "google"
+    when /\Aclaude-/ then "anthropic"
+    when /\Agpt-/ then "openai"
+    end
+  end
+
   def execution_identity(model)
-    [ "google", model.to_s.empty? ? nil : model.to_s ]
+    value = model.to_s
+    return [ nil, nil ] if value.empty?
+
+    [ model_family(value), value ]
   end
 
   def plan_review_launch_kwargs(**)

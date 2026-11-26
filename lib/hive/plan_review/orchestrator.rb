@@ -1426,6 +1426,7 @@ module Hive
           "independence_reason" => adapter["independence_reason"] || base["independence_reason"],
           "attempt_id" => attempt_id, "outcome" => outcome, "retry_at" => retry_at,
           "attempts" => base["attempts"] || adapter["attempts"],
+          "usage" => adapter["usage"],
           "diagnostic_source" => adapter["diagnostic_source"] || base["diagnostic_source"],
           "diagnostic" => diagnostic
         }.compact

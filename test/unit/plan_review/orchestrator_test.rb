@@ -1912,6 +1912,21 @@ class PlanReviewOrchestratorTest < Minitest::Test
     end
   end
 
+  def test_metered_review_usage_survives_publication_on_the_original_attempt
+    usage = { "input" => 120, "output" => 45, "reasoning" => 20, "cache_read" => 0 }
+    with_task(mandatory_plan) do |task, cfg|
+      adapter = FakeAdapter.new do |request|
+        result = successful_result(request)
+        result.with(route_receipt: result.route_receipt.merge("usage" => usage))
+      end
+      record = orchestrator(task, cfg, adapter:).advance!.record
+      store = Hive::PlanReview::Store.new(task_folder: task.folder)
+      receipt = JSON.parse(store.read_reference(record["artifacts"].fetch("adversarial_route")))
+      assert_equal usage, receipt["usage"]
+      assert_equal receipt, record["routes"].find { |r| r["attempt_id"] == receipt["attempt_id"] }
+    end
+  end
+
   def test_unverified_adversarial_route_cannot_satisfy_independent_coverage
     [ [ standard_plan, "degraded_cleared", "terminal_failure" ],
       [ mandatory_plan, "blocked", nil ] ].each do |plan, state, degradation|

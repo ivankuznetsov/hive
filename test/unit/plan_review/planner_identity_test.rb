@@ -45,10 +45,19 @@ class PlanReviewPlannerIdentityTest < Minitest::Test
       )
     )
 
-    identity = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:)
+    identity = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "gemini-4-neon-xhigh")
+    silent = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:)
+    assert_nil silent.fetch("family")
 
     assert_equal "google", identity.fetch("family")
     assert_equal "antigravity-cli/v1", identity.fetch("route")
+    claude = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "claude-opus-5-5-high")
+    assert_equal "anthropic", claude.fetch("family")
+    legacy = claude.merge("family" => "google")
+    assert_equal [ false, "planner_family_unknown" ],
+                 Hive::PlanReview::RouteResolver.independence(legacy, { "family" => "anthropic" })
+    unknown = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "custom-model")
+    assert_nil unknown.fetch("family")
     assert_equal [ true, "different_model_family" ],
                  Hive::PlanReview::RouteResolver.independence(identity, { "family" => "openai" })
     assert_equal [ false, "same_model_family" ],

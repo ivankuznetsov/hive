@@ -26,6 +26,11 @@ module Hive
         OUTPUT_BASENAME = "hive-plan-review-result.json".freeze
 
         class HiveRunner
+          TOKEN_FIELDS = %i[
+            input output cached cache_read cache_write reasoning
+            input_includes_cache_read input_includes_cache_write output_includes_reasoning
+          ].freeze
+
           def initialize(task:, cfg:)
             @task = task
             @cfg = cfg
@@ -73,10 +78,7 @@ module Hive
           rescue Hive::ArtifactFirewall::Error => error
             { "status" => "terminal_failure", "diagnostic" => error.message }
           rescue Hive::AgentError => error
-            {
-              "status" => "retryable_failure", "diagnostic" => error.message,
-              "actual_route" => request.reviewer
-            }
+            normalize_result({ status: :error }, request).merge("diagnostic" => error.message)
           end
 
           # Capability checks must use the same project profile as the launch
@@ -118,7 +120,7 @@ module Hive
               "model" => request.reviewer["model"],
               "family" => request.reviewer["family"]
             }
-            if result.key?(:model) || !served_model.empty?
+            if request.reviewer["provider"] == "agy" || result.key?(:model) || !served_model.empty?
               actual["model"] = served_model
               actual.delete("family")
               actual = RouteResolver.attest_observed_identity(
@@ -129,7 +131,8 @@ module Hive
               "status" => status,
               "diagnostic" => result[:error_message],
               "retry_at" => retry_at,
-              "actual_route" => actual
+              "actual_route" => actual,
+              "usage" => result[:usage]&.slice(*TOKEN_FIELDS)&.compact&.transform_keys(&:to_s)
             }
           end
 
@@ -247,14 +250,14 @@ module Hive
             return result(
               "terminal_failure",
               diagnostic: "reviewer mutated the immutable plan snapshot",
-              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+              route_receipt: route_receipt(request, run: runner_result)
             )
           end
           unless File.binread(disposable_plan) == snapshot_bytes
             return result(
               "terminal_failure",
               diagnostic: "reviewer mutated the immutable disposable plan snapshot",
-              route_receipt: route_receipt(request, actual: runner_result["actual_route"])
+              route_receipt: route_receipt(request, run: runner_result)
             )
           end
 
@@ -265,7 +268,7 @@ module Hive
               diagnostic: runner_result["diagnostic"],
               retry_at: runner_result["retry_at"],
               route_receipt: route_receipt(
-                request, actual: runner_result["actual_route"],
+                request, run: runner_result,
                 diagnostic_source: runner_result["diagnostic"] && "runner"
               )
             )
@@ -299,7 +302,7 @@ module Hive
             return result(
               "retryable_failure", diagnostic: e.message, rejected_output: bytes,
               route_receipt: route_receipt(
-                request, actual: runner_result["actual_route"], diagnostic_source: "parser"
+                request, run: runner_result, diagnostic_source: "parser"
               )
             )
           end
@@ -313,7 +316,7 @@ module Hive
             diagnostic: parsed.diagnostic,
             retry_at: parsed.retry_at,
             route_receipt: route_receipt(
-              request, actual: runner_result["actual_route"],
+              request, run: runner_result,
               diagnostic_source: parsed.diagnostic && "reviewer"
             )
           )
@@ -328,16 +331,14 @@ module Hive
             route_receipt: route_receipt(request)
           )
         rescue StaleObservation, InvalidRecord => e
-          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
           result(
             "terminal_failure", diagnostic: e.message,
-            route_receipt: route_receipt(request, actual:, diagnostic_source: "parser")
+            route_receipt: route_receipt(request, run: runner_result, diagnostic_source: "parser")
           )
         rescue Hive::ConfigError => e
-          actual = runner_result.is_a?(Hash) ? runner_result["actual_route"] : nil
           result(
             "terminal_failure", diagnostic: e.message,
-            route_receipt: route_receipt(request, actual:, diagnostic_source: "adapter")
+            route_receipt: route_receipt(request, run: runner_result, diagnostic_source: "adapter")
           )
         rescue SystemCallError, IOError => e
           result("terminal_failure", diagnostic: "plan review adapter filesystem failure: #{e.message}")
@@ -429,8 +430,10 @@ module Hive
           end
         end
 
-        def route_receipt(request, actual: nil, capability_result: "present", diagnostic_source: nil)
-          actual = stringify(actual)
+        def route_receipt(request, run: nil, capability_result: "present", diagnostic_source: nil)
+          actual = stringify(run&.dig("actual_route"))
+          usage = run&.dig("usage")
+          usage = nil if usage&.empty?
           independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
             "role" => request.kind,
@@ -439,7 +442,8 @@ module Hive
             "capability_result" => capability_result,
             "independence_verified" => independent,
             "independence_reason" => reason,
-            "diagnostic_source" => diagnostic_source
+            "diagnostic_source" => diagnostic_source,
+            "usage" => usage
           }.compact.freeze
         end
 

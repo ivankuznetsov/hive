@@ -25,10 +25,16 @@ module Hive
         )
         model = observed_model.to_s.strip
         model = (resolution.model || "default").to_s if model.empty?
+        support = Hive::AgentSupport.for(profile)
+        observed_family = if support&.respond_to?(:model_family)
+          support.model_family(observed_model)
+        else
+          family(profile.name)
+        end
         identity = {
           "provider" => profile.name.to_s,
           "model" => model,
-          "family" => family(profile.name),
+          "family" => observed_family,
           "effort" => (resolution.effort || "default").to_s,
           "route" => profile.launcher_identity.to_s
         }

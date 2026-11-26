@@ -28,6 +28,11 @@ Usage is captured at the same boundary that runs stage agents:
 
 That placement deliberately excludes sessions launched outside Hive and avoids scraping `~/.claude/projects/*.jsonl` or any on-disk agent log after the fact. See [[modules/agent]], [[modules/agent_profile]], [[modules/patrol]], and [[stages/index]].
 
+For Antigravity, the model in the opening stream event accompanies the terminal
+usage counts in the ledger. The requested and observed models have separate
+columns. The review receipt carries the same available token counts and
+inclusion flags. For example, reasoning is included in the reported output.
+
 ## Agent Extractors
 
 `agent-cli-runtime` owns the concrete parsers;
@@ -68,9 +73,9 @@ Schema:
 |--------|---------|
 | `id` | UUID primary key. |
 | `agent` | Profile name, for example `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`, or `agy`. |
-| `model` | Best-effort model name from the usage event; OpenCode uses its observed actual route when export proved it. |
-| `requested_backend` / `requested_model` | OpenCode's requested nested route, stored separately from actual identity. |
-| `actual_backend` / `actual_model` | Sanitized-export-observed OpenCode route, or nil when unavailable. |
+| `model` | Model observed in the provider stream or usage event. OpenCode uses the actual route from its sanitized export. |
+| `requested_backend` / `requested_model` | Provider and model requested at launch when available. An explicit nested route takes precedence. |
+| `actual_backend` / `actual_model` | Backend and model identified by the provider adapter. An unavailable value is nil. |
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
 | `stage` | Stage name at spawn time, for example `4-execute`. |

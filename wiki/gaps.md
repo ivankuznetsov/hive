@@ -3051,6 +3051,8 @@ at all); only the log line and receipt record it.
   fail closed and `provider_routing` advertises `%w[filesystem shell web]`.
 - `~/.gemini/config` has no CLI-specific config-dir env override (follows
   `HOME`), so non-default named launch bindings remain unsupported.
+- A stream without a concrete model, or with conflicting generation models,
+  leaves the served model unknown. No provider cost or model is inferred from the requested pin.
 - `UsageExtractors::AGY` records `output_includes_reasoning: true` when
   `thinking_tokens` is present; `input_includes_cache_read` and USD pricing
   stay unknown (`nil`).

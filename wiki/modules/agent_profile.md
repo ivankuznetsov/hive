@@ -390,7 +390,9 @@ representation decision.
   and no USD cost). `ErrorExtractors::AGY` parses non-`SUCCESS` `result`
   envelopes (`result.error` or status fallback) and `error` events.
   `Hive::AgentSupport::Agy::Stream::TokenMeter` treats `event == "result"` as
-  terminal to prevent double-counting. Config and skills live under
+  terminal to prevent double-counting. Hive reads the conversation model from
+  `init.model` and uses a generation's reported model when available.
+  Conflicting generation models leave the session model unknown. Config and skills live under
   `~/.gemini/config` (relocated only via `HOME`); settings and fallback OAuth
   token live under `~/.gemini/antigravity-cli/{settings.json,antigravity-oauth-token}`
   (checked via binary read). `default_model` normalizes Antigravity display

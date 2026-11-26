@@ -4,6 +4,7 @@ type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
 updated: 2026-11-26
+updated: 2026-11-24
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
 
@@ -3049,6 +3050,42 @@ at all); only the log line and receipt record it.
   task has an attempt binding (`TaskActivity.for_task`). The always-written
   durable record is `reviews/archive/<label>/retirement.json` plus the budget
   audit expiry.
+
+## Base-merge adoption under a review grant (2026-11-24)
+
+See [[publication-recovery]] (Base merge under an active review grant).
+
+- **The fresh generation gets the configured pass budget.** Adoption resets
+  to pass 1 with `review.max_passes`, the same reset a rewind or a
+  fast-forward adoption applies. The expired grant's unspent slots are never
+  carried or refunded. Unverified whether a base merge under a grant should
+  instead get only a verification pass.
+- **Active stacked PRs and retargets away from `worktree.yml` `base_branch`
+  fail closed.** Coding tasks write `base_branch: default_branch` (with
+  `base_ref: origin/<prereq>`) into `worktree.yml` while `5-open-pr` opens a
+  stacked PR against `<prereq>`. Merging `origin/<prereq>` on an active
+  stacked PR, or merging a new base after a PR is retargeted away from
+  `worktree.yml` `base_branch` (only `github-publication.json` records
+  retargets), is then not on `origin/<base_branch>`, so the grant refusal
+  stands and the operator rewinds as before. Retargeting a stacked coding PR
+  back to `default_branch` matches `worktree.yml` `base_branch`.
+- **No fetch.** The merge's second parent must already be on the local
+  `refs/remotes/origin/<base>`. The documented `git fetch origin` before the
+  merge provides it. A merge made in another clone and only pushed leaves the
+  worktree on the blocked head, so nothing is adopted.
+- **Merge content is not inspected.** Conflict resolutions reach review in
+  the fresh pass 1, not through `FixGuardrail`. That matches the ungranted
+  fix-mode retry, but differs from a spent grant, whose verify-only path
+  guardrails the merge diff first.
+- **Only `review_ci_stale reason=base_conflict` markers are candidates.** A
+  base merge made while any other marker is current keeps the
+  `review_grant_evidence_changed` refusal.
+- The `adopted_base_merge` journal activity needs an attempt binding
+  (`TaskActivity.for_task`). The durable record is `retirement.json` plus the
+  audit expiry.
+- **Not validated against live state.** The uk-new-companies task that
+  exposed this had already been rewound by hand. Coverage is unit and
+  integration tests only.
 
 ## Managed service agent discovery (2026-11-15)
 

@@ -23,6 +23,7 @@ require "hive/task_resolver"
 require "hive/task_activity"
 require "hive/review_budget"
 require "hive/review_fast_forward_adoption"
+require "hive/review_base_merge_adoption"
 require "hive/agent_support/operator_authority"
 
 module Hive
@@ -153,7 +154,8 @@ module Hive
                      generation_resolver: nil, attempt_store: nil,
                      attempt_store_factory: nil,
                      runtime_digest: Hive::RuntimeIdentity.source_digest,
-                      runtime_residue_recovery: nil, review_fast_forward_adoption: nil)
+                      runtime_residue_recovery: nil, review_fast_forward_adoption: nil,
+                      review_base_merge_adoption: nil)
         @state_home = state_home
         @task_resolver = task_resolver || method(:resolve_task)
         @safety = safety.respond_to?(:call) ? safety : safety.method(:safe_to_retry?)
@@ -171,6 +173,8 @@ module Hive
           Hive::Artifacts::RuntimeResidueRecovery.new.method(:recover)
         @review_fast_forward_adoption = review_fast_forward_adoption ||
           ->(task) { Hive::ReviewFastForwardAdoption.new(task: task) }
+        @review_base_merge_adoption = review_base_merge_adoption ||
+          ->(task) { Hive::ReviewBaseMergeAdoption.new(task: task) }
       end
 
       # The single retry ladder. Every retry in Hive is paced by this, so
@@ -1011,13 +1015,18 @@ module Hive
               ) unless generation_matches?(predicted, recovery)
 
               begin
-                # A PR branch fast-forwarded outside Hive is adopted before
-                # grant validation: adoption retires the grant and passes
-                # bound to the old head, so the run starts a new generation.
+                # A PR branch fast-forwarded outside Hive, or the documented
+                # base merge after a base conflict, is adopted before grant
+                # validation: adoption retires the grant and passes bound to
+                # the old head, so the run starts a new generation.
                 @review_fast_forward_adoption.call(locked_task).adopt!(marker: marker)
+                @review_base_merge_adoption.call(locked_task).adopt!(marker: marker)
                 preserve_review_grant_resume!(locked_task, marker, current_request)
               rescue Hive::ReviewFastForwardAdoption::Refused => error
                 return block_request(current_request, "remote_fast_forward_refused",
+                  owner: error.owner, remediation: "#{error.reason}: #{error.message}")
+              rescue Hive::ReviewBaseMergeAdoption::Refused => error
+                return block_request(current_request, "review_base_merge_refused",
                   owner: error.owner, remediation: "#{error.reason}: #{error.message}")
               rescue Hive::ReviewBudget::Refused => error
                 return block_request(current_request, "review_grant_evidence_changed",

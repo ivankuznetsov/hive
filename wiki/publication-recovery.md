@@ -160,6 +160,66 @@ PR reference ahead of the worktree `behind`/`published`. Closure still
 requires the operator decision. `confirm_absence` still marks only `ahead` as
 `unpublished`. Push guidance is still emitted only for `ahead`.
 
+## Base merge under an active review grant
+
+`REVIEW_CI_STALE gate=github reason=base_conflict` asks the operator to merge
+`origin/<base>` into the task branch with a merge commit and then run
+`workflow.retry` (see [[stages/review]]). A review grant binds the exact head it
+approved, so before 2026-11-24 that merge made the grant read as changed. The
+retry was blocked as `review_grant_evidence_changed` and CI and review never
+restarted. Example: uk-new-companies task 43513. Its 09:14 grant covered pass 3.
+The entry gate then parked head `12a9007b` on `master`. The retry queued at
+09:49 was blocked until an operator rewound the task by hand at 17:01.
+
+`Hive::ReviewBaseMergeAdoption` (`lib/hive/review_base_merge_adoption.rb`)
+handles that one case. `RecoveryCoordinator#resume` calls it under the task
+lock, after the fast-forward adoption and before grant validation. It adopts
+only when all of these hold:
+
+- the marker is `review_ci_stale` with `reason=base_conflict`, and its encoded
+  publication evidence records the blocked `local_head`;
+- the owned worktree's HEAD is a merge commit with exactly two parents. The
+  first parent is the blocked head. The second is an ancestor of
+  `refs/remotes/origin/<base>` and is not already an ancestor of the blocked
+  head, where `<base>` is `worktree.yml`'s `base_branch`. Older pointers fall
+  back to `GitOps#origin_default_branch`; with neither, nothing is adopted;
+- live grant receipts exist, the grant refuses at the real HEAD, and the same
+  validation passes with the blocked head substituted
+  (`ReviewBudget.new(head: blocked).validate_resume!`). The merge is then the
+  only change;
+- the worktree is clean.
+
+Anything else keeps the old outcome. That includes a non-merge commit, a merge
+followed by more commits, a commit before the merge, a merge of a branch that
+is not on the base, an octopus merge, and an unreadable worktree. The grant
+refusal stands as `review_grant_evidence_changed`. Edited grant artifacts beside
+a valid merge raise the budget refusal before anything moves. A dirty worktree
+blocks as `review_base_merge_refused` with `dirty_worktree` and the exact
+`git status` command. Unsafe Git reads refuse as `git_unavailable`.
+
+Adoption never carries approval and never refunds budget. `PassArchive.retire!`
+ends the review generation the same way a rewind or a fast-forward adoption
+does. The grant expires in `review-budget/audit.jsonl` with
+`expiry_reason=base_merge_adopted`. Numbered passes, fix receipts and
+grant/completion receipts move to
+`reviews/archive/<utc>-base-merge-<oid12>/`, with a deterministic
+`retirement.json` naming `before_oid`, `after_oid`, `base_branch` and
+`base_oid`. The coordinator then clears the marker. The next run gets
+one fresh review of the merged head from pass 1, through the normal CI gates,
+with only the configured `review.max_passes`. A `recovery_recorded` activity
+with operation `review-base-merge:<before>:<after>` records the adoption.
+
+Repeated retries reuse that one fresh review. A replayed transition finds the
+marker already cleared. A crash after `retirement.json` is written (even
+mid-move while grant receipts remain in `reviews/`, or before the marker
+clears) resumes into the same archive without revalidating the half-moved
+receipt chain. A later base conflict on the merged
+head has no grant left to adopt, so ordinary recovery keeps the fresh passes.
+Tasks without a grant, and grants whose slots are already spent (they still
+validate on the merged head), keep the existing retry path. That path clears
+the marker and re-runs the gate, and the spent-grant case guardrails the merge
+diff before its verify-only pass.
+
 ## Stacked base retarget
 
 A task PR stacked on its prerequisite's branch is retargeted by GitHub when the

@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+## 0.2.5 - 2026-11-26
+
+- Add the built-in Antigravity CLI (`agy`) profile (appended after `muse`),
+  compiling stdin print mode (`agy --input-format=text --dangerously-skip-permissions --output-format stream-json`)
+  with repeatable `--add-dir`, `--model`, and `--effort`, binary-safe OAuth
+  token probing (`~/.gemini/antigravity-cli/antigravity-oauth-token`),
+  `step_update`/`result` usage extraction (`thinking_tokens` and
+  `cache_read_tokens`), and non-`SUCCESS` `result` error extraction.
+- Add the built-in Muse Code (`muse`) profile (`muse exec --prompt-file=/dev/stdin --json`
+  with model/effort pinning, `workspace-write`/`read-only` sandbox flags,
+  `run.usage`/`run.terminal` extractors, and XDG config/data resolution), along
+  with dual-form version parsing, `configuration_directory_probe`, and
+  `prompt_argument`.
+- Support OpenCode 2.x private-server execution (`--standalone` capability
+  probe threaded through `auth list`, `models`, prepared `run`, and sanitized
+  `export`) and flattened 2.x `error.type`/`error.message` provider errors.
+- Extract Claude rejected `rate_limit_event` payloads for `five_hour` and
+  `seven_day` windows as typed `provider_limit` failures.
+- Skip Codex `Reconnecting... n/m` transport retry notices in provider error
+  extraction so they do not mask terminal errors, and parse `unexpected status NNN`
+  HTTP status codes.
+- Harden OpenCode `ProbeRequest` and `OpenCodePreparationRequest` environment
+  validation against non-overlay keys and scrubbed Ruby/Bundler injection
+  variables (`SCRUBBED_RUNTIME_ENVIRONMENT_KEYS`).
+
 ## 0.2.4 - 2026-08-25
 
 - Expose the OpenCode permission compiler independently from the prepared

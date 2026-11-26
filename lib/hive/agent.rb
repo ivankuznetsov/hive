@@ -606,6 +606,9 @@ module Hive
         provider_error: provider_error,
         status: nil
       }
+      if result[:model] && model_identity&.respond_to?(:evidence_source)
+        result[:execution_identity_source] = model_identity.evidence_source
+      end
       result[:model_unsupported_text] = model_unsupported_text if model_unsupported_text
       if structured_failure
         result[:failure_origin] = structured_failure.fetch(:origin)

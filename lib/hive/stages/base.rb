@@ -1199,7 +1199,8 @@ module Hive
           end
           record_usage(
             task, profile, result, started_at,
-            context: context, session_id: observation.session_id
+            context: context, session_id: observation.session_id,
+            requested_provider: requested_provider, requested_model: requested_model_identity
           )
           if context && agent_custody_safe_after?(agent_custody)
             Hive::ContextProvenance.promote_agent_receipt(
@@ -1548,7 +1549,8 @@ module Hive
         ]
       end
 
-      def record_usage(task, profile, result, started_at, context: nil, session_id: nil)
+      def record_usage(task, profile, result, started_at, context: nil, session_id: nil,
+                       requested_provider: nil, requested_model: nil)
         usage = result && result[:usage]
         return unless usage
 
@@ -1575,6 +1577,7 @@ module Hive
             usage[:provider_reported_cost].nil? ? usage[:cost] : usage[:provider_reported_cost],
           cost: usage[:cost],
           requested_route: result[:requested_route],
+          requested_provider: requested_provider, requested_model: requested_model,
           actual_route: result[:actual_route],
           actual_provider: result[:actual_provider],
           actual_model: result[:actual_model],

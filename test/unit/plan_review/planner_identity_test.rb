@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/plan_review/planner_identity"
 require "hive/plan_review/route_resolver"
+require "hive/stages/plan"
 
 class PlanReviewPlannerIdentityTest < Minitest::Test
   def test_codex_capture_does_not_inherit_claude_model_controls
@@ -37,6 +38,19 @@ class PlanReviewPlannerIdentityTest < Minitest::Test
                  Hive::PlanReview::RouteResolver.independence(identity, { "family" => "meta" })
   end
 
+  def test_agy_plan_stage_uses_usage_model_only_for_legacy_results
+    profile = Hive::AgentProfiles.lookup(:agy)
+    cfg = Hive::Config::DEFAULTS
+    usage = { model: "gpt-oss-120b-medium" }
+
+    legacy = Hive::Stages::Plan.planner_identity(profile, cfg, { usage: usage })
+    assert_equal usage.fetch(:model), legacy.fetch("model")
+    assert_equal "openai", legacy.fetch("family")
+
+    ambiguous = Hive::Stages::Plan.planner_identity(profile, cfg, { model: nil, usage: usage })
+    assert_nil ambiguous.fetch("family")
+  end
+
   def test_agy_planner_has_a_family_so_a_codex_adversary_is_independent
     profile = Hive::AgentProfiles.lookup(:agy)
     cfg = Hive::Config::DEFAULTS.merge(
@@ -45,10 +59,19 @@ class PlanReviewPlannerIdentityTest < Minitest::Test
       )
     )
 
-    identity = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:)
+    identity = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "gemini-4-neon-xhigh")
+    silent = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:)
+    assert_nil silent.fetch("family")
 
     assert_equal "google", identity.fetch("family")
     assert_equal "antigravity-cli/v1", identity.fetch("route")
+    claude = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "claude-opus-5-5-high")
+    assert_equal "anthropic", claude.fetch("family")
+    legacy = claude.merge("family" => "google")
+    assert_equal [ false, "planner_family_unknown" ],
+                 Hive::PlanReview::RouteResolver.independence(legacy, { "family" => "anthropic" })
+    unknown = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:, observed_model: "custom-model")
+    assert_nil unknown.fetch("family")
     assert_equal [ true, "different_model_family" ],
                  Hive::PlanReview::RouteResolver.independence(identity, { "family" => "openai" })
     assert_equal [ false, "same_model_family" ],

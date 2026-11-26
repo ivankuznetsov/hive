@@ -238,7 +238,7 @@ module Hive
       def planner_identity(profile, cfg, result)
         Hive::PlanReview::PlannerIdentity.capture(
           profile:, cfg:,
-          observed_model: result&.dig(:usage, :model)
+          observed_model: result&.fetch(:model) { result.dig(:usage, :model) }
         )
       end
     end

@@ -59,6 +59,32 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_antigravity_review_receipt_pairs_observed_identity_with_metered_tokens
+    with_request do |request, _|
+      reviewer = { "provider" => "agy", "model" => "gemini-4-neon-xhigh", "family" => "google",
+                   "effort" => "xhigh", "route" => "antigravity-cli/v1" }
+      request = request.with(kind: "adversarial", reviewer: reviewer)
+      tokens = { input: 120, output: 45, cache_read: 0, reasoning: 20, output_includes_reasoning: true }
+      normalizer = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(task: nil, cfg: {})
+      adapter = adapter_for(lambda do |output_path:, **|
+        File.write(output_path, JSON.generate(valid_result(request)))
+        normalizer.send(:normalize_result, {
+          status: :ok, model: reviewer["model"], usage: tokens.merge(model: reviewer["model"], cost: nil)
+        }, request)
+      end)
+      receipt = adapter.call(request).route_receipt
+      assert_equal true, receipt["independence_verified"]
+      assert_equal reviewer["model"], receipt.dig("actual", "model")
+      assert_equal tokens.transform_keys(&:to_s), receipt["usage"]
+      silent = normalizer.send(:normalize_result, { status: :ok }, request)
+      refute silent.fetch("actual_route").key?("model")
+      refute silent.fetch("actual_route").key?("family")
+      mislabeled = request.with(reviewer: reviewer.merge("model" => "claude-opus-5-5-high"))
+      observed = normalizer.send(:normalize_result, { status: :ok, model: "claude-opus-5-5-high" }, mislabeled)
+      refute observed.fetch("actual_route").key?("family")
+    end
+  end
+
   def test_hive_runner_capability_probe_degrades_profile_faults_to_unsupported
     runner = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(
       task: nil, cfg: Hive::Config::DEFAULTS
@@ -337,6 +363,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
         { "status" => "ok" }
       end)
       assert_equal "terminal_failure", adapter.call(request).outcome
+    end
+  end
+
+  def test_malformed_optional_usage_does_not_hide_the_runner_outcome
+    with_request do |request, _plan_path|
+      normalizer = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(task: nil, cfg: {})
+      [ 12, "unknown", [] ].each do |usage|
+        normalized = normalizer.send(:normalize_result, { timed_out: true, usage: usage }, request)
+        assert_equal "timeout", normalized.fetch("status")
+        assert_nil normalized.fetch("usage")
+        runner = ->(**) { { "status" => "timeout", "usage" => usage } }
+        result = adapter_for(runner).call(request)
+        assert_equal "timeout", result.outcome
+        refute result.route_receipt.key?("usage")
+      end
+
+      malformed = adapter_for(->(**) { "invalid runner response" }).call(request)
+      assert_equal "retryable_failure", malformed.outcome
+      refute malformed.route_receipt.fetch("independence_verified")
     end
   end
 

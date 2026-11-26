@@ -11,7 +11,8 @@ class AgentRoles
 
   NAMES = {
     "claude" => "Claude Code", "codex" => "Codex", "grok" => "Grok",
-    "pi" => "Pi", "opencode" => "OpenCode", "muse" => "Muse", "gh" => "GitHub CLI"
+    "pi" => "Pi", "opencode" => "OpenCode", "muse" => "Muse",
+    "agy" => "Antigravity CLI", "gh" => "GitHub CLI"
   }.freeze
 
   def self.display_name(agent) = NAMES.fetch(agent.to_s) { agent.to_s.humanize }

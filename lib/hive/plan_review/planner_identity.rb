@@ -12,7 +12,7 @@ module Hive
       # Muse serves Meta models (Muse.execution_identity provider "meta").
       FAMILIES = {
         claude: "anthropic", codex: "openai", grok: "grok", pi: "pi",
-        muse: "meta"
+        muse: "meta", agy: "google"
       }.freeze
 
       module_function

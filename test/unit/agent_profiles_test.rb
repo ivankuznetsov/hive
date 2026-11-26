@@ -86,6 +86,7 @@ class AgentProfilesTest < Minitest::Test
     Hive::AgentProfiles.register(:grok, Hive::AgentProfiles::GROK)
     Hive::AgentProfiles.register(:opencode, Hive::AgentProfiles::OPENCODE)
     Hive::AgentProfiles.register(:muse, Hive::AgentProfiles::MUSE)
+    Hive::AgentProfiles.register(:agy, Hive::AgentProfiles::AGY)
   end
 
   def test_lookup_returns_v1_built_in_profiles
@@ -335,6 +336,8 @@ class AgentProfilesTest < Minitest::Test
                  Hive::ImplementationIdentity::UtilityModels.resolve(:opencode))
     assert_equal({ model: nil, pin_model: false },
                  Hive::ImplementationIdentity::UtilityModels.resolve(:muse))
+    assert_equal({ model: nil, pin_model: false },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:agy))
     assert_raises(Hive::ImplementationIdentity::ResolutionError) do
       Hive::ImplementationIdentity::UtilityModels.resolve(:unknown)
     end

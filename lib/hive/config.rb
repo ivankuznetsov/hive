@@ -143,6 +143,7 @@ module Hive
           "pi" => "/llm-wiki:wiki-plan",
           "opencode" => "/ce-plan",
           "muse" => "/ce-plan",
+          "agy" => "/ce-plan",
           "default" => "/llm-wiki:wiki-plan"
         }
       },
@@ -267,6 +268,11 @@ module Hive
           "bin" => "muse",
           "env_override" => "HIVE_MUSE_BIN",
           "min_version" => "1.4.14"
+        },
+        "agy" => {
+          "bin" => "agy",
+          "env_override" => "HIVE_AGY_BIN",
+          "min_version" => "1.5.17"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -864,7 +870,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode muse].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok opencode muse agy].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze

@@ -406,7 +406,7 @@ module Hive
       ).call
     end
 
-    desc "setup-agents", "Provision managed skills for configured Claude, Codex, Pi, Grok, OpenCode, and Muse agents"
+    desc "setup-agents", "Provision managed skills for configured Claude, Codex, Pi, Grok, OpenCode, Muse, and Agy agents"
     long_desc <<~DESC
       Inspects every enabled, manifest-managed coding workflow capability,
       prints one aggregate plan of native commands and Hive-owned files, and

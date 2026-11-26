@@ -67,6 +67,57 @@ module AgentCliRuntime
       }
     end
 
+    # Antigravity CLI (`agy`) emits per-step usage on `step_update` events and
+    # cumulative run usage on the terminal `result` event under `result.usage`.
+    # Captured streams show `input_tokens + output_tokens == total_tokens` with
+    # `thinking_tokens <= output_tokens`, so `output_includes_reasoning` is true
+    # when thinking tokens are reported; cache-read inclusion in `input_tokens`
+    # stays unknown (`nil`). Zero-turn error results (such as an empty prompt)
+    # emit zero counters without a model call and return nil.
+    AGY = lambda do |event|
+      next nil unless event.is_a?(Hash)
+
+      kind = event["event"]
+      envelope = case kind
+      when "result"
+        event["result"]
+      when "step_update"
+        event["step_update"]
+      end
+      next nil unless envelope.is_a?(Hash)
+
+      usage = envelope["usage"]
+      next nil unless usage.is_a?(Hash) && !usage.empty?
+
+      if kind == "result" &&
+         envelope["status"].to_s.upcase != "SUCCESS" &&
+         envelope["num_turns"].to_i.zero? &&
+         usage["total_tokens"].to_i.zero?
+        next nil
+      end
+
+      input = UsageExtractors.optional_token_count(usage, "input_tokens")
+      output = UsageExtractors.optional_token_count(usage, "output_tokens")
+      cache_read = UsageExtractors.optional_token_count(usage, "cache_read_tokens")
+      reasoning = UsageExtractors.optional_token_count(usage, "thinking_tokens")
+      next nil if input.nil? && output.nil? && cache_read.nil? && reasoning.nil?
+
+      model = envelope["model"].to_s
+      {
+        input: input,
+        output: output,
+        cached: nil,
+        cache_read: cache_read,
+        cache_write: nil,
+        reasoning: reasoning,
+        input_includes_cache_read: nil,
+        input_includes_cache_write: nil,
+        output_includes_reasoning: reasoning.nil? ? nil : true,
+        model: model.empty? ? nil : model,
+        provider_reported_cost: nil
+      }
+    end
+
     def muse_total(entries, key)
       present = entries.select { |entry| entry.key?(key) }
       return nil if present.empty?

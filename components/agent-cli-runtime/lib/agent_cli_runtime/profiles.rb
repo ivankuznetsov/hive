@@ -66,7 +66,7 @@ module AgentCliRuntime
 
     def auth_from_file(path, source:)
       configured = File.file?(path) &&
-                   !File.read(path).strip.match?(/\A(?:|\{\s*\})\z/m)
+                   !File.binread(path).strip.match?(/\A(?:|\{\s*\})\z/m)
       AuthConfiguration.new(
         status: configured ? :configured : :missing,
         source: source
@@ -142,6 +142,20 @@ module AgentCliRuntime
       base = home || env["HOME"]
       base = nil if base.to_s.empty?
       home_path(base, ".local", "share", "muse")
+    end
+
+    # Antigravity CLI (`agy`) stores settings and its fallback OAuth token
+    # under `~/.gemini/antigravity-cli`, while skills and plugins live under
+    # `~/.gemini/config`. Neither path has a CLI-specific environment override;
+    # both follow `HOME`.
+    def agy_state_directory(home:, env:)
+      base = home || env["HOME"]
+      base = nil if base.to_s.empty?
+      home_path(base, ".gemini", "antigravity-cli")
+    end
+
+    def agy_auth_path(home:, env:)
+      File.join(agy_state_directory(home:, env:), "antigravity-oauth-token")
     end
 
     def opencode_auth_path(home:, env:)
@@ -448,7 +462,45 @@ module AgentCliRuntime
       end
     )
 
-    PROFILES = [ CLAUDE, CODEX, PI, GROK, OPENCODE, MUSE ].to_h do |profile|
+    AGY = Profile.new(
+      name: :agy,
+      bin_default: "agy",
+      env_bin_override_keys: %w[AGENT_CLI_RUNTIME_AGY_BIN HIVE_AGY_BIN],
+      # `agy` runs non-interactively and reads the prompt from piped or
+      # file-redirected stdin when `--input-format=text` is passed without `-p`,
+      # keeping arbitrarily large prompts out of argv.
+      headless_flag: "--input-format=text",
+      prompt_style: :piped_stdin,
+      permission_skip_flag: "--dangerously-skip-permissions",
+      add_dir_flag: "--add-dir",
+      output_format_flags: [ "--output-format", "stream-json" ],
+      version_flag: "--version",
+      min_version: "1.5.17",
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "--effort", effort ] },
+      launcher_identity: "antigravity-cli/v1",
+      usage_extractor: UsageExtractors::AGY,
+      error_extractor: ErrorExtractors::AGY,
+      credential_environment_keys: %w[
+        GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_APPLICATION_CREDENTIALS
+      ],
+      configuration_environment_key: nil,
+      default_configuration_directory: ".gemini/config",
+      auth_configuration_probe: lambda do |home:, env:|
+        if env_configured?(
+          env, "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS"
+        )
+          AuthConfiguration.new(status: :configured, source: "environment")
+        else
+          auth_from_file(
+            agy_auth_path(home: home, env: env),
+            source: "~/.gemini/antigravity-cli/antigravity-oauth-token"
+          )
+        end
+      end
+    )
+
+    PROFILES = [ CLAUDE, CODEX, PI, GROK, OPENCODE, MUSE, AGY ].to_h do |profile|
       [ profile.name, profile ]
     end.freeze
     PROVIDER_ORDER = PROFILES.keys.freeze

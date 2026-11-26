@@ -151,6 +151,30 @@ class AgentSupportTest < Minitest::Test
     ], stdout.lines.map(&:strip)
   end
 
+  def test_agy_loads_only_after_selection_and_keeps_facets_lazy
+    script = <<~RUBY
+      require "hive/agent_profiles"
+      puts defined?(Hive::AgentSupport::Agy) || "unloaded"
+      support = Hive::AgentSupport.for(Hive::AgentProfiles.lookup(:agy))
+      puts support.name
+      puts support.autoload?(:Skills) || "skills-loaded"
+      puts support.autoload?(:SetupAdapter) || "setup-loaded"
+      puts support.autoload?(:Stream) || "stream-loaded"
+    RUBY
+
+    stdout, stderr, status = Open3.capture3(
+      RbConfig.ruby, "-I#{File.expand_path('../../lib', __dir__)}", "-e", script
+    )
+
+    assert status.success?, stderr
+    assert_equal [
+      "unloaded", "Hive::AgentSupport::Agy",
+      "hive/agent_support/agy/skills",
+      "hive/agent_support/agy/setup_adapter",
+      "hive/agent_support/agy/stream"
+    ], stdout.lines.map(&:strip)
+  end
+
   def test_pi_behavior_has_no_generic_core_residue
     pi_branch = /(?:when\s+(?::pi|["']pi["'])|(?:==|!=)\s*(?::pi|["']pi["'])|def\s+(?:self\.)?pi_|\b(?:compile_pi|pi_(?:evidence|executable|auth|bwrap))|Hive::SkillCheck::Pi|Adapters::Pi)/
     support_root = File.join(ROOT, "lib/hive/agent_support")

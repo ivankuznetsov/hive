@@ -43,6 +43,10 @@ module Hive
         "grok" => %w[grok login --device-auth],
         "opencode" => %w[opencode auth login],
         "muse" => %w[muse login],
+        # `agy acp --login` prints a Google OAuth URL and accepts the pasted
+        # authorization code (or callback URL) on stdin, then exits — the same
+        # paste-back relay shape as `claude setup-token`.
+        "agy" => %w[agy acp --login],
         # gh is not a pipeline agent, but its login IS first-run setup: git's
         # https credential helper reads it for every push the daemon makes.
         # The flags pin the prompts away (host, protocol, no ssh key upload)
@@ -83,7 +87,7 @@ module Hive
       end
 
       def statuses
-        agents = %w[claude codex pi grok opencode muse].to_h do |agent|
+        agents = %w[claude codex pi grok opencode muse agy].to_h do |agent|
           [ agent, { "logged_in" => Hive::AgentProfiles.logged_in?(agent) } ]
         end
         # Not an agent profile, but part of the same first-run checklist:

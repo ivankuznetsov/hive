@@ -141,4 +141,29 @@ class AgentProfilesLaunchBindingsTest < Minitest::Test
       assert_match(/muse supports only the default binding/, error.message)
     end
   end
+
+  def test_agy_runs_on_the_default_binding_and_refuses_named_ones
+    # Antigravity CLI has no private config-dir variable; named bindings fail closed.
+    binding = Hive::AgentProfiles::LaunchBindings.resolve(
+      adapter: "agy", binding_id: "default", environment: {}
+    )
+    assert_equal(
+      {
+        "GEMINI_API_KEY" => nil,
+        "GOOGLE_API_KEY" => nil,
+        "GOOGLE_APPLICATION_CREDENTIALS" => nil
+      },
+      binding.environment
+    )
+
+    with_tmp_dir do |root|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::AgentProfiles::LaunchBindings.resolve(
+          adapter: "agy", binding_id: "team",
+          environment: { "HIVE_PROVIDER_BINDING_AGY_TEAM" => root }
+        )
+      end
+      assert_match(/agy supports only the default binding/, error.message)
+    end
+  end
 end

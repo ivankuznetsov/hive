@@ -55,7 +55,7 @@ class MuseAgentTest < Minitest::Test
     names = Hive::AgentProfiles.registered_names
 
     assert_equal :claude, names.first
-    assert_equal :muse, names.last
+    assert_operator names.index(:muse), :>, names.index(:opencode)
     assert_includes names, :muse
     assert_equal "claude", Hive::Config::DEFAULTS.dig("brainstorm", "agent")
     assert_equal "claude", Hive::Config::DEFAULTS.dig("plan", "agent")

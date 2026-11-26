@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/agent.rb, lib/hive/usage_db.rb, lib/hive/billing_evidence.rb, lib/hive/model_pricing.rb, lib/hive/task_workspace/resources.rb, lib/hive/task_workspace/usage.rb, config/model-pricing.v1.yml, lib/hive/patrol/launch_budget.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-11-05
+updated: 2026-11-25
 tags: [observability, usage, pricing, billing, tui, sqlite, agent]
 ---
 
@@ -40,6 +40,7 @@ That placement deliberately excludes sessions launched outside Hive and avoids s
 | `pi` | accepts supported terminal/completion shapes; omitted categories remain unavailable rather than zero. |
 | `grok` | accepts a real usage object if a future streaming event supplies one; current `end` events contain no counts, so the extractor returns nil rather than fabricating zero usage. |
 | `muse` | reads the single terminal `run.usage` event and sums its per-model `payload.models[]` breakdown. A category absent from every entry stays nil; `model` is set only when exactly one model name appears. Cache-read/write split and inclusion semantics are undocumented, so they stay nil, and cost stays unknown (no Meta rate cards; see [[gaps]]). |
+| `agy` | reads `step_update` and terminal `result` usage payloads (`input_tokens`, `output_tokens`, `thinking_tokens` as `reasoning`, and `cache_read_tokens` as `cache_read`). `input_includes_cache_read` and cost stay unknown (no Antigravity rate cards; see [[gaps]]). |
 | `opencode` | uses the strict run/export normalizer. Sanitized export supplies authoritative input, output, cache-read, cache-write, reasoning, and cost values; unavailable fields remain nil and numeric zero remains zero. |
 
 Extractor output preserves nullable input, output, cache-read, cache-write, and
@@ -66,7 +67,7 @@ Schema:
 | Column | Meaning |
 |--------|---------|
 | `id` | UUID primary key. |
-| `agent` | Profile name, for example `claude`, `codex`, `pi`, `grok`, `opencode`, or `muse`. |
+| `agent` | Profile name, for example `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`, or `agy`. |
 | `model` | Best-effort model name from the usage event; OpenCode uses its observed actual route when export proved it. |
 | `requested_backend` / `requested_model` | OpenCode's requested nested route, stored separately from actual identity. |
 | `actual_backend` / `actual_model` | Sanitized-export-observed OpenCode route, or nil when unavailable. |

@@ -1,7 +1,7 @@
 ---
 title: Hive::AgentRuntime + Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,muse,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
+source: lib/hive/agent_runtime.rb, lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok,opencode,muse,agy,error_normalizers,launch_bindings}.rb, lib/hive/agent_skills/
 created: 2026-04-26
 updated: 2026-11-22
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
@@ -12,8 +12,8 @@ tags: [agent, profile, registry, architecture, skills, provisioning, permissions
 CLI prerequisites, verifies capabilities, extracts usage, and normalizes
 results. `Hive::AgentProfile` adds only Hive policy and preserves its
 optional-keyword custom extension contract. `Hive::AgentProfiles` remains the
-registry; its Claude, Codex, Pi, Grok, OpenCode, and Muse adapters reference the package's
-built-in profiles. Muse is appended last and selected nowhere by default. Process lifetime, workflow selection, model routing,
+registry; its Claude, Codex, Pi, Grok, OpenCode, Muse, and Agy adapters reference the package's
+built-in profiles. Agy is appended last and selected nowhere by default. Process lifetime, workflow selection, model routing,
 subscription binding, retries, artifact acceptance, and stage success remain
 in Hive.
 
@@ -167,7 +167,7 @@ constructs a package profile from them. Every profile freezes after init.
 | `auth_configuration_required:` | Hive preflight policy. The shipped Pi and Grok adapters require a CLI subscription/session artifact; custom profiles default false. |
 | `subscription_environment(unset_value: nil)` | Builds the Hive-only child environment scrub from the package credential-name inventory while preserving explicit session-file selectors such as `GROK_AUTH_PATH`. |
 | `name:` | Symbol used by the registry. |
-| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`, `"muse"`). |
+| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`, `"opencode"`, `"muse"`, `"agy"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
 | `prompt_style:` | `:positional`, `:headless_flag_value`, `:stdin`, or `:piped_stdin`; controls where the rendered prompt is delivered. `:stdin` includes a `-` argv marker, while `:piped_stdin` does not. The published runtime profile supplies the built-in default; custom profiles fall back to `:positional`. Built-in Pi and OpenCode use `:piped_stdin` so large prompts do not occupy one OS-limited argv element. |
@@ -377,6 +377,38 @@ representation decision.
   `/ce-plan` like OpenCode, and `muse-ce-code-review` is an opt-in init
   reviewer (never a default). Managed-workflow actors fail closed: Muse has
   no `Runtime` support facet.
+- `agy` — Antigravity CLI (`agy`), headless via `--input-format=text`
+  (reading the prompt from stdin without `-p`) with
+  `--output-format=stream-json`, `--disable-slash-commands`, and
+  `--dangerously-skip-permissions` for `:unrestricted` permission mode.
+  `--mode auto` / `accept-edits` / `plan` remain fail-closed (`request-review`
+  or account-gated in `agy 1.5.17`), so `:workspace_write` and `:read_only`
+  sandbox flags remain empty and `agy` runs `:unrestricted` only when allowed.
+  `UsageExtractors::AGY` parses `step_update.usage` and `result.usage`
+  (`input_tokens`, `output_tokens`, `cache_read_tokens`, `thinking_tokens`
+  with `output_includes_reasoning: true`, `input_includes_cache_read: nil`,
+  and no USD cost). `ErrorExtractors::AGY` parses non-`SUCCESS` `result`
+  envelopes (`result.error` or status fallback) and `error` events.
+  `Hive::AgentSupport::Agy::Stream::TokenMeter` treats `event == "result"` as
+  terminal to prevent double-counting. Config and skills live under
+  `~/.gemini/config` (relocated only via `HOME`); settings and fallback OAuth
+  token live under `~/.gemini/antigravity-cli/{settings.json,antigravity-oauth-token}`
+  (checked via binary read). `default_model` normalizes Antigravity display
+  names (e.g. `Gemini 4 Neon (XHigh)`) to slug IDs. Min version `1.5.17`.
+  `:output_file_exists`. `Hive::AgentSupport::Agy::Skills` resolves flat skill
+  ids across workspace `.agents/skills`, `.agent/skills`, workspace plugins,
+  `~/.gemini/config/skills`, `~/.agents/skills`, and enabled
+  `~/.gemini/config/plugins/`. The canonical Hive operating skill is projected
+  for `agy` as `/hive`. Compound Engineering installs natively via
+  `agy plugin install <source>` / `agy plugin enable <pkg>` (reading the
+  repository URL from `.claude-plugin/plugin.json` or `plugin.json` for
+  ownership checks). The plan stage maps `agy` to `/ce-plan`, and
+  `Hive::AgentSupport::Agy.plan_review_launch_kwargs` admits `agy` to
+  disposable-worktree plan review and planner revisions (matching `pi`, with
+  `ArtifactFirewall` retaining custody). `agy-ce-code-review` is an opt-in
+  init reviewer (never a default). Web login uses `agy acp --login`
+  (paste-back OAuth flow). Managed-workflow actors fail closed: `agy` has no
+  `Runtime` support facet.
 
 If a prepared launch fails after brainstorm answers were recorded, automatic
 recovery distinguishes Hive's `hive-answer:v1` bindings from legacy or manual

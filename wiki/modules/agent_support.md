@@ -3,8 +3,8 @@ title: Hive::AgentSupport
 type: module
 source: lib/hive/agent_support.rb, lib/hive/agent_support/
 created: 2026-08-25
-updated: 2026-11-05
-tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude, muse]
+updated: 2026-11-25
+tags: [agent, provider, boundary, selective-loading, pi, opencode, codex, grok, claude, muse, agy]
 ---
 
 **TLDR**: `Hive::AgentSupport` is a small convention loader for optional
@@ -39,6 +39,12 @@ root declares cohesive behavior and lazily exposes larger facets by constant:
   outside the clone fails staging; a dangling link is dropped), and
   `Muse::SetupAdapter` installs or updates the plugin from that staged tree.
   Muse has no `Runtime` or `Mcp` facet yet; see [[gaps]].
+- Agy owns its `stream-json` result/sensitivity protocol, `Stream::TokenMeter`
+  for `{"event":"result"}` termination, `settings.json` display-name model
+  normalization, `plan_review_launch_kwargs` (for disposable-worktree plan
+  review and planner revisions), `~/.gemini/config` skill and native plugin
+  inventory, and `SetupAdapter` (`agy plugin install`/`enable`). Agy has no
+  `Runtime` or `Mcp` facet yet; see [[gaps]].
 - Codex owns its native reviewer, managed-runtime and evidence permissions,
   path-qualified reads, skill/plugin inventory, setup, credential, model,
   effort, and invocation rules. The generic runtime still materializes output

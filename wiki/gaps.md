@@ -3060,11 +3060,15 @@ See [[publication-recovery]] (Base merge under an active review grant).
   fast-forward adoption applies. The expired grant's unspent slots are never
   carried or refunded. Unverified whether a base merge under a grant should
   instead get only a verification pass.
-- **Stacked retargets fail closed.** The base comes from `worktree.yml`
-  `base_branch`, which nothing updates after GitHub retargets a stacked PR
-  (only `github-publication.json` records the retarget). A merge of the new
-  base is then not on `origin/<old base>`, so the grant refusal stands and
-  the operator rewinds as before.
+- **Active stacked PRs and retargets away from `worktree.yml` `base_branch`
+  fail closed.** Coding tasks write `base_branch: default_branch` (with
+  `base_ref: origin/<prereq>`) into `worktree.yml` while `5-open-pr` opens a
+  stacked PR against `<prereq>`. Merging `origin/<prereq>` on an active
+  stacked PR, or merging a new base after a PR is retargeted away from
+  `worktree.yml` `base_branch` (only `github-publication.json` records
+  retargets), is then not on `origin/<base_branch>`, so the grant refusal
+  stands and the operator rewinds as before. Retargeting a stacked coding PR
+  back to `default_branch` matches `worktree.yml` `base_branch`.
 - **No fetch.** The merge's second parent must already be on the local
   `refs/remotes/origin/<base>`. The documented `git fetch origin` before the
   merge provides it. A merge made in another clone and only pushed leaves the

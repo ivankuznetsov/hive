@@ -180,9 +180,9 @@ only when all of these hold:
   publication evidence records the blocked `local_head`;
 - the owned worktree's HEAD is a merge commit with exactly two parents. The
   first parent is the blocked head. The second is an ancestor of
-  `refs/remotes/origin/<base>`, where `<base>` is `worktree.yml`'s
-  `base_branch`. Older pointers fall back to `GitOps#origin_default_branch`;
-  with neither, nothing is adopted;
+  `refs/remotes/origin/<base>` and is not already an ancestor of the blocked
+  head, where `<base>` is `worktree.yml`'s `base_branch`. Older pointers fall
+  back to `GitOps#origin_default_branch`; with neither, nothing is adopted;
 - live grant receipts exist, the grant refuses at the real HEAD, and the same
   validation passes with the blocked head substituted
   (`ReviewBudget.new(head: blocked).validate_resume!`). The merge is then the
@@ -210,8 +210,10 @@ with only the configured `review.max_passes`. A `recovery_recorded` activity
 with operation `review-base-merge:<before>:<after>` records the adoption.
 
 Repeated retries reuse that one fresh review. A replayed transition finds the
-marker already cleared. A crash between retirement and the marker clear replays
-the same receipt into the same archive. A later base conflict on the merged
+marker already cleared. A crash after `retirement.json` is written (even
+mid-move while grant receipts remain in `reviews/`, or before the marker
+clears) resumes into the same archive without revalidating the half-moved
+receipt chain. A later base conflict on the merged
 head has no grant left to adopt, so ordinary recovery keeps the fresh passes.
 Tasks without a grant, and grants whose slots are already spent (they still
 validate on the merged head), keep the existing retry path. That path clears

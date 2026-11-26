@@ -97,15 +97,17 @@ module Hive
 
     private
 
-    # Only an active grant made stale by the merge alone qualifies. Without
-    # live grant receipts, only the replay of this exact retirement does:
-    # retiring an ungranted generation would hand out a fresh pass budget
-    # that nothing authorized.
+    # Only an active grant made stale by the merge alone qualifies. Once a
+    # matching retirement receipt is already on disk, finish moving any
+    # remaining receipts instead of revalidating a half-moved chain. Without
+    # live grant receipts or a matching retirement, do nothing: retiring an
+    # ungranted generation would hand out a fresh pass budget that nothing
+    # authorized.
     def adoptable?(receipt)
       budget = Hive::ReviewBudget.new(task: @task, project: @task.project_name)
-      unless budget.present?
-        return !Hive::Stages::Review::PassArchive.existing_retirement(@task.folder, retirement_document(receipt)).nil?
-      end
+      present = budget.present?
+      return true if Hive::Stages::Review::PassArchive.existing_retirement(@task.folder, retirement_document(receipt))
+      return false unless present
       return false if grant_valid?(budget)
 
       # Raises ReviewBudget::Refused when anything besides HEAD changed.
@@ -143,8 +145,9 @@ module Hive
 
     # The documented recovery is `git merge --no-ff origin/<base>` on the
     # blocked head: HEAD's first parent is that head, and its second parent
-    # is already on the remote-tracking base branch. Returns that second
-    # parent, or nil for any other shape.
+    # is already on the remote-tracking base branch and brings in commits not
+    # yet on the blocked head. Returns that second parent, or nil for any
+    # other shape.
     def verified_base_parent(path, base_branch, blocked, head)
       parents = commit_parents(path, head)
       return nil unless parents && parents.length == 2 && parents.first == blocked
@@ -153,7 +156,10 @@ module Hive
       return nil unless base_tip.success?
 
       ancestor = @gate.read(path, :ancestor, base_oid: parents.last, head_oid: base_tip.stdout.strip.downcase)
-      ancestor.success? ? parents.last : nil
+      return nil unless ancestor.success?
+
+      not_already_merged = @gate.read(path, :ancestor, base_oid: parents.last, head_oid: blocked)
+      not_already_merged.exitstatus == 1 && !not_already_merged.overflow ? parents.last : nil
     end
 
     def commit_parents(path, oid)

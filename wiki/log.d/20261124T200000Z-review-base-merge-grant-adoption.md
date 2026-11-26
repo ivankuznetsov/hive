@@ -13,8 +13,10 @@
   a clean worktree whose HEAD is one merge commit with two parents. The first
   parent is the blocked `local_head`; the second is already on
   `refs/remotes/origin/<worktree.yml base_branch>` (older pointers fall back
-  to `GitOps#origin_default_branch`). The grant must refuse at HEAD and
-  validate with the blocked head substituted.
+  to `GitOps#origin_default_branch`) and not already an ancestor of the
+  blocked head. The grant must refuse at HEAD and validate with the blocked
+  head substituted (unless a matching `retirement.json` already exists from an
+  interrupted retirement).
 - Adoption retires the generation with `PassArchive.retire!`. Grants expire
   with `expiry_reason=base_merge_adopted`, and passes and receipts move to
   `reviews/archive/<utc>-base-merge-<oid12>/` with a deterministic

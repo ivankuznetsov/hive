@@ -141,6 +141,11 @@ class ReviewBaseMergeAdoptionTest < Minitest::Test
         "an octopus merge" => lambda do
           other = git(task, "commit-tree", "-p", approved, "-m", "branch-only", "#{approved}^{tree}")
           git(task, "merge", "--no-ff", "--quiet", "-m", "octopus", "origin/master", other)
+        end,
+        "swapped merge parents" => lambda do
+          swapped = git(task, "commit-tree", "-p", base_tip(task), "-p", approved,
+            "-m", "swapped parents", "#{approved}^{tree}")
+          git(task, "reset", "--hard", "--quiet", swapped)
         end
       }
       unrelated.each do |label, change|
@@ -173,7 +178,7 @@ class ReviewBaseMergeAdoptionTest < Minitest::Test
       File.write(File.join(task.worktree_path, "scratch.txt"), "operator scratch\n")
       before = review_files(task)
 
-      dirty, = resume_recovery(task)
+      dirty, coordinator = resume_recovery(task)
 
       assert_equal "blocked", dirty.status
       assert_equal "review_base_merge_refused", dirty.reason
@@ -184,9 +189,131 @@ class ReviewBaseMergeAdoptionTest < Minitest::Test
       assert_equal merged, git_head(task)
 
       File.delete(File.join(task.worktree_path, "scratch.txt"))
-      receipt = adopter(task).adopt!(marker: Hive::Markers.current(task.state_file))
-      assert_equal merged, receipt.fetch("after_oid")
+      cleared = coordinator.resume(request: result_request(coordinator, dirty), row: recovery_row(task))
+      assert_equal "queued", cleared.status, cleared.to_h.inspect
+      assert_equal "cleared", cleared.phase
+      assert_equal :none, Hive::Markers.current(task.state_file).name
+      assert_equal merged, git_head(task)
       assert_empty live_review_state(task)
+    end
+  end
+
+  # A crash mid-move inside PassArchive.retire! can leave a review-grant-*.json
+  # still in reviews/ after retirement.json is written and an earlier receipt
+  # has already moved. Resuming must finish the move into the same archive
+  # instead of revalidating the half-moved receipt chain.
+  def test_interrupted_mid_move_retirement_resumes_without_revalidating_partial_receipts
+    with_base_merge_grant_task do |task|
+      budget = Hive::ReviewBudget.new(task: task, project: task.project_name)
+      input = budget.observe
+      git(task, "commit", "--allow-empty", "-qm", "granted fix")
+      fixed = git_head(task)
+      budget.complete_fix!(snapshot: input, pass: 4, head: fixed)
+      File.write(File.join(task.reviews_dir, "fix-success-04.md"), "<!-- HIVE: head=#{fixed} kind=fixed -->\n")
+      File.write(File.join(task.reviews_dir, "codex-05.md"), "- [x] Follow-up accepted finding\n")
+      File.write(File.join(task.reviews_dir, "escalations-05.md"), "# Escalations\n")
+      Hive::Markers.set(task.state_file, :review_stale,
+        reason: "final_fix_unverified", pass: 5, accepted: 1, escalations: 0)
+      token = budget.observe.evidence_token
+      Hive::Daemon::RecoveryCoordinator.new.grant_review!(task: task, project: task.project_name,
+        passes: 1, reason: "Fix follow-up finding", evidence_token: token)
+
+      merged = merge_task_base(task)
+      mark_task_base_conflict(task, blocked: fixed)
+
+      orig_rename = File.method(:rename)
+      crashed = false
+      interrupted = lambda do |from, to|
+        if !crashed && File.basename(from).start_with?("review-grant-")
+          crashed = true
+          raise IOError, "simulated crash mid-retirement"
+        end
+        orig_rename.call(from, to)
+      end
+      with_replaced_singleton_method(File, :rename, interrupted) do
+        assert_raises(IOError) { adopter(task).adopt!(marker: Hive::Markers.current(task.state_file)) }
+      end
+
+      assert crashed
+      assert budget.present?, "a grant receipt still remains in reviews/ after the mid-move crash"
+      assert_empty Dir[File.join(task.reviews_dir, "review-completion-*.json")],
+                   "the completion receipt moved before the crash"
+      assert_raises(Hive::ReviewBudget::Refused) do
+        Hive::ReviewBudget.new(task: task, project: task.project_name, head: fixed).validate_resume!
+      end
+
+      result, = resume_recovery(task)
+      assert_equal "queued", result.status, result.to_h.inspect
+      assert_equal "cleared", result.phase
+      assert_equal :none, Hive::Markers.current(task.state_file).name
+      assert_equal merged, git_head(task)
+      assert_empty live_review_state(task)
+      refute budget.present?
+
+      archives = Dir[File.join(task.reviews_dir, "archive", "*")]
+      assert_equal 1, archives.size
+      assert_equal 1, Dir[File.join(archives.first, "review-completion-*.json")].size
+      assert_equal 2, Dir[File.join(archives.first, "review-grant-*.json")].size
+      audit = File.readlines(budget.audit_path).map { |line| JSON.parse(line) }
+      assert_equal 2, audit.count { |entry| entry["event"] == "expiry" }
+    end
+  end
+
+  def test_adopts_a_base_merge_whose_base_parent_is_strictly_behind_origin_base
+    with_base_merge_grant_task do |task, approved|
+      older_base = base_tip(task)
+      merged = merge_task_base(task)
+      File.write(File.join(task.project_root, "BASE.md"), "base moved past the merge\n")
+      run!("git", "-C", task.project_root, "commit", "--quiet", "-am", "base moved past the merge")
+      run!("git", "-C", task.project_root, "push", "--quiet", "origin", "master")
+      git(task, "fetch", "--quiet", "origin")
+      refute_equal older_base, base_tip(task)
+
+      mark_task_base_conflict(task, blocked: approved)
+      receipt = adopter(task, activity: nil).adopt!(marker: Hive::Markers.current(task.state_file))
+
+      assert_equal merged, receipt.fetch("after_oid")
+      assert_equal older_base, receipt.fetch("base_oid")
+      assert_empty live_review_state(task)
+    end
+  end
+
+  def test_stale_remote_tracking_base_ref_fails_closed
+    with_base_merge_grant_task do |task, approved|
+      File.write(File.join(task.project_root, "LOCAL_BASE.md"), "unpushed local base\n")
+      run!("git", "-C", task.project_root, "add", "LOCAL_BASE.md")
+      run!("git", "-C", task.project_root, "commit", "--quiet", "-m", "local master ahead of origin")
+      local_master = run!("git", "-C", task.project_root, "rev-parse", "refs/heads/master").strip
+      refute_equal base_tip(task), local_master
+
+      merge_task_base(task, ref: "master")
+      mark_task_base_conflict(task, blocked: approved)
+      before = review_files(task)
+
+      assert_nil adopter(task).adopt!(marker: Hive::Markers.current(task.state_file))
+      assert_equal before, review_files(task)
+    end
+  end
+
+  def test_synthetic_merge_bringing_no_new_base_commits_fails_closed
+    with_base_merge_grant_task(grant: false) do |task, branch_point|
+      git(task, "commit", "--allow-empty", "-qm", "task work ahead of base")
+      approved = git_head(task)
+      File.write(File.join(task.reviews_dir, "fix-success-03.md"), "<!-- HIVE: head=#{approved} kind=fixed -->\n")
+      token = Hive::ReviewBudget.new(task: task, project: task.project_name).observe.evidence_token
+      Hive::Daemon::RecoveryCoordinator.new.grant_review!(task: task, project: task.project_name,
+        passes: 1, reason: "Fix the accepted finding and verify it", evidence_token: token)
+
+      synthetic = git(task, "commit-tree", "-p", approved, "-p", branch_point,
+        "-m", "synthetic zero-new-base-commit merge", "#{approved}^{tree}")
+      git(task, "reset", "--hard", "--quiet", synthetic)
+      assert_equal [ synthetic, approved, branch_point ], git(task, "rev-list", "--parents", "-n", "1", "HEAD").split
+
+      mark_task_base_conflict(task, blocked: approved)
+      before = review_files(task)
+
+      assert_nil adopter(task).adopt!(marker: Hive::Markers.current(task.state_file))
+      assert_equal before, review_files(task)
     end
   end
 

@@ -1,0 +1,54 @@
+schema: "honeycomb-manifest/v1"
+name: "demo"
+version: "1.0.0"
+description: "Demo"
+author:
+  name: "Test"
+  url: "https://example.test/test"
+license: "MIT"
+hive_min_version: "0.4.3"
+source:
+  url: "https://example.test/source"
+  revision: "cccccccccccccccccccccccccccccccccccccccc"
+permissions:
+  risk: "low"
+  capabilities:
+    - "filesystem-read"
+  network_hosts: []
+  filesystem_read:
+    - "repository"
+    - "task"
+  filesystem_write: []
+  secrets: []
+files:
+  "packages/demo/1.0.0/README.md": "31ca6c61ca3fcc54029a62bd082448b88718b913d24e195794969dd2d123b990"
+  "packages/demo/1.0.0/instructions/work.md": "fd0c542be53a8ba29852cd68338ffa1107bf860661a01da25838bcb1840fcc40"
+  "packages/demo/1.0.0/prompts/context.md": "5ce27b561ce185abfd304dee0a86a21a1c974cf28ef7d9c0002467ec75f80d0c"
+  "packages/demo/1.0.0/tools/check.sh": "a8076d3d28d21e02012b20eaf7dbf75409a6277134439025f282e368e3305abf"
+  "packages/demo/1.0.0/workflow.yml": "caa3a13033197ad5d351e96d2eddff687576abed8ccb5d52f4cea79b611c5ad3"
+release_sha256: "7a54bb56bb6f6943df04aaa2d359526cffdce7aef634e8327bfefc0ea299cc4e"
+x-hive:
+  tools:
+    -
+      path: "tools/check.sh"
+  prompt_assets:
+    -
+      path: "prompts/context.md"
+  optional_inputs:
+    -
+      name: "CONTEXT"
+      authorized_slots:
+        - "stages.work"
+  external_skills:
+    - "external/reviewer"
+x-meta:
+  z:
+    source:
+      z: 2
+      a: 1
+  author:
+    custom: "must-survive"
+  a:
+    -
+      z: 2
+      a: 1

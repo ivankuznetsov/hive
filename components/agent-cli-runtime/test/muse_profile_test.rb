@@ -6,7 +6,7 @@ class AgentCliRuntimeMuseProfileTest < Minitest::Test
   end
 
   def test_muse_is_the_last_built_in_provider
-    assert_equal %i[claude codex pi grok opencode muse],
+    assert_equal AgentCliRuntime::Conformance::PROVIDER_NAMES,
                  AgentCliRuntime::Profiles.names
   end
 

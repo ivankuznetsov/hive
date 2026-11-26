@@ -108,6 +108,28 @@ module AgentCliRuntime
       reason.empty? ? "muse run #{terminal}" : reason
     end
 
+    # Antigravity CLI (`agy`) terminates every stream-json run with an
+    # `{"event":"result","result":{...}}` envelope. Non-SUCCESS statuses
+    # (`ERROR`, `CANCELED`, etc.) carry the provider/CLI diagnostic in
+    # `result.error`.
+    AGY = lambda do |event|
+      next nil unless event.is_a?(Hash)
+
+      case event["event"]
+      when "result"
+        result = event["result"]
+        next nil unless result.is_a?(Hash)
+
+        status = result["status"].to_s.upcase
+        next nil if status.empty? || status == "SUCCESS"
+
+        message = result["error"].to_s.strip
+        message.empty? ? "agy run #{status.downcase}" : message
+      when "error"
+        ErrorExtractors.message_from(event)
+      end
+    end
+
     def opencode_error_message(error)
       return nil unless error.is_a?(Hash)
 

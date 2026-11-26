@@ -286,6 +286,44 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_unexpected_run_debug_handles_nil_backtrace
+    with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
+      Dir.mktmpdir("e2e-nil-backtrace") do |scratch|
+        fixture = File.join(scratch, "nil_backtrace.rb")
+        File.write(fixture, <<~RUBY)
+          require #{File.join(__dir__, "runner").inspect}
+          class NilBacktraceRunError < StandardError
+            def backtrace
+              nil
+            end
+          end
+          module NilBacktraceRunFailure
+            def run_all(**)
+              raise NilBacktraceRunError, "backtrace unavailable"
+            end
+          end
+          Hive::E2E::Runner.prepend(NilBacktraceRunFailure)
+        RUBY
+
+        [ false, true ].each do |json|
+          out, err, status = Open3.capture3(
+            { "HIVE_E2E_RUNS_DIR" => runs_dir, "HIVE_E2E_DEBUG" => "1" },
+            RbConfig.ruby, "-r", fixture, hive_e2e, "run", name, *([ "--json" ] if json)
+          )
+          assert_equal 1, status.exitstatus, "#{out}#{err}"
+          message = "NilBacktraceRunError: backtrace unavailable"
+          if json
+            assert_equal message, assert_error_document(out, kind: "run_failed", code: 1, command: "run").fetch("message")
+            assert_equal "hive-e2e debug: #{message}\n", err
+          else
+            assert_empty out
+            assert_equal "hive-e2e: #{message}\nhive-e2e debug: #{message}\n", err
+          end
+        end
+      end
+    end
+  end
+
   def test_repeated_unexpected_run_failure_keeps_diagnostics_complete_and_fixture_unchanged
     with_unexpected_run_failure(:blocked_runs) do |name, runs_dir|
       messages = 2.times.map do

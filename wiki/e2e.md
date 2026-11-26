@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, schemas/hive-e2e-{coverage,selection}.v1.json, Rakefile
 created: 2026-04-29
-updated: 2026-11-03
+updated: 2026-11-26
 tags: [test, e2e, tui, incidents, modules, artifacts]
 ---
 
@@ -96,7 +96,7 @@ JSON error document in JSON mode. Normal mode emits no backtrace.
 
 `HIVE_E2E_DEBUG=1` adds one diagnostic block on stderr after the primary error
 output, containing only the rescued exception's own class, message, and
-backtrace. It never walks or renders `Exception#cause`, and adds no JSON
+backtrace (when present). It never walks or renders `Exception#cause`, and adds no JSON
 properties or stdout diagnostics. Only the exact value `1` enables this;
 unset, empty, whitespace-only, `0`, `true`, `yes`, `on`, and every other value
 keep debug disabled. This differs from `HIVE_TUI_DEBUG`, which enables its

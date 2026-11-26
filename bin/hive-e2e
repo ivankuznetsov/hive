@@ -340,7 +340,7 @@ module Hive
       def exit_with_run_failure(error)
         message = "#{error.class}: #{error.message}"
         detail = if ENV["HIVE_E2E_DEBUG"] == "1"
-                   [ "hive-e2e debug: #{message}", *error.backtrace.map { |frame| "  #{frame}" } ].join("\n")
+                   [ "hive-e2e debug: #{message}", *Array(error.backtrace).map { |frame| "  #{frame}" } ].join("\n")
         end
         exit_with_error(message, error_kind: "run_failed", exit_code: BinaryExit::FAILURE, stderr_detail: detail)
       end

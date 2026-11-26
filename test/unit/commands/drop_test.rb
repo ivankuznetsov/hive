@@ -188,6 +188,117 @@ class DropCommandTest < Minitest::Test
     end
   end
 
+  def test_dropping_ad_hoc_review_never_closes_the_borrowed_pr
+    with_drop_project do |dir, ops, project|
+      slug = "adhoc-review-pr-42"
+      folder = create_task(dir, "6-review", slug, body: "---\nsource: ad-hoc\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      File.write(File.join(folder, "idea.md"), "---\nsource: ad-hoc\n---\n\nreview PR #42\n")
+      File.write(File.join(folder, "pr.md"), "---\nsource: ad-hoc\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      commit_hive_state(ops, "6-review", slug)
+
+      with_gh_capture_stub(->(*) { raise "borrowed PR must not be closed" }) do
+        out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"]
+        assert_equal true, payload["pr_closed"]
+      end
+      refute Dir.exist?(folder)
+    end
+  end
+
+  def test_dropping_task_with_ad_hoc_source_in_task_or_idea_md_preserves_pr
+    %w[task.md idea.md].each do |source_file|
+      with_drop_project do |dir, ops, project|
+        slug = "adhoc-fallback-#{source_file.delete('.')}-42"
+        folder = create_task(dir, "6-review", slug, body: "# #{slug}\n<!-- REVIEW_WAITING -->\n")
+        File.write(File.join(folder, source_file), "---\nsource: Ad-Hoc\n---\n")
+        File.write(File.join(folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+        commit_hive_state(ops, "6-review", slug)
+
+        with_gh_capture_stub(->(*) { raise "borrowed PR must not be closed (#{source_file})" }) do
+          out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+          payload = JSON.parse(out)
+          assert_equal true, payload["ok"]
+          assert_equal true, payload["pr_closed"]
+        end
+        refute Dir.exist?(folder)
+      end
+    end
+  end
+
+  def test_dropping_pr_review_workflow_task_preserves_borrowed_pr
+    with_drop_project do |dir, ops, project|
+      slug = "pr-review-42"
+      folder = create_task(dir, "6-review", slug, body: "# #{slug}\n")
+      Hive::TaskMeta.write(folder, id: 4242, slug: slug, display_name: nil, workflow: "pr-review")
+      File.write(File.join(folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/42\n---\n")
+      commit_hive_state(ops, "6-review", slug)
+
+      with_gh_capture_stub(->(*) { raise "pr-review workflow PR must not be closed" }) do
+        out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"]
+        assert_equal true, payload["pr_closed"]
+      end
+      refute Dir.exist?(folder)
+    end
+  end
+
+  def test_dropping_task_with_unreadable_ownership_metadata_preserves_pr
+    with_drop_project do |dir, ops, project|
+      slug = "unreadable-source-261126-aaaa"
+      folder = create_task(dir, "6-review", slug, body: "# #{slug}\n")
+      task_md = File.join(folder, "task.md")
+      File.write(File.join(folder, "pr.md"), "---\npr_url: https://github.com/acme/app/pull/99\n---\n")
+      commit_hive_state(ops, "6-review", slug)
+
+      original_pr_frontmatter = Hive::Gh.method(:pr_frontmatter)
+      with_replaced_singleton_method(Hive::Gh, :pr_frontmatter, lambda { |path|
+        raise Errno::EACCES, path if path == task_md
+
+        original_pr_frontmatter.call(path)
+      }) do
+        with_gh_capture_stub(->(*) { raise "PR with unreadable ownership must not be closed" }) do
+          out, err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+          payload = JSON.parse(out)
+          assert_equal true, payload["ok"]
+          assert_equal true, payload["pr_closed"]
+          assert_includes err, "preserving PR"
+        end
+      end
+      refute Dir.exist?(folder)
+    end
+  end
+
+  def test_drop_still_closes_hive_owned_pr_in_review_stage
+    with_drop_project do |dir, ops, project|
+      slug = "owned-review-pr-261126-aaaa"
+      folder = create_task(dir, "6-review", slug, body: "---\nsource: cli\n---\n\n# #{slug}\n")
+      Hive::TaskMeta.write(folder, id: 4243, slug: slug, display_name: nil, workflow: "coding")
+      File.write(File.join(folder, "idea.md"), "---\nsource: cli\n---\n\nImplement feature\n")
+      File.write(
+        File.join(folder, "pr.md"),
+        "---\npr_url: https://github.com/acme/app/pull/77\npr_number: 77\npublication_id: pub-77\nhosted_state: draft\n---\n"
+      )
+      commit_hive_state(ops, "6-review", slug)
+
+      calls = []
+      with_gh_capture_stub(lambda do |*cmd, **_kwargs|
+        calls << cmd
+        [ "", "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
+      end) do
+        out, _err = capture_io { Hive::Commands::Drop.new(slug, project: project, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal true, payload["ok"]
+        assert_equal true, payload["pr_closed"]
+      end
+      assert_equal [
+        [ "gh", "pr", "close", "https://github.com/acme/app/pull/77", "--comment", "task dropped (hive drop #{slug})" ]
+      ], calls
+      refute Dir.exist?(folder)
+    end
+  end
+
   def test_drop_closes_pr_url_from_pr_md_best_effort
     with_drop_project do |dir, ops, project|
       slug = "drop-pr-260522-aaaa"

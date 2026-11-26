@@ -3,7 +3,7 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, web/app/models/task.rb, web/app/models/concerns/task_mutations.rb, web/app/controllers/tasks/drops_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-09-02
+updated: 2026-11-26
 tags: [command, task, cleanup, json, tui, web]
 ---
 
@@ -13,9 +13,10 @@ task lease, cleans that recorded process plus identity-stable descendants, and
 fences the remaining destructive work with the project commit lock and
 deterministic task leases. An unresolved `kill_failed` candidate aborts before
 those leases or any PR/worktree/branch/task/log deletion. Successful Drop
-closes the draft PR best-effort, removes worktree/branch/folders/logs, and
-records an audit commit on `hive/state`. There is no dropped bucket, archive,
-undo, reason prompt, or confirmation.
+closes any Hive-owned draft PR best-effort (preserving borrowed/ad-hoc PRs),
+removes worktree/branch/folders/logs, and records an audit commit on
+`hive/state`. There is no dropped bucket, archive, undo, reason prompt, or
+confirmation.
 
 ## Usage
 
@@ -61,7 +62,7 @@ Pre-dispatch usage failures use the same `hive-drop.v2` error envelope with
 raises `JSON::GeneratorError`, drop warns on stderr, emits no substitute
 document, and re-raises the original typed failure.
 
-When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded case — and `false` strictly means a recorded PR could not be closed (Hive web qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
+When a recorded Hive-owned draft PR exists but `gh` is not installed on PATH, draft-PR close is skipped with a warning on stderr (`pr_closed: false`, exit 0). Drop does not require `gh`. Borrowed PRs — tasks marked `source: ad-hoc` in `pr.md`, `task.md`, or `idea.md`, tasks using the `pr-review` workflow, or tasks whose ownership metadata cannot be read (fail closed with a stderr warning) — are never closed on GitHub. In the current v2 JSON contract, `pr_closed` is `true` whenever PR cleanup ends clean — including the common no-PR-recorded and preserved borrowed-PR cases — and `false` strictly means a Hive-owned recorded PR could not be closed (Hive web qualifies its "Dropped" notice on that signal). The v1 schema file remains for consumers pinned to the older no-PR-is-false interpretation.
 
 ## Steps Performed
 
@@ -98,9 +99,9 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
    aborts Drop before deletion.
 6. Re-resolve and revalidate folder/stage context while the commit lock and
    task leases are held.
-7. Close `pr_url` best-effort; remove owned worktree and branch; delete every
-   active-stage folder and `.hive-state/logs/<slug>/`; then commit
-   `hive: dropped/<slug> dropped`.
+7. Close Hive-owned `pr_url` best-effort (skipping borrowed/ad-hoc PRs); remove
+   owned worktree and branch; delete every active-stage folder and
+   `.hive-state/logs/<slug>/`; then commit `hive: dropped/<slug> dropped`.
 
 The logical leases remain held across this external work, but no SQLite
 transaction remains open while GitHub, process, filesystem, or Git operations

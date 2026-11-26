@@ -3,6 +3,7 @@ require "json"
 require "yaml"
 require "hive/config"
 require "hive/task"
+require "hive/task_meta"
 require "hive/task_resolver"
 require "hive/markers"
 require "hive/git_ops"
@@ -454,15 +455,21 @@ module Hive
       end
 
       def close_draft_prs(folders)
-        urls = folders.filter_map do |entry|
-          frontmatter = Hive::Gh.pr_frontmatter(File.join(entry[:folder], "pr.md"))
-          frontmatter["pr_url"].to_s.strip.empty? ? nil : frontmatter["pr_url"].to_s.strip
+        entries = folders.map do |entry|
+          [ entry[:folder], Hive::Gh.pr_frontmatter(File.join(entry[:folder], "pr.md")) ]
+        end
+        urls = entries.filter_map do |_folder, frontmatter|
+          url = frontmatter["pr_url"].to_s.strip
+          url.empty? ? nil : url
         end.uniq
         # No PR recorded = PR cleanup is clean. `false` strictly means "a PR
         # existed and could not be closed" — that distinction is what lets
         # the web tier qualify its Dropped notice without false alarms on
         # the common case (dropping an idea that never reached open-pr).
         return true if urls.empty?
+        # Borrowed PRs (ad-hoc reviews or standalone pr-review tasks) were not
+        # opened by Hive, so dropping the task must never close them on GitHub.
+        return true if entries.any? { |folder, frontmatter| borrowed_pr?(folder, frontmatter) }
 
         comment = "task dropped (hive drop #{@target})"
         closed_any = false
@@ -477,6 +484,28 @@ module Hive
           warn "[hive] drop: gh pr close skipped: #{e.message}"
         end
         closed_any
+      end
+
+      def borrowed_pr?(folder, pr_frontmatter)
+        return true if adhoc_source?(pr_frontmatter)
+        return true if Hive::TaskMeta.read(folder)[:workflow].to_s.strip.casecmp?("pr-review")
+
+        %w[task.md idea.md].any? do |filename|
+          adhoc_source?(read_ownership_frontmatter(File.join(folder, filename)))
+        end
+      end
+
+      def adhoc_source?(frontmatter)
+        frontmatter.nil? || frontmatter["source"].to_s.strip.casecmp?("ad-hoc")
+      end
+
+      def read_ownership_frontmatter(path)
+        Hive::Gh.pr_frontmatter(path)
+      rescue SystemCallError, IOError => e
+        # Fail closed when task ownership metadata cannot be read so drop never
+        # closes a PR whose borrowed/ad-hoc provenance is unconfirmable.
+        warn "[hive] drop: could not read #{path} to verify PR ownership (#{e.class}: #{e.message}); preserving PR"
+        nil
       end
 
       def remove_worktrees(context, folders)

@@ -41,7 +41,8 @@ module HiveBench
 
       outcome = RunAll.new(runner: hive_runner(reuse_existing: opts[:reuse_existing],
                                                reuse_unverified: opts[:reuse_unverified]), gate: no_op_gate,
-                           judges: Driver.judges(opts), withhold_reference: opts[:withhold_reference])
+                           judges: Driver.judges(opts), withhold_reference: opts[:withhold_reference],
+                           plan_source: opts[:plan_source])
                       .call(entries: entries, profiles: candidates, out_root: opts[:out],
                             corpus_version: opts[:corpus_version])
       JudgeProvenance.annotate_document!(outcome.results, efforts: Driver.judge_efforts(opts),
@@ -68,7 +69,7 @@ module HiveBench
 
     def parse(argv)
       opts = { corpus: "corpus", out: "runs/v2", source: nil, candidate: nil, seeds: 1,
-               corpus_version: "v2", withhold_reference: false, claude_judge: true, judge_bin: "claude",
+               corpus_version: "v2", withhold_reference: false, plan_source: :frozen, claude_judge: true, judge_bin: "claude",
                judge_model: nil, codex_judge: true,
                codex_judge_model: CodexJudge::DEFAULT_MODEL, codex_judge_effort: CodexJudge::DEFAULT_EFFORT,
                codex_judge_provider: CodexJudge::DEFAULT_PROVIDER, codex_judge_provider_model: nil,
@@ -85,6 +86,8 @@ module HiveBench
         o.on("--seeds N", Integer, "judge samples per judge (default 1; use >=3 for " \
                                    "published cells — 1 seed collapses the tie interval") { |v| opts[:seeds] = v }
         o.on("--[no-]withhold-reference", "default off: judge vs the reference PR") { |v| opts[:withhold_reference] = v }
+        o.on("--plan-source SRC", %w[frozen candidate],
+             "what {{PLAN}} carries for inline judging: frozen (v2 default) or candidate (v3 contract)") { |v| opts[:plan_source] = v.to_sym }
         o.on("--[no-]reuse-existing-artifacts", "reuse completed Hive output after result/judge failure (default on)") do |v|
           opts[:reuse_existing] = v
         end
@@ -131,9 +134,10 @@ module HiveBench
       File.write(path, "#{JSON.pretty_generate(outcome.results)}\n")
       warn "wrote #{path}: #{outcome.results["cells"].size} cell(s), #{outcome.pending.size} pending, " \
            "#{outcome.failed.size} failed"
+      Driver.report_coverage(outcome.results)
       outcome.results["cells"].each do |c|
-        judges = (c["judges"] || {}).map { |n, j| "#{n}=#{j["mean"]}" }.join(" ")
-        warn "  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  judge[#{judges}]"
+        judges = ResultEvidence.admitted_judges(c).map { |n, j| "#{n}=#{j["mean"]}" }.join(" ")
+        warn "  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  ranked judge[#{judges.empty? ? "n/a" : judges}] diagnostic_judges=#{(c["judges"] || {}).size - ResultEvidence.admitted_judges(c).size}"
       end
       exit(2) unless outcome.failed.empty?
     end

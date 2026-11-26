@@ -45,6 +45,15 @@ class BenchWorkflowInstallTest < Minitest::Test
         end
         assert_includes File.read(File.join(runtime_root, "harness", "lib", "isolation.sh")), "HB_API_KEYS"
         assert_includes File.read(File.join(runtime_root, "harness", "lib", "isolation_exec.rb")), "CREDENTIAL_POLICY_ERROR"
+        %w[result_evidence generation_provenance campaign_merge].each do |helper|
+          assert_path_exists File.join(runtime_root, "harness", "lib", "#{helper}.rb")
+        end
+        fixture = File.expand_path("../support/bench_evidence_lifecycle.rb", __dir__)
+        lifecycle_out, lifecycle_err, lifecycle_status = Open3.capture3(
+          RbConfig.ruby, "-I#{File.join(runtime_root, 'harness')}", fixture
+        )
+        assert lifecycle_status.success?, lifecycle_out + lifecycle_err
+        assert_equal 2, JSON.parse(lifecycle_out).fetch("eligible")
         tracked_runtime, tracked_runtime_err, tracked_runtime_status = Open3.capture3(
           "git", "-C", File.join(project_root, ".hive-state"), "ls-files", "bench-runtime"
         )

@@ -45,12 +45,14 @@ module HiveBench
     # judges: { "<name>" => HiveBench::Judge } — every cell is scored by each.
     # withhold_reference: grade on plan+diff alone for ALL cells (de-anchoring +
     # cheaper); reused incumbent cells are always reference-withheld regardless.
-    def initialize(runner:, gate:, judges:, scorer: Score.new, withhold_reference: false, clock: -> { Time.now.utc })
+    def initialize(runner:, gate:, judges:, scorer: Score.new, withhold_reference: false,
+                   plan_source: :frozen, clock: -> { Time.now.utc })
       @runner = runner
       @gate = gate
       @judges = judges
       @scorer = scorer
       @withhold_reference = withhold_reference
+      @plan_source = plan_source.to_sym
       @clock = clock
     end
 
@@ -69,7 +71,7 @@ module HiveBench
       end
 
       results = @scorer.results(records: records, corpus_version: corpus_version,
-                                generated_at: @clock.call.iso8601)
+                                generated_at: @clock.call.iso8601, pending: pending, failed: failed)
       results["pending"] = pending
       results["failed"] = failed
       Outcome.new(results: results, pending: pending, failed: failed)
@@ -84,33 +86,48 @@ module HiveBench
     # cell). A provider limit is parked in `pending` for re-run. The catch-all is
     # deliberate and loud (it warns), not silent: this is a long, expensive matrix.
     def run_cell(entry, profile, out_dir, records, pending, failed)
+      previous_manifest = load_manifest_safely(out_dir)
       cell = @runner.call(entry: entry, profile: profile, out_dir: out_dir)
 
       if cell.status == "limit_hit"
-        pending << park(entry, profile, cell.reason)
+        pending << park(entry, profile, cell.reason, cell)
         return
       end
 
       scored = score_cell(entry, profile, cell, out_dir)
       records << scored.record
-      park_judge_failure(scored.judge_failure, entry, profile, pending, failed) if scored.judge_failure
+      park_judge_failure(scored.judge_failure, entry, profile, pending, failed, cell) if scored.judge_failure
     rescue StandardError => e
       reason = "#{e.class}: #{e.message}"
       warn "hive-bench: parked failed — #{profile.id} #{entry["task_id"]}: #{redact(reason)}"
-      failed << park(entry, profile, reason)
+      if cell && records.none? { |record| record["task_id"] == cell.task_id && record["agent_id"] == cell.agent_id }
+        error_subset = cell.diff_path && gated_entry?(entry) ? "gated" : "judged"
+        error_gate = Gate::Result.new(status: :error, subset: error_subset, reason: redact(reason), details: {})
+        verification_error = e.is_a?(GenerationProvenance::Mismatch) ? "artifact recovery/rejudging required: #{redact(e.message)}" : nil
+        records << cell_record(cell, error_gate, {}, entry,
+                               plan: safe_evaluation_plan(entry, out_dir),
+                               artifact_verification_error: verification_error)
+      end
+      parked = park(entry, profile, reason, cell)
+      if !cell && (manifest = load_manifest_safely(out_dir)) && manifest != previous_manifest
+        parked.merge!(manifest.slice("generation_id", "run_status", "efficiency"))
+      end
+      failed << parked
     end
 
-    def park(entry, profile, reason)
-      { "task_id" => entry["task_id"], "agent_id" => profile.id, "reason" => redact(reason) }
+    def park(entry, profile, reason, cell = nil)
+      { "task_id" => entry["task_id"], "agent_id" => profile.id, "reason" => redact(reason),
+        "generation_id" => cell.respond_to?(:generation_id) ? cell.generation_id : nil,
+        "run_status" => cell&.status, "mode" => cell&.mode, "efficiency" => cell&.telemetry || {} }
     end
 
     # The diff generated fine but no judge could score it. A provider limit
     # (drained balance, 429) is transient; anything else is a hard judge failure.
     # In both cases the generated record is already preserved for rejudge.
-    def park_judge_failure(error, entry, profile, pending, failed)
+    def park_judge_failure(error, entry, profile, pending, failed, cell)
       bucket, label = error.limit ? [pending, "pending (judge limit)"] : [failed, "failed (all judges)"]
       warn "hive-bench: #{label} — #{profile.id} #{entry["task_id"]}: #{redact(error.message)}"
-      bucket << park(entry, profile, error.message)
+      bucket << park(entry, profile, error.message, cell)
     end
 
     # Strip provider-secret shapes from any text persisted into results.json —
@@ -122,6 +139,11 @@ module HiveBench
     end
 
     def score_cell(entry, _profile, cell, out_dir)
+      manifest = GenerationProvenance.load(out_dir)
+      if manifest && cell.respond_to?(:generation_id) && cell.generation_id
+        GenerationProvenance.verify!(out_dir, entry: entry, agent_id: cell.agent_id) if cell.diff_path
+      end
+      plan = evaluation_plan(entry, out_dir)
       gate_spec = load_gate(entry)
       candidate_patch = cell.diff_path ? File.read(cell.diff_path) : ""
 
@@ -133,18 +155,26 @@ module HiveBench
           Gate::Result.new(status: :no_gate, subset: "judged", reason: "no diff or no gate", details: {})
         end
 
-      judges_res = judge_cell(entry, candidate_patch, withhold_reference: @withhold_reference || cell.mode == "reused")
-      ScoredCell.new(record: cell_record(cell, gate_res, judges_res), judge_failure: nil)
+      judges_res = judge_cell(entry, candidate_patch, withhold_reference: @withhold_reference || cell.mode == "reused", plan: plan)
+      ScoredCell.new(record: cell_record(cell, gate_res, judges_res, entry, plan: plan), judge_failure: nil)
     rescue JudgesExhausted => e
       # Generation and gating already succeeded. Persist that paid artifact even
       # when every judge is unavailable so rejudge can backfill it later.
-      ScoredCell.new(record: cell_record(cell, gate_res, {}), judge_failure: e)
+      ScoredCell.new(record: cell_record(cell, gate_res, {}, entry, plan: plan), judge_failure: e)
     end
 
-    def cell_record(cell, gate_res, judges_res)
+    def cell_record(cell, gate_res, judges_res, entry, plan: nil, artifact_verification_error: nil)
+      withheld = @withhold_reference || cell.mode == "reused"
+      eval_plan = plan.nil? ? read_entry_file(entry, entry.dig("spec", "plan")) : plan
+      context = GenerationProvenance.context(plan: eval_plan,
+                                             reference: read_entry_file(entry, "reference.patch"), withheld: withheld)
       @scorer.cell_record(
         cell: { task_id: cell.task_id, agent_id: cell.agent_id, mode: cell.mode,
-                model_version: cell.model_version, run_status: cell.status, telemetry: cell.telemetry },
+                model_version: cell.model_version, run_status: cell.status, telemetry: cell.telemetry,
+                generation_id: cell.respond_to?(:generation_id) ? cell.generation_id : nil,
+                artifact_binding: cell.respond_to?(:artifact_binding) ? cell.artifact_binding : nil,
+                evaluation_context: context,
+                artifact_verification_error: artifact_verification_error },
         gate: gate_res, judges: judges_res
       )
     end
@@ -157,10 +187,10 @@ module HiveBench
     # it against the reference would be circular incumbent-anchoring — grade it on
     # the task alone (R24). Raises JudgesExhausted only when EVERY judge failed.
     # Returns { name => Judge::Result } (empty when there's no diff).
-    def judge_cell(entry, candidate_patch, withhold_reference:)
+    def judge_cell(entry, candidate_patch, withhold_reference:, plan: nil)
       return {} if candidate_patch.strip.empty?
 
-      plan = read_entry_file(entry, entry.dig("spec", "plan"))
+      plan = read_entry_file(entry, entry.dig("spec", "plan")) if plan.nil?
       reference = withhold_reference ? nil : read_entry_file(entry, "reference.patch")
       results = {}
       failures = []
@@ -175,6 +205,43 @@ module HiveBench
       end
 
       results
+    end
+
+    def evaluation_plan(entry, out_dir)
+      return read_entry_file(entry, entry.dig("spec", "plan")).to_s unless @plan_source == :candidate
+
+      manifest = GenerationProvenance.load(out_dir)
+      if manifest && (path = GenerationProvenance.artifact_path(out_dir, manifest["plan_path"]))
+        return File.read(path)
+      end
+      stored = File.join(out_dir, "generation-plan.md")
+      return File.read(stored) if File.file?(stored)
+
+      pipeline = File.join(out_dir, "plan_work", "HIVE_BENCH_PLAN.md")
+      return File.read(pipeline) if File.file?(pipeline)
+
+      GenerationProvenance.candidate_plan(File.join(out_dir, "target"), entry.fetch("task_id"))
+    end
+
+    def safe_evaluation_plan(entry, out_dir)
+      evaluation_plan(entry, out_dir)
+    rescue StandardError
+      ""
+    end
+
+    def load_manifest_safely(out_dir)
+      GenerationProvenance.load(out_dir)
+    rescue StandardError
+      nil
+    end
+
+    def gated_entry?(entry)
+      path = File.join(entry.fetch("entry_dir"), "gate", "gate.yml")
+      return false unless File.file?(path)
+
+      !YAML.safe_load_file(path).nil?
+    rescue StandardError
+      true
     end
 
     def load_gate(entry)
@@ -226,7 +293,7 @@ module HiveBench
 
     def parse(argv)
       opts = { corpus: "corpus", out: "runs", source: nil, agent: nil,
-               seeds: 1, corpus_version: "v1", withhold_reference: true,
+               seeds: 1, corpus_version: "v1", withhold_reference: true, plan_source: :frozen,
                claude_judge: true, judge_bin: "claude", judge_model: nil,
                codex_judge: false, codex_judge_model: CodexJudge::DEFAULT_MODEL,
                codex_judge_effort: CodexJudge::DEFAULT_EFFORT,
@@ -241,6 +308,8 @@ module HiveBench
         o.on("--seeds N", Integer, "judge seeds per judge (default: 1)") { |v| opts[:seeds] = v }
         o.on("--corpus-version V", "recorded in results.json (default: v1)") { |v| opts[:corpus_version] = v }
         o.on("--[no-]withhold-reference", "judge on plan+diff alone (default: on)") { |v| opts[:withhold_reference] = v }
+        o.on("--plan-source SRC", %w[frozen candidate],
+             "what {{PLAN}} carries for inline judging: frozen or candidate (default: frozen)") { |v| opts[:plan_source] = v.to_sym }
         o.on("--[no-]claude-judge", "score with the local claude judge (default: on)") { |v| opts[:claude_judge] = v }
         o.on("--judge-bin BIN", "claude judge CLI binary (default: claude)") { |v| opts[:judge_bin] = v }
         o.on("--judge-model M", "claude judge model (default: claude-fable-5)") { |v| opts[:judge_model] = v }
@@ -282,7 +351,8 @@ module HiveBench
                         reuse_resolver: Reuse.resolver),
         gate: Gate.new(exec: IsolationExec.gate_exec),
         judges: judges(opts),
-        withhold_reference: opts[:withhold_reference]
+        withhold_reference: opts[:withhold_reference],
+        plan_source: opts[:plan_source]
       )
     end
 
@@ -346,15 +416,24 @@ module HiveBench
       exit(2) unless outcome.failed.empty?
     end
 
+    def report_coverage(results)
+      results.fetch("agents", {}).each do |agent, summary|
+        coverage = summary.fetch("coverage", {})
+        warn "  #{agent} coverage attempted=#{coverage['attempted_cells']} eligible=#{coverage['eligible_executions']} " \
+             "judged=#{coverage['judged_cells']} gated=#{coverage['gated_cells']} preliminary=#{summary['preliminary']}"
+      end
+    end
+
     def report(outcome, path)
+      report_coverage(outcome.results)
       cells = outcome.results["cells"]
       warn "wrote #{path}: #{cells.size} scored cell(s), #{outcome.pending.size} pending, #{outcome.failed.size} failed"
       outcome.pending.each { |p| warn "  pending  #{p["agent_id"]}  #{p["task_id"]}  (#{p["reason"]})" }
       outcome.failed.each { |f| warn "  FAILED   #{f["agent_id"]}  #{f["task_id"]}  (#{f["reason"]})" }
       cells.each do |c|
-        judges = (c["judges"] || {}).map { |name, j| "#{name}=#{j["mean"]}" }.join(" ")
+        judges = ResultEvidence.admitted_judges(c).map { |name, j| "#{name}=#{j["mean"]}" }.join(" ")
         warn "  #{c["subset"]}  #{c["agent_id"]}  #{c["task_id"]}  gen=#{c["run_status"]}  " \
-             "gate=#{c.dig("gate", "status")}  judge[#{judges.empty? ? "—" : judges}]"
+             "ranked_gate=#{ResultEvidence.admitted_gate?(c) ? c.dig("gate", "status") : "n/a"}  judge[#{judges.empty? ? "n/a" : judges}] diagnostic_judges=#{(c["judges"] || {}).size - ResultEvidence.admitted_judges(c).size}"
       end
     end
   end

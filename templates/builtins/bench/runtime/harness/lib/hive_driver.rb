@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "lib/generation_provenance"
 require "json"
 require "yaml"
 require "open3"
@@ -27,7 +28,11 @@ module HiveBench
     class ArtifactProvenanceMismatch < StandardError; end
 
     Cell = Data.define(:task_id, :agent_id, :mode, :model_version, :status,
-                       :diff_path, :telemetry, :reason)
+                        :diff_path, :telemetry, :reason, :generation_id, :artifact_binding) do
+      def initialize(generation_id: nil, artifact_binding: nil, **attributes)
+        super(**attributes, generation_id: generation_id, artifact_binding: artifact_binding)
+      end
+    end
 
     IMAGE = ENV.fetch("HB_RUNNER_IMAGE", "hive-bench-runner:latest")
     OPENCODE_IMAGE = ENV.fetch("HB_OPENCODE_RUNNER_IMAGE", "hive-bench-runner:opencode")
@@ -101,6 +106,7 @@ module HiveBench
       resume_marker_id =
         !resume_review && @reuse_existing &&
         resumable_execute_marker(entry, candidate, work, identity)
+      manifest = GenerationProvenance.start!(out_dir: out_dir, entry: entry, agent_id: candidate.id)
       unless resume_review || resume_marker_id
         setup_repo(source, base, work)
         seed_task(entry, slug, work)
@@ -112,6 +118,7 @@ module HiveBench
       end
       seed_project_enrollment(work)
 
+      prior_telemetry = (resume_review || resume_marker_id) ? telemetry(work) : {}
       started = @clock.call
       stdout = run_container(
         slug, base, work, candidate, out_dir,
@@ -119,7 +126,19 @@ module HiveBench
       )
       wall = (@clock.call - started).round(2)
 
-      build_cell(entry, candidate, work, stdout, wall)
+      produced = build_cell(entry, candidate, work, stdout, wall)
+      unless prior_telemetry.empty?
+        current = telemetry(work)
+        current.each do |key, value|
+          current[key] = [value - prior_telemetry.fetch(key, 0), 0].max if value.is_a?(Numeric)
+        end
+        retained = produced.telemetry.reject { |key, _| key.end_with?("_tokens") || key.start_with?("cost_usd") }
+        retained.merge!(current)
+        price_telemetry(retained, candidate)
+        produced = produced.with(telemetry: retained)
+      end
+      GenerationProvenance.finalize_cell!(produced, out_dir: out_dir, manifest: manifest,
+                                          plan: GenerationProvenance.candidate_plan(work, slug))
     end
 
     private
@@ -148,7 +167,32 @@ module HiveBench
       end
 
       provenance = verified ? "verified" : "legacy-unverified"
-      build_cell(entry, candidate, work, stdout, nil, recovered: provenance)
+      produced = build_cell(entry, candidate, work, stdout, nil, recovered: provenance)
+      out_dir = File.dirname(work)
+      manifest = GenerationProvenance.load(out_dir)
+      return produced unless manifest # Legacy artifacts need the explicit rejudge migration.
+
+      unless manifest["task_id"] == entry["task_id"] && manifest["agent_id"] == candidate.id && manifest["base_commit"] == base
+        raise ArtifactProvenanceMismatch, "generation attempt does not match task/candidate/base"
+      end
+      if manifest["artifact_binding"]
+        GenerationProvenance.verify!(out_dir, entry: entry, agent_id: candidate.id)
+        persisted = manifest["efficiency"]
+        recovered_telemetry =
+          if persisted.is_a?(Hash) && !persisted.empty?
+            produced.telemetry
+                    .reject { |key, value| value.nil? || key.end_with?("_tokens") || key.start_with?("cost_usd") }
+                    .merge(persisted.compact)
+                    .merge("recovered_artifact" => true, "artifact_provenance" => provenance)
+          else
+            produced.telemetry.compact
+          end
+        produced.with(generation_id: manifest.fetch("generation_id"), artifact_binding: manifest["artifact_binding"],
+                      telemetry: recovered_telemetry)
+      else
+        GenerationProvenance.finalize_cell!(produced, out_dir: out_dir, manifest: manifest,
+                                            plan: GenerationProvenance.candidate_plan(work, entry["task_id"]), state: "recovery-finalized")
+      end
     end
 
     # Resume only a provenance-matched Hive task with a recovery-safe terminal
@@ -851,7 +895,7 @@ module HiveBench
       # Failed runs can leave a zero-byte capture that `generate` would mistake
       # for a paid artifact sentinel. Preserve real diffs and terminal empties.
       FileUtils.rm_f(diff_path) if diff.empty? && !%w[generated empty_diff].include?(status)
-      cell(entry, candidate, status, status == "generated" ? diff_path : nil, tel, reason)
+      cell(entry, candidate, status, File.file?(diff_path) ? diff_path : nil, tel, reason)
     end
 
     # The outer timeout can kill hive_stages.sh while review is running, before

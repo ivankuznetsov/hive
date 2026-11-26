@@ -426,3 +426,29 @@ There is no publish stage or executable outcome action.
 - [[modules/stages]] — the canonical stage list this module references
 - [[modules/task]] — task stage validation and state-file lookup derived from the descriptor-backed constants
 - [[modules/workflow_package]] — reviewed Honeycomb trust, storage, policy, and publication boundary
+
+## Benchmark ranked evidence
+
+The packaged benchmark runtime emits result schema version 2. Only `generated`
+and successful `empty_diff` statuses are eligible; current-bound judge and gate
+evidence alone enters the retained `judged`/`gated` aggregates. Judges bind to
+`generation_id`, `artifact_binding`, and `evaluation_context` (aligned with
+`--plan-source`), while objective gates bind only to `generation_id` and
+`artifact_binding` so rejudging context changes preserve valid current gates.
+Partial scores, unknown statuses, parked telemetry and discarded generations
+remain diagnostic. Coverage separates attempted cells, eligible executions and
+valid judged/gated evidence; zero eligible cells stay preliminary and unranked.
+Missing scores render unavailable. The rc=124 outer-timeout classification
+exception remains.
+
+Every generation attempt has an identity outside its candidate checkout.
+Replacement clears prior judges, gates and telemetry even for identical bytes;
+verified unchanged backfill retains them. Campaign handoff preserves the root
+and parked-only snapshots, skips retired snapshots and orders explicit
+replacements before judge-only overlays. Rejudge verifies one artifact bundle,
+reconciles finalized manifest status/telemetry, preserves document metadata and
+operational buckets, and supports legacy judging without generation. Unbound
+legacy gates require fresh gating. Deliberation filters on admitted eligible
+judges and summarizes only current eligible generations. See
+`docs/bench-result-contract.md` and `docs/bench-runtime-inventory.md` for
+populations, merge order and delivery.

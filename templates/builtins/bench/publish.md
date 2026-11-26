@@ -101,8 +101,8 @@ ruby -rjson -e '
   abort("merged results contain no agents/cells; nothing to publish") if agents.empty?
   puts "## Leaderboard Summary"
   puts
-  puts "| Agent | Cells | Cross-family mean | Judged cells | Gate pass rate | Fresh | Reused | Cost USD |"
-  puts "|---|---:|---|---:|---:|---:|---:|---:|"
+  puts "| Agent | Attempted | Eligible | Judged | Gated | Cross-family mean | Gate pass rate | Ranking | Operational cost USD | Diagnostic judged |"
+  puts "|---|---:|---:|---:|---:|---|---:|---|---:|---:|"
   def fmt(value)
     value.nil? ? "n/a" : value
   end
@@ -112,15 +112,19 @@ ruby -rjson -e '
   end
   agents.keys.sort.each do |agent|
     row = agents.fetch(agent)
-    cells = row["cells"]
+    attempted = row.dig("coverage", "attempted_cells")
+    eligible = row.dig("coverage", "eligible_executions")
+    gated = row.dig("gated", "total")
     cross_mean = mean_map(row.dig("judged", "mean_quality_cross_family"))
     judged = row.dig("judged", "scored_cells")
     pass_rate = row.dig("gated", "pass_rate")
-    fresh = row.dig("provenance", "fresh")
-    reused = row.dig("provenance", "reused")
+    ranking = eligible.to_i.zero? ? "preliminary / unranked" : (row["preliminary"] ? "preliminary" : "eligible")
+    diagnostics = row.dig("diagnostics", "judged", "scored_cells")
     cost = row.dig("efficiency", "total_cost_usd")
-    puts "| #{agent} | #{fmt(cells)} | #{cross_mean} | #{fmt(judged)} | #{fmt(pass_rate)} | #{fmt(fresh)} | #{fmt(reused)} | #{fmt(cost)} |"
+    puts "| #{agent} | #{fmt(attempted)} | #{fmt(eligible)} | #{fmt(judged)} | #{fmt(gated)} | #{cross_mean} | #{fmt(pass_rate)} | #{ranking} | #{fmt(cost)} | #{fmt(diagnostics)} |"
   end
+  puts
+  puts "Judged and gated fields contain only admissible current-generation evidence (schema version 2). Diagnostic scores do not enter rankings. Attempted/eligible coverage is separate from judged/gated coverage; gate pass rate uses valid eligible gate outcomes. Operational cost includes available unsuccessful-attempt costs."
   puts
   puts "Merged results: `#{ARGV.fetch(0)}`"
   puts

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "fileutils"
+require "lib/generation_provenance"
 require "lib/git_restore"
 require "lib/isolation_exec"
 require "lib/agent_limit"
@@ -20,7 +21,11 @@ module HiveBench
   #   identity prompt frame (the pipeline supplies the full planner prompt);
   #   exec_spawn uses the normal executor frame. Both are isolated gen runs.
   class Pipeline
-    Cell = Data.define(:task_id, :agent_id, :mode, :model_version, :status, :diff_path, :telemetry, :reason)
+    Cell = Data.define(:task_id, :agent_id, :mode, :model_version, :status,  :diff_path, :telemetry, :reason, :generation_id, :artifact_binding) do
+      def initialize(generation_id: nil, artifact_binding: nil, **attributes)
+        super(**attributes, generation_id: generation_id, artifact_binding: artifact_binding)
+      end
+    end
 
     def initialize(plan_spawn:, exec_spawn:, restorer: GitRestore.new, clock: -> { Time.now.utc })
       @restorer = restorer
@@ -32,26 +37,34 @@ module HiveBench
     # planner/executor: HiveBench::Profile. pair_id: the agent_id recorded (e.g.
     # "glm-5.2->kimi-k2.7"). Returns a Cell shaped like Run::Cell for scoring.
     def call(entry:, planner:, executor:, pair_id:, out_dir:)
+      manifest = GenerationProvenance.start!(out_dir: out_dir, entry: entry, agent_id: pair_id)
+      produced = produce(entry: entry, planner: planner, executor: executor, pair_id: pair_id, out_dir: out_dir)
+      path = File.join(out_dir, "plan_work", IsolationExec::PLAN_OUTPUT_FILE)
+      plan = File.file?(path) ? File.read(path) : ""
+      GenerationProvenance.finalize_cell!(produced, out_dir: out_dir, manifest: manifest, plan: plan)
+    end
+
+    def produce(entry:, planner:, executor:, pair_id:, out_dir:)
       FileUtils.mkdir_p(out_dir)
       base = entry.dig("source", "base_commit") or raise ArgumentError, "entry has no source.base_commit"
       source = entry["checkout_source"] or raise ArgumentError, "entry has no checkout_source"
 
       plan, plan_tel, plan_result = plan_phase(entry, planner, source, base, out_dir)
-      return parked(entry, pair_id, planner, "planner hit a provider limit") if limit?(plan_result)
+      return parked(entry, pair_id, planner, "planner hit a provider limit", merge_telemetry(plan_tel, {})) if limit?(plan_result)
       # Validate the planner spawn itself: a timeout-kill or non-zero exit can
       # still leave a non-empty plan file behind (partial work), and emptiness
       # alone is not success. Only a clean planner exit may reach the executor.
       if (plan_status = plan_result[:status]) != :ok
-        return cell(entry, pair_id, executor, "plan_failed", nil, plan_tel,
+        return cell(entry, pair_id, executor, "plan_failed", nil, merge_telemetry(plan_tel, {}),
                     plan_status == :timeout ? "planner timed out" : "planner exited non-zero")
       end
       if plan.strip.empty?
-        return cell(entry, pair_id, executor, "plan_failed", nil, plan_tel,
+        return cell(entry, pair_id, executor, "plan_failed", nil, merge_telemetry(plan_tel, {}),
                     "planner wrote no #{IsolationExec::PLAN_OUTPUT_FILE}")
       end
 
       diff_path, exec_tel, exec_result, status = exec_phase(plan, executor, source, base, out_dir)
-      return parked(entry, pair_id, executor, "executor hit a provider limit") if limit?(exec_result)
+      return parked(entry, pair_id, executor, "executor hit a provider limit", merge_telemetry(plan_tel, exec_tel)) if limit?(exec_result)
 
       cell(entry, pair_id, executor, status, diff_path, merge_telemetry(plan_tel, exec_tel),
            status == "agent_failed" ? "executor exited non-zero" : nil)
@@ -61,6 +74,7 @@ module HiveBench
 
     def plan_phase(entry, planner, source, base, out_dir)
       work = File.join(out_dir, "plan_work")
+      FileUtils.rm_f(File.join(work, IsolationExec::PLAN_OUTPUT_FILE))
       @restorer.restore(source: source, base_commit: base, into: work)
       idea = read_entry(entry, entry.dig("spec", "idea"))
       brainstorm = read_entry(entry, entry.dig("spec", "brainstorm"))
@@ -122,9 +136,9 @@ module HiveBench
                telemetry: telemetry, reason: reason)
     end
 
-    def parked(entry, pair_id, profile, reason)
+    def parked(entry, pair_id, profile, reason, telemetry)
       Cell.new(task_id: entry.fetch("task_id"), agent_id: pair_id, mode: "pipeline",
-               model_version: profile.model, status: "limit_hit", diff_path: nil, telemetry: {}, reason: reason)
+               model_version: profile.model, status: "limit_hit", diff_path: nil, telemetry: telemetry, reason: reason)
     end
 
     def read_entry(entry, rel)

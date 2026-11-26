@@ -3125,3 +3125,20 @@ See [[publication-recovery]] (Base merge under an active review grant).
 - `UsageExtractors::AGY` records `output_includes_reasoning: true` when
   `thinking_tokens` is present; `input_includes_cache_read` and USD pricing
   stay unknown (`nil`).
+
+## Benchmark external ranking consumers (2026-11-03)
+
+The canonical hive-bench checkout and Hive's packaged runtime share
+generation/evaluation admission semantics and deterministic local regressions.
+Follow-up review hardening in Hive's packaged harness (legacy finalized-manifest
+status reconciliation, decoupled gate `evidence_binding`, `--plan-source`
+alignment, single-doc diagnostic merge preservation, legacy bucket/park
+deduplication, resumed delta recovery, `RunAll` rescue hygiene, eligible-only
+deliberation, parked-only campaign snapshots, and empty timeout-patch guard)
+must be synced back to `ivankuznetsov/hive-bench` after this PR merges.
+The external hivecli.sh/bench site's source and unknown downstream readers were
+outside the accessible checkouts. Retained `judged`/`gated` keys narrow their
+populations under writer schema version 2; external readers ignoring version
+metadata are not protected by the version bump. No installed campaigns or
+historical results were deployed or rewritten. Canonical's configured
+cross-project main wiki path was unavailable during this delivery.

@@ -1,15 +1,6 @@
 # frozen_string_literal: true
 
-require "test_helper"
-require "fileutils"
-
-# The bench harness is packaged (templates/builtins/bench/runtime/harness) and
-# linted/lint-excluded there, but its planner/executor Pipeline is scored logic:
-# these tests load it from its packaged home and pin the cell statuses it emits.
-module BenchHarness
-  HARNESS_ROOT = File.expand_path("../../../templates/builtins/bench/runtime/harness", __dir__)
-end
-$LOAD_PATH.unshift(BenchHarness::HARNESS_ROOT) unless $LOAD_PATH.include?(BenchHarness::HARNESS_ROOT)
+require "support/bench_harness"
 require "lib/pipeline"
 
 class BenchHarnessPipelineTest < Minitest::Test
@@ -61,6 +52,7 @@ class BenchHarnessPipelineTest < Minitest::Test
           .call(entry: @entry, planner: @planner, executor: @executor,
                 pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
     assert_equal "planner timed out", cell.reason
@@ -71,6 +63,7 @@ class BenchHarnessPipelineTest < Minitest::Test
     cell = pipeline(plan_status: :error).call(entry: @entry, planner: @planner, executor: @executor,
                                               pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
     assert_equal "planner exited non-zero", cell.reason
@@ -81,6 +74,7 @@ class BenchHarnessPipelineTest < Minitest::Test
           .call(entry: @entry, planner: @planner, executor: @executor,
                 pair_id: "planner-1->executor-1", out_dir: @out_dir)
 
+    refute_nil cell.generation_id
     assert_equal "plan_failed", cell.status
     assert_nil cell.diff_path
   end

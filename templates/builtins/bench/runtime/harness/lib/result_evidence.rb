@@ -1,0 +1,152 @@
+# frozen_string_literal: true
+
+require "json"
+require "digest"
+
+module HiveBench
+  # Admission is derived from source fields on every read, including legacy and
+  # mixed-vintage documents. Stored summaries/eligibility flags have no authority.
+  module ResultEvidence
+    SUCCESS_STATUSES = %w[generated empty_diff].freeze
+    RECORD_KINDS = %w[generation judge_only].freeze
+    module_function
+
+    def execution_eligible?(record)
+      SUCCESS_STATUSES.include?(record["run_status"])
+    end
+
+    def digest?(value) = value.is_a?(String) && value.match?(/\A[0-9a-f]{64}\z/)
+
+    def bound_generation?(record)
+      return false if record["provenance_conflict"] || record["artifact_verification_error"]
+
+      binding = record["artifact_binding"]
+      !record["generation_id"].to_s.empty? && RECORD_KINDS.include?(record["record_kind"]) &&
+        binding.is_a?(Hash) && binding["task_id"] == record["task_id"] &&
+        !binding["base_commit"].to_s.empty? && digest?(binding["patch_sha256"]) && digest?(binding["plan_sha256"])
+    end
+
+    def valid_context?(context)
+      context.is_a?(Hash) && digest?(context["plan_sha256"]) &&
+        (context["reference_mode"] == "withheld" ||
+          (context["reference_mode"] == "provided" && digest?(context["reference_sha256"])))
+    end
+
+    def binding(record)
+      record.slice("generation_id", "artifact_binding", "evaluation_context")
+    end
+
+    def gate_binding(record)
+      record.slice("generation_id", "artifact_binding")
+    end
+
+    def same_generation?(left, right)
+      bound_generation?(left) && bound_generation?(right) &&
+        left["generation_id"] == right["generation_id"] && left["artifact_binding"] == right["artifact_binding"]
+    end
+
+    def evaluation_bound?(record, evaluation)
+      bound_generation?(record) && valid_context?(record["evaluation_context"]) &&
+        evaluation.is_a?(Hash) && evaluation["evidence_binding"] == binding(record)
+    end
+
+    def gate_bound?(record, gate)
+      bound_generation?(record) && gate.is_a?(Hash) && gate["evidence_binding"] == gate_binding(record)
+    end
+
+    def valid_judge?(judge)
+      judge.is_a?(Hash) && judge["mean"].is_a?(Numeric) && judge["mean"].finite? && judge["mean"].between?(0, 10)
+    end
+
+    def admitted_judges(record)
+      return {} unless execution_eligible?(record)
+
+      bound_judges(record)
+    end
+
+    def bound_judges(record)
+      (record["judges"] || {}).select { |_, judge| valid_judge?(judge) && evaluation_bound?(record, judge) }
+    end
+
+    def evaluation_key(record)
+      return unless bound_generation?(record) && valid_context?(record["evaluation_context"])
+
+      [record["task_id"].to_s, record["agent_id"].to_s, record["generation_id"],
+       record["artifact_binding"], record["evaluation_context"]]
+    end
+
+    def admitted_gate?(record)
+      execution_eligible?(record) && record["subset"] == "gated" &&
+        %w[pass fail].include?(record.dig("gate", "status")) && gate_bound?(record, record["gate"])
+    end
+
+    def rejudging_reasons(record)
+      reasons = []
+      reasons << "generation provenance conflict" if record["provenance_conflict"]
+      reasons << record["artifact_verification_error"] if record["artifact_verification_error"]
+      reasons << "execution status is not eligible: #{record['run_status'] || 'unknown'}" unless execution_eligible?(record)
+      reasons << "select current artifacts and establish generation identity before rejudging" unless bound_generation?(record)
+      reasons << "evaluation context is missing or invalid" unless valid_context?(record["evaluation_context"])
+      if (record["judges"] || {}).any? { |_, j| !evaluation_bound?(record, j) }
+        reasons << "fresh judging required: unbound or conflicting judge evidence"
+      end
+      if record["subset"] == "gated" && !gate_bound?(record, record["gate"])
+        reasons << "fresh gating required"
+      end
+      reasons.concat(Array(record["rejudging_reasons"]))
+      reasons.uniq
+    end
+
+    def canonical(value)
+      case value
+      when Hash then value.keys.sort.to_h { |key| [key, canonical(value.fetch(key))] }
+      when Array then value.map { |item| canonical(item) }
+      else value
+      end
+    end
+
+    def snapshot_digest(record) = Digest::SHA256.hexdigest(JSON.generate(canonical(record)))
+
+    def attempt_snapshot_digest(record)
+      snapshot_digest(
+        "agent_id" => record["agent_id"],
+        "task_id" => record["task_id"],
+        "run_status" => record["run_status"],
+        "mode" => record["mode"],
+        "efficiency" => record["efficiency"] || {}
+      )
+    end
+
+    def history_entry(record, reason)
+      record.slice("agent_id", "task_id", "generation_id", "record_kind").merge(
+        "snapshot_sha256" => snapshot_digest(record), "record" => record, "reasons" => [reason]
+      )
+    end
+
+    def deduplicate_history(entries)
+      entries.group_by do |entry|
+        record = entry.fetch("record")
+        [record["agent_id"], record["task_id"], record["generation_id"], record["record_kind"], snapshot_digest(record)]
+      end.values.map do |group|
+        group.first.merge("reasons" => group.flat_map { |entry| Array(entry["reasons"]) }.uniq.sort)
+      end
+    end
+
+    def deduplicate_buckets(records)
+      records.group_by do |r|
+        id = r["generation_id"]
+        if id.to_s.empty?
+          [:legacy, snapshot_digest(r)]
+        else
+          [:identified, r["agent_id"], r["task_id"], id]
+        end
+      end.values.map do |group|
+        group.reduce do |prev, cur|
+          prev.merge(cur.reject { |_, value| value.nil? }).merge(
+            "efficiency" => (prev["efficiency"] || {}).merge((cur["efficiency"] || {}).compact)
+          )
+        end
+      end
+    end
+  end
+end

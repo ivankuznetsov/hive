@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-11-02
+updated: 2026-11-26
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
@@ -132,15 +132,18 @@ keeps the default `environment: ENV`, preserving normal `hive doctor` behavior.
 
 Discovery selects the first eligible candidate in this order:
 
-1. Nonempty `HIVE_QMD_BIN`, if executable. This override does not require a
-   regular file; a directory can be selected and then produce a launch warning.
+1. Nonempty `HIVE_QMD_BIN`, if executable, normalized with `File.absolute_path`
+   so bare names execute directly instead of searching the parent process's
+   `PATH` and `~` is never expanded. This override does not require a regular
+   file; a directory can be selected and then produce a launch warning.
 2. `qmd` on the supplied `PATH`, using `Hive::InvokedBinary.which`. Missing or
    empty `PATH` searches no directories.
 3. `<data-home>/hive/qmd/bin/qmd`.
 4. `<HOME>/.local/share/hive/qmd/bin/qmd`.
 5. `<prefix>/hive/qmd/bin/qmd`, where the prefix is the stripped first line of
-   `<data-home>/hive/install-prefix`. A blank first line contributes no candidate,
-   even if later lines are nonempty.
+   regular readable file `<data-home>/hive/install-prefix`. A blank first line
+   or non-regular sidecar entry contributes no candidate, even if later lines
+   are nonempty.
 
 Data home is nonempty supplied `XDG_DATA_HOME`, otherwise nonempty supplied
 `HOME` plus `.local/share`. Missing or empty `HOME` omits the separate home

@@ -217,7 +217,7 @@ module Hive
 
       def find_qmd
         env_qmd = @environment["HIVE_QMD_BIN"].to_s
-        return env_qmd if !env_qmd.empty? && File.executable?(env_qmd)
+        return File.absolute_path(env_qmd) if !env_qmd.empty? && File.executable?(env_qmd)
 
         path_qmd = which("qmd")
         return path_qmd if path_qmd
@@ -231,12 +231,12 @@ module Hive
         candidates << File.join(home_data, "hive", "qmd", "bin", "qmd") if home_data
 
         prefix_file = File.join(data_home, "hive", "install-prefix") if data_home
-        if prefix_file && File.readable?(prefix_file)
+        if prefix_file && File.file?(prefix_file) && File.readable?(prefix_file)
           prefix = File.read(prefix_file).lines.first.to_s.strip
           candidates << File.join(prefix, "hive", "qmd", "bin", "qmd") unless prefix.empty?
         end
 
-        candidates.find { |candidate| File.file?(candidate) && File.executable?(candidate) }
+        candidates.uniq.find { |candidate| File.file?(candidate) && File.executable?(candidate) }
       end
 
       def which(name)

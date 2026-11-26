@@ -6,33 +6,31 @@ tags: [doctor, qmd, environment, testing]
 ---
 
 - QMD discovery reads `HIVE_QMD_BIN`, `PATH`, `HOME`, and `XDG_DATA_HOME`
-  from Doctor's supplied environment. Missing or empty roots omit managed
-  candidates instead of consulting the host or creating relative paths.
+  from Doctor's supplied environment. Executable `HIVE_QMD_BIN` values are
+  normalized with `File.absolute_path` so bare names execute directly rather
+  than searching the parent process's `PATH` and `~` is never expanded.
+  Missing or empty roots omit managed candidates instead of consulting the host
+  or creating relative paths.
 - Preserved override/PATH/data-home/HOME/sidecar precedence, executable-only
-  override eligibility, regular-file managed candidates, and stripped
-  first-line-only install-prefix parsing.
+  override eligibility, regular-file managed candidates, deduplicated candidate
+  lookup, and stripped first-line-only parsing of regular readable
+  `install-prefix` files (ignoring directory entries instead of raising
+  `Errno::EISDIR`).
 - The version subprocess receives the supplied environment with inherited
   variables disabled. The 15-second deadline, diagnostic selection, optional
   warnings, human output, v2 JSON, and default `environment: ENV` remain intact.
 - Converted QMD and auth boundary tests to injected hashes and scratch-home
-  Ruby children. Child launches inherit Ruby/Bundler and coverage settings,
-  disable MCP discovery, inject an empty inspector, and assert unchanged ENV
-  across successful, missing, failed, unlaunchable, and timed-out probes.
+  Ruby children, and added regression coverage for bare-name `HIVE_QMD_BIN`
+  isolation (file and directory), literal `~/qmd` non-expansion, and directory
+  `install-prefix` sidecars. Child launches inherit Ruby/Bundler and coverage
+  settings, disable MCP discovery, inject an empty inspector, and assert
+  unchanged ENV across successful, missing, failed, unlaunchable, and timed-out
+  probes.
 - Documented the narrow contract in [[commands/doctor]], including required
   executable dependencies and the remaining host-driven default MCP discovery
   and runtime-state checks. The production CLI still uses default ENV.
-- Verification: Doctor tests passed (47 tests, 516 assertions); adjacent managed
-  skills, web aliases, and config validation passed (8 tests, 48 assertions).
-  `bin/test --changed` passed (290 tests, 2,139 assertions), as did
-  `bundle exec rake coverage:changed` with exact line coverage for Doctor.
-  RuboCop passed for both changed Ruby files. Discovery and probe regressions
-  were observed failing before their respective fixes.
-- Broad checkpoint: `bin/test --all` completed with 15,924 tests and 305,476
-  assertions, but was not green (3 failures, 23 errors, 14 skips). Available
-  diagnostics show `Errno::ESRCH` reading vanished `/proc/<pid>/environ` entries
-  in unchanged process-custody code, affecting OpenCode lifecycle/integration
-  and custody tests. A representative OpenCode case reproduced that error
-  while a broad worker remained active; after the workers exited, four
-  representative cases passed together (4 tests, 47 assertions). The runner
-  reused `worker-2.log` for its component job, so its full earlier diagnostic
-  list was not retained. This run does not establish a green broad suite.
+- Verification: `test/unit/commands/doctor_test.rb` passed (51 runs, 560
+  assertions); adjacent doctor unit and integration tests passed (22 runs, 125
+  assertions); `bundle exec rake coverage:changed` passed (315 runs, 2,427
+  assertions) with exact line coverage for `lib/hive/commands/doctor.rb`;
+  RuboCop passed with 0 offenses on both changed Ruby files.

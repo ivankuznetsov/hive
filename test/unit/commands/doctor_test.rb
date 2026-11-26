@@ -684,6 +684,9 @@ class HiveCommandsDoctorTest < Minitest::Test
       sidecar = File.join(data_home, "hive/install-prefix")
       environment = { "XDG_DATA_HOME" => data_home }
       assert_nil find_qmd(environment)
+      FileUtils.mkdir_p(sidecar)
+      assert_nil find_qmd(environment), "directory install-prefix must not raise EISDIR"
+      FileUtils.rmdir(sidecar)
       [ "", "\n#{prefix}\n", "  \n#{prefix}\n" ].each do |contents|
         write_file(sidecar, contents)
         assert_nil find_qmd(environment)
@@ -778,6 +781,41 @@ class HiveCommandsDoctorTest < Minitest::Test
       row = result.fetch("rows").find { |entry| entry["label"] == "wiki/qmd" }
       assert_equal "warning", row.fetch("status")
       assert_includes row.fetch("message"), "qmd at #{override} timed out or could not be executed"
+    end
+  end
+
+  def test_llm_wiki_qmd_bare_override_resolves_local_executable_without_host_path
+    with_tmp_dir do |root|
+      FileUtils.mkdir_p(File.join(root, ".llm-wiki"))
+      workdir = File.join(root, "work")
+      host_bin = File.join(root, "host-bin")
+      qmd_executable(File.join(host_bin, "qmd"), 'printf "host-path-qmd\n"')
+      qmd_executable(File.join(workdir, "qmd"), 'printf "local-bare-qmd\n"')
+      FileUtils.mkdir_p(File.join(workdir, "qmd-dir"))
+      qmd_executable(File.join(host_bin, "qmd-dir"), 'printf "host-dir-name-qmd\n"')
+      qmd_executable(File.join(workdir, "~", "qmd"), 'printf "literal-tilde-qmd\n"')
+
+      Dir.chdir(workdir) do
+        expected_local = File.absolute_path("qmd")
+        assert_equal expected_local, find_qmd("HIVE_QMD_BIN" => "qmd")
+        result = doctor_in_child(
+          project_root: root,
+          environment: { "HIVE_QMD_BIN" => "qmd" },
+          host_environment: { "PATH" => host_bin }
+        )
+        assert_qmd_present(result, expected_local, "local-bare-qmd")
+
+        expected_dir = File.absolute_path("qmd-dir")
+        dir_result = doctor_in_child(
+          project_root: root,
+          environment: { "HIVE_QMD_BIN" => "qmd-dir" },
+          host_environment: { "PATH" => host_bin }
+        )
+        assert_qmd_warning(dir_result, "qmd at #{expected_dir} timed out or could not be executed")
+
+        expected_tilde = File.absolute_path("~/qmd")
+        assert_equal expected_tilde, find_qmd("HIVE_QMD_BIN" => "~/qmd")
+      end
     end
   end
 

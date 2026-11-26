@@ -185,7 +185,8 @@ ruby -ryaml -rshellwords -rjson -e '
         "--task", task.to_s,
         "--out", out,
         "--seeds", data.fetch("seeds").to_s,
-        "--corpus-version", data.fetch("corpus_version").to_s
+        "--corpus-version", data.fetch("corpus_version").to_s,
+        "--plan-source", "candidate"
       ]
       args.concat(judge_args)
       env = ["env"]

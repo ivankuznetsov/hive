@@ -35,7 +35,7 @@ module HiveBench
       delib = Deliberation.new(judge_fns: judge_fns)
       transcripts = cells.filter_map do |cell|
         info = bases[cell["task_id"]] or next
-        next unless ResultEvidence.evaluation_key(cell)
+        next unless ResultEvidence.execution_eligible?(cell) && ResultEvidence.evaluation_key(cell)
 
         bundle = Rejudge.artifact_bundle(search_dirs, cell, info, restorer, plan_source: plan_source)
         diff = bundle.fetch(:diff)
@@ -172,10 +172,10 @@ if $PROGRAM_NAME == __FILE__
   # Deliberation only makes sense where both judges already scored the cell —
   # and only pays for itself where they DISAGREE (the pilot showed agreeing
   # judges simply hold their scores; discussing agreement is wasted tokens).
-  cells = cells.select { |c| HiveBench::ResultEvidence.bound_judges(c).size >= 2 }
+  cells = cells.select { |c| HiveBench::ResultEvidence.admitted_judges(c).size >= 2 }
   if opts[:min_disagreement].positive?
     cells = cells.select do |c|
-      means = HiveBench::ResultEvidence.bound_judges(c).values.filter_map { |j| j["mean"] }
+      means = HiveBench::ResultEvidence.admitted_judges(c).values.filter_map { |j| j["mean"] }
       means.size >= 2 && (means.max - means.min) >= opts[:min_disagreement]
     end
   end

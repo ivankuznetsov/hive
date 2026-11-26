@@ -31,7 +31,10 @@ module HiveBench
         # generation snapshot; ambiguous overlay-only generations stay diagnostic.
         if snapshots.empty?
           first = overlays.first
-          if overlays.all? { |record| ResultEvidence.same_generation?(first, record) }
+          if overlays.uniq.size == 1
+            snapshots = [first]
+            overlays = []
+          elsif overlays.all? { |record| ResultEvidence.same_generation?(first, record) }
             snapshots = [first]
             overlays = overlays.drop(1)
           else
@@ -42,6 +45,8 @@ module HiveBench
         active = snapshots.reduce do |previous, current|
           if ResultEvidence.same_generation?(previous, current) && previous["evaluation_context"] == current["evaluation_context"]
             merge_pair(previous, current)
+          elsif previous == current && (previous["provenance_conflict"] || previous["artifact_verification_error"])
+            previous
           else
             history << ResultEvidence.history_entry(previous, "replaced by explicitly later generation snapshot")
             if conflicting_identity?(previous, current)
@@ -80,8 +85,8 @@ module HiveBench
       end
       # Evidence overlays have no authority over generation telemetry/subset/gate.
       result = previous.merge("judges" => (previous["judges"] || {}).merge(fresh))
-      if !ResultEvidence.evaluation_bound?(previous, previous["gate"]) &&
-         ResultEvidence.evaluation_bound?(current, current["gate"])
+      if !ResultEvidence.gate_bound?(previous, previous["gate"]) &&
+         ResultEvidence.gate_bound?(current, current["gate"])
         result = result.merge("gate" => current["gate"], "subset" => current["subset"])
       end
       result

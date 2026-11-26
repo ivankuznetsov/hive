@@ -8,11 +8,12 @@ class BenchHarnessScoreTest < Minitest::Test
     binding = { "task_id" => task, "base_commit" => "base", "patch_sha256" => "a" * 64,
                 "plan_sha256" => "b" * 64 }
     context = { "plan_sha256" => "b" * 64, "reference_mode" => "withheld" }
+    gate_evidence = { "generation_id" => task, "artifact_binding" => binding }
     evidence = { "generation_id" => task, "artifact_binding" => binding, "evaluation_context" => context }
     { "task_id" => task, "agent_id" => "A", "run_status" => status, "mode" => mode,
       "record_kind" => "generation", "generation_id" => task, "artifact_binding" => binding,
       "evaluation_context" => context, "subset" => "gated",
-      "gate" => { "status" => "pass", "evidence_binding" => evidence },
+      "gate" => { "status" => "pass", "evidence_binding" => gate_evidence },
       "judges" => { "X" => { "mean" => 9.0, "scores" => [ 9.0 ], "evidence_binding" => evidence } },
       "efficiency" => { "cost_usd" => 2.0, "wall_clock_sec" => 4.0 } }
   end
@@ -49,6 +50,7 @@ class BenchHarnessScoreTest < Minitest::Test
     legacy = record(task: "legacy").reject { |key, _| %w[generation_id artifact_binding record_kind evaluation_context].include?(key) }
     forged = record(task: "forged")
     forged["gate"]["evidence_binding"]["generation_id"] = "other"
+    forged["judges"]["X"]["evidence_binding"]["generation_id"] = "other"
     out = results([ record, legacy, forged ])
     assert_equal 1, out.dig("agents", "A", "judged", "scored_cells")
     assert_equal 1, out.dig("agents", "A", "gated", "total")
@@ -95,11 +97,31 @@ class BenchHarnessScoreTest < Minitest::Test
     assert_equal 4.0, agent.dig("efficiency", "total_cost_usd")
   end
 
-  def test_missing_reference_requires_an_explicit_withheld_context
+  def test_missing_reference_requires_an_explicit_withheld_context_without_invalidating_gate
     value = record
     value["evaluation_context"]["reference_mode"] = "unavailable"
     agent = results([ value ]).dig("agents", "A")
     assert_equal 0, agent.dig("judged", "scored_cells")
-    assert_equal 0, agent.dig("gated", "total")
+    assert_equal 1, agent.dig("gated", "total")
+    assert_equal 1.0, agent.dig("gated", "pass_rate")
+  end
+
+  def test_nil_generation_id_does_not_collapse_distinct_legacy_failures
+    pending_one = { "agent_id" => "A", "task_id" => "t", "run_status" => "limit_hit",
+                    "reason" => "first quota", "mode" => "fresh", "efficiency" => { "cost_usd" => 2.0 } }
+    failed_two = { "agent_id" => "A", "task_id" => "t", "run_status" => "agent_failed",
+                   "reason" => "second crash", "mode" => "fresh", "efficiency" => { "cost_usd" => 3.0 } }
+    active_legacy = { "agent_id" => "A", "task_id" => "t", "run_status" => "generated",
+                      "mode" => "fresh", "subset" => "judged", "gate" => {}, "judges" => {},
+                      "efficiency" => { "cost_usd" => 4.0 } }
+    out = results([ active_legacy ], pending: [ pending_one, pending_one.dup ], failed: [ failed_two ])
+    agent = out.dig("agents", "A")
+    assert_equal 1, out.fetch("pending").size
+    assert_equal 1, out.fetch("failed").size
+    assert_equal 3, agent.dig("coverage", "attempts")
+    assert_equal 1, agent.dig("generation", "limit_hit")
+    assert_equal 1, agent.dig("generation", "agent_failed")
+    assert_equal 1, agent.dig("generation", "generated")
+    assert_equal 9.0, agent.dig("efficiency", "total_cost_usd")
   end
 end

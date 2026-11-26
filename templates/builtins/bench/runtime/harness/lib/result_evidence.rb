@@ -36,6 +36,10 @@ module HiveBench
       record.slice("generation_id", "artifact_binding", "evaluation_context")
     end
 
+    def gate_binding(record)
+      record.slice("generation_id", "artifact_binding")
+    end
+
     def same_generation?(left, right)
       bound_generation?(left) && bound_generation?(right) &&
         left["generation_id"] == right["generation_id"] && left["artifact_binding"] == right["artifact_binding"]
@@ -44,6 +48,10 @@ module HiveBench
     def evaluation_bound?(record, evaluation)
       bound_generation?(record) && valid_context?(record["evaluation_context"]) &&
         evaluation.is_a?(Hash) && evaluation["evidence_binding"] == binding(record)
+    end
+
+    def gate_bound?(record, gate)
+      bound_generation?(record) && gate.is_a?(Hash) && gate["evidence_binding"] == gate_binding(record)
     end
 
     def valid_judge?(judge)
@@ -69,7 +77,7 @@ module HiveBench
 
     def admitted_gate?(record)
       execution_eligible?(record) && record["subset"] == "gated" &&
-        %w[pass fail].include?(record.dig("gate", "status")) && evaluation_bound?(record, record["gate"])
+        %w[pass fail].include?(record.dig("gate", "status")) && gate_bound?(record, record["gate"])
     end
 
     def rejudging_reasons(record)
@@ -82,7 +90,7 @@ module HiveBench
       if (record["judges"] || {}).any? { |_, j| !evaluation_bound?(record, j) }
         reasons << "fresh judging required: unbound or conflicting judge evidence"
       end
-      if record["subset"] == "gated" && !evaluation_bound?(record, record["gate"])
+      if record["subset"] == "gated" && !gate_bound?(record, record["gate"])
         reasons << "fresh gating required"
       end
       reasons.concat(Array(record["rejudging_reasons"]))
@@ -98,6 +106,16 @@ module HiveBench
     end
 
     def snapshot_digest(record) = Digest::SHA256.hexdigest(JSON.generate(canonical(record)))
+
+    def attempt_snapshot_digest(record)
+      snapshot_digest(
+        "agent_id" => record["agent_id"],
+        "task_id" => record["task_id"],
+        "run_status" => record["run_status"],
+        "mode" => record["mode"],
+        "efficiency" => record["efficiency"] || {}
+      )
+    end
 
     def history_entry(record, reason)
       record.slice("agent_id", "task_id", "generation_id", "record_kind").merge(
@@ -115,7 +133,14 @@ module HiveBench
     end
 
     def deduplicate_buckets(records)
-      records.group_by { |r| r.values_at("agent_id", "task_id", "generation_id") }.values.map do |group|
+      records.group_by do |r|
+        id = r["generation_id"]
+        if id.to_s.empty?
+          [:legacy, snapshot_digest(r)]
+        else
+          [:identified, r["agent_id"], r["task_id"], id]
+        end
+      end.values.map do |group|
         group.reduce do |prev, cur|
           prev.merge(cur.reject { |_, value| value.nil? }).merge(
             "efficiency" => (prev["efficiency"] || {}).merge((cur["efficiency"] || {}).compact)

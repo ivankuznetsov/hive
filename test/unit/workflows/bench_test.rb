@@ -1940,13 +1940,13 @@ class WorkflowsBenchTest < Minitest::Test
       cell = { "task_id" => "t", "agent_id" => "A", "mode" => "hive", "run_status" => "generated", "subset" => "gated",
                "gate" => { "status" => "pass" }, "judges" => { "X" => { "mean" => 2.0 } }, "efficiency" => { "cost_usd" => 3.0 } }
       bound_bench_fixture_json("cells" => [ cell ])
-      cell["gate"]["evidence_binding"] = cell.slice("generation_id", "artifact_binding", "evaluation_context")
+      cell["gate"]["evidence_binding"] = cell.slice("generation_id", "artifact_binding")
       failed = Marshal.load(Marshal.dump(cell))
       failed.merge!("task_id" => "failed", "run_status" => "timed_out", "generation_id" => "failed-attempt")
       failed["artifact_binding"]["task_id"] = "failed"
       failed["judges"]["X"]["mean"] = 9.0
       bound_bench_fixture_json("cells" => [ failed ])
-      failed["gate"]["evidence_binding"] = failed.slice("generation_id", "artifact_binding", "evaluation_context")
+      failed["gate"]["evidence_binding"] = failed.slice("generation_id", "artifact_binding")
       [ [ cell, failed ], [ failed ] ].each do |cells|
         path = File.join(run, "results.json")
         File.write(path, JSON.generate("cells" => cells, "agents" => { "stale" => { "judged" => { "mean_quality" => { "X" => 10 } } } }))
@@ -2005,6 +2005,65 @@ class WorkflowsBenchTest < Minitest::Test
       assert_includes summary, "campaign requires generated or empty_diff before judging"
       assert_includes summary, "<!-- WAITING -->"
       refute_path_exists calls
+    end
+  end
+
+  def test_generate_passes_candidate_plan_source_to_hive_run
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+    assert_includes instruction, '"--plan-source", "candidate"'
+  end
+
+  def test_judge_deliberation_merge_averages_only_current_eligible_generations
+    instruction = File.read(stages_by_name.fetch("judge").instruction)
+    merger = instruction.match(
+      /ruby -I"\$BENCH_ROOT\/harness" -rjson -rlib\/result_evidence -e '\n(?<code>.*?)\n' "\$REPO_ROOT\/\$DELIB" "\$REPO_ROOT\/\$DELIB\.next" "\$REPO_ROOT\/\$RESULTS"/m
+    )
+    refute_nil merger, "judge instruction must expose its deliberation union snippet"
+
+    Dir.mktmpdir("bench-delib-merge") do |root|
+      runtime_harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+      old_path = File.join(root, "deliberation.json")
+      new_path = File.join(root, "deliberation.json.next")
+      results_path = File.join(root, "results.json")
+
+      binding = { "task_id" => "t", "base_commit" => "base", "patch_sha256" => "a" * 64, "plan_sha256" => "b" * 64 }
+      context = { "plan_sha256" => "b" * 64, "reference_mode" => "withheld" }
+      retired = {
+        "task_id" => "t", "agent_id" => "A", "generation_id" => "retired-gen",
+        "record_kind" => "generation", "artifact_binding" => binding, "evaluation_context" => context,
+        "judges" => {
+          "fable-5" => { "initial" => 2.0, "final" => 2.0, "delta" => 0.0 },
+          "gpt-5.6-sol" => { "initial" => 8.0, "final" => 8.0, "delta" => 0.0 }
+        }
+      }
+      current = {
+        "task_id" => "t", "agent_id" => "A", "generation_id" => "current-gen",
+        "record_kind" => "generation", "artifact_binding" => binding, "evaluation_context" => context,
+        "judges" => {
+          "fable-5" => { "initial" => 7.0, "final" => 8.0, "delta" => 1.0 },
+          "gpt-5.6-sol" => { "initial" => 9.0, "final" => 8.0, "delta" => -1.0 }
+        }
+      }
+      File.write(old_path, JSON.generate("cells" => [ retired ]))
+      File.write(new_path, JSON.generate("cells" => [ current ]))
+      File.write(results_path, JSON.generate("cells" => [
+        current.merge("run_status" => "generated")
+      ]))
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-I#{runtime_harness}", "-rjson", "-rlib/result_evidence",
+        "-e", merger[:code], old_path, new_path, results_path
+      )
+      assert status.success?, out + err
+
+      merged = JSON.parse(File.read(old_path))
+      assert_equal 2, merged.fetch("cells").size, "retired transcripts stay inspectable in cells[]"
+      summary = merged.fetch("summary")
+      assert_equal 1, summary.fetch("cells")
+      assert_equal 2.0, summary.fetch("mean_spread_before")
+      assert_equal 0.0, summary.fetch("mean_spread_after")
+      assert_equal({ "fable-5" => 1.0, "gpt-5.6-sol" => -1.0 }, summary.fetch("mean_revision_by_judge"))
+      assert_equal({ "fable-5" => 1.0, "gpt-5.6-sol" => 1.0 }, summary.fetch("mean_abs_revision_by_judge"))
     end
   end
 end

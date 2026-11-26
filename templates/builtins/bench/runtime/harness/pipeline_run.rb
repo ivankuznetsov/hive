@@ -33,7 +33,8 @@ module HiveBench
       pairs = select_pairs(opts[:pair])
 
       outcome = RunAll.new(runner: pipeline_runner, gate: Gate.new(exec: IsolationExec.gate_exec),
-                           judges: Driver.judges(opts), withhold_reference: opts[:withhold_reference])
+                           judges: Driver.judges(opts), withhold_reference: opts[:withhold_reference],
+                           plan_source: opts[:plan_source])
                       .call(entries: entries, profiles: pairs, out_root: opts[:out],
                             corpus_version: opts[:corpus_version])
       write_and_report(outcome, opts)
@@ -52,7 +53,7 @@ module HiveBench
 
     def parse(argv)
       opts = { corpus: "corpus", out: "runs", source: nil, pair: nil, seeds: 1, corpus_version: "v1",
-               withhold_reference: true, claude_judge: true, judge_bin: "claude", judge_model: nil,
+               withhold_reference: true, plan_source: :frozen, claude_judge: true, judge_bin: "claude", judge_model: nil,
                openrouter_judge: true, openrouter_judge_model: "openai/gpt-5.5-pro" }
       OptionParser.new do |o|
         o.banner = "Usage: OPENROUTER_API_KEY=… ruby harness/pipeline_run.rb --source <clone> [opts]"
@@ -63,6 +64,7 @@ module HiveBench
         o.on("--seeds N", Integer) { |v| opts[:seeds] = v }
         o.on("--corpus-version V") { |v| opts[:corpus_version] = v }
         o.on("--[no-]withhold-reference") { |v| opts[:withhold_reference] = v }
+        o.on("--plan-source SRC", %w[frozen candidate]) { |v| opts[:plan_source] = v.to_sym }
         o.on("--[no-]openrouter-judge") { |v| opts[:openrouter_judge] = v }
       end.parse!(argv)
       opts

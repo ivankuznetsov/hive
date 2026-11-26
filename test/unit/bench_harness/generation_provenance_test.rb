@@ -2,6 +2,7 @@
 
 require "support/bench_harness"
 require "run"
+require "run_all"
 require "lib/generation_provenance"
 
 class BenchHarnessGenerationProvenanceTest < Minitest::Test
@@ -66,5 +67,54 @@ class BenchHarnessGenerationProvenanceTest < Minitest::Test
     assert_equal 1.0, cell.telemetry.fetch("cost_usd")
     refute_nil cell.generation_id
     refute_nil cell.artifact_binding
+  end
+
+  def test_run_all_rescue_sets_verification_error_and_preserves_judged_subset
+    corrupting_runner = lambda do |entry:, profile:, out_dir:|
+      cell = HiveBench::Run.new(restorer: @restorer, spawn: ->(**) { { status: :ok, usage: { cost: 1.0 }, stdout: "", stderr: "" } })
+                           .call(entry: entry, profile: profile, out_dir: out_dir)
+      File.write(cell.diff_path, "+tampered after finalize\n")
+      cell
+    end
+    gate = Object.new
+    def gate.call(**) = flunk("gate must not run on unverified artifact")
+    outcome = nil
+    capture_io do
+      outcome = HiveBench::RunAll.new(runner: corrupting_runner, gate: gate, judges: {}, withhold_reference: true)
+                                 .call(entries: [ @entry ], profiles: [ @profile ], out_root: @out, corpus_version: "v2")
+    end
+    assert_equal 1, outcome.failed.size
+    record = outcome.results.fetch("cells").first
+    refute_nil record["artifact_verification_error"]
+    refute HiveBench::ResultEvidence.bound_generation?(record)
+    assert_equal "judged", record["subset"]
+    assert_equal 0, outcome.results.dig("agents", "A", "diagnostics", "gated", "total")
+    reasons = outcome.results.fetch("rejudging_needed").first.fetch("reasons")
+    assert reasons.any? { |reason| reason.include?("artifact recovery/rejudging required") }
+    refute_includes reasons, "fresh gating required"
+  end
+
+  def test_run_all_rescue_before_start_does_not_stamp_prior_manifest_onto_failed_record
+    cell_out = File.join(@out, @entry["task_id"], @profile.id)
+    prior = HiveBench::GenerationProvenance.start!(out_dir: cell_out, entry: @entry, agent_id: @profile.id)
+    File.write(File.join(cell_out, "candidate.patch"), "+prior\n")
+    prior = HiveBench::GenerationProvenance.finalize!(
+      out_dir: cell_out, manifest: prior, diff_path: File.join(cell_out, "candidate.patch"),
+      plan: "plan", status: "generated", telemetry: { "cost_usd" => 7.0 }
+    )
+    failing_before_start = lambda do |**|
+      raise "ArtifactProvenanceMismatch before start!"
+    end
+    outcome = nil
+    capture_io do
+      outcome = HiveBench::RunAll.new(runner: failing_before_start, gate: Object.new, judges: {}, withhold_reference: true)
+                                 .call(entries: [ @entry ], profiles: [ @profile ], out_root: @out, corpus_version: "v2")
+    end
+    assert_equal 1, outcome.failed.size
+    parked = outcome.failed.first
+    refute_equal prior["generation_id"], parked["generation_id"]
+    assert_nil parked["generation_id"]
+    assert_nil parked["run_status"]
+    assert_equal({}, parked["efficiency"])
   end
 end

@@ -8,10 +8,11 @@ class BenchHarnessMergeResultsTest < Minitest::Test
   def generation(id, judge, score, kind: "generation")
     binding = { "task_id" => "t", "base_commit" => "base", "patch_sha256" => "a" * 64, "plan_sha256" => "b" * 64 }
     context = { "plan_sha256" => "b" * 64, "reference_mode" => "withheld" }
+    gate_evidence = { "generation_id" => id, "artifact_binding" => binding }
     evidence = { "generation_id" => id, "artifact_binding" => binding, "evaluation_context" => context }
     { "task_id" => "t", "agent_id" => "A", "generation_id" => id, "record_kind" => kind,
       "artifact_binding" => binding, "evaluation_context" => context, "run_status" => "generated", "mode" => "hive",
-      "subset" => "gated", "gate" => { "status" => "pass", "evidence_binding" => evidence },
+      "subset" => "gated", "gate" => { "status" => "pass", "evidence_binding" => gate_evidence },
       "efficiency" => { "cost_usd" => score },
       "judges" => { judge => { "mean" => score, "evidence_binding" => evidence } } }
   end
@@ -115,8 +116,8 @@ class BenchHarnessMergeResultsTest < Minitest::Test
       end
     end
   end
-  def test_parked_bucket_deduplication_retains_available_legacy_telemetry
-    first = { "agent_id" => "A", "task_id" => "t", "efficiency" => { "cost_usd" => 3.0 } }
+  def test_parked_bucket_deduplication_retains_available_telemetry_for_identified_attempts
+    first = { "agent_id" => "A", "task_id" => "t", "generation_id" => "g1", "efficiency" => { "cost_usd" => 3.0 } }
     second = first.merge("run_status" => "limit_hit", "reason" => "quota",
                          "efficiency" => { "cost_usd" => nil, "wall_clock_sec" => 2.0 })
     out = combine({ "pending" => [ first ] }, { "pending" => [ second ] })
@@ -124,5 +125,41 @@ class BenchHarnessMergeResultsTest < Minitest::Test
     assert_equal 3.0, out.dig("agents", "A", "efficiency", "total_cost_usd")
     assert_equal "limit_hit", out.fetch("pending").first["run_status"]
     assert_equal 2.0, out.fetch("pending").first.dig("efficiency", "wall_clock_sec")
+  end
+
+  def test_distinct_legacy_nil_id_bucket_records_are_not_collapsed
+    first = { "agent_id" => "A", "task_id" => "t", "run_status" => "limit_hit", "reason" => "quota 1",
+              "efficiency" => { "cost_usd" => 3.0 } }
+    second = { "agent_id" => "A", "task_id" => "t", "run_status" => "limit_hit", "reason" => "quota 2",
+               "efficiency" => { "cost_usd" => 2.0 } }
+    out = combine({ "pending" => [ first ] }, { "pending" => [ second ] })
+    assert_equal 2, out.fetch("pending").size
+    assert_equal 5.0, out.dig("agents", "A", "efficiency", "total_cost_usd")
+    repeated = combine(out, out)
+    assert_equal 2, repeated.fetch("pending").size
+    assert_equal 5.0, repeated.dig("agents", "A", "efficiency", "total_cost_usd")
+  end
+
+  def test_single_doc_and_repeat_publish_merge_preserves_diagnostic_judge_only_cells
+    variants = [
+      generation("a", "X", 4.0, kind: "judge_only").merge("artifact_verification_error" => "artifact recovery/rejudging required: digest mismatch"),
+      generation("a", "X", 4.0, kind: "judge_only").merge("provenance_conflict" => true),
+      generation("a", "X", 4.0, kind: "judge_only").merge("artifact_binding" => nil)
+    ]
+    variants.each do |cell|
+      single = combine([ cell ])
+      assert_equal 1, single.fetch("cells").size
+      assert_equal 0, single.dig("agents", "A", "judged", "scored_cells")
+      assert_equal 1, single.dig("agents", "A", "coverage", "attempted_cells")
+      assert_equal 4.0, single.dig("agents", "A", "efficiency", "total_cost_usd")
+      assert_equal 1, single.fetch("rejudging_needed").size
+      assert_empty single.fetch("generation_history")
+
+      repeated = combine(single, single)
+      assert_equal single.fetch("cells"), repeated.fetch("cells")
+      assert_equal single.fetch("agents"), repeated.fetch("agents")
+      assert_equal single.fetch("generation_history"), repeated.fetch("generation_history")
+      assert_equal single.fetch("rejudging_needed"), repeated.fetch("rejudging_needed")
+    end
   end
 end

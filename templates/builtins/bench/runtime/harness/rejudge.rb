@@ -79,7 +79,13 @@ module HiveBench
                     .merge("record_kind" => "judge_only", "evaluation_context" => context)
                     .reject { |key, _| %w[artifact_verification_error provenance_conflict rejudging_reasons].include?(key) }
       if old["generation_id"].to_s.empty?
-        prepared["adopted_attempt_snapshot_sha256"] = ResultEvidence.snapshot_digest(old)
+        unless bundle[:adopted]
+          prepared["run_status"] = manifest["run_status"]
+          prepared["efficiency"] = manifest["efficiency"] || {}
+        end
+        if bundle[:adopted] || manifest["run_status"] == old["run_status"]
+          prepared["adopted_attempt_snapshot_sha256"] = ResultEvidence.attempt_snapshot_digest(old)
+        end
       end
       continuity = !bundle[:adopted] && ResultEvidence.same_generation?(old, prepared) && old["evaluation_context"] == context
       history << ResultEvidence.history_entry(old, "legacy or incompatible evaluations require fresh judging") unless continuity
@@ -119,6 +125,9 @@ module HiveBench
           if old["artifact_binding"] && old["artifact_binding"] != manifest["artifact_binding"]
             raise GenerationProvenance::Mismatch, "result/artifact binding conflict"
           end
+          if !old["generation_id"].to_s.empty? && old["run_status"] != manifest["run_status"]
+            raise GenerationProvenance::Mismatch, "result/artifact run_status conflict"
+          end
         else
           diff_path = existing_patch(path, old, info[:base], restorer)
           plan = bundle_plan(path, old, entry, plan_source)
@@ -137,7 +146,10 @@ module HiveBench
         plan = plan_source == :candidate ? File.read(GenerationProvenance.artifact_path(path, manifest["plan_path"])) : read_plan(entry)
         { manifest: manifest, diff: File.read(diff_path), plan: plan, adopted: adopted }
       end
-      unless bundles.all? { |bundle| bundle[:manifest]["artifact_binding"] == bundles.first[:manifest]["artifact_binding"] }
+      unless bundles.all? do |bundle|
+               bundle[:manifest]["artifact_binding"] == bundles.first[:manifest]["artifact_binding"] &&
+                 bundle[:manifest]["run_status"] == bundles.first[:manifest]["run_status"]
+             end
         raise GenerationProvenance::Mismatch, "conflicting copies of generation artifacts"
       end
       bundles.first
@@ -147,11 +159,16 @@ module HiveBench
       final = File.join(path, "target", "candidate.patch")
       execute = File.join(path, "target", "candidate-execute.patch")
       transcript = File.join(path, "target", ".hb", "stages.out")
-      if !File.file?(final) && File.file?(execute) && File.file?(transcript)
+      if !File.file?(final) && File.file?(execute) && File.size?(execute) && File.file?(transcript)
         text = File.read(transcript)
         if text.match?(/^HB_EXIT rc=124$/) && %w[plan develop].all? { |stage| text.match?(/^HB_STAGE #{stage} rc=0$/) }
-          FileUtils.cp(execute, "#{final}.next")
-          File.rename("#{final}.next", final)
+          next_patch = "#{final}.next"
+          begin
+            FileUtils.cp(execute, next_patch)
+            File.rename(next_patch, final)
+          ensure
+            FileUtils.rm_f(next_patch)
+          end
         end
       end
       patch = [final, File.join(path, "candidate.patch")].find { |candidate| File.file?(candidate) }

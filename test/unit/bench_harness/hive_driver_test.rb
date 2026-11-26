@@ -284,4 +284,46 @@ class BenchHarnessHiveDriverTest < Minitest::Test
 
     assert_equal "limit_hit", status
   end
+
+  def test_recovery_preserves_resumed_per_attempt_delta_telemetry_over_cumulative_logs
+    mixed = HiveBench::Candidates.by_id("all-opus-4.8")
+    first_usage = '[stream] 2026-01-01T00:00:00Z {"message":{"usage":{"input_tokens":1000,' \
+                  '"output_tokens":2000,"cache_read_input_tokens":0,"cache_creation_input_tokens":500}}}'
+    driver(log_lines: [ first_usage ]).call(entry: entry, candidate: mixed, out_dir: @out)
+    task = File.join(@work, ".hive-state", "stages", "4-execute", "add-i-key")
+    FileUtils.mkdir_p(task)
+    File.write(File.join(task, "task.md"),
+               "<!-- ERROR reason=dirty_worktree status=error marker_id=abc123 -->\n")
+    File.write(File.join(@work, ".hb", "stages.out"),
+               "HB_STAGE plan rc=0\nHB_STAGE develop rc=3\nHB_EXIT rc=0\n")
+
+    second_usage = '[stream] 2026-01-01T00:01:00Z {"message":{"usage":{"input_tokens":200,' \
+                   '"output_tokens":400,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}'
+    resumed = hive_driver(runner: lambda do |_cmd|
+      logs = File.join(@work, ".hive-state", "logs", "add-i-key")
+      File.write(File.join(logs, "execute-2.log"), "#{second_usage}\n")
+      File.write(File.join(@work, "candidate.patch"), "diff --git a/app.rb b/app.rb\n")
+      OK_STDOUT
+    end, reuse_existing: true, reuse_unverified: false)
+
+    resumed_cell = resumed.call(entry: entry, candidate: mixed, out_dir: @out)
+    assert_equal 200, resumed_cell.telemetry["input_tokens"]
+    assert_equal 400, resumed_cell.telemetry["output_tokens"]
+    assert_equal 0, resumed_cell.telemetry["cache_creation_tokens"]
+    expected_delta_cost = ((200 * 5) + (400 * 25)) / 1_000_000.0
+    assert_in_delta expected_delta_cost, resumed_cell.telemetry["cost_usd"], 0.0001
+
+    File.write(File.join(@work, ".hb", "stages.out"), OK_STDOUT)
+    recovered = hive_driver(runner: ->(_cmd) { flunk "completed resumed artifact must not regenerate" },
+                            reuse_existing: true, reuse_unverified: false)
+                .call(entry: entry, candidate: mixed, out_dir: @out)
+
+    assert_equal resumed_cell.generation_id, recovered.generation_id
+    assert recovered.telemetry["recovered_artifact"]
+    assert_equal "verified", recovered.telemetry["artifact_provenance"]
+    assert_equal 200, recovered.telemetry["input_tokens"]
+    assert_equal 400, recovered.telemetry["output_tokens"]
+    assert_equal 0, recovered.telemetry["cache_creation_tokens"]
+    assert_in_delta expected_delta_cost, recovered.telemetry["cost_usd"], 0.0001
+  end
 end

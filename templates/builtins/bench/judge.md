@@ -273,19 +273,25 @@ ruby -ryaml -rjson -e '
 DELIBERATE_ERR_TAIL="$(tail -n 15 .judge-deliberate.err)" || DELIBERATE_ERR_TAIL=""
 
 # Union transcripts by task, candidate, generation and evaluated context and replace via tmp+mv;
-# the summary is recomputed over the union (mirrors DeliberateCli.summary —
-# the scratch file's summary covers only the newly deliberated cells).
-ruby -rjson -e '
-  old_path, new_path = ARGV.fetch(0), ARGV.fetch(1)
+# the summary is recomputed over current eligible generations only (mirrors
+# DeliberateCli.summary — retired transcripts stay inspectable in cells[] without
+# diluting the current-generation deliberation summary).
+ruby -I"$BENCH_ROOT/harness" -rjson -rlib/result_evidence -e '
+  old_path, new_path, results_path = ARGV.fetch(0), ARGV.fetch(1), ARGV.fetch(2)
   read = ->(path) { File.file?(path) ? JSON.parse(File.read(path)) : nil }
   fresh = read.(new_path) or abort("deliberate wrote no transcript at #{new_path}")
   old = read.(old_path)
+  results = read.(results_path) || { "cells" => [] }
+  current_keys = results.fetch("cells", []).filter_map do |cell|
+    HiveBench::ResultEvidence.evaluation_key(cell) if HiveBench::ResultEvidence.execution_eligible?(cell)
+  end
   union = ((old ? old["cells"].to_a : []) + fresh["cells"].to_a)
           .each_with_object({}) { |t, acc| acc[t.values_at("task_id", "agent_id", "generation_id", "artifact_binding", "evaluation_context")] = t }
           .values
+  current = union.select { |t| current_keys.include?(HiveBench::ResultEvidence.evaluation_key(t)) }
   per_judge = Hash.new { |h, k| h[k] = [] }
   spreads = { before: [], after: [] }
-  union.each do |t|
+  current.each do |t|
     js = t.fetch("judges", {}).values
     if js.size >= 2
       spreads[:before] << (js.map { |j| j["initial"] }.max - js.map { |j| j["initial"] }.min)
@@ -296,7 +302,7 @@ ruby -rjson -e '
   end
   mean = ->(values) { values.empty? ? nil : (values.sum.to_f / values.size).round(3) }
   summary = {
-    "cells" => union.size,
+    "cells" => current.size,
     "mean_revision_by_judge" => per_judge.transform_values { |d| (d.sum / d.size).round(3) },
     "mean_abs_revision_by_judge" => per_judge.transform_values { |d| (d.sum(&:abs) / d.size).round(3) },
     "mean_spread_before" => mean.(spreads[:before]),
@@ -305,7 +311,7 @@ ruby -rjson -e '
   merged = (old || fresh).merge("cells" => union, "summary" => summary)
   File.write("#{old_path}.merged", "#{JSON.pretty_generate(merged)}\n")
   File.rename("#{old_path}.merged", old_path)
-' "$REPO_ROOT/$DELIB" "$REPO_ROOT/$DELIB.next" >.judge-delibmerge.out 2>.judge-delibmerge.err || {
+' "$REPO_ROOT/$DELIB" "$REPO_ROOT/$DELIB.next" "$REPO_ROOT/$RESULTS" >.judge-delibmerge.out 2>.judge-delibmerge.err || {
   rm -f "$REPO_ROOT/$DELIB.next" "$REPO_ROOT/$DELIB.merged"
   write_waiting "Deliberation transcript union failed: $(cat .judge-delibmerge.err .judge-delibmerge.out)"
   exit 0

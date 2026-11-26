@@ -32,15 +32,23 @@ module HiveBench
           end
         end
         # Stale per-cell buckets must not re-arm generation or charge old work.
-        # Existing root buckets are retained as operational evidence.
+        # Existing root buckets and parked-only snapshots (limit_hit/crash with
+        # no cell entry) are retained as operational evidence unless retired.
+        document_cell_keys = document.fetch("cells", []).map { |cell| [cell["agent_id"], cell["task_id"]] }
         keys = selected.map { |cell| cell.values_at("agent_id", "task_id", "generation_id") }
         filtered = document.merge("cells" => selected)
         %w[pending failed].each do |bucket|
           filtered[bucket] = document.fetch(bucket, []).select do |record|
-            keys.include?(record.values_at("agent_id", "task_id", "generation_id"))
+            key = [record["agent_id"], record["task_id"]]
+            id = record["generation_id"]
+            if document_cell_keys.include?(key)
+              keys.include?([*key, id])
+            else
+              id.to_s.empty? || !history.any? { |entry| entry.values_at("agent_id", "task_id", "generation_id") == [*key, id] }
+            end
           end
         end
-        generations << filtered unless selected.empty?
+        generations << filtered unless selected.empty? && filtered["pending"].empty? && filtered["failed"].empty?
       end
       baseline["generation_history"] = ResultEvidence.deduplicate_history(history)
       [baseline, *generations, *overlays]

@@ -41,9 +41,12 @@ module HiveBench
         "artifact_binding" => cell[:artifact_binding],
         "evaluation_context" => cell[:evaluation_context]
       }
-      if ResultEvidence.bound_generation?(record) && ResultEvidence.valid_context?(record["evaluation_context"])
-        record["gate"]["evidence_binding"] = ResultEvidence.binding(record)
-        record["judges"].each_value { |judge| judge["evidence_binding"] = ResultEvidence.binding(record) }
+      record["artifact_verification_error"] = cell[:artifact_verification_error] if cell[:artifact_verification_error]
+      if ResultEvidence.bound_generation?(record)
+        record["gate"]["evidence_binding"] = ResultEvidence.gate_binding(record)
+        if ResultEvidence.valid_context?(record["evaluation_context"])
+          record["judges"].each_value { |judge| judge["evidence_binding"] = ResultEvidence.binding(record) }
+        end
       end
       record
     end
@@ -56,7 +59,9 @@ module HiveBench
       # charging its overlapping parked entry again without inferring continuity
       # from a cell key or equal patch bytes.
       adopted = records.filter_map { |record| record["adopted_attempt_snapshot_sha256"] }
-      parked = (pending + failed).reject { |record| adopted.include?(ResultEvidence.snapshot_digest(record)) }
+      parked = (pending + failed).reject do |record|
+        record["generation_id"].to_s.empty? && adopted.include?(ResultEvidence.attempt_snapshot_digest(record))
+      end
       attempts = ResultEvidence.deduplicate_buckets(parked + records)
       agents = attempts.group_by { |r| r["agent_id"] }.to_h do |agent, tried|
         active = records.select { |r| r["agent_id"] == agent }

@@ -177,8 +177,18 @@ module HiveBench
       end
       if manifest["artifact_binding"]
         GenerationProvenance.verify!(out_dir, entry: entry, agent_id: candidate.id)
+        persisted = manifest["efficiency"]
+        recovered_telemetry =
+          if persisted.is_a?(Hash) && !persisted.empty?
+            produced.telemetry
+                    .reject { |key, value| value.nil? || key.end_with?("_tokens") || key.start_with?("cost_usd") }
+                    .merge(persisted.compact)
+                    .merge("recovered_artifact" => true, "artifact_provenance" => provenance)
+          else
+            produced.telemetry.compact
+          end
         produced.with(generation_id: manifest.fetch("generation_id"), artifact_binding: manifest["artifact_binding"],
-                      telemetry: (manifest["efficiency"] || {}).merge(produced.telemetry.compact))
+                      telemetry: recovered_telemetry)
       else
         GenerationProvenance.finalize_cell!(produced, out_dir: out_dir, manifest: manifest,
                                             plan: GenerationProvenance.candidate_plan(work, entry["task_id"]), state: "recovery-finalized")

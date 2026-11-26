@@ -67,10 +67,13 @@ with state `recovery-finalized`; old evaluations do not gain authority thereby.
 Resuming work that can change output rotates identity before the container runs.
 The driver's exact configuration compatibility hash is separate and unchanged.
 
-Each evaluation carries `evidence_binding` containing generation identity,
+Each judge evaluation carries `evidence_binding` containing generation identity,
 artifact binding and evaluated context. Context names the evaluated plan digest
-and either a provided reference digest or explicit `reference_mode: withheld`.
-An unavailable reference without explicit withholding is not valid context.
+(aligned with `--plan-source`) and either a provided reference digest or explicit
+`reference_mode: withheld`. Objective gates bind only to `generation_id` and
+`artifact_binding`, decoupled from judge `evaluation_context`, so rejudging with
+a different `--plan-source` or `--withhold-reference` preserves valid gates.
+An unavailable reference without explicit withholding is not valid judge context.
 Patch equality, directory names and `mode: reused` never establish continuity.
 Artifact resolution selects one verified patch/plan bundle; missing/ambiguous
 bundles require recovery or selection and never masquerade as empty patches.

@@ -332,7 +332,7 @@ class AgentCliRuntimeComponentTest < Minitest::Test
     refute_nil dependency
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.1.1"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.0"))
-    assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.4"))
+    refute dependency.requirement.satisfied_by?(Gem::Version.new("0.2.4"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.5"))
     assert dependency.requirement.satisfied_by?(Gem::Version.new("0.2.99"))
     refute dependency.requirement.satisfied_by?(Gem::Version.new("0.3.0"))

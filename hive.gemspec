@@ -61,9 +61,10 @@ Gem::Specification.new do |spec|
 
   # Runtime dependencies. Dev/test dependencies stay in the Gemfile because
   # they have no business being installed for end users.
-  # Keep installed Hive on the independently published OpenCode-capable line.
+  # Keep installed Hive on the independently published line that includes
+  # OpenCode, Muse, and Antigravity CLI profiles.
   # Source checkouts still resolve the reviewed component through the Gemfile.
-  spec.add_dependency "agent-cli-runtime", "~> 0.2.4"
+  spec.add_dependency "agent-cli-runtime", "~> 0.2.5"
   spec.add_dependency "base64", ">= 0.2"
   spec.add_dependency "bubbletea", "= 0.1.4"
   # Usage accounting and pricing math parse token counts with BigDecimal.

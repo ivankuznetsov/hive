@@ -54,6 +54,21 @@ class PlanReviewWorkspaceScopeTest < Minitest::Test
     end
   end
 
+  def test_agy_uses_the_native_review_runtime_inside_the_disposable_worktree
+    Dir.mktmpdir("hive-plan-review-agy") do |workspace|
+      output_path = File.join(workspace, "hive-plan-review-result.json")
+      scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
+        profile: Hive::AgentProfiles.lookup(:agy), workspace:,
+        output_path:, role: "planner_revision"
+      )
+
+      assert_nil scope.fetch(:permission_mode)
+      assert_nil scope.fetch(:allowed_tools)
+      assert_nil scope.fetch(:disallowed_tools)
+      refute scope.key?(:runtime_policy)
+    end
+  end
+
   def test_opencode_uses_a_typed_full_review_policy
     scope = Hive::PlanReview::WorkspaceScope.launch_kwargs(
       profile: Hive::AgentProfiles.lookup(:opencode),

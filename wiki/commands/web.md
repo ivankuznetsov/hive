@@ -815,8 +815,9 @@ Honeycomb projections.
   `muse login` through those same constrained routes. Codex, Grok, Muse, and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
-  PTY child exits while hiding the paste-back form. Claude remains the
-  paste-back `claude setup-token` flow. Grok status recognizes
+  PTY child exits while hiding the paste-back form. Claude (`claude setup-token`)
+  and Antigravity CLI (`agy acp --login`) use the paste-back flow through those
+  same constrained routes. Grok status recognizes
   `GROK_AUTH_PATH` and credentials under `GROK_HOME`; API keys are not Hive
   login state. Raw PTY bytes are scrubbed to
   render-safe UTF-8 before the `<pre>` output is interpolated, and captured

@@ -8,7 +8,7 @@ tags: [agent, runtime, component, gem, cli]
 ---
 
 **TLDR**: `agent-cli-runtime` gives Ruby applications one stable integration
-layer for Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, and Muse Code. Its versioned
+layer for Claude Code, Codex CLI, Pi, Grok CLI, OpenCode, Muse Code, and Antigravity CLI (`agy`). Its versioned
 profiles centralize provider-specific commands, local capability checks,
 environment rules, usage extraction, and result normalization so consumers
 can add, switch, and upgrade agent CLIs behind one request and result
@@ -27,7 +27,7 @@ reads the managed stdin file instead of receiving a potentially oversized
 
 The package lives at `components/agent-cli-runtime/`, loads with
 `require "agent_cli_runtime"`, and exposes the `AgentCliRuntime` namespace.
-Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`.
+Its built-in profiles are ordered `claude`, `codex`, `pi`, `grok`, `opencode`, `muse`, `agy`.
 Appended profiles leave the order and behavior of the earlier profiles
 unchanged. The `muse` profile also introduced two generic contract points:
 version output that repeats one version in two forms (Muse prints

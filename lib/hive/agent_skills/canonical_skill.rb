@@ -24,7 +24,8 @@ module Hive
         "codex" => { invocation: "$hive", destination_relative: "skills/hive" },
         "pi" => { invocation: "/skill:hive", destination_relative: "skills/hive" },
         "opencode" => { invocation: "/hive", destination_relative: "skills/hive" },
-        "muse" => { invocation: "/hive", destination_relative: "skills/hive" }
+        "muse" => { invocation: "/hive", destination_relative: "skills/hive" },
+        "agy" => { invocation: "/hive", destination_relative: "skills/hive" }
       }.freeze
 
       ValidationError = Hive::AgentSkills::ValidationError

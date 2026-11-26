@@ -36,4 +36,22 @@ class PlanReviewPlannerIdentityTest < Minitest::Test
     assert_equal [ false, "same_model_family" ],
                  Hive::PlanReview::RouteResolver.independence(identity, { "family" => "meta" })
   end
+
+  def test_agy_planner_has_a_family_so_a_codex_adversary_is_independent
+    profile = Hive::AgentProfiles.lookup(:agy)
+    cfg = Hive::Config::DEFAULTS.merge(
+      "plan" => Hive::Config::DEFAULTS.fetch("plan").merge(
+        "agent" => "agy", "model" => "gemini-4-neon-xhigh", "effort" => "xhigh"
+      )
+    )
+
+    identity = Hive::PlanReview::PlannerIdentity.capture(profile:, cfg:)
+
+    assert_equal "google", identity.fetch("family")
+    assert_equal "antigravity-cli/v1", identity.fetch("route")
+    assert_equal [ true, "different_model_family" ],
+                 Hive::PlanReview::RouteResolver.independence(identity, { "family" => "openai" })
+    assert_equal [ false, "same_model_family" ],
+                 Hive::PlanReview::RouteResolver.independence(identity, { "family" => "google" })
+  end
 end

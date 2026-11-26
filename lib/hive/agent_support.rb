@@ -1,7 +1,7 @@
 module Hive::AgentSupport
   BUILTINS = {
     pi: "Pi", opencode: "OpenCode", codex: "Codex", grok: "Grok",
-    claude: "Claude", muse: "Muse"
+    claude: "Claude", muse: "Muse", agy: "Agy"
   }.freeze
   DEFAULT_PROMPT_STYLES = { codex: :stdin }.freeze
   DEFAULT_TOOL_SCOPE_FLAGS = {
@@ -9,7 +9,8 @@ module Hive::AgentSupport
   }.freeze
   DEFAULT_PERMISSION_PRESETS = { claude: %w[read-only scoped].freeze }.freeze
   PROTOCOLS = {
-    grok_end: :grok, pi_agent_end: :pi, muse_terminal: :muse
+    grok_end: :grok, pi_agent_end: :pi, muse_terminal: :muse,
+    agy_result: :agy
   }.freeze
   autoload :StreamMeter, "hive/agent_support/stream_meter"
 

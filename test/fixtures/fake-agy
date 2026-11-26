@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# Minimal fake Antigravity CLI (`agy`) for tests.
+#
+#   --version        prints the CLI version (override with HIVE_FAKE_AGY_VERSION,
+#                    default 1.5.17).
+#
+#   plugin ...       a small plugin registry over $HOME/.gemini/config/{plugins,config.json}
+#                    mirroring the real `agy plugin list --json`, `install`, and
+#                    `enable` shapes Hive consumes. Set HIVE_FAKE_AGY_PLUGIN_SOURCE
+#                    to redirect remote URL installs to a local fixture directory.
+#
+#   --input-format=text [...]
+#                    logs cwd, scrubbed credential env vars, and argv to
+#                    $HIVE_FAKE_AGY_LOG_DIR/fake-agy-argv.log, drains stdin,
+#                    emits a realistic stream-json sequence (`init`,
+#                    `step_update`, `result`), optionally writes
+#                    $HIVE_FAKE_AGY_WRITE_FILE, sleeps $HIVE_FAKE_AGY_HANG,
+#                    and exits with HIVE_FAKE_AGY_EXIT (default 0).
+#                    HIVE_FAKE_AGY_RESULT=error emits a failed terminal result
+#                    (with HIVE_FAKE_AGY_ERROR, default "fake provider failure").
+set -u
+
+if [[ "${1:-}" == "--version" ]]; then
+  printf '%s\n' "${HIVE_FAKE_AGY_VERSION:-1.5.17}"
+  exit 0
+fi
+
+LOG_DIR="${HIVE_FAKE_AGY_LOG_DIR:-/tmp}"
+mkdir -p "$LOG_DIR"
+{
+  echo "---"
+  echo "cwd=$(pwd)"
+  printf 'env_GEMINI_API_KEY=%s\n' "${GEMINI_API_KEY-__unset__}"
+  printf 'env_GOOGLE_API_KEY=%s\n' "${GOOGLE_API_KEY-__unset__}"
+  printf 'env_GOOGLE_APPLICATION_CREDENTIALS=%s\n' "${GOOGLE_APPLICATION_CREDENTIALS-__unset__}"
+  for a in "$@"; do
+    printf 'arg=%s\n' "$a"
+  done
+} >> "${LOG_DIR}/fake-agy-argv.log"
+
+if [[ "${1:-}" == "plugin" || "${1:-}" == "plugins" ]]; then
+  exec ruby -rjson -rfileutils -e '
+    config_root = File.join(ENV["HOME"] || Dir.home, ".gemini", "config")
+    plugins_dir = File.join(config_root, "plugins")
+    config_path = File.join(config_root, "config.json")
+
+    read_config = lambda do
+      File.file?(config_path) ? JSON.parse(File.read(config_path)) : {}
+    end
+    write_config = lambda do |doc|
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, JSON.pretty_generate(doc) + "\n")
+    end
+
+    case ARGV[0]
+    when "list"
+      config = read_config.call
+      plugin_prefs = config.fetch("plugins", {})
+      entries = if File.directory?(plugins_dir)
+        Dir.children(plugins_dir).sort.filter_map do |dir_name|
+          dir = File.join(plugins_dir, dir_name)
+          next unless File.directory?(dir)
+          manifest_path = [ "plugin.json", ".claude-plugin/plugin.json" ]
+            .map { |rel| File.join(dir, rel) }.find { |p| File.file?(p) }
+          next unless manifest_path
+          manifest = JSON.parse(File.read(manifest_path))
+          pref = plugin_prefs[dir_name]
+          enabled = pref.is_a?(Hash) && pref.key?("enabled") ? pref["enabled"] : manifest["disabled"] != true
+          skills = Dir.glob(File.join(dir, "skills", "*", "SKILL.md")).map { |p| File.basename(File.dirname(p)) }.sort
+          {
+            "name" => manifest["name"] || dir_name,
+            "enabled" => enabled,
+            "version" => manifest["version"],
+            "source" => File.file?(File.join(dir, ".claude-plugin", "plugin.json")) ? "claude-code" : "antigravity",
+            "path" => dir,
+            "skills" => skills
+          }
+        end
+      else
+        []
+      end
+      puts JSON.pretty_generate(entries)
+    when "install"
+      target = ARGV[1].to_s
+      source_dir = if target.start_with?("http://", "https://") && !ENV["HIVE_FAKE_AGY_PLUGIN_SOURCE"].to_s.empty?
+        ENV["HIVE_FAKE_AGY_PLUGIN_SOURCE"]
+      else
+        target
+      end
+      unless File.directory?(source_dir)
+        warn "Error: install target must be a directory: #{target}"
+        exit 1
+      end
+      manifest_path = [ ".claude-plugin/plugin.json", "plugin.json" ]
+        .map { |rel| File.join(source_dir, rel) }.find { |p| File.file?(p) }
+      unless manifest_path
+        warn "Error: missing plugin.json in #{source_dir}"
+        exit 1
+      end
+      manifest = JSON.parse(File.read(manifest_path))
+      name = manifest.fetch("name")
+      dest = File.join(plugins_dir, name)
+      FileUtils.rm_rf(dest)
+      FileUtils.mkdir_p(plugins_dir)
+      FileUtils.cp_r(source_dir, dest)
+      File.write(
+        File.join(dest, "plugin.json"),
+        JSON.pretty_generate("name" => name, "version" => manifest["version"]) + "\n"
+      )
+      puts "  [ok]    #{name}"
+      puts "          Installed to #{dest}"
+    when "enable"
+      name = ARGV[1].to_s
+      dest = File.join(plugins_dir, name)
+      unless File.directory?(dest)
+        warn "Error: plugin #{name.inspect} not found or invalid"
+        exit 1
+      end
+      doc = read_config.call
+      (doc["plugins"] ||= {})[name] = { "enabled" => true }
+      write_config.call(doc)
+    else
+      warn "fake-agy: unsupported plugin invocation: #{ARGV.join(%q{ })}"
+      exit 2
+    end
+  ' -- "${@:2}"
+fi
+
+# Drain piped/file-redirected prompt stdin like real `agy --input-format=text`.
+prompt_body="$(cat)"
+if [[ -n "${HIVE_FAKE_AGY_LOG_DIR:-}" ]]; then
+  printf '%s' "$prompt_body" > "${LOG_DIR}/fake-agy-stdin.txt"
+fi
+
+if [[ -n "${HIVE_FAKE_AGY_HANG:-}" ]]; then
+  sleep "${HIVE_FAKE_AGY_HANG}"
+fi
+
+if [[ -n "${HIVE_FAKE_AGY_WRITE_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${HIVE_FAKE_AGY_WRITE_FILE}")"
+  printf '%s\n' "${HIVE_FAKE_AGY_WRITE_CONTENT:-fake agy output}" > "${HIVE_FAKE_AGY_WRITE_FILE}"
+fi
+
+model="${HIVE_FAKE_AGY_MODEL:-gemini-4-neon-xhigh}"
+final="${HIVE_FAKE_AGY_FINAL:-fake agy final}"
+printf '{"event":"init","conversation_id":"fake-conv-1","init":{"model":"%s","cwd":"%s","tools":["view_file","write_to_file","run_command"],"permission_mode":"always-proceed"}}\n' "$model" "$(pwd)"
+printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"fake-conv-1","step_index":0,"state":"DONE","step_type":"user_input"}}'
+printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"fake-conv-1","step_index":1,"state":"ACTIVE","step_type":"agent_response","text_delta":"STREAM-SENSITIVE-DELTA"}}'
+printf '%s\n' '{"event":"step_update","step_update":{"conversation_id":"fake-conv-1","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"\n","duration_seconds":1.2,"usage":{"input_tokens":120,"output_tokens":45,"thinking_tokens":20,"cache_read_tokens":10,"total_tokens":165}}}'
+
+if [[ "${HIVE_FAKE_AGY_RESULT:-success}" == "error" ]]; then
+  err="${HIVE_FAKE_AGY_ERROR:-fake provider failure}"
+  printf '{"event":"result","result":{"conversation_id":"fake-conv-1","status":"ERROR","response":"","error":"%s","duration_seconds":1.3,"num_turns":1,"usage":{"input_tokens":120,"output_tokens":45,"thinking_tokens":20,"cache_read_tokens":10,"total_tokens":165},"finished_reason":"error"}}\n' "$err"
+else
+  printf '{"event":"result","result":{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"%s","duration_seconds":1.3,"num_turns":1,"usage":{"input_tokens":120,"output_tokens":45,"thinking_tokens":20,"cache_read_tokens":10,"total_tokens":165}}}\n' "$final"
+fi
+
+exit "${HIVE_FAKE_AGY_EXIT:-0}"

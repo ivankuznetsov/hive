@@ -152,6 +152,18 @@ class HiveCommandsInitTest < Minitest::Test
     assert File.file?(File.expand_path("../../../templates/reviewer_muse_ce_code_review.md.erb", __dir__))
   end
 
+  def test_project_config_can_render_optional_agy_reviewer
+    # init offers agy-ce-code-review; the template must render it rather
+    # than silently dropping the selection.
+    answers = project_config_answers.merge("enabled_reviewers" => [ "agy-ce-code-review" ])
+    rendered = render_fresh_config(:coding, answers: answers)
+
+    assert_match(/name: agy-ce-code-review/, rendered)
+    assert_match(/agent: agy/, rendered)
+    assert_match(/prompt_template: reviewer_agy_ce_code_review\.md\.erb/, rendered)
+    assert File.file?(File.expand_path("../../../templates/reviewer_agy_ce_code_review.md.erb", __dir__))
+  end
+
   def test_project_config_renders_discovery_only_refactor_patrol_choice
     enabled = render_fresh_config(
       :coding,

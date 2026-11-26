@@ -11,7 +11,8 @@ module Hive
         opencode: { model: nil, pin_model: true }.freeze,
         # Muse has no separate low-cost model; open-PR runs on the
         # provider's configured model, like Pi and Grok.
-        muse: { model: nil, pin_model: false }.freeze
+        muse: { model: nil, pin_model: false }.freeze,
+        agy: { model: nil, pin_model: false }.freeze
       }.freeze
 
       module_function

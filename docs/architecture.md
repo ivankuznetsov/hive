@@ -108,7 +108,7 @@ session secret always comes from the persisted session-secret file.
 ## Agents
 
 Hive has built-in agent profiles for `claude`, `codex`, `pi`, `grok`,
-`opencode`, and `muse`. The
+`opencode`, `muse`, and `agy` (Antigravity CLI). The
 published `agent-cli-runtime` gem owns each CLI's compatibility facts; Hive's
 profile wrapper adds workflow policy such as skills, routing, and status
 detection. Stage runners use CLI-managed subscription/session state and scrub

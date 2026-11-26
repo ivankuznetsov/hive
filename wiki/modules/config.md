@@ -376,6 +376,7 @@ reference.
      "pi" => "/llm-wiki:wiki-plan",
      "opencode" => "/ce-plan",
      "muse" => "/ce-plan",
+     "agy" => "/ce-plan",
      "default" => "/llm-wiki:wiki-plan"}},
  "plan_review" =>
   {"enabled" => true,
@@ -466,7 +467,11 @@ reference.
    "muse" =>
     {"bin" => "muse",
      "env_override" => "HIVE_MUSE_BIN",
-     "min_version" => "1.4.14"}},
+     "min_version" => "1.4.14"},
+   "agy" =>
+    {"bin" => "agy",
+     "env_override" => "HIVE_AGY_BIN",
+     "min_version" => "1.5.17"}},
  "review" =>
   {"ci" =>
     {"command" => nil,

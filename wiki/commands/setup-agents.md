@@ -8,7 +8,7 @@ tags: [command, agents, skills, hive, canonical, provisioning, consent]
 ---
 
 **TLDR**: `hive setup-agents` provisions the bundled Hive operating skill for
-Claude, Codex, Pi, OpenCode, and Muse plus unresolved built-in native
+Claude, Codex, Pi, OpenCode, Muse, and Antigravity CLI (`agy`) plus unresolved built-in native
 capabilities for those agents and Grok. Grok currently participates through
 native Compound Engineering plugin capabilities, not a copied Hive
 operating-skill projection. Muse installs Compound Engineering as a native

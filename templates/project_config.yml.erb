@@ -314,7 +314,7 @@ rebase:
   conflict_resolution_timeout_sec: 2700
 
 # 6-review stage configuration. Each role takes an `agent` (one of the
-# names registered in Hive::AgentProfiles — claude, codex, pi, grok, opencode, muse)
+# names registered in Hive::AgentProfiles — claude, codex, pi, grok, opencode, muse, agy)
 # and an optional `prompt_template` path under templates/.
 review:
   ci:
@@ -456,6 +456,16 @@ review:
       output_basename: muse-ce-code-review
       prompt_template: reviewer_muse_ce_code_review.md.erb
       # budget_usd: 50  # suggested cap; uncomment to enforce
+      timeout_sec: 7200
+<% end -%>
+<% if enabled_reviewers.include?("agy-ce-code-review") -%>
+    - name: agy-ce-code-review
+      kind: agent
+      agent: agy
+      skill: ce-code-review
+      output_basename: agy-ce-code-review
+      prompt_template: reviewer_agy_ce_code_review.md.erb
+      budget_usd: 50
       timeout_sec: 7200
 <% end -%>
 <% end -%>

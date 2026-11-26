@@ -578,6 +578,9 @@ components:
         - Hive::AgentSupport::OpenCode::LaunchPolicy
         - Hive::AgentSupport::OpenCode::Observation
         - Hive::AgentSupport::OpenCode::Skills
+        - Hive::AgentSupport::Agy
+        - Hive::AgentSupport::Agy::Skills
+        - Hive::AgentSupport::Agy::Stream
         - Hive::AgentSupport::Pi
         - Hive::AgentSupport::Pi::Runtime
         - Hive::AgentSupport::Pi::Skills
@@ -605,6 +608,9 @@ components:
       - lib/hive/agent_support/opencode/launch_policy.rb
       - lib/hive/agent_support/opencode/observation.rb
       - lib/hive/agent_support/opencode/skills.rb
+      - lib/hive/agent_support/agy.rb
+      - lib/hive/agent_support/agy/skills.rb
+      - lib/hive/agent_support/agy/stream.rb
       - lib/hive/agent_support/pi.rb
       - lib/hive/agent_support/pi/runtime.rb
       - lib/hive/agent_support/pi/skills.rb
@@ -820,6 +826,7 @@ components:
       - lib/hive/agent_support/codex/setup_adapter.rb
       - lib/hive/agent_support/grok/setup_adapter.rb
       - lib/hive/agent_support/claude/setup_adapter.rb
+      - lib/hive/agent_support/agy/setup_adapter.rb
       - config/agent-skills.yml
     state_contracts:
       - "Canonical skill source and projected agent-home directories"

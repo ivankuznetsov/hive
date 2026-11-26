@@ -6,6 +6,7 @@ class SetupAgentsIntegrationTest < Minitest::Test
   include HiveTestHelper
 
   FAKE_MUSE = File.expand_path("../fixtures/fake-muse", __dir__)
+  FAKE_AGY = File.expand_path("../fixtures/fake-agy", __dir__)
 
   FAKE_AGENT = <<~'RUBY'
     #!/usr/bin/env ruby
@@ -209,7 +210,8 @@ class SetupAgentsIntegrationTest < Minitest::Test
         "HIVE_CODEX_BIN" => nil,
         "HIVE_PI_BIN" => nil,
         "HIVE_OPENCODE_BIN" => nil,
-        "HIVE_MUSE_BIN" => FAKE_MUSE
+        "HIVE_MUSE_BIN" => FAKE_MUSE,
+        "HIVE_AGY_BIN" => FAKE_AGY
       }
       with_env(env) { yield dir, config_for(bins) }
     end

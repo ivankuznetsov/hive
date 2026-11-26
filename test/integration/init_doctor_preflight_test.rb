@@ -71,7 +71,8 @@ class InitDoctorPreflightTest < Minitest::Test
       "claude" => File.join(home, ".claude"),
       "codex" => File.join(home, ".codex"),
       "pi" => File.join(home, ".pi", "agent"),
-      "opencode" => File.join(home, ".config", "opencode")
+      "opencode" => File.join(home, ".config", "opencode"),
+      "agy" => File.join(home, ".gemini", "config")
     }
     roots.each do |platform, root|
       publisher = Hive::AgentSkills::DirectoryPublisher.new(

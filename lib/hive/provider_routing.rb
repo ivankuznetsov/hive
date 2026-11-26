@@ -71,6 +71,12 @@ module Hive
       "muse" => {
         "tools" => %w[filesystem shell web].freeze,
         "permissions" => PERMISSION_CAPABILITIES
+      },
+      # No "mcp": Hive has no Agy MCP renderer yet, so an Agy launch keeps
+      # the operator's own MCP config instead of the Hive-granted servers.
+      "agy" => {
+        "tools" => %w[filesystem shell web].freeze,
+        "permissions" => PERMISSION_CAPABILITIES
       }
     }.freeze
 

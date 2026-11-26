@@ -3039,3 +3039,18 @@ at all); only the log line and receipt record it.
 - Shipped agent profiles and Node/Bun/Python launchers are covered. Custom
   profile executables and launchers needing additional environment variables
   still require explicit service configuration.
+
+## Antigravity CLI (`agy`) profile boundaries (2026-11-25)
+
+- `agy 1.5.17` does not expose a working headless workspace-write or read-only
+  sandbox (`--mode auto` is account-gated; `--mode accept-edits` and
+  `--mode plan` remain in `request-review`). `:workspace_write` and `:read_only`
+  flags stay empty so `agy` fails closed for `7-artifacts` and
+  `refactor_patrol` discovery.
+- `agy` has no `Runtime` or `Mcp` support facet yet; managed-workflow actors
+  fail closed and `provider_routing` advertises `%w[filesystem shell web]`.
+- `~/.gemini/config` has no CLI-specific config-dir env override (follows
+  `HOME`), so non-default named launch bindings remain unsupported.
+- `UsageExtractors::AGY` records `output_includes_reasoning: true` when
+  `thinking_tokens` is present; `input_includes_cache_read` and USD pricing
+  stay unknown (`nil`).

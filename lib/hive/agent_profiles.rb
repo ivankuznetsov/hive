@@ -79,7 +79,7 @@ module Hive
       # True iff `path` is a regular file holding more than an empty JSON
       # object — i.e. an actual credential, not a freshly-created `{}` stub.
       def credential_present?(path)
-        File.file?(path) && !File.read(path).strip.match?(/\A(?:|\{\s*\})\z/m)
+        File.file?(path) && !File.binread(path).strip.match?(/\A(?:|\{\s*\})\z/m)
       end
 
       # Test helper: clear the registry. Used by per-test setup that wants
@@ -114,5 +114,6 @@ require "hive/agent_profiles/pi"
 require "hive/agent_profiles/grok"
 require "hive/agent_profiles/opencode"
 require "hive/agent_profiles/muse"
+require "hive/agent_profiles/agy"
 require "hive/agent_profiles/error_normalizers"
 require "hive/agent_profiles/launch_bindings"

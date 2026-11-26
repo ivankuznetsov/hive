@@ -398,7 +398,11 @@ module Hive
             structured_failure ||= stream.failure(json) if stream&.respond_to?(:failure)
             if @log_stream
               safe_line = if message || sensitive_payload
-                event_type = json.is_a?(Hash) ? json.fetch("type", "unknown") : "end"
+                event_type = if json.is_a?(Hash)
+                  json["type"] || json["payload_type"] || json["event"] || "unknown"
+                else
+                  "end"
+                end
                 "[structured message omitted type=#{event_type}]\n"
               else
                 Hive::SecretPatterns.redact(line)

@@ -219,9 +219,10 @@ budgets, or contain Hive defaults and skills. It can load and run without
 `hive-cli` or Hive constants. Direct standard-library gem dependencies are
 declared in its gemspec.
 
-Hive requires `agent-cli-runtime ~> 0.2.0` and resolves the monorepo component
+Hive requires `agent-cli-runtime ~> 0.2.5` and resolves the monorepo component
 path during development. This keeps installed Hive on the independently
-published OpenCode-capable line while allowing compatible 0.2.x patches;
+published line (including OpenCode, Muse, and Antigravity CLI) while allowing
+compatible 0.2.x patches;
 component publication and Hive dependency cutover remain separate operations.
 OpenCode's prepared invocation keeps its configuration, data, cache, state,
 and temporary roots private, while Hive forwards the operator-selected

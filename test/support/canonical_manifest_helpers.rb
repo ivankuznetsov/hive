@@ -73,6 +73,7 @@ module CanonicalManifestHelpers
       YAML
     }
   end
+
   def fixture_package(destination, name, canonicalize: false)
     canonical_payloads.each do |path, bytes|
       target = File.join(destination, path)

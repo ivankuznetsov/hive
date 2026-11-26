@@ -8,6 +8,8 @@ module Hive
         permissions files release_sha256
       ].freeze
       EXTENSION_PATTERN = /\Ax-[a-z0-9][a-z0-9-]*\z/
+      YAML_KEYWORD_KEY = /\A(?:true|false|yes|no|on|off|null)\z/i
+      private_constant :YAML_KEYWORD_KEY
 
       MANIFEST_ORDERS = {
         [] => MANIFEST_KEYS,
@@ -32,7 +34,7 @@ module Hive
       # Reader-only compatibility: pair an exact historical byte match with its
       # unsigned digest input. Producers always use dump_manifest.
       def legacy_v1_release_input(manifest, bytes)
-        return unless bytes == legacy_v1_dump(manifest)
+        return unless bytes.b == legacy_v1_dump(manifest).b
 
         legacy_v1_dump(manifest, include_release: false)
       end
@@ -71,7 +73,9 @@ module Hive
 
           ordered[key] = legacy_v1_value(key, manifest[key]) if manifest.key?(key)
         end
-        manifest.keys.grep(EXTENSION_PATTERN).sort.each { |key| ordered[key] = manifest[key] }
+        manifest.keys.select { |key| key.is_a?(String) && EXTENSION_PATTERN.match?(key) }.sort.each do |key|
+          ordered[key] = manifest[key]
+        end
         dump(ordered)
       end
       private_class_method :legacy_v1_dump
@@ -159,7 +163,11 @@ module Hive
       def key_text(key)
         raise ArgumentError, "canonical YAML keys must be strings" unless key.is_a?(String)
 
-        key.match?(/\A[a-zA-Z_][a-zA-Z0-9_-]*\z/) ? key : JSON.generate(key)
+        if key.match?(/\A[a-zA-Z_][a-zA-Z0-9_-]*\z/) && !YAML_KEYWORD_KEY.match?(key)
+          key
+        else
+          JSON.generate(key)
+        end
       end
     end
   end

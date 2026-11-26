@@ -37,7 +37,6 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     end
   end
 
-
   def test_validator_accepts_canonical_registry_manifest_and_release_digest
     with_registry_package do |root, document|
       result = Hive::WorkflowPackage::Validator.validate(
@@ -398,6 +397,94 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     )
     assert_package_rule("manifest.release_digest_mismatch") do
       Hive::WorkflowPackage::RegistryManifest.load_bytes(Hive::WorkflowPackage::CanonicalYAML.dump(data))
+    end
+  end
+
+  def test_loads_canonical_and_legacy_manifests_with_non_ascii_utf8_from_disk_and_binary_bytes
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    with_tmp_dir do |root|
+      metadata = Data.define(:description, :author, :license, :hive_min_version, :source).new(
+        description: "Lossless manifest — résumé",
+        author: { "name" => "Iván — Café", "url" => "https://example.test/ivan" },
+        license: "MIT", hive_min_version: Hive::VERSION,
+        source: { "url" => "https://example.test/source", "revision" => "c" * 40 }
+      )
+      destination = File.join(root, "built")
+      build = Hive::WorkflowPackage::RegistryManifestBuilder.build!(
+        destination: destination, name: "demo", version: "1.0.0",
+        metadata: metadata, snapshot: builder_snapshot
+      )
+      loaded = Hive::WorkflowPackage::RegistryManifest.load(File.join(destination, "manifest.yml"))
+      assert_equal "Iván — Café", loaded.data.dig("author", "name")
+      assert_equal "Lossless manifest — résumé", loaded.summary
+      assert_equal build.release_digest, loaded.digest
+      assert_equal build.bytes.b, loaded.bytes
+
+      canonical_data = YAML.safe_load(manifest_fixture("canonical"))
+      canonical_data["author"]["name"] = "Iván — Café"
+      canonical_data["description"] = "Canonical — naïve"
+      canonical_data["x-meta"] = { "note" => "em-dash — café" }
+      canonical_data["release_sha256"] = Digest::SHA256.hexdigest(yaml.dump_manifest(canonical_data, include_release: false))
+      canonical_bytes = yaml.dump_manifest(canonical_data).b
+      canonical_path = File.join(root, "canonical.yml")
+      File.binwrite(canonical_path, canonical_bytes)
+      [ Hive::WorkflowPackage::RegistryManifest.load(canonical_path),
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(canonical_bytes) ].each do |manifest|
+        assert_equal canonical_data, manifest.data
+        assert_equal canonical_bytes, manifest.bytes
+        assert_equal canonical_data.fetch("release_sha256"), manifest.digest
+      end
+
+      legacy_data = YAML.safe_load(manifest_fixture("legacy_order"))
+      legacy_data["author"]["name"] = "Iván — Café"
+      legacy_data["x-meta"]["note"] = "em-dash — café"
+      legacy_unsigned = yaml.dump(legacy_data.reject { |key, _| key == "release_sha256" })
+      legacy_data["release_sha256"] = Digest::SHA256.hexdigest(legacy_unsigned)
+      legacy_bytes = yaml.dump(legacy_data).b
+      refute_equal legacy_bytes, yaml.dump_manifest(legacy_data).b
+      legacy_path = File.join(root, "legacy.yml")
+      File.binwrite(legacy_path, legacy_bytes)
+      [ Hive::WorkflowPackage::RegistryManifest.load(legacy_path),
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(legacy_bytes) ].each do |manifest|
+        assert_equal legacy_data, manifest.data
+        assert_equal legacy_bytes, manifest.bytes
+        assert_equal legacy_data.fetch("release_sha256"), manifest.digest
+      end
+    end
+  end
+
+  def test_round_trips_yaml_1_1_keyword_keys_through_registry_manifest_loader
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    with_tmp_dir do |root|
+      canonical_data = YAML.safe_load(manifest_fixture("canonical"))
+      canonical_data["x-meta"] = {
+        "on" => 1, "yes" => 2, "true" => 3, "off" => 4, "no" => 5,
+        "false" => 6, "null" => 7, "Null" => 8, "ON" => 9, "~" => 10
+      }
+      canonical_data["release_sha256"] = Digest::SHA256.hexdigest(yaml.dump_manifest(canonical_data, include_release: false))
+      canonical_bytes = yaml.dump_manifest(canonical_data)
+      canonical_path = File.join(root, "canonical-keywords.yml")
+      File.binwrite(canonical_path, canonical_bytes)
+      loaded = Hive::WorkflowPackage::RegistryManifest.load(canonical_path)
+      assert_equal canonical_data, loaded.data
+      assert_equal canonical_data.fetch("release_sha256"), loaded.digest
+
+      legacy_data = YAML.safe_load(manifest_fixture("canonical"))
+      legacy_data["x-meta"] = { "z" => 1, "on" => "push", "yes" => "go", "true" => "ok", "null" => "none", "a" => 2 }
+      legacy_unsigned = yaml.dump(legacy_data.reject { |key, _| key == "release_sha256" })
+      legacy_data["release_sha256"] = Digest::SHA256.hexdigest(legacy_unsigned)
+      legacy_bytes = yaml.dump(legacy_data)
+      refute_equal legacy_bytes, yaml.dump_manifest(legacy_data)
+      legacy_path = File.join(root, "legacy-keywords.yml")
+      File.binwrite(legacy_path, legacy_bytes)
+      legacy_loaded = Hive::WorkflowPackage::RegistryManifest.load(legacy_path)
+      assert_equal legacy_data, legacy_loaded.data
+      assert_equal legacy_data.fetch("release_sha256"), legacy_loaded.digest
+
+      unquoted_keyword_bytes = canonical_bytes.sub('  "on": 1', "  on: 1")
+      assert_package_rule("manifest.non_canonical") do
+        Hive::WorkflowPackage::RegistryManifest.load_bytes(unquoted_keyword_bytes)
+      end
     end
   end
 

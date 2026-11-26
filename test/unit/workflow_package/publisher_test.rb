@@ -29,7 +29,6 @@ class WorkflowPackagePublisherTest < Minitest::Test
     end
   end
 
-
   Package = Hive::WorkflowPackage::Publisher::Package
   RetainedReceipt = Data.define(
     :name, :version, :package_digest, :release_digest, :lint_contract

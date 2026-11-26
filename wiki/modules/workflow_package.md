@@ -3,7 +3,7 @@ title: Hive::WorkflowPackage
 type: module
 source: lib/hive/workflow_package/
 created: 2026-08-13
-updated: 2026-11-03
+updated: 2026-11-26
 tags: [module, workflow-package, honeycomb, registry, permissions, disclosure, managed-store]
 ---
 
@@ -251,8 +251,12 @@ key in lexical order. Unrecognized or ambiguous mappings sort all keys
 lexically and recurse through every descendant. Sequences keep their element
 order, including scalars and empty containers, while contained maps are
 normalized. `include_release: false` omits only the root `release_sha256`.
-The generic `CanonicalYAML.dump` emitter, scalar encoding, and `hive-module/v1`
-bytes are unchanged.
+Scalar encoding and `hive-module/v1` bytes are unchanged. `CanonicalYAML.key_text`
+quotes YAML 1.1 boolean/null keywords (`true`, `false`, `yes`, `no`, `on`, `off`,
+`null`, case-insensitive) in addition to non-identifier keys so Psych round-trips
+every string key losslessly. `RegistryManifest.load_bytes` and
+`CanonicalYAML.legacy_v1_release_input` compare validated UTF-8 bytes
+consistently regardless of binary (`ASCII-8BIT`) file-read encoding.
 
 Serialization preserves fields before validation. `RegistryManifest` validates
 root/core shape before matching bytes; `WorkflowPackage::Validator` owns

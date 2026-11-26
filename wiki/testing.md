@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/{ci,live-agent-skills,release-candidate,release}.yml, packaging/{live_agent_skills,release_candidate}/, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-11-09
+updated: 2026-11-26
 tags: [test, minitest, fixtures, honeycomb, agent-skills, component-boundaries, plan-review, terminal-outcomes, release-proof, bounded-storage, daily-digest, read-only]
 ---
 
@@ -444,9 +444,11 @@ change invalidates the exception.
 
 `workflow_package/canonical_yaml_test.rb` covers exact structural roles plus
 lexical remainders, reserved-name collisions at arbitrary extension depths,
-sequence positions, non-mutation, idempotency, root-only release omission, and
+sequence positions, non-mutation, idempotency, root-only release omission,
+YAML 1.1 boolean/null keyword key quoting, binary UTF-8 legacy matching, and
 uniform string-key/scalar failures. `registry_manifest_test.rb` pins exact
-canonical and legacy bytes, both SHA-256 identities, overlap with equal unsigned
+canonical and legacy bytes, non-ASCII UTF-8 disk/binary reads, YAML 1.1 keyword
+key round-trips, both SHA-256 identities, overlap with equal unsigned
 inputs, newly admitted hand-authored and mixed extension orders, shape ownership,
 and the full/unsigned dump-call error conversions. YAML/encoding errors and
 unrelated `ArgumentError`s keep their existing boundaries.

@@ -29,7 +29,6 @@ class WorkflowPackageRegistrySubmissionTest < Minitest::Test
     refute_equal identities[0][1], identities[1][1]
   end
 
-
   PullRequest = Hive::WorkflowPackage::RegistryGateway::PullRequest
 
   class FakeGateway

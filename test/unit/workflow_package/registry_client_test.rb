@@ -25,7 +25,6 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
-
   def test_fetches_bare_version_and_listed_full_source_sha_to_verified_package
     with_registry do |repository, source_revision, catalog_commit|
       client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)

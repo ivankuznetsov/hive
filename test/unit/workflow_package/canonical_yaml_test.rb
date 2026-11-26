@@ -40,6 +40,7 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
     assert_raises(ArgumentError) { serializer.dump(Float::INFINITY) }
     assert_raises(ArgumentError) { serializer.dump(Object.new) }
   end
+
   def test_manifest_roles_preserve_known_order_and_every_lexical_remainder
     document = {
       "z" => 1, "schema" => "example", "a" => 2,
@@ -124,8 +125,8 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
   end
 
   def test_manifest_keys_fail_uniformly_before_sorting_at_every_depth
-    [ { 1 => "bad", "a" => 1 }, { "author" => { "name" => "ok", 1 => "bad" } },
-      { "x-meta" => [ { "a" => 1, nil => "bad" } ] } ].each do |document|
+    [ { 1 => "bad", "a" => 1 }, { bad: 1, "a" => 1 }, { "author" => { "name" => "ok", 1 => "bad" } },
+      { "x-meta" => { bad: 1 } }, { "x-meta" => [ { "a" => 1, nil => "bad" } ] } ].each do |document|
       error = assert_raises(ArgumentError) { Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document) }
       assert_equal "canonical YAML keys must be strings", error.message
     end
@@ -133,6 +134,41 @@ class WorkflowPackageCanonicalYAMLTest < Minitest::Test
       assert_raises(ArgumentError) { Hive::WorkflowPackage::CanonicalYAML.dump_manifest({ "x-meta" => value }) }
     end
     refute_respond_to Hive::WorkflowPackage::CanonicalYAML, :ordered_value
+  end
+
+  def test_quotes_yaml_1_1_keyword_keys_for_lossless_round_tripping
+    serializer = Hive::WorkflowPackage::CanonicalYAML
+    keywords = %w[true True TRUE false False FALSE yes Yes YES no No NO on On ON off Off OFF null Null NULL ~]
+    keyword_map = keywords.each_with_index.to_h { |key, index| [ key, index + 1 ] }
+    ordinary_map = { "online" => 1, "truth" => 2, "nullable" => 3, "yes_no" => 4 }
+    document = { "x-meta" => keyword_map.merge(ordinary_map) }
+
+    [ serializer.dump(document), serializer.dump_manifest(document) ].each do |yaml_text|
+      keywords.each { |key| assert_includes yaml_text, "  #{JSON.generate(key)}: " }
+      ordinary_map.each_key { |key| assert_includes yaml_text, "  #{key}: " }
+      parsed = Psych.safe_load(yaml_text, permitted_classes: [], permitted_symbols: [], aliases: false)
+      assert_equal document, parsed
+      assert_equal document.fetch("x-meta").keys.sort, parsed.fetch("x-meta").keys.sort
+    end
+
+    canonical = serializer.dump_manifest(document)
+    assert_equal canonical, serializer.dump_manifest(
+      Psych.safe_load(canonical, permitted_classes: [], permitted_symbols: [], aliases: false)
+    )
+  end
+
+  def test_legacy_v1_release_input_compares_binary_utf8_and_ignores_symbol_extension_keys
+    yaml = Hive::WorkflowPackage::CanonicalYAML
+    data = YAML.safe_load(manifest_fixture("legacy_order"))
+    data["author"]["name"] = "Iván — Café"
+    data["x-meta"]["note"] = "résumé"
+    unsigned = yaml.dump(data.reject { |key, _| key == "release_sha256" })
+    data["release_sha256"] = Digest::SHA256.hexdigest(unsigned)
+    binary_bytes = yaml.dump(data).b
+
+    assert_equal Encoding::ASCII_8BIT, binary_bytes.encoding
+    assert_equal unsigned, yaml.legacy_v1_release_input(data, binary_bytes)
+    assert_nil yaml.legacy_v1_release_input(data.merge("x-sym": "ignored"), "mismatch".b)
   end
 
   private

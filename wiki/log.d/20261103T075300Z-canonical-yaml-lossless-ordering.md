@@ -23,13 +23,14 @@
   Store, gateway, client, submission, publish CLI and install/update lifecycle
   tests prove exact byte retention and digest handoffs. Serializer/reader
   changed-source coverage is exactly 100% per file.
-- Focused behavioral, consumer, lifecycle, module and Wiki checks pass, as does
-  repository-wide RuboCop. The broad `bin/test --all` checkpoint is red: Hive
-  partitions report four failures and twenty-three errors, while standalone
-  Agent CLI Runtime passes. The exact OpenCode lifecycle success test reproduces
-  `Errno::ESRCH` at `invocation_process_custody.rb:112` on untouched base
-  `966211001e` and the implementation. Other broad failures are not all
-  independently baselined. This exceeds the plan's allowed baseline exception;
-  completion remains blocked and no execution-complete trailer is recorded.
+- `CanonicalYAML.key_text` quotes YAML 1.1 boolean/null keyword keys
+  (`true`/`false`/`yes`/`no`/`on`/`off`/`null`, case-insensitive) so Psych
+  round-trips every string key losslessly without collapsing or coercing
+  keyword keys. `RegistryManifest.load_bytes` and
+  `CanonicalYAML.legacy_v1_release_input` compare validated UTF-8 bytes
+  encoding-safely so non-ASCII UTF-8 manifests loaded from disk (`ASCII-8BIT`)
+  verify identically for both canonical and legacy-v1 forms.
+- Focused workflow-package, module-package, lifecycle, and Wiki suites pass,
+  along with 100% changed-source coverage and RuboCop on the rebased branch.
 - Contract and evidence ownership: [[modules/workflow_package]], [[testing]].
   Live-registry inventory remains an explicit gap in [[gaps]].

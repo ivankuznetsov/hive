@@ -27,7 +27,6 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
-
   def test_validates_manifest_inventory_digest_and_package_descriptor_name
     with_package do |root|
       manifest = write_manifest(root)

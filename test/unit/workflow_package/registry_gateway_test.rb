@@ -21,7 +21,6 @@ class WorkflowPackageRegistryGatewayTest < Minitest::Test
     end
   end
 
-
   Status = Data.define(:success?)
   OK = Status.new(success?: true)
   FAILED = Status.new(success?: false)

@@ -32,7 +32,6 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
-
   def test_installed_workflow_reads_check_integrity_without_launching_secret_scans
     with_tmp_dir do |dir|
       package = File.join(dir, "package")

@@ -466,7 +466,6 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     end
   end
 
-
   def update(project, client, dry_run: false, yes: false, json: true, stdin: $stdin,
              stdout: StringIO.new, input_bindings: [])
     Hive::Commands::Workflow::Update.new(

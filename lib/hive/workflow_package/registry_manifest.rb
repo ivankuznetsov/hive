@@ -43,14 +43,14 @@ module Hive
         rescue ArgumentError
           fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML")
         end
-        release_input = if bytes == canonical
+        release_input = if utf8 == canonical
           begin
             CanonicalYAML.dump_manifest(data, include_release: false)
           rescue ArgumentError
             fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML")
           end
         else
-          CanonicalYAML.legacy_v1_release_input(data, bytes)
+          CanonicalYAML.legacy_v1_release_input(data, utf8)
         end
         fail!("manifest.non_canonical", FILE_NAME, "manifest must use canonical Honeycomb YAML") unless release_input
         expected = ::Digest::SHA256.hexdigest(release_input)

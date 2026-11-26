@@ -23,7 +23,6 @@ class WorkflowPackagePublishStoreTest < Minitest::Test
     end
   end
 
-
   def test_persists_one_private_receipt_and_validated_digest_bundle
     with_package do |package|
       with_tmp_dir do |state|

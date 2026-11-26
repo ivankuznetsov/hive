@@ -15,9 +15,11 @@ module Hive::AgentSupport::Agy
         return unless payload.is_a?(Hash)
 
         id = payload["conversation_id"] || event["conversation_id"]
-        return if @conversation_id && id && id != @conversation_id
-        @conversation_id ||= id if kind == "init"
-        return if kind == "step_update" && (!@conversation_id || id != @conversation_id)
+        id = nil unless id.is_a?(String) && !id.empty?
+        # Only the opening init can establish which conversation owns the review.
+        @conversation_id = id if kind == "init" && !defined?(@conversation_id)
+        return unless @conversation_id
+        return if id && id != @conversation_id
         raw = payload["model"]
         return unless raw.is_a?(String) && raw.bytesize.between?(1, 256)
         model = Hive::AgentSupport::Agy.normalize_settings_model(raw)
@@ -25,9 +27,9 @@ module Hive::AgentSupport::Agy
         return if %w[auto default inherit].include?(model.downcase)
 
         if kind == "init"
-          @initial_model ||= model
+          @initial_model ||= model if id
         elsif kind == "result" || payload["step_type"] == "agent_response"
-          @mixed ||= @served_model && @served_model != model
+          @ambiguous ||= id.nil? || (@served_model && @served_model != model)
           @served_model = model
         end
       end
@@ -35,7 +37,7 @@ module Hive::AgentSupport::Agy
       def evidence_source = "provider_stream_event"
 
       def model
-        @served_model || @initial_model unless @mixed
+        @served_model || @initial_model unless @ambiguous
       end
     end
 

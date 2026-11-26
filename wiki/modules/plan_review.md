@@ -288,6 +288,8 @@ Antigravity planners also need an observed model. Hive treats an older planner
 receipt with a conflicting model and family as unverified.
 Each metered review attempt stores its token counts alongside the actual route
 in the immutable receipt. Parser-rejected reviews retain the same accounting.
+If a runner supplies malformed optional usage, Hive omits it while preserving
+the review outcome.
 
 Planner authority capture is provider-scoped too. A Codex-authored plan never
 inherits `claude.model` or `claude.effort` when its own plan route is unpinned;

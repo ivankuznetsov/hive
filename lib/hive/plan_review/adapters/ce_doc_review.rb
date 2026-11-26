@@ -108,7 +108,8 @@ module Hive
             else
               "retryable_failure"
             end
-            served_model = result.fetch(:model) { result.dig(:usage, :model) }.to_s
+            usage = result[:usage] if result[:usage].is_a?(Hash)
+            served_model = result.fetch(:model) { usage&.dig(:model) }.to_s
             retry_at = result[:retry_at]
             if status == "provider_limit" && retry_at.to_s.empty?
               retry_at = Hive::AgentLimit.retry_after(text: result[:limit_text])
@@ -132,7 +133,7 @@ module Hive
               "diagnostic" => result[:error_message],
               "retry_at" => retry_at,
               "actual_route" => actual,
-              "usage" => result[:usage]&.slice(*TOKEN_FIELDS)&.compact&.transform_keys(&:to_s)
+              "usage" => usage&.slice(*TOKEN_FIELDS)&.compact&.transform_keys(&:to_s)
             }
           end
 
@@ -215,7 +216,7 @@ module Hive
         end
 
         def call(request)
-          runner_result = nil
+          runner_result = {}
           disposable = nil
           disposable_worktree = nil
           validate_snapshot!(request)
@@ -430,10 +431,10 @@ module Hive
           end
         end
 
-        def route_receipt(request, run: nil, capability_result: "present", diagnostic_source: nil)
-          actual = stringify(run&.dig("actual_route"))
-          usage = run&.dig("usage")
-          usage = nil if usage&.empty?
+        def route_receipt(request, run: {}, capability_result: "present", diagnostic_source: nil)
+          actual = stringify(run["actual_route"])
+          usage = run["usage"]
+          usage = nil unless usage.is_a?(Hash) && !usage.empty?
           independent, reason = RouteResolver.independence(request.planner_identity, actual)
           {
             "role" => request.kind,

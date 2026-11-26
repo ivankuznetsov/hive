@@ -291,6 +291,8 @@ class AgyAgentTest < Minitest::Test
 
     identity.observe("event" => "init", "conversation_id" => "main",
                      "init" => { "model" => "Gemini 4 Neon (XHigh)" })
+    identity.observe("event" => "step_update", "step_update" => { "conversation_id" => "child",
+                     "step_type" => "agent_response", "model" => "claude-opus" })
     assert_equal "gemini-4-neon-xhigh", identity.model
     identity.observe("event" => "step_update", "step_update" => { "conversation_id" => "main",
                      "step_type" => "agent_response", "model" => "claude-opus-5-5-high" })
@@ -298,6 +300,24 @@ class AgyAgentTest < Minitest::Test
     identity.observe("event" => "result", "result" => { "conversation_id" => "main", "model" => "another-model" })
     assert_nil identity.model
     assert_equal [ nil, nil ], Hive::AgentSupport::Agy.execution_identity(identity.model)
+  end
+
+  def test_missing_root_id_does_not_allow_a_child_to_claim_the_run
+    identity = Hive::AgentSupport.for(:agy)::Stream::ModelIdentity.new
+    identity.observe("event" => "init", "init" => { "model" => "gemini-4-neon-xhigh" })
+    identity.observe("event" => "init", "conversation_id" => "child", "init" => { "model" => "claude-opus" })
+    identity.observe("event" => "result", "result" => { "conversation_id" => "child", "model" => "claude-opus" })
+
+    assert_nil identity.model
+  end
+
+  def test_unattributed_generation_cannot_confirm_the_opening_model
+    identity = Hive::AgentSupport.for(:agy)::Stream::ModelIdentity.new
+    identity.observe("event" => "init", "conversation_id" => "main", "init" => { "model" => "gemini-4-neon-xhigh" })
+    identity.observe("event" => "step_update", "step_update" => { "step_type" => "agent_response", "model" => "claude-opus" })
+    identity.observe("event" => "result", "result" => { "conversation_id" => "main", "model" => "gemini-4-neon-xhigh" })
+
+    assert_nil identity.model
   end
 
   def test_spawn_result_error_event_is_an_error_despite_zero_exit

@@ -392,7 +392,10 @@ representation decision.
   `Hive::AgentSupport::Agy::Stream::TokenMeter` treats `event == "result"` as
   terminal to prevent double-counting. Hive reads the conversation model from
   `init.model` and uses a generation's reported model when available.
-  Conflicting generation models leave the session model unknown. Config and skills live under
+  Hive uses the opening conversation ID to identify the main agent and ignores
+  events from known child conversations. A missing opening ID, a model-bearing
+  generation with no conversation ID, or conflicting main-agent generation models
+  leaves the session model unknown. Config and skills live under
   `~/.gemini/config` (relocated only via `HOME`); settings and fallback OAuth
   token live under `~/.gemini/antigravity-cli/{settings.json,antigravity-oauth-token}`
   (checked via binary read). `default_model` normalizes Antigravity display

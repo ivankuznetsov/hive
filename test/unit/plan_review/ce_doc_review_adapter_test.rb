@@ -366,6 +366,25 @@ class PlanReviewCeDocReviewAdapterTest < Minitest::Test
     end
   end
 
+  def test_malformed_optional_usage_does_not_hide_the_runner_outcome
+    with_request do |request, _plan_path|
+      normalizer = Hive::PlanReview::Adapters::CeDocReview::HiveRunner.new(task: nil, cfg: {})
+      [ 12, "unknown", [] ].each do |usage|
+        normalized = normalizer.send(:normalize_result, { timed_out: true, usage: usage }, request)
+        assert_equal "timeout", normalized.fetch("status")
+        assert_nil normalized.fetch("usage")
+        runner = ->(**) { { "status" => "timeout", "usage" => usage } }
+        result = adapter_for(runner).call(request)
+        assert_equal "timeout", result.outcome
+        refute result.route_receipt.key?("usage")
+      end
+
+      malformed = adapter_for(->(**) { "invalid runner response" }).call(request)
+      assert_equal "retryable_failure", malformed.outcome
+      refute malformed.route_receipt.fetch("independence_verified")
+    end
+  end
+
   def test_result_nested_evidence_is_immutable
     result = Hive::PlanReview::Adapters::Base::Result.new(
       outcome: "success",

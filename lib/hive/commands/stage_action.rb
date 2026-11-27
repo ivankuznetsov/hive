@@ -41,7 +41,8 @@ module Hive
                      observation_guard: nil,
                      module_event_publisher: nil, idempotency_key: nil,
                      retry_horizon_expires_at: nil,
-                     command_receipt_store: nil)
+                     command_receipt_store: nil,
+                     explicit_plan_repair: nil)
         @verb = verb
         @target = target
         @project_filter = project
@@ -55,6 +56,7 @@ module Hive
         @idempotency_key = idempotency_key
         @retry_horizon_expires_at = retry_horizon_expires_at
         @command_receipt_store = command_receipt_store
+        @explicit_plan_repair = explicit_plan_repair
       end
 
       def call
@@ -135,7 +137,11 @@ module Hive
         end
 
         if current_stage == target_stage
-          run_at(task.folder, observation_guard: @observation_guard)
+          run_at(
+            task.folder,
+            observation_guard: @observation_guard,
+            explicit_plan_repair: explicit_plan_repair_intent?(task, current_stage, target_stage)
+          )
           publish_task_completed(task)
           return emit_phase(task, "ran")
         end
@@ -285,15 +291,40 @@ module Hive
         ).call
       end
 
-      def run_at(folder, observation_guard:, no_rebase: false)
+      def run_at(folder, observation_guard:, no_rebase: false, explicit_plan_repair: false)
         Hive::Commands::Run.new(
           folder,
           project: @project_filter,
           json: false,
           quiet: @json || @quiet,
           no_rebase: no_rebase,
-          observation_guard: observation_guard
+          observation_guard: observation_guard,
+          explicit_plan_repair: explicit_plan_repair
         ).call
+      end
+
+      # Only an explicit operator `hive plan <root> [--project <p>] --from 3-plan`
+      # targeting a task already at 3-plan grants local plan-repair intent.
+      # Forward transitions, other verbs, generic `run`, and automated daemon
+      # dispatches never grant it.
+      def explicit_plan_repair_intent?(task, current_stage, target_stage)
+        return false if @explicit_plan_repair == false
+        return false unless @verb == "plan"
+        return false unless current_stage == "3-plan" && target_stage == "3-plan"
+        return false if @from.to_s.strip.empty?
+        return false if automated_dispatch?
+
+        resolved_from = if task.respond_to?(:workflow) && task.workflow.respond_to?(:resolve_stage_ref)
+          task.workflow.resolve_stage_ref(@from)
+        else
+          @from.to_s
+        end
+        resolved_from == "3-plan"
+      end
+
+      def automated_dispatch?
+        Hive::Attempts::Context.current&.automated_dispatch? == true ||
+          ENV["HIVE_DAEMON_AUTOMATED_DISPATCH"] == "1"
       end
 
       def publish_task_completed(task)

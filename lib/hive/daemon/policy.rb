@@ -100,7 +100,15 @@ module Hive
       # Closed explanation for a pure policy result. The dispatcher augments
       # `dispatch` with the actual concurrency gate it observed, but separate
       # status processes never need to reimplement Policy.decide.
-      def operational_disposition(decision)
+      def operational_disposition(decision, dependency_correction_exhausted: false)
+        if dependency_correction_exhausted && decision.to_sym == :skip
+          return {
+            decision: "skip",
+            owner: "operator",
+            reason: "plan dependency automatic correction exhausted"
+          }
+        end
+
         owner, reason = OPERATIONAL_DISPOSITIONS.fetch(
           decision.to_sym,
           [ "unknown", "scheduler decision is not recognized" ]
@@ -166,7 +174,9 @@ module Hive
       # has a baseline to compare against.
       def decide(action:, stage: nil, workflow: nil, command:, state_file_mtime:, last_dispatched_state_file_mtime:,
                  now:, edit_debounce_sec: 30, answers_pending: false,
-                 answers_complete: false, blocked: false, admission_error: false)
+                 answers_complete: false, blocked: false, admission_error: false,
+                 dependency_correction_exhausted: false)
+        return :skip if dependency_correction_exhausted
         return :admission_error if admission_error || action == "admission_error"
         return :skip if action.nil?
         # Advance, cleared-plan approval, review automation, and edit-resume

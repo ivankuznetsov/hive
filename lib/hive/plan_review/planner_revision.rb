@@ -5,6 +5,7 @@ require "securerandom"
 require "hive/artifact_firewall"
 require "hive/markers"
 require "hive/model_routing"
+require "hive/plan_dependency_correction"
 require "hive/plan_review/disposable_worktree"
 require "hive/plan_review/plan_signals"
 require "hive/plan_review/workspace_scope"
@@ -44,6 +45,7 @@ module Hive
             [ name, File.join(@task.folder, name) ]
           end
           protected["meta.yml"] = @task.meta_yml_path
+          protected["plan-dependency-correction"] = Hive::PlanDependencyCorrection.path(@task.folder)
           protected["plan-review-current"] = File.join(@task.folder, "plan-review", "current.json")
           protected["revision-input"] = File.join(workspace, "input-plan.md")
           manifest = Hive::ArtifactFirewall::Manifest.new(
@@ -152,7 +154,8 @@ module Hive
       end
 
       def call(review_id:, plan_bytes:, findings:, planner_identity:, timeout_sec:,
-               planner_authority: planner_identity, pending_findings: [])
+               planner_authority: planner_identity, pending_findings: [],
+               dependency_diagnostic: "")
         DisposableWorktree.open(
           project_root: @task.project_root,
           prefix: "hive-plan-revision-worktree-"
@@ -165,7 +168,8 @@ module Hive
           seed_candidate!(output_path, redacted_plan)
           prompt = render_prompt(
             input_path:, output_path:, findings:, review_id:, planner_identity:,
-            planner_authority:, pending_findings:
+            planner_authority:, pending_findings:,
+            dependency_diagnostic_text: dependency_diagnostic.to_s
           )
           observed = stringify(@runner.call(
             prompt:, workspace:, output_path:, planner_identity:, timeout_sec:
@@ -199,7 +203,8 @@ module Hive
       end
 
       def render_prompt(input_path:, output_path:, findings:, review_id:, planner_identity:,
-                        planner_authority:, pending_findings: [])
+                        planner_authority:, pending_findings: [],
+                        dependency_diagnostic_text: "")
         source = File.read(File.expand_path("../../../templates/plan_revision_prompt.md.erb", __dir__))
         ERB.new(source, trim_mode: "-").result_with_hash(
           nonce: SecureRandom.hex(24), input_path:, output_path:, review_id:,
@@ -208,7 +213,8 @@ module Hive
           end),
           pending_findings_json: JSON.pretty_generate(pending_findings),
           planner_identity_json: JSON.generate(planner_identity),
-          planner_authority_json: JSON.generate(planner_authority)
+          planner_authority_json: JSON.generate(planner_authority),
+          dependency_diagnostic_text: dependency_diagnostic_text.to_s
         )
       end
 

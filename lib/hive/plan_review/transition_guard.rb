@@ -4,7 +4,11 @@ require "json"
 require "time"
 require "hive/atomic_file"
 require "hive/config"
+require "hive/dependencies"
 require "hive/model_routing"
+require "hive/plan_dependency_adoption"
+require "hive/plan_dependency_correction"
+require "hive/plan_frontmatter"
 require "hive/plan_review/execute_blocked"
 require "hive/plan_review/identity"
 require "hive/plan_review/orchestrator"
@@ -198,11 +202,86 @@ module Hive
         )
         fresh = current_freshness.fetch("status") == "current"
         executable = record.execution_allowed? && record["blockers"].empty?
-        return projection if fresh && executable
+        if fresh && executable
+          validate_current_dependencies!(task, projection)
+          return projection
+        end
 
         reason = current_freshness["reason"] ||
           "plan review is #{record.state} and does not authorize execution"
         raise blocked_error(task, projection, reason)
+      end
+
+      # Review task_generation intentionally excludes `depends_on` so
+      # permitted adoption preserves review identity. Therefore freshness alone
+      # cannot prove that current plan.md and meta.yml still agree and resolve
+      # at dispatch/approve/execute entry.
+      def validate_current_dependencies!(task, projection)
+        meta = Hive::TaskMeta.read_for_admission(task.folder)
+        unless meta.ok?
+          raise blocked_error(
+            task, projection,
+            "task dependency metadata is invalid or unreadable (#{meta.reason})",
+            required_action: "repair #{task.folder}/meta.yml and retry"
+          )
+        end
+
+        plan_path = File.join(task.folder, "plan.md")
+        plan_read = Hive::PlanFrontmatter.read(plan_path)
+        if plan_read.status == :invalid
+          raise blocked_error(
+            task, projection,
+            "plan.md depends_on frontmatter is invalid (#{plan_read.error || plan_read.invalid_kind})",
+            required_action: Hive::PlanDependencyCorrection.exhausted_action(task: task, validation: nil)
+          )
+        end
+        return unless plan_read.has_depends_on?
+
+        plan_normalized = Hive::Dependencies.serialize_declaration(plan_read.depends_on)
+        meta_raw = meta.data[:depends_on]
+        if meta_raw.nil?
+          raise blocked_error(
+            task, projection,
+            "plan.md depends_on is not recorded in meta.yml (plan_dependency_missing)",
+            required_action: "align meta.yml and plan.md depends_on and retry"
+          )
+        end
+        meta_normalized = Hive::Dependencies.normalize_declaration(meta_raw)
+        unless plan_normalized == meta_normalized
+          raise blocked_error(
+            task, projection,
+            "plan.md depends_on disagrees with meta.yml (plan_dependency_mismatch)",
+            required_action: "align meta.yml and plan.md depends_on and retry"
+          )
+        end
+
+        return unless task.respond_to?(:project_root) && task.project_root &&
+                      project_registered?(task.project_root)
+
+        validation = Hive::PlanDependencyAdoption.validate(task)
+        return if validation.ok? && !validation.adoptable?
+
+        raise blocked_error(
+          task, projection,
+          "plan dependencies failed validation (#{validation.reason_code || 'plan_dependency_missing'}: #{validation.offending_ref})",
+          required_action: validation.safe_correction ||
+                           Hive::PlanDependencyCorrection.exhausted_action(task: task, validation: validation)
+        )
+      rescue Hive::Dependencies::InvalidReference => error
+        raise blocked_error(
+          task, projection,
+          "plan dependency metadata is invalid: #{error.message}",
+          required_action: "repair depends_on in #{task.folder}/meta.yml and plan.md"
+        )
+      end
+
+      def project_registered?(project_root)
+        expanded = File.expand_path(project_root.to_s)
+        Hive::Config.registered_projects.any? do |entry|
+          File.expand_path(entry.fetch("path")) == expanded
+        end
+      rescue StandardError
+        false
       end
 
       def freshness(task:, projection:, config:, allow_policy_drift: false)
@@ -357,7 +436,8 @@ module Hive
 
       def stage_dir(task) = "#{task.stage_index}-#{task.stage_name}"
 
-      private_class_method :authorize!, :observation, :policy_configuration_matches?,
+      private_class_method :authorize!, :validate_current_dependencies!,
+                           :project_registered?, :observation, :policy_configuration_matches?,
                            :current_plan_digest, :write_legacy_adoption!,
                            :persisted_run_level, :blocked_error,
                            :stale, :coding?, :stage_dir,

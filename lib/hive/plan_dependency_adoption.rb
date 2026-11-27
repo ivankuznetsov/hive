@@ -156,7 +156,7 @@ module Hive
       end
 
       entries_list = registry_entries || Hive::Config.registered_projects
-      project_name = task_project_name(task)
+      project_name = task_project_name(task, registry_entries: entries_list)
       context = admission_context
       effective_signature = lookup_signature
 
@@ -469,7 +469,14 @@ module Hive
       Hive::Dependencies.reference_identity(reference, project_name || task_project_name(task))
     end
 
-    def task_project_name(task)
+    def task_project_name(task, registry_entries: nil)
+      if task.respond_to?(:project_root) && !task.project_root.to_s.empty? && registry_entries
+        expanded = File.expand_path(task.project_root.to_s)
+        match = Array(registry_entries).find do |entry|
+          entry.is_a?(Hash) && entry["path"] && File.expand_path(entry["path"].to_s) == expanded
+        end
+        return match["name"].to_s if match && !match["name"].to_s.empty?
+      end
       return task.project_name if task.respond_to?(:project_name) && task.project_name
       return File.basename(task.project_root) if task.respond_to?(:project_root) && task.project_root
 

@@ -626,7 +626,15 @@ module Hive
     # Recompute dependency admission from disk and raise the typed manual
     # boundary error. Callers invoke this while holding the depending task's
     # lock immediately before forward side effects.
-    def enforce_admission!(task, registry_entries: Hive::Config.registered_projects)
+    #
+    # When `allow_local_plan_repair: true` (granted only to explicit
+    # `hive plan <root-slug> --project <project> --from 3-plan`), a task whose
+    # own `plan.md` carries a covered local dependency defect is evaluated with
+    # that local plan diagnostic separated, so the root can be repaired even
+    # while invalid bytes remain on disk, while retaining every unrelated
+    # metadata, environment, cycle, and inherited prerequisite wait.
+    def enforce_admission!(task, registry_entries: Hive::Config.registered_projects,
+                           allow_local_plan_repair: false)
       project = registry_entries.select do |entry|
         File.expand_path(entry.fetch("path")) == File.expand_path(task.project_root)
       end
@@ -639,11 +647,23 @@ module Hive
         )
       end
 
-      verdict = admission_context(registry_entries).verdict(
-        project: project.first.fetch("name"),
-        slug: task.slug
-      )
+      project_name = project.first.fetch("name")
+      context = admission_context(registry_entries)
+      verdict = context.verdict(project: project_name, slug: task.slug)
       return verdict if verdict.clear?
+
+      if allow_local_plan_repair
+        require "hive/plan_dependency_adoption"
+        local_validation = Hive::PlanDependencyAdoption.validate(
+          task, admission_context: context, registry_entries: registry_entries
+        )
+        if local_validation.covered_defect?
+          separated = context.verdict_without_local_plan(project: project_name, slug: task.slug)
+          return separated if separated.clear?
+
+          verdict = separated
+        end
+      end
 
       if verdict.wait?
         unmet_dependencies = verdict.unmet_dependencies

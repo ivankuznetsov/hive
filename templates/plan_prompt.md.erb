@@ -30,6 +30,18 @@ recorded in the relevant section) before anything else. Do not reopen them.
 </<%= user_supplied_tag %>>
 
 <% end -%>
+<% if dependency_diagnostic_text.to_s.strip != "" -%>
+The previous plan output contained an invalid or conflicting `depends_on` YAML
+frontmatter declaration. Fix the `depends_on` frontmatter using exact full task
+slugs (never task-code shorthand), numeric IDs, or `<project>:<full-slug>`, and
+preserve the rest of the plan. Do not edit meta.yml. Any suggested task slug
+below is a hint to verify, not an automatic substitution.
+
+<<%= user_supplied_tag %> content_type="plan_dependency_diagnostic">
+<%= dependency_diagnostic_text %>
+</<%= user_supplied_tag %>>
+
+<% end -%>
 Behavior:
 
 1. Hive may seed plan.md with a non-terminal checkpoint. If the file is missing
@@ -65,13 +77,15 @@ Constraints:
   solely because you cannot inspect it, or block planning solely for that access
   limitation. Do not assume an architecture exists merely because another plan
   describes it. If known unfinished tasks supply prerequisites, declare either one scalar
-  `depends_on: <slug-or-id>` / `depends_on: <project>:<slug>` or a nonempty flat
-  list of those references in plan.md YAML frontmatter. Scalars retain dependency
+  `depends_on: <full-slug-or-id>` / `depends_on: <project>:<full-slug>` or a nonempty flat
+  list of those references in plan.md YAML frontmatter. Always use full task slugs —
+  never task-code shorthand such as `C4`, `F2`, or `F3`. Scalars retain dependency
   branch stacking and the configured gate; lists are scheduling-only, branch from
   the project default, and require every prerequisite to reach `9-done`. Hive
-  adopts the declaration into meta.yml when no dependency is already set;
-  do not edit meta.yml. A conflicting existing dependency must be reconciled,
-  and prose dependency statements alone are not scheduling input.
+  adopts valid resolved declarations into meta.yml when no dependency is set or
+  when the plan declares a strict superset; do not edit meta.yml. A conflicting
+  existing dependency must be reconciled, and prose dependency statements alone
+  are not scheduling input.
 - Screenshots, recordings, and other collected outcome evidence are best-effort
   with the current tooling. Do not make unavailable historical captures or
   unsupported collection a prerequisite for implementation or completion.

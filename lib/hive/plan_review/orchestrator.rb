@@ -9,6 +9,7 @@ require "hive/atomic_file"
 require "hive/canonical_json"
 require "hive/lock"
 require "hive/plan_dependency_adoption"
+require "hive/plan_dependency_correction"
 require "hive/plan_review/approval_policy"
 require "hive/plan_review/adapters/base"
 require "hive/plan_review/adapters/ce_doc_review"
@@ -181,6 +182,7 @@ module Hive
       end
 
       def resume_review(record, original_plan_bytes)
+        return Projection.new(record) if dependency_correction_exhausted_record?(record)
         return terminal(record, state: "skipped", outcome: "skipped") if
           record.effective_level == "skip"
 
@@ -259,6 +261,7 @@ module Hive
             )
           end
           revision_input = candidate_bytes || original_plan_bytes
+          round_number = verification_revision_rounds(record)
           record, revision, pending = ensure_planner_revision(record, revision_input, accepted)
           return Projection.new(record) if pending
           unless revision.success?
@@ -268,6 +271,11 @@ module Hive
               required_action: "repair the planner route and start a linked plan generation"
             )
           end
+          record, revision, blocked_projection = validate_or_correct_revision_dependencies(
+            record, revision, accepted, round_number: round_number
+          )
+          return blocked_projection if blocked_projection
+
           candidate_bytes = revision.candidate_bytes
           candidate_digest = Digest::SHA256.hexdigest(candidate_bytes.b)
           candidate_ref = @store.write_review_artifact!(
@@ -351,18 +359,10 @@ module Hive
           required_action: clearance.required_action,
           degradation_reason: clearance.degradation_reason
         }
-        if clearance.execution_allowed && record["candidate_plan_digest"]
-          with_task_mutation_lock do
-            promote_candidate!(record, candidate_bytes)
-            # The revision can add a prerequisite the initial plan lacked;
-            # without this meta.yml never learns it and admission parks the
-            # task on plan_dependency_missing/mismatch after clearance.
-            Hive::PlanDependencyAdoption.adopt!(@task, observation: @task_observation)
-            terminal(record, **terminal_args)
-          end
-        else
-          terminal(record, **terminal_args)
+        promoting_bytes = if clearance.execution_allowed && record["candidate_plan_digest"]
+          candidate_bytes
         end
+        terminal(record, **terminal_args, candidate_bytes: promoting_bytes)
       end
 
       def begin_review(current, policy, signals, generation, review_id)
@@ -901,7 +901,29 @@ module Hive
       end
 
       def terminal(record, state:, outcome:, findings: record["findings"], blockers: [],
-                   required_action: nil, degradation_reason: nil)
+                   required_action: nil, degradation_reason: nil, candidate_bytes: nil)
+        execution_allowed = %w[skipped cleared degraded_cleared].include?(state)
+        if execution_allowed
+          return publish_guarded_clearance(
+            record,
+            state: state, outcome: outcome, findings: findings,
+            blockers: blockers, required_action: required_action,
+            degradation_reason: degradation_reason,
+            candidate_bytes: candidate_bytes
+          )
+        end
+
+        publish_terminal_record(
+          record,
+          state: state, outcome: outcome, findings: findings,
+          blockers: blockers, required_action: required_action,
+          degradation_reason: degradation_reason,
+          execution_allowed: false
+        )
+      end
+
+      def publish_terminal_record(record, state:, outcome:, findings:, blockers:,
+                                  required_action:, degradation_reason:, execution_allowed:)
         next_version = record.version + 1
         resolution = {
           "review_id" => record.review_id, "version" => next_version,
@@ -915,7 +937,7 @@ module Hive
           "decisions" => record["decisions"], "routes" => record["routes"],
           "blockers" => blockers, "required_action" => required_action,
           "degradation_reason" => degradation_reason,
-          "execution_allowed" => %w[skipped cleared degraded_cleared].include?(state),
+          "execution_allowed" => execution_allowed,
           "resolved_at" => record["updated_at"]
         }
         reference = @store.write_review_artifact!(
@@ -929,8 +951,283 @@ module Hive
           "degradation_reason" => degradation_reason,
           "artifacts" => record["artifacts"].merge("resolution" => reference),
           "retry_at" => nil,
-          "execution_allowed" => %w[skipped cleared degraded_cleared].include?(state)
+          "execution_allowed" => execution_allowed
         ))
+      end
+
+      # Single guarded publication boundary for every execution-allowed
+      # resolution (`skipped`, `cleared`, `degraded_cleared`), with or without
+      # candidate promotion. Builds lookup/admission context outside the
+      # mutation critical section, then under `with_task_mutation_lock`
+      # rechecks digests, task observation, and local lookup observations
+      # before promoting, adopting metadata, verifying authoritative agreement,
+      # and publishing the immutable resolution artifact.
+      def publish_guarded_clearance(record, state:, outcome:, findings:, blockers:,
+                                    required_action:, degradation_reason:, candidate_bytes:)
+        promoting = !candidate_bytes.nil? && !record["candidate_plan_digest"].nil?
+        attempts = 0
+        loop do
+          attempts += 1
+          validation = Hive::PlanDependencyAdoption.validate(
+            @task, plan_bytes: promoting ? candidate_bytes : nil
+          )
+          unless validation.ok?
+            return block_clearance_dependency_failure(
+              record, findings: findings, validation: validation
+            )
+          end
+
+          stale_retry = false
+          projection = with_task_mutation_lock do
+            unless Hive::PlanDependencyAdoption.fresh_under_custody?(
+              @task,
+              observation: @task_observation,
+              validation: validation,
+              plan_bytes: promoting ? candidate_bytes : nil
+            )
+              stale_retry = true
+              next nil
+            end
+
+            plan_path = File.join(@task.folder, "plan.md")
+            original_plan_bytes = nil
+            original_plan_mode = nil
+            if promoting
+              verify_candidate_promotion_inputs!(record, candidate_bytes, plan_path)
+              original_plan_bytes = File.binread(plan_path)
+              original_plan_mode = File.stat(plan_path).mode & 0o777
+              promote_candidate!(record, candidate_bytes)
+            end
+
+            begin
+              if validation.adoptable?
+                rewrite = Hive::TaskMeta.rewrite(
+                  @task.folder,
+                  { depends_on: validation.prospective_depends_on },
+                  observation: @task_observation
+                )
+                if rewrite.stale?
+                  raise StaleObservation, "meta.yml changed during plan-review dependency adoption"
+                end
+              end
+
+              unless Hive::PlanDependencyAdoption.authoritative_agreement?(
+                @task, expected_declaration: validation.plan_declaration
+              )
+                raise StaleObservation,
+                      "plan.md and meta.yml dependency agreement failed after custody write"
+              end
+            rescue StaleObservation, Hive::TaskMeta::StaleTask, Hive::TaskMeta::InvalidMetadata,
+                   SystemCallError, IOError
+              if promoting && !original_plan_bytes.nil?
+                Hive::AtomicFile.write(plan_path, original_plan_bytes, mode: original_plan_mode)
+                File.chmod(original_plan_mode, plan_path)
+              end
+              raise
+            end
+
+            publish_terminal_record(
+              record,
+              state: state, outcome: outcome, findings: findings,
+              blockers: blockers, required_action: required_action,
+              degradation_reason: degradation_reason, execution_allowed: true
+            )
+          end
+          return projection unless stale_retry
+
+          if attempts >= Hive::PlanDependencyAdoption::MAX_CUSTODY_RETRIES
+            raise StaleObservation, "plan dependency observations changed repeatedly before clearance"
+          end
+        end
+      end
+
+      def block_clearance_dependency_failure(record, findings:, validation:)
+        diagnostic = "#{validation.offending_ref}: #{validation.safe_correction}"
+        action = if validation.covered_defect?
+          Hive::PlanDependencyCorrection.exhausted_action(task: @task, validation: validation)
+        else
+          validation.safe_correction
+        end
+        publish_terminal_record(
+          record,
+          state: "blocked", outcome: "blocked", findings: findings,
+          blockers: [
+            {
+              "owner" => "operator",
+              "reason" => validation.reason_code,
+              "diagnostic" => diagnostic
+            }
+          ],
+          required_action: action,
+          degradation_reason: nil,
+          execution_allowed: false
+        )
+      end
+
+      def validate_or_correct_revision_dependencies(record, revision, findings, round_number:)
+        validation = Hive::PlanDependencyAdoption.validate(
+          @task, plan_bytes: revision.candidate_bytes
+        )
+        return [ record, revision, nil ] if validation.ok?
+
+        if validation.noncovered_error?
+          blocked = block_clearance_dependency_failure(
+            record, findings: record["findings"], validation: validation
+          )
+          return [ record, nil, blocked ]
+        end
+
+        scope_key = "#{record.review_id}:revision-#{round_number}"
+        reserved = with_task_mutation_lock do
+          Hive::PlanDependencyCorrection.reserve_revision_correction!(
+            @task.folder,
+            observation: @task_observation,
+            review_id: record.review_id,
+            scope_key: scope_key,
+            input_digest: validation.plan_digest,
+            diagnostic: validation
+          )
+        end
+        unless reserved
+          blocked = block_revision_dependency_exhausted(
+            record, scope_key: scope_key, validation: validation
+          )
+          return [ record, nil, blocked ]
+        end
+
+        record, correction = run_revision_dependency_correction(
+          record, revision.candidate_bytes, findings, validation
+        )
+        unless correction.success?
+          blocked = block_revision_dependency_exhausted(
+            record, scope_key: scope_key, validation: validation
+          )
+          return [ record, nil, blocked ]
+        end
+
+        second_validation = Hive::PlanDependencyAdoption.validate(
+          @task, plan_bytes: correction.candidate_bytes
+        )
+        return [ record, correction, nil ] if second_validation.ok?
+
+        if second_validation.noncovered_error?
+          blocked = block_clearance_dependency_failure(
+            record, findings: record["findings"], validation: second_validation
+          )
+          return [ record, nil, blocked ]
+        end
+
+        blocked = block_revision_dependency_exhausted(
+          record, scope_key: scope_key, validation: second_validation
+        )
+        [ record, nil, blocked ]
+      end
+
+      def run_revision_dependency_correction(record, candidate_bytes, findings, validation)
+        attempt_id = Identity.attempt(record.review_id)
+        revision_identity, fallback = planner_revision_identity(record)
+        call_kwargs = {
+          review_id: record.review_id,
+          plan_bytes: candidate_bytes,
+          findings: findings,
+          planner_identity: revision_identity,
+          planner_authority: planner_identity(record),
+          pending_findings: pending_decision_findings(record).map(&:to_h),
+          timeout_sec: @cfg.dig("plan_review", "attempts", "timeout_sec")
+        }
+        if revision_accepts_dependency_diagnostic?
+          call_kwargs[:dependency_diagnostic] =
+            Hive::PlanDependencyCorrection.format_prompt_diagnostic(validation)
+        end
+        correction = @planner_revision.call(**call_kwargs)
+        route = planner_revision_route(
+          correction, record, requested: revision_identity, fallback: fallback,
+          attempt_id: attempt_id, retry_at: nil
+        ).merge(
+          "dependency_correction" => true,
+          "dependency_reason" => validation.reason_code
+        )
+        refs = @store.write_attempt!(
+          review_id: record.review_id, attempt_id: attempt_id, plan_bytes: candidate_bytes,
+          result: correction.to_h, coverage: [], route_receipt: route
+        )
+        artifacts = record["artifacts"].merge(
+          "planner_revision_input" => refs.fetch("input_plan"),
+          "planner_revision_result" => refs.fetch("result"),
+          "planner_revision_coverage" => refs.fetch("coverage"),
+          "planner_revision_route" => refs.fetch("route_receipt")
+        )
+        updated = publish(
+          record,
+          "state" => "revising", "outcome" => nil,
+          "attempt_ids" => record["attempt_ids"] + [ attempt_id ],
+          "current_attempt_id" => attempt_id,
+          "routes" => record["routes"] + [ route ], "artifacts" => artifacts,
+          "blockers" => [], "required_action" => nil,
+          "retry_at" => nil, "execution_allowed" => false
+        )
+        [ updated, correction ]
+      end
+
+      def block_revision_dependency_exhausted(record, scope_key:, validation:)
+        with_task_mutation_lock do
+          Hive::PlanDependencyCorrection.mark_revision_exhausted!(
+            @task.folder,
+            observation: @task_observation,
+            review_id: record.review_id,
+            scope_key: scope_key,
+            input_digest: validation.plan_digest,
+            diagnostic: validation
+          )
+        end
+        publish_terminal_record(
+          record,
+          state: "blocked", outcome: "blocked", findings: record["findings"],
+          blockers: [
+            {
+              "owner" => "operator",
+              "reason" => Hive::PlanDependencyCorrection::EXHAUSTED_REASON,
+              "diagnostic" => Hive::PlanDependencyCorrection.exhausted_message(
+                task: @task, validation: validation
+              )
+            }
+          ],
+          required_action: Hive::PlanDependencyCorrection.exhausted_action(
+            task: @task, validation: validation
+          ),
+          degradation_reason: nil,
+          execution_allowed: false
+        )
+      end
+
+      def dependency_correction_exhausted_record?(record)
+        record.state == "blocked" && Array(record["blockers"]).any? do |blocker|
+          blocker.is_a?(Hash) && blocker["reason"].to_s == Hive::PlanDependencyCorrection::EXHAUSTED_REASON
+        end
+      end
+
+      def revision_accepts_dependency_diagnostic?
+        params = if @planner_revision.respond_to?(:parameters)
+          @planner_revision.parameters
+        elsif @planner_revision.respond_to?(:method)
+          @planner_revision.method(:call).parameters
+        else
+          []
+        end
+        params.any? do |kind, name|
+          kind == :keyrest || ((kind == :key || kind == :keyreq) && name == :dependency_diagnostic)
+        end
+      end
+
+      def verify_candidate_promotion_inputs!(record, candidate_bytes, path)
+        observed = safe_plan_digest(path)
+        allowed = [ record.plan_digest, record["candidate_plan_digest"] ].compact
+        unless allowed.include?(observed)
+          raise StaleObservation, "canonical plan changed before candidate promotion"
+        end
+        unless Digest::SHA256.hexdigest(candidate_bytes.b) == record["candidate_plan_digest"]
+          raise InvalidRecord, "candidate digest changed before promotion"
+        end
       end
 
       def publish(record, attributes)
@@ -1271,7 +1568,9 @@ module Hive
 
       def verification_revision_rounds(record)
         record["routes"].count do |route|
-          route["role"] == "planner_revision" && SUCCESS_OUTCOMES.include?(route["outcome"])
+          route["role"] == "planner_revision" &&
+            SUCCESS_OUTCOMES.include?(route["outcome"]) &&
+            route["dependency_correction"] != true
         end
       end
 

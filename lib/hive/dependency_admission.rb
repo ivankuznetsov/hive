@@ -316,6 +316,42 @@ module Hive
         )
       end
 
+      # Evaluate admission for one task with its own local plan.md assertion
+      # separated. Used exclusively by explicit `hive plan --from 3-plan`
+      # root repair so the task can repair its own covered local plan defect
+      # while still enforcing every unrelated metadata, environment, cycle,
+      # and inherited prerequisite wait.
+      def verdict_without_local_plan(project:, slug:)
+        source_project = unique_project(project)
+        return admission_error("dependency_project_unknown", project, project_correction(project)) unless source_project
+        return validation_failure(source_project.validation_error, project) if source_project.validation_error
+
+        source_matches = task_matches(source_project, slug: slug)
+        if source_matches.length > 1
+          return validation_failure("duplicate task slug #{slug.inspect}", "#{project}:#{slug}")
+        end
+        source = source_matches.first
+        return admission_error("dependency_task_missing", "#{project}:#{slug}", task_correction(project)) unless source
+        return clear if source.cancelled || source.superseded_by
+
+        separated = source.with(
+          plan_status: :absent,
+          plan_dependency: nil,
+          plan_error: nil,
+          plan_raw_depends_on: nil,
+          plan_issues: EMPTY_ISSUES,
+          plan_invalid_kind: nil,
+          plan_entries: EMPTY_ENTRIES
+        ).freeze
+        walk(separated, use_shared_cache: false, override_task: separated)
+      rescue StandardError => e
+        admission_error(
+          "dependency_validation_failed",
+          "#{project}:#{slug}",
+          "Inspect dependency metadata and project enrollment; validation failed with #{e.class}."
+        )
+      end
+
       def plan_invalid_error(task_folder:, issues:, fallback_ref: nil, fallback_correction: nil)
         list = Array(issues)
         plan_path = File.join(task_folder.to_s, "plan.md")

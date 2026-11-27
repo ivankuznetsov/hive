@@ -608,6 +608,38 @@ class HiveDaemonPolicyTest < Minitest::Test
       Hive::Daemon::Policy.operational_disposition(:wait_for_answers)
     )
     assert_equal "unknown", Hive::Daemon::Policy.operational_disposition(:new_result).fetch(:owner)
+    assert_equal(
+      { decision: "skip", owner: "operator",
+        reason: "plan dependency automatic correction exhausted" },
+      Hive::Daemon::Policy.operational_disposition(:skip, dependency_correction_exhausted: true)
+    )
+  end
+
+  def test_dependency_correction_exhausted_skips_before_admission_error_and_ignores_mtime_bumps
+    assert_equal :skip,
+                 Hive::Daemon::Policy.decide(
+                   action: "needs_input",
+                   stage: "3-plan",
+                   workflow: "coding",
+                   command: "hive plan root-task --from 3-plan",
+                   state_file_mtime: T0 - 60,
+                   last_dispatched_state_file_mtime: T0 - 600,
+                   now: T0,
+                   admission_error: true,
+                   dependency_correction_exhausted: true
+                 )
+    assert_equal :skip,
+                 Hive::Daemon::Policy.decide(
+                   action: "plan_reviewing",
+                   stage: "3-plan",
+                   workflow: "coding",
+                   command: "hive plan-review-run root-task",
+                   state_file_mtime: T0,
+                   last_dispatched_state_file_mtime: nil,
+                   now: T0,
+                   admission_error: false,
+                   dependency_correction_exhausted: true
+                 )
   end
 
   private

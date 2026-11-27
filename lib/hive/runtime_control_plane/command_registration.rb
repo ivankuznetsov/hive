@@ -76,9 +76,11 @@ module Hive
           @current&.rebind_after_daemonize!
         end
 
-        def spawn_registered_hive!(*argv, role:, spawner: Process.method(:spawn), **options)
+        def spawn_registered_hive!(*argv, role:, spawner: Process.method(:spawn), env: nil, **options)
           if @current
-            @current.spawn_registered_hive!(*argv, role: role, spawner: spawner, **options)
+            @current.spawn_registered_hive!(*argv, role: role, spawner: spawner, env: env, **options)
+          elsif env.is_a?(Hash) && !env.empty?
+            spawner.call(env, *argv, **options)
           else
             spawner.call(*argv, **options)
           end
@@ -126,16 +128,16 @@ module Hive
       # bin/hive's launch gate, then let it adopt the same row. If this parent
       # dies in the handoff, the unresolved reservation/registration remains
       # durable and quiescence fails closed rather than overlooking a child.
-      def spawn_registered_hive!(*argv, role:, spawner: Process.method(:spawn), **options)
+      def spawn_registered_hive!(*argv, role:, spawner: Process.method(:spawn), env: nil, **options)
         reader, writer = IO.pipe
         reader.close_on_exec = false
         reservation = @registry.reserve!(
           origin: "direct_cli", role: role, timeout_sec: 30
         )
-        environment = {
+        environment = (env.is_a?(Hash) ? env.dup : {}).merge(
           LAUNCH_GATE_ENV => reader.fileno.to_s,
           CHILD_RESERVATION_ENV => reservation.id
-        }
+        )
         spawn_options = options.merge(reader.fileno => reader.fileno, close_others: true)
         pid = spawner.call(environment, *argv, **spawn_options)
         reader.close

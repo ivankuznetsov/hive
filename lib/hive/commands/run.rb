@@ -21,6 +21,7 @@ require "hive/commit_or_rollback"
 require "hive/terminal_outcome"
 require "hive/review_residual_commit"
 require "hive/recovery"
+require "hive/plan_dependency_correction"
 
 module Hive
   module Commands
@@ -90,7 +91,7 @@ module Hive
 
       def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
                      durable: false, attempt_entrypoint: nil, observation_guard: nil,
-                     clock: -> { Time.now.utc })
+                     clock: -> { Time.now.utc }, explicit_plan_repair: false)
         @target = target
         @project_filter = project
         @stage_filter = stage
@@ -101,6 +102,7 @@ module Hive
         @attempts_api = attempt_entrypoint
         @observation_guard = observation_guard
         @clock = clock
+        @explicit_plan_repair = explicit_plan_repair == true
       end
 
       def call
@@ -142,7 +144,12 @@ module Hive
           create: false, observation: observation,
           acquire_under_commit_lock: task.hive_state_path
         ) do
-          Hive::DependencySnapshot.enforce_admission!(task)
+          allow_local_repair = allow_local_plan_repair?(task)
+          if allow_local_repair
+            Hive::DependencySnapshot.enforce_admission!(task, allow_local_plan_repair: true)
+          else
+            Hive::DependencySnapshot.enforce_admission!(task)
+          end
           Hive::Attempts::Context.current&.validate_generation!(task)
           @observation_guard&.call(task)
           cfg = Hive::Config.load(task.project_root)
@@ -167,7 +174,7 @@ module Hive
           normalization = nil
           begin
             result = Hive::Stages::Base.with_stage_events(task, cfg: cfg) do
-              raw_result = runner.call(task, cfg)
+              raw_result = invoke_runner(runner, task, cfg, explicit_plan_repair: allow_local_repair)
               normalization = Hive::TerminalOutcome.normalize(task, raw_result)
               normalization.result
             end
@@ -339,6 +346,36 @@ module Hive
 
       def pick_runner(task)
         Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)
+      end
+
+      def allow_local_plan_repair?(task)
+        return false unless @explicit_plan_repair
+        return false unless task.stage_name == "plan" && Hive::Workflows.coding_id?(task.workflow.id)
+        return false if Hive::Attempts::Context.current&.automated_dispatch? == true
+        return false if ENV["HIVE_DAEMON_AUTOMATED_DISPATCH"] == "1"
+
+        true
+      end
+
+      def invoke_runner(runner, task, cfg, explicit_plan_repair:)
+        if explicit_plan_repair && runner_accepts_explicit_plan_repair?(runner)
+          runner.call(task, cfg, explicit_plan_repair: true)
+        else
+          runner.call(task, cfg)
+        end
+      end
+
+      def runner_accepts_explicit_plan_repair?(runner)
+        params = if runner.respond_to?(:parameters)
+          runner.parameters
+        elsif runner.respond_to?(:method)
+          runner.method(:call).parameters
+        else
+          []
+        end
+        params.any? do |kind, name|
+          kind == :keyrest || ((kind == :key || kind == :keyreq) && name == :explicit_plan_repair)
+        end
       end
 
       def commit_after(task, result, config: nil, terminal_snapshot: nil, stamp_completion: true,
@@ -645,6 +682,15 @@ module Hive
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
               "instructions" => instructions
+            }
+          end
+
+          if Hive::PlanDependencyCorrection.marker_exhausted?(marker.attrs)
+            return {
+              "kind" => Hive::Schemas::NextActionKind::NO_OP,
+              "reason" => marker.attrs["reason"],
+              "error" => marker.attrs,
+              "instructions" => Hive::PlanDependencyCorrection.remediation(marker.attrs)
             }
           end
 

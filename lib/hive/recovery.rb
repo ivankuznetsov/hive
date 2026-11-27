@@ -1,6 +1,7 @@
 require "hive/review_escalations"
 require "hive/model_unsupported"
 require "hive/plan_review/execute_blocked"
+require "hive/plan_dependency_correction"
 
 module Hive
   # Shared, policy-free vocabulary for durable recovery. Mutation and pacing
@@ -11,11 +12,15 @@ module Hive
     ].freeze
     OWNERS = %w[agent operator provider scheduler hive none unknown].freeze
     # Error reasons that replaying the same stage cannot fix: an operator must
-    # change configuration (a provider-refused model) or plan-review evidence
-    # (execute entry refused by the plan-review guard) first. The daemon's
-    # automatic sweep never retries them; a human retry is still admitted.
+    # change configuration (a provider-refused model), plan-review evidence
+    # (execute entry refused by the plan-review guard), or invalid plan
+    # dependency frontmatter (after the single automatic correction is spent).
+    # The daemon's automatic sweep never retries them; a human retry is still
+    # admitted.
     OPERATOR_OWNED_ERROR_REASONS = [
-      Hive::ModelUnsupported::REASON, Hive::PlanReview::ExecuteBlocked::REASON
+      Hive::ModelUnsupported::REASON,
+      Hive::PlanReview::ExecuteBlocked::REASON,
+      Hive::PlanDependencyCorrection::EXHAUSTED_REASON
     ].freeze
 
     module_function
@@ -39,6 +44,7 @@ module Hive
       case operator_owned_error_reason(attrs)
       when Hive::ModelUnsupported::REASON then Hive::ModelUnsupported.remediation(attrs)
       when Hive::PlanReview::ExecuteBlocked::REASON then Hive::PlanReview::ExecuteBlocked.remediation(attrs)
+      when Hive::PlanDependencyCorrection::EXHAUSTED_REASON then Hive::PlanDependencyCorrection.remediation(attrs)
       end
     end
 

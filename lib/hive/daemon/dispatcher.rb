@@ -9,6 +9,7 @@ require "hive/stages"
 require "hive/workflows"
 require "hive/task_action"
 require "hive/brainstorm_parser"
+require "hive/plan_dependency_correction"
 require "hive/daemon/policy"
 require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
@@ -1254,7 +1255,8 @@ module Hive
             project: row.project, slug: row.slug
           ), now: now, edit_debounce_sec: @edit_debounce_sec,
           answers_pending: answers[:pending], answers_complete: answers[:complete],
-          blocked: row.blocked == true, admission_error: !row.admission_error.nil?
+          blocked: row.blocked == true, admission_error: !row.admission_error.nil?,
+          dependency_correction_exhausted: dependency_correction_exhausted_row?(row)
         )
       end
 
@@ -2418,7 +2420,8 @@ module Hive
           answers_pending: brainstorm_answers.fetch(:pending),
           answers_complete: brainstorm_answers.fetch(:complete),
           blocked: row.blocked == true,
-          admission_error: !row.admission_error.nil?
+          admission_error: !row.admission_error.nil?,
+          dependency_correction_exhausted: dependency_correction_exhausted_row?(row)
         )
         route, diagnostic = failed_attempt_route(row, decision)
         if route
@@ -2894,8 +2897,18 @@ module Hive
       end
 
       def observe_policy_disposition(row, decision)
-        disposition = Policy.operational_disposition(decision)
+        disposition = Policy.operational_disposition(
+          decision,
+          dependency_correction_exhausted: dependency_correction_exhausted_row?(row)
+        )
         observe_operational_disposition(row, **disposition)
+      end
+
+      def dependency_correction_exhausted_row?(row)
+        Hive::PlanDependencyCorrection.exhausted_row?(
+          marker_attrs: row.marker_attrs,
+          plan_review: row.plan_review
+        )
       end
 
       def observe_dispatch_outcome(row, outcome)

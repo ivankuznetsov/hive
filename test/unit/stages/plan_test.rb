@@ -5,17 +5,35 @@ require "hive/task_meta"
 class HiveStagesPlanTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:folder, :slug, :id, :project_name, keyword_init: true)
+  FakeTask = Struct.new(:folder, :slug, :id, :project_name, :project_root, keyword_init: true)
   Marker = Struct.new(:name)
 
-  def with_planned_task(plan_frontmatter, meta_depends_on: nil, slug: "cli-task")
-    Dir.mktmpdir do |dir|
+  def with_planned_task(plan_frontmatter, meta_depends_on: nil, slug: "cli-task",
+                        prerequisites: %w[rails-task api-task operator-choice],
+                        repository_identity: "github.com/acme/app")
+    Dir.mktmpdir do |project_root|
+      dir = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(dir)
       Hive::TaskMeta.write(
         dir, id: 42, slug: slug, display_name: "CLI Task",
         depends_on: meta_depends_on
       )
       File.write(File.join(dir, "plan.md"), plan_frontmatter)
-      yield FakeTask.new(folder: dir, slug: slug, id: 42, project_name: "app"), dir
+      Array(prerequisites).each_with_index do |prereq_slug, index|
+        prereq_dir = File.join(project_root, ".hive-state", "stages", "8-finalize", prereq_slug)
+        FileUtils.mkdir_p(prereq_dir)
+        Hive::TaskMeta.write(prereq_dir, id: 100 + index, slug: prereq_slug, display_name: prereq_slug)
+      end
+      registry = [
+        { "name" => "app", "path" => project_root, "repository_identity" => repository_identity }
+      ]
+      with_replaced_singleton_method(Hive::Config, :registered_projects, -> { registry }) do
+        with_replaced_singleton_method(Hive::RepositoryIdentity, :current, ->(_) { repository_identity }) do
+          yield FakeTask.new(
+            folder: dir, slug: slug, id: 42, project_name: "app", project_root: project_root
+          ), dir
+        end
+      end
     end
   end
 

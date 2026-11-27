@@ -84,6 +84,45 @@ class PlanFrontmatterTest < Minitest::Test
     assert_match(/frontmatter/, malformed.error)
     assert_match(/mapping/, non_mapping.error)
     assert_match(/depends_on/, invalid_dependency.error)
+    assert_equal :malformed_yaml, malformed.invalid_kind
+    assert_equal :malformed_frontmatter, unterminated.invalid_kind
+    assert_equal :non_mapping, non_mapping.invalid_kind
+    assert_equal [ { "depends_on" => "base-task" } ], non_mapping.raw_depends_on
+    assert_equal :invalid_depends_on, invalid_dependency.invalid_kind
+    assert_equal [ "one", nil ], invalid_dependency.raw_depends_on
+    assert_equal [ 1 ], invalid_dependency.issues.map(&:index)
+    assert_equal [ 0 ], invalid_dependency.entries.map(&:index)
+  end
+
+  def test_duplicate_keys_and_task_code_lists_preserve_structured_offending_evidence
+    duplicate = Hive::PlanFrontmatter.parse(<<~MARKDOWN)
+      ---
+      depends_on: blocked-task
+      depends_on:
+        - completed-task
+      ---
+      # Plan
+    MARKDOWN
+    codes = Hive::PlanFrontmatter.parse(<<~MARKDOWN)
+      ---
+      depends_on:
+        - C4
+        - valid-task
+        - F2
+        - F3
+      ---
+      # Plan
+    MARKDOWN
+
+    assert_equal :duplicate_depends_on, duplicate.invalid_kind
+    assert_equal [ "blocked-task", [ "completed-task" ] ], duplicate.raw_depends_on
+    assert_equal 2, duplicate.issues.length
+
+    assert_equal :invalid_depends_on, codes.invalid_kind
+    assert_equal [ 0, 2, 3 ], codes.issues.map(&:index)
+    assert_equal %w[C4 F2 F3], codes.issues.map(&:raw_value)
+    assert_equal [ [ 1, "valid-task" ] ],
+                 codes.entries.map { |entry| [ entry.index, entry.reference.to_s ] }
   end
 
   private

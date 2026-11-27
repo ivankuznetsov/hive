@@ -476,19 +476,22 @@ class PlanReviewOrchestratorTest < Minitest::Test
   def test_candidate_promotion_adopts_a_dependency_added_by_the_revision
     revised = standard_plan.sub("files:", "depends_on: hivedev:base-task\nfiles:")
     with_task(standard_plan) do |task, cfg|
-      projection = orchestrator(
-        task, cfg,
-        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
-        planner_revision: FakeRevision.new(revised)
-      ).advance!
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: FakeRevision.new(revised)
+        ).advance!
 
-      assert_equal "cleared", projection.record.state
-      assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
-      assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
-      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
-      assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
-        task:, projection:, config: cfg
-      ).fetch("status")
+        assert_equal "cleared", projection.record.state
+        assert_equal revised, File.binread(File.join(task.folder, "plan.md"))
+        assert_equal "hivedev:base-task", YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+        assert_equal "current", Hive::PlanReview::TransitionGuard.freshness(
+          task:, projection:, config: cfg
+        ).fetch("status")
+      end
     end
   end
 
@@ -499,16 +502,20 @@ class PlanReviewOrchestratorTest < Minitest::Test
       "files:", "depends_on:\n  - hivedev:base-task\n  - other-task\nfiles:"
     )
     with_task(standard_plan, meta_depends_on: "base-task") do |task, cfg|
-      projection = orchestrator(
-        task, cfg,
-        adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
-        planner_revision: FakeRevision.new(revised)
-      ).advance!
+      seed_prerequisite(task.project_root, "base-task", id: 10)
+      seed_prerequisite(task.project_root, "other-task", id: 11)
+      with_registered_hivedev(task.project_root) do
+        projection = orchestrator(
+          task, cfg,
+          adapter: success_adapter(primary_findings: [ finding("safe_auto", "Clarify tests") ]),
+          planner_revision: FakeRevision.new(revised)
+        ).advance!
 
-      assert_equal "cleared", projection.record.state
-      assert_equal %w[hivedev:base-task other-task],
-                   YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
-      assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+        assert_equal "cleared", projection.record.state
+        assert_equal %w[hivedev:base-task other-task],
+                     YAML.safe_load(File.read(task.meta_yml_path))["depends_on"]
+        assert Hive::PlanReview::Identity.task_generation_current?(task, projection.record.task_generation)
+      end
     end
   end
 
@@ -2791,6 +2798,24 @@ class PlanReviewOrchestratorTest < Minitest::Test
       },
       "lifecycle" => "open", "display_order" => line
     )
+  end
+
+  def seed_prerequisite(project_root, slug, id:, stage: "8-finalize")
+    folder = File.join(project_root, ".hive-state", "stages", stage, slug)
+    FileUtils.mkdir_p(folder)
+    Hive::TaskMeta.write(folder, id: id, slug: slug, display_name: slug)
+    folder
+  end
+
+  def with_registered_hivedev(project_root, repository_identity: "github.com/acme/hivedev")
+    registry = [
+      { "name" => "hivedev", "path" => project_root, "repository_identity" => repository_identity }
+    ]
+    with_replaced_singleton_method(Hive::Config, :registered_projects, -> { registry }) do
+      with_replaced_singleton_method(Hive::RepositoryIdentity, :current, ->(_) { repository_identity }) do
+        yield
+      end
+    end
   end
 
   def with_task(plan, meta_depends_on: nil, shipped_defaults: false)

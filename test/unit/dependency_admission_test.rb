@@ -98,25 +98,25 @@ class DependencyAdmissionTest < Minitest::Test
                  "dependency_metadata_unreadable"
 
     plan_only = task("app", "plan-only", plan_status: :ok, plan_dependency: "base")
-    assert_error context(project(tasks: [ plan_only ])).verdict(project: "app", slug: "plan-only"),
-                 "plan_dependency_missing"
+    assert_error context(project(tasks: [ plan_only, task("app", "base") ]))
+      .verdict(project: "app", slug: "plan-only"), "plan_dependency_missing"
 
     mismatch = task("app", "drift", depends_on: "base", plan_status: :ok, plan_dependency: "other")
-    assert_error context(project(tasks: [ mismatch ])).verdict(project: "app", slug: "drift"),
-                 "plan_dependency_mismatch"
+    assert_error context(project(tasks: [ mismatch, task("app", "base"), task("app", "other") ]))
+      .verdict(project: "app", slug: "drift"), "plan_dependency_mismatch"
 
     shape_mismatch = task(
       "app", "shape-drift", depends_on: "base", plan_status: :ok,
       plan_dependency: [ "base" ]
     )
-    assert_error context(project(tasks: [ shape_mismatch ]))
+    assert_error context(project(tasks: [ shape_mismatch, task("app", "base") ]))
       .verdict(project: "app", slug: "shape-drift"), "plan_dependency_mismatch"
 
     reverse_shape_mismatch = task(
       "app", "reverse-shape-drift", depends_on: [ "base" ], plan_status: :ok,
       plan_dependency: "base"
     )
-    assert_error context(project(tasks: [ reverse_shape_mismatch ]))
+    assert_error context(project(tasks: [ reverse_shape_mismatch, task("app", "base") ]))
       .verdict(project: "app", slug: "reverse-shape-drift"), "plan_dependency_mismatch"
 
     matching_list = task(
@@ -136,26 +136,95 @@ class DependencyAdmissionTest < Minitest::Test
       "app", "superset", depends_on: "base", plan_status: :ok,
       plan_dependency: %w[base other]
     )
-    assert_error context(project(tasks: [ superset ]))
+    assert_error context(project(tasks: [ superset, task("app", "base"), task("app", "other") ]))
       .verdict(project: "app", slug: "superset"), "plan_dependency_mismatch"
 
     omission = task(
       "app", "omission", depends_on: %w[base other], plan_status: :ok,
       plan_dependency: %w[base]
     )
-    assert_error context(project(tasks: [ omission ]))
+    assert_error context(project(tasks: [ omission, task("app", "base"), task("app", "other") ]))
       .verdict(project: "app", slug: "omission"), "plan_dependency_mismatch"
 
     reordered_list = task(
       "app", "reordered-list", depends_on: %w[first second], plan_status: :ok,
       plan_dependency: %w[second first]
     )
-    assert_error context(project(tasks: [ reordered_list ]))
+    assert_error context(project(tasks: [ reordered_list, task("app", "first"), task("app", "second") ]))
       .verdict(project: "app", slug: "reordered-list"), "plan_dependency_mismatch"
 
     invalid = task("app", "bad-plan", plan_status: :invalid, plan_error: "bad frontmatter")
     assert_error context(project(tasks: [ invalid ])).verdict(project: "app", slug: "bad-plan"),
                  "plan_dependency_invalid"
+  end
+
+  def test_unresolved_plan_assertion_reports_plan_dependency_invalid_before_missing_or_mismatch
+    plan_only_unknown = task("app", "plan-only", plan_status: :ok, plan_dependency: "ghost-task")
+    mismatch_unknown = task(
+      "app", "mismatch", depends_on: "base", plan_status: :ok, plan_dependency: %w[base ghost-task]
+    )
+    matching_unknown = task(
+      "app", "both-missing", depends_on: "ghost-task", plan_status: :ok, plan_dependency: "ghost-task"
+    )
+    metadata_only_unknown = task("app", "meta-only", depends_on: "ghost-task")
+    ctx = context(project(tasks: [
+      task("app", "base"), plan_only_unknown, mismatch_unknown, matching_unknown, metadata_only_unknown
+    ]))
+
+    assert_error ctx.verdict(project: "app", slug: "plan-only"), "plan_dependency_invalid"
+    assert_error ctx.verdict(project: "app", slug: "mismatch"), "plan_dependency_invalid"
+    assert_error ctx.verdict(project: "app", slug: "both-missing"), "plan_dependency_invalid"
+    assert_error ctx.verdict(project: "app", slug: "meta-only"), "dependency_task_missing"
+  end
+
+  def test_project_hint_lookup_handles_agreement_ambiguity_duplicates_and_incomplete_coverage
+    agreeing = D::ProjectHintLookup.new(
+      project: "app",
+      complete: true,
+      tasks: [
+        D::HintTask.new(project: "app", slug: "f2-workspace-260923-d691", idempotency_key: "app:f2:v1"),
+        D::HintTask.new(project: "app", slug: "f20-other-task", idempotency_key: "free-form")
+      ]
+    )
+    assert_equal "f2-workspace-260923-d691", agreeing.suggest("F2")
+    assert_equal "f2-workspace-260923-d691", agreeing.suggest("f2")
+    assert_nil agreeing.suggest("F2", exclude_slug: "f2-workspace-260923-d691")
+
+    ambiguous = D::ProjectHintLookup.new(
+      project: "app",
+      complete: true,
+      tasks: [
+        D::HintTask.new(project: "app", slug: "f2-active-task", idempotency_key: nil),
+        D::HintTask.new(project: "app", slug: "archived-renamed-task", idempotency_key: "app:F2:v1")
+      ]
+    )
+    assert_nil ambiguous.suggest("F2")
+
+    duplicated = D::ProjectHintLookup.new(
+      project: "app",
+      complete: true,
+      tasks: [ D::HintTask.new(project: "app", slug: "f2-workspace-260923-d691", idempotency_key: nil) ],
+      duplicate_identities: [ [ "app", "f2-workspace-260923-d691" ] ]
+    )
+    assert_nil duplicated.suggest("F2")
+
+    incomplete = D::ProjectHintLookup.new(
+      project: "app",
+      complete: false,
+      tasks: [ D::HintTask.new(project: "app", slug: "f2-workspace-260923-d691", idempotency_key: nil) ]
+    )
+    assert_nil incomplete.suggest("F2")
+
+    isolated = D::ProjectHintLookup.new(
+      project: "app",
+      complete: true,
+      tasks: [
+        D::HintTask.new(project: "other", slug: "f2-foreign-task", idempotency_key: "other:f2:v1"),
+        D::HintTask.new(project: "app", slug: "unrelated", idempotency_key: "other:f2:v1")
+      ]
+    )
+    assert_nil isolated.suggest("F2")
+    assert_nil isolated.suggest("other:F2")
   end
 
   def test_gate_unknown_and_unreachable_are_errors
@@ -608,7 +677,7 @@ class DependencyAdmissionTest < Minitest::Test
       .verdict(project: "app", slug: "invalid-meta"), "dependency_metadata_invalid"
     assert_error context(project(tasks: [ late_invalid_reference ]))
       .verdict(project: "app", slug: "late-invalid"), "dependency_reference_invalid"
-    assert_error context(project(tasks: [ normalized_invalid ]))
+    assert_error context(project(tasks: [ normalized_invalid, task("app", "other") ]))
       .verdict(project: "app", slug: "normalized-invalid"), "plan_dependency_mismatch"
   end
 

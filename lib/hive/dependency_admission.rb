@@ -67,7 +67,53 @@ module Hive
 
     EMPTY_UNMET_DEPENDENCIES = [].freeze
     EMPTY_REFERENCES = [].freeze
-    private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REFERENCES
+    EMPTY_ISSUES = [].freeze
+    EMPTY_ENTRIES = [].freeze
+    private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REFERENCES, :EMPTY_ISSUES, :EMPTY_ENTRIES
+
+    HintTask = Data.define(:project, :slug, :idempotency_key)
+
+    # Complete, readable project-scoped active+archived task index used solely
+    # for suggestion hints. Never substitutes values automatically; suppresses
+    # hints on incomplete/unreadable coverage, duplicate identities, or
+    # ambiguity across slug-prefix and idempotency-key matches.
+    ProjectHintLookup = Data.define(:project, :complete, :tasks, :duplicate_identities) do
+      def initialize(project:, complete:, tasks: [], duplicate_identities: [])
+        super(
+          project: project.to_s,
+          complete: complete == true,
+          tasks: Array(tasks).freeze,
+          duplicate_identities: Array(duplicate_identities).uniq.freeze
+        )
+      end
+
+      def complete? = complete
+
+      def suggest(raw_value, exclude_slug: nil)
+        return nil unless complete?
+        return nil unless duplicate_identities.empty?
+
+        code = Hive::Dependencies.hint_code_for(raw_value, current_project: project)
+        return nil unless code
+
+        matched = {}
+        tasks.each do |candidate|
+          next unless candidate.project.to_s == project
+          next if exclude_slug && candidate.slug.to_s == exclude_slug.to_s
+
+          slug_match = Hive::Dependencies.slug_prefix_matches?(candidate.slug, code: code)
+          key_match = Hive::Dependencies.idempotency_key_matches?(
+            candidate.idempotency_key, project: project, code: code
+          )
+          next unless slug_match || key_match
+
+          identity = [ candidate.project.to_s, candidate.slug.to_s ]
+          matched[identity] = candidate.slug.to_s
+        end
+
+        matched.size == 1 ? matched.values.first : nil
+      end
+    end
 
     Blocker = Data.define(:identity, :unmet)
     Evaluation = Data.define(:verdict, :blockers, :cycle_derived, :cycle_anchors)
@@ -101,9 +147,14 @@ module Hive
     TaskSnapshot = Data.define(
       :project, :slug, :id, :stage, :workflow_stages, :depends_on,
       :metadata_status, :metadata_error, :plan_status, :plan_dependency,
-      :plan_error, :folder, :validation_error, :cancelled, :superseded_by
+      :plan_error, :folder, :validation_error, :cancelled, :superseded_by,
+      :idempotency_key, :plan_raw_depends_on, :plan_issues, :plan_invalid_kind,
+      :plan_entries
     ) do
-      def initialize(superseded_by: nil, **fields)
+      def initialize(superseded_by: nil, idempotency_key: nil,
+                     plan_raw_depends_on: nil, plan_issues: EMPTY_ISSUES,
+                     plan_invalid_kind: nil, plan_entries: EMPTY_ENTRIES,
+                     **fields)
         super
       end
     end
@@ -116,18 +167,24 @@ module Hive
     class Context
       attr_reader :projects
 
-      def initialize(projects:, fallback: nil)
+      def initialize(projects:, fallback: nil, hint_provider: nil)
         @projects = projects.map do |project|
           tasks = project.tasks.map do |task|
             task.with(
               workflow_stages: Array(task.workflow_stages).dup.freeze,
               depends_on: immutable_declaration(task.depends_on),
-              plan_dependency: immutable_declaration(task.plan_dependency)
+              plan_dependency: immutable_declaration(task.plan_dependency),
+              plan_raw_depends_on: Hive::Dependencies.json_safe_value(task.plan_raw_depends_on),
+              plan_issues: Array(task.plan_issues).dup.freeze,
+              plan_entries: Array(task.plan_entries).dup.freeze
             ).freeze
           end.freeze
           project.with(tasks: tasks).freeze
         end.freeze
         @fallback = fallback
+        @hint_provider = hint_provider
+        @hint_lookups = {}
+        @hint_lookup_mutex = Mutex.new
         @projects_by_name = @projects.group_by(&:name).transform_values(&:freeze).freeze
         @projects_by_path = @projects.group_by { |project| File.expand_path(project.path) }
           .transform_values(&:freeze).freeze
@@ -141,6 +198,148 @@ module Hive
         @tasks_by_project_id.freeze
         @verdict_cache = {}
         @verdict_cache_mutex = Mutex.new
+      end
+
+      def project_snapshot(name)
+        unique_project(name)
+      end
+
+      def resolve_plan_entries(project_name:, entries:)
+        covered_issues = []
+        noncovered_errors = []
+
+        Array(entries).each do |entry|
+          reference = entry.reference
+          target_project_name = Hive::Dependencies.reference_project(reference, project_name)
+          same_project = target_project_name == project_name
+          target_project = unique_project(target_project_name)
+          if target_project.nil?
+            noncovered_errors << admission_error(
+              "dependency_project_unknown", target_project_name, project_correction(target_project_name)
+            ).admission_error
+            next
+          end
+          if target_project.validation_error
+            noncovered_errors << validation_failure(
+              target_project.validation_error, target_project_name
+            ).admission_error
+            next
+          end
+          if reference.explicit_project
+            identity_error = validate_repository_identity(target_project, reference.to_s)
+            if identity_error
+              noncovered_errors << identity_error.admission_error
+              next
+            end
+          end
+
+          matches = task_matches_for_reference(target_project, reference)
+          if matches.length > 1
+            noncovered_errors << validation_failure(
+              "dependency reference resolves to multiple tasks", reference.to_s
+            ).admission_error
+          elsif matches.empty?
+            if same_project
+              covered_issues << Hive::Dependencies::DeclarationIssue.new(
+                index: entry.index,
+                raw_value: entry.raw_value,
+                code: :unresolved_reference,
+                message: "unresolved same-project task #{entry.raw_value.inspect}"
+              )
+            else
+              noncovered_errors << admission_error(
+                "dependency_task_missing",
+                reference.to_s,
+                "Correct depends_on or restore the prerequisite task in project #{target_project.name}."
+              ).admission_error
+            end
+          end
+        end
+
+        { covered_issues: covered_issues.freeze, noncovered_errors: noncovered_errors.freeze }
+      end
+
+      def enrich_issues_with_hints(project_name:, issues:, exclude_slug: nil, hint_lookup: nil)
+        list = Array(issues)
+        return list.freeze if list.empty?
+
+        eligible = list.any? do |issue|
+          hint_eligible_issue?(issue) &&
+            Hive::Dependencies.hint_code_for(issue.raw_value, current_project: project_name)
+        end
+        return list.freeze unless eligible
+
+        lookup = hint_lookup || hint_lookup_for(project_name)
+        return list.freeze unless lookup&.complete?
+
+        list.map do |issue|
+          next issue unless hint_eligible_issue?(issue)
+
+          suggestion = lookup.suggest(issue.raw_value, exclude_slug: exclude_slug)
+          suggestion ? issue.with(suggestion: suggestion) : issue
+        end.freeze
+      end
+
+      def validate_prospective_declaration(project:, slug:, depends_on:, plan_dependency:)
+        source_project = unique_project(project)
+        return admission_error("dependency_project_unknown", project, project_correction(project)) unless source_project
+        return validation_failure(source_project.validation_error, project) if source_project.validation_error
+
+        source_matches = task_matches(source_project, slug: slug)
+        if source_matches.length > 1
+          return validation_failure("duplicate task slug #{slug.inspect}", "#{project}:#{slug}")
+        end
+        source = source_matches.first
+        return admission_error("dependency_task_missing", "#{project}:#{slug}", task_correction(project)) unless source
+
+        entries = if plan_dependency.nil?
+          EMPTY_ENTRIES
+        else
+          Hive::Dependencies.inspect_declaration(plan_dependency).entries
+        end
+        prospective = source.with(
+          depends_on: immutable_declaration(depends_on),
+          plan_status: plan_dependency.nil? ? :absent : :ok,
+          plan_dependency: immutable_declaration(plan_dependency),
+          plan_error: nil,
+          plan_issues: EMPTY_ISSUES,
+          plan_invalid_kind: nil,
+          plan_entries: entries
+        ).freeze
+
+        walk(prospective, use_shared_cache: false, override_task: prospective)
+      rescue StandardError => e
+        admission_error(
+          "dependency_validation_failed",
+          "#{project}:#{slug}",
+          "Inspect dependency metadata and project enrollment; validation failed with #{e.class}."
+        )
+      end
+
+      def plan_invalid_error(task_folder:, issues:, fallback_ref: nil, fallback_correction: nil)
+        list = Array(issues)
+        plan_path = File.join(task_folder.to_s, "plan.md")
+        if list.empty?
+          return admission_error(
+            "plan_dependency_invalid",
+            fallback_ref || plan_path,
+            fallback_correction || "Repair plan.md YAML frontmatter; do not infer dependencies from prose."
+          )
+        end
+
+        offending = list.map(&:display_value).reject(&:empty?).uniq.join(", ")
+        offending = fallback_ref || plan_path if offending.empty?
+
+        correction = if list.any? { |issue| %i[malformed_frontmatter oversized_frontmatter malformed_yaml non_mapping unreadable_frontmatter].include?(issue.code) }
+          "Repair plan.md YAML frontmatter in #{plan_path} (#{list.first.message}); do not infer dependencies from prose."
+        elsif list.any? { |issue| issue.code == :duplicate_depends_on }
+          "Remove duplicate depends_on keys in #{plan_path} YAML frontmatter (#{offending}); declare one scalar or nonempty flat list."
+        else
+          details = Hive::Dependencies.format_issue_details(list)
+          "Repair depends_on in #{plan_path} using full task slugs (#{details}); do not edit meta.yml or infer dependencies from prose."
+        end
+
+        admission_error("plan_dependency_invalid", offending, correction)
       end
 
       def project_for_path(path)
@@ -202,10 +401,11 @@ module Hive
 
       private
 
-      def walk(source)
+      def walk(source, use_shared_cache: true, override_task: nil)
         frames = []
         active_index = {}
         walk_cache = {}
+        override_identity = override_task ? qualify(override_task) : nil
         push_frame(frames, active_index, source, incoming: nil)
 
         until frames.empty?
@@ -217,7 +417,7 @@ module Hive
             frames.pop
             active_index.delete(frame.identity)
             walk_cache[frame.identity] = evaluation
-            @verdict_cache[frame.identity] = evaluation unless evaluation.cycle_derived
+            @verdict_cache[frame.identity] = evaluation if use_shared_cache && !evaluation.cycle_derived
             return evaluation.verdict if frames.empty?
 
             absorb_child(frames.last, frame.incoming, evaluation)
@@ -225,7 +425,7 @@ module Hive
           end
 
           reference = frame.next_reference
-          edge = resolve_edge(frame.task, reference)
+          edge = resolve_edge(frame.task, reference, override_task: override_task, override_identity: override_identity)
           if edge.is_a?(Verdict)
             frame.fail!(edge.admission_error)
             next
@@ -261,7 +461,7 @@ module Hive
           else
             { blocker: gate_result, admission_error: nil }.freeze
           end
-          cached = @verdict_cache[target_identity]
+          cached = use_shared_cache ? @verdict_cache[target_identity] : nil
           walked = walk_cache[target_identity]
           if cached.nil? && walked && reusable_walk_evaluation?(walked, active_index)
             cached = walked
@@ -304,7 +504,7 @@ module Hive
         frame.list_declaration = list_declaration
       end
 
-      def resolve_edge(task, reference)
+      def resolve_edge(task, reference, override_task: nil, override_identity: nil)
         target_project = resolve_project(task.project, reference)
         return target_project if target_project.is_a?(Verdict)
 
@@ -315,6 +515,7 @@ module Hive
 
         target = resolve_task(target_project, reference)
         return target if target.is_a?(Verdict)
+        target = override_task if override_task && qualify(target) == override_identity
 
         [ target, target_project ]
       end
@@ -431,12 +632,21 @@ module Hive
           )
         end
 
-        if task.plan_status == :invalid
-          return admission_error(
-            "plan_dependency_invalid",
-            File.join(task.folder, "plan.md"),
-            "Repair plan.md YAML frontmatter; do not infer dependencies from prose."
-          )
+        if task.plan_status == :invalid || (task.plan_status == :ok && !task.plan_dependency.nil?)
+          entries = plan_entries_for(task)
+          resolved = resolve_plan_entries(project_name: task.project, entries: entries)
+          covered_issues = sort_issues(Array(task.plan_issues) + resolved[:covered_issues])
+          if task.plan_status == :invalid && covered_issues.empty?
+            return plan_invalid_error(task_folder: task.folder, issues: [])
+          end
+          unless covered_issues.empty?
+            enriched = enrich_issues_with_hints(
+              project_name: task.project,
+              issues: covered_issues,
+              exclude_slug: task.slug
+            )
+            return plan_invalid_error(task_folder: task.folder, issues: enriched)
+          end
         end
 
         if task.plan_dependency && task.depends_on.nil?
@@ -456,6 +666,33 @@ module Hive
         end
 
         nil
+      end
+
+      def plan_entries_for(task)
+        return task.plan_entries unless Array(task.plan_entries).empty?
+        return EMPTY_ENTRIES if task.plan_dependency.nil?
+
+        Hive::Dependencies.inspect_declaration(task.plan_dependency).entries
+      end
+
+      def sort_issues(issues)
+        Array(issues).each_with_index.sort_by do |issue, order|
+          [ issue.index.nil? ? 0 : 1, issue.index || 0, order ]
+        end.map(&:first).freeze
+      end
+
+      def hint_eligible_issue?(issue)
+        %i[task_code_shorthand invalid_reference unresolved_reference].include?(issue.code)
+      end
+
+      def hint_lookup_for(project_name)
+        return nil unless @hint_provider
+
+        @hint_lookup_mutex.synchronize do
+          return @hint_lookups[project_name] if @hint_lookups.key?(project_name)
+
+          @hint_lookups[project_name] = @hint_provider.call(project_name)
+        end
       end
 
       def parse_declaration(value)
@@ -500,11 +737,7 @@ module Hive
       end
 
       def resolve_task(project, reference)
-        matches = if reference.explicit_project || !Hive::Dependencies.numeric?(reference.task)
-          task_matches(project, slug: reference.task)
-        else
-          task_matches(project, id: Integer(reference.task))
-        end
+        matches = task_matches_for_reference(project, reference)
         if matches.length > 1
           return validation_failure(
             "dependency reference resolves to multiple tasks",
@@ -518,6 +751,14 @@ module Hive
           reference.to_s,
           "Correct depends_on or restore the prerequisite task in project #{project.name}."
         )
+      end
+
+      def task_matches_for_reference(project, reference)
+        if reference.explicit_project || !Hive::Dependencies.numeric?(reference.task)
+          task_matches(project, slug: reference.task)
+        else
+          task_matches(project, id: Integer(reference.task))
+        end
       end
 
       def validate_repository_identity(project, reference)

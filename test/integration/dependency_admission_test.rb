@@ -46,12 +46,14 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
 
   def test_plan_only_ordering_declaration_holds_status_row
     with_tmp_dir do |root|
+      prereq = write_task(root, "4-execute", "prerequisite-task", "task.md", "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(prereq, id: 1, slug: "prerequisite-task", display_name: nil)
       folder = write_task(root, "4-execute", "ordering-task", "task.md", "EXECUTE_COMPLETE")
       Hive::TaskMeta.write(folder, id: 2, slug: "ordering-task", display_name: nil)
       File.write(File.join(folder, "plan.md"), "---\ndepends_on: prerequisite-task\n---\n# Plan\n")
 
       payload = Hive::Commands::Status.new.json_payload([ project(File.basename(root), root) ])
-      row = payload.fetch("projects").first.fetch("tasks").first
+      row = payload.fetch("projects").first.fetch("tasks").find { |task| task["slug"] == "ordering-task" }
 
       assert_equal true, row.fetch("blocked")
       assert_equal "plan_dependency_missing", row.fetch("admission_error").fetch("reason_code")
@@ -64,6 +66,7 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
         capture_io { Hive::Commands::Init.new(dir).call }
         project_name = File.basename(dir)
         capture_io do
+          Hive::Commands::New.new(project_name, "prerequisite task", slug_override: "prerequisite-task").call
           Hive::Commands::New.new(project_name, "ordering task", slug_override: "ordering-task").call
         end
         inbox = File.join(dir, ".hive-state", "stages", "1-inbox", "ordering-task")

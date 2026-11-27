@@ -208,9 +208,30 @@ class PackagingVerifyReleaseTest < Minitest::Test
     assert_equal "${{ matrix.channel == 'bash' && github.token || '' }}",
                  verify.fetch("verify").fetch("steps").find { |step| step["name"] == "Verify channel" }
                        .fetch("env").fetch("GITHUB_TOKEN")
-    [ INSTALL_SMOKE_WORKFLOW, INSTALL_VERIFY_WORKFLOW ].each do |path|
+    Dir.glob(File.expand_path("../../../.github/workflows/*.yml", __dir__)).sort.each do |path|
       refute_includes File.read(path), "sigstore/cosign-installer", "#{path}: anonymous bootstrap download"
     end
+  end
+
+  def test_release_finalize_uses_authenticated_cosign_install_before_signing
+    release = YAML.safe_load_file(RELEASE_WORKFLOW, aliases: true)
+    job = release.fetch("jobs").fetch("release-finalize")
+    steps = job.fetch("steps")
+    installers = steps.select { |step| step["uses"] == "./.github/actions/install-cosign" }
+
+    assert_match(/\Aubuntu-/, job.fetch("runs-on"), "install-cosign requires a Linux runner")
+    assert_equal 1, installers.size
+    assert_equal "${{ github.token }}", installers.first.fetch("with").fetch("github-token")
+
+    checkout_index = steps.index { |step| step["uses"].to_s.start_with?("actions/checkout@") }
+    installer_index = steps.index(installers.first)
+    sign_index = steps.index { |step| step["name"] == "Sign checksums" }
+
+    refute_nil checkout_index
+    refute_nil sign_index
+    assert_operator checkout_index, :<, installer_index, "local action needs checkout first"
+    assert_operator installer_index, :<, sign_index, "cosign must be installed before signing checksums"
+    refute_includes File.read(RELEASE_WORKFLOW), "sigstore/cosign-installer"
   end
 
   def test_install_cosign_action_downloads_authenticated_and_verifies_a_pinned_digest

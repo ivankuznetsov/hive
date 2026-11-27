@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-10-14
+updated: 2026-11-27
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
@@ -490,7 +490,8 @@ retry (`--retry 4 --retry-delay 5 --retry-max-time 60`; curl treats HTTP
 408/429/5xx and timeouts as transient even without `--fail`) and the optional
 `GITHUB_TOKEN` auth above. The `full-smoke`, `verify-release`, and
 `install-verify.yml` bash-channel steps pass `${{ github.token }}` step-scoped.
-These jobs install cosign with the local composite action
+These jobs — along with `release.yml`'s `release-finalize` signing job — install
+cosign with the local composite action
 [`.github/actions/install-cosign`](../.github/actions/install-cosign/action.yml)
 instead of `sigstore/cosign-installer`. That action has no token input, and its
 anonymous bootstrap downloads kept failing with 504 during GitHub's 2026-11-09

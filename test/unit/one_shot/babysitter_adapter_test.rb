@@ -68,6 +68,20 @@ class OneShotBabysitterAdapterTest < Minitest::Test
     end
   end
 
+  def test_provider_error_and_limits_reached_project_as_external_retries
+    with_tmp_dir do |dir|
+      tick = Tick.new(summary(pr(10, :provider_error), pr(11, :limits_reached)))
+      result = adapter(dir, tick: tick).call
+
+      assert_equal [ "babysitter:pr:10", "babysitter:pr:11", "babysitter:poll" ],
+                   ids(result, "waiting_external")
+      assert_empty ids(result, "waiting_operator")
+      assert_equal %w[provider_error limits_reached],
+                   result.to_h.fetch("ran").map { |row| row.fetch("outcome") }
+      assert_schema(result)
+    end
+  end
+
   def test_persistent_admission_probe_reaches_the_project_tick
     with_tmp_dir do |dir|
       tick = Tick.new(summary)

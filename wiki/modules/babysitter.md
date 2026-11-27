@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-11-16
+updated: 2026-11-27
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -17,7 +17,8 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::Logger` | `lib/hive/babysitter/logger.rb` | Rotated JSON-line process log at `$HIVE_HOME/logs/babysitter.log`. |
 | `Hive::Babysitter::Interval` | `lib/hive/babysitter/interval.rb` | Parses integer seconds or `\d+[smh]` duration strings. |
 | `Hive::Babysitter::ProjectTick` | `lib/hive/babysitter/project_tick.rb` | One-project tick: reload config, list PRs, filter labels, enforce `max_concurrent_prs`, call `PrFixer`. |
-| `Hive::Babysitter::PrFixer` | `lib/hive/babysitter/pr_fixer.rb` | Per-PR precheck, green-but-`BEHIND` auto-rebase, worktree setup, context gathering, prompt render, agent spawn, give-up handling. |
+| `Hive::Babysitter::PrFixer` | `lib/hive/babysitter/pr_fixer.rb` | Per-PR precheck, green-but-`BEHIND` auto-rebase, worktree setup, context gathering, prompt render, agent spawn, provider hold/backoff, give-up handling. |
+| `Hive::Babysitter::FailureClassifier` | `lib/hive/babysitter/failure_classifier.rb` | Pure classifier separating non-PR operational failures (provider quota/rate-limit/usage-cap/credit exhaustion -> `:limits_reached`; capacity/overloaded/5xx/network/auth/preflight/provider errors -> `:provider_error`) from genuine repair failures and ADR-057 `model_unsupported`. |
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
 | `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from a force-refreshed internal PR-head ref. Before add, it force-removes the old checkout, moves any undeletable residue to `.hive-state/babysitter/quarantine/worktrees/`, and immediately prunes stale Git metadata so rebased, force-pushed, interrupted, or container-contaminated worktrees do not wedge the babysitter cache. |
 | `Hive::Babysitter::GhOps` | `lib/hive/babysitter/gh_ops.rb` | Hive-driven GitHub/git side effects: `force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil)` (explicit `--force-with-lease=<branch>:<oid>` when `expected_oid` is given — robust without a local remote-tracking ref — else the bare `--force-with-lease`), `rebase_onto_base` (fetch base over the remote's **push URL** + rebase onto `FETCH_HEAD`, abort-on-conflict, returns a `RebaseResult` of `:success`/`:conflict`/`:failure`), idempotent provisioning and application of the Hive-owned `babysitter/needs-human` label, and comments. Honors dry-run. |
@@ -65,7 +66,7 @@ Each action appends one JSON object:
 
 Closed action enum: `list-prs`, `noop`, `skipped`, `agent-fix`, `rebase`, `force-push`, `pr-comment`, `label-apply`, `give-up`, `dry_run`.
 
-Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `draft_pr`, `pipeline_owned`, `fork_pr`, `dry_run`, `shutdown`.
+Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhausted`, `limits_reached`, `provider_error`, `model_unsupported`, `gh-error`, `already-green`, `label_ignored`, `draft_pr`, `pipeline_owned`, `fork_pr`, `ci_blocked`, `dry_run`, `shutdown`.
 
 `emit` raises `ArgumentError` on any action/outcome outside these allowlists.
 

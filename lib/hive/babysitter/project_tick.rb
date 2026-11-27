@@ -22,7 +22,7 @@ module Hive
         give_up: :operator, fork_pr: :operator, rebase_conflict: :operator, ci_blocked: :operator,
         model_unsupported: :operator,
         failure: :retry, timeout: :retry, budget_exhausted: :retry,
-        limits_reached: :retry,
+        limits_reached: :retry, provider_error: :retry,
         pipeline_owned: :pipeline_owned, inflight: :inflight,
         success: :observed, rebased: :observed, already_green: :observed,
         noop: :observed, dry_run: :observed

@@ -10,6 +10,7 @@ require "hive/atomic_file"
 require "hive/babysitter/context_builder"
 require "hive/babysitter/dry_run_env"
 require "hive/babysitter/events"
+require "hive/babysitter/failure_classifier"
 require "hive/babysitter/gh_ops"
 require "hive/babysitter/worktree"
 require "hive/reviewers/synthetic_task"
@@ -20,6 +21,7 @@ module Hive
     class PrFixer
       GIVE_UP_TAIL_BYTES = 4096
       LIMIT_HOLD_FILE = "agent-limit-hold.json".freeze
+      TRANSIENT_HOLD_COOLDOWN_SEC = 300
 
       def self.run(pr, project, cfg, detail_sink: nil, **options)
         fixer = new(pr, project, cfg, **options)
@@ -73,7 +75,9 @@ module Hive
 
         return handle_green(status, started) if already_green?(status)
         return :shutdown unless admission_open?
-        return hold_for_limit(started) if limit_held?
+
+        hold = active_provider_hold
+        return hold_for_provider(hold, started) if hold
 
         worktree = Hive::Babysitter::Worktree.materialize(@project, @pr)
         context = Hive::Babysitter::ContextBuilder.build(
@@ -96,10 +100,11 @@ module Hive
         result = spawn_agent(worktree.path, context)
         return :shutdown if result == :shutdown
 
-        outcome = outcome_for(result, worktree.path)
-        emit_agent_event(outcome, started)
-        record_limit_hold(result, outcome)
-        return outcome if %i[success dry_run limits_reached].include?(outcome)
+        classification = Hive::Babysitter::FailureClassifier.classify(result)
+        outcome = outcome_for(result, worktree.path, classification: classification)
+        emit_agent_event(outcome, started, classification: classification)
+        record_provider_hold(result, outcome, classification: classification)
+        return outcome if %i[success dry_run limits_reached provider_error].include?(outcome)
 
         give_up(worktree.path, result, outcome, started)
         outcome
@@ -322,12 +327,12 @@ module Hive
         )
       end
 
-      # A provider usage limit is not a repair failure: nothing about the PR
-      # needs a human, and every spawn before the quota resets fails the
-      # same way. Hold this provider's spawns for the project; like the
-      # stage limit holds, the next attempt is due on the hourly cooldown
-      # from when the limit was recorded (AgentLimit.retry_due?), so an
-      # account switch or top-up is noticed before the provider's reset date.
+      # A provider usage limit or transient operational/capacity error is not a
+      # repair failure: nothing about the PR needs a human, and retrying
+      # immediately into the same wall wastes spawns. Hold this provider's
+      # spawns for the project: quota/rate limits use the hourly AgentLimit
+      # cooldown, while transient provider/preflight errors use a short
+      # backoff so the next poll can recover automatically.
       def limit_hold_path
         File.join(@project.fetch("hive_state_path"), "babysitter", LIMIT_HOLD_FILE)
       end
@@ -339,31 +344,37 @@ module Hive
         {}
       end
 
-      def limit_held?
+      def active_provider_hold
         hold = limit_holds[agent_profile.name.to_s]
-        return false unless hold.is_a?(Hash)
+        return nil unless hold.is_a?(Hash)
 
-        limited_at = Time.iso8601(hold["limited_at"].to_s)
-        !Hive::AgentLimit.retry_due?(limited_at: limited_at)
+        if hold["outcome"] == "provider_error"
+          return hold if Time.now.utc < Time.iso8601(hold["hold_until"].to_s)
+        else
+          limited_at = Time.iso8601(hold["limited_at"].to_s)
+          return hold unless Hive::AgentLimit.retry_due?(limited_at: limited_at)
+        end
+        nil
       rescue ArgumentError
-        false
+        nil
       end
 
-      def hold_for_limit(started)
-        hold = limit_holds.fetch(agent_profile.name.to_s)
+      def hold_for_provider(hold, started)
+        outcome = hold["outcome"] == "provider_error" ? :provider_error : :limits_reached
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,
           action: "skipped",
-          outcome: "limits_reached",
+          outcome: outcome.to_s,
           duration_ms: duration_ms(started),
           provider: agent_profile.name.to_s,
+          reason: hold["reason"],
           retry_after: hold["retry_after"]
         )
-        :limits_reached
+        outcome
       end
 
-      def record_limit_hold(result, outcome)
+      def record_provider_hold(result, outcome, classification:)
         return if @dry_run
 
         holds = limit_holds
@@ -371,9 +382,22 @@ module Hive
         if outcome == :limits_reached
           holds[provider] = {
             "limited_at" => Time.now.utc.iso8601,
-            "retry_after" => result[:retry_at],
-            "message" => result[:error_message].to_s.byteslice(0, 500).to_s.scrub
-          }
+            "retry_after" => result[:retry_at] || Hive::AgentLimit.retry_after(text: classification.retry_after_text),
+            "outcome" => "limits_reached",
+            "reason" => classification.reason,
+            "message" => classification.message
+          }.compact
+        elsif outcome == :provider_error
+          now = Time.now.utc
+          hold_until = (now + TRANSIENT_HOLD_COOLDOWN_SEC).iso8601
+          holds[provider] = {
+            "limited_at" => now.iso8601,
+            "hold_until" => hold_until,
+            "retry_after" => hold_until,
+            "outcome" => "provider_error",
+            "reason" => classification.reason,
+            "message" => classification.message
+          }.compact
         else
           return unless holds.delete(provider)
         end
@@ -460,12 +484,12 @@ module Hive
         Hive::Stages::Base.render("babysitter_pr_fix_prompt.md.erb", bindings)
       end
 
-      def outcome_for(result, worktree_path = nil)
-        return :timeout if result[:status] == :timeout || result[:timed_out]
-        return :limits_reached if result[:error_reason] == "limits_reached"
+      def outcome_for(result, worktree_path = nil, classification: Hive::Babysitter::FailureClassifier.classify(result))
         # Never a limit hold: the configured babysitter model is refused, so
         # give up on the PR with the operator-facing fix in the comment.
-        return :model_unsupported if result[:error_reason] == Hive::ModelUnsupported::REASON
+        return :model_unsupported if Hive::Babysitter::FailureClassifier.model_unsupported?(result)
+        return classification.outcome if classification
+        return :timeout if result[:status] == :timeout || result[:timed_out]
         return :budget_exhausted if budget_exhausted?(result)
         if @dry_run && result[:status] == :ok
           return :dry_run if worktree_path && File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
@@ -482,25 +506,34 @@ module Hive
         reason = result[:reason].to_s
         %i[budget_exceeded budget_exhausted].include?(status) ||
           reason == "budget_exceeded" ||
-          reason == "budget_exhausted"
+          reason == "budget_exhausted" ||
+          result[:failure_origin].to_s == "budget_exhausted"
       end
 
-      def emit_agent_event(outcome, started)
+      def emit_agent_event(outcome, started, classification: nil)
         event_outcome = case outcome
         when :success then "success"
         when :dry_run then "dry_run"
         when :timeout then "timeout"
         when :budget_exhausted then "budget_exhausted"
         when :limits_reached then "limits_reached"
+        when :provider_error then "provider_error"
         when :model_unsupported then "model_unsupported"
         else "failure"
+        end
+        attrs = {}
+        if classification
+          attrs[:provider] = agent_profile.name.to_s
+          attrs[:reason] = classification.reason
+          attrs[:message] = classification.message unless classification.message.empty?
         end
         Hive::Babysitter::Events.emit(
           project: @project,
           pr: number,
           action: outcome == :dry_run ? "dry_run" : "agent-fix",
           outcome: event_outcome,
-          duration_ms: duration_ms(started)
+          duration_ms: duration_ms(started),
+          **attrs
         )
       end
 

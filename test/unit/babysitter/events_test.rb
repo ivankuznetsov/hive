@@ -44,6 +44,25 @@ class BabysitterEventsTest < Minitest::Test
     end
   end
 
+  def test_emit_accepts_provider_error_outcome
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      record = Hive::Babysitter::Events.emit(
+        project: project,
+        pr: 42,
+        action: "agent-fix",
+        outcome: "provider_error",
+        provider: "claude",
+        reason: "transient_provider_error",
+        message: "API Error: 529 Overloaded"
+      )
+      assert_equal "agent-fix", record.fetch("action")
+      assert_equal "provider_error", record.fetch("outcome")
+      assert_equal "claude", record.fetch("provider")
+      assert_equal "transient_provider_error", record.fetch("reason")
+    end
+  end
+
   def test_emit_raises_on_unknown_action_and_outcome
     with_tmp_dir do |dir|
       project = project_entry(dir)

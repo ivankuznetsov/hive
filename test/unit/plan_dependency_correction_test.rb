@@ -273,12 +273,15 @@ class PlanDependencyCorrectionTest < Minitest::Test
         old_env.nil? ? ENV.delete("HIVE_DAEMON_AUTOMATED_DISPATCH") : ENV["HIVE_DAEMON_AUTOMATED_DISPATCH"] = old_env
       end
 
-      # 3. Descendant running `hive plan <child> --project app --from 3-plan` STILL refuses.
-      assert_raises(Hive::DependencyAdmissionError) do
+      # 3. Descendant running `hive plan <child> --project app --from 3-plan` STILL refuses
+      # (and under Unit 3 root attribution, inherited-only descendants raise DependencyWaitError).
+      child_err = assert_raises(Hive::DependencyWaitError) do
         Hive::Commands::StageAction.new(
           "plan", child_task.slug, project: "app", from: "3-plan", quiet: true
         ).call
       end
+      assert_includes child_err.message, "app:#{root_task.slug}"
+      assert_includes child_err.message, "F2"
 
       # 4. Forward approve / develop from 3-plan STILL refuses (plan review blocks clearance).
       approve_err = assert_raises(Hive::PlanReview::TransitionBlocked) do

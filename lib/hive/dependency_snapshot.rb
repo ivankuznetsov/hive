@@ -58,6 +58,7 @@ module Hive
                 "plan_status" => task.plan_status,
                 "plan_dependency" => task.plan_dependency,
                 "plan_raw_depends_on" => task.plan_raw_depends_on,
+                "plan_issues" => Array(task.plan_issues).map(&:to_h),
                 "validation_error" => task.validation_error.to_s,
                 "cancelled" => task.cancelled,
                 "superseded_by" => task.superseded_by
@@ -667,6 +668,38 @@ module Hive
 
       if verdict.wait?
         unmet_dependencies = verdict.unmet_dependencies
+        repair_roots = verdict.dependency_repair_roots
+        if repair_roots.any?
+          remaining_unmet = unmet_dependencies.reject do |unmet|
+            repair_roots.any? do |root|
+              Hive::Dependencies.repair_root_matches_target?(
+                root, unmet.blocked_by, current_project: project_name
+              )
+            end
+          end
+          summary = Hive::Dependencies.blocker_summary(
+            depends_on: task.depends_on,
+            blocked_by: verdict.blocked_by,
+            dependency_stage: verdict.dependency_stage,
+            unmet_dependencies: remaining_unmet,
+            dependency_repair_roots: repair_roots,
+            current_project: project_name
+          )
+          root_corrections = repair_roots.map do |root|
+            "Repair #{root.qualified_identity} (#{root.safe_correction})"
+          end
+          wait_corrections = remaining_unmet.map do |unmet|
+            "wait for #{unmet.blocked_by} to reach #{unmet.required_gate} " \
+              "(currently at #{unmet.dependency_stage})"
+          end
+          correction = (root_corrections + wait_corrections).join("; ")
+          raise Hive::DependencyWaitError.new(
+            "dependency wait: #{task.slug} is #{summary}",
+            offending_ref: repair_roots.first.qualified_identity,
+            safe_correction: correction
+          )
+        end
+
         waits = unmet_dependencies.map do |unmet|
           ref = unmet.blocked_by.to_s
           "#{ref} at #{unmet.dependency_stage} (needs #{unmet.required_gate})"
@@ -772,6 +805,9 @@ module Hive
         [ dependency.reference, dependency.blocked_by, dependency.dependency_stage,
           dependency.required_gate ]
       end
+      repair_roots = verdict.dependency_repair_roots.map do |root|
+        [ root.project, root.slug, root.reason_code, root.offending_ref, root.safe_correction ]
+      end
       payload = [
         "hive-dependency-admission-v2", project, task.slug.to_s,
         declaration,
@@ -779,6 +815,7 @@ module Hive
         unmet, base_mode,
         error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
       ]
+      payload << repair_roots unless repair_roots.empty?
       ::Digest::SHA256.hexdigest(JSON.generate(payload))
     rescue StandardError => e
       ::Digest::SHA256.hexdigest(

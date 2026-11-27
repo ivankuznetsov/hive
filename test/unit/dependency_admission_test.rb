@@ -715,6 +715,205 @@ class DependencyAdmissionTest < Minitest::Test
     assert_match(/RuntimeError/, verdict.admission_error.safe_correction)
   end
 
+  def test_root_attribution_for_c5_root_c6_direct_and_c7_transitive_descendants
+    c5_issues = Hive::Dependencies.inspect_declaration(%w[F2 F3]).issues
+    c5 = task(
+      "app", "c5-root", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: %w[F2 F3], plan_issues: c5_issues
+    )
+    c6 = task("app", "c6-direct", stage: "2-brainstorm", depends_on: "c5-root")
+    c7 = task("app", "c7-transitive", stage: "1-inbox", depends_on: "c6-direct")
+    ctx = context(project(tasks: [ c5, c6, c7 ]))
+
+    v5 = ctx.verdict(project: "app", slug: "c5-root")
+    assert_error v5, "plan_dependency_invalid"
+    assert_empty v5.dependency_repair_roots
+    assert_equal "F2, F3", v5.admission_error.offending_ref
+
+    v6 = ctx.verdict(project: "app", slug: "c6-direct")
+    assert v6.wait?
+    assert v6.blocked?
+    assert_nil v6.admission_error
+    assert_equal "c5-root", v6.blocked_by
+    assert_equal "3-plan", v6.dependency_stage
+    assert_equal [ "app:c5-root" ], v6.dependency_repair_roots.map(&:qualified_identity)
+    assert_equal "F2, F3", v6.dependency_repair_roots.first.offending_ref
+    assert_equal [ 0, 1 ], v6.dependency_repair_roots.first.issues.map(&:index)
+
+    v7 = ctx.verdict(project: "app", slug: "c7-transitive")
+    assert v7.wait?
+    assert_nil v7.admission_error
+    assert_equal "c6-direct", v7.blocked_by
+    assert_equal "2-brainstorm", v7.dependency_stage
+    assert_equal [ "app:c5-root" ], v7.dependency_repair_roots.map(&:qualified_identity)
+  end
+
+  def test_identical_missing_slug_in_plan_versus_metadata_only
+    plan_root = task(
+      "app", "plan-root", stage: "3-plan",
+      depends_on: "ghost-slug", plan_status: :ok, plan_dependency: "ghost-slug"
+    )
+    plan_child = task("app", "plan-child", stage: "2-brainstorm", depends_on: "plan-root")
+
+    meta_root = task("app", "meta-root", stage: "3-plan", depends_on: "ghost-slug")
+    meta_child = task("app", "meta-child", stage: "2-brainstorm", depends_on: "meta-root")
+
+    ctx = context(project(tasks: [ plan_root, plan_child, meta_root, meta_child ]))
+
+    assert_error ctx.verdict(project: "app", slug: "plan-root"), "plan_dependency_invalid"
+    child_verdict = ctx.verdict(project: "app", slug: "plan-child")
+    assert child_verdict.wait?
+    assert_nil child_verdict.admission_error
+    assert_equal [ "app:plan-root" ], child_verdict.dependency_repair_roots.map(&:qualified_identity)
+
+    assert_error ctx.verdict(project: "app", slug: "meta-root"), "dependency_task_missing"
+    meta_child_verdict = ctx.verdict(project: "app", slug: "meta-child")
+    assert_error meta_child_verdict, "dependency_task_missing"
+    assert_empty meta_child_verdict.dependency_repair_roots
+  end
+
+  def test_diamond_and_fan_in_collect_roots_in_declaration_order_deduplicated_and_cached
+    root1 = task(
+      "app", "root-one", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: "F2",
+      plan_issues: Hive::Dependencies.inspect_declaration("F2").issues
+    )
+    root2 = task(
+      "app", "root-two", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: "C4",
+      plan_issues: Hive::Dependencies.inspect_declaration("C4").issues
+    )
+    left = task("app", "left", stage: "4-execute", depends_on: %w[root-one root-two])
+    right = task("app", "right", stage: "4-execute", depends_on: %w[root-two root-one])
+    diamond = task("app", "diamond", stage: "2-brainstorm", depends_on: %w[left right])
+    sibling_consumer = task("app", "shared-consumer", stage: "2-brainstorm", depends_on: "right")
+    ctx = context(project(tasks: [ root1, root2, left, right, diamond, sibling_consumer ]))
+
+    v_diamond = ctx.verdict(project: "app", slug: "diamond")
+    assert v_diamond.wait?
+    assert_nil v_diamond.blocked_by
+    assert_nil v_diamond.dependency_stage
+    assert_equal %w[app:root-one app:root-two], v_diamond.dependency_repair_roots.map(&:qualified_identity)
+
+    # Reusing cached shared roots preserves exact traversal order for another consumer.
+    v_shared = ctx.verdict(project: "app", slug: "shared-consumer")
+    assert v_shared.wait?
+    assert_equal %w[app:root-two app:root-one], v_shared.dependency_repair_roots.map(&:qualified_identity)
+  end
+
+  def test_waiting_list_sibling_preserves_unmet_edges_alongside_multi_hop_repair_root
+    waiting_sibling = task("app", "waiting-sibling", stage: "4-execute")
+    root = task(
+      "app", "c5-root", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: %w[F2 F3],
+      plan_issues: Hive::Dependencies.inspect_declaration(%w[F2 F3]).issues
+    )
+    mid = task("app", "c6-mid", stage: "4-execute", depends_on: "c5-root")
+    leaf = task("app", "leaf", stage: "2-brainstorm", depends_on: %w[waiting-sibling c6-mid])
+    ctx = context(project(tasks: [ waiting_sibling, root, mid, leaf ]))
+
+    verdict = ctx.verdict(project: "app", slug: "leaf")
+    assert verdict.wait?
+    assert_nil verdict.blocked_by
+    assert_nil verdict.dependency_stage
+    assert_equal %w[waiting-sibling c6-mid], verdict.unmet_dependencies.map(&:blocked_by)
+    assert_equal [ "app:c5-root" ], verdict.dependency_repair_roots.map(&:qualified_identity)
+  end
+
+  def test_repair_root_alone_causes_wait_even_when_unmet_dependencies_are_empty
+    done_root = task(
+      "app", "done-root", stage: "9-done",
+      plan_status: :invalid, plan_raw_depends_on: "F2",
+      plan_issues: Hive::Dependencies.inspect_declaration("F2").issues
+    )
+    child = task("app", "child", stage: "3-plan", depends_on: "done-root")
+    ctx = context(project(tasks: [ done_root, child ]))
+
+    verdict = ctx.verdict(project: "app", slug: "child")
+    assert verdict.wait?
+    assert verdict.blocked?
+    assert_nil verdict.admission_error
+    assert_empty verdict.unmet_dependencies
+    assert_equal [ "app:done-root" ], verdict.dependency_repair_roots.map(&:qualified_identity)
+  end
+
+  def test_independently_broken_descendant_keeps_own_error_and_displays_inherited_roots
+    root = task(
+      "app", "c5-root", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: "F2",
+      plan_issues: Hive::Dependencies.inspect_declaration("F2").issues
+    )
+    broken_child = task(
+      "app", "c6-broken", stage: "3-plan",
+      depends_on: "c5-root",
+      plan_status: :invalid, plan_raw_depends_on: "F9",
+      plan_issues: Hive::Dependencies.inspect_declaration("F9").issues
+    )
+    grandchild = task("app", "c7-grandchild", stage: "2-brainstorm", depends_on: "c6-broken")
+    ctx = context(project(tasks: [ root, broken_child, grandchild ]))
+
+    v_child = ctx.verdict(project: "app", slug: "c6-broken")
+    assert_error v_child, "plan_dependency_invalid"
+    assert_equal "F9", v_child.admission_error.offending_ref
+    assert_equal [ "app:c5-root" ], v_child.dependency_repair_roots.map(&:qualified_identity)
+
+    v_grandchild = ctx.verdict(project: "app", slug: "c7-grandchild")
+    assert v_grandchild.wait?
+    assert_nil v_grandchild.admission_error
+    assert_equal %w[app:c6-broken app:c5-root], v_grandchild.dependency_repair_roots.map(&:qualified_identity)
+  end
+
+  def test_root_recovery_removes_repair_evidence_while_retaining_gate_waits
+    prereq = task("app", "f2-real-task", stage: "4-execute")
+    repaired_root = task(
+      "app", "c5-root", stage: "3-plan",
+      depends_on: "f2-real-task", plan_status: :ok, plan_dependency: "f2-real-task"
+    )
+    child = task("app", "c6-child", stage: "2-brainstorm", depends_on: "c5-root")
+    ctx = context(project(tasks: [ prereq, repaired_root, child ]))
+
+    v_root = ctx.verdict(project: "app", slug: "c5-root")
+    assert v_root.wait?
+    assert_empty v_root.dependency_repair_roots
+    assert_equal "f2-real-task", v_root.blocked_by
+
+    v_child = ctx.verdict(project: "app", slug: "c6-child")
+    assert v_child.wait?
+    assert_empty v_child.dependency_repair_roots
+    assert_equal "c5-root", v_child.blocked_by
+    assert_equal "3-plan", v_child.dependency_stage
+
+    done_ctx = context(project(tasks: [
+      task("app", "f2-real-task", stage: "9-done"),
+      task("app", "c5-root", stage: "9-done", depends_on: "f2-real-task",
+           plan_status: :ok, plan_dependency: "f2-real-task"),
+      task("app", "c6-child", stage: "2-brainstorm", depends_on: "c5-root")
+    ]))
+    assert done_ctx.verdict(project: "app", slug: "c6-child").clear?
+  end
+
+  def test_noncovered_errors_and_malformed_metadata_remain_unchanged
+    corrupt_root = task(
+      "app", "corrupt", stage: "3-plan",
+      depends_on: "other", metadata_status: :invalid, metadata_error: "bad yaml"
+    )
+    corrupt_child = task("app", "corrupt-child", stage: "2-brainstorm", depends_on: "corrupt")
+    other = task(
+      "app", "other", stage: "3-plan",
+      plan_status: :invalid, plan_raw_depends_on: "F2",
+      plan_issues: Hive::Dependencies.inspect_declaration("F2").issues
+    )
+    ctx = context(project(tasks: [ corrupt_root, corrupt_child, other ]))
+
+    v_corrupt = ctx.verdict(project: "app", slug: "corrupt")
+    assert_error v_corrupt, "dependency_metadata_invalid"
+    assert_empty v_corrupt.dependency_repair_roots, "must not infer edges from malformed metadata"
+
+    v_child = ctx.verdict(project: "app", slug: "corrupt-child")
+    assert_error v_child, "dependency_metadata_invalid"
+    assert_empty v_child.dependency_repair_roots
+  end
+
   private
 
   def context(*projects)
@@ -736,7 +935,8 @@ class DependencyAdmissionTest < Minitest::Test
 
   def task(project, slug, id: nil, depends_on: nil, stage: "4-execute",
            workflow_stages: Hive::Stages::DIRS, metadata_status: :ok, metadata_error: nil,
-           plan_status: :absent, plan_dependency: nil, plan_error: nil, validation_error: nil)
+           plan_status: :absent, plan_dependency: nil, plan_error: nil, validation_error: nil,
+           plan_raw_depends_on: nil, plan_issues: [])
     D::TaskSnapshot.new(
       cancelled: false,
       project: project,
@@ -750,6 +950,8 @@ class DependencyAdmissionTest < Minitest::Test
       plan_status: plan_status,
       plan_dependency: plan_dependency,
       plan_error: plan_error,
+      plan_raw_depends_on: plan_raw_depends_on,
+      plan_issues: plan_issues,
       folder: "/tmp/#{project}/#{slug}",
       validation_error: validation_error
     )

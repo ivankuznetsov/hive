@@ -326,6 +326,73 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
     end
   end
 
+  def test_inherited_root_defect_raises_wait_error_and_leaves_descendant_files_untouched
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project_name = File.basename(dir)
+        capture_io do
+          Hive::Commands::New.new(project_name, "c5 root", slug_override: "c5-root").call
+          Hive::Commands::New.new(project_name, "c6 direct", slug_override: "c6-direct",
+                                  depends_on: "c5-root").call
+          Hive::Commands::New.new(project_name, "c7 transitive", slug_override: "c7-transitive",
+                                  depends_on: "c6-direct").call
+        end
+        stages = File.join(dir, ".hive-state", "stages")
+        c5 = File.join(stages, "3-plan", "c5-root")
+        c6 = File.join(stages, "2-brainstorm", "c6-direct")
+        c7 = File.join(stages, "2-brainstorm", "c7-transitive")
+        FileUtils.mkdir_p(File.dirname(c5))
+        FileUtils.mkdir_p(File.dirname(c6))
+        FileUtils.mv(File.join(stages, "1-inbox", "c5-root"), c5)
+        FileUtils.mv(File.join(stages, "1-inbox", "c6-direct"), c6)
+        FileUtils.mv(File.join(stages, "1-inbox", "c7-transitive"), c7)
+        File.write(File.join(c5, "plan.md"), "---\ndepends_on:\n  - F2\n  - F3\n---\n# Broken\n")
+        File.write(File.join(c6, "brainstorm.md"), "# Direct\n<!-- COMPLETE -->\n")
+        File.write(File.join(c7, "brainstorm.md"), "# Transitive\n<!-- COMPLETE -->\n")
+        # Persisted legacy descendant repair artifact must remain untouched by read-only checks.
+        legacy_repair = File.join(c6, "diagnostics", "red-status.md")
+        FileUtils.mkdir_p(File.dirname(legacy_repair))
+        File.write(legacy_repair, "# Legacy descendant repair note\n")
+
+        c6_meta_before = File.binread(File.join(c6, "meta.yml"))
+        c7_meta_before = File.binread(File.join(c7, "meta.yml"))
+        legacy_before = File.binread(legacy_repair)
+
+        root_err = assert_raises(Hive::DependencyAdmissionError) do
+          Hive::Commands::Run.new(c5, quiet: true).call
+        end
+        assert_equal "plan_dependency_invalid", root_err.reason_code
+
+        c6_out, = capture_io do
+          assert_raises(Hive::DependencyWaitError) do
+            Hive::Commands::Approve.new(c6, force: true, json: true).call
+          end
+        end
+        c6_payload = JSON.parse(c6_out)
+        assert_equal "dependency_wait", c6_payload.fetch("error_kind")
+        assert_equal "dependency_wait", c6_payload.fetch("reason_code")
+        assert_equal "#{project_name}:c5-root", c6_payload.fetch("offending_ref")
+        assert_includes c6_payload.fetch("message"), "#{project_name}:c5-root: invalid depends_on F2, F3"
+        assert_schema_valid("hive-approve", c6_payload)
+
+        c7_out, = capture_io do
+          assert_raises(Hive::DependencyWaitError) do
+            Hive::Commands::Run.new(c7, json: true).call
+          end
+        end
+        c7_payload = JSON.parse(c7_out)
+        assert_equal "dependency_wait", c7_payload.fetch("error_kind")
+        assert_equal "#{project_name}:c5-root", c7_payload.fetch("offending_ref")
+        assert_schema_valid("hive-run", c7_payload)
+
+        assert_equal c6_meta_before, File.binread(File.join(c6, "meta.yml"))
+        assert_equal c7_meta_before, File.binread(File.join(c7, "meta.yml"))
+        assert_equal legacy_before, File.binread(legacy_repair)
+      end
+    end
+  end
+
   private
 
   def assert_schema_valid(name, payload)

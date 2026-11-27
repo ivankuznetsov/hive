@@ -1775,6 +1775,46 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_enforce_admission_raises_wait_error_for_inherited_root_and_updates_fingerprint_on_recovery
+    with_tmp_dir do |root|
+      prepare_test_runtime_project(root)
+      c5_folder = write_task_meta(root, "3-plan", "c5-root", id: 1)
+      File.write(File.join(c5_folder, "plan.md"), "---\ndepends_on:\n  - F2\n  - F3\n---\n# Plan\n")
+      c6_folder = write_task_meta(root, "2-brainstorm", "c6-child", id: 2)
+      Hive::TaskMeta.write(c6_folder, id: 2, slug: "c6-child", display_name: nil, depends_on: "c5-root")
+
+      registry = [ { "name" => "app", "path" => root, "repository_identity" => "github.com/acme/app" } ]
+      c5_task = Hive::Task.new(c5_folder)
+      c6_task = Hive::Task.new(c6_folder)
+
+      root_err = assert_raises(Hive::DependencyAdmissionError) do
+        Hive::DependencySnapshot.enforce_admission!(c5_task, registry_entries: registry)
+      end
+      assert_equal "plan_dependency_invalid", root_err.reason_code
+
+      child_err = assert_raises(Hive::DependencyWaitError) do
+        Hive::DependencySnapshot.enforce_admission!(c6_task, registry_entries: registry)
+      end
+      assert_includes child_err.message, "app:c5-root: invalid depends_on F2, F3"
+      assert_equal "app:c5-root", child_err.offending_ref
+      assert_includes child_err.safe_correction, "Repair app:c5-root"
+
+      fp_broken = Hive::DependencySnapshot.admission_fingerprint(c6_task, registry_entries: registry)
+
+      # Repair c5-root: remove invalid frontmatter; c6 still waits on c5's stage gate,
+      # and fingerprint changes cleanly.
+      File.write(File.join(c5_folder, "plan.md"), "# Repaired Plan\n")
+      fp_repaired = Hive::DependencySnapshot.admission_fingerprint(c6_task, registry_entries: registry)
+      refute_equal fp_broken, fp_repaired
+
+      child_gate_err = assert_raises(Hive::DependencyWaitError) do
+        Hive::DependencySnapshot.enforce_admission!(c6_task, registry_entries: registry)
+      end
+      refute_includes child_gate_err.message, "invalid depends_on"
+      assert_includes child_gate_err.message, "c5-root at 3-plan"
+    end
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

@@ -405,7 +405,7 @@ module Hive
       false
     end
 
-    def blocker_names(unmet_dependencies:, blocked_by: nil)
+    def blocker_names(unmet_dependencies:, blocked_by: nil, dependency_repair_roots: [])
       names = Array(unmet_dependencies).filter_map do |entry|
         value = field(entry, :blocked_by).to_s.strip
         value = field(entry, :reference).to_s.strip if value.empty?
@@ -413,13 +413,67 @@ module Hive
       end
       fallback = blocked_by.to_s.strip
       names << fallback if names.empty? && !fallback.empty?
+      Array(dependency_repair_roots).each do |root|
+        qualified = repair_root_identity(root)
+        names << qualified unless qualified.empty?
+      end
       names.uniq
     end
 
+    def repair_root_identity(root)
+      project = field(root, :project).to_s.strip
+      slug = field(root, :slug).to_s.strip
+      return "" if slug.empty?
+
+      project.empty? ? slug : "#{project}:#{slug}"
+    end
+
+    def repair_root_summary(root)
+      qualified = repair_root_identity(root)
+      reason_code = field(root, :reason_code).to_s.strip
+      offending = field(root, :offending_ref).to_s.strip
+      case reason_code
+      when "plan_dependency_invalid"
+        offending.empty? ? "#{qualified}: invalid depends_on" : "#{qualified}: invalid depends_on #{offending}"
+      when "plan_dependency_mismatch"
+        offending.empty? ? "#{qualified}: mismatched depends_on" : "#{qualified}: mismatched depends_on #{offending}"
+      when "plan_dependency_missing"
+        offending.empty? ? "#{qualified}: unadopted depends_on" : "#{qualified}: unadopted depends_on #{offending}"
+      else
+        offending.empty? ? "#{qualified}: #{reason_code}" : "#{qualified}: #{reason_code} #{offending}"
+      end
+    end
+
+    def repair_roots_summary(dependency_repair_roots)
+      Array(dependency_repair_roots).filter_map do |root|
+        summary = repair_root_summary(root)
+        summary unless summary.empty?
+      end.join("; ")
+    end
+
+    def repair_root_matches_target?(root, target, current_project: nil)
+      name = target.to_s.strip
+      return false if name.empty?
+
+      project = field(root, :project).to_s.strip
+      slug = field(root, :slug).to_s.strip
+      return false if slug.empty?
+
+      if name.include?(":")
+        name == "#{project}:#{slug}"
+      elsif current_project && !current_project.to_s.empty?
+        project == current_project.to_s && slug == name
+      else
+        slug == name
+      end
+    end
+
     # Undecorated blocker summary shared by human and structured renderers.
-    # The complete unmet collection is authoritative; scalar singulars are
-    # compatibility fallbacks only.
-    def blocker_summary(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [])
+    # The complete unmet collection and inherited repair roots are authoritative;
+    # scalar singulars are compatibility fallbacks only.
+    def blocker_summary(depends_on:, blocked_by:, dependency_stage:, unmet_dependencies: [],
+                        dependency_repair_roots: [], current_project: nil)
+      roots = Array(dependency_repair_roots).reject { |root| repair_root_identity(root).empty? }
       blockers = Array(unmet_dependencies).filter_map do |entry|
         reference = field(entry, :reference)
         target = field(entry, :blocked_by)
@@ -427,6 +481,7 @@ module Hive
         gate = field(entry, :required_gate)
         name = target.to_s.strip.empty? ? reference.to_s.strip : target.to_s.strip
         next if name.empty?
+        next if roots.any? { |root| repair_root_matches_target?(root, name, current_project: current_project) }
 
         if target.to_s.strip.empty?
           "#{name} (unresolved)"
@@ -436,6 +491,14 @@ module Hive
           "#{name} (#{stage})"
         end
       end
+
+      unless roots.empty?
+        roots_text = repair_roots_summary(roots)
+        return "blocked by #{roots_text}" if blockers.empty?
+
+        return "blocked by #{roots_text}; #{blockers.join(', ')}"
+      end
+
       if blockers.empty?
         blockers << if !blocked_by.to_s.strip.empty?
           "#{blocked_by} (#{dependency_stage})"

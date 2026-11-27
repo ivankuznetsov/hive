@@ -1365,7 +1365,9 @@ module Hive
       return false if row["admission_error"]
 
       Hive::Dependencies.blocker_names(
-        unmet_dependencies: row["unmet_dependencies"], blocked_by: row["blocked_by"]
+        unmet_dependencies: row["unmet_dependencies"],
+        blocked_by: row["blocked_by"],
+        dependency_repair_roots: row["dependency_repair_roots"]
       ).any?
     end
 
@@ -1374,7 +1376,8 @@ module Hive
         depends_on: row["depends_on"],
         blocked_by: row["blocked_by"],
         dependency_stage: row["dependency_stage"],
-        unmet_dependencies: row["unmet_dependencies"]
+        unmet_dependencies: row["unmet_dependencies"],
+        dependency_repair_roots: row["dependency_repair_roots"]
       )
     end
 

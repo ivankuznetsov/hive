@@ -21,6 +21,11 @@ module Hive
       dependency_validation_failed
     ].freeze
     CYCLE_REASON_CODES = %w[dependency_cycle dependency_self_reference].freeze
+    COVERED_PLAN_REASON_CODES = %w[
+      plan_dependency_invalid
+      plan_dependency_mismatch
+      plan_dependency_missing
+    ].freeze
 
     AdmissionError = Data.define(:reason_code, :offending_ref, :safe_correction) do
       def cycle? = CYCLE_REASON_CODES.include?(reason_code)
@@ -30,6 +35,34 @@ module Hive
           "reason_code" => reason_code,
           "offending_ref" => offending_ref,
           "safe_correction" => safe_correction
+        }
+      end
+    end
+
+    RepairRoot = Data.define(
+      :project, :slug, :reason_code, :offending_ref, :safe_correction, :issues
+    ) do
+      def initialize(project:, slug:, reason_code:, offending_ref:, safe_correction:, issues: [])
+        super(
+          project: project.to_s,
+          slug: slug.to_s,
+          reason_code: reason_code.to_s,
+          offending_ref: offending_ref.to_s,
+          safe_correction: safe_correction.to_s,
+          issues: Array(issues).freeze
+        )
+      end
+
+      def qualified_identity = "#{project}:#{slug}"
+
+      def to_h
+        {
+          "project" => project,
+          "slug" => slug,
+          "reason_code" => reason_code,
+          "offending_ref" => offending_ref,
+          "safe_correction" => safe_correction,
+          "issues" => issues.map { |issue| issue.respond_to?(:to_h) ? issue.to_h : issue }
         }
       end
     end
@@ -46,16 +79,20 @@ module Hive
     end
 
     Verdict = Data.define(
-      :state, :blocked_by, :dependency_stage, :unmet_dependencies, :admission_error
+      :state, :blocked_by, :dependency_stage, :unmet_dependencies,
+      :admission_error, :dependency_repair_roots
     ) do
       def initialize(state:, blocked_by: nil, dependency_stage: nil,
-                     unmet_dependencies: EMPTY_UNMET_DEPENDENCIES, admission_error: nil)
+                     unmet_dependencies: EMPTY_UNMET_DEPENDENCIES,
+                     admission_error: nil,
+                     dependency_repair_roots: EMPTY_REPAIR_ROOTS)
         super(
           state: state,
           blocked_by: blocked_by,
           dependency_stage: dependency_stage,
           unmet_dependencies: unmet_dependencies,
-          admission_error: admission_error
+          admission_error: admission_error,
+          dependency_repair_roots: Array(dependency_repair_roots).freeze
         )
       end
 
@@ -66,10 +103,12 @@ module Hive
     end
 
     EMPTY_UNMET_DEPENDENCIES = [].freeze
+    EMPTY_REPAIR_ROOTS = [].freeze
     EMPTY_REFERENCES = [].freeze
     EMPTY_ISSUES = [].freeze
     EMPTY_ENTRIES = [].freeze
-    private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REFERENCES, :EMPTY_ISSUES, :EMPTY_ENTRIES
+    private_constant :EMPTY_UNMET_DEPENDENCIES, :EMPTY_REPAIR_ROOTS, :EMPTY_REFERENCES,
+                     :EMPTY_ISSUES, :EMPTY_ENTRIES
 
     HintTask = Data.define(:project, :slug, :idempotency_key)
 
@@ -116,11 +155,15 @@ module Hive
     end
 
     Blocker = Data.define(:identity, :unmet)
-    Evaluation = Data.define(:verdict, :blockers, :cycle_derived, :cycle_anchors)
+    Evaluation = Data.define(
+      :verdict, :blockers, :repair_roots, :noncovered_error, :cycle_derived, :cycle_anchors
+    )
     Frame = Struct.new(
       :task, :identity, :incoming, :entered, :references, :cursor,
       :list_declaration, :direct_blockers, :transitive_blockers,
-      :admission_error, :cycle_derived, :cycle_anchors,
+      :admission_error, :local_covered_error, :local_covered_root,
+      :covered_unresolved_identities, :inherited_repair_roots,
+      :cycle_derived, :cycle_anchors,
       keyword_init: true
     ) do
       def complete? = cursor >= references.length
@@ -463,6 +506,10 @@ module Hive
           reference = frame.next_reference
           edge = resolve_edge(frame.task, reference, override_task: override_task, override_identity: override_identity)
           if edge.is_a?(Verdict)
+            if edge.admission_error.reason_code == "dependency_task_missing" &&
+               covered_unresolved_edge?(frame, reference)
+              next
+            end
             frame.fail!(edge.admission_error)
             next
           end
@@ -517,15 +564,28 @@ module Hive
           task: task, identity: identity, incoming: incoming, entered: false,
           references: EMPTY_REFERENCES, cursor: 0, list_declaration: false,
           direct_blockers: [], transitive_blockers: [], admission_error: nil,
+          local_covered_error: nil, local_covered_root: nil,
+          covered_unresolved_identities: [], inherited_repair_roots: [],
           cycle_derived: false, cycle_anchors: []
         )
       end
 
       def enter_frame(frame)
         frame.entered = true
-        if (node_error = validate_node(frame.task))
-          frame.fail!(node_error.admission_error)
-          return
+        node_result = validate_node(frame.task)
+        if node_result
+          if node_result.is_a?(Hash) && node_result[:covered_root]
+            frame.local_covered_error = node_result[:error]
+            frame.local_covered_root = node_result[:covered_root]
+            frame.covered_unresolved_identities = node_result[:covered_unresolved_identities]
+            # Continue walking parsable metadata prerequisites after a covered
+            # local plan error so independently broken descendants still collect
+            # inherited roots, cycles, and ordinary blockers.
+          else
+            error = node_result.is_a?(Hash) ? node_result[:error] : node_result.admission_error
+            frame.fail!(error)
+            return
+          end
         end
         return unless frame.task.depends_on
 
@@ -538,6 +598,13 @@ module Hive
         references, list_declaration = declaration
         frame.references = references
         frame.list_declaration = list_declaration
+      end
+
+      def covered_unresolved_edge?(frame, reference)
+        return false if frame.covered_unresolved_identities.empty?
+
+        edge_identity = Hive::Dependencies.reference_identity(reference, frame.task.project)
+        frame.covered_unresolved_identities.include?(edge_identity)
       end
 
       def resolve_edge(task, reference, override_task: nil, override_identity: nil)
@@ -564,11 +631,15 @@ module Hive
             evaluation.blockers.map { |blocker| blocker_for_requesting_project(frame, blocker) }
           )
         end
+        # Always merge repair roots even when an unmet direct edge suppresses
+        # ordinary transitive blockers so a waiting sibling cannot hide a
+        # deeper broken root.
+        frame.inherited_repair_roots.concat(evaluation.repair_roots)
         frame.fail!(incoming[:admission_error]) if incoming[:admission_error]
-        return unless evaluation.verdict.error?
+        return unless evaluation.noncovered_error
 
         frame.fail!(
-          evaluation.verdict.admission_error,
+          evaluation.noncovered_error,
           cycle_derived: evaluation.cycle_derived,
           cycle_anchors: evaluation.cycle_anchors
         )
@@ -577,24 +648,47 @@ module Hive
       def complete_frame(frame)
         blockers = deduplicate_blockers(frame.direct_blockers + frame.transitive_blockers)
         unmet = blockers.map(&:unmet).freeze
+        inherited_roots = deduplicate_repair_roots(frame.inherited_repair_roots)
+        propagated_roots = deduplicate_repair_roots(
+          (frame.local_covered_root ? [ frame.local_covered_root ] : []) + inherited_roots
+        )
         singular = frame.list_declaration ? nil : frame.direct_blockers.first&.unmet
-        verdict = if frame.admission_error
-          error_verdict(frame.admission_error, unmet)
-        elsif blockers.empty?
+        effective_error = if frame.admission_error&.cycle?
+          frame.admission_error
+        else
+          frame.local_covered_error || frame.admission_error
+        end
+        verdict = if effective_error
+          error_verdict(effective_error, unmet, dependency_repair_roots: inherited_roots)
+        elsif blockers.empty? && inherited_roots.empty?
           clear
         else
           wait(
             blocked_by: singular&.blocked_by,
             dependency_stage: singular&.dependency_stage,
-            unmet_dependencies: unmet
+            unmet_dependencies: unmet,
+            dependency_repair_roots: inherited_roots
           )
         end
         Evaluation.new(
           verdict: verdict.freeze,
           blockers: blockers.freeze,
+          repair_roots: propagated_roots,
+          noncovered_error: frame.admission_error,
           cycle_derived: frame.cycle_derived,
           cycle_anchors: frame.cycle_anchors.uniq.freeze
         ).freeze
+      end
+
+      def deduplicate_repair_roots(roots)
+        seen = {}
+        Array(roots).each_with_object([]) do |root, result|
+          key = root.qualified_identity
+          next if seen.key?(key)
+
+          seen[key] = true
+          result << root
+        end.freeze
       end
 
       def reusable_walk_evaluation?(evaluation, active_index)
@@ -641,31 +735,44 @@ module Hive
 
       def validate_node(task)
         if task.validation_error
-          return cached_admission_error(task.validation_error) if task.validation_error.is_a?(AdmissionError)
-
-          return validation_failure(task.validation_error, qualify(task))
+          error = task.validation_error.is_a?(AdmissionError) ?
+            task.validation_error :
+            validation_failure(task.validation_error, qualify(task)).admission_error
+          return { error: error, covered_root: nil, covered_unresolved_identities: [] }
         end
 
         case task.metadata_status
         when :unreadable
-          return admission_error(
-            "dependency_metadata_unreadable",
-            qualify(task),
-            "Repair #{task.folder}/meta.yml without removing dependency evidence."
-          )
+          return {
+            error: admission_error(
+              "dependency_metadata_unreadable",
+              qualify(task),
+              "Repair #{task.folder}/meta.yml without removing dependency evidence."
+            ).admission_error,
+            covered_root: nil,
+            covered_unresolved_identities: []
+          }
         when :invalid_reference
           correction = invalid_reference_correction(task)
-          return admission_error(
-            "dependency_reference_invalid",
-            task.depends_on ? Hive::Dependencies.display_declaration(task.depends_on) : qualify(task),
-            correction
-          )
+          return {
+            error: admission_error(
+              "dependency_reference_invalid",
+              task.depends_on ? Hive::Dependencies.display_declaration(task.depends_on) : qualify(task),
+              correction
+            ).admission_error,
+            covered_root: nil,
+            covered_unresolved_identities: []
+          }
         when :invalid
-          return admission_error(
-            "dependency_metadata_invalid",
-            qualify(task),
-            "Repair #{task.folder}/meta.yml as a YAML mapping and preserve the intended depends_on value."
-          )
+          return {
+            error: admission_error(
+              "dependency_metadata_invalid",
+              qualify(task),
+              "Repair #{task.folder}/meta.yml as a YAML mapping and preserve the intended depends_on value."
+            ).admission_error,
+            covered_root: nil,
+            covered_unresolved_identities: []
+          }
         end
 
         if task.plan_status == :invalid || (task.plan_status == :ok && !task.plan_dependency.nil?)
@@ -673,7 +780,8 @@ module Hive
           resolved = resolve_plan_entries(project_name: task.project, entries: entries)
           covered_issues = sort_issues(Array(task.plan_issues) + resolved[:covered_issues])
           if task.plan_status == :invalid && covered_issues.empty?
-            return plan_invalid_error(task_folder: task.folder, issues: [])
+            error = plan_invalid_error(task_folder: task.folder, issues: []).admission_error
+            return covered_node_result(task, error: error, issues: [])
           end
           unless covered_issues.empty?
             enriched = enrich_issues_with_hints(
@@ -681,27 +789,70 @@ module Hive
               issues: covered_issues,
               exclude_slug: task.slug
             )
-            return plan_invalid_error(task_folder: task.folder, issues: enriched)
+            error = plan_invalid_error(task_folder: task.folder, issues: enriched).admission_error
+            unresolved_ids = resolved[:covered_issues].filter_map do |issue|
+              entry = entries.find { |e| e.index == issue.index && e.raw_value == issue.raw_value }
+              next unless entry
+
+              Hive::Dependencies.reference_identity(entry.reference, task.project)
+            end.uniq.freeze
+            return covered_node_result(
+              task, error: error, issues: enriched, covered_unresolved_identities: unresolved_ids
+            )
           end
         end
 
         if task.plan_dependency && task.depends_on.nil?
-          return admission_error(
+          offending = Hive::Dependencies.display_declaration(task.plan_dependency)
+          error = admission_error(
             "plan_dependency_missing",
-            Hive::Dependencies.display_declaration(task.plan_dependency),
+            offending,
             "Add the same depends_on value to #{task.folder}/meta.yml or remove the stale plan assertion."
+          ).admission_error
+          issue = Hive::Dependencies::DeclarationIssue.new(
+            index: nil,
+            raw_value: task.plan_dependency,
+            display_value: offending,
+            code: :plan_dependency_missing,
+            message: "plan.md depends_on (#{offending}) is absent from meta.yml"
           )
+          return covered_node_result(task, error: error, issues: [ issue ])
         end
 
         if task.plan_dependency && normalized_declaration(task.plan_dependency) != normalized_declaration(task.depends_on)
-          return admission_error(
+          offending = Hive::Dependencies.display_declaration(task.plan_dependency)
+          error = admission_error(
             "plan_dependency_mismatch",
-            Hive::Dependencies.display_declaration(task.plan_dependency),
+            offending,
             "Make plan.md depends_on exactly match #{task.folder}/meta.yml."
+          ).admission_error
+          issue = Hive::Dependencies::DeclarationIssue.new(
+            index: nil,
+            raw_value: task.plan_dependency,
+            display_value: offending,
+            code: :plan_dependency_mismatch,
+            message: "plan.md depends_on (#{offending}) disagrees with meta.yml"
           )
+          return covered_node_result(task, error: error, issues: [ issue ])
         end
 
         nil
+      end
+
+      def covered_node_result(task, error:, issues:, covered_unresolved_identities: [])
+        root = RepairRoot.new(
+          project: task.project,
+          slug: task.slug,
+          reason_code: error.reason_code,
+          offending_ref: error.offending_ref,
+          safe_correction: error.safe_correction,
+          issues: issues
+        ).freeze
+        {
+          error: error,
+          covered_root: root,
+          covered_unresolved_identities: covered_unresolved_identities
+        }
       end
 
       def plan_entries_for(task)
@@ -924,13 +1075,15 @@ module Hive
         Verdict.new(state: :clear).freeze
       end
 
-      def wait(blocked_by:, dependency_stage:, unmet_dependencies:)
+      def wait(blocked_by:, dependency_stage:, unmet_dependencies:,
+               dependency_repair_roots: EMPTY_REPAIR_ROOTS)
         Verdict.new(
           state: :wait,
           blocked_by: blocked_by,
           dependency_stage: dependency_stage,
           unmet_dependencies: unmet_dependencies,
-          admission_error: nil
+          admission_error: nil,
+          dependency_repair_roots: dependency_repair_roots
         ).freeze
       end
 
@@ -950,13 +1103,14 @@ module Hive
         ).freeze
       end
 
-      def error_verdict(error, unmet_dependencies)
+      def error_verdict(error, unmet_dependencies, dependency_repair_roots: EMPTY_REPAIR_ROOTS)
         Verdict.new(
           state: :error,
           blocked_by: nil,
           dependency_stage: nil,
           unmet_dependencies: unmet_dependencies,
-          admission_error: error
+          admission_error: error,
+          dependency_repair_roots: dependency_repair_roots
         ).freeze
       end
 

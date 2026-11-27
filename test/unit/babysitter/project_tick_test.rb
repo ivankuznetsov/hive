@@ -471,6 +471,31 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_provider_error_and_limits_reached_outcomes_retry_without_counting_needs_human
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 2 })
+      logger = make_logger(dir)
+      prs = [
+        { "number" => 23, "labels" => [], "updatedAt" => "2026-05-26T10:00:00Z" },
+        { "number" => 24, "labels" => [], "updatedAt" => "2026-05-26T11:00:00Z" }
+      ]
+      outcomes = { 23 => :provider_error, 24 => :limits_reached }
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(_path, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, ->(pr, *_args, **_kwargs) { outcomes.fetch(pr["number"]) }) do
+          summary = Hive::Babysitter::ProjectTick.run(project, dry_run: false, logger: logger, inflight: Set.new)
+          assert_equal({ total: 2, fixed: 0, untouched: 0, needs_human: 0 }, summary)
+        end
+      end
+      assert_equal :retry, Hive::Babysitter::ProjectTick.outcome_class(:provider_error)
+      assert_equal :retry, Hive::Babysitter::ProjectTick.outcome_class(:limits_reached)
+      assert_raises(ArgumentError) { Hive::Babysitter::ProjectTick.outcome_class(:unknown_outcome) }
+    ensure
+      logger&.close
+    end
+  end
+
   def test_gh_error_emits_event_and_does_not_spawn_agent
     with_tmp_dir do |dir|
       project = project_entry(dir)

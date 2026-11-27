@@ -46,4 +46,44 @@ class BabysitterAcceptanceGiveUpTest < Minitest::Test
       }
     end
   end
+
+  def test_provider_quota_and_transient_errors_never_comment_or_label_pr
+    [
+      [ { status: :error, error_message: "exit_code=1", final_message: "429 Too Many Requests: usage cap reached" }, :limits_reached ],
+      [ { status: :error, error_reason: "provider_error",
+          provider_error: { kind: :provider_error, provider: :claude, status_code: 529, message: "Overloaded" },
+          error_message: "API Error: 529 Overloaded" }, :provider_error ]
+    ].each do |spawn_result, expected_outcome|
+      with_tmp_dir do |dir|
+        project = babysitter_project(dir)
+        worktree_path = File.join(dir, "worktree")
+        FileUtils.mkdir_p(worktree_path)
+        pr = babysitter_pr
+        gh_calls = []
+
+        with_non_green_babysitter_context(project, worktree_path, pr) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawn_result }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { gh_calls << [ :label, args ] }) do
+              with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, ->(*args, **_kwargs) { gh_calls << [ :comment, args ] }) do
+                outcome = Hive::Babysitter::PrFixer.run(
+                  pr,
+                  project,
+                  babysitter_cfg,
+                  dry_run: false,
+                  logger: acceptance_logger,
+                  inflight: Set.new
+                )
+                assert_equal expected_outcome, outcome
+              end
+            end
+          end
+        end
+
+        assert_empty gh_calls, "provider operational failure #{expected_outcome} must not touch PR labels or comments"
+        events = babysitter_events(project)
+        assert events.any? { |event| event["action"] == "agent-fix" && event["outcome"] == expected_outcome.to_s && event["pr"] == 42 }
+        refute events.any? { |event| %w[give-up pr-comment label-apply].include?(event["action"]) }
+      end
+    end
+  end
 end

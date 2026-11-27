@@ -393,6 +393,167 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_unstructured_quota_and_rate_limit_failures_suppress_comments_and_hold_provider
+    scenarios = [
+      { status: :error, error_message: "exit_code=1", final_message: "You've hit your limit \u00b7 resets 8pm (Europe/London)" },
+      { status: :error, error_message: "exit_code=1", final_message: "You have reached your usage cap" },
+      { status: :error, error_message: "exit_code=1", final_message: "429 Too Many Requests" },
+      { status: :error, error_message: "exit_code=1", final_message: "Your credit balance is too low to access the Anthropic API" },
+      { status: :error, timed_out: true, error_reason: "limits_reached", error_message: "limits reached for claude: quota exhausted" }
+    ]
+
+    scenarios.each do |spawn_result|
+      with_tmp_dir do |dir|
+        project = project_entry(dir)
+        worktree_path = File.join(dir, "wt")
+        FileUtils.mkdir_p(worktree_path)
+        spawns = 0
+        gh_calls = []
+
+        stub_non_green_context(project, worktree_path) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; spawn_result }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { gh_calls << [ :label, args ] }) do
+              with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, ->(*args, **_kwargs) { gh_calls << [ :comment, args ] }) do
+                assert_equal :limits_reached,
+                             Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+                assert_equal :limits_reached,
+                             Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+              end
+            end
+          end
+        end
+
+        assert_equal 1, spawns, "quota/rate-limit hold must suppress repeated spawns for #{spawn_result.inspect}"
+        assert_empty gh_calls, "quota/rate-limit failure must never post a PR comment or label: #{spawn_result.inspect}"
+        hold = JSON.parse(File.read(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json"))).fetch("claude")
+        assert_equal "limits_reached", hold.fetch("outcome")
+        refute_empty hold.fetch("retry_after").to_s
+        refute_equal "exit_code=1", hold.fetch("message")
+        events = read_events(project)
+        assert(events.any? { |event| event["action"] == "agent-fix" && event["outcome"] == "limits_reached" && event["provider"] == "claude" })
+        assert(events.any? { |event| event["action"] == "skipped" && event["outcome"] == "limits_reached" && event["provider"] == "claude" })
+        refute(events.any? { |event| %w[give-up pr-comment label-apply].include?(event["action"]) })
+      end
+    end
+  end
+
+  def test_transient_provider_capacity_and_preflight_failures_suppress_comments_and_back_off
+    scenarios = [
+      [ { status: :error, error_reason: "provider_error",
+          provider_error: { kind: :provider_error, provider: :claude, status_code: 529, message: "Overloaded" },
+          error_message: "API Error: 529 Overloaded" }, "provider_error" ],
+      [ { status: :error, error_message: "exit_code=1",
+          final_message: "MODEL_CAPACITY_EXHAUSTED: No capacity available for model gemini-3" }, "transient_provider_error" ],
+      [ { status: :error, preflight_failed: true,
+          error_message: "preflight failed: codex (ENOENT)" }, "preflight_failed" ],
+      [ { status: :error, error_reason: "authentication_failure",
+          error_message: "This API key has expired" }, "authentication_failure" ]
+    ]
+
+    scenarios.each do |spawn_result, expected_reason|
+      with_tmp_dir do |dir|
+        project = project_entry(dir)
+        worktree_path = File.join(dir, "wt")
+        FileUtils.mkdir_p(worktree_path)
+        spawns = 0
+        gh_calls = []
+
+        stub_non_green_context(project, worktree_path) do
+          with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; spawn_result }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { gh_calls << [ :label, args ] }) do
+              with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, ->(*args, **_kwargs) { gh_calls << [ :comment, args ] }) do
+                assert_equal :provider_error,
+                             Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+                assert_equal :provider_error,
+                             Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+              end
+            end
+          end
+        end
+
+        assert_equal 1, spawns, "transient provider hold must skip same-window retries for #{expected_reason}"
+        assert_empty gh_calls, "operational/provider error must never comment or label the PR (#{expected_reason})"
+        hold = JSON.parse(File.read(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json"))).fetch("claude")
+        assert_equal "provider_error", hold.fetch("outcome")
+        assert_equal expected_reason, hold.fetch("reason")
+        assert Time.iso8601(hold.fetch("hold_until")) > Time.now.utc
+        events = read_events(project)
+        assert(events.any? do |event|
+          event["action"] == "agent-fix" && event["outcome"] == "provider_error" &&
+            event["provider"] == "claude" && event["reason"] == expected_reason
+        end)
+        assert(events.any? do |event|
+          event["action"] == "skipped" && event["outcome"] == "provider_error" &&
+            event["provider"] == "claude" && event["reason"] == expected_reason
+        end)
+        refute(events.any? { |event| %w[give-up pr-comment label-apply].include?(event["action"]) })
+      end
+    end
+  end
+
+  def test_expired_transient_provider_hold_respawns_and_clears_on_success
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      hold_path = File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json")
+      FileUtils.mkdir_p(File.dirname(hold_path))
+      File.write(hold_path, JSON.generate(
+        "claude" => {
+          "outcome" => "provider_error",
+          "limited_at" => (Time.now.utc - 600).iso8601,
+          "hold_until" => (Time.now.utc - 60).iso8601,
+          "reason" => "provider_error"
+        },
+        "codex" => { "limited_at" => Time.now.utc.iso8601 }
+      ))
+      spawns = 0
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; { status: :ok } }) do
+          assert_equal :success,
+                       Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+        end
+      end
+
+      assert_equal 1, spawns
+      assert_equal %w[codex], JSON.parse(File.read(hold_path)).keys
+    end
+  end
+
+  def test_budget_exhausted_failure_origin_still_gives_up
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      comments = []
+      exhausted = {
+        status: :error,
+        failure_origin: "budget_exhausted",
+        error_message: "agent exhausted its per-run budget (observed $50.1, configured $50)"
+      }
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { exhausted }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, lambda { |*_args, **_kwargs|
+            Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+          }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, lambda { |*args, **_kwargs|
+              comments << args[2]
+              Hive::Gh::PushResult.new(success: true, stdout: "", stderr: "")
+            }) do
+              assert_equal :budget_exhausted,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new)
+            end
+          end
+        end
+      end
+
+      assert_equal 1, comments.size
+      assert_includes comments.first, "Outcome: budget_exhausted"
+    end
+  end
+
   # Supersedes #1473: a refused babysitter model is operator-owned config. It
   # must not take a limit hold; the PR gets the give-up label and a comment
   # that names the model and the config fix.
@@ -473,7 +634,8 @@ class BabysitterPrFixerTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(hold_path))
       spawns = 0
       [ "not json", JSON.generate([ 1 ]), JSON.generate("claude" => "x"),
-        JSON.generate("claude" => { "limited_at" => "garbage" }) ].each do |content|
+        JSON.generate("claude" => { "limited_at" => "garbage" }),
+        JSON.generate("claude" => { "outcome" => "provider_error", "hold_until" => "garbage" }) ].each do |content|
         File.write(hold_path, content)
         stub_non_green_context(project, worktree_path) do
           with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, ->(*_args, **_kwargs) { spawns += 1; { status: :ok } }) do
@@ -483,7 +645,32 @@ class BabysitterPrFixerTest < Minitest::Test
         end
       end
 
-      assert_equal 4, spawns
+      assert_equal 5, spawns
+    end
+  end
+
+  def test_dry_run_provider_error_suppresses_comments_without_persisting_hold
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      gh_calls = []
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_args, **_kwargs|
+          { status: :error, error_reason: "provider_error", error_message: "529 Overloaded" }
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::GhOps, :add_label, ->(*args, **_kwargs) { gh_calls << args }) do
+            with_replaced_singleton_method(Hive::Babysitter::GhOps, :post_pr_comment, ->(*args, **_kwargs) { gh_calls << args }) do
+              assert_equal :provider_error,
+                           Hive::Babysitter::PrFixer.run(pr, project, cfg, dry_run: true, logger: nil, inflight: Set.new)
+            end
+          end
+        end
+      end
+
+      assert_empty gh_calls
+      refute File.exist?(File.join(project.fetch("hive_state_path"), "babysitter", "agent-limit-hold.json"))
     end
   end
 

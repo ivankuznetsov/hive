@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, lib/hive/babysitter/git_policy.rb, lib/hive/babysitter/gh_policy.rb, lib/hive/babysitter/passthrough_runner.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh.rb
 created: 2026-05-26
-updated: 2026-11-01
+updated: 2026-11-27
 tags: [command, babysitter, daemon, github, systemd, launchd]
 ---
 
@@ -158,22 +158,40 @@ repair blocker. The comment leads with the classified `Error:` line before the
 agent tail, because the tail is often provider startup noise (for example MCP
 connection errors from the operator's own Codex config).
 
-A provider usage limit (`error_reason: "limits_reached"` from `Hive::Agent`) is
-not a give-up: no label, no comment. `PrFixer` records the provider in
-`.hive-state/babysitter/agent-limit-hold.json` (`limited_at`, the provider's
-`retry_after` estimate, and the message) and emits `agent-fix` with outcome
-`limits_reached`. Until `AgentLimit.retry_due?` says the hourly cooldown from
-`limited_at` has passed, later ticks skip that provider's spawns with a
-`skipped`/`limits_reached` event; the next real spawn that does not hit the
-limit clears the hold. `limits_reached` is a `:retry` outcome class, so the
-one-shot projection reports it as `waiting_external` until the next poll.
+A provider usage limit, rate limit, usage cap, or billing/credit wall (from
+`Hive::Babysitter::FailureClassifier`: `error_reason: "limits_reached"`,
+typed `provider_error` / `provider_signal` quota or HTTP 402/429 signals,
+`limit_text`, or matching failure lines even when the CLI timed out waiting on
+the wall) is not a give-up: no label, no PR comment. `PrFixer` records the
+provider in `.hive-state/babysitter/agent-limit-hold.json` (`limited_at`,
+`outcome: "limits_reached"`, `reason`, `retry_after`, and a redacted bounded
+`message`) and emits `agent-fix` with outcome `limits_reached` plus structured
+`provider`/`reason`/`message` metadata. Until `AgentLimit.retry_due?` says the
+hourly cooldown from `limited_at` has passed, later ticks skip that provider's
+spawns with a `skipped`/`limits_reached` event; the next real spawn that does
+not hit a hold clears it.
+
+Transient provider, capacity/overloaded, 5xx, network, auth, and local-host
+preflight/operational failures (`preflight_failed`, `provider_error`,
+`provider_route_failed`, `provider_route_preflight_failed`,
+`authentication_failure`, `process_cleanup_failed`, structured
+`provider_error`/`provider_signal` envelopes, or unambiguous capacity/5xx/network
+diagnostics) are also not give-ups: no label, no PR comment. `PrFixer` returns
+`:provider_error`, emits `agent-fix`/`provider_error` with structured metadata,
+and writes a short 5-minute `hold_until` backoff in
+`.hive-state/babysitter/agent-limit-hold.json` so same-tick PRs and fast-poll
+loops skip spawning (`skipped`/`provider_error`) while the next regular poll
+recovers automatically once the backoff expires. Both `limits_reached` and
+`provider_error` belong to the `:retry` outcome class (not counted as
+`needs_human`), so the one-shot projection reports them as `waiting_external`
+until the next poll.
 
 A refused babysitter model (`error_reason: "model_unsupported"`, ADR-057) is
-not a limit: no hold is recorded. `PrFixer` returns `:model_unsupported`, emits
-`agent-fix` and `give-up` events with outcome `model_unsupported`, applies the
-give-up label, and posts a comment whose `Error:` line names the model and the
-config fix. `ProjectTick` counts it as `needs_human` (outcome class
-`:operator`).
+not a limit or transient provider error: no hold is recorded. `PrFixer` returns
+`:model_unsupported`, emits `agent-fix` and `give-up` events with outcome
+`model_unsupported`, applies the give-up label, and posts a comment whose
+`Error:` line names the model and the config fix. `ProjectTick` counts it as
+`needs_human` (outcome class `:operator`).
 
 ## Dry Run
 

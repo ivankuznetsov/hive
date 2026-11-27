@@ -25,7 +25,34 @@
                 <th scope="row"><%= node.fetch("id") %><% if node["root"] %> <span class="workspace-chip">Current</span><% end %></th>
                 <td><%= node["stage"].presence || node.fetch("kind").humanize %></td>
                 <td><%= Array(node["depends_on"]).presence&.to_sentence || "None" %></td>
-                <td><span class="workspace-state-label"><%= node.dig("admission", "state").to_s.humanize.presence || "Unavailable" %></span></td>
+                <td>
+                  <span class="workspace-state-label"><%= node.dig("admission", "state").to_s.humanize.presence || "Unavailable" %></span>
+                  <% repair_roots = Array(node.dig("admission", "dependency_repair_roots")) %>
+                  <% if repair_roots.any? %>
+                    <div class="dependency-repair-roots">
+                      <p><%= Hive::Dependencies.blocker_summary(depends_on: node["depends_on"], blocked_by: node.dig("admission", "blocked_by"), dependency_stage: node.dig("admission", "dependency_stage"), unmet_dependencies: node.dig("admission", "unmet_dependencies"), dependency_repair_roots: repair_roots, current_project: node["project"]) %></p>
+                      <ul>
+                        <% repair_roots.each do |root| %>
+                          <li>
+                            <strong><%= Hive::Dependencies.repair_root_summary(root) %></strong>
+                            <% Array(root["issues"]).each do |issue| %>
+                              <div>
+                                [<%= issue["index"].nil? ? "declaration" : "index #{issue['index']}" %>]
+                                <code><%= issue["display_value"] %></code>: <%= issue["message"] %>
+                                <% if issue["suggestion"].present? %>
+                                  (suggestion: <code><%= issue["suggestion"] %></code>)
+                                <% end %>
+                              </div>
+                            <% end %>
+                            <% if root["safe_correction"].present? %>
+                              <div>Repair: <%= root["safe_correction"] %></div>
+                            <% end %>
+                          </li>
+                        <% end %>
+                      </ul>
+                    </div>
+                  <% end %>
+                </td>
               </tr>
             <% end %>
           </tbody>

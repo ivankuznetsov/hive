@@ -57,12 +57,22 @@ module Hive
 
       def to_h
         {
-          "project" => project,
-          "slug" => slug,
+          "project" => project[0, 255],
+          "slug" => slug[0, 255],
           "reason_code" => reason_code,
-          "offending_ref" => offending_ref,
-          "safe_correction" => safe_correction,
-          "issues" => issues.map { |issue| issue.respond_to?(:to_h) ? issue.to_h : issue }
+          "offending_ref" => offending_ref[0, 1024],
+          "safe_correction" => safe_correction[0, 2048],
+          "issues" => issues.first(128).map do |issue|
+            raw = issue.respond_to?(:to_h) ? issue.to_h : issue
+            {
+              "index" => raw["index"].is_a?(Integer) && raw["index"] >= 0 ? raw["index"] : nil,
+              "raw_value" => Hive::Dependencies.json_safe_value(raw["raw_value"]),
+              "display_value" => raw["display_value"].to_s[0, 512],
+              "code" => raw["code"].to_s[0, 64],
+              "message" => raw["message"].to_s[0, 512],
+              "suggestion" => raw["suggestion"].nil? ? nil : raw["suggestion"].to_s[0, 255]
+            }
+          end
         }
       end
     end
@@ -840,12 +850,18 @@ module Hive
       end
 
       def covered_node_result(task, error:, issues:, covered_unresolved_identities: [])
+        repair_cmd = "hive plan #{task.slug} --project #{task.project} --from 3-plan"
+        root_correction = if error.safe_correction.include?(repair_cmd)
+          error.safe_correction
+        else
+          "#{error.safe_correction} Repair at root with `#{repair_cmd}`."
+        end
         root = RepairRoot.new(
           project: task.project,
           slug: task.slug,
           reason_code: error.reason_code,
           offending_ref: error.offending_ref,
-          safe_correction: error.safe_correction,
+          safe_correction: root_correction,
           issues: issues
         ).freeze
         {

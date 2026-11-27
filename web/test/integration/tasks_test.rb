@@ -269,6 +269,43 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select ".task-closure li", 0
   end
 
+  test "task detail renders root-directed dependency repair roots with indexed values and suggestions" do
+    root_slug = "c5-root-261030-aaaa"
+    child_slug = "c6-child-261030-bbbb"
+    target_slug = "f2-payments-261030-cccc"
+
+    target_dir = stage_dir(@project, "9-done").join(target_slug)
+    target_dir.mkpath
+    target_dir.join("task.md").write("# F2\n<!-- COMPLETE -->\n")
+    Hive::TaskMeta.write(target_dir.to_s, id: 2, slug: target_slug, display_name: "F2", completed_at: Time.now.utc)
+
+    root_dir = stage_dir(@project, "3-plan").join(root_slug)
+    root_dir.mkpath
+    root_dir.join("plan.md").write("---\ndepends_on:\n  - F2\n  - F3\n---\n# C5\n<!-- COMPLETE -->\n")
+    Hive::TaskMeta.write(root_dir.to_s, id: 5, slug: root_slug, display_name: "C5")
+
+    child_dir = stage_dir(@project, "2-brainstorm").join(child_slug)
+    child_dir.mkpath
+    child_dir.join("brainstorm.md").write("# C6\n<!-- COMPLETE -->\n")
+    Hive::TaskMeta.write(child_dir.to_s, id: 6, slug: child_slug, display_name: "C6", depends_on: root_slug)
+
+    refresh_status_feed!
+
+    get task_path(@project, child_slug)
+    assert_response :success
+    assert_select "#workspace-dependencies .dependency-repair-roots", 1
+    assert_includes response.body, "#{@project}:#{root_slug}: invalid depends_on F2, F3"
+    assert_includes response.body, "index 0"
+    assert_includes response.body, target_slug
+    assert_includes response.body, "hive plan #{root_slug} --project #{@project} --from 3-plan"
+
+    get task_path(@project, root_slug)
+    assert_response :success
+    assert_select "#workspace-dependencies .dependency-repair-roots", 1
+    assert_includes response.body, "F2"
+    assert_includes response.body, "F3"
+  end
+
   test "an archive link resolves a task omitted from the ordinary snapshot" do
     folder = stage_dir(@project, "9-done").join(@slug)
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug), folder)

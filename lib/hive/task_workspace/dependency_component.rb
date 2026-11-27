@@ -525,7 +525,7 @@ module Hive
 
       def verdict_payload(verdict)
         error = verdict.admission_error
-        {
+        payload = {
           "state" => verdict.state.to_s,
           "blocked_by" => verdict.blocked_by,
           "dependency_stage" => verdict.dependency_stage,
@@ -535,6 +535,55 @@ module Hive
             "offending_ref" => safe_offending_ref(error.offending_ref)
           }
         }
+        roots = safe_repair_roots(verdict.dependency_repair_roots)
+        payload["dependency_repair_roots"] = roots unless roots.empty?
+        payload
+      end
+
+      def safe_repair_roots(roots)
+        Array(roots).first(64).filter_map do |root|
+          raw = root.respond_to?(:to_h) ? root.to_h : root
+          next unless raw.is_a?(Hash)
+
+          {
+            "project" => raw["project"].to_s[0, 255],
+            "slug" => raw["slug"].to_s[0, 255],
+            "reason_code" => raw["reason_code"].to_s,
+            "offending_ref" => safe_workspace_text(raw["offending_ref"], 1024),
+            "safe_correction" => safe_workspace_text(raw["safe_correction"], 2048),
+            "issues" => Array(raw["issues"]).first(128).filter_map do |issue|
+              item = issue.respond_to?(:to_h) ? issue.to_h : issue
+              next unless item.is_a?(Hash)
+
+              {
+                "index" => item["index"].is_a?(Integer) && item["index"] >= 0 ? item["index"] : nil,
+                "raw_value" => safe_workspace_value(item["raw_value"]),
+                "display_value" => safe_workspace_text(item["display_value"], 512),
+                "code" => item["code"].to_s[0, 64],
+                "message" => safe_workspace_text(item["message"], 512),
+                "suggestion" => item["suggestion"].nil? ? nil : safe_workspace_text(item["suggestion"], 255)
+              }
+            end
+          }
+        end
+      end
+
+      def safe_workspace_text(value, limit)
+        text = Hive::SecretPatterns.redact(value.to_s)
+        text = text.gsub(%r{(?:[A-Za-z]:[\\/]|/)\S*/(plan\.md|meta\.yml)\b}, '\1')
+        text = text.gsub(%r{\A/+}, "")
+        text = text.gsub(%r{(?:^|[\\/])\.\.(?:[\\/]|$)}, "/")
+        text[0, limit]
+      end
+
+      def safe_workspace_value(value)
+        case value
+        when String then safe_workspace_text(value, 512)
+        when Array then value.first(32).map { |child| safe_workspace_value(child) }
+        when Hash then value.first(32).to_h { |k, v| [ safe_workspace_text(k, 64), safe_workspace_value(v) ] }
+        when Numeric, TrueClass, FalseClass, NilClass then value
+        else safe_workspace_text(value, 512)
+        end
       end
 
       def safe_offending_ref(value)

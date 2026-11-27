@@ -37,6 +37,16 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
     claude_pid: nil,
     claude_pid_alive: nil,
     implementation_identity: { "generation" => 0, "pending" => true, "stages" => {} },
+    dependency_repair_roots: [
+      {
+        "project" => "app",
+        "slug" => "root-task",
+        "reason_code" => "plan_dependency_invalid",
+        "offending_ref" => "F2",
+        "safe_correction" => "Repair root-task.",
+        "issues" => []
+      }
+    ],
     action_key: "ready_to_brainstorm",
     action_label: "Ready to brainstorm",
     suggested_command: "hive brainstorm probe --from 1-inbox"

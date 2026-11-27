@@ -1094,6 +1094,8 @@ module Hive
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
         payload.delete("implementation_identity") unless row[:implementation_identity]
+        repair_roots = Array(row[:dependency_repair_roots])
+        payload["dependency_repair_roots"] = repair_roots unless repair_roots.empty?
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(
             row[:marker_attrs], held_limit_fallback(row)
@@ -1365,7 +1367,7 @@ module Hive
             command = r[:suggested_command] || "-"
             state = [
               r[:state_label], plan_review_status_token(r[:plan_review]),
-              dependency_indicator(r), implementation_owner_token(r)
+              dependency_indicator(r, current_project: project["name"]), implementation_owner_token(r)
             ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
@@ -1386,7 +1388,7 @@ module Hive
           command = row[:suggested_command] || "-"
           state = [
             row[:state_label], plan_review_status_token(row[:plan_review]),
-            dependency_indicator(row), implementation_owner_token(row)
+            dependency_indicator(row, current_project: project["name"]), implementation_owner_token(row)
           ].compact.join(" ")
           puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
@@ -1440,11 +1442,23 @@ module Hive
         Hive::Tui::Views::Hyperlink.splice(padded, token_start, token.length, row[:pr_url], enabled: $stdout.tty?)
       end
 
-      def dependency_indicator(row)
+      def dependency_indicator(row, current_project: nil)
         return nil unless row[:blocked]
+        repair_roots = Array(row[:dependency_repair_roots])
         if row[:admission_error]
           error = row[:admission_error]
-          return "⚠ admission #{error.reason_code}: #{error.safe_correction}"
+          base = "⚠ admission #{error.reason_code}: #{error.safe_correction}"
+          return base if repair_roots.empty?
+
+          inherited = Hive::Dependencies.blocker_summary(
+            depends_on: row[:depends_on],
+            blocked_by: row[:blocked_by],
+            dependency_stage: row[:dependency_stage],
+            unmet_dependencies: row[:unmet_dependencies],
+            dependency_repair_roots: repair_roots,
+            current_project: current_project
+          )
+          return "#{base}; #{inherited}"
         end
 
         # Shared with the TUI's renderer so the unresolved-vs-resolved
@@ -1454,7 +1468,9 @@ module Hive
           depends_on: row[:depends_on],
           blocked_by: row[:blocked_by],
           dependency_stage: row[:dependency_stage],
-          unmet_dependencies: row[:unmet_dependencies]
+          unmet_dependencies: row[:unmet_dependencies],
+          dependency_repair_roots: repair_roots,
+          current_project: current_project
         )
       end
 
@@ -2124,6 +2140,7 @@ module Hive
         row[:blocked_by] = verdict.wait? ? verdict.blocked_by : nil
         row[:dependency_stage] = verdict.wait? ? verdict.dependency_stage : nil
         row[:unmet_dependencies] = verdict.unmet_dependencies.map(&:to_h)
+        row[:dependency_repair_roots] = verdict.dependency_repair_roots.first(64).map(&:to_h)
         row[:dependency_base_mode] = project_dependency_base_mode(
           row, project: project, config: config, base_context: base_context,
           base_projection_available: base_projection_available, branch_refs: branch_refs
@@ -2166,6 +2183,7 @@ module Hive
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
         row[:unmet_dependencies] = []
+        row[:dependency_repair_roots] = []
         unless preserve_base_mode && row[:dependency_base_mode]
           row[:dependency_base_mode] = project_dependency_base_mode(
             row, project: project, config: config, base_context: base_context,

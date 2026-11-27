@@ -83,6 +83,43 @@
         }
       }
     },
+    "DependencyRepairIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "raw_value", "display_value", "code", "message", "suggestion"],
+      "properties": {
+        "index": { "type": ["integer", "null"], "minimum": 0 },
+        "raw_value": { "type": ["string", "number", "boolean", "null", "array", "object"] },
+        "display_value": { "type": "string", "maxLength": 512 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "suggestion": { "type": ["string", "null"], "maxLength": 255 }
+      }
+    },
+    "DependencyRepairRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "reason_code", "offending_ref", "safe_correction", "issues"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "plan_dependency_invalid",
+            "plan_dependency_mismatch",
+            "plan_dependency_missing"
+          ]
+        },
+        "offending_ref": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "safe_correction": { "type": "string", "minLength": 1, "maxLength": 2048 },
+        "issues": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/DependencyRepairIssue" }
+        }
+      }
+    },
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
@@ -178,6 +215,13 @@
                   "$ref": "#/$defs/AdmissionError"
                 }
               ]
+            },
+            "dependency_repair_roots": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/DependencyRepairRoot"
+              }
             }
           }
         },

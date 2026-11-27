@@ -411,11 +411,53 @@
         "reference": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/SafeObject" }] }
       }
     },
+    "DependencyRepairIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "raw_value", "display_value", "code", "message", "suggestion"],
+      "properties": {
+        "index": { "type": ["integer", "null"], "minimum": 0 },
+        "raw_value": { "$ref": "#/$defs/SafeValue" },
+        "display_value": { "$ref": "#/$defs/SafeString" },
+        "code": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "message": { "$ref": "#/$defs/SafeString" },
+        "suggestion": { "$ref": "#/$defs/StringOrNull" }
+      }
+    },
+    "DependencyRepairRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "slug", "reason_code", "offending_ref", "safe_correction", "issues"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "slug": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "plan_dependency_invalid",
+            "plan_dependency_mismatch",
+            "plan_dependency_missing"
+          ]
+        },
+        "offending_ref": { "$ref": "#/$defs/SafeString" },
+        "safe_correction": { "$ref": "#/$defs/SafeString" },
+        "issues": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/DependencyRepairIssue" }
+        }
+      }
+    },
     "Diagnostic": {
       "type": "object", "additionalProperties": false,
       "required": ["state", "summary", "log"],
       "properties": {
         "review_publication": { "$ref": "#/$defs/ReviewPublication" },
+        "dependency_repair_roots": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/DependencyRepairRoot" }
+        },
         "state": { "type": "string", "enum": ["current", "unavailable", "not_applicable"] },
         "summary": { "$ref": "#/$defs/StringOrNull" },
         "log": { "$ref": "#/$defs/LogLocator" }

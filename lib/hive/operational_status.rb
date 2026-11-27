@@ -518,7 +518,10 @@ module Hive
           "unmet_dependencies" => Array(row["unmet_dependencies"]),
           "dependency_base_mode" => row["dependency_base_mode"] || "default",
           "admission_error" => row["admission_error"]
-        },
+        }.tap do |dep|
+          roots = Array(row["dependency_repair_roots"])
+          dep["dependency_repair_roots"] = roots unless roots.empty?
+        end,
         "freshness" => {
           "task_observed_at" => @status_payload.fetch("generated_at"),
           "scheduler_status" => scheduler_freshness
@@ -689,6 +692,7 @@ module Hive
         "blocked_by" => row["blocked_by"],
         "dependency_stage" => row["dependency_stage"],
         "unmet_dependencies" => Array(row["unmet_dependencies"]),
+        "dependency_repair_roots" => Array(row["dependency_repair_roots"]),
         "dependency_base_mode" => row["dependency_base_mode"] || "default",
         "blocked" => row["blocked"] == true,
         "admission_error" => row["admission_error"]
@@ -710,6 +714,7 @@ module Hive
         "blocked_by" => observed["blocked_by"],
         "dependency_stage" => observed["dependency_stage"],
         "unmet_dependencies" => Array(observed["unmet_dependencies"]),
+        "dependency_repair_roots" => Array(observed["dependency_repair_roots"]),
         "dependency_base_mode" => observed["dependency_base_mode"] || "default",
         "blocked" => observed["blocked"],
         "admission_error" => observed["admission_error"]
@@ -1307,7 +1312,7 @@ module Hive
         message = unanswered.positive? ? "#{unanswered} unanswered questions" : row["action_label"]
         reasons << reason("human_input", message || "task requires an operator decision", "task")
       elsif row["blocked"] == true
-        message = dependency_wait_message(row)
+        message = dependency_wait_message(row, current_project: project["name"])
         reasons << reason("dependency_wait", message, "dependency")
       elsif COMPLETION_ACTIONS.include?(row["action"])
         reasons << reason("completion_ready", row["action_label"] || "task is ready to complete", "task")
@@ -1324,8 +1329,9 @@ module Hive
       if (substituted = limit_fallback_used_reason(row))
         reasons << substituted
       end
-      if dependency_wait?(row) && reasons.none? { |entry| entry["code"] == "dependency_wait" }
-        reasons << reason("dependency_wait", dependency_wait_message(row), "dependency")
+      if (dependency_wait?(row) || Array(row["dependency_repair_roots"]).any?) &&
+         reasons.none? { |entry| entry["code"] == "dependency_wait" }
+        reasons << reason("dependency_wait", dependency_wait_message(row, current_project: project["name"]), "dependency")
       end
       if row["condition_warning"]
         reasons << reason("condition_warning", row.fetch("condition_warning"), "condition")
@@ -1371,13 +1377,14 @@ module Hive
       ).any?
     end
 
-    def dependency_wait_message(row)
+    def dependency_wait_message(row, current_project: nil)
       Hive::Dependencies.blocker_summary(
         depends_on: row["depends_on"],
         blocked_by: row["blocked_by"],
         dependency_stage: row["dependency_stage"],
         unmet_dependencies: row["unmet_dependencies"],
-        dependency_repair_roots: row["dependency_repair_roots"]
+        dependency_repair_roots: row["dependency_repair_roots"],
+        current_project: current_project
       )
     end
 

@@ -412,7 +412,10 @@ module Hive
             "dependency_base_mode" => (value(row, :dependency_base_mode) || "default").to_s,
             "blocked" => value(row, :blocked) == true,
             "admission_error" => canonical_record(value(row, :admission_error))
-          }
+          }.tap do |record|
+            roots = canonical(Array(value(row, :dependency_repair_roots)))
+            record["dependency_repair_roots"] = roots unless roots.empty?
+          end
         end
 
         def row_key(row)

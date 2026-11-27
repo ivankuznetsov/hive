@@ -2493,6 +2493,7 @@ module Hive
                                   depends_on: row.depends_on,
                                   blocked_by: row.blocked_by,
                                   unmet_dependencies: row.unmet_dependencies,
+                                  dependency_repair_roots: row.dependency_repair_roots,
                                   dependency_stage: row.dependency_stage)
           observe_policy_disposition(row, decision)
         when :poll_for_merge
@@ -4174,7 +4175,9 @@ module Hive
 
       def dependency_blockers(row)
         Hive::Dependencies.blocker_names(
-          unmet_dependencies: row&.unmet_dependencies, blocked_by: row&.blocked_by
+          unmet_dependencies: row&.unmet_dependencies,
+          blocked_by: row&.blocked_by,
+          dependency_repair_roots: row&.dependency_repair_roots
         )
       end
 

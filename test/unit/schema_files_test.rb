@@ -3271,4 +3271,52 @@ class SchemaFilesTest < Minitest::Test
              "hive-act ErrorPayload must accept #{kind}: #{schemer.validate(payload).to_a.inspect}"
     end
   end
+
+  def test_dependency_repair_roots_extension_preserves_closed_admission_contracts
+    status_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    assert_equal %w[offending_ref reason_code safe_correction],
+                 status_doc.dig("$defs", "AdmissionError", "properties").keys.sort
+    assert_equal false, status_doc.dig("$defs", "AdmissionError", "additionalProperties")
+    assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                 status_doc.dig("$defs", "AdmissionError", "properties", "reason_code", "enum").sort
+    assert_equal %w[blocked_by dependency_stage reference required_gate],
+                 status_doc.dig("$defs", "UnmetDependency", "properties").keys.sort
+    assert_equal false, status_doc.dig("$defs", "UnmetDependency", "additionalProperties")
+    refute_includes status_doc.dig("$defs", "Task", "required"), "dependency_repair_roots"
+    assert status_doc.dig("$defs", "Task", "properties", "dependency_repair_roots"),
+           "hive-status Task must declare optional dependency_repair_roots"
+
+    op_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-operational-status")))
+    op_dep = op_doc.dig("$defs", "Task", "properties", "dependency")
+    assert_equal %w[blocked_by dependency_stage reference required_gate],
+                 op_doc.dig("$defs", "UnmetDependency", "properties").keys.sort
+    assert_equal false, op_doc.dig("$defs", "UnmetDependency", "additionalProperties")
+    refute_includes op_dep.fetch("required"), "dependency_repair_roots"
+    assert op_dep.dig("properties", "dependency_repair_roots")
+
+    stack_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-stack")))
+    assert_equal %w[offending_ref reason_code safe_correction],
+                 stack_doc.dig("$defs", "AdmissionError", "properties").keys.sort
+    assert_equal false, stack_doc.dig("$defs", "AdmissionError", "additionalProperties")
+    stack_dep = stack_doc.dig("$defs", "SuccessPayload", "properties", "dependency")
+    refute_includes stack_dep.fetch("required"), "dependency_repair_roots"
+    assert stack_dep.dig("properties", "dependency_repair_roots")
+
+    workspace_doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-task-workspace", version: 2)))
+    assert workspace_doc.dig("$defs", "DependencyRepairRoot"),
+           "hive-task-workspace.v2 must declare DependencyRepairRoot"
+    refute_includes workspace_doc.dig("$defs", "Diagnostic", "required"), "dependency_repair_roots"
+    assert workspace_doc.dig("$defs", "Diagnostic", "properties", "dependency_repair_roots")
+
+    %w[hive-run hive-approve hive-stage-action].each do |name|
+      doc = JSON.parse(File.read(Hive::Schemas.schema_path(name)))
+      admission_def = doc.dig("$defs", "AdmissionError") || doc.dig("$defs", "ErrorPayload", "properties", "admission_error")
+      next unless admission_def && admission_def["properties"]
+
+      assert_equal %w[offending_ref reason_code safe_correction],
+                   admission_def["properties"].keys.sort
+      assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                   admission_def.dig("properties", "reason_code", "enum").sort
+    end
+  end
 end

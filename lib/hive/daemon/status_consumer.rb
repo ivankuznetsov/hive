@@ -21,7 +21,7 @@ module Hive
                        :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
                        :task_lock_id, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :unmet_dependencies, :dependency_base_mode,
-                       :blocked, :admission_error,
+                       :blocked, :admission_error, :dependency_repair_roots,
                        :attempt_id, :task_generation,
                        :condition_task_generation, :commit_generation, :current_attempt,
                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
@@ -228,7 +228,8 @@ module Hive
               unmet_dependencies: Array(task["unmet_dependencies"]),
               dependency_base_mode: task["dependency_base_mode"] || "default",
               blocked: admission_error ? true : task["blocked"] == true,
-              admission_error: admission_error
+              admission_error: admission_error,
+              dependency_repair_roots: extract_dependency_repair_roots(task)
             )
           end
         end
@@ -258,6 +259,50 @@ module Hive
           offending_ref: value["offending_ref"],
           safe_correction: value["safe_correction"]
         )
+      end
+
+      def extract_dependency_repair_roots(task)
+        raw = task["dependency_repair_roots"]
+        return [] unless raw.is_a?(Array)
+
+        raw.first(64).filter_map do |entry|
+          next unless entry.is_a?(Hash)
+
+          project = entry["project"]
+          slug = entry["slug"]
+          reason_code = entry["reason_code"]
+          offending_ref = entry["offending_ref"]
+          safe_correction = entry["safe_correction"]
+          next unless project.is_a?(String) && !project.empty? &&
+                      slug.is_a?(String) && !slug.empty? &&
+                      Hive::DependencyAdmission::COVERED_PLAN_REASON_CODES.include?(reason_code) &&
+                      offending_ref.is_a?(String) && !offending_ref.empty? &&
+                      safe_correction.is_a?(String) && !safe_correction.empty?
+
+          issues = Array(entry["issues"]).first(128).filter_map do |issue|
+            next unless issue.is_a?(Hash)
+            next unless issue["code"].is_a?(String) && !issue["code"].empty? &&
+                        issue["message"].is_a?(String) && !issue["message"].empty? &&
+                        issue["display_value"].is_a?(String)
+
+            {
+              "index" => issue["index"].is_a?(Integer) && issue["index"] >= 0 ? issue["index"] : nil,
+              "raw_value" => Hive::Dependencies.json_safe_value(issue["raw_value"]),
+              "display_value" => issue["display_value"][0, 512],
+              "code" => issue["code"][0, 64],
+              "message" => issue["message"][0, 512],
+              "suggestion" => issue["suggestion"].is_a?(String) ? issue["suggestion"][0, 255] : nil
+            }
+          end
+          {
+            "project" => project[0, 255],
+            "slug" => slug[0, 255],
+            "reason_code" => reason_code,
+            "offending_ref" => offending_ref[0, 1024],
+            "safe_correction" => safe_correction[0, 2048],
+            "issues" => issues
+          }
+        end
       end
 
       def admission_backstop(task, problem)

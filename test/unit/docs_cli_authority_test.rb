@@ -2358,6 +2358,162 @@ class DocsCliAuthorityTest < Minitest::Test
     assert_equal before, tree_snapshot(File.join(ROOT, "docs"))
   end
 
+  # U2 Scenario 1-3: Inherited --json classification (single-doc, JSONL, rejected, success-only vs structured error)
+  def test_json_framing_and_output_semantics_match_runtime_contracts
+    result = auditor.audit(document_text: docs_cli_text)
+    assert result.success?, result.diagnostics.map(&:to_s).join("\n")
+    by_path = result.catalog.leaves.to_h { |leaf| [ leaf.path, leaf ] }
+
+    version = by_path.fetch("version")
+    assert_includes version.output, "hive-version.v1"
+    assert_includes version.output, "schemas/hive-version.v1.json"
+
+    watch = by_path.fetch("watch")
+    assert_includes watch.output, "--json-lines"
+    assert_includes watch.output, "hive-watch-event.v1"
+    assert_match(/rejects.*--json/i, watch.output)
+
+    tui = by_path.fetch("tui")
+    assert_match(/rejects.*--json/i, tui.output)
+    assert_includes tui.exits_and_retry, "64"
+
+    # Success-only JSON vs structured-error JSON leaves document distinct failure framing
+    bench = by_path.fetch("bench submit")
+    assert_match(/success-only/i, bench.output)
+    assert_match(/no JSON error envelope/i, bench.output)
+
+    local_task = by_path.fetch("task")
+    assert_match(/success-only/i, local_task.output)
+    assert_includes local_task.output, "hive-task-workspace.v2"
+    assert_includes local_task.output, "hive-remote.v1"
+
+    act = by_path.fetch("act")
+    assert_includes act.output, "hive-act.v2"
+    assert_includes act.output, "on success and error"
+    assert_includes act.output, "no fallback JSON document is emitted"
+  end
+
+  # U2 Scenario 5-6: Aliases resolve to one canonical leaf, no implementation method names, support classes vs exclusions
+  def test_aliases_implementation_names_and_support_classifications
+    result = auditor.audit(document_text: docs_cli_text)
+    assert result.success?, result.diagnostics.map(&:to_s).join("\n")
+    by_path = result.catalog.leaves.to_h { |leaf| [ leaf.path, leaf ] }
+
+    assert_equal [ "pr" ], by_path.fetch("open-pr").aliases
+    assert_equal %w[--version -v], by_path.fetch("version").aliases
+    assert_equal %w[--help -? -D -h], by_path.fetch("help").aliases
+    assert_equal %w[--tree -t], by_path.fetch("tree").aliases
+
+    # Implementation Ruby method names must never appear as public catalog paths
+    %w[new_task run_task open_pr generate_name plan_review plan_review_run review_grant answer_digest].each do |method_name|
+      refute by_path.key?(method_name), "implementation method #{method_name} must not be a public catalog leaf"
+    end
+
+    # Support classifications distinguish experimental, maintenance, and visible_internal
+    assert_equal "experimental", by_path.fetch("babysit").support
+    assert_equal "maintenance", by_path.fetch("prune").support
+    assert_equal "maintenance", by_path.fetch("receipt prune").support
+    assert_equal "maintenance", by_path.fetch("worktree status").support
+    assert_equal "visible_internal", by_path.fetch("evidence terminal").support
+    assert_equal "visible_internal", by_path.fetch("web capture-server").support
+    assert_equal "visible_internal", by_path.fetch("plan-review-run").support
+
+    # Hidden/private routes stay exclusively in exclusions
+    excluded_names = result.catalog.exclusions.map(&:name)
+    %w[
+      __patrol-fix-semantic-decision refactor-patrol-classify refactor-patrol-scheduled
+      __attempt-supervise __module-hook
+    ].each do |hidden|
+      refute by_path.key?(hidden), "hidden/private route #{hidden} leaked into public catalog"
+      assert_includes excluded_names, hidden
+    end
+  end
+
+  # U2 Scenario 7: Required R5 fields and checked-exception non-excepted fields fail closed
+  def test_required_semantic_fields_and_checked_exceptions_fail_closed
+    result = auditor.audit(document_text: docs_cli_text)
+    assert result.success?, result.diagnostics.map(&:to_s).join("\n")
+
+    result.catalog.leaves.each do |leaf|
+      %i[output context_behavior exits_and_retry effects_and_approvals example].each do |field|
+        refute_empty leaf.public_send(field).strip, "#{leaf.path} missing #{field}"
+      end
+      if leaf.coverage == "checked_exception"
+        refute_nil leaf.exception, "#{leaf.path} missing Exception"
+        %i[field evidence owner follow_up].each do |attr|
+          refute_empty leaf.exception.public_send(attr), "#{leaf.path} missing exception #{attr}"
+        end
+      end
+    end
+
+    missing_example = mutate_leaf(docs_cli_text, "doctor") do |section|
+      section.sub(/^- \*\*Example:\*\* .*\n/, "- **Example:** \n")
+    end
+    assert_diagnostic auditor.audit(document_text: missing_example), :missing_semantic_field, "doctor", /example/
+
+    missing_exc_field = mutate_leaf(docs_cli_text, "context add") do |section|
+      section.sub(/^- \*\*Effects and approvals:\*\* .*\n/, "- **Effects and approvals:** \n")
+    end
+    assert_diagnostic auditor.audit(document_text: missing_exc_field), :missing_semantic_field, "context add", /effects_and_approvals/
+  end
+
+  # U2 Scenario 8: Remote context contracts and authoritative preamble / link integrity
+  def test_remote_context_contracts_and_docs_cli_authority_preamble
+    text = docs_cli_text
+    result = auditor.audit(document_text: text)
+    assert result.success?, result.diagnostics.map(&:to_s).join("\n")
+    by_path = result.catalog.leaves.to_h { |leaf| [ leaf.path, leaf ] }
+
+    refute_match(/For the full API contract, see \[wiki\/cli\.md\]/, text)
+    assert_match(/canonical public CLI reference/, text)
+
+    status = by_path.fetch("status")
+    assert_includes status.output, "hive-remote.v1"
+    assert_includes status.context_behavior, "--operational"
+    assert_includes status.context_behavior, "64"
+    assert_includes status.context_behavior, "before any network request"
+
+    task = by_path.fetch("task")
+    assert_includes task.context_behavior, "--output"
+    assert_includes task.context_behavior, "local binary file write"
+    assert_includes task.context_behavior, "--diff"
+    assert_includes task.context_behavior, "--artifact"
+    assert_includes task.context_behavior, "64"
+
+    approve = by_path.fetch("approve")
+    assert_includes approve.context_behavior, "--generation"
+    assert_includes approve.exits_and_retry, "75"
+    assert_includes approve.exits_and_retry, "--idempotency-key"
+    assert_includes approve.exits_and_retry, "--from"
+    assert_includes approve.exits_and_retry, "--generation"
+
+    operation = by_path.fetch("operation")
+    assert_includes operation.context_behavior, "--context <remote>"
+    assert_includes operation.context_behavior, "64"
+    assert_includes operation.output, "hive-operation.v1"
+
+    # Local-only leaves document remote refusal
+    doctor = by_path.fetch("doctor")
+    assert_equal "local_only", doctor.context_posture
+    assert_includes doctor.context_behavior, "64"
+
+    # Every relative Markdown link in docs/cli.md resolves to an existing file or heading anchor
+    headings = text.scan(/^#+ (.+)$/).flatten.map do |heading|
+      heading.downcase.gsub(/[`.,()]/, "").gsub(/[^a-z0-9 _-]/, "").strip.gsub(/\s+/, "-")
+    end
+    text.scan(/\[[^\]]+\]\(([^)]+)\)/).flatten.uniq.each do |target|
+      next if target.start_with?("http://", "https://")
+
+      if target.start_with?("#")
+        assert_includes headings, target.delete_prefix("#"), "broken internal anchor in docs/cli.md: #{target}"
+      else
+        rel_path, _anchor = target.split("#", 2)
+        resolved = File.expand_path(rel_path, File.dirname(DOCS_CLI_PATH))
+        assert File.exist?(resolved), "broken relative link in docs/cli.md: #{target}"
+      end
+    end
+  end
+
   private
 
   def extract_leaf(document, path)

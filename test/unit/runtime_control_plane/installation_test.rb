@@ -24,6 +24,88 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
     end
   end
 
+  def test_preparation_precedes_activation_lock_and_staged_database_creation
+    klass = Hive::RuntimeControlPlane::StorageAttributes
+    [ false, true ].each do |populated|
+      with_tmp_dir do |root|
+        state = File.join(root, "custom state")
+        Dir.mkdir(state, 0o700)
+        File.write(File.join(state, ".shared"), "keep") if populated
+        mutations = []
+        runner = lambda do |command, *args|
+          case command
+          when "stat" then "9123683e btrfs"
+          when "chattr"
+            assert_empty Dir.children(state), "preparation must precede the activation lock"
+            mutations << args.last
+            ""
+          when "lsattr"
+            # Model btrfs inheritance from a flagged ancestor.
+            flagged = mutations.any? { |p| args.last == p || args.last.start_with?(p + "/") }
+            "----------------#{flagged ? 'C' : '-'}----- #{args.last}"
+          end
+        end
+        warnings = []
+        path = Hive::Paths.runtime_control_plane_path(state)
+        rename = File.method(:rename)
+        staged_flag = nil
+        observe_publication = lambda do |source, target|
+          if target == path
+            raise "missing staging database" unless File.file?(source)
+            result = klass.new(path: source, platform: "linux").inspect_storage
+            staged_flag = result.fetch(:paths).find { |r| r[:role] == "database" }.fetch(:nocow)
+          end
+          rename.call(source, target)
+        end
+        with_linux_storage(runner: runner) do
+          with_replaced_singleton_method(File, :rename, observe_publication) do
+            Hive::RuntimeControlPlane::Installation.setup(state_home: state, on_warning: warnings.method(:<<))
+          end
+        end
+        assert_equal !populated, staged_flag
+        assert_equal(populated ? [] : [ state ], mutations)
+        if populated
+          assert_equal "keep", File.read(File.join(state, ".shared"))
+          assert_match(/quiesce/i, warnings.fetch(0))
+        else
+          assert_empty warnings
+        end
+      end
+    end
+  end
+
+  def test_preparation_failures_are_advisory_and_existing_custody_refusals_still_apply
+    runner = lambda do |cmd, *args|
+      case cmd
+      when "stat" then "9123683e btrfs"
+      when "lsattr" then "---------------------- #{args.last}"
+      when "chattr" then raise Errno::EACCES
+      end
+    end
+    with_linux_storage(runner: runner) do
+      with_tmp_dir do |state|
+        warnings = []
+        result = Hive::RuntimeControlPlane::Installation.setup(state_home: state, on_warning: warnings.method(:<<))
+        assert_equal "active", result.fetch("phase")
+        assert_match(/chattr.*Permission denied/, warnings.fetch(0))
+      end
+    end
+    calls = []
+    with_linux_storage(runner: ->(cmd, *args) { calls << cmd; runner.call(cmd, *args) }) do
+      with_tmp_dir do |state|
+        File.chmod(0o770, state)
+        assert_raises(Hive::ConfigError) { Hive::RuntimeControlPlane::Installation.setup(state_home: state, on_warning: nil) }
+        File.chmod(0o700, state)
+        wrong_uid = Process.uid + 1
+        with_replaced_singleton_method(Process, :uid, -> { wrong_uid }) do
+          assert_raises(Hive::ConfigError) { Hive::RuntimeControlPlane::Installation.setup(state_home: state, on_warning: nil) }
+        end
+        assert_empty Dir.children(state)
+      end
+      refute_includes calls, "chattr"
+    end
+  end
+
   def test_status_does_not_create_missing_storage
     with_tmp_dir do |root|
       state = File.join(root, "missing")
@@ -72,6 +154,7 @@ class RuntimeControlPlaneInstallationTest < Minitest::Test
     %w[before after].each do |point|
       with_tmp_dir do |root|
         code = <<~'RUBY'
+          require ENV.fetch("HIVE_TEST_STORAGE_BOOT")
           require "hive"
           require "hive/runtime_control_plane/installation"
           root, point = ARGV

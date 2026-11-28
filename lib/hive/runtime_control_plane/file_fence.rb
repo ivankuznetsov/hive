@@ -12,6 +12,10 @@ module Hive
 
       attr_reader :path, :mode
 
+      def self.safe_directory?(status)
+        status.directory? && !status.symlink? && status.uid == Process.uid && (status.mode & 0o022).zero?
+      end
+
       def initialize(path:, timeout_sec:, monotonic_clock: nil, sleeper: nil,
                      label: "runtime fence")
         @path = File.expand_path(path)
@@ -37,6 +41,36 @@ module Hive
         yield self
       ensure
         release! if acquired_here && acquired?
+      end
+
+      # A fresh installation may never have had a writer. All writers create
+      # this permanent inode before admission, so its appearance invalidates a
+      # copy made while it was absent.
+      def observe_exclusively
+        handle = begin
+          File.open(path, File::RDONLY | File::NOFOLLOW | File::NONBLOCK)
+        rescue Errno::ENOENT
+          nil
+        end
+        if handle
+          validate_binding!(handle)
+          raise Busy, "#{@label} is busy" unless handle.flock(File::LOCK_EX | File::LOCK_NB)
+          validate_binding!(handle)
+        end
+        result = yield
+        if handle
+          validate_binding!(handle)
+        else
+          begin
+            File.lstat(path)
+            raise Busy, "#{@label} appeared during inspection"
+          rescue Errno::ENOENT
+            # Still no writer.
+          end
+        end
+        result
+      ensure
+        handle&.close
       end
 
       def release!
@@ -92,9 +126,7 @@ module Hive
         parent = File.dirname(path)
         FileUtils.mkdir_p(parent, mode: 0o700)
         status = File.lstat(parent)
-        valid = status.directory? && !status.symlink? && status.uid == Process.uid &&
-          (status.mode & 0o022).zero?
-        raise Hive::ConfigError, "#{@label} directory is unsafe" unless valid
+        raise Hive::ConfigError, "#{@label} directory is unsafe" unless FileFence.safe_directory?(status)
       end
 
       def validate_binding!(handle)

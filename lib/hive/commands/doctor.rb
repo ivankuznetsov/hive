@@ -4,6 +4,7 @@ require "timeout"
 
 require "hive"
 require "hive/config"
+require "hive/runtime_control_plane/storage_attributes"
 require "hive/invoked_binary"
 require "hive/agent_profiles"
 require "hive/agent_skills"
@@ -47,7 +48,7 @@ module Hive
       def call
         legacy_rows = check_claude_auth + check_claude_config + check_llm_wiki_qmd + check_project_config +
                       check_plan_review_independence + check_web_environment_aliases +
-                      check_runtime_control_plane + check_mcp
+                      check_runtime_storage + check_runtime_control_plane + check_mcp
         managed_rows = managed_skill_rows
         @rows = legacy_rows + managed_rows
         if @json
@@ -80,13 +81,31 @@ module Hive
         )
       end
 
+      def check_runtime_storage
+        evidence = Hive::RuntimeControlPlane::StorageAttributes.new.inspect_storage
+        fields = { stage: "runtime", label: "runtime/sqlite-storage", agent: "hive",
+                   skill: "NOCOW", configured_skill: "btrfs", message: evidence[:message] }
+        row = case evidence[:outcome]
+        when "warning", "indeterminate" then warning_row(**fields)
+        when "healthy" then fields.merge(kind: "dependency", status: "present")
+        else fields.merge(kind: "dependency", status: "not_applicable")
+        end
+        [ row.merge(evidence) ]
+      end
+
       def check_runtime_control_plane
         require "hive/runtime_control_plane"
         require "hive/runtime_control_plane/installation"
         path = Hive::Paths.runtime_control_plane_path
-        return [] unless File.exist?(path)
+        begin
+          File.lstat(path)
+        rescue Errno::ENOENT
+          return []
+        rescue SystemCallError
+          # Installation supplies the typed diagnosis for inaccessible storage.
+        end
 
-        status = Hive::RuntimeControlPlane::Installation.status(state_home: Hive::Paths.state_home)
+        status = Hive::RuntimeControlPlane::Installation.status(state_home: Hive::Paths.state_home, non_creating: true)
         diagnosis = status.fetch("database")
         healthy = status.fetch("phase") == "active" && diagnosis.fetch("status") == "ok"
         [ {

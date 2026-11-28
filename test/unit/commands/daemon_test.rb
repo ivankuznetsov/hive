@@ -281,6 +281,31 @@ class HiveCommandsDaemonTest < Minitest::Test
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 
+  def test_first_start_prepares_before_logs_and_lock_without_bootstrapping_a_database
+    state = File.join(@home, "fresh")
+    activation = FakeActivationLock.new
+    mutations = []
+    runner = lambda do |command, *args|
+      case command
+      when "stat" then "9123683e btrfs"
+      when "lsattr" then "----------------#{mutations.empty? ? '-' : 'C'}----- #{args.last}"
+      when "chattr"
+        assert_empty Dir.children(state), "first start must prepare before the logs directory"
+        mutations << args.last
+        ""
+      end
+    end
+    command = daemon("start", hive_home: state, activation_lock: activation)
+    # Stop at the lock boundary, after the log directory has been created.
+    activation.define_singleton_method(:acquire!) { raise Hive::ConcurrentRunError, "lock held" }
+    with_linux_storage(runner: runner) do
+      assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+    assert_equal [ state ], mutations
+    assert File.directory?(File.dirname(command.log_file))
+    refute_path_exists Hive::Paths.runtime_control_plane_path(state)
+  end
+
   def test_start_holds_activation_lock_until_runtime_readiness_is_published
     activation_lock = FakeActivationLock.new
     command = daemon(

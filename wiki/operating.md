@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, skills/hive/, lib/hive/runtime_identity.rb, lib/hive/commands/{setup,setup_agents,daemon,babysit,bot}.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-11-27
+updated: 2026-11-28
 tags: [operating, daemon, bot, systemd, launchd, install, skills, dogfood, receipts]
 ---
 
@@ -894,6 +894,10 @@ quiesce, and start the copy again. A pre-drain `ownership_unverifiable` response
 with `admission_open: true` changed nothing, so work can still arrive while you
 are trying to make the installation idle. A refusal with admission closed has
 `resume_required: true`; either retry the same generation or resume explicitly.
+
+For a whole state-root replacement, the [btrfs NOCOW migration](commands/runtime.md#btrfs-nocow-migration)
+adds a post-quiescence manifest and validation of separately stopped writers
+to this database backup procedure.
 
 This limitation applies on macOS as well as Linux without usable delegated
 custody. Darwin has no promised arbitrary-descendant success mode; only the

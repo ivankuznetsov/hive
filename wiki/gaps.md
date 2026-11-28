@@ -3,9 +3,18 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-11-27
+updated: 2026-11-28
 tags: [gap, todo, release-proof, agent-skills, plan-review, opencode, runtime-database, json]
 ---
+
+## Doctor v2 SQLite row vocabulary (2026-11-28)
+
+The existing `runtime/sqlite` integrity row emits kind `runtime_control_plane`
+and healthy status `ok`. Both fall outside the checked-in v2 `LegacyCheck`
+enums. This can invalidate a full doctor envelope with an initialized DB.
+The `runtime/sqlite-storage` row uses the existing dependency/warning vocabulary
+and has direct schema coverage. Aligning the integrity row with its consumers
+remains open.
 
 ## E2E binary fixture concurrency (2026-11-26)
 

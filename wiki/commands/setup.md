@@ -3,7 +3,7 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/commands/setup_agents.rb, lib/hive/runtime_control_plane/dogfood_rollback_deployment.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,babysit,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-11-07
+updated: 2026-11-28
 tags: [command, setup, install, agents, skills, consent, web, daemon, babysitter, receipts]
 ---
 
@@ -77,7 +77,19 @@ Without `--no-bootstrap`, setup provisions in this order:
 1. Inspect and provision the bundled Hive operating skill plus other selected
    managed capabilities through `Hive::Commands::SetupAgents`. The nested
    `hive init` later in the run suppresses its own agent-skill preflight, so
-   setup never asks twice.
+   setup never asks twice. Once agent setup permits provisioning, Hive prepares
+   the effective runtime state directory before QMD, web and enrollment can
+   populate it. It sets and verifies C on confirmed btrfs only while the
+   directory is new or empty, owned by the user and safe for the activation
+   lock. Hidden locks and files already added to a shared `HIVE_HOME` count as
+   contents. Preparation is best effort. The `runtime_control_plane` phase
+   reports deduplicated `storage_warnings` in JSON and displays them in human
+   output. An advisory alone leaves the phase successful. `--no-bootstrap`
+   skips preparation entirely.
+
+   New files inheriting NOCOW lose data checksums, checksum-based mirror
+   repair and compression. Snapshots can still cause CoW. For populated
+   installations, follow the [btrfs NOCOW migration](runtime.md#btrfs-nocow-migration).
 2. Install QMD through `npm install --global --prefix <data_home>/qmd
    @tobilu/qmd` when diagnostics report it missing and npm is available.
    Diagnostics run the discovered QMD's bounded `--version` probe rather than

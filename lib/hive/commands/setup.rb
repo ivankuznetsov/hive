@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/daily_digest/migration"
 require "hive/invoked_binary"
 require "hive/paths"
+require "hive/runtime_control_plane/storage_attributes"
 require "hive/setup/diagnostics"
 require "hive/setup/qmd_probe"
 require "hive/web/app_bundle"
@@ -74,6 +75,7 @@ module Hive
         @dogfood_rollback_resolver = dogfood_rollback_resolver
         @mcp_import_offer = mcp_import_offer == true
         @phases = []
+        @storage_warnings = []
       end
 
       def call
@@ -111,6 +113,7 @@ module Hive
           setup_agent_skills
           offer_mcp_import
           unless agent_setup_refused?
+            Hive::RuntimeControlPlane::StorageAttributes.prepare(on_warning: method(:record_storage_warning))
             bootstrap_qmd_if_missing(diagnostics)
             web_bundle = bootstrap_web_bundle
             enroll_project unless @no_init
@@ -312,6 +315,10 @@ require "hive/runtime_identity"
         end
       end
 
+      def record_storage_warning(message)
+        @storage_warnings << message unless @storage_warnings.include?(message)
+      end
+
       def bootstrap_runtime_control_plane
         phase("runtime_control_plane") do
           require "hive/runtime_control_plane/installation"
@@ -319,7 +326,8 @@ require "hive/runtime_identity"
             install_command_receipts: @install_command_receipts,
             rollback_package: @rollback_package,
             writer_guard: @command_schema_writer_guard,
-            web_running: method(:managed_web_running?)
+            web_running: method(:managed_web_running?),
+            on_warning: method(:record_storage_warning)
           )
           # enroll_project runs before this phase, so on a fresh install its
           # registration found no database to sync into.
@@ -341,6 +349,8 @@ require "hive/runtime_identity"
             end
           end
           [ true, details ]
+        end.tap do |row|
+          row["storage_warnings"] = @storage_warnings.dup unless @storage_warnings.empty?
         end
       end
 
@@ -661,6 +671,7 @@ require "hive/runtime_identity"
             @output.puts "hive setup: #{phase["name"]} #{phase["ok"] ? "ok" : "needs attention"}"
             @output.puts "hive setup: #{phase["name"]} mutation=#{phase["mutation"]}" if phase["mutation"]
             @output.puts "hive setup: #{phase["name"]} #{phase["message"]}" if phase["message"]
+            Array(phase["storage_warnings"]).each { |message| @output.puts "hive setup: #{message}" }
           end
           diagnostics.results.each do |row|
             next if row.ok? || row.bootstrappable || row.fix_command.to_s.empty?

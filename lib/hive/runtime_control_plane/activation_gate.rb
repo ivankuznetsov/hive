@@ -92,6 +92,8 @@ module Hive
       def strict_no_write_route?(argv)
         words = Array(argv).map(&:to_s)
         route = command(words)
+        return true if route == "doctor"
+
         if route == "daemon"
           return %w[status quiesce resume].include?(
             subcommand_after(words, route, value_options: %w[--timeout])

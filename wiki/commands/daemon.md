@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-11-15
+updated: 2026-11-28
 tags: [command, daemon, automation, plan-review, json, dogfood]
 ---
 
@@ -143,7 +143,9 @@ explicit `hive daemon resume`. In this increment the acknowledged backup set is
 only `Paths.runtime_control_plane_path` together with its generation-bound
 `Paths.runtime_quiescence_proof_path`; no runtime payload directory, workflow
 publication, daily-digest file, or per-project `.hive-state` tree has qualifying
-writer proof yet.
+writer proof yet. For a whole-directory replacement, follow the
+[btrfs migration procedure](runtime.md#btrfs-nocow-migration), including its separate
+checks for files outside the database proof.
 
 An `ownership_unverifiable` refusal before closure leaves admission open and
 does not allocate a generation; new work may still start. A refusal against an

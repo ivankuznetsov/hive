@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/config"
 require "hive/paths"
+require "hive/runtime_control_plane/storage_attributes"
 require "hive/lock"
 require "hive/pid_file"
 require "hive/daemon/activation_lock"
@@ -259,6 +260,7 @@ module Hive
 
       def start_daemon
         warn_unsupported_json_flag if @json
+        Hive::RuntimeControlPlane::StorageAttributes.prepare(path: Hive::Paths.runtime_control_plane_path(@hive_home))
         FileUtils.mkdir_p(@hive_home)
         FileUtils.mkdir_p(File.dirname(log_file))
         activation_lock = daemon_activation_lock

@@ -8,6 +8,7 @@ require "sqlite3"
 require "json"
 require "hive/atomic_file"
 require "hive/runtime_control_plane/file_fence"
+require "hive/runtime_control_plane/inspection_snapshot"
 require "hive/runtime_control_plane/command_schema"
 
 module Hive
@@ -15,6 +16,8 @@ module Hive
     EXPECTED_SCHEMA_SHA256 = "92cbd2aaa9f77ff9c294280d18116928d23f727430466a6306baf6ad08385cf0".freeze
 
     class Database
+      include InspectionSnapshot
+
       MIGRATE_ACTION = "stop Hive writers and follow https://github.com/ivankuznetsov/hive/blob/main/docs/guides/current-format-migration.md; command receipts require explicit `hive setup --install-command-receipts`".freeze
       BACKUP_ACTION = "stop Hive and recover from an external backup".freeze
       STORAGE_ACTION = "Use a writable, accessible state root (HIVE_HOME).".freeze

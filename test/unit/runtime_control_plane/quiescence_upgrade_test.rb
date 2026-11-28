@@ -7,6 +7,9 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
   NOW = "2026-09-25T12:00:00.000000Z"
 
   def test_explicit_upgrade_preserves_identity_attempts_and_payload_references
+    storage = Hive::RuntimeControlPlane::StorageAttributes
+    original = storage.default_runner
+    storage.default_runner = ->(*) { flunk "low-level creation and upgrade must not probe attributes" }
     with_tmp_dir do |root|
       path = Hive::Paths.runtime_control_plane_path(root)
       database = Hive::RuntimeControlPlane::Database.new(path: path).migrate!
@@ -41,6 +44,8 @@ class RuntimeControlPlaneQuiescenceUpgradeTest < Minitest::Test
       upgraded&.disconnect
       database&.disconnect
     end
+  ensure
+    storage.default_runner = original
   end
 
   def test_quiescence_schema_revisions_preserve_closed_generation_and_render_current_ddl

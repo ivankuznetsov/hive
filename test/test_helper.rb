@@ -94,6 +94,8 @@ else
 end
 
 require "hive"
+require_relative "support/non_btrfs_storage"
+ENV["HIVE_TEST_STORAGE_BOOT"] = File.expand_path("support/non_btrfs_storage.rb", __dir__)
 require_relative "support/workflow_helpers"
 require_relative "support/failure_evidence"
 
@@ -542,6 +544,17 @@ module HiveTestHelper
   # to stub module-level methods like `Hive::Gh.push_branch!` or class
   # methods like `Hive::Lock.process_start_time` without reaching for a
   # mocking library. Both name forms work: pass a lambda or a method object.
+  # Exercise Linux attribute decisions on any test host. Ordinary fixtures
+  # keep the process-wide non-btrfs runner.
+  def with_linux_storage(runner: nil, &block)
+    type = Hive::RuntimeControlPlane::StorageAttributes
+    constructor = type.method(:new)
+    factory = lambda do |**options|
+      constructor.call(platform: "linux", runner: runner || type.default_runner, **options)
+    end
+    with_replaced_singleton_method(type, :new, factory, &block)
+  end
+
   def with_replaced_singleton_method(receiver, name, replacement)
     original = receiver.method(name)
     receiver.define_singleton_method(name, &replacement)

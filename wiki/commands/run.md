@@ -61,10 +61,20 @@ recovery.
 `hive-run` schema v2 error envelopes add `error_kind: "dependency_wait"` or
 `"admission_error"`. Both include `reason_code`, `offending_ref`, and
 `safe_correction`; waits use reason `dependency_wait`, while admission errors
-use the closed codes documented in [[modules/task_dependencies]]. The envelope
-is emitted before the typed exception propagates, so automation receives both
-machine-readable context and the exit code. `--force` is not a run option and
-workflow-verb composition cannot bypass this check.
+use the closed codes documented in [[modules/task_dependencies]]. Descendants
+whose only upstream errors are covered plan defects (`plan_dependency_invalid`,
+`plan_dependency_mismatch`, unadopted `plan_dependency_missing`) now raise
+retryable `DependencyWaitError` (exit 75, `error_kind: "dependency_wait"`)
+directing the operator to repair the owning root task rather than
+`DependencyAdmissionError` (exit 78). Local covered plan defects remain
+`DependencyAdmissionError` on generic `hive run`, forward `hive approve`, and
+automated dispatches; only explicit operator
+`hive plan <root-slug> --project <project> --from 3-plan` grants local
+plan-defect repair intent inside `Run#run_task` while preserving every
+unrelated metadata, environment, cycle, and inherited prerequisite check. The
+envelope is emitted before the typed exception propagates, so automation
+receives both machine-readable context and the exit code. `--force` is not a
+run option and workflow-verb composition cannot bypass this check.
 
 Pre-dispatch missing/extra-argument failures use the same `hive-run.v2` error
 contract. If command-level error-envelope encoding raises

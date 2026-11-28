@@ -4,13 +4,19 @@ require "hive/commands/approve"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/plan_review"
+require "hive/commands/run"
 require "hive/commands/stage_action"
+require "hive/daemon/plan_approval"
+require "hive/daemon/policy"
+require "hive/plan_dependency_correction"
 require "hive/plan_review/orchestrator"
 require "hive/plan_review/transition_guard"
 require "hive/task_action"
+require_relative "../support/plan_dependency_incident_fixture"
 
 class PlanReviewLifecycleIntegrationTest < Minitest::Test
   include HiveTestHelper
+  include PlanDependencyIncidentFixture
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)
 
@@ -323,6 +329,252 @@ class PlanReviewLifecycleIntegrationTest < Minitest::Test
     refute outcomes.fetch("blocked").fetch("execution_allowed")
     assert_equal "still_denied", outcomes.dig("blocked", "transition", "after_resolution")
     assert_equal "review_unavailable", outcomes.dig("degraded_cleared", "degradation_reason")
+  end
+
+  def test_revised_invalid_candidate_corrects_once_and_promotes_preserving_review_identity
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(project, "c5 revision", slug_override: "c5-rev",
+                                  depends_on: "f2-payments-261030-aaaa").call
+        end
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2,
+                                      idempotency_key: "#{project}:F2:v1")
+        create_done_prerequisite(dir, slug: "f3-ledger-261030-bbbb", id: 3,
+                                      idempotency_key: "#{project}:F3:v1")
+        folder = move_stage_task(dir, "c5-rev", from: "1-inbox", to: "3-plan")
+        initial_plan = incident_plan_markdown(
+          depends_on: "f2-payments-261030-aaaa", low_risk: false, title: "Initial"
+        )
+        File.write(File.join(folder, "plan.md"), initial_plan)
+        task = Hive::Task.new(folder)
+
+        finding = Hive::PlanReview::Finding.new(
+          "source" => "whole_document", "classification" => "safe_auto",
+          "risk" => "low", "title" => "Add F3 prerequisite",
+          "description" => "Declare F3 in frontmatter.",
+          "evidence" => {
+            "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+            "anchor_digest" => Digest::SHA256.hexdigest("plan")
+          },
+          "lifecycle" => "open", "display_order" => 1
+        )
+        adapter = Object.new
+        adapter.define_singleton_method(:call) do |request|
+          findings = request.kind == "primary" ? [ finding ] : []
+          evidence = request.kind == "verification" ? request.verification_findings.map do |entry|
+            {
+              "finding_fingerprint" => entry.fetch("fingerprint"),
+              "status" => "verified", "evidence" => "candidate fixed depends_on"
+            }
+          end : []
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "success", findings: findings, residual_evidence: evidence,
+            coverage: request.required_coverage.map { |name| { "name" => name, "required" => true, "status" => "completed" } },
+            route_receipt: {
+              "role" => request.kind, "requested" => request.reviewer,
+              "actual" => request.reviewer, "capability_result" => "present",
+              "independence_verified" => true, "independence_reason" => "different_model_family"
+            }
+          )
+        end
+
+        revision_calls = []
+        bad_candidate = incident_plan_markdown(
+          depends_on: %w[f2-payments-261030-aaaa F3], low_risk: false, title: "Revised bad"
+        )
+        good_candidate = incident_plan_markdown(
+          depends_on: %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb], low_risk: false, title: "Revised good"
+        )
+        revision_runner = lambda do |**kwargs|
+          revision_calls << kwargs
+          bytes = revision_calls.length == 1 ? bad_candidate : good_candidate
+          Hive::PlanReview::PlannerRevision::Result.new(
+            outcome: "success", candidate_bytes: bytes,
+            candidate_digest: Digest::SHA256.hexdigest(bytes),
+            route_receipt: kwargs.fetch(:planner_identity), diagnostic: ""
+          )
+        end
+
+        orch = Hive::PlanReview::Orchestrator.new(
+          task: task, cfg: Hive::Config.load(dir),
+          planner_identity: planner_identity, adapter: adapter,
+          planner_revision: revision_runner,
+          route_resolver: method(:resolve_route),
+          clock: -> { Time.utc(2026, 10, 30, 12) }
+        )
+        result = orch.advance!
+
+        assert_equal 2, revision_calls.length, "invalid revision candidate must receive exactly one correction"
+        assert_includes revision_calls[1].fetch(:dependency_diagnostic), "F3"
+        assert_includes revision_calls[1].fetch(:dependency_diagnostic), "f3-ledger-261030-bbbb"
+        assert_equal "cleared", result.record.state
+        assert_equal true, result.record.execution_allowed?
+        assert_equal good_candidate, File.read(File.join(folder, "plan.md"))
+        assert_equal %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb],
+                     Hive::TaskMeta.read(folder)[:depends_on]
+        projection = Hive::PlanReview::Projection.load(task_folder: folder)
+        freshness = Hive::PlanReview::TransitionGuard.freshness(
+          task: Hive::Task.new(folder), projection: projection, config: Hive::Config.load(dir)
+        )
+        assert_equal "current", freshness.fetch("status")
+      end
+    end
+  end
+
+  def test_revised_permanent_invalid_candidate_blocks_without_mutating_plan_or_metadata
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(project, "c5 rev fail", slug_override: "c5-rev-fail",
+                                  depends_on: "f2-payments-261030-aaaa").call
+        end
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2)
+        folder = move_stage_task(dir, "c5-rev-fail", from: "1-inbox", to: "3-plan")
+        initial_plan = incident_plan_markdown(
+          depends_on: "f2-payments-261030-aaaa", low_risk: false, title: "Initial"
+        )
+        File.write(File.join(folder, "plan.md"), initial_plan)
+        meta_before = File.binread(File.join(folder, "meta.yml"))
+        task = Hive::Task.new(folder)
+
+        finding = Hive::PlanReview::Finding.new(
+          "source" => "whole_document", "classification" => "safe_auto",
+          "risk" => "low", "title" => "Update plan",
+          "description" => "Update dependencies.",
+          "evidence" => {
+            "path" => "plan.md", "start_line" => 1, "end_line" => 1,
+            "anchor_digest" => Digest::SHA256.hexdigest("plan")
+          },
+          "lifecycle" => "open", "display_order" => 1
+        )
+        adapter = Object.new
+        adapter.define_singleton_method(:call) do |request|
+          Hive::PlanReview::Adapters::Base::Result.new(
+            outcome: "success",
+            findings: request.kind == "primary" ? [ finding ] : [],
+            residual_evidence: [],
+            coverage: request.required_coverage.map { |name| { "name" => name, "required" => true, "status" => "completed" } },
+            route_receipt: {
+              "role" => request.kind, "requested" => request.reviewer,
+              "actual" => request.reviewer, "capability_result" => "present",
+              "independence_verified" => true, "independence_reason" => "different_model_family"
+            }
+          )
+        end
+
+        revision_calls = 0
+        unknown_candidate = incident_plan_markdown(
+          depends_on: %w[f2-payments-261030-aaaa ghost-unknown-target], low_risk: false, title: "Bad candidate"
+        )
+        revision_runner = lambda do |**kwargs|
+          revision_calls += 1
+          Hive::PlanReview::PlannerRevision::Result.new(
+            outcome: "success", candidate_bytes: unknown_candidate,
+            candidate_digest: Digest::SHA256.hexdigest(unknown_candidate),
+            route_receipt: kwargs.fetch(:planner_identity), diagnostic: ""
+          )
+        end
+
+        orch = Hive::PlanReview::Orchestrator.new(
+          task: task, cfg: Hive::Config.load(dir),
+          planner_identity: planner_identity, adapter: adapter,
+          planner_revision: revision_runner,
+          route_resolver: method(:resolve_route),
+          clock: -> { Time.utc(2026, 10, 30, 12) }
+        )
+        result = orch.advance!
+
+        assert_equal 2, revision_calls
+        assert_equal "blocked", result.record.state
+        refute result.record.execution_allowed?
+        assert Hive::PlanDependencyCorrection.plan_review_exhausted?(result.record.to_h)
+        assert_equal initial_plan, File.read(File.join(folder, "plan.md"))
+        assert_equal meta_before, File.binread(File.join(folder, "meta.yml"))
+        action = Hive::TaskAction.for(
+          Hive::Task.new(folder), Hive::Markers.current(File.join(folder, "plan.md")),
+          config: Hive::Config.load(dir)
+        )
+        assert_equal Hive::Schemas::TaskActionKind::PLAN_REVIEW_BLOCKED, action.key
+        assert_nil action.command
+      end
+    end
+  end
+
+  def test_direct_review_cannot_clear_old_invalid_plan_and_post_clearance_drift_is_rejected
+    # Part A: Direct Orchestrator runs across skipped, degraded_cleared, and cleared paths
+    # must refuse an existing invalid plan and never publish execution_allowed: true.
+    {
+      skipped: [ incident_plan_markdown(depends_on: %w[F2 F3], low_risk: true), FakeAdapter.new("success") ],
+      degraded: [ incident_plan_markdown(depends_on: %w[F2 F3], low_risk: false), FakeAdapter.new("terminal_failure") ],
+      cleared: [ incident_plan_markdown(depends_on: %w[F2 F3], low_risk: false), FakeAdapter.new("success") ]
+    }.each do |mode, (plan_text, adapter)|
+      with_plan_task(plan_text) do |_dir, task|
+        result = orchestrator(task, adapter).advance!
+        assert_equal "blocked", result.record.state, "#{mode} path must not clear invalid plan"
+        refute result.record.execution_allowed?, "#{mode} path must keep execution_allowed=false"
+        blockers = Array(result.record.to_h["blockers"])
+        assert blockers.any? { |b| b["reason"].to_s.include?("plan_dependency") },
+               "#{mode} blocker must record plan dependency failure: #{blockers.inspect}"
+      end
+    end
+
+    # Part B: Post-clearance metadata drift is rejected even though depends_on is excluded from task_generation.
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project = File.basename(dir)
+        capture_io do
+          Hive::Commands::Init.new(dir).call
+          Hive::Commands::New.new(project, "drift guard", slug_override: "drift-guard",
+                                  depends_on: "f2-payments-261030-aaaa").call
+        end
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2)
+        create_done_prerequisite(dir, slug: "f3-ledger-261030-bbbb", id: 3)
+        folder = move_stage_task(dir, "drift-guard", from: "1-inbox", to: "3-plan")
+        File.write(
+          File.join(folder, "plan.md"),
+          incident_plan_markdown(depends_on: "f2-payments-261030-aaaa", low_risk: true)
+        )
+        task = Hive::Task.new(folder)
+        cleared = orchestrator(task, FakeAdapter.new("success")).advance!
+        assert_equal "skipped", cleared.record.state
+        assert cleared.record.execution_allowed?
+        observation = Hive::PlanReview::TransitionGuard.prepare_existing!(
+          task: task, destination: "4-execute", config: Hive::Config.load(dir)
+        )
+
+        # Drift metadata depends_on after clearance: task_generation stays identical.
+        Hive::TaskMeta.rewrite(folder, { depends_on: "f3-ledger-261030-bbbb" })
+        drifted_task = Hive::Task.new(folder)
+        projection = Hive::PlanReview::Projection.load(task_folder: folder)
+        assert_equal "current",
+                     Hive::PlanReview::TransitionGuard.freshness(
+                       task: drifted_task, projection: projection, config: Hive::Config.load(dir)
+                     ).fetch("status")
+
+        assert_raises(Hive::PlanReview::TransitionBlocked) do
+          Hive::PlanReview::TransitionGuard.verify!(
+            task: drifted_task, destination: "4-execute", observation: observation,
+            config: Hive::Config.load(dir)
+          )
+        end
+
+        approve_err = assert_raises(Hive::PlanReview::TransitionBlocked) do
+          Hive::Commands::Approve.new(folder, to: "4-execute", force: true).call
+        end
+        assert_includes approve_err.message, "plan_dependency_mismatch"
+
+        exec_folder = move_stage_task(dir, "drift-guard", from: "3-plan", to: "4-execute")
+        run_err = assert_raises(Hive::DependencyAdmissionError) do
+          Hive::Commands::Run.new(exec_folder, quiet: true).call
+        end
+        assert_equal "plan_dependency_mismatch", run_err.reason_code
+      end
+    end
   end
 
   private

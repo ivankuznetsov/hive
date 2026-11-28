@@ -524,8 +524,15 @@ class NewTest < Minitest::Test
           File.write(File.join(existing, "idea.md"), "# Broken prerequisite\n<!-- WAITING -->\n")
           if failure == :unreadable_metadata
             File.write(File.join(existing, "meta.yml"), "depends_on: [unterminated\n")
-            expected_reason = "dependency_metadata_unreadable"
           else
+            %w[first-upstream second-upstream].each_with_index do |slug, idx|
+              upstream_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
+              FileUtils.mkdir_p(upstream_dir)
+              File.write(File.join(upstream_dir, "task.md"), "# #{slug}\n<!-- COMPLETE -->\n")
+              Hive::TaskMeta.write(
+                upstream_dir, id: 10 + idx, slug: slug, display_name: nil, completed_at: Time.now.utc
+              )
+            end
             Hive::TaskMeta.write(
               existing, id: 40, slug: prerequisite, display_name: nil,
               depends_on: "first-upstream"
@@ -534,7 +541,6 @@ class NewTest < Minitest::Test
               File.join(existing, "plan.md"),
               "---\ndepends_on: second-upstream\n---\n# Plan\n"
             )
-            expected_reason = "plan_dependency_mismatch"
           end
 
           capture_io do
@@ -552,9 +558,17 @@ class NewTest < Minitest::Test
           context = Hive::DependencySnapshot.admission_context([
             { "name" => project, "path" => dir, "repository_identity" => nil }
           ])
-          assert_equal expected_reason,
-                       context.verdict(project: project, slug: File.basename(created))
-                         .admission_error.reason_code
+          created_verdict = context.verdict(project: project, slug: File.basename(created))
+          if failure == :unreadable_metadata
+            assert_equal "dependency_metadata_unreadable", created_verdict.admission_error.reason_code
+          else
+            assert_equal "plan_dependency_mismatch",
+                         context.verdict(project: project, slug: prerequisite).admission_error.reason_code
+            assert created_verdict.wait?
+            assert_nil created_verdict.admission_error
+            assert_equal [ [ prerequisite, "plan_dependency_mismatch" ] ],
+                         created_verdict.dependency_repair_roots.map { |root| [ root.slug, root.reason_code ] }
+          end
         end
       end
     end

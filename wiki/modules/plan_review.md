@@ -468,12 +468,40 @@ to prevent.
 
 Re-running the plan stage on a plan that is already COMPLETE, and whose review
 has cleared and is still current (`TransitionGuard.freshness`), is a no-op
-that returns `complete`. It does not respawn the planner. `hive develop` is
-the move forward from there. Previously the re-run edited `plan.md`, which
-staled the cleared review and opened a fresh review cycle. A verified candidate
-is atomically promoted to canonical `plan.md` under the task mutation lock
-immediately before its matching terminal resolution is published under that
-same lock.
+that returns `complete` only when current `plan.md` and `meta.yml` dependency
+validation passes. If a previously cleared plan now has invalid or mismatched
+dependencies, the fast path records a controller diagnostic and fails without
+spawning a planner, promoting bytes, altering historical clearance records, or
+starting a new review cycle; only explicit operator
+`hive plan <root-slug> --project <project> --from 3-plan` can replan it.
+
+`PlannerRevision` protects `plan-dependency-correction.json` alongside task
+metadata and controller review artifacts through `ArtifactFirewall`, and accepts
+structured `dependency_diagnostic_text` when `Orchestrator` triggers a bounded
+dependency correction. When a revised candidate introduces a covered plan
+dependency defect (shorthand, unknown same-project target, malformed shape, or
+unadoptable drift), `Orchestrator` reserves the durable one-correction allowance
+before spawning at most one revision correction against the immutable input and
+a separate candidate file; a second invalid candidate leaves canonical `plan.md`
+and `meta.yml` untouched and blocks the review with operator-owned reason
+`plan_dependency_correction_exhausted` (explicitly excluded from recoverable
+planner-revision retries in `TaskAction` and daemon `Policy`).
+
+Every execution-allowing terminal resolution (`skipped`, `cleared`, and
+`degraded_cleared`) publishes through one guarded custody path in
+`Orchestrator#terminal`: lookup context is built outside the lock, then under
+`with_task_mutation_lock` Hive re-reads and validates current plan/metadata and
+any candidate before promotion, additive strict-superset adoption, and terminal
+resolution publication. Direct `hive plan-review-run` on an existing invalid
+plan cannot publish `skipped`, `cleared`, or `degraded_cleared`. Stale lookup
+observations or failed/drifted writes abort promotion and clearance rather than
+writing an allowed resolution.
+
+`TransitionGuard.verify!`, daemon `PlanApproval`, forward `Approve`, and
+execute entry revalidate current `plan.md` and `meta.yml` dependency agreement
+even when `TransitionGuard.freshness` reports `"current"`, because `depends_on`
+is excluded from `task_generation`. Post-clearance metadata drift therefore
+cannot bypass dependency admission by relying on a matching generation digest.
 
 A successful verifier result with no contrary finding but an incomplete set of
 fingerprint-bound evidence rows is treated as an incomplete transient attempt,

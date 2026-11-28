@@ -61,7 +61,7 @@ module Hive
       project = resolved_project_name(task)
       parts = [ "hive", "plan", task.slug.to_s ]
       parts.concat([ "--project", project ]) if project && !project.empty?
-      parts.concat([ "--from", "3-plan" ])
+      parts.concat([ "--from", "3-plan" ]) # coding-scoped: root plan repair command targets the coding 3-plan stage
       parts.shelljoin
     end
 

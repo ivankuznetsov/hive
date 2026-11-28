@@ -5,13 +5,20 @@ require "hive/commands/new"
 require "hive/commands/run"
 require "hive/commands/approve"
 require "hive/commands/stage_action"
+require "hive/daemon/status_consumer"
 require "hive/dependency_snapshot"
+require "hive/operational_status"
 require "hive/repository_identity"
 require "hive/task_meta"
+require "hive/tui/snapshot"
+require "hive/tui/views/tasks_pane"
+require "hive/web/status_payload"
 require "json_schemer"
+require_relative "../support/plan_dependency_incident_fixture"
 
 class DependencyAdmissionIntegrationTest < Minitest::Test
   include HiveTestHelper
+  include PlanDependencyIncidentFixture
 
   def test_cross_project_live_repository_mismatch_holds_status_row
     with_tmp_dir do |root|
@@ -389,6 +396,130 @@ class DependencyAdmissionIntegrationTest < Minitest::Test
         assert_equal c6_meta_before, File.binread(File.join(c6, "meta.yml"))
         assert_equal c7_meta_before, File.binread(File.join(c7, "meta.yml"))
         assert_equal legacy_before, File.binread(legacy_repair)
+      end
+    end
+  end
+
+  def test_end_to_end_root_repair_clears_inherited_surfaces_while_retaining_siblings_and_legacy_records
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project_name = File.basename(dir)
+        create_done_prerequisite(dir, slug: "f2-payments-261030-aaaa", id: 2,
+                                      idempotency_key: "#{project_name}:F2:v1")
+        create_done_prerequisite(dir, slug: "f3-ledger-261030-bbbb", id: 3,
+                                      idempotency_key: "#{project_name}:F3:v1")
+        capture_io do
+          Hive::Commands::New.new(project_name, "waiting sibling", slug_override: "waiting-sibling").call
+          Hive::Commands::New.new(project_name, "c5 root", slug_override: "c5-root").call
+          Hive::Commands::New.new(project_name, "c6 direct", slug_override: "c6-direct",
+                                  depends_on: "c5-root").call
+          Hive::Commands::New.new(project_name, "c7 fanin", slug_override: "c7-fanin",
+                                  depends_on: %w[c6-direct waiting-sibling]).call
+        end
+        sibling = move_stage_task(dir, "waiting-sibling", from: "1-inbox", to: "2-brainstorm")
+        c5 = move_stage_task(dir, "c5-root", from: "1-inbox", to: "3-plan")
+        c6 = move_stage_task(dir, "c6-direct", from: "1-inbox", to: "2-brainstorm")
+        c7 = move_stage_task(dir, "c7-fanin", from: "1-inbox", to: "2-brainstorm")
+        File.write(File.join(sibling, "brainstorm.md"), "# Sibling\n<!-- WAITING -->\n")
+        File.write(File.join(c5, "brainstorm.md"), "## Requirements\n- x\n<!-- COMPLETE -->\n")
+        File.write(File.join(c5, "plan.md"), incident_plan_markdown(depends_on: %w[F2 F3], low_risk: true))
+        File.write(File.join(c6, "brainstorm.md"), "# Direct\n<!-- COMPLETE -->\n")
+        File.write(File.join(c7, "brainstorm.md"), "# Fanin\n<!-- COMPLETE -->\n")
+
+        legacy_repair = File.join(c6, "diagnostics", "red-status.md")
+        FileUtils.mkdir_p(File.dirname(legacy_repair))
+        File.write(legacy_repair, "# Legacy descendant repair record\n")
+        historical_review = File.join(c5, "plan-review", "reviews", "pr-historical", "manifest.json")
+        FileUtils.mkdir_p(File.dirname(historical_review))
+        File.write(historical_review, "{\"review_id\":\"pr-historical\"}\n")
+
+        legacy_before = File.binread(legacy_repair)
+        historical_before = File.binread(historical_review)
+        c6_meta_before = File.binread(File.join(c6, "meta.yml"))
+        c7_meta_before = File.binread(File.join(c7, "meta.yml"))
+
+        # Read-only status, operational, daemon consumer, TUI, and web surfaces before repair
+        before_json = Hive::Commands::Status.new(json: true).json_payload(Hive::Config.registered_projects)
+        before_by_slug = before_json.fetch("projects").first.fetch("tasks").to_h { |t| [ t["slug"], t ] }
+        assert_equal "admission_error", before_by_slug["c5-root"]["action"]
+        assert_equal "plan_dependency_invalid", before_by_slug["c5-root"].dig("admission_error", "reason_code")
+        assert_nil before_by_slug["c6-direct"]["admission_error"]
+        assert_equal [ "c5-root" ], before_by_slug["c6-direct"]["dependency_repair_roots"].map { |r| r["slug"] }
+        assert_equal [ "c5-root" ], before_by_slug["c7-fanin"]["dependency_repair_roots"].map { |r| r["slug"] }
+        assert_includes before_by_slug["c7-fanin"]["unmet_dependencies"].map { |u| u["blocked_by"] }, "waiting-sibling"
+
+        before_op = Hive::OperationalStatus.new(
+          status_payload: before_json,
+          project_context: { project_name => { "daemon_enabled" => false } }
+        ).to_h
+        before_c7_op = before_op.fetch("tasks").find { |t| t.dig("identity", "slug") == "c7-fanin" }
+        assert_equal "waiting_on_provider_or_scheduler", before_c7_op["state"]
+        assert_includes before_c7_op["reason"], "#{project_name}:c5-root: invalid depends_on F2, F3"
+        assert_includes before_c7_op["reason"], "waiting-sibling"
+
+        consumer_before = Hive::Daemon::StatusConsumer.new(
+          producer: ->(task_keys:, warnings:) { before_json }
+        ).fetch
+        assert consumer_before.ok
+        c6_consumer = consumer_before.rows.find { |r| r.slug == "c6-direct" }
+        assert_equal [ "c5-root" ], c6_consumer.dependency_repair_roots.map { |r| r["slug"] }
+        assert_nil c6_consumer.admission_error
+
+        tui_before = Hive::Tui::Snapshot.from_payload(before_json).rows.to_h { |r| [ r.slug, r ] }
+        assert_includes Hive::Tui::Views::TasksPane.status_label(tui_before["c6-direct"]),
+                        "#{project_name}:c5-root: invalid depends_on F2, F3"
+        web_before = Hive::Web::StatusPayload.call(before_json)
+        web_c6 = web_before.fetch("projects").first.fetch("tasks").find { |t| t["slug"] == "c6-direct" }
+        assert_equal [ "c5-root" ], web_c6["dependency_repair_roots"].map { |r| r["slug"] }
+
+        # Repair ONLY the root via explicit `hive plan c5-root --project <p> --from 3-plan`
+        fixed_plan = incident_plan_markdown(
+          depends_on: %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb], low_risk: true
+        )
+        fake_agent = lambda do |_task, _cfg, _prompt, _profile, **|
+          File.write(File.join(c5, "plan.md"), fixed_plan)
+          { exit_code: 0, model: "claude-opus-4-6" }
+        end
+        with_replaced_singleton_method(Hive::Stages::Plan, :spawn_plan_agent, fake_agent) do
+          capture_io do
+            Hive::Commands::StageAction.new("plan", "c5-root", project: project_name, from: "3-plan").call
+          end
+        end
+
+        # After repair: inherited evidence clears across every surface; waiting siblings and ordinary gates stay.
+        after_json = Hive::Commands::Status.new(json: true).json_payload(Hive::Config.registered_projects)
+        after_by_slug = after_json.fetch("projects").first.fetch("tasks").to_h { |t| [ t["slug"], t ] }
+        refute after_by_slug["c5-root"]["blocked"]
+        assert_nil after_by_slug["c5-root"]["admission_error"]
+        assert_equal %w[f2-payments-261030-aaaa f3-ledger-261030-bbbb], after_by_slug["c5-root"]["depends_on"]
+        refute after_by_slug["c6-direct"].key?("dependency_repair_roots")
+        assert_equal true, after_by_slug["c6-direct"]["blocked"]
+        assert_equal "c5-root", after_by_slug["c6-direct"]["blocked_by"]
+        refute after_by_slug["c7-fanin"].key?("dependency_repair_roots")
+        assert_equal %w[c6-direct waiting-sibling],
+                     after_by_slug["c7-fanin"]["unmet_dependencies"].map { |u| u["blocked_by"] }
+
+        after_op = Hive::OperationalStatus.new(
+          status_payload: after_json,
+          project_context: { project_name => { "daemon_enabled" => false } }
+        ).to_h
+        after_c6_op = after_op.fetch("tasks").find { |t| t.dig("identity", "slug") == "c6-direct" }
+        refute_includes after_c6_op["reason"], "invalid depends_on"
+        assert_includes after_c6_op["reason"], "c5-root (3-plan)"
+
+        tui_after = Hive::Tui::Snapshot.from_payload(after_json).rows.to_h { |r| [ r.slug, r ] }
+        assert_empty tui_after["c6-direct"].dependency_repair_roots
+        assert_includes Hive::Tui::Views::TasksPane.status_label(tui_after["c6-direct"]), "c5-root (3-plan)"
+        web_after = Hive::Web::StatusPayload.call(after_json)
+        refute web_after.fetch("projects").first.fetch("tasks").find { |t| t["slug"] == "c6-direct" }
+          .key?("dependency_repair_roots")
+
+        # Read-only status and root repair never touch descendants, persisted legacy repair, or historical reviews.
+        assert_equal c6_meta_before, File.binread(File.join(c6, "meta.yml"))
+        assert_equal c7_meta_before, File.binread(File.join(c7, "meta.yml"))
+        assert_equal legacy_before, File.binread(legacy_repair)
+        assert_equal historical_before, File.binread(historical_review)
       end
     end
   end

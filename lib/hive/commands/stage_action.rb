@@ -310,7 +310,7 @@ module Hive
       def explicit_plan_repair_intent?(task, current_stage, target_stage)
         return false if @explicit_plan_repair == false
         return false unless @verb == "plan"
-        return false unless current_stage == "3-plan" && target_stage == "3-plan"
+        return false unless current_stage == "3-plan" && target_stage == "3-plan" # coding-scoped: plan-dependency repair intent targets the coding 3-plan stage
         return false if @from.to_s.strip.empty?
         return false if automated_dispatch?
 
@@ -319,7 +319,7 @@ module Hive
         else
           @from.to_s
         end
-        resolved_from == "3-plan"
+        resolved_from == "3-plan" # coding-scoped: explicit root repair requires --from 3-plan
       end
 
       def automated_dispatch?

@@ -73,13 +73,37 @@ top-level `depends_on` keys are invalid here too. Frontmatter scanning stops at
 its closing delimiter and is capped at 64 KiB, so admission never reads an
 unbounded plan body. Hive never scans plan prose for prerequisites.
 
-Admission's comparison stays exact. The plan stage heals the two safe drifts
-before admission sees them: `Hive::PlanDependencyAdoption` writes the plan's
-declaration into metadata when metadata has none or when the plan is a strict
-superset of it (compared by target via `Dependencies.reference_identity`, the
-same bare-means-own-project rule `resolve_project` uses). It runs after the
-initial planner and again when plan review promotes a revised candidate. It
-never drops or replaces an existing metadata edge; see [[stages/plan]].
+Admission's comparison stays exact. The plan stage validates and heals the two
+safe additive drifts before admission sees them: `Hive::PlanDependencyAdoption`
+validates every asserted plan reference (preserving per-element zero-based
+index, raw value, and optional unique hint across all offending elements such
+as `[F2, F3]`), refuses to adopt unresolved targets, and writes the plan's
+declaration into metadata only when metadata has none or the plan is a strict
+superset (compared by target via `Dependencies.reference_identity`, the same
+bare-means-own-project rule `resolve_project` uses). It runs after the initial
+planner and inside `PlanReview::Orchestrator`'s guarded clearance boundary. It
+never drops, replaces, re-spells, or reorders an existing metadata edge; see
+[[stages/plan]].
+
+For actionable diagnostics on task-code shorthand or missing same-project
+targets, `DependencySnapshot.project_hint_lookup` performs a separate
+project-scoped complete active-plus-archived lookup (without expanding ordinary
+fleet admission snapshots). It unions same-project slug-prefix matches and
+matching `idempotency_key` values recognizing only three nonempty
+colon-separated components `<project>:<code>:<version>` where `<project>`
+matches the current project and `<code>` matches the task code
+case-insensitively. A suggestion is returned only when coverage is complete and
+readable and resolves to exactly one distinct task identity; suggestions are
+evidence only and never auto-substitute invalid plan bytes.
+
+In `validate_node`, covered unresolved same-project plan assertions report
+`plan_dependency_invalid` ahead of `plan_dependency_missing` or
+`plan_dependency_mismatch` even when `meta.yml` already agrees on the same
+missing slug; the same missing target declared in `meta.yml` alone retains
+`dependency_task_missing`. Cross-project enrollment/repository-identity errors,
+duplicate-task ambiguity, cancelled/superseded targets, cycles/self-references,
+metadata corruption, and ordinary below-gate waits retain existing admission
+handling and never trigger planner correction.
 
 This cross-check closes the ordering failure observed in the Honeycomb work:
 the plan named a prerequisite that scheduling metadata did not carry. The
@@ -161,8 +185,41 @@ Admission returns exactly one verdict:
 | Verdict | Meaning | Status shape |
 |---|---|---|
 | Clear | no dependency, or every valid prerequisite at/after its gate | `blocked: false`, singular wait fields null, `unmet_dependencies: []`, `admission_error: null` |
-| Wait | one or more valid prerequisites below their gates | `blocked: true`; scalar rows populate `blocked_by`/`dependency_stage`, while list rows keep those singulars null; `unmet_dependencies` contains every remaining blocker in declaration order |
-| Admission error | invalid, inconsistent, or indeterminate evidence | `blocked: true`, singular wait fields null, action `admission_error`, no suggested command, structured `admission_error`; any independently observed blockers remain in `unmet_dependencies` |
+| Wait | one or more valid prerequisites below their gates, and/or inherited covered plan defects owned by upstream root(s) | `blocked: true`; scalar rows populate `blocked_by`/`dependency_stage`, while list rows keep those singulars null; `unmet_dependencies` contains every remaining ordinary blocker in declaration order; optional `dependency_repair_roots` lists each owning upstream root in deterministic traversal order when non-empty, with `admission_error: null` |
+| Admission error | local covered plan defect, or any noncovered invalid, inconsistent, or indeterminate evidence | `blocked: true`, singular wait fields null, action `admission_error`, no suggested command, structured `admission_error`; any independently observed blockers remain in `unmet_dependencies`, and any inherited roots remain in optional `dependency_repair_roots` |
+
+### Root ownership for covered plan defects
+
+Covered plan defects (`plan_dependency_invalid`, `plan_dependency_mismatch`,
+and unadopted `plan_dependency_missing`) belong to their owning root task:
+
+- Only the task with its own broken `plan.md` receives `admission_error` and a
+  local repair target (`hive plan <root-slug> --project <project> --from 3-plan`).
+- Direct and transitive descendants whose only errors are inherited covered
+  plan defects evaluate as `:wait` (`admission_error: null`), carrying typed
+  `dependency_repair_roots` entries (qualified `project`/`slug`, `reason_code`,
+  `offending_ref`, per-index `issues` with raw/display values and unique
+  suggestions, and root-directed `safe_correction`).
+- `enter_frame` continues walking parsable metadata prerequisites after a local
+  covered plan error (never inferring edges from malformed metadata), and
+  `absorb_child` always merges `dependency_repair_roots` even when an unmet
+  direct edge suppresses ordinary transitive blockers. Repair-root evidence
+  alone produces `:wait` even if no ordinary gate blocker exists.
+- An independently broken descendant stays `:error` for its own defect while
+  still surfacing inherited `dependency_repair_roots`. Noncovered errors
+  (cycles, metadata corruption, missing metadata-only targets, cross-project
+  identity/enrollment faults, cancellation/supersession, ambiguity) keep their
+  existing propagation and precedence unchanged.
+- Descendants raising through `DependencySnapshot.enforce_admission!` (`hive run`
+  and forward `hive approve`) therefore raise retryable `Hive::DependencyWaitError`
+  (exit 75, `error_kind: "dependency_wait"`) pointing to the owning root(s)
+  rather than `Hive::DependencyAdmissionError` (exit 78).
+- After repairing the root, fresh reads recompute from disk and clear inherited
+  `dependency_repair_roots` across CLI, daemon, TUI, and web surfaces while
+  retaining ordinary waiting siblings and gate waits. Read-only status never
+  mutates descendants, historical review records, or persisted legacy
+  descendant repair artifacts; legacy descendant repair and obsolete clearance
+  records remain explicit operator responsibilities.
 
 Each `unmet_dependencies` entry contains `reference`, resolved `blocked_by`,
 `dependency_stage`, and `required_gate`. `hive-status.v9` and

@@ -94,7 +94,7 @@ class ReleaseDocumentationTest < Minitest::Test
     [ URL.sub("https:", "http:"), URL.sub("/hive/", "/other/"),
       URL.sub("v9.9.9", "main"), URL.sub("v9.9.9", "v0.7.0"),
       URL.sub("v9.9.9", "v9.9.9-rc.1"), "#{URL}?download", "#{URL}#latest",
-      "#{URL}/extra", URL.sub("v9.9.9", '$TAG'), '$INSTALL_URL' ].each do |bad|
+      "#{URL}/extra", URL.sub("v9.9.9", "$TAG"), "$INSTALL_URL" ].each do |bad|
       assert_one_error in_testing("`curl -fsSL \"#{bad}\" | sh`"), "installer", bad, URL
     end
     assert_empty in_testing("`curl -fsSL '#{URL}' | bash`")
@@ -148,7 +148,7 @@ class ReleaseDocumentationTest < Minitest::Test
     [ "`#{VERIFY} --version=v0.7.0`", "<code>#{VERIFY} --version=v0.7.0</code>" ].each do |example|
       assert_one_error in_testing(example), "verifier", "--version=v0.7.0", "v9.9.9"
     end
-    [ "--version=", '--version=$TAG', "--version=v9.9.9-rc.1",
+    [ "--version=", "--version=$TAG", "--version=v9.9.9-rc.1",
       "--version v9.9.9" ].each do |option|
       assert_one_error in_testing("`#{VERIFY} #{option}`"), "verifier", option, "--version=v9.9.9"
     end

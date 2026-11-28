@@ -12,11 +12,11 @@ class HiveReleaseDocumentation
       text = File.read(File.join(root, path), encoding: "UTF-8")
       unless text.valid_encoding?
         line = text.each_line.find_index { |value| !value.valid_encoding? }
-        next ["#{path}:#{line + 1}: document has invalid bytes; expected UTF-8"]
+        next [ "#{path}:#{line + 1}: document has invalid bytes; expected UTF-8" ]
       end
       new(path, text, version).check
     rescue Errno::ENOENT
-      ["#{path}:1: missing document; expected #{path}"]
+      [ "#{path}:1: missing document; expected #{path}" ]
     end
   end
 
@@ -46,7 +46,7 @@ class HiveReleaseDocumentation
     when "wiki/operating.md" then require_operating_examples
     when "wiki/active-areas.md" then check_inventory
     end
-    @errors.sort_by { |line, message| [line, message] }.map { |line, message| "#{@path}:#{line + 1}: #{message}" }
+    @errors.sort_by { |line, message| [ line, message ] }.map { |line, message| "#{@path}:#{line + 1}: #{message}" }
   end
 
   private
@@ -78,7 +78,7 @@ class HiveReleaseDocumentation
     prose = line.gsub(MARKUP) do
       span = Regexp.last_match
       label = span.pre_match.match?(/\[[^\[\]]*\z/) && span.post_match.match?(/\A[^\[\]]*\]\(/)
-      scan_code([span[2] || span[3]], index, fenced: false, link_label: label)
+      scan_code([ span[2] || span[3] ], index, fenced: false, link_label: label)
       " "
     end
     prose.scan(%r{[\w.+-]+://[^\s<>()\[\]`"']+}).each do |url|
@@ -168,7 +168,7 @@ class HiveReleaseDocumentation
   def check_installer(url, line)
     return true if url == @url
 
-    @errors << [line, "installer URL #{url.inspect} does not match; expected #{@url}"]
+    @errors << [ line, "installer URL #{url.inspect} does not match; expected #{@url}" ]
     false
   end
 
@@ -176,17 +176,17 @@ class HiveReleaseDocumentation
     versions = options.grep(/\A--version(?:=|\z)/)
     expected = "--version=#{@tag}"
     if versions.empty?
-      @errors << [line, "verifier missing version; expected #{expected}"]
+      @errors << [ line, "verifier missing version; expected #{expected}" ]
       return
     end
     options.each_with_index do |option, index|
       if option == "--version"
         actual = options[index, 2].join(" ")
-        @errors << [line, "verifier split version #{actual.inspect}; expected #{expected}"]
+        @errors << [ line, "verifier split version #{actual.inspect}; expected #{expected}" ]
       elsif option == "--version="
-        @errors << [line, "verifier has empty --version=; expected #{expected}"]
+        @errors << [ line, "verifier has empty --version=; expected #{expected}" ]
       elsif option.start_with?("--version=") && option != expected
-        @errors << [line, "verifier version #{option.inspect} does not match; expected #{expected}"]
+        @errors << [ line, "verifier version #{option.inspect} does not match; expected #{expected}" ]
       end
     end
     return unless versions.all? { |option| option == expected }
@@ -206,7 +206,7 @@ class HiveReleaseDocumentation
   def require_example(kind, range, anchor, description, expected)
     return if range && @examples[kind].any? { |line| range.cover?(line) }
 
-    @errors << [anchor || 0, "missing #{description}; expected #{expected}"]
+    @errors << [ anchor || 0, "missing #{description}; expected #{expected}" ]
   end
 
   def require_install_table
@@ -238,27 +238,27 @@ class HiveReleaseDocumentation
     rows = @prose.select { |line, text| inventory&.cover?(line) && text.match?(%r{^\|\s*Release/install\s*\|}) }
     expected = "Current release: `#{@tag}`"
     if rows.empty?
-      @errors << [inventory&.begin || 0, "missing Release/install row under What exists; expected #{expected}"]
+      @errors << [ inventory&.begin || 0, "missing Release/install row under What exists; expected #{expected}" ]
     end
     rows.each_with_index do |(line, text), index|
-      @errors << [line, "duplicate Release/install row; expected one row with #{expected}"] if index.positive?
+      @errors << [ line, "duplicate Release/install row; expected one row with #{expected}" ] if index.positive?
       count = text.scan("Current release:").size
       if count != 1
-        @errors << [line, "#{count.zero? ? 'missing' : 'duplicate'} Current release: marker; expected #{expected}"]
+        @errors << [ line, "#{count.zero? ? 'missing' : 'duplicate'} Current release: marker; expected #{expected}" ]
       end
       rest = text.gsub(/Current release:(?: (`[^`]*`|[^\s|`]+))?/) do
         actual = Regexp.last_match(1)
         if !actual&.start_with?("`")
-          @errors << [line, "current release #{actual.inspect} needs a backtick-quoted tag; expected #{expected}"]
+          @errors << [ line, "current release #{actual.inspect} needs a backtick-quoted tag; expected #{expected}" ]
         elsif actual != "`#{@tag}`"
-          @errors << [line, "current release #{actual} does not match; expected #{expected}"]
+          @errors << [ line, "current release #{actual} does not match; expected #{expected}" ]
         end
         ""
       end
       rest.scan(/\bv\d+\.\d+\.\d+(?:[.-][\w.-]+)?/).each do |tag|
         next if count.zero? && tag == @tag
 
-        @errors << [line, "additional release tag #{tag}; expected only #{expected}"]
+        @errors << [ line, "additional release tag #{tag}; expected only #{expected}" ]
       end
     end
   end

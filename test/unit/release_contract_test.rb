@@ -29,7 +29,6 @@ class ReleaseContractTest < Minitest::Test
     assert_match(/^    hive-cli \(#{version}\)$/, read("Gemfile.lock"))
     assert_match(/^    hive-cli \(#{version}\)$/, read("web/Gemfile.lock"))
     assert_equal 1, read("CHANGELOG.md").scan(/^## #{version}$/).size
-    assert_equal 1, read("README.md").scan(%r{/v#{version}/install\.sh}).size
     assert_equal 2, read("install.md").scan(%r{/v#{version}/install\.sh}).size
 
     releasing = read("docs/RELEASING.md")

@@ -15,7 +15,13 @@ module HiveBench
       def success? = exitstatus == 0
     end
     Cleanup = Struct.new(:signals, :stdout_eof, :stderr_eof, :reaped, :descendants, :limitations, keyword_init: true)
-    Result = Struct.new(:stdout, :stderr, :status, :timed_out, :error, :cleanup, keyword_init: true)
+    Result = Struct.new(:stdout, :stderr, :status, :timed_out, :error, :cleanup, keyword_init: true) do
+      def failure_message(judge, timeout)
+        reason = timed_out ? "timed out after #{timeout}s" : error
+        details = [ reason, *cleanup.limitations ].compact
+        "#{judge} judge #{details.join('; ')}" unless details.empty?
+      end
+    end
 
     def self.seconds(value)
       match = /\A(\+?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)([smhd]?)\z/.match(value.to_s)

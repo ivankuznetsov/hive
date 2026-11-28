@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
-require "open3"
+require_relative "judge_process"
 require "json"
 require "pathname"
 require "tmpdir"
@@ -52,7 +52,7 @@ module HiveBench
           raise Error, "OPENROUTER_API_KEY is required for the OpenRouter codex judge route"
         end
 
-        argv = [ "timeout", timeout_s.to_s, bin, "exec", "--skip-git-repo-check" ]
+        argv = [ bin, "exec", "--skip-git-repo-check" ]
         argv += [ "--ephemeral", "--ignore-user-config", "--ignore-rules" ]
         argv += [ "-m", provider == OPENROUTER_PROVIDER ? provider_model : model ] if model
         if provider == OPENROUTER_PROVIDER
@@ -84,7 +84,7 @@ module HiveBench
         # a private Codex home. ChatGPT retains the operator home for subscription
         # auth, while the CLI flags above still exclude its config, rules, and
         # persisted sessions from the one-shot judge.
-        out, err, status = Dir.mktmpdir("hive-bench-codex-judge") do |root|
+        result = Dir.mktmpdir("hive-bench-codex-judge") do |root|
           workspace = File.join(root, "workspace")
           FileUtils.mkdir_p(workspace)
           isolated_env = child_env
@@ -93,14 +93,12 @@ module HiveBench
             FileUtils.mkdir_p(codex_home)
             isolated_env = child_env.merge("CODEX_HOME" => codex_home)
           end
-          Open3.capture3(
-            isolated_env,
-            *argv,
-            stdin_data: prompt.to_s,
-            chdir: workspace
-          )
+          JudgeProcess.capture(argv, stdin_data: prompt.to_s, timeout: timeout_s, env: isolated_env, chdir: workspace)
         end
-        raise Error, "codex judge timed out after #{timeout_s}s" if status.exitstatus == 124
+        failure = result.failure_message("codex", timeout_s)
+        raise Error, failure if failure
+
+        out, err, status = result.stdout, result.stderr, result.status
 
         unless status.success?
           # Codex prints a long CLI banner (and sometimes the prompt) before the

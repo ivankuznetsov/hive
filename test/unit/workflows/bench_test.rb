@@ -1608,6 +1608,52 @@ class WorkflowsBenchTest < Minitest::Test
                  "model-authored quota prose must not forge retry evidence"
   end
 
+  def test_cli_judges_on_a_path_without_timeout
+    harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
+    require File.join(harness, "lib/claude_judge")
+    require File.join(harness, "lib/codex_judge")
+    assert_equal 1200, HiveBench::ClaudeJudge::DEFAULT_TIMEOUT
+    assert_equal 3600, HiveBench::CodexJudge::DEFAULT_TIMEOUT
+
+    Dir.mktmpdir("bench-judge-path") do |root|
+      fake = File.join(root, "judge")
+      File.write(fake, <<~'SH')
+        #!/bin/sh
+        read -r prompt
+        case "$prompt" in
+          args) printf '{"score":7,"reason":"%s"}' "$*" ;;
+          quota) printf "You've hit your session limit · resets 7:40pm (Europe/London)"; exit 1 ;;
+          malformed) printf 'unscored' ;;
+          *) printf 'ordinary failure' >&2; exit 124 ;;
+        esac
+      SH
+      File.chmod(0o755, fake)
+      with_env("PATH" => root) do
+        claude = HiveBench::ClaudeJudge.judge_fn(bin: "judge")
+        assert_equal "-p", claude.call(prompt: "args", seed: 1)[:reason]
+        pinned = HiveBench::ClaudeJudge.judge_fn(bin: "judge", model: "opus")
+        assert_equal "-p --model opus", pinned.call(prompt: "args", seed: 1)[:reason]
+        quota = assert_raises(HiveBench::ProviderLimitError) { claude.call(prompt: "quota", seed: 0) }
+        assert_includes quota.message, "You've hit your session limit · resets 7:40pm (Europe/London)"
+        [ HiveBench::ClaudeJudge, HiveBench::CodexJudge ].each do |adapter|
+          [ 0, 1.5, "0.5m" ].each do |duration|
+            judge = adapter.judge_fn(bin: "judge", model: nil, timeout_s: duration)
+            verdict = judge.call(prompt: "args", seed: 0)
+            assert_equal 7, verdict[:score]
+            refute_includes verdict[:reason].split, "-m"
+          end
+          judge = adapter.judge_fn(bin: "judge")
+          error = assert_raises(adapter::Error) { judge.call(prompt: "ordinary", seed: 0) }
+          assert_includes error.message, "exited 124: ordinary failure"
+          error = assert_raises(adapter::Error) { judge.call(prompt: "malformed", seed: 0) }
+          assert_includes error.message, "no parseable"
+          error = assert_raises(adapter::Error) { adapter.judge_fn(bin: "missing-cli").call(prompt: "", seed: 0) }
+          assert_match(/missing-cli.*No such file/i, error.message)
+        end
+      end
+    end
+  end
+
   def test_claude_judge_types_trusted_cli_quota_evidence_without_trusting_model_prose
     harness = File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness")
     script = <<~'RUBY'
@@ -1635,7 +1681,11 @@ class WorkflowsBenchTest < Minitest::Test
         [ "analysis\nYou've hit your session limit · resets 7:40pm (Europe/London)\n", "", status ],
         [ "the candidate handles HTTP 429 rate limit exceeded", "", status ]
       ]
-      Open3.define_singleton_method(:capture3) { |*| responses.shift }
+      HiveBench::JudgeProcess.define_singleton_method(:capture) do |*, **|
+        out, err, status = responses.shift
+        HiveBench::JudgeProcess::Result.new(stdout: out, stderr: err, status: status,
+          cleanup: HiveBench::JudgeProcess::Cleanup.new(limitations: []))
+      end
       judge = HiveBench::ClaudeJudge.judge_fn
       errors = 7.times.map do
         judge.call(prompt: "prompt", seed: 1)

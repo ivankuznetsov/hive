@@ -2,7 +2,7 @@
 title: hive runtime
 type: command
 source: lib/hive/commands/runtime.rb, lib/hive/worktree.rb, lib/hive/runtime_control_plane/installation.rb, lib/hive/runtime_control_plane/database.rb, lib/hive/runtime_control_plane/activation_gate.rb, lib/hive/config.rb, schemas/hive-runtime-maintenance.v1.json
-updated: 2026-11-23
+updated: 2026-11-28
 tags: [command, sqlite, status, read-only, audit, bootstrap]
 ---
 
@@ -132,3 +132,128 @@ current databases do not require another conversion.
 Tests: `test/unit/runtime_control_plane/installation_test.rb`,
 `activation_gate_test.rb`, `database_test.rb`, `test/unit/commands/runtime_test.rb`,
 and the real-mount `test/integration/status_read_only_test.rb` gate.
+
+## Runtime storage attributes
+
+Use the service account and its environment to resolve the live database.
+A nonempty `HIVE_HOME` selects the state root directly. Otherwise it is
+`$XDG_STATE_HOME/hive`, defaulting to `~/.local/state/hive`. The usual file is
+`runtime-control-plane.sqlite3`. An explicitly supplied database path uses its
+actual parent. Doctor reports the resolved paths in `runtime/sqlite-storage`.
+
+| Outcome | Evidence and operator action |
+| --- | --- |
+| `healthy` | All applicable existing btrfs paths have C. The directory, DB and each present `-wal`, `-shm` and `-journal` have independent evidence. |
+| `warning` | At least one btrfs path lacks C. Read the affected paths and any additional inconclusive probes before planning a move. |
+| `indeterminate` | Hive could not establish the filesystem or flags. Check path access and the reported probe. On Linux verify that GNU `stat -f` and `lsattr -d` work as the service user, then rerun doctor. |
+| `not_applicable` | The paths are on known non-btrfs storage or this is a non-Linux platform. |
+| `uninitialized` | The state directory is absent. An existing directory can be checked before the DB exists, including any orphaned sidecars. |
+
+On a provisioning run, setup attempts preparation after agent setup permits
+it. Direct `Installation.setup` (including `hive runtime init`) checks before
+the activation lock creates its file. It publishes a database migrated by
+`Database` in a staging directory under that root. On first daemon start, Hive
+checks before creating logs or acquiring the lock. The daemon still requires
+the normal explicit database initialization. Readers, low-level migrations,
+quiescence upgrades and diagnose-only setup perform no attribute preparation.
+
+On confirmed btrfs, Hive sets and verifies C on a new or empty eligible
+directory so newly created files inherit it. A populated directory, including
+one with only a hidden lock file, requires manual migration if flags need to
+change. A failed probe or preparation is advisory. NOCOW disables data
+checksums and compression for affected files, including other new files that
+inherit the directory flag. This loses checksum-based mirror repair of their
+data. Snapshots may still trigger CoW. The attribute check measures no latency
+or throughput. See [btrfs scrub](https://btrfs.readthedocs.io/en/latest/Scrub.html),
+[compression compatibility](https://btrfs.readthedocs.io/en/latest/Compression.html#compatibility)
+and [chattr(1)](https://www.man7.org/linux/man-pages/man1/chattr.1.html).
+
+## Btrfs NOCOW migration
+
+Use this manual procedure for an existing installation. Keep the original
+tree intact and keep admission closed through copy, validation and swap.
+
+1. **Identify the installation and plan the backup.** In the effective service
+   environment, record the resolved root, DB path, installation ID from
+   `hive runtime status --json`, ownership and permissions. Choose an external
+   backup location. Make a provisional inventory of *every* root being
+   replaced, including hidden files, runtime payloads, daily digests, workflow
+   publication objects and receipts, fences, and unrelated files. This applies
+   equally to default XDG, custom XDG and shared `HIVE_HOME` installations.
+   Writers may still add files or payload references at this point.
+2. **Establish an idle window.** Follow the [Increment-1 idle backup procedure](../operating.md#increment-1-idle-backup-procedure)
+   and [Increment-1 quiescence boundary](daemon.md#increment-1-quiescence-boundary).
+   Stop external submissions, run `hive daemon disable --all`, inhibit
+   automatic restarts, stop the daemon, bot, babysitter and web services and
+   let outstanding attempts finish. Separately stop and verify readers and
+   writers of payloads, digests, publication state and every other file outside
+   the DB proof. Abort the replacement if their consistency is uncertain.
+   Daemon absence, a descriptor scan and an eligibility verdict each leave
+   the required quiescence acknowledgement outstanding.
+3. **Bind the final inventory to the paused generation.** Run
+   `hive daemon quiesce --json`. Require `paused: true`, generation G,
+   `checkpoint.complete: true` and the bound proof for G. With external
+   writers verified stopped, rescan all source roots. Build the **final
+   manifest for G** with each non-database path, file type, owner, permissions
+   and, for regular files, size and hash. Include required fences and receipts.
+   A receipt written between the provisional inventory and shutdown belongs
+   in this final manifest. Run `hive runtime payloads --json` anew against
+   the paused source, including references added just before quiescence.
+   Record the source and intended destination of every retained payload and
+   verify its size and SHA-256 against the DB. Store these records with the
+   external backup, outside both trees.
+
+   Immediately before copying, inspect `hive daemon status --json` and require
+   `lifecycle.phase: paused`, the same G, `lifecycle.proof.valid: true` and
+   `lifecycle.liveness.clear: true`. A quiescing result, changed generation,
+   incomplete checkpoint or missing/stale proof invalidates the manifest and
+   any copy. Retry quiesce, fetch payload references again, rebuild the
+   manifest and restart copying. If another writer restarts or source contents
+   change after finalization, reestablish consistency and repeat those steps.
+   A precheck refusal with admission open authorizes no copy. A refusal with
+   admission closed needs explicit retry or resume. A manual SQLite
+   checkpoint or backup command cannot establish Hive's generation proof.
+4. **Prepare empty storage and copy.** Create a fresh private destination on
+   the intended btrfs filesystem. Check it with `stat -f`, set
+   `chattr +C "$destination"` and verify C with `lsattr -d "$destination"`
+   before placing data there. Retain an external coherent backup of the
+   checkpointed DB, its matching `runtime-quiescence-proof.json`, and all
+   state in the final manifest. Copy the DB and matching proof into new
+   files using `cp --reflink=never` and preserve ownership and private modes.
+   Verify btrfs and C on the actual destination DB. Keep the original WAL and
+   journal intact. Committed transactions can reside in a WAL, and old
+   sidecars must never be combined with a replacement DB. The successful
+   checkpoint and proof authorize the DB/proof pair only. Copy the separately
+   stopped contents from the **final** manifest to their recorded paths,
+   preserving types, ownership, permissions and required fence files.
+   See [SQLite WAL](https://www.sqlite.org/wal.html).
+5. **Validate before swapping.** Keep the original usable and retained if
+   any check fails. Using the candidate environment and read-only checks,
+   validate SQLite integrity and foreign keys, application and schema identity,
+   the original installation ID, paused generation G and its matching proof.
+   `hive runtime status --json` and `hive daemon status --json` expose these
+   installation and lifecycle checks. Close validation connections and inspect
+   any resulting sidecars. Keep the proof in place and avoid lifecycle
+   mutations on the candidate. Compare every non-database entry against the
+   final manifest, including types, ownership, private permissions, and
+   regular-file sizes and hashes. Account for unexpected destination entries.
+   Verify every retained payload for G at its recorded destination by size
+   and SHA-256. A missing or mismatched publication receipt blocks the swap
+   even when the DB, proof and every payload pass.
+6. **Swap while admission is closed.** Recheck the source's paused generation,
+   proof and clear liveness and verify external writers remain stopped. Close
+   all processes and descriptors holding old storage or fence inodes. Stage on
+   the same filesystem when using rename. Replace the complete directory, or
+   point every service consistently at the validated dedicated location.
+   Preserve all state-root contents for every layout. `XDG_STATE_HOME` takes
+   effect only when `HIVE_HOME` is unset or empty. Confirm the matching proof
+   at its effective path beside the DB and all stable fences before restarting.
+7. **Resume from the destination.** Run `hive daemon resume --json` explicitly.
+   Require `admission_reopened: true`, then check `hive daemon status --json`
+   for `lifecycle.admission_open: true` and `hive runtime status --json` for
+   an active, healthy installation with `result.lifecycle.admission_open: true`.
+   Check each service restart outcome and run `hive doctor`. Restore intended
+   dispatch and service settings deliberately after successful reconciliation.
+   A healthy database can still be paused, and individual restarts can fail
+   after admission reopens. Retain the old coherent installation until all
+   checks pass. After new writes, reconcile them before attempting rollback.

@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: skills/hive/, lib/hive/commands/doctor.rb, lib/hive/agent_skills/{inspector,filesystem_inventory}.rb, lib/hive/agent_skills/adapters/openclaw.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-11-26
+updated: 2026-11-28
 tags: [command, preflight, skills, hive, openclaw, provisioning]
 ---
 
@@ -15,9 +15,8 @@ filesystem evidence is joined with the real runtime resolver and exact
 projection digests; Doctor does not launch supported agent CLIs, because even
 nominally read-only upstream commands can initialize user state. `--json` is
 the versioned `hive-doctor.v2` contract.
-Legacy Claude auth/config, QMD, and deprecated-config checks remain separate rows. When a
-runtime database or cutover manifest exists, Doctor also reports exact SQLite
-application/schema/integrity health without creating or migrating anything.
+Legacy Claude auth/config, QMD, and deprecated-config checks remain separate rows. Doctor reports filesystem attributes for runtime storage and checks SQLite
+integrity when a database exists.
 
 ## Usage
 
@@ -35,12 +34,22 @@ separate from managed-agent inventory.
 
 ## Runtime control-plane diagnosis
 
-Doctor opens no missing database. When SQLite or cutover evidence exists, it
-validates the immutable manifest, exact application/schema identity, lineage,
-and integrity. A corrupt or identity-mismatched manifest stays a typed failure
-even if the database file itself is healthy. An incomplete irreversible
-cutover reports `hive runtime status` / `hive runtime resume`; Doctor never
-falls back to legacy authority and never offers rollback, restore, or downgrade.
+The `runtime/sqlite-storage` row inspects the effective state directory, even
+before the database exists. It inspects the database and each present WAL,
+SHM and rollback journal separately. JSON includes the aggregate `outcome`
+and per-path evidence in `paths`. A missing C flag on btrfs or an inconclusive
+probe adds one warning in human and JSON output. It increments
+`summary.warnings` and alone leaves the exit code successful. For outcomes,
+tool access and the migration procedure, see [runtime storage](runtime.md#runtime-storage-attributes).
+
+The independent `runtime/sqlite` row checks database custody, application ID,
+schema, integrity and installation identity. On writable storage doctor checks
+a private temporary copy outside the state root, including an existing WAL/SHM
+pair. The copy checks the writer fence and source identities and is removed
+after inspection. A busy fence, changing source, rollback journal or unpaired
+sidecar can prevent a consistent inspection. Retry once storage is stable.
+Confirmed read-only mounts use the existing read-only SQLite policy. A storage
+warning remains visible alongside a database failure.
 
 The CLI loads the project through the shared `Hive::Config.load` boundary
 before constructing the doctor inspector. Unsupported project root keys
@@ -261,10 +270,12 @@ project.
 - `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy
   dependency rows, QMD discovery precedence and missing roots, isolated real
   version probes, default ENV behavior, exact warning diagnostics, auth key
-  redaction, control-plane integrity, and corrupt-manifest diagnosis. QMD and
+  redaction and control-plane error reporting. QMD and
   auth full-call fixtures run in Ruby children with scratch HOME/HIVE_HOME,
   injected inspectors, and MCP discovery disabled; they preserve coverage
   instrumentation and assert that global ENV remains unchanged.
+  `doctor_storage_attributes_test.rb` checks advisory exits, sidecar evidence,
+  committed WAL reads and cold-database inspection without source writes.
   `doctor_managed_skills_test.rb` covers managed remediation,
   non-blocking unavailable agents, OpenClaw ownership, and byte-identical homes
   even when every available agent runner would mutate if called.

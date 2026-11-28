@@ -108,7 +108,8 @@
       <summary>Publication diagnostics (<%= publication.fetch("diagnostics").length %>)</summary>
       <ul>
         <% publication.fetch("diagnostics").each do |diagnostic| %>
-          <li><%= diagnostic.fetch("reason").humanize %></li>
+          <% label = diagnostic["source"] == "publication_cache" && diagnostic.fetch("reason") == "network_failed" ? Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE : diagnostic.fetch("reason").humanize %>
+          <li><%= label %></li>
         <% end %>
       </ul>
     </details>

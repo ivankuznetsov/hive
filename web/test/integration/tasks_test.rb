@@ -1842,6 +1842,102 @@ class TasksTest < ActionDispatch::IntegrationTest
     Task.define_method(:publication, original_publication) if original_publication
   end
 
+  test "publication refresh renders shared guidance for cached network failure and preserves humanized non-network reasons" do
+    sign_in!(token: "github-session-token")
+    project_root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project)
+    Hive::Config.register_project(
+      name: @project, path: project_root,
+      repository_identity: "github.com/acme/demo", replace_existing: true
+    )
+    task_folder = stage_dir(@project, "1-inbox").join(@slug)
+    default_branch, branch_status = Open3.capture2("git", "-C", project_root, "branch", "--show-current")
+    assert branch_status.success?
+    default_branch = default_branch.strip
+    base_oid, base_status = Open3.capture2("git", "-C", project_root, "rev-parse", "HEAD")
+    assert base_status.success?
+    base_oid = base_oid.strip
+
+    owned = Hive::Worktree.new(project_root, @slug)
+    owned.create!(@slug, default_branch: default_branch)
+    owned.write_pointer!(
+      task_folder, @slug,
+      base_branch: default_branch, base_oid: base_oid,
+      repository: "github.com/acme/demo"
+    )
+    worktree = owned.path
+    task_folder.join("pr.md").write(<<~MARKDOWN)
+      ---
+      pr_url: https://github.com/acme/demo/pull/42
+      pr_number: 42
+      title: Ship
+      ---
+      # Ship
+    MARKDOWN
+
+    sentinel_host = "secret-proxy.internal.invalid"
+    sentinel_message = "read timed out talking to https://#{sentinel_host}/graphql?token=gho_secret99"
+    original_new = GithubApi.method(:new)
+    timeout_transport = ->(**) { raise Net::ReadTimeout, sentinel_message }
+
+    with_replaced_singleton_method(GithubApi, :new, ->(token, **kwargs) {
+      original_new.call(token, transport: timeout_transport, **kwargs)
+    }) do
+      post task_publication_path(@project, @slug)
+    end
+
+    assert_response :success
+    assert_select ".workspace-diagnostics li", text: Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE
+    refute_includes response.body, sentinel_host
+    refute_includes response.body, "gho_secret99"
+    refute_includes response.body, "Net::ReadTimeout"
+
+    with_replaced_singleton_method(GithubApi, :new, ->(*) {
+      flunk "cache-only publication GET must not call GitHub"
+    }) do
+      get task_publication_path(@project, @slug)
+      assert_response :success
+      assert_select ".workspace-diagnostics li", text: Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE
+      refute_includes response.body, sentinel_host
+      refute_includes response.body, "Net::ReadTimeout"
+
+      get task_publication_path(@project, @slug, format: :json)
+      assert_response :success
+      diagnostic = response.parsed_body.fetch("diagnostics").find do |entry|
+        entry["source"] == "publication_cache" && entry["reason"] == "network_failed"
+      end
+      refute_nil diagnostic, "expected cached publication_cache network_failed diagnostic"
+      assert_equal "publication_cache", diagnostic.fetch("source")
+      assert_equal "network_failed", diagnostic.fetch("reason")
+      assert_equal "GithubApi::ReadError", diagnostic.fetch("message")
+      refute_includes response.body, sentinel_host
+      refute_includes response.body, "Net::ReadTimeout"
+    end
+
+    # A different cached reason (e.g. rate_limited) keeps its humanized label.
+    task_folder.join("pr.md").write(<<~MARKDOWN)
+      ---
+      pr_url: https://github.com/acme/demo/pull/43
+      pr_number: 43
+      title: Ship 43
+      ---
+      # Ship 43
+    MARKDOWN
+    rate_limited_transport = ->(**) do
+      GithubApi::Response.new(code: "429", headers: { "retry-after" => "60" }, body: "{}")
+    end
+    with_replaced_singleton_method(GithubApi, :new, ->(token, **kwargs) {
+      original_new.call(token, transport: rate_limited_transport, **kwargs)
+    }) do
+      post task_publication_path(@project, @slug)
+    end
+
+    assert_response :success
+    assert_select ".workspace-diagnostics li", text: "Rate limited"
+    assert_select ".workspace-diagnostics li", text: Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE, count: 0
+  ensure
+    FileUtils.rm_rf(worktree) if worktree.present?
+  end
+
   test "publication refresh is CSRF protected and unavailable for archives" do
     previous = ActionController::Base.allow_forgery_protection
     ActionController::Base.allow_forgery_protection = true

@@ -3,6 +3,7 @@ require "net/http"
 require "timeout"
 require "uri"
 require "hive/gh"
+require "hive/web/github_auth"
 
 # Minimal GitHub client for the operator's device-flow token. Repository
 # listing and the one fixed task-publication GraphQL query are read-only;
@@ -29,18 +30,24 @@ class GithubApi
     end
   end
 
-  # Kept in lockstep with Hive::Web::GithubAuth::NETWORK_ERRORS — drift here
-  # already shipped one blank 500 (EHOSTUNREACH missing while the auth class
-  # had it).
+  class TotalDeadlineExceeded < StandardError; end
+  private_constant :TotalDeadlineExceeded
+
+  # Shared transport policy owned by Hive::Web::GithubAuth so device-flow and
+  # API callers stay identical across exception classes, guidance, and warnings.
   NETWORK_ERRORS = Hive::Web::GithubAuth::NETWORK_ERRORS
+  TRANSPORT_ERROR_MESSAGE = Hive::Web::GithubAuth::TRANSPORT_ERROR_MESSAGE
+  TOTAL_DEADLINE_MESSAGE = "GitHub API request exceeded its total deadline".freeze
 
   def initialize(token, transport: nil, open_timeout: OPEN_TIMEOUT,
-                 read_timeout: READ_TIMEOUT, total_timeout: TOTAL_TIMEOUT)
+                 read_timeout: READ_TIMEOUT, total_timeout: TOTAL_TIMEOUT,
+                 logger: GithubTransportLogger.build)
     @token = token
     @transport = transport || method(:perform_request)
     @open_timeout = open_timeout
     @read_timeout = read_timeout
     @total_timeout = total_timeout
+    @logger = logger
   end
 
   # The operator's repositories, most recently pushed first. Paginated up to
@@ -84,7 +91,9 @@ class GithubApi
         "checks" => checks_limit
       }
     )
-    document = request_json(uri, request, max_bytes: Integer(max_bytes))
+    document = request_json(
+      uri, request, operation: "github_api_pull_request", max_bytes: Integer(max_bytes)
+    )
     if Array(document["errors"]).any?
       raise ReadError.new("github_response_error", "GitHub publication query returned errors")
     end
@@ -135,17 +144,11 @@ class GithubApi
     req = Net::HTTP::Get.new(uri)
     req["Accept"] = "application/vnd.github+json"
     req["Authorization"] = "Bearer #{@token}"
-    request_json(uri, req)
+    request_json(uri, req, operation: "github_api_repositories")
   end
 
-  def request_json(uri, request, max_bytes: nil)
-    response = Timeout.timeout(@total_timeout) do
-      @transport.call(
-        uri: uri, request: request,
-        open_timeout: @open_timeout, read_timeout: @read_timeout,
-        max_bytes: max_bytes
-      )
-    end
+  def request_json(uri, request, operation:, max_bytes: nil)
+    response = execute_transport(uri, request, operation: operation, max_bytes: max_bytes)
     code = Integer(response.code)
     retry_after = response.headers.to_h["retry-after"] || response.headers.to_h["Retry-After"]
     remaining = response.headers.to_h["x-ratelimit-remaining"] ||
@@ -166,10 +169,26 @@ class GithubApi
     JSON.parse(response.body)
   rescue JSON::ParserError
     raise ReadError.new("response_invalid", "GitHub API returned an unparseable response")
-  rescue Timeout::Error
-    raise ReadError.new("deadline_exceeded", "GitHub API request exceeded its total deadline")
+  end
+
+  def execute_transport(uri, request, operation:, max_bytes:)
+    Timeout.timeout(@total_timeout, TotalDeadlineExceeded) do
+      @transport.call(
+        uri: uri, request: request,
+        open_timeout: @open_timeout, read_timeout: @read_timeout,
+        max_bytes: max_bytes
+      )
+    end
+  rescue TotalDeadlineExceeded => e
+    Hive::Web::GithubAuth.warn_transport(
+      logger: @logger, operation: operation, error: e, total_deadline: true
+    )
+    raise ReadError.new("deadline_exceeded", TOTAL_DEADLINE_MESSAGE), cause: nil
   rescue *NETWORK_ERRORS => e
-    raise ReadError.new("network_failed", "could not reach GitHub (#{e.class})")
+    Hive::Web::GithubAuth.warn_transport(
+      logger: @logger, operation: operation, error: e
+    )
+    raise ReadError.new("network_failed", TRANSPORT_ERROR_MESSAGE), cause: nil
   end
 
   def perform_request(uri:, request:, open_timeout:, read_timeout:, max_bytes:)
